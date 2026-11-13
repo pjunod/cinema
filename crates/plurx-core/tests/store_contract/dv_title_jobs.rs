@@ -1277,7 +1277,7 @@ async fn playback_title(
                 request_id: id.clone(),
                 request_digest: "b".repeat(64),
                 consumer_kind: "playback_qualification".into(),
-                consumer_ref: demand.file_id.to_string(),
+                consumer_ref: recipe.identity.clone(),
                 target_node_id: None,
                 deadline_ms,
                 retain_identity: false,
@@ -1296,29 +1296,42 @@ async fn title_live_playback_demands_precede_cursor_and_remain_visible_while_run
         let viewer = seed_playback(&store, "title-live-viewer").await;
         let requested = bound(&store, viewer.id, &scanner).await;
         let ordinary = seed(&store, "title-live-ordinary").await;
-        let ordinary_demand = bound(&store, ordinary.id, &scanner).await;
+        let later = bound(&store, ordinary.id, &scanner).await;
         let job_id = playback_title(&store, &requested, &scanner, Some(5_000)).await;
         let rows = store
+            .dv_title_playback_demands(0, 1_001, None)
+            .await
+            .expect("independent live cursor");
+        assert_eq!(rows.len(), 1, "{backend}");
+        assert_eq!(rows[0].file_id, viewer.id);
+        assert!(rows[0].playback_requested);
+        assert_eq!(
+            rows[0].playback_recipes,
+            vec![playback_recipe(&requested).identity]
+        );
+        assert_eq!(rows[0].queued_job_id.as_deref(), Some(job_id.as_str()));
+        assert_eq!(rows[0].scanner_digest.as_deref(), Some(scanner.as_str()));
+        assert!(store
+            .dv_title_playback_demands(requested.probe_revision, 1_001, None)
+            .await
+            .expect("live cursor applies")
+            .is_empty());
+        let ordinary_rows = store
             .dv_title_demands(&scanner, requested.probe_revision, 1_001)
             .await
-            .expect("live demand behind cursor");
+            .expect("maintenance cursor independent");
         assert_eq!(
-            rows.iter().map(|d| d.file_id).collect::<Vec<_>>(),
-            vec![viewer.id, ordinary.id],
-            "{backend}"
+            ordinary_rows.iter().map(|d| d.file_id).collect::<Vec<_>>(),
+            vec![ordinary.id]
         );
-        assert!(rows[0].playback_requested);
-        assert_eq!(rows[0].queued_job_id.as_deref(), Some(job_id.as_str()));
-        assert!(!rows[1].playback_requested);
         let _running = claim(&store, &job_id, 1_002).await;
         let rows = store
-            .dv_title_demands(&scanner, ordinary_demand.probe_revision, 1_003)
+            .dv_title_playback_demands(later.probe_revision, 1_003, Some(viewer.id))
             .await
-            .expect("running live demand");
+            .expect("direct owned live interest");
         assert_eq!(rows.len(), 1, "{backend}");
-        assert!(rows[0].playback_requested);
         assert!(rows[0].queued_job_id.is_none());
-        assert!(store.dv_title_demands(&scanner, 0, -1).await.is_err());
+        assert!(store.dv_title_playback_demands(0, -1, None).await.is_err());
     })
     .await;
 }
@@ -1477,7 +1490,7 @@ async fn title_consumed_playback_recipe_returns_to_ordinary_paging() {
         let _job = playback_title(&store, &demand, &scanner, Some(5_000)).await;
         assert!(
             store
-                .dv_title_demands(&scanner, demand.probe_revision, 1_001)
+                .dv_title_playback_demands(0, 1_001, None)
                 .await
                 .expect("live")[0]
                 .playback_requested
@@ -1508,6 +1521,343 @@ async fn title_consumed_playback_recipe_returns_to_ordinary_paging() {
             .expect("maintenance");
         assert_eq!(maintenance.len(), 1, "{backend}");
         assert!(!maintenance[0].playback_requested);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_viewer_bootstraps_current_work_and_keeps_recipe_interest_exact() {
+    use plurx_core::transcode::dv_fel_qualification as q;
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed_playback(&store, "title-bootstrap-viewer").await;
+        let demand = demand(&store, file.id, &scanner).await;
+        let first = playback_recipe(&demand);
+        assert!(store
+            .request_dv_fel_variant(file.id, &first)
+            .await
+            .expect("register first"));
+        let viewer = |request: q::FelRecipeRequest, now| TitleViewerRequest {
+            file_id: file.id,
+            viewer: "viewer".into(),
+            request,
+            scanner_digest: scanner.clone(),
+            deadline_ms: now + 60_000,
+            now_ms: now,
+        };
+        assert!(
+            store
+                .attach_dv_title_viewer(viewer(first.clone(), 1_000))
+                .await
+                .expect("bootstrap without physical admission"),
+            "{backend}"
+        );
+        let live = store
+            .dv_title_playback_demands(0, 1_001, None)
+            .await
+            .expect("fresh queued viewer");
+        assert_eq!(live.len(), 1);
+        let job = live[0].queued_job_id.clone().expect("bootstrapped job");
+        assert!(store
+            .attach_dv_title_viewer(viewer(first.clone(), 1_002))
+            .await
+            .expect("idempotent renewal"));
+        assert_eq!(
+            store
+                .dv_title_playback_demands(0, 1_003, None)
+                .await
+                .expect("renewed")[0]
+                .queued_job_id
+                .as_deref(),
+            Some(job.as_str())
+        );
+        let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+            90_000,
+            plurx_core::transcode::EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+            3840,
+            2160,
+            (24, 1),
+            true,
+            plurx_core::transcode::EnhancementRateLimits {
+                video_peak_bps: Some(130_000_000),
+                ..Default::default()
+            },
+        )
+        .expect("second exact envelope");
+        let second = q::FelRecipeRequest::new(
+            first.backend_identity.clone(),
+            file.size,
+            file.mtime,
+            envelope,
+            first.output,
+        );
+        assert!(second.valid());
+        assert!(store
+            .request_dv_fel_variant(file.id, &second)
+            .await
+            .expect("peer request"));
+        assert_eq!(
+            store
+                .dv_title_playback_demands(0, 1_004, None)
+                .await
+                .expect("only exact viewer recipe")[0]
+                .playback_recipes,
+            vec![first.identity.clone()],
+            "an unrelated pending backend is not live work"
+        );
+        assert!(store
+            .attach_dv_title_viewer(TitleViewerRequest {
+                viewer: "peer".into(),
+                ..viewer(second.clone(), 1_004)
+            })
+            .await
+            .expect("peer exact waiter"));
+        let receipt = q::FelRecipeVerdict {
+            request: first.clone(),
+            verdict: q::FelVerdict::unmeasurable(
+                first.identity.clone(),
+                file.size,
+                file.mtime,
+                1_005,
+            ),
+        };
+        assert!(store
+            .put_dv_fel_verdict(
+                file.id,
+                file.size,
+                file.mtime,
+                &serde_json::to_value(receipt).expect("receipt")
+            )
+            .await
+            .expect("finish exact measurement"));
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id: job.clone(),
+                after: None,
+                limit: 20,
+            })
+            .await
+            .expect("waiters");
+        assert!(waiters
+            .waiters
+            .iter()
+            .any(|w| w.consumer_ref == first.identity && w.state == "succeeded"));
+        assert!(waiters
+            .waiters
+            .iter()
+            .any(|w| w.consumer_ref == second.identity && w.state == "pending"));
+        assert!(!store
+            .attach_dv_title_viewer(viewer(first, 1_006))
+            .await
+            .expect("completed recipe cannot revive"));
+        assert!(store
+            .attach_dv_title_viewer(viewer(second.clone(), 1_007))
+            .await
+            .expect("same viewer advances exact recipe"));
+        let live = store
+            .dv_title_playback_demands(0, 1_008, None)
+            .await
+            .expect("remaining recipe");
+        assert_eq!(live[0].playback_recipes, vec![second.identity]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_live_paging_reaches_after_full_page_and_direct_own_interest() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let initial = seed_playback(&store, "title-many-live").await;
+        let mut last = initial.id;
+        for n in 0..129 {
+            let id = if n == 0 {
+                initial.id
+            } else {
+                let mut p = probe();
+                p.dolby_vision.el_present = Some(true);
+                store
+                    .upsert_file(
+                        initial.item_id,
+                        &format!("/title-many-live/{n}.mkv"),
+                        initial.size,
+                        initial.mtime,
+                        &p,
+                    )
+                    .await
+                    .expect("distinct source")
+            };
+            let demand = bound(&store, id, &scanner).await;
+            playback_title(&store, &demand, &scanner, Some(60_000)).await;
+            last = id;
+        }
+        let first = store
+            .dv_title_playback_demands(0, 1_001, None)
+            .await
+            .expect("first live page");
+        assert_eq!(first.len(), 128, "{backend}");
+        let second = store
+            .dv_title_playback_demands(first.last().expect("cursor").probe_revision, 1_001, None)
+            .await
+            .expect("second live page");
+        assert_eq!(
+            second.iter().map(|d| d.file_id).collect::<Vec<_>>(),
+            vec![last],
+            "{backend}"
+        );
+        let own = store
+            .dv_title_playback_demands(0, 1_001, Some(last))
+            .await
+            .expect("direct own interest");
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].file_id, last);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_live_preemption_rejects_running_and_backoff_candidates() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let maintenance = seed(&store, "title-preempt-maintenance").await;
+        let (_, current) = active(&store, maintenance.id, &scanner, 1_000).await;
+        let viewer = seed_playback(&store, "title-preempt-viewer").await;
+        let demand = bound(&store, viewer.id, &scanner).await;
+        let candidate = playback_title(&store, &demand, &scanner, Some(60_000)).await;
+        assert!(
+            store
+                .dv_title_can_preempt(&candidate, &current.id, "title-node", 1_001)
+                .await
+                .expect("queued eligible"),
+            "{backend}"
+        );
+        let running = claim(&store, &candidate, 1_002).await;
+        assert!(!store
+            .dv_title_can_preempt(&candidate, &current.id, "title-node", 1_003)
+            .await
+            .expect("healthy running"));
+        assert!(store
+            .settle_job(SettleJob {
+                token: running.token.expect("owner"),
+                now_ms: 1_004,
+                settlement: JobSettlement::Yield {
+                    error_code: Some("busy".into()),
+                    not_before_ms: 10_000,
+                    checkpoint: None
+                }
+            })
+            .await
+            .expect("backoff"));
+        assert!(!store
+            .dv_title_can_preempt(&candidate, &current.id, "title-node", 1_005)
+            .await
+            .expect("future retry"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_live_handoff_accounts_for_current_reader_release() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let maintenance = seed(&store, "title-handoff-current").await;
+        let (_, current) = active(&store, maintenance.id, &scanner, 1_000).await;
+        let other = seed_playback(&store, "title-handoff-other").await;
+        let other_demand = bound(&store, other.id, &scanner).await;
+        let other_id = playback_title(&store, &other_demand, &scanner, Some(60_000)).await;
+        let _other = claim(&store, &other_id, 1_001).await;
+        let viewer = seed_playback(&store, "title-handoff-viewer").await;
+        let demand = bound(&store, viewer.id, &scanner).await;
+        let candidate = playback_title(&store, &demand, &scanner, Some(60_000)).await;
+        assert!(
+            store
+                .dv_title_can_preempt(&candidate, &current.id, "title-node", 1_002)
+                .await
+                .expect("current release makes one slot"),
+            "{backend}"
+        );
+        assert!(store
+            .settle_job(SettleJob {
+                token: current.token.expect("owner"),
+                now_ms: 1_003,
+                settlement: JobSettlement::Yield {
+                    error_code: Some("viewer".into()),
+                    not_before_ms: 10_000,
+                    checkpoint: None
+                }
+            })
+            .await
+            .expect("current owner yields"));
+        let _claimed = claim(&store, &candidate, 1_004).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_terminal_episode_new_recipe_bootstraps_a_new_job() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed_playback(&store, "title-new-episode").await;
+        let demand = bound(&store, file.id, &scanner).await;
+        let first = playback_recipe(&demand);
+        assert!(store
+            .request_dv_fel_variant(file.id, &first)
+            .await
+            .expect("pending"));
+        let attach = |request, now| TitleViewerRequest {
+            file_id: file.id,
+            viewer: "viewer".into(),
+            request,
+            scanner_digest: scanner.clone(),
+            deadline_ms: now + 60_000,
+            now_ms: now,
+        };
+        assert!(store
+            .attach_dv_title_viewer(attach(first.clone(), 1_000))
+            .await
+            .expect("first episode"));
+        let id = store
+            .dv_title_playback_demands(0, 1_001, None)
+            .await
+            .expect("live")[0]
+            .queued_job_id
+            .clone()
+            .expect("job");
+        let job = claim(&store, &id, 1_002).await;
+        assert!(store
+            .settle_job(SettleJob {
+                token: job.token.expect("owner"),
+                now_ms: 1_003,
+                settlement: JobSettlement::Stop {
+                    error_code: "unmeasurable".into()
+                }
+            })
+            .await
+            .expect("terminal episode"));
+        let second = plurx_core::transcode::dv_fel_qualification::FelRecipeRequest::new(
+            "c".repeat(64),
+            file.size,
+            file.mtime,
+            first.envelope,
+            first.output,
+        );
+        assert!(store
+            .request_dv_fel_variant(file.id, &second)
+            .await
+            .expect("new pending"));
+        assert!(store
+            .attach_dv_title_viewer(attach(second.clone(), 1_004))
+            .await
+            .expect("new episode"));
+        let next = store
+            .dv_title_playback_demands(0, 1_005, None)
+            .await
+            .expect("new live");
+        assert_ne!(
+            next[0].queued_job_id.as_deref(),
+            Some(id.as_str()),
+            "{backend}"
+        );
+        assert_eq!(next[0].playback_recipes, vec![second.identity]);
     })
     .await;
 }

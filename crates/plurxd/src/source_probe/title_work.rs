@@ -31,6 +31,7 @@ pub(super) struct TitleTask {
     file_id: i64,
     probe_revision: i64,
     playback_requested: bool,
+    live_after: i64,
 }
 impl TitleTask {
     /// Discovery is bounded by the existing runner tick. Durable demand survives
@@ -39,12 +40,28 @@ impl TitleTask {
         state: &AppState,
         boot: &str,
         after: &mut i64,
+        live_after: &mut i64,
         playback_only: bool,
     ) -> Result<Option<Self>, StoreError> {
         let authority = state.jobs.execution_authority();
         if !authority.may_execute_job(JobKind::DvTitleScan).await {
             return Ok(None);
         }
+        // Empty viewer queues must not hash installed bundles or submit the
+        // maintenance outbox's replicated reopen operation on every probe pass.
+        let live_demands = if playback_only {
+            let demands = state
+                .store
+                .dv_title_playback_demands(*live_after, now_ms(), None)
+                .await?;
+            if demands.is_empty() {
+                *live_after = 0;
+                return Ok(None);
+            }
+            Some(demands)
+        } else {
+            None
+        };
         let tools = match ToolSet::capture().await {
             Ok(Some(tools)) => tools,
             Ok(None) => return Ok(None),
@@ -53,14 +70,24 @@ impl TitleTask {
                 return Ok(None);
             }
         };
-        let Some(probe_pipeline) = plurx_core::scan::probe::pipeline_digest().await else {
-            return Ok(None);
+        let probe_pipeline = if playback_only {
+            String::new()
+        } else {
+            let Some(pipeline) = plurx_core::scan::probe::pipeline_digest().await else {
+                return Ok(None);
+            };
+            pipeline
         };
         let scanner = tools.title_scanner_digest();
-        let demands = state
-            .store
-            .dv_title_demands(&scanner, *after, now_ms())
-            .await?;
+        let demands = match live_demands {
+            Some(demands) => demands,
+            None => {
+                state
+                    .store
+                    .dv_title_demands(&scanner, *after, now_ms())
+                    .await?
+            }
+        };
         if demands.is_empty() {
             if playback_only {
                 return Ok(None);
@@ -70,15 +97,19 @@ impl TitleTask {
             requalify_stale_fel_titles(state, &tools, &scanner).await;
             return Ok(None);
         }
-        if !playback_only && !demands.iter().any(|demand| !demand.playback_requested) {
-            *after = 0;
-        }
         for mut demand in demands {
-            if playback_only && !demand.playback_requested {
-                continue;
-            }
-            if !demand.playback_requested {
+            if playback_only {
+                *live_after = demand.probe_revision;
+                if demand.scanner_digest.as_deref() != Some(scanner.as_str()) {
+                    continue;
+                }
+            } else {
                 *after = demand.probe_revision;
+                // Live work was considered independently above; an ordinary
+                // turn must not acquire its more permissive companion class.
+                if demand.playback_requested {
+                    continue;
+                }
             }
             let Some(file) = eligible_file(state, &demand, &tools.backend_digest()).await? else {
                 continue;
@@ -140,7 +171,10 @@ impl TitleTask {
                             probe_revision: demand.probe_revision,
                             scanner_digest: scanner.clone(),
                         },
-                        dedupe_key: format!("dv-title:{identity}"),
+                        dedupe_key: format!(
+                            "dv-title-generation:{}:{}:{}",
+                            file.id, demand.probe_revision, scanner
+                        ),
                         priority: 0,
                         not_before_ms: now,
                         now_ms: now,
@@ -227,6 +261,7 @@ impl TitleTask {
                 file_id,
                 probe_revision,
                 playback_requested,
+                live_after: 0,
             }));
         }
         Ok(None)
@@ -235,30 +270,54 @@ impl TitleTask {
     /// Scheduler checks only locally readable, compatible, live ordinary work.
     /// Durable SQL excludes stale coordinators and other resource blockers.
     pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {
+        let now = now_ms();
+        if self.playback_requested {
+            // Owned interest is checked directly, never through a page that
+            // unrelated renewed viewers can push us out of.
+            let own = state
+                .store
+                .dv_title_playback_demands(0, now, Some(self.file_id))
+                .await?;
+            for demand in own {
+                if demand.probe_revision == self.probe_revision
+                    && demand.scanner_digest.as_deref() == Some(self.scanner.as_str())
+                    && eligible_file(state, &demand, &self.backend_digest)
+                        .await?
+                        .is_some()
+                {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
         let demands = state
             .store
-            .dv_title_demands(&self.scanner, 0, now_ms())
+            .dv_title_playback_demands(self.live_after, now, None)
             .await?;
-        let mut own_live = false;
-        for demand in demands.iter().filter(|demand| demand.playback_requested) {
-            if eligible_file(state, demand, &self.backend_digest)
-                .await?
-                .is_none()
+        if demands.is_empty() {
+            self.live_after = 0;
+        }
+        for demand in demands {
+            self.live_after = demand.probe_revision;
+            if demand.scanner_digest.as_deref() != Some(self.scanner.as_str())
+                || eligible_file(state, &demand, &self.backend_digest)
+                    .await?
+                    .is_none()
             {
                 continue;
             }
-            if !self.playback_requested {
-                // A viewer may upgrade the very title this maintenance pass owns.
-                return Ok(true);
-            }
             if demand.file_id == self.file_id && demand.probe_revision == self.probe_revision {
-                own_live = true;
+                return Ok(true); // Promote this already-owned maintenance job.
             }
-        }
-        if self.playback_requested {
-            // Live bounded qualification holds its lane until its interest ends;
-            // an ordinary probe must not continually restart its measurement.
-            return Ok(!own_live);
+            if let Some(candidate) = demand.queued_job_id.as_deref() {
+                if state
+                    .store
+                    .dv_title_can_preempt(candidate, &self.job_id, &state.node_id, now)
+                    .await?
+                {
+                    return Ok(true);
+                }
+            }
         }
         if !state
             .jobs
@@ -351,10 +410,11 @@ async fn eligible_file(
         }
         if !pending.is_empty() {
             let backend = state.transcode.fel_identity(backend_digest).await.ok();
-            if !pending
-                .iter()
-                .any(|request| Some(&request.backend_identity) == backend.as_ref())
-            {
+            if !pending.iter().any(|request| {
+                Some(&request.backend_identity) == backend.as_ref()
+                    && (!demand.playback_requested
+                        || demand.playback_recipes.contains(&request.identity))
+            }) {
                 return Ok(None);
             }
         }

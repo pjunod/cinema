@@ -39,7 +39,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
     session_id: &str,
     generation: &str,
 ) {
-    let file_id = {
+    let (file_id, request) = {
         let mut entries = lock();
         match entries.get_mut(session_id) {
             Some(Entry::AwaitingQualification(wait))
@@ -49,7 +49,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
                         .is_none_or(|renewed| renewed.elapsed() >= VIEWER_RENEWAL) =>
             {
                 wait.demand_renewed = Some(std::time::Instant::now());
-                wait.wait.file_id
+                (wait.wait.file_id, wait.wait.request.clone())
             }
             _ => return,
         }
@@ -58,9 +58,24 @@ pub(in crate::http::hls) fn hold_viewer_demand(
     let viewer = session_id.to_owned();
     tokio::spawn(async move {
         let now = crate::media_sessions::unix_ms();
+        let tools = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+            Ok(Some(tools)) => tools,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "title viewer scanner unavailable");
+                return;
+            }
+        };
         match state
             .store
-            .attach_dv_title_viewer(file_id, &viewer, now.saturating_add(VIEWER_DEMAND_MS), now)
+            .attach_dv_title_viewer(plurx_core::store::dv_title_jobs::TitleViewerRequest {
+                file_id,
+                viewer,
+                request,
+                scanner_digest: tools.title_scanner_digest(),
+                deadline_ms: now.saturating_add(VIEWER_DEMAND_MS),
+                now_ms: now,
+            })
             .await
         {
             Ok(true) => {}

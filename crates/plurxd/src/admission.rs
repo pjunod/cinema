@@ -66,6 +66,10 @@ pub enum Priority {
     /// already-waiting viewer. Once granted, its permit is accounted as live:
     /// committing the successor therefore needs no unsafe permit swap.
     Speculative,
+    /// Bounded companion work for the current presentation. It may use spare
+    /// capacity beside live permits, but is accounted as background so a
+    /// foreground start waits for its worker to release it.
+    Companion,
     /// The pre-transcode producer. Takes what is spare, gives it back the
     /// moment a live start wants it, and does not take it again until every
     /// live encoder permit has been released.
@@ -82,7 +86,7 @@ impl From<Priority> for PermitOwner {
     fn from(priority: Priority) -> Self {
         match priority {
             Priority::Live | Priority::Speculative => PermitOwner::Live,
-            Priority::Background => PermitOwner::Background,
+            Priority::Background | Priority::Companion => PermitOwner::Background,
         }
     }
 }
@@ -367,13 +371,21 @@ impl SwPool {
             Priority::Background if permits.background_blocked() => {
                 return None;
             }
+            Priority::Companion if permits.live_waiting > 0 => return None,
             Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
                 return None;
             }
             _ => {}
         }
         let used = permits.software_used();
-        if used > 0 && used + weight > budget {
+        if priority == Priority::Companion
+            && used
+                .checked_add(weight)
+                .is_none_or(|required| required > budget)
+        {
+            return None;
+        }
+        if priority != Priority::Companion && used > 0 && used + weight > budget {
             return None;
         }
         match priority {
@@ -381,7 +393,7 @@ impl SwPool {
                 permits.software_live_permits += 1;
                 permits.software_live_used += weight;
             }
-            Priority::Background => {
+            Priority::Background | Priority::Companion => {
                 permits.software_background_permits += 1;
                 permits.software_background_used += weight;
             }
@@ -803,7 +815,9 @@ impl Admissions {
         let software_needed = estimates.iter().try_fold(0_usize, |sum, estimate| {
             sum.checked_add(estimate.cpu_threads)
         })?;
-        if estimates.len() > 1 && software_needed > software_budget {
+        if (estimates.len() > 1 || priority == Priority::Companion)
+            && software_needed > software_budget
+        {
             return None;
         }
         let mut permits = self
@@ -814,10 +828,14 @@ impl Admissions {
             return None;
         }
         permits.prune();
-        let claim = claim.filter(|token| permits.holds_reservation(*token));
+        let claim = claim.filter(|token| {
+            !matches!(priority, Priority::Background | Priority::Companion)
+                && permits.holds_reservation(*token)
+        });
         match priority {
             Priority::Live if permits.background_active() => return None,
             Priority::Background if permits.background_blocked() => return None,
+            Priority::Companion if permits.live_waiting > 0 => return None,
             Priority::Speculative
                 if (permits.live_waiting > 0 && claim.is_none()) || permits.background_active() =>
             {
@@ -852,7 +870,7 @@ impl Admissions {
             if estimate.hardware_slot {
                 match priority {
                     Priority::Live | Priority::Speculative => permits.hardware_live += 1,
-                    Priority::Background => permits.hardware_background += 1,
+                    Priority::Background | Priority::Companion => permits.hardware_background += 1,
                 }
             }
             if estimate.cpu_threads > 0 {
@@ -861,7 +879,7 @@ impl Admissions {
                         permits.software_live_permits += 1;
                         permits.software_live_used += estimate.cpu_threads;
                     }
-                    Priority::Background => {
+                    Priority::Background | Priority::Companion => {
                         permits.software_background_permits += 1;
                         permits.software_background_used += estimate.cpu_threads;
                     }
@@ -907,7 +925,7 @@ impl Admissions {
             || estimates
                 .iter()
                 .any(|estimate| !estimate.hardware_slot && estimate.cpu_threads == 0)
-            || priority == Priority::Background
+            || matches!(priority, Priority::Background | Priority::Companion)
         {
             return None;
         }
@@ -1328,6 +1346,7 @@ impl Admissions {
             Priority::Background if permits.background_blocked() => {
                 return None;
             }
+            Priority::Companion if permits.live_waiting > 0 => return None,
             Priority::Speculative if permits.live_waiting > 0 || permits.background_active() => {
                 return None;
             }
@@ -1338,7 +1357,7 @@ impl Admissions {
         }
         match priority {
             Priority::Live | Priority::Speculative => permits.hardware_live += 1,
-            Priority::Background => permits.hardware_background += 1,
+            Priority::Background | Priority::Companion => permits.hardware_background += 1,
         }
         drop(permits);
         Some(HwSlot {
@@ -1616,7 +1635,12 @@ mod tests {
         };
         let token = pool.reserve_for_handoff(&software, std::time::Duration::from_secs(60));
         assert_eq!(pool.snapshot().software_used, 4);
-        for priority in [Priority::Live, Priority::Speculative, Priority::Background] {
+        for priority in [
+            Priority::Live,
+            Priority::Speculative,
+            Priority::Background,
+            Priority::Companion,
+        ] {
             assert!(
                 pool.try_admit_bundle(1, 4, &software, priority).is_none(),
                 "{priority:?} cannot take reserved capacity"
@@ -1625,6 +1649,11 @@ mod tests {
         assert!(pool
             .try_admit_bundle_claiming(1, 4, &software, Priority::Speculative, Some(token + 1))
             .is_none());
+        assert!(
+            pool.try_admit_bundle_claiming(1, 4, &software, Priority::Companion, Some(token))
+                .is_none(),
+            "companion work cannot consume a foreground handoff reservation"
+        );
         let waiter = pool.wait_for_slot();
         let claimed = pool
             .try_admit_bundle_claiming(1, 4, &software, Priority::Speculative, Some(token))
@@ -2471,6 +2500,168 @@ mod tests {
             a.try_admit_bundle(4, 16, &mixed(4), Priority::Background)
                 .is_some(),
             "and takes it again once the start is gone"
+        );
+    }
+
+    #[test]
+    fn companion_uses_bounded_background_counters_beside_current_playback() {
+        let admissions = Admissions::new();
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 2,
+            decoder_threads: None,
+        };
+        let viewer = admissions
+            .try_admit_bundle(2, 4, &resources, Priority::Live)
+            .expect("current playback");
+        let companion = admissions
+            .try_admit_bundle(2, 4, &resources, Priority::Companion)
+            .expect("companion may use the last bounded GPU and CPU share");
+
+        assert_eq!(admissions.in_use(), 2);
+        assert_eq!(admissions.software_in_use(), 4);
+        assert!(
+            admissions
+                .try_admit_bundle(2, 4, &resources, Priority::Companion)
+                .is_none(),
+            "the global hardware and CPU caps still apply"
+        );
+        assert!(
+            admissions
+                .try_admit_family(2, 4, &[resources], &[None], Priority::Companion)
+                .is_none(),
+            "companion work cannot create a continuous presentation family"
+        );
+
+        drop(companion);
+        let waiting = admissions.queue_for_slot();
+        assert!(
+            admissions
+                .try_admit_bundle(2, 4, &resources, Priority::Companion)
+                .is_none(),
+            "companion yields while a foreground waiter exists"
+        );
+        drop(waiting);
+        drop(viewer);
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[test]
+    fn companion_extension_counts_against_its_own_background_base() {
+        let admissions = Admissions::new();
+        let base = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 2,
+            decoder_threads: None,
+        };
+        let extension = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 1,
+            decoder_threads: None,
+        };
+        let base_permit = admissions
+            .try_admit_bundle(2, 4, &base, Priority::Companion)
+            .expect("companion base");
+        let extension_permit = admissions
+            .try_admit_bundle(2, 4, &extension, Priority::Companion)
+            .expect("extension may add to its own companion base");
+
+        assert_eq!(admissions.in_use(), 2);
+        assert_eq!(admissions.software_in_use(), 3);
+        assert!(
+            admissions
+                .try_admit_bundle(2, 4, &extension, Priority::Companion)
+                .is_none(),
+            "the extension does not hide its base from pool accounting"
+        );
+
+        drop(extension_permit);
+        drop(base_permit);
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[test]
+    fn companion_cannot_use_the_empty_pool_oversize_exception() {
+        let admissions = Admissions::new();
+        assert!(
+            admissions
+                .try_admit_software(2, 3, Priority::Companion)
+                .is_none(),
+            "companion CPU must fit the configured budget even on an idle pool"
+        );
+        assert!(
+            admissions
+                .try_admit_bundle(
+                    1,
+                    2,
+                    &TranscodeResourceEstimate {
+                        hardware_slot: false,
+                        cpu_threads: 3,
+                        decoder_threads: None,
+                    },
+                    Priority::Companion,
+                )
+                .is_none(),
+            "single-bundle companion admission has no oversized exception"
+        );
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[tokio::test]
+    async fn foreground_preparation_waits_for_companion_reap_within_its_deadline() {
+        let admissions = Admissions::new();
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 2,
+            decoder_threads: None,
+        };
+        let _viewer = admissions
+            .try_admit_bundle(2, 4, &resources, Priority::Live)
+            .expect("current playback");
+        let companion = admissions
+            .try_admit_bundle(2, 4, &resources, Priority::Companion)
+            .expect("companion fills the remaining bounded capacity");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let foreground = tokio::spawn({
+            let admissions = admissions.clone();
+            let resources = resources.clone();
+            async move {
+                crate::vodencode::admit_frozen_preparation(
+                    &admissions,
+                    2,
+                    4,
+                    &resources,
+                    Some(2),
+                    deadline,
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !admissions.live_is_waiting() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("foreground registers its capacity waiter");
+        assert!(!foreground.is_finished(), "the foreground waiter persists");
+        // This is the companion worker's cooperative checkpoint: it observes
+        // the real foreground waiter, then releases its actual pool permits.
+        assert!(admissions.live_is_waiting());
+        drop(companion);
+
+        let admitted = foreground.await.expect("foreground task completed");
+        assert!(
+            admitted.is_ok(),
+            "foreground receives the released capacity"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the original deadline remains in force"
         );
     }
 

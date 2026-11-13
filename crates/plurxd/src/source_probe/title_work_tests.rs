@@ -10,7 +10,7 @@ use plurx_core::{
 async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page() {
     let dir = crate::test_tempdir().expect("scratch");
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let state = AppState::new(
+    let mut state = AppState::new(
         "test".into(),
         Arc::clone(&store),
         crate::state::Dirs {
@@ -62,6 +62,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
                 video_codec: Some("hevc".into()),
                 dolby_vision: DolbyVisionFacts {
                     profile: Some(7),
+                    el_present: Some(true),
                     rpu_present: Some(true),
                     ..Default::default()
                 },
@@ -228,6 +229,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         file_id: file,
         probe_revision: revision,
         playback_requested: false,
+        live_after: 0,
     };
     assert!(!task
         .should_yield(&state)
@@ -289,9 +291,70 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         .should_yield(&state)
         .await
         .expect("no exact pending recipe retains no live lane"));
+    let caps = plurx_core::transcode::EncoderCaps {
+        vaapi: true,
+        vaapi_hdr_policy: Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
+        vaapi_driver: Some("Mesa Gallium driver for AMD fixture (radeonsi)".into()),
+        ..Default::default()
+    };
+    state.transcode = Arc::new(
+        crate::transcode::TranscodeManager::new(
+            Arc::clone(&store),
+            dir.path().join("live-runtime"),
+            caps,
+            plurx_core::transcode::Pipeline::Cpu,
+        )
+        .with_hdr10_passthrough_vaapi(true),
+    );
+    let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+        90_000,
+        plurx_core::transcode::EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        3840,
+        2160,
+        (24, 1),
+        true,
+        Default::default(),
+    )
+    .expect("exact recipe envelope");
+    let recipe = plurx_core::transcode::dv_fel_qualification::FelRecipeRequest::new(
+        state
+            .transcode
+            .fel_identity(&task.backend_digest)
+            .await
+            .expect("synthetic backend identity"),
+        size,
+        mtime,
+        envelope,
+        plurx_core::transcode::dv_fel_qualification::FelRecipeOutput::new(0, (3840, 2160), (24, 1)),
+    );
+    assert!(store
+        .request_dv_fel_variant(file, &recipe)
+        .await
+        .expect("pending exact recipe"));
+    assert!(store
+        .attach_dv_title_viewer(plurx_core::store::dv_title_jobs::TitleViewerRequest {
+            file_id: file,
+            viewer: viewer_id.clone(),
+            request: recipe,
+            scanner_digest: task.scanner.clone(),
+            deadline_ms: now_ms().saturating_add(60_000),
+            now_ms: now_ms(),
+        })
+        .await
+        .expect("renew exact interest on the already-owned title"));
+    assert!(!task
+        .should_yield(&state)
+        .await
+        .expect("own renewed exact interest retains live lane"));
+    task.playback_requested = false;
+    assert!(task
+        .should_yield(&state)
+        .await
+        .expect("same-file live upgrade preempts maintenance"));
+    task.playback_requested = true;
     store
         .cancel_waiter(plurx_core::store::background_jobs::CancelWaiter {
-            scope: "title-priority".into(),
+            scope: "playback-qualification".into(),
             request_id: viewer_id,
             now_ms: now_ms(),
         })
@@ -325,6 +388,7 @@ async fn title_stop_awaits_owned_work_instead_of_dropping_it() {
         file_id: 0,
         probe_revision: 0,
         playback_requested: false,
+        live_after: 0,
     };
     assert!(!task.stop().await);
     assert!(reaped.load(std::sync::atomic::Ordering::Acquire));
@@ -717,6 +781,8 @@ fn stored_title() -> TitleDemand {
     TitleDemand {
         queued_job_id: None,
         playback_requested: false,
+        scanner_digest: None,
+        playback_recipes: Vec::new(),
         file_id: 9,
         probe_revision: 7,
         source_size: 1,

@@ -1501,7 +1501,7 @@ impl TranscodeManager {
                     cpu_threads: 1,
                     decoder_threads: None,
                 },
-                Priority::Speculative,
+                Priority::Companion,
             )
             .map(|permit| FragmentAdmission {
                 playback_qualification: true,
@@ -1586,7 +1586,7 @@ impl TranscodeManager {
             resources,
             software_threads,
             if admission.playback_qualification {
-                Priority::Speculative
+                Priority::Companion
             } else {
                 Priority::Background
             },

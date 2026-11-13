@@ -21250,6 +21250,8 @@ const RECENT_SOURCE_METHODS: &[&str] = &[
     "copy_index_v3_locations",
     "copy_index_v3_quarantine_code",
     "copy_index_v3_variant",
+    "dv_title_can_preempt",
+    "dv_title_playback_demands",
     "ensure_copy_index_v3_head",
     "establish_analysis_coordination",
     "find_offloaded_episode",

@@ -62,23 +62,32 @@ It runs two ways, with one aggregate:
 ## Playback qualification precedes maintenance scanning
 
 An exact, unexpired `playback_qualification` waiter with an outstanding
-source-bound FEL recipe promotes its current
-`dv_title_scan` demand ahead of ordinary probe and title pagination, including
-when its revision is behind the maintenance cursor. The worker checks current
+source-bound FEL recipe holds its current
+`dv_title_scan` demand in a separate bounded live queue before ordinary probe
+and title pagination. The live queue has its own revision cursor; the owned
+attempt checks its interest directly, independently of page pressure. A viewer
+can create the current typed job and attach its exact recipe before physical
+admission, so active playback cannot prevent that demand from being recorded. The worker checks current
 source facts, readability, installed scanner and the requested encoder identity
-before replacing an ordinary title task. Cancellation reaps the existing child
-and settles its typed yield before the replacement starts.
+before replacing an ordinary title task. Only a queued, due, locally eligible candidate can preempt another title; a
+healthy owner on another node or a backoff timer cannot interrupt maintenance.
+Cancellation reaps the existing child and settles its typed yield before the
+replacement starts.
 
 The promoted turn measures only the explicitly requested FEL recipe. Its
 bounded picture windows do not depend on a complete title aggregate, so it
-publishes the recipe receipt before a full-file metadata scan. It yields the
-unfinished aggregate job back to maintenance; a qualification receipt never
+publishes the recipe receipt before a full-file metadata scan. Storing a receipt atomically completes only the matching recipe interest,
+preserving other viewers and recipes. It yields the unfinished aggregate job
+back to maintenance; a qualification receipt never
 stands in for complete title metadata or marks the scan complete. Window
 coverage and quality thresholds remain unchanged, so this removes queue and
 whole-file prerequisites rather than promising a fixed measurement duration.
 
-Qualification uses the existing spare-capacity companion admission alongside
-playback, within the CPU and GPU pools. Waiting viewers retain priority. It
+Qualification uses a preemptible companion admission alongside playback,
+within the CPU and GPU pools. Its permits count as background capacity, so a
+foreground start keeps its waiter until qualification has actually reaped and
+released the resources. Waiting viewers retain priority; companion work cannot
+use the isolated oversized-job exception or adopt foreground handoff capacity. It
 still owns the heavy lane and uses the same durable job, source grant,
 foreground sharing permission, physical pause and freshness fences. Expired
 playback interest returns the task to maintenance. Ordinary complete-title

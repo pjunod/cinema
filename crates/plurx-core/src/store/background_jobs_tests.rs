@@ -2553,64 +2553,148 @@ async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work
 
 #[tokio::test]
 async fn a_waiting_viewer_attaches_and_renews_its_demand_on_the_title_scan() {
+    use crate::{
+        domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
+        store::{dv_title_jobs::TitleViewerRequest, LibraryStore, MediaStore},
+        transcode::{
+            dv_fel_qualification as q, EnhancementRateEnvelope, EnhancementRateLimits,
+            EnhancementRateProvenance,
+        },
+    };
     let dir = tempfile::tempdir().expect("directory");
     let path = dir.path().join("jobs.db");
     let store = SqliteStore::open(&path).expect("store");
     let db = rusqlite::Connection::open(path).expect("fixture connection");
-    // No scan yet: nothing to attach to, and the next exchange retries.
-    assert!(!store
-        .attach_dv_title_viewer(7, "viewer-1", 60_000, 1_000)
+    let library = store
+        .create_library(&NewLibrary {
+            name: "viewer-title".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/media".into()],
+            anime: false,
+        })
         .await
-        .expect("no scan"));
-    let job = enqueue(1_000);
-    store.enqueue_job(job.clone()).await.expect("accepted");
-    db.execute(
-        "UPDATE background_jobs SET kind='dv_title_scan',payload_json='{\"file_id\":7}' WHERE id=?1",
-        [&job.id],
-    )
-    .expect("queued title scan");
-    assert!(store
-        .attach_dv_title_viewer(7, "viewer-1", 60_000, 1_000)
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "viewer title".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
         .await
-        .expect("attach"));
-    assert!(store
-        .attach_dv_title_viewer(7, "viewer-1", 90_000, 30_000)
-        .await
-        .expect("renew"));
-    let (count, deadline): (i64, i64) = db
-        .query_row(
-            "SELECT count(*), max(deadline_ms) FROM background_job_waiters
-             WHERE job_id=?1 AND consumer_kind='playback_qualification' AND state='pending'",
-            [&job.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+        .expect("item");
+    let file = store
+        .upsert_file(
+            item,
+            "/media/viewer-title.mkv",
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("hevc".into()),
+                dolby_vision: DolbyVisionFacts {
+                    profile: Some(7),
+                    rpu_present: Some(true),
+                    el_present: Some(true),
+                    ..Default::default()
+                },
+                raw_json: Some("{}".into()),
+                ..Default::default()
+            },
         )
-        .expect("viewer waiter");
-    assert_eq!(
-        (count, deadline),
-        (1, 90_000),
-        "one renewed waiter per viewer"
+        .await
+        .expect("source");
+    let envelope = EnhancementRateEnvelope::resolve(
+        90_000,
+        EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        3840,
+        2160,
+        (24, 1),
+        true,
+        EnhancementRateLimits::default(),
+    )
+    .expect("envelope");
+    let recipe = q::FelRecipeRequest::new(
+        "b".repeat(64),
+        100,
+        1,
+        envelope,
+        q::FelRecipeOutput::new(0, (3840, 2160), (24, 1)),
     );
-    // The viewer paused past its deadline and upkeep cancelled the demand; a
-    // resumed viewer's renewal revives it.
-    db.execute(
-        "UPDATE background_job_waiters SET state='cancelled' WHERE consumer_kind='playback_qualification'",
-        [],
-    )
-    .expect("lapsed demand");
-    assert!(store
-        .attach_dv_title_viewer(7, "viewer-1", 200_000, 110_000)
+    let viewer = |deadline, now| TitleViewerRequest {
+        file_id: file,
+        viewer: "viewer-1".into(),
+        request: recipe.clone(),
+        scanner_digest: "a".repeat(64),
+        deadline_ms: deadline,
+        now_ms: now,
+    };
+    assert!(!store
+        .attach_dv_title_viewer(viewer(60_000, 1_000))
         .await
-        .expect("revived"));
-    let state: String = db
-        .query_row(
-            "SELECT state FROM background_job_waiters WHERE consumer_kind='playback_qualification'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("revived waiter");
-    assert_eq!(state, "pending");
+        .expect("unregistered recipe"));
     assert!(store
-        .attach_dv_title_viewer(7, "viewer-1", 1_000, 2_000)
+        .request_dv_fel_variant(file, &recipe)
+        .await
+        .expect("registered request"));
+    db.execute("UPDATE files SET probe_json=json_set(probe_json,'$.plurx_dv_fel_requests_v3.'||?1||'.source_size',99) WHERE id=?2",
+        rusqlite::params![recipe.identity,file]).expect("old source request fixture");
+    assert!(!store
+        .attach_dv_title_viewer(viewer(60_000, 1_000))
+        .await
+        .expect("old source cannot bootstrap"));
+    assert!(store
+        .request_dv_fel_variant(file, &recipe)
+        .await
+        .expect("restore registered current source"));
+    db.execute(
+        "UPDATE dv_title_jobs_demand SET terminal=1 WHERE file_id=?1",
+        [file],
+    )
+    .expect("terminal fixture");
+    assert!(store
+        .dv_title_playback_demands(0, 1_000, None)
+        .await
+        .expect("no live viewers")
+        .is_empty());
+    let terminal: i64 = db
+        .query_row(
+            "SELECT terminal FROM dv_title_jobs_demand WHERE file_id=?1",
+            [file],
+            |r| r.get(0),
+        )
+        .expect("unchanged terminal");
+    assert_eq!(terminal, 1, "read-only live discovery never reopens demand");
+    assert!(store
+        .attach_dv_title_viewer(viewer(60_000, 1_000))
+        .await
+        .expect("bootstrap"));
+    let live = store
+        .dv_title_playback_demands(0, 1_001, None)
+        .await
+        .expect("live");
+    let job = live[0].queued_job_id.clone().expect("queued job");
+    db.execute("UPDATE background_job_waiters SET consumer_ref='legacy-viewer' WHERE consumer_kind='playback_qualification'",[]).expect("legacy demand fixture");
+    assert!(store
+        .attach_dv_title_viewer(viewer(90_000, 30_000))
+        .await
+        .expect("renew legacy waiter"));
+    let (count,deadline,reference):(i64,i64,String)=db.query_row(
+        "SELECT count(*),max(deadline_ms),max(consumer_ref) FROM background_job_waiters WHERE job_id=?1 AND consumer_kind='playback_qualification' AND state='pending'",
+        [&job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).expect("viewer waiter");
+    assert_eq!(
+        (count, deadline, reference),
+        (1, 90_000, recipe.identity.clone())
+    );
+    db.execute("UPDATE background_job_waiters SET state='cancelled' WHERE consumer_kind='playback_qualification'",[]).expect("lapsed demand");
+    assert!(store
+        .attach_dv_title_viewer(viewer(200_000, 110_000))
+        .await
+        .expect("explicit viewer renewal"));
+    assert!(store
+        .attach_dv_title_viewer(viewer(1_000, 2_000))
         .await
         .is_err());
 }
