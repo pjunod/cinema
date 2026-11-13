@@ -73,7 +73,7 @@ Linux replicated source ownership requires the actual host machine and boot
 identities. The tracked Compose file supplies read-only `/etc/machine-id` and
 procfs boot-ID binds with missing-source creation disabled. Preserve them in
 overrides; startup refuses an invalid reboot-recovery identity before serving.
-The [source-custody recovery procedure](../docs/server/SOURCE-CUSTODY-RECOVERY.md#15-linux-startup-preserves-reboot-recovery-old-empty-identity-records-need-independent-proof)
+The [source-custody recovery procedure](../docs/server/SOURCE-CUSTODY-RECOVERY.md#15-linux-replicated-startup-requires-actual-host-identity)
 explains why adding mounts now cannot repair an old empty-identity record.
 
 One command from the repository root brings the stack up for the first time:

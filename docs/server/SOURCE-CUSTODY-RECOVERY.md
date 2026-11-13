@@ -321,7 +321,7 @@ host identity; it does not repair historical records. The lab4 incident and
 the [existing exact-custody census recovery in §1.3](#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census)
 remain separate: that recovery is implemented by merged PR #1567, and the
 fleet evidence and acceptance are still pending. See the
-[shared-playback RCA §5.1](../streaming/SHARED-LIBRARY-PLAYBACK-RCA.md#51-a-different-lab4-owner-lost-both-recovery-paths-after-replacement-and-reboot).
+[shared-playback RCA §5.1](../streaming/SHARED-LIBRARY-PLAYBACK-RCA.md#51-missing-host-identity-let-a-replicated-linux-daemon-start-without-reboot-recovery).
 
 ## 2. The journal never impersonates an activation or completed join
 
