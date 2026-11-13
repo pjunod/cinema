@@ -1973,6 +1973,9 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let catalogue = selected.catalogue_reader();
         let applied = selected.applied_view();
         let dirs = create_dirs_for_config(&config)?;
+        if let Err(error) = crate::source_custody::configure_access_roots(&config, &dirs) {
+            tracing::warn!(%error, "source-access roots unavailable; launches remain unverified");
+        }
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
         // slow probe from waiting out its grace period while this process

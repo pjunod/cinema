@@ -306,7 +306,7 @@ test("every section is a route, grouped in the rail's order", () => {
     cluster: "clusterPanel(d)",
     sharing: "sharingManagementPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
-    developer: "developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https))",
+    developer: "developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https),sourceRecoveryMount(d.sourceRecovery))",
   };
   const panel = shippedSource("settingsPanel");
   for (const [id] of r.SET_TABS) {
@@ -707,7 +707,7 @@ function developerPanels(){
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
       shippedSource("indexingWhileServingCard"),
       shippedSource("appliedViewCard"),
-      shippedSource("processedDvUpgradeCard"),
+      shippedSource("processedDvUpgradeCard"), shippedSource("sourceRecoveryCard"),
       shippedSource("subtitleTranscriptionCard"),
       shippedSource("subtitleTranslationCard"),
       shippedSource("clusterClockCard"),
@@ -750,7 +750,7 @@ function developerPanels(){
       "const SETTINGS_DATA=null,ME={is_admin:true},PLAYER=null;",
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
-      "return {server:SERVER,developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel,analysisSettingsPanel,clusterSettingsSection};",
+      "return {server:SERVER,developerPanel,sourceRecoveryCard,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel,analysisSettingsPanel,clusterSettingsSection};",
     ].join("\n");
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
@@ -805,12 +805,15 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     dvr_webhook_url: "",
   };
   const httpsCard = '<div id="settings-https">Node-local HTTPS</div>';
+  const sourceRecovery = '<div id="settings-source-recovery">Playback restart recovery</div>';
   const html = renderComposedPanel(
-    "developerPanel", () => panels.developerPanel(settings, readiness, httpsCard),
+    "developerPanel", () => panels.developerPanel(settings, readiness, httpsCard, sourceRecovery),
   );
   assert.ok(html.indexOf("HEAD:Developer") < html.indexOf(httpsCard), "the page heading precedes HTTPS");
   assert.ok(html.indexOf("</nav>") < html.indexOf(httpsCard), "everyday destinations precede HTTPS");
   assert.ok(html.indexOf(httpsCard) < html.indexOf("CARDHEAD:Diagnostic ZIP reports"), "HTTPS stays inside the Developer card list");
+  assert.ok(html.indexOf(httpsCard) < html.indexOf(sourceRecovery), "node-local status follows HTTPS");
+  assert.ok(html.indexOf(sourceRecovery) < html.indexOf("CARDHEAD:Diagnostic ZIP reports"), "recovery status stays in the Developer card list");
   for (const id of ["hevc-unverified", "pabr"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Graduated 2026-10-10 (Paul: "clean up developer settings"). Each switch
@@ -1054,7 +1057,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // 21 since D1 (2026-11-07): the processed DV upgrade waits on its measured
   // switches. 22 since E1a (2026-11-11): the applied view waits on its
   // readers. The bound still catches a card that should have graduated.
-  assert.ok(developerCards.length <= 22, `Developer holds only what still waits (${developerCards.length})`);
+  assert.ok(developerCards.length <= 23, `Developer holds only what still waits (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
@@ -2367,6 +2370,39 @@ test("Mac processing exposes every independent implemented graph while preservin
   assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
 });
 
+test("playback restart recovery is node-local, read-only, and conservative when unavailable",()=>{
+  const render=new Function("esc","setCard","cardHead","devGraduation",`${shippedSource("sourceRecoveryCard")}\nreturn sourceRecoveryCard;`)(
+    esc,body=>body,(title,sub,tools)=>`CARD:${title}|${sub}|${tools}`, (waiting,then)=>`LEAVES:${waiting}|THEN:${then}`,
+  );
+  const html=render({node_name:"lab4",supported:false,authoritative_backend:true,kernel_available:true,local_filesystem:true,daemon_init_or_subreaper:null,
+    launches:{mediated:6,verified:12,no_source:4,metadata_only:2,brokered:6,unverified:1,unknown:3,latest_unknown:{purpose:"session transcode",observed_at_ms:1000}},poisoned:null},"");
+  assert.match(html,/This node: lab4/);
+  assert.match(html,/Verified attempts since process start[\s\S]*?12/);
+  assert.match(html,/Verified no-source attempts[\s\S]*?4/);
+  assert.match(html,/Verified metadata-only attempts[\s\S]*?2/);
+  assert.match(html,/Verified brokered attempts[\s\S]*?6/);
+  assert.match(html,/Unknown attempts since process start[\s\S]*?3/);
+  assert.match(html,/Explicitly unverified attempts[\s\S]*?1 · subset of unknown/);
+  assert.doesNotMatch(html,/Broker-declared attempts/);
+  assert.match(html,/Latest unknown launch: session transcode/);
+  assert.match(html,/Poisoned witness status is unavailable/);
+  assert.doesNotMatch(html,/Poisoned witnesses:<\/b> 0/);
+  assert.match(html,/native Linux\/macOS crash recovery and performance qualification are accepted/);
+  assert.doesNotMatch(html,/TOG:|onclick="[^\"]*(?:save|enable)/i);
+  assert.match(html,/onclick="reloadSourceRecovery\(this\)"/);
+  const errored=render({node_name:"lab4",error:"partial source status",supported:true,launches:{mediated:0,unknown:0},poisoned:{total:0,witnesses:[]}},"");
+  assert.match(errored,/Poisoned witness status is unavailable/);
+  assert.doesNotMatch(errored,/Poisoned witnesses:<\/b> 0/);
+  const poisoned=render({node_name:"lab4",supported:true,authoritative_backend:true,kernel_available:true,local_filesystem:true,
+    launches:{mediated:0,unknown:0,latest_unknown:null},poisoned:{total:33,witnesses:Array.from({length:33},(_,index)=>({family:"playback",owner_id:String(index),purpose:"unverified child",boot_tick:index}))}},"");
+  assert.match(poisoned,/Verified attempts since process start[\s\S]*?Unknown/,"missing counter fields remain unobservable, not healthy zeroes");
+  assert.match(poisoned,/owner-stop proof, namespace teardown, or reboot/);
+  assert.match(poisoned,/Confined-reader recovery is future work/);
+  assert.match(poisoned,/this status does not make a playback census safe/);
+  assert.match(poisoned,/Showing (?:up to )?the first 32 witnesses/);
+  assert.equal((poisoned.match(/<li>/g)||[]).length,32);
+});
+
 test("HTTPS card keeps exact node revision, env ownership, public facts and a token-free IPv6 link",()=>{
   const url=new Function("location",`${shippedSource("httpsConnectionUrl")} return httpsConnectionUrl;`)({href:"http://user:secret@[::1]:32400/path?token=SECRET#/settings/developer"});
   assert.equal(url({active:{enabled:true,port:32443}}),"https://[::1]:32443/");
@@ -2471,6 +2507,31 @@ test("HTTPS isolated loader ignores late navigation and reports its own failure"
   const fail=new Function("loadSettingsKey","settingsCurrent","applyHttpsSettings",`${shippedSource("loadHttpsCard")} return loadHttpsCard;`)(
     async()=>{throw Error("local read failed");},()=>true,(...args)=>paints.push(args));
   await fail(2);assert.deepEqual(paints,[[null,"local read failed"]]);
+});
+
+test("Developer source recovery retries only its own secondary read",async()=>{
+  let calls=0;const paints=[],local={node_name:"lab2",poisoned:null};
+  const harness=new Function("settingsCurrent","applySourceRecovery","endpoint",`
+    const PAGE_RENDER_GENERATION=1,SETTINGS_HTTPS_EPOCH=0;
+    let SETTINGS_SOURCE_RECOVERY_EPOCH=0,DV_SETTINGS_POLL_AT=0,CLUSTER_LOADED=false;
+    const DV_PROGRESS_POLL_MS=10,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+    const SETTINGS_ENDPOINTS={sourceRecovery:endpoint};
+    ${shippedSource("loadSettingsKey")}
+    ${shippedSource("loadSourceRecoveryCard")}
+    ${shippedSource("reloadSourceRecovery")}
+    return {first:()=>loadSourceRecoveryCard(1),retry:reloadSourceRecovery,data:SETTINGS_DATA};
+  `)(()=>true,(...args)=>paints.push(args),async()=>{if(++calls===1)throw Error("local recovery read unavailable");return local;});
+  await harness.first();
+  assert.deepEqual(paints,[[null,"local recovery read unavailable"]]);
+  assert.equal(calls,1);
+  await harness.retry({disabled:false});
+  assert.deepEqual(paints,[[null,"local recovery read unavailable"],[null,"Loading this node's recovery status…"],[local]]);
+  assert.equal(calls,2);
+  assert.equal(harness.data.sourceRecovery,local);
+  assert.deepEqual(Object.keys(harness.data),["sourceRecovery"],"local retry changes no other settings section data");
+  assert.match(shippedConst("SETTINGS_ENDPOINTS"),/sourceRecovery:\(\)=>api\("\/developer\/source-recovery"\)/);
+  assert.match(shippedConst("SETTINGS_MANIFEST"),/developer:\{required:\["settings"\],secondary:\[[^\]]*"sourceRecovery"/);
+  assert.match(shippedSource("loadSettingsTab"),/tab==="developer"&&key==="sourceRecovery"\)return loadSourceRecoveryCard\(generation\)/);
 });
 
 test("Developer keeps replicated settings error and Retry while loading only its independent HTTPS card",async()=>{

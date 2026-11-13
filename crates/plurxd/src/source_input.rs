@@ -172,6 +172,7 @@ impl SourceInputByteBudget for crate::background_jobs::SourceReadBudget {
 
 pub(crate) struct SourceInput {
     url: String,
+    broker: Arc<std::sync::Mutex<Option<plurx_core::process::source_lifetime::BrokerRegistration>>>,
     state: Arc<InputState>,
     close: tokio_util::sync::CancellationToken,
     server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -562,30 +563,56 @@ impl SourceInput {
             .map_err(|error| error.to_string())?;
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let route = format!("/{}", uuid::Uuid::new_v4().simple());
+        let url = format!("http://{address}{route}");
+        let broker = Arc::new(std::sync::Mutex::new(Some(
+            plurx_core::process::source_lifetime::register_broker(&url)
+                .map_err(|error| error.to_string())?,
+        )));
         let router = Router::new()
             .route(&route, any(serve_input))
             .with_state(Arc::clone(&state));
         let close = state.close.clone();
         if let Some(observer) = state.observer.clone() {
             let source_close = close.clone();
+            let authority_broker = Arc::clone(&broker);
             tokio::spawn(async move {
                 tokio::select! {
                     ()=source_close.cancelled()=>{},
-                    ()=observer.authority_lost()=>source_close.cancel(),
+                    ()=observer.authority_lost()=>{
+                        drop(authority_broker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+                        source_close.cancel();
+                    },
                 }
             });
         }
         let shutdown = close.clone();
+        let server_broker = Arc::clone(&broker);
+        let shutdown_broker = Arc::clone(&broker);
         let server = tokio::spawn(async move {
             let _ = axum::serve(
                 listener,
                 router.into_make_service_with_connect_info::<SocketAddr>(),
             )
-            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .with_graceful_shutdown(async move {
+                shutdown.cancelled().await;
+                drop(
+                    shutdown_broker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(),
+                );
+            })
             .await;
+            drop(
+                server_broker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
         });
         Ok(Self {
-            url: format!("http://{address}{route}"),
+            url,
+            broker,
             state,
             close,
             server: std::sync::Mutex::new(Some(server)),
@@ -708,9 +735,19 @@ impl SourceInput {
             .expect("foreground source observer")
             .clone()
     }
+    fn revoke_broker(&self) {
+        let registration = self
+            .broker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(registration);
+    }
+
     /// Join actual source reads, then close the held capability before a
     /// background caller returns its job/resource claim.
     pub(crate) async fn close_and_wait(self) -> std::io::Result<()> {
+        self.revoke_broker();
         self.close.cancel();
         if let Some(observer) = &self.state.observer {
             observer.mark_cleanup_pending();
@@ -736,6 +773,7 @@ impl SourceInput {
         Ok(())
     }
     pub(crate) fn cleanup_pending(self) {
+        self.revoke_broker();
         self.close.cancel();
         if let Some(custody) = self.state.custody.lock().expect("source custody").take() {
             custody.cleanup_pending();
@@ -744,6 +782,7 @@ impl SourceInput {
 }
 impl Drop for SourceInput {
     fn drop(&mut self) {
+        self.revoke_broker();
         self.close.cancel();
     }
 }

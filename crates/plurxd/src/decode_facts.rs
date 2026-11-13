@@ -1420,62 +1420,6 @@ fn resolve_executable(bin: &str) -> Result<PathBuf, DecodeFactError> {
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))
 }
 
-#[cfg(unix)]
-fn duplicate_child_fd(source: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
-    let duplicate = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10) };
-    if duplicate == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(duplicate)
-    }
-}
-
-#[cfg(unix)]
-fn assign_child_fd(
-    duplicate: std::os::fd::RawFd,
-    target: std::os::fd::RawFd,
-) -> std::io::Result<()> {
-    if unsafe { libc::dup2(duplicate, target) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let flags = unsafe { libc::fcntl(target, libc::F_GETFD) };
-    if flags == -1 || unsafe { libc::fcntl(target, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn install_child_fd(source: std::os::fd::RawFd, target: std::os::fd::RawFd) -> std::io::Result<()> {
-    let duplicate = duplicate_child_fd(source)?;
-    let result = assign_child_fd(duplicate, target);
-    unsafe { libc::close(duplicate) };
-    result
-}
-
-#[cfg(unix)]
-fn install_probe_child_fds(
-    source: std::os::fd::RawFd,
-    executable: std::os::fd::RawFd,
-) -> std::io::Result<()> {
-    let source_duplicate = duplicate_child_fd(source)?;
-    let executable_duplicate = match duplicate_child_fd(executable) {
-        Ok(duplicate) => duplicate,
-        Err(error) => {
-            unsafe { libc::close(source_duplicate) };
-            return Err(error);
-        }
-    };
-    let result = assign_child_fd(source_duplicate, 3)
-        .and_then(|()| assign_child_fd(executable_duplicate, HELD_PROBE_FD));
-    unsafe {
-        libc::close(source_duplicate);
-        libc::close(executable_duplicate);
-    }
-    result
-}
-
 #[cfg(target_os = "linux")]
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
 #[cfg(target_os = "linux")]
@@ -2824,6 +2768,7 @@ static STEADY_RESPONSE_STOP_EXITS: std::sync::atomic::AtomicUsize =
 
 #[cfg(unix)]
 struct ProbeExecutionSupervisor {
+    descriptors: Option<Arc<crate::producer_spawn::DescriptorManifest>>,
     retirement: Option<crate::background_jobs::RawRetirement>,
     #[cfg(target_os = "linux")]
     linux: Option<LinuxProbeExecSupervisor>,
@@ -2833,6 +2778,7 @@ struct ProbeExecutionSupervisor {
 impl ProbeExecutionSupervisor {
     fn none() -> Self {
         Self {
+            descriptors: None,
             retirement: None,
             #[cfg(target_os = "linux")]
             linux: None,
@@ -2842,6 +2788,7 @@ impl ProbeExecutionSupervisor {
     #[cfg(target_os = "linux")]
     fn linux(supervisor: LinuxProbeExecSupervisor) -> Self {
         Self {
+            descriptors: None,
             retirement: None,
             linux: Some(supervisor),
         }
@@ -2910,12 +2857,22 @@ async fn spawn_configured_probe(
         // `configure_probe_execution` already registered the priority ahead
         // of its own exec-from-`pre_exec`; the launcher's second registration
         // lands after that closure and never runs.
-        let spawned = match &supervisor.retirement {
+        let launch = |command: &mut tokio::process::Command| match &supervisor.retirement {
             Some(retirement) => {
-                retirement.spawn(|| crate::process_control::spawn_job_owned(&mut command, work))
+                retirement.spawn(|| crate::process_control::spawn_job_owned(command, work))
             }
-            None => crate::process_control::spawn_job_owned(&mut command, work),
+            None => crate::process_control::spawn_job_owned(command, work),
         };
+        let spawned = match supervisor.descriptors.as_ref() {
+            Some(descriptors) => {
+                crate::producer_spawn::with_manifest(descriptors, &mut command, launch)
+            }
+            None => launch(&mut command),
+        };
+        // The forked child owns its copied pins. Parent-side copies in both
+        // the hook and supervisor must close before control-socket EOF/reap.
+        drop(command);
+        supervisor.descriptors.take();
         supervisor.parent_after_spawn();
         match spawned {
             Ok((child, job)) => Ok((child, job, supervisor)),
@@ -3069,6 +3026,7 @@ fn configure_probe_execution(
     arg0: &Path,
     arguments: &[OsString],
     class: crate::process_control::ChildClass,
+    stdio: crate::producer_spawn::StdioFacts,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     #[cfg(target_os = "linux")]
     let retirement = if source_fd.is_some() && launch_mode.is_production() {
@@ -3091,6 +3049,7 @@ fn configure_probe_execution(
         arg0,
         arguments,
         class,
+        stdio,
     )?;
     supervisor.retirement = retirement;
     Ok(supervisor)
@@ -3106,6 +3065,7 @@ fn configure_probe_execution_untracked(
     arg0: &Path,
     arguments: &[OsString],
     class: crate::process_control::ChildClass,
+    stdio: crate::producer_spawn::StdioFacts,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     #[cfg(target_os = "linux")]
     if command.as_std().get_program() == OsStr::new("/usr/bin/bwrap") {
@@ -3118,6 +3078,7 @@ fn configure_probe_execution_untracked(
             arguments,
             class,
             launch_deadline,
+            stdio,
         );
     }
     command.args(arguments);
@@ -3169,15 +3130,28 @@ fn configure_probe_execution_untracked(
     let supervisor_receiver_fd = production_supervisor
         .as_ref()
         .map(LinuxProbeExecSupervisor::child_receiver_fd);
+    let mut mappings = vec![(executable_fd, HELD_PROBE_FD)];
+    if let Some(source_fd) = source_fd {
+        mappings.push((source_fd, 3));
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    if let Some(export_socket) = launch_mode.export_socket_fd() {
+        mappings.push((export_socket, 5));
+    }
+    let descriptors = crate::producer_spawn::Descriptors::from_mappings(&mappings, None)
+        .prepare_inline(stdio)
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let child_descriptors = Arc::clone(&descriptors);
     // Before the closure below: it execs the probe from inside itself, so a
     // `pre_exec` registered after it (the launcher's) never runs.
     crate::process_control::priority::apply(command, class);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
-            match source_fd {
-                Some(source_fd) => install_probe_child_fds(source_fd, executable_fd)?,
-                None => install_child_fd(executable_fd, HELD_PROBE_FD)?,
+            // Inline: a later pre_exec hook cannot run after our custom exec.
+            child_descriptors.inherit_target(HELD_PROBE_FD)?;
+            if source_fd.is_some() {
+                child_descriptors.inherit_target(3)?;
             }
             if !launch_mode.is_production() {
                 return Ok(());
@@ -3195,8 +3169,8 @@ fn configure_probe_execution_untracked(
                 libc::close(receiver_fd);
                 mark_unrelated_fds_close_on_exec()?;
                 #[cfg(test)]
-                if let Some(export_socket) = launch_mode.export_socket_fd() {
-                    install_child_fd(export_socket, 5)?;
+                if launch_mode.export_socket_fd().is_some() {
+                    child_descriptors.inherit_target(5)?;
                 }
                 install_linux_filesystem_execute_denial()?;
                 let Some(seccomp) = production_seccomp.as_ref() else {
@@ -3223,9 +3197,13 @@ fn configure_probe_execution_untracked(
     }
     #[cfg(target_os = "linux")]
     if let Some(supervisor) = production_supervisor {
-        return Ok(ProbeExecutionSupervisor::linux(supervisor));
+        let mut supervisor = ProbeExecutionSupervisor::linux(supervisor);
+        supervisor.descriptors = Some(descriptors);
+        return Ok(supervisor);
     }
-    Ok(ProbeExecutionSupervisor::none())
+    let mut supervisor = ProbeExecutionSupervisor::none();
+    supervisor.descriptors = Some(descriptors);
+    Ok(supervisor)
 }
 
 #[cfg(unix)]
@@ -3988,6 +3966,11 @@ async fn probe_version_with_deadline_on(
             &configured_path,
             &arguments,
             DECODE_FACT_VERSION_PROBE.class,
+            crate::producer_spawn::StdioFacts {
+                stdin: crate::producer_spawn::StdioMode::Null,
+                stdout: crate::producer_spawn::StdioMode::Piped,
+                stderr: crate::producer_spawn::StdioMode::Null,
+            },
         )?;
         let (mut child, _child_job, mut supervisor, pause_guard) =
             spawn_configured_probe(command, supervisor, DECODE_FACT_VERSION_PROBE, None).await?;
@@ -5346,6 +5329,7 @@ async fn collect_refinement_output(
         probe.executable(),
         &arguments,
         work.class,
+        crate::producer_spawn::StdioFacts::CAPTURED,
     )?;
     let (mut child, _child_job, mut supervisor, pause_guard) =
         spawn_configured_probe(command, supervisor, work, pause_guard).await?;
@@ -5695,6 +5679,7 @@ async fn collect_platform(
         probe.executable(),
         &arguments,
         work.class,
+        crate::producer_spawn::StdioFacts::CAPTURED,
     )?;
     let (mut child, _child_job, mut supervisor, pause_guard) =
         spawn_configured_probe(command, supervisor, work, pause_guard).await?;

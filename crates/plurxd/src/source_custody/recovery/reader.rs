@@ -1,6 +1,7 @@
 //! Kernel lifetime witnesses for explicitly daemon-mediated readers. Works on
 //! native macOS/Linux and in containers; no host PID or reboot inference.
 use super::*;
+use plurx_core::process::source_lifetime::LaunchObservation;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -80,6 +81,255 @@ fn namespace_torn_down(
     )
 }
 
+const MAX_POISONED_BYTES: u64 = 128;
+const MAX_ENTRIES: usize = 8 * MAX_FILES;
+
+/// Bounded diagnostic attribution only. This sidecar never grants recovery
+/// authority and is deliberately absent from eligibility and source binding.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PoisonedDiagnostic {
+    pub(super) purpose: String,
+    pub(super) boot_tick: u64,
+}
+
+fn read_poisoned_file(path: &Path) -> Result<(std::fs::File, PoisonedDiagnostic), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_POISONED_BYTES {
+        return Err("invalid reader poisoning diagnostic size/type".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+            return Err("reader poisoning diagnostic is not private".into());
+        }
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(MAX_POISONED_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_POISONED_BYTES {
+        return Err("reader poisoning diagnostic grew past its bound".into());
+    }
+    let diagnostic = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    Ok((file, diagnostic))
+}
+
+pub(super) fn read_poisoned_diagnostic(path: &Path) -> Result<PoisonedDiagnostic, String> {
+    read_poisoned_file(path).map(|(_, diagnostic)| diagnostic)
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct PoisonedWitness {
+    pub(super) family: &'static str,
+    pub(super) owner_id: String,
+    pub(super) purpose: String,
+    pub(super) boot_tick: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct PoisonedSnapshot {
+    pub(super) total: usize,
+    pub(super) witnesses: Vec<PoisonedWitness>,
+}
+
+/// Advisory attribution only: validate private bounded sidecars and their exact
+/// evidence identities, without interpreting them as recovery authority.
+pub(super) fn poisoned_witnesses(directory: &Path) -> Result<PoisonedSnapshot, String> {
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = directory;
+        Err("reader poisoning diagnostics need a supported witness filesystem".into())
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        verify_directory(directory)?;
+        let mut owners = inventory(
+            std::fs::read_dir(directory).map_err(|error| error.to_string())?,
+            false,
+        )?;
+        owners.sort();
+        let mut sidecars = Vec::new();
+        for (index, entry) in std::fs::read_dir(directory)
+            .map_err(|error| error.to_string())?
+            .take(MAX_ENTRIES + 1)
+            .enumerate()
+        {
+            if index == MAX_ENTRIES {
+                return Err("reader witness inventory exceeds its entry bound".into());
+            }
+            let path = entry.map_err(|error| error.to_string())?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "poisoned")
+            {
+                sidecars.push(path);
+            }
+        }
+        // Validate all existing diagnostics, including orphans, before reading
+        // owners. A malformed sidecar must never become a healthy zero count.
+        let mut diagnostics = HashMap::new();
+        for path in sidecars {
+            let diagnostic = read_poisoned_diagnostic(&path)
+                .map_err(|_| "invalid reader poisoning diagnostic")?;
+            diagnostics.insert(path.with_extension("json"), diagnostic);
+        }
+        let mut snapshot = PoisonedSnapshot {
+            total: 0,
+            witnesses: Vec::new(),
+        };
+        for evidence_path in owners {
+            let evidence: Evidence =
+                read_private_json(&evidence_path).map_err(|_| "invalid reader witness evidence")?;
+            let expected_name = evidence
+                .record
+                .name()
+                .map_err(|_| "invalid reader owner identity")?;
+            if evidence_path.file_name().and_then(|name| name.to_str())
+                != Some(expected_name.as_str())
+                || evidence.version != 2
+                || evidence.reader_model != "daemon_mediated_v1"
+                || evidence.node_id != evidence.record.node()
+                || !uuid::Uuid::parse_str(&evidence.anchor_nonce).is_ok_and(|nonce| {
+                    !nonce.is_nil() && nonce.to_string() == evidence.anchor_nonce
+                })
+            {
+                return Err("reader evidence identity mismatch".into());
+            }
+            let invalidated = diagnostic_anchor_invalidated(directory, &evidence)?;
+            let diagnostic = diagnostics.remove(&evidence_path);
+            if diagnostic.is_none() && !invalidated {
+                continue;
+            }
+            let (family, owner_id) = match evidence.record {
+                Record::Foreground { token } => ("foreground", token.owner.owner_id),
+                Record::Background { token } => ("background", token.custody_id),
+            };
+            let (purpose, boot_tick) = match diagnostic {
+                Some(diagnostic) => (diagnostic.purpose, Some(diagnostic.boot_tick)),
+                None => (
+                    "Unknown (older witness; no launch diagnostic)".to_owned(),
+                    None,
+                ),
+            };
+            snapshot.total += 1;
+            if snapshot.witnesses.len() < 32 {
+                snapshot.witnesses.push(PoisonedWitness {
+                    family,
+                    owner_id,
+                    purpose,
+                    boot_tick,
+                });
+            }
+        }
+        Ok(snapshot)
+    }
+}
+
+/// The same anchor identity, bytes, ctime and disqualification facts replay
+/// requires, observed without taking a lock or granting settlement authority.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn diagnostic_anchor_invalidated(directory: &Path, evidence: &Evidence) -> Result<bool, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let name = evidence.record.name()?;
+    let anchor_path = directory.join(name).with_extension("anchor");
+    let anchor = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&anchor_path)
+        .map_err(|_| "reader anchor unavailable during diagnostics")?;
+    let before = anchor
+        .metadata()
+        .map_err(|_| "reader anchor metadata unavailable")?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || before.mode() & 0o077 != 0
+        || before.len() > 64
+        || !local_filesystem(&anchor)
+    {
+        return Err("invalid reader anchor for diagnostics".into());
+    }
+    let mut nonce = Vec::new();
+    (&anchor)
+        .take(65)
+        .read_to_end(&mut nonce)
+        .map_err(|_| "reader anchor unreadable")?;
+    if nonce.len() > 64 {
+        return Err("reader anchor grew past its bound".into());
+    }
+    let after = anchor
+        .metadata()
+        .map_err(|_| "reader anchor metadata unavailable")?;
+    if !after.is_file() || after.nlink() != 1 || after.mode() & 0o077 != 0 || after.len() > 64 {
+        return Err("reader anchor changed during diagnostics".into());
+    }
+    // Cleanup can unlink a still-open anchor. Report the unavailable snapshot
+    // rather than treating the orphaned descriptor as a healthy current file.
+    let current = anchor_path
+        .symlink_metadata()
+        .map_err(|_| "reader anchor unavailable during diagnostics")?;
+    if !current.is_file()
+        || current.file_type().is_symlink()
+        || current.nlink() != 1
+        || current.mode() & 0o077 != 0
+        || current.len() > 64
+    {
+        return Err("invalid current reader anchor for diagnostics".into());
+    }
+    let identity_changed = before.dev() != evidence.anchor_device
+        || before.ino() != evidence.anchor_inode
+        || after.dev() != current.dev()
+        || after.ino() != current.ino();
+    let ctime_changed = evidence.anchor_ctime.is_none_or(|original| {
+        anchor_ctime(&before) != original
+            || anchor_ctime(&after) != original
+            || anchor_ctime(&current) != original
+    });
+    let disqualified = match anchor_path.with_extension("unmediated").symlink_metadata() {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return Err("reader disqualification marker unavailable".into()),
+    };
+    Ok(identity_changed
+        || ctime_changed
+        || nonce != evidence.anchor_nonce.as_bytes()
+        || disqualified)
+}
+
+fn poisoned_bytes(purpose: &'static str, boot_tick: u64) -> std::io::Result<Vec<u8>> {
+    // Bound work before escaping; then shorten complete UTF-8 scalars until
+    // the serialized JSON, including its keys and boot tick, fits the bound.
+    let mut end = purpose.len().min(MAX_POISONED_BYTES as usize);
+    while !purpose.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut diagnostic = PoisonedDiagnostic {
+        purpose: purpose[..end].to_owned(),
+        boot_tick,
+    };
+    loop {
+        let bytes = serde_json::to_vec(&diagnostic).map_err(std::io::Error::other)?;
+        if bytes.len() as u64 <= MAX_POISONED_BYTES {
+            return Ok(bytes);
+        }
+        if diagnostic.purpose.pop().is_none() {
+            return Err(std::io::Error::other(
+                "reader poisoning diagnostic exceeds its bound",
+            ));
+        }
+    }
+}
+
 pub(crate) struct Witness {
     directory: PathBuf,
     name: String,
@@ -97,6 +347,27 @@ pub(crate) struct Witness {
 }
 
 impl Witness {
+    fn record_poisoned(&self, purpose: &'static str) -> std::io::Result<()> {
+        let path = self.directory.join(format!("{}.poisoned", self.name));
+        let bytes = poisoned_bytes(purpose, crate::source_custody::boot_tick())?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        match options.open(&path) {
+            Ok(mut file) => file.write_all(&bytes).and_then(|()| file.sync_all())?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let (file, _) = read_poisoned_file(&path).map_err(std::io::Error::other)?;
+                file.sync_all()?;
+            }
+            Err(error) => return Err(error),
+        }
+        std::fs::File::open(&self.directory)?.sync_all()
+    }
+
     pub(crate) fn arm(&self, activation_id: &str) -> Result<(), String> {
         if self.activation_id != activation_id {
             return Err("reader activation nonce mismatch".into());
@@ -118,7 +389,12 @@ impl Witness {
             .map_err(|error| error.to_string())
     }
 
-    fn observe_launch(&self, mediated: bool, declared: bool) -> std::io::Result<()> {
+    fn observe_launch(
+        &self,
+        mediated: bool,
+        declared: bool,
+        purpose: &'static str,
+    ) -> std::io::Result<()> {
         if !mediated && !declared {
             // Observed before the spawn, so the child's start tick follows.
             self.escape_tick.fetch_min(
@@ -138,6 +414,7 @@ impl Witness {
         if *disqualified {
             return Ok(());
         }
+        self.record_poisoned(purpose)?;
         #[cfg(unix)]
         {
             let mut disqualified = disqualified;
@@ -163,6 +440,7 @@ impl Witness {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             *disqualified = true;
+            crate::source_custody::diagnostics::record_poisoned(purpose);
             Ok(())
         }
         #[cfg(not(unix))]
@@ -364,7 +642,15 @@ pub(super) fn complete_at(directory: &Path, record: &Record) -> Result<(), Strin
     }
     // The caller already has authoritative exact-owner acknowledgement. Keep
     // the JSON until subsidiary cleanup succeeds so interrupted retries finish.
-    for suffix in ["anchor", "unmediated", "armed", "source", "json"] {
+    for suffix in [
+        "anchor",
+        "unmediated",
+        "armed",
+        "source",
+        "poisoned",
+        "lifetime",
+        "json",
+    ] {
         match std::fs::remove_file(directory.join(format!("{name}.{suffix}"))) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -492,8 +778,8 @@ pub(super) fn live_background_escape(
     )
 }
 
-pub(super) fn observe_children(mediated: bool) -> std::io::Result<()> {
-    if mediated {
+pub(super) fn observe_children(observation: &LaunchObservation) -> std::io::Result<()> {
+    if observation.mediated {
         return Ok(());
     }
     let witnesses: Vec<_> = OWNED
@@ -512,17 +798,16 @@ pub(super) fn observe_children(mediated: bool) -> std::io::Result<()> {
         });
         // Declared raw children STILL invalidate the durable anchor. Only the
         // in-memory exact-owner ledger can later prove their explicit joins.
-        witness.observe_launch(false, declared)?;
+        witness.observe_launch(false, declared, observation.purpose)?;
     }
     Ok(())
 }
 
-// Each owner has evidence, an anchor, an arm marker and, for older
-// witnesses, an optional unmediated marker. Bound physical entries as well
-// as owners so unrelated files cannot create unbounded directory scans.
+// Each owner reserves evidence, anchor, arm, source, legacy unmediated,
+// poisoning diagnostic and future lifetime sidecars, plus capacity for one
+// additional entry. Bound entries as well as owners for directory scans.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn inventory(entries: std::fs::ReadDir, reserving_owner: bool) -> Result<Vec<PathBuf>, String> {
-    const MAX_ENTRIES: usize = 4 * MAX_FILES;
     let mut paths = Vec::new();
     let mut arms = std::collections::HashSet::new();
     let mut count = 0;
@@ -551,7 +836,7 @@ fn inventory(entries: std::fs::ReadDir, reserving_owner: bool) -> Result<Vec<Pat
             .iter()
             .filter(|path| !arms.contains(&path.with_extension("armed")))
             .count();
-        if paths.len() == MAX_FILES || count + pending + 3 > MAX_ENTRIES {
+        if paths.len() == MAX_FILES || count + pending + 8 > MAX_ENTRIES {
             return Err("reader witness inventory has no capacity for a new owner".into());
         }
     }
