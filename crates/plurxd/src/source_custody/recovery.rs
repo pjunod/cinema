@@ -10,6 +10,8 @@ use std::io::Read;
 
 #[cfg(target_os = "linux")]
 mod physical_stop;
+#[cfg(target_os = "linux")]
+mod reboot_proof;
 mod reader;
 #[cfg(target_os = "linux")]
 mod source_census;
@@ -146,6 +148,38 @@ enum Record {
 struct Identity {
     machine_id: String,
     boot_id: String,
+}
+
+/// A Linux replicated daemon must retain both same-kernel and reboot proof.
+/// Run at the serving boundary before any source reader or listener starts.
+pub(super) fn validate_startup(authoritative: bool) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        validate_linux_startup(authoritative, Identity::current(), reader::kernel_instance())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = authoritative;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_linux_startup(
+    authoritative: bool,
+    identity: Option<Identity>,
+    kernel: Option<String>,
+) -> Result<(), String> {
+    if !authoritative {
+        return Ok(());
+    }
+    let identity = identity.filter(Identity::valid).ok_or(
+        "Linux replicated source recovery requires read-only actual-host machine-id and boot-id binds at /run/plurx-host-machine-id and /run/plurx-host-boot-id",
+    )?;
+    if kernel.as_deref() != Some(format!("linux:{}", identity.boot_id).as_str()) {
+        return Err("source recovery host boot identity is not the actual procfs kernel identity".into());
+    }
+    Ok(())
 }
 
 impl Identity {
@@ -535,6 +569,10 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
     #[cfg(target_os = "linux")]
     let legacy_result = legacy_result.and(
         source_census::replay(store, &context.dir.with_file_name("v2"), &context.dir, node).await,
+    );
+    #[cfg(target_os = "linux")]
+    let legacy_result = legacy_result.and(
+        reboot_proof::replay(store, &context.dir, node).await,
     );
     reader_result.and(legacy_result)
 }
