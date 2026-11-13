@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Playback-control refusal logs retain the protocol code, route-read failure
+  stage and sanitized source location, distinguishing release reconciliation
+  from storage errors without exposing session capabilities.
+
 - The host source census can release a dead owner's custody after the host
   has rebooted. It proves from the machine's own journal that the witness's
   kernel boot ended. A host without the identity binds had no other way to
