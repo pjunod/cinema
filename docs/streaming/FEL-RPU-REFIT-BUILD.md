@@ -16,6 +16,12 @@ a decoder or client protocol signal, stop and flag it: F+ changes RPU bytes
 on the server. Developer controls and playback-info presentation are part of
 §4 and §6, without changing how clients decode or identify their platform.
 
+The combined candidate integrates main `483d2bcf3` and reviewed Twilight source
+`757ba29badc75cc3872889f2b08459f280658d33`; that source has not yet landed.
+Worker protocol11 combines main's strict catalog provenance with the F+ digest.
+SQLite132 preserves exact title-demand continuity; F+ appends133. Integration
+review and exact-source qualification remain pending; no deployment is implied.
+
 ## 1. Objective
 
 A Profile 7 FEL title converted to 8.1 today plays the disc's base layer

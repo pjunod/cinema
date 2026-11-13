@@ -641,6 +641,12 @@ pub struct PretranscodeFence {
 }
 
 pub(crate) struct FragmentAdmission {
+    /// Bounded qualification for an active playback successor, not maintenance.
+    pub(super) playback_qualification: bool,
+    /// Maintenance work yields to explicit playback-qualification demand.
+    /// Captions and playback qualification share the lane but do not yield to
+    /// this maintenance-only signal.
+    pub(super) maintenance: bool,
     pub(super) threads: usize,
     /// Runs beside live sessions instead of only on an idle node (the F+
     /// fit): it yields when a viewer waits for capacity, not whenever one
@@ -673,6 +679,8 @@ impl FragmentAdmission {
         Self {
             threads: 1,
             coexist: false,
+            playback_qualification: false,
+            maintenance: false,
             extension: std::sync::Mutex::new(None),
             _permit: None,
             _heavy: None,

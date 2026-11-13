@@ -564,13 +564,13 @@ fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
-/// Rewind v132 (F+ curve fits) to v131: the exact marker is required and
+/// Rewind v133 (F+ curve fits) to v132: the exact marker is required and
 /// stored fits refuse; the extension's own objects go.
-fn rewind_dv_refit_to_v131(connection: &rusqlite::Connection) {
+fn rewind_dv_refit_to_v132(connection: &rusqlite::Connection) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture F+ ordinal");
-    if version != 132 {
+    if version != 133 {
         return;
     }
     let marker: i64 = connection
@@ -605,10 +605,34 @@ fn rewind_dv_refit_to_v131(connection: &rusqlite::Connection) {
         .iter()
         .map(|(kind, name)| format!("DROP {} {name};", kind.to_ascii_uppercase()))
         .collect();
-    plan.push("PRAGMA user_version=131;".into());
+    plan.push("PRAGMA user_version=132;".into());
     connection
         .execute_batch(&plan.join("\n"))
         .expect("published F+ rewind");
+}
+
+/// The title-v2 extension is removed by the shared exact title teardown.
+/// First validate its complete published shape and absence of accepted work;
+/// keep the objects until that teardown while lowering the unrelated tail.
+fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("title continuation ordinal");
+    if version != 132 { return; }
+    let actual = connection.prepare(super::TITLE_FIXTURE_SHAPE_SQL)
+        .expect("title v2 shape")
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .expect("title v2 shape rows").collect::<Result<Vec<_>, _>>()
+        .expect("complete title v2 shape");
+    let marker: i64 = connection.query_row(
+        "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
+        [], |row| row.get(0)).expect("exact title v2 marker");
+    let retained: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL))",
+        [], |row| row.get(0)).expect("complete title v2 retained data");
+    let _ = super::validated_empty_title_rewind(&actual, 2, marker, retained);
+    connection.execute_batch("PRAGMA user_version=131;")
+        .expect("owned empty title v2 tail");
 }
 
 /// Rewind an owned, empty v131 storage-domain extension to published v130.
@@ -767,11 +791,12 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
         .expect("published custody retention rewind");
 }
 
-/// Rewind an owned, empty v127-v132 coordination tail to published v126;
+/// Rewind an owned, empty v127-v133 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
-    rewind_dv_refit_to_v131(connection);
+    rewind_dv_refit_to_v132(connection);
+    rewind_title_v2_to_v131(connection);
     rewind_empty_storage_domain_pending_to_v130(connection);
     rewind_offload_to_v129(connection);
     rewind_custody_retention_to_v128(connection);

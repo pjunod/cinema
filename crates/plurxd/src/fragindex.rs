@@ -3240,6 +3240,10 @@ async fn build_with_args_shared(
     progress: Option<SharedIndexProgress>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Vec<IndexBuild> {
+    // The local index scheduler owns cancellation without a replicated
+    // SourceIndexExecution. Preserve that scope through the actual child wait.
+    let inherited = plurx_core::process::bounded::cancellation();
+    let cancel = cancel.or(inherited.as_ref());
     build_with_args_owned(
         file,
         pass,
@@ -3511,7 +3515,7 @@ async fn build_with_args_owned(
     #[cfg(not(unix))]
     let sibling_readers: Option<Vec<tokio::process::ChildStdout>> = stdout.is_some().then(Vec::new);
     let (Some(stdout), Some(sibling_readers)) = (stdout, sibling_readers) else {
-        if source_owned.is_some() {
+        if source_owned.is_some() || cancel.is_some() {
             let _ = child.start_kill();
             loop {
                 match child.wait().await {
@@ -3765,14 +3769,14 @@ async fn build_with_args_owned(
             Some("exit_grace_exceeded".to_owned())
         }
     };
-    if source_owned.is_some()
+    if (source_owned.is_some() || cancel.is_some())
         && matches!(
             exit_category.as_deref(),
             Some("wait_failed" | "exit_grace_exceeded")
         )
     {
-        // The private Source owner retains its actual permit and ChildJob here.
-        // Killing or a timed-out wait is never physical settlement.
+        // Both supervised Source work and an awaited local cancellation retain
+        // their admission here. A failed/timed-out wait is not physical exit.
         let _ = child.start_kill();
         if let Some(execution) = source_owned {
             execution.hooks.slot.get().before_reap_retry().await;

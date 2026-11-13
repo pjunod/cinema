@@ -2528,13 +2528,22 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
     ) -> Result<bool, StoreError>;
-    /// Hold `viewer`'s bounded live demand on `file_id`'s title scan; see
-    /// `dv_title_jobs::attach_viewer`. False when no scan is queued or running.
+    /// Register exact bounded viewer interest, bootstrapping current title work.
     async fn attach_dv_title_viewer(
         &self,
-        file_id: i64,
-        viewer: &str,
-        deadline_ms: i64,
+        request: super::dv_title_jobs::TitleViewerRequest,
+    ) -> Result<bool, StoreError>;
+    async fn dv_title_playback_demands(
+        &self,
+        after: i64,
+        now_ms: i64,
+        file_id: Option<i64>,
+    ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError>;
+    async fn dv_title_can_preempt(
+        &self,
+        candidate_id: &str,
+        current_id: &str,
+        node: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
     async fn request_dv_fel_requalification(
@@ -2550,6 +2559,7 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         scanner: &str,
         after: i64,
+        now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError>;
     async fn bind_dv_title_demand(
         &self,
@@ -3638,12 +3648,26 @@ LIMIT 1
     }
     async fn attach_dv_title_viewer(
         &self,
-        file_id: i64,
-        viewer: &str,
-        deadline_ms: i64,
+        request: super::dv_title_jobs::TitleViewerRequest,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::attach_viewer(self, request).await
+    }
+    async fn dv_title_playback_demands(
+        &self,
+        after: i64,
+        now_ms: i64,
+        file_id: Option<i64>,
+    ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
+        super::dv_title_jobs::playback_demands(self, after, now_ms, file_id).await
+    }
+    async fn dv_title_can_preempt(
+        &self,
+        candidate_id: &str,
+        current_id: &str,
+        node: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        super::dv_title_jobs::attach_viewer(self, file_id, viewer, deadline_ms, now_ms).await
+        super::dv_title_jobs::title_can_preempt(self, candidate_id, current_id, node, now_ms).await
     }
     async fn request_dv_fel_requalification(
         &self,
@@ -3666,8 +3690,9 @@ LIMIT 1
         &self,
         scanner: &str,
         after: i64,
+        now_ms: i64,
     ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
-        super::dv_title_jobs::demands(self, scanner, after).await
+        super::dv_title_jobs::demands(self, scanner, after, now_ms).await
     }
     async fn bind_dv_title_demand(
         &self,

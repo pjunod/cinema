@@ -1772,7 +1772,9 @@ mod tests {
             "ADD COLUMN offloaded_at",
             // v131: storage-domain pending tables, views and marker.
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
-            // v132: the shared queue helper drops the F+ curve extension.
+            // v132: the shared queue helper drops title demand v2 and its triggers.
+            "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
+            // v133: the shared queue helper drops the F+ curve extension.
             "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
         ];
 

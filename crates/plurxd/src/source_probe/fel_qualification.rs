@@ -933,6 +933,60 @@ pub(super) async fn qualify_if_due(
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Qualification, String> {
+    qualify_due(state, file, document, tools, admission, cancel, None).await
+}
+
+/// A live successor may only measure an explicit, still-pending recipe.
+/// It must not create opportunistic maintenance work after a competing receipt.
+pub(super) async fn qualify_requested_if_due(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    tools: &crate::vodencode::dv_runtime::ToolSet,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+    recipe_identity: &str,
+) -> Result<Qualification, String> {
+    qualify_due(
+        state,
+        file,
+        document,
+        tools,
+        admission,
+        cancel,
+        Some(recipe_identity),
+    )
+    .await
+}
+
+async fn qualify_due(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    tools: &crate::vodencode::dv_runtime::ToolSet,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+    requested_recipe: Option<&str>,
+) -> Result<Qualification, String> {
+    let live_recipes = if let Some(recipe) = requested_recipe {
+        state
+            .store
+            .dv_title_playback_demands(0, super::now_ms(), Some(file.id))
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|demand| {
+                demand.scanner_digest.as_deref() == Some(tools.title_scanner_digest().as_str())
+            })
+            .flat_map(|demand| demand.playback_recipes)
+            .filter(|identity| identity == recipe)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if requested_recipe.is_some() && live_recipes.is_empty() {
+        return Ok(Qualification::NotDue);
+    }
     let renderer = Renderer {
         scanner: tools.backend_digest(),
         path: &tools.renderer,
@@ -943,7 +997,7 @@ pub(super) async fn qualify_if_due(
             crate::ffmpeg::has_hevc_main10_vaapi_decode().await,
         ),
     };
-    qualify_with(
+    qualify_with_mode(
         state,
         file,
         document,
@@ -951,6 +1005,7 @@ pub(super) async fn qualify_if_due(
         admission,
         cancel,
         measure_title,
+        requested_recipe.map(|_| live_recipes.as_slice()),
     )
     .await
 }
@@ -965,6 +1020,7 @@ impl Drop for Extension<'_> {
 }
 
 /// [`qualify_if_due`] with its renderer and measurement given.
+#[cfg(test)]
 pub(crate) async fn qualify_with(
     state: &crate::state::AppState,
     file: &plurx_core::domain::MediaFile,
@@ -973,6 +1029,23 @@ pub(crate) async fn qualify_with(
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
     measurer: Measurer,
+) -> Result<Qualification, String> {
+    qualify_with_mode(
+        state, file, document, renderer, admission, cancel, measurer, None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn qualify_with_mode(
+    state: &crate::state::AppState,
+    file: &plurx_core::domain::MediaFile,
+    document: &str,
+    renderer: &Renderer<'_>,
+    admission: &crate::transcode::FragmentAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+    measurer: Measurer,
+    requested_recipes: Option<&[String]>,
 ) -> Result<Qualification, String> {
     let dv = file.dolby_vision;
     if dv.profile != Some(7)
@@ -1021,12 +1094,12 @@ pub(crate) async fn qualify_with(
     let pending = q::pending_recipes(&current_document, file.size, file.mtime);
     let mut clock =
         Clock::from_document(&serde_json::from_str(document).map_err(|e| e.to_string())?)?;
-    let request = if let Some(request) = pending
-        .iter()
-        .find(|request| request.backend_identity == backend_identity)
-    {
+    let request = if let Some(request) = pending.iter().find(|request| {
+        request.backend_identity == backend_identity
+            && requested_recipes.is_none_or(|recipes| recipes.contains(&request.identity))
+    }) {
         request.clone()
-    } else if !pending.is_empty() {
+    } else if requested_recipes.is_some() || !pending.is_empty() {
         return Ok(Qualification::NotDue);
     } else {
         let doc: serde_json::Value = serde_json::from_str(document).map_err(|e| e.to_string())?;
@@ -1291,6 +1364,8 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        // The prepared command hook owns a duplicate writer until dropped.
+        drop(command);
         drop(write);
         let mut bytes = Vec::new();
         read.read_to_end(&mut bytes).expect("settled NUT output");
@@ -1964,7 +2039,7 @@ mod tests {
             .expect("physical encoder identity");
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("real graph resource admission");
         let token = tokio_util::sync::CancellationToken::new();
@@ -2049,7 +2124,7 @@ mod tests {
                 qualification_fixture_with_threads(dir.path(), threads).await;
             let admission = state
                 .transcode
-                .admit_dv_title()
+                .admit_dv_title(false)
                 .await
                 .expect("admit the one-thread title worker");
             let renderer_path = dir.path().join("renderer");
@@ -2126,7 +2201,7 @@ mod tests {
             .expect("HDR10 processing disabled independently");
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let renderer_path = dir.path().join("renderer");
@@ -2223,6 +2298,149 @@ mod tests {
         assert!(matches!(again, Qualification::NotDue), "{again:?}");
     }
 
+    #[tokio::test]
+    async fn live_qualification_does_not_invent_a_recipe_after_request_consumption() {
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title(true)
+            .await
+            .expect("live admission");
+        let renderer_path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &renderer_path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let before = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe");
+        assert!(
+            q::pending_recipes(before.as_deref().expect("document"), file.size, file.mtime)
+                .is_empty()
+        );
+        let outcome = qualify_with_mode(
+            &state,
+            &file,
+            &document,
+            &renderer,
+            &admission,
+            &tokio_util::sync::CancellationToken::new(),
+            slow_measurement,
+            Some(&[]),
+        )
+        .await
+        .expect("no request is not due");
+        assert!(matches!(outcome, Qualification::NotDue));
+        assert_eq!(
+            state
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .expect("probe"),
+            before,
+            "no default request or receipt may replace consumed live demand"
+        );
+        assert!(!admission.has_extension());
+    }
+
+    #[tokio::test]
+    async fn live_qualification_measures_only_its_requested_recipe_and_preserves_departed_peers() {
+        fn current_measurement<'a>(
+            sample: &'a Sample<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Measurement, String>> + Send + 'a>,
+        > {
+            assert_eq!(
+                sample.clock.raster,
+                (1920, 1080),
+                "departed recipe must not win backend matching"
+            );
+            slow_measurement(sample)
+        }
+        let dir = crate::test_tempdir().expect("scratch");
+        let (state, file, document) = qualification_fixture(dir.path()).await;
+        let admission = state
+            .transcode
+            .admit_dv_title(true)
+            .await
+            .expect("live admission");
+        let path = dir.path().join("renderer");
+        let renderer = Renderer {
+            scanner: "a".repeat(64),
+            path: &path,
+            tools: None,
+            env: Vec::new(),
+            decode: RendererDecode::Gpu,
+        };
+        let backend = state
+            .transcode
+            .fel_identity(&renderer.scanner)
+            .await
+            .expect("backend");
+        let recipe = |width, height| {
+            let envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+                20_000,
+                plurx_core::transcode::EnhancementRateProvenance::ExplicitEncode,
+                width,
+                height,
+                (24000, 1001),
+                true,
+                Default::default(),
+            )
+            .expect("envelope");
+            q::FelRecipeRequest::new(
+                backend.clone(),
+                file.size,
+                file.mtime,
+                envelope,
+                q::FelRecipeOutput::new(0, (width, height), (24000, 1001)),
+            )
+        };
+        let departed = recipe(1280, 720);
+        let current = recipe(1920, 1080);
+        for request in [&departed, &current] {
+            assert!(state
+                .store
+                .request_dv_fel_variant(file.id, request)
+                .await
+                .expect("pending recipe"));
+        }
+        let allowed = vec![current.identity.clone()];
+        let outcome = qualify_with_mode(
+            &state,
+            &file,
+            &document,
+            &renderer,
+            &admission,
+            &tokio_util::sync::CancellationToken::new(),
+            current_measurement,
+            Some(&allowed),
+        )
+        .await
+        .expect("exact live measurement");
+        assert!(matches!(outcome, Qualification::Stored(_)));
+        let stored = state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe")
+            .expect("document");
+        assert_eq!(
+            q::pending_recipes(&stored, file.size, file.mtime),
+            vec![departed]
+        );
+        assert!(matches!(
+            q::verdict_state(Some(&stored), file.size, file.mtime, &current.identity),
+            q::VerdictState::Current(_)
+        ));
+    }
+
     /// S1: a live reconstructed 8.1 preempts a running qualification through
     /// the slot: the qualification stops (no verdict), the play gets the slot.
     #[tokio::test]
@@ -2232,7 +2450,7 @@ mod tests {
         let (state, file, document) = qualification_fixture(dir.path()).await;
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let renderer_path = dir.path().join("renderer");
@@ -2313,7 +2531,7 @@ mod tests {
         let (state, file, document) = qualification_fixture(dir.path()).await;
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let path = dir.path().join("renderer");
@@ -2420,7 +2638,7 @@ mod tests {
         let (state, file, document) = qualification_fixture(dir.path()).await;
         let admission = state
             .transcode
-            .admit_dv_title()
+            .admit_dv_title(false)
             .await
             .expect("title admission");
         let path = dir.path().join("renderer");

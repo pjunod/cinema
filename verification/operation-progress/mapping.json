@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "764cc01df2c82b18b8b52428ecee03d8018298d794d217e3fc6f59c385612f07"
+        "sha256": "a4c9fcb96f1aa6a4993e787fa402e7a6ec49ff06a541e8fe2068c8adf2cc6901"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "764cc01df2c82b18b8b52428ecee03d8018298d794d217e3fc6f59c385612f07"
+        "sha256": "a4c9fcb96f1aa6a4993e787fa402e7a6ec49ff06a541e8fe2068c8adf2cc6901"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "764cc01df2c82b18b8b52428ecee03d8018298d794d217e3fc6f59c385612f07"
+        "sha256": "a4c9fcb96f1aa6a4993e787fa402e7a6ec49ff06a541e8fe2068c8adf2cc6901"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "3b78ba496728dbd70adaeab2684f41594269ec543673a57aa0b2cff6c36a7389"
+        "sha256": "d6127c1de4cf08fa96e58baf2410922ce8786c7f316427bfc74c990910cf9576"
       },
       {
         "table": "31 authority implementation",
@@ -249,25 +249,25 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "e2b3e792a841cd5d3144d8c60f4093f5089a071842136e5c0e2e49c0db984d6f"
+        "sha256": "d4b8f28c1ce980da700fc463e27a2577b981ae4686d6997cef5409ebca9330d4"
       },
       {
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "813b7cc873da78c3f62de7bd6c4d572211c565fa51cd68be2796267ae9080174"
+        "sha256": "d2cd65bebc8cfdcd973216efb331840a3d8062babc5696affd8270c2864ff58f"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "813b7cc873da78c3f62de7bd6c4d572211c565fa51cd68be2796267ae9080174"
+        "sha256": "d2cd65bebc8cfdcd973216efb331840a3d8062babc5696affd8270c2864ff58f"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "88c58e951378aaef0e7dc4798ab90e14ed76c41d7e94187516d101c31962ecf6"
+        "sha256": "57abf0a4e939ee8b9e0475b1bff33ca0b58c71875b88fdfd5a5884a60880d3ac"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -345,13 +345,13 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "c20cd4961bbef84d7d67b889bfbf0912f30c2b613864baf84c8d5d1a674b42fb"
+        "sha256": "916b8775441965302982df160ec3d181519b90fb45f096bba4cbcb41ae723eff"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
         "source": "crates/plurxd/src/source_custody/recovery.rs",
         "anchor": "pub(super) fn configure_backend(",
-        "sha256": "b24c8deb7d80a9e73ac1b341ffa7b30010573be0d2446bcd05079a776aba58c1"
+        "sha256": "252ce1e43ede3e1991793c3bb482e5a5cbd72021b675bf0c777a0a804e2ddc17"
       },
       {
         "table": "recovery dependency outside model: prepared host-reboot challenge",

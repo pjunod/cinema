@@ -1948,6 +1948,11 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
         }
+        crate::source_custody::validate_recovery_startup(
+            selected.backend == SelectedBackend::Replicated,
+        )
+        .map_err(anyhow::Error::msg)
+        .context("validating physical source recovery before serving")?;
         let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
             .await
             .context("qualifying Source schema before serving")?;
