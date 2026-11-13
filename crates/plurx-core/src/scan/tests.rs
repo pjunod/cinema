@@ -2426,3 +2426,385 @@ async fn problem_list_is_capped_with_a_trailing_count() {
         "summary must say how many were hidden, got: {last}"
     );
 }
+
+/// Contract amendment `removed_paths`: a probe-only targeted scan of a
+/// library root records exactly the files it names. A new folder elsewhere
+/// under the root is not found, because nothing walked it.
+#[tokio::test]
+async fn a_probe_only_targeted_scan_records_exactly_the_named_files() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("tmp");
+    write_fake_video(dir.path(), "Heat (1995)/Heat (1995).mkv").await;
+    let lib = movie_library(&store, dir.path()).await;
+    scan_library(&store, &lib).await.expect("full scan");
+
+    let dune = write_fake_video(dir.path(), "Dune (2021)/Dune (2021).mkv").await;
+    let brazil = write_fake_video(dir.path(), "Brazil (1985)/Brazil (1985).mkv").await;
+    let root = dir.path().canonicalize().expect("root");
+    let outside = std::env::temp_dir().join("never-probed.mkv");
+    let (out, detail) = scan_path_targeted(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &root,
+        &TargetedOptions {
+            force_probe: [dune.clone()].into_iter().collect(),
+            only: Some(vec![dune.clone(), outside]),
+        },
+    )
+    .await
+    .expect("probe-only");
+    assert_eq!(out.report.added, 1, "{:?}", out.report);
+    assert_eq!(out.items.len(), 1);
+    assert_eq!(out.items[0].path, dune.to_string_lossy());
+    assert_eq!(
+        detail.candidates.len(),
+        1,
+        "only the named file is a candidate"
+    );
+    assert!(store
+        .get_file_by_path(&brazil.to_string_lossy())
+        .await
+        .expect("lookup")
+        .is_none());
+    // The sibling that was already catalogued is neither re-read nor pruned:
+    // a probe-only pass at a library root reconciles nothing.
+    let heat = dir.path().join("Heat (1995)").join("Heat (1995).mkv");
+    assert!(
+        store
+            .get_file_by_path(&heat.to_string_lossy())
+            .await
+            .expect("lookup")
+            .is_some(),
+        "an existing sibling survives a probe-only pass at the root"
+    );
+    assert!(
+        !format!("{:?}", out.report).contains("no media files"),
+        "a probe-only pass does not claim the path holds nothing"
+    );
+}
+
+/// Contract amendment `removed_paths`: an absent file's record goes, and
+/// the item with it when that was its last file; an absent folder takes
+/// every record below it; a path never catalogued is `unknown`; and a
+/// library whose root identity was never recorded keeps its records
+/// (`retained`) rather than trusting this node's view.
+#[tokio::test]
+async fn removed_paths_forget_their_records_and_the_items_left_without_files() {
+    use crate::store::scan_request_v2::{PlacedReport, RetainedCode};
+    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("tmp");
+    let dune = write_fake_video(dir.path(), "Dune (1984)/Dune (1984).mkv").await;
+    let ran = write_fake_video(dir.path(), "Ran (1985)/Ran (1985).mkv").await;
+    let heat = write_fake_video(dir.path(), "Heat (1995)/Heat (1995).mkv").await;
+    let lib = movie_library(&store, dir.path()).await;
+    scan_library(&store, &lib).await.expect("full scan");
+    let item = |path: &Path| {
+        let path = path.to_string_lossy().into_owned();
+        let store = &store;
+        async move {
+            store
+                .get_file_by_path(&path)
+                .await
+                .expect("lookup")
+                .map(|file| file.item_id)
+        }
+    };
+    let dune_item = item(&dune).await.expect("Dune");
+    let ran_item = item(&ran).await.expect("Ran");
+    let heat_item = item(&heat).await.expect("Heat");
+
+    std::fs::remove_dir_all(dune.parent().expect("folder")).expect("rm Dune");
+    std::fs::remove_dir_all(ran.parent().expect("folder")).expect("rm Ran");
+    let root = dir.path().to_path_buf();
+    let mut absent = Vec::new();
+    for path in [
+        dune.clone(),
+        ran.parent().expect("folder").to_path_buf(),
+        root.join("Never (2000)").join("Never (2000).mkv"),
+    ] {
+        match removed::probe_removed(&root, &path).expect("readable") {
+            removed::RemovedProbe::Absent { spellings } => absent.push(removed::AbsentPath {
+                path: path.display().to_string(),
+                spellings,
+                root: root.clone(),
+            }),
+            other => panic!("{path:?} is absent, not {other:?}"),
+        }
+    }
+    let removal = removed::remove_absent(&PublicationStore::unfenced(&store), &lib, &absent, false)
+        .await
+        .expect("removal");
+    assert_eq!(
+        removal.reports,
+        vec![
+            PlacedReport::Gone {
+                path: dune.display().to_string(),
+                item_id: dune_item,
+                item_ids: vec![dune_item],
+                item_removed: true
+            },
+            PlacedReport::Gone {
+                path: ran.parent().expect("folder").display().to_string(),
+                item_id: ran_item,
+                item_ids: vec![ran_item],
+                item_removed: true
+            },
+            PlacedReport::Unknown {
+                path: absent[2].path.clone()
+            },
+        ]
+    );
+    assert_eq!(removal.deleted_files, 2);
+    assert!(store.get_item(dune_item).await.expect("get").is_none());
+    assert!(store.get_item(ran_item).await.expect("get").is_none());
+    assert!(store.get_item(heat_item).await.expect("get").is_some());
+
+    // A library only ever scanned by targeted passes has no recorded root
+    // identity: nothing is removed, and the report says why.
+    let other = tempfile::tempdir().expect("tmp2");
+    let alien = write_fake_video(other.path(), "Alien (1979)/Alien (1979).mkv").await;
+    let unscanned = store
+        .create_library(&NewLibrary {
+            name: "Movies 2".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![other.path().to_path_buf()],
+            anime: false,
+        })
+        .await
+        .expect("second library");
+    scan_path(&store, &unscanned, &other.path().join("Alien (1979)"))
+        .await
+        .expect("targeted");
+    let alien_item = item(&alien).await.expect("Alien");
+    std::fs::remove_file(&alien).expect("rm Alien");
+    let removal = removed::remove_absent(
+        &PublicationStore::unfenced(&store),
+        &unscanned,
+        &[removed::AbsentPath {
+            path: alien.display().to_string(),
+            spellings: vec![alien.clone()],
+            root: other.path().to_path_buf(),
+        }],
+        false,
+    )
+    .await
+    .expect("removal");
+    assert!(
+        matches!(&removal.reports[..], [PlacedReport::Retained { item_id, code: RetainedCode::RootIdentityUnset, retryable: true, .. }] if *item_id == alien_item),
+        "{:?}",
+        removal.reports
+    );
+    assert!(item(&alien).await.is_some(), "the record was kept");
+}
+
+/// Build a library with `files` scanned in full (so its root identity is
+/// recorded), returning the store, the library and the root.
+async fn removal_fixture(files: &[&str]) -> (SqliteStore, Library, tempfile::TempDir) {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("tmp");
+    for file in files {
+        write_fake_video(dir.path(), file).await;
+    }
+    let lib = movie_library(&store, dir.path()).await;
+    scan_library(&store, &lib).await.expect("full scan");
+    (store, lib, dir)
+}
+
+async fn absent_path(root: &Path, path: &Path) -> removed::AbsentPath {
+    match removed::probe_removed(root, path).expect("readable") {
+        removed::RemovedProbe::Absent { spellings } => removed::AbsentPath {
+            path: path.display().to_string(),
+            spellings,
+            root: root.to_path_buf(),
+        },
+        other => panic!("{path:?} is absent, not {other:?}"),
+    }
+}
+
+/// A folder removal matches by path component: `/m/Dune` does not take
+/// `/m/Dune (2021)`, and the prefix query reads only the folder's own subtree.
+#[tokio::test]
+async fn a_folder_removal_does_not_take_a_sibling_that_shares_its_prefix() {
+    use crate::store::scan_request_v2::PlacedReport;
+    let (store, lib, dir) =
+        removal_fixture(&["Dune/Dune (1984).mkv", "Dune (2021)/Dune (2021).mkv"]).await;
+    let root = dir.path().to_path_buf();
+    let sibling = root.join("Dune (2021)").join("Dune (2021).mkv");
+    let under = store
+        .library_file_paths_under(lib.id, &root.join("Dune"))
+        .await
+        .expect("under");
+    assert_eq!(under.len(), 1, "{under:?}");
+    assert!(under[0].1.ends_with("Dune (1984).mkv"));
+    std::fs::remove_dir_all(root.join("Dune")).expect("rm");
+    let absent = vec![absent_path(&root, &root.join("Dune")).await];
+    let removal = removed::remove_absent(&PublicationStore::unfenced(&store), &lib, &absent, false)
+        .await
+        .expect("removal");
+    assert!(
+        matches!(&removal.reports[..], [PlacedReport::Gone { .. }]),
+        "{:?}",
+        removal.reports
+    );
+    assert_eq!(removal.deleted_files, 1);
+    assert!(store
+        .get_file_by_path(&sibling.to_string_lossy())
+        .await
+        .expect("lookup")
+        .is_some());
+}
+
+/// A folder that held two items reports both, and `item_removed` says every
+/// one of them went.
+#[tokio::test]
+async fn a_gone_folder_reports_every_item_it_removed() {
+    use crate::store::scan_request_v2::PlacedReport;
+    let (store, lib, dir) = removal_fixture(&[
+        "Pack/Alpha (2000).mkv",
+        "Pack/Beta (2001).mkv",
+        "Heat (1995)/Heat (1995).mkv",
+    ])
+    .await;
+    let root = dir.path().to_path_buf();
+    std::fs::remove_dir_all(root.join("Pack")).expect("rm");
+    let absent = vec![absent_path(&root, &root.join("Pack")).await];
+    let removal = removed::remove_absent(&PublicationStore::unfenced(&store), &lib, &absent, false)
+        .await
+        .expect("removal");
+    match &removal.reports[..] {
+        [PlacedReport::Gone {
+            item_ids,
+            item_id,
+            item_removed,
+            ..
+        }] => {
+            assert_eq!(item_ids.len(), 2, "{item_ids:?}");
+            assert_eq!(item_ids[0], *item_id);
+            assert!(*item_removed);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Nothing is removed while an expected file of the same request is not
+/// placed, and a file that reappears between the first look and the removal
+/// stays.
+#[tokio::test]
+async fn removals_are_held_for_an_unplaced_expected_file_and_for_a_reappeared_path() {
+    use crate::store::scan_request_v2::{PlacedReport, PresentReason, RetainedCode};
+    let (store, lib, dir) =
+        removal_fixture(&["Dune (1984)/Dune (1984).mkv", "Ran (1985)/Ran (1985).mkv"]).await;
+    let root = dir.path().to_path_buf();
+    let dune = root.join("Dune (1984)").join("Dune (1984).mkv");
+    let ran = root.join("Ran (1985)").join("Ran (1985).mkv");
+    std::fs::remove_file(&dune).expect("rm");
+    let held = vec![absent_path(&root, &dune).await];
+    let removal = removed::remove_absent(&PublicationStore::unfenced(&store), &lib, &held, true)
+        .await
+        .expect("removal");
+    assert!(
+        matches!(
+            &removal.reports[..],
+            [PlacedReport::Retained {
+                code: RetainedCode::ExpectedNotPlaced,
+                retryable: true,
+                ..
+            }]
+        ),
+        "{:?}",
+        removal.reports
+    );
+    assert_eq!(removal.deleted_files, 0);
+    assert!(store
+        .get_file_by_path(&dune.to_string_lossy())
+        .await
+        .expect("lookup")
+        .is_some());
+
+    // Absent at the first look, back before the removal.
+    std::fs::remove_file(&ran).expect("rm");
+    let first_look = vec![absent_path(&root, &ran).await];
+    write_fake_video(&root, "Ran (1985)/Ran (1985).mkv").await;
+    let removal = removed::remove_absent(
+        &PublicationStore::unfenced(&store),
+        &lib,
+        &first_look,
+        false,
+    )
+    .await
+    .expect("removal");
+    assert!(
+        matches!(
+            &removal.reports[..],
+            [PlacedReport::Present {
+                reason: PresentReason::ReappearedBeforeRemoval,
+                ..
+            }]
+        ),
+        "{:?}",
+        removal.reports
+    );
+    assert!(store
+        .get_file_by_path(&ran.to_string_lossy())
+        .await
+        .expect("lookup")
+        .is_some());
+}
+
+/// A removal under a publisher whose lease another holder has taken over —
+/// what a full scan holding the library's domain leaves behind — is refused
+/// by the fence and removes nothing.
+#[tokio::test]
+async fn a_removal_from_a_superseded_lease_is_fenced_and_removes_nothing() {
+    use crate::cluster::coordination::LeaseClaim;
+    use crate::store::{CoordinationStore, PublicationFence};
+    let (store, lib, dir) = removal_fixture(&["Dune (1984)/Dune (1984).mkv"]).await;
+    let root = dir.path().to_path_buf();
+    let dune = root.join("Dune (1984)").join("Dune (1984).mkv");
+    let resource = format!("scan:library:{}", lib.id);
+    let LeaseClaim::Acquired(stale) = store
+        .acquire_lease(&resource, "node-a", 1_000, 2_000)
+        .await
+        .expect("first holder")
+    else {
+        panic!("first holder");
+    };
+    let LeaseClaim::Acquired(_) = store
+        .acquire_lease(&resource, "node-b", 10_000, 600_000_000_000)
+        .await
+        .expect("full scan took over")
+    else {
+        panic!("takeover");
+    };
+    std::fs::remove_dir_all(dune.parent().expect("folder")).expect("rm");
+    let absent = vec![absent_path(&root, &dune).await];
+    let publisher = PublicationStore::fenced(&store, PublicationFence::new(stale));
+    let refused = removed::remove_absent(&publisher, &lib, &absent, false).await;
+    assert!(
+        matches!(refused, Err(StoreError::FenceRejected { .. })),
+        "{refused:?}"
+    );
+    assert!(store
+        .get_file_by_path(&dune.to_string_lossy())
+        .await
+        .expect("lookup")
+        .is_some());
+}
+
+/// A gone request path scopes to its nearest existing ancestor, never above
+/// the library root.
+#[tokio::test]
+async fn a_gone_request_path_is_scoped_to_its_nearest_existing_ancestor() {
+    let (_store, lib, dir) = removal_fixture(&["Heat (1995)/Heat (1995).mkv"]).await;
+    let root = containment::lexical(dir.path());
+    let libs = [lib];
+    let gone = root.join("Dune (1984)").join("Extras");
+    assert_eq!(containment::nearest_existing(&libs, &gone), root);
+    let under_file = root.join("Heat (1995)").join("Heat (1995).mkv").join("x");
+    assert_eq!(
+        containment::nearest_existing(&libs, &under_file),
+        root.join("Heat (1995)").join("Heat (1995).mkv"),
+        "a file where a folder should be is where the climb stops"
+    );
+    assert_eq!(containment::nearest_existing(&libs, &root), root);
+}

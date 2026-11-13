@@ -151,8 +151,15 @@ pub async fn list(
             })
             .await?;
         if let Some(request) = pending.first() {
-            if let Some(sidecar) = state.store.scan_request_v2(&request.request_id).await? {
-                row["waiting_on"] = json!(sidecar.waiting_on);
+            // Advisory: a sidecar this node cannot read (a row written by a
+            // newer or older build) leaves the listing without `waiting_on`
+            // instead of failing it.
+            match state.store.scan_request_v2(&request.request_id).await {
+                Ok(Some(sidecar)) => row["waiting_on"] = json!(sidecar.waiting_on),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, request = %request.request_id, "reading scan request sidecar for the job listing");
+                }
             }
         }
     }

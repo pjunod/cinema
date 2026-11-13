@@ -3897,7 +3897,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # source in `working` has exactly one), bounded by MAX_PENDING_SOURCES, which
 # ends when publish_source returns. Its supervisor task awaits that unit's
 # JoinHandle and always returns the key, a panic included, then ends.
-expected_occurrences = 1144
+# #1546 (removed_paths / probe-only scans), +4 joined blocking workers, no
+# detached task: scan/removed.rs probes a removed path's chain and fingerprints
+# the library root on two spawn_blocking calls, each awaited in place;
+# library_work.rs probe_removed_paths runs its no-follow probes on one awaited
+# spawn_blocking; state.rs run_targeted scopes a probe-only group to the nearest
+# existing folder on one awaited spawn_blocking. Each JoinHandle is awaited by
+# the request's own future, so cancellation and panics surface as task errors.
+expected_occurrences = 1148
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5759,7 +5766,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Local playback demand (item 6, first step) adds no task, timer or process: a
 # local start's demand is one more message in the copy-analysis inbox, and the
 # build it leads to is the existing source unit and its Analysis phases.
-expected_occurrences = 2202
+# #1546, +1 test-only: http/tests.rs polls for the library's own scan to drain
+# with a 25 ms tokio::time::sleep inside a bounded loop that asserts it drained.
+# No production timer.
+expected_occurrences = 2203
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6264,7 +6274,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # this_daemon_accepts_the_pinned_media_runtimes_dv_helpers: python3 runs the
 # bundle installer's --identity once; the synchronous output() joins and reaps it
 # before the assertion. No production producer.
-expected_occurrences = 341
+# #1546, +1 test-only (341 -> 342): http/tests.rs makes one real Matroska
+# fixture with ffmpeg via testfixtures::run, which waits for and reaps the child
+# before the test continues. No production producer.
+expected_occurrences = 342
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

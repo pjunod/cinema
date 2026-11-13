@@ -51,7 +51,7 @@
         "table": "08 worker acquisition and cleanup",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "plurx_worker_control::library_driver::run_driver(&mut environment)",
-        "sha256": "12be9fa16f9a1aea08cc42ebd324ef6ca9d55359972baa27e773777b46abcdce"
+        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
       },
       {
         "table": "09 domain lease acquisition",
@@ -63,13 +63,13 @@
         "table": "10 work iteration bound",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "for _ in 0..8 {",
-        "sha256": "12be9fa16f9a1aea08cc42ebd324ef6ca9d55359972baa27e773777b46abcdce"
+        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
       },
       {
         "table": "11 lost reply resolution",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "// A lost completion acknowledgement must not rerun a published result.",
-        "sha256": "12be9fa16f9a1aea08cc42ebd324ef6ca9d55359972baa27e773777b46abcdce"
+        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
       },
       {
         "table": "12 domain lease ttl heartbeat",
@@ -171,13 +171,13 @@
         "table": "28 library completion conditional update",
         "source": "crates/plurx-core/src/store/background_jobs_library.rs",
         "anchor": "UPDATE background_library_requests SET result_json = json_extract($1, '$.result'),",
-        "sha256": "093d8001d85c9a944fe8f1f4320e68211aa4b81f50c0b1793238021be67cf350"
+        "sha256": "eb383fe07b48580e782ddeaaaaf340f3c9b030f3d3a2a5ebd3596ca285f380c7"
       },
       {
         "table": "29 library completion backend wrapper",
         "source": "crates/plurx-core/src/store/background_jobs_library.rs",
         "anchor": "pub(super) async fn complete<T: QueueSql>(",
-        "sha256": "093d8001d85c9a944fe8f1f4320e68211aa4b81f50c0b1793238021be67cf350"
+        "sha256": "eb383fe07b48580e782ddeaaaaf340f3c9b030f3d3a2a5ebd3596ca285f380c7"
       },
       {
         "table": "30 authority job-kind boundary",
@@ -207,31 +207,31 @@
         "table": "34 scanner page capacity",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "const WALK_PAGES_IN_FLIGHT: usize = 4;",
-        "sha256": "fe891c18af2d95175322f84f0c309ca2ec5a026095b3638803ec5bd7012efde6"
+        "sha256": "45572faa7133592faf096bbaabffb1f42962e2f895b390266a1339dd23077646"
       },
       {
         "table": "35 blocking walk cancellation",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "if tx.is_closed()",
-        "sha256": "fe891c18af2d95175322f84f0c309ca2ec5a026095b3638803ec5bd7012efde6"
+        "sha256": "45572faa7133592faf096bbaabffb1f42962e2f895b390266a1339dd23077646"
       },
       {
         "table": "36 blocking page send",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": ".blocking_send(std::mem::replace(&mut page, next))",
-        "sha256": "fe891c18af2d95175322f84f0c309ca2ec5a026095b3638803ec5bd7012efde6"
+        "sha256": "45572faa7133592faf096bbaabffb1f42962e2f895b390266a1339dd23077646"
       },
       {
         "table": "37 scanner joins walker",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "walker\n        .await",
-        "sha256": "fe891c18af2d95175322f84f0c309ca2ec5a026095b3638803ec5bd7012efde6"
+        "sha256": "45572faa7133592faf096bbaabffb1f42962e2f895b390266a1339dd23077646"
       },
       {
         "table": "38 per-file I/O loop",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "async fn record_candidates(",
-        "sha256": "fe891c18af2d95175322f84f0c309ca2ec5a026095b3638803ec5bd7012efde6"
+        "sha256": "45572faa7133592faf096bbaabffb1f42962e2f895b390266a1339dd23077646"
       },
       {
         "table": "39 bounded process cancellation",
@@ -255,13 +255,13 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb"
+        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb"
+        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7"
       },
       {
         "table": "44 main worker spawn no shutdown arg",

@@ -55,7 +55,7 @@
       },
       {
         "anchor": "    reprobe_files_with_publication(&PublicationStore::unfenced(store), files).await",
-        "sha256": "fe891c18af2d95175322f84f0c309ca2ec5a026095b3638803ec5bd7012efde6",
+        "sha256": "45572faa7133592faf096bbaabffb1f42962e2f895b390266a1339dd23077646",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/scan/mod.rs:485"
       },
@@ -517,7 +517,7 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "12be9fa16f9a1aea08cc42ebd324ef6ca9d55359972baa27e773777b46abcdce",
+        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
@@ -535,37 +535,37 @@
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "12be9fa16f9a1aea08cc42ebd324ef6ca9d55359972baa27e773777b46abcdce",
+        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },
       {
         "anchor": "    async fn run_targeted(",
-        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb",
+        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
       },
       {
         "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
-        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb",
+        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
       },
       {
         "anchor": "    async fn run_scan(",
-        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb",
+        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
       },
       {
         "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
-        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb",
+        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
       },
       {
         "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
-        "sha256": "8580cff3938519b06b957211f4a4099a43b91ffdbbc7a783eb65ca9b63ec67eb",
+        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
       },
