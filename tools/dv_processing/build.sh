@@ -19,7 +19,9 @@ placebo_flags=$(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplac
 "$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror -I"$dovi_prefix/include" \
     "$source_dir/scan_title.c" "$dovi_prefix/lib/libdovi.a" \
     -o "$output_dir/scan_title" $ffmpeg_flags -lm -lpthread -ldl
-"$CC" $CFLAGS -frounding-math -std=c11 -Wall -Wextra -Werror -I"$dovi_prefix/include" \
+# The renderer's F+ statistics (refit_compose.h) must not depend on whether
+# the compiler fuses multiply-adds.
+"$CC" $CFLAGS -frounding-math -ffp-contract=off -std=c11 -Wall -Wextra -Werror -I"$dovi_prefix/include" \
     "$source_dir/segment_decode_render.c" "$dovi_prefix/lib/libdovi.a" \
     -o "$output_dir/segment_decode_render" $ffmpeg_flags $placebo_flags -lm -lpthread -ldl
 "$CC" $CFLAGS -frounding-math -std=c11 -Wall -Wextra -Werror "$source_dir/mux_rgb.c" \

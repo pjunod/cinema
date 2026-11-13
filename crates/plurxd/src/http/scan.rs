@@ -72,6 +72,18 @@ pub struct ScanRequestBody {
     /// whatever its size and mtime say, and reported per file.
     #[serde(default)]
     pub expected_files: Option<Vec<ExpectedFileBody>>,
+    /// Files, or folders once emptied and removed, under `path` that no
+    /// longer exist (contract amendment `removed_paths`). With any named the
+    /// request is probe-only: plurx looks at exactly `expected_files` and
+    /// these, walks nothing else, and reports each as `gone`, `unknown`,
+    /// `present` or `retained`.
+    #[serde(default)]
+    pub removed_paths: Option<Vec<String>>,
+    /// Record exactly `expected_files` and walk nothing, even at a library
+    /// root, and never share a pass with a request that did not ask for it.
+    /// Default `false`; a request with `removed_paths` is always probe-only.
+    #[serde(default)]
+    pub probe_only: Option<bool>,
     /// Connection test (contract v2 §5.3): with this set and `path` absent,
     /// answer which of these library roots plurx can see. Each must be a
     /// configured root or lie under one; anything else is listed under
@@ -174,12 +186,25 @@ pub async fn scan(
             "every `expected_files[].path` must be absolute".to_owned(),
         ));
     }
+    let removed_paths = body.removed_paths.clone().unwrap_or_default();
+    let scope = containment::lexical(&path);
+    if removed_paths.iter().any(|removed| {
+        let removed = std::path::Path::new(removed);
+        !removed.is_absolute() || !containment::lexical(removed).starts_with(&scope)
+    }) {
+        return Err(ApiError::BadRequest(
+            "every `removed_paths[]` entry must be absolute and under `path`".to_owned(),
+        ));
+    }
     let seed = ScanRequestV2Seed {
         key_id: key.0.id,
         key_hash: key.0.key_hash.clone(),
         request_key,
         expected_files,
+        removed_paths,
+        probe_only: body.probe_only.unwrap_or(false),
     };
+    let probe_only = seed.is_probe_only();
     seed.validate()
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let wait = Duration::from_millis(body.wait_ms.unwrap_or(0).min(MAX_WAIT_MS));
@@ -213,15 +238,27 @@ pub async fn scan(
     let classified = {
         let libraries = libraries.clone();
         let path = path.clone();
-        tokio::task::spawn_blocking(
-            move || match containment::classify_path(&libraries, &path) {
+        tokio::task::spawn_blocking(move || {
+            // A removal-only request may name a folder that is itself gone
+            // as its common parent: scope it to the nearest folder that still
+            // exists, which every path it names lies under too.
+            let path = if probe_only {
+                containment::nearest_existing(&libraries, &path)
+            } else {
+                path
+            };
+            match containment::classify_path(&libraries, &path) {
                 PathClass::Outside { roots } => Err(Err(roots)),
                 PathClass::Unreadable { root, error } => Err(Ok((root, error))),
-                PathClass::Inside { library, .. } => Ok(library.id),
-            },
-        )
+                PathClass::Inside { library, .. } => Ok((library.id, path)),
+            }
+        })
         .await
         .map_err(|error| ApiError::Internal(format!("path classification: {error}")))?
+    };
+    let (classified, path) = match classified {
+        Ok((id, scoped)) => (Ok(id), scoped),
+        Err(error) => (Err(error), path),
     };
     let library = match classified {
         Ok(id) => libraries
@@ -373,6 +410,10 @@ async fn answer(
     }
 }
 
+/// Optional contract features this build implements, advertised on the
+/// connection-test answer.
+pub const FEATURES: &[&str] = &["removed_paths", "probe_only"];
+
 /// The most paths one connection test may name.
 pub const MAX_PROBE_PATHS: usize = 64;
 
@@ -421,6 +462,10 @@ async fn probe_paths(state: &AppState, probe: &[String]) -> Result<Response, Api
             }
         }
         serde_json::json!({
+            // What this build understands beyond the base contract, so a
+            // caller can tell before it sends a request shape that an older
+            // plurx would mis-handle (contract amendment §5.3).
+            "features": FEATURES,
             "roots": containment::configured_roots(&libraries),
             "visible": visible,
             "missing": missing,

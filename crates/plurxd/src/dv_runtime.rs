@@ -110,7 +110,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 19] = [
+    let inputs: [(&str, &[u8]); 21] = [
         (
             "author_p81.c",
             include_bytes!("../../../tools/dv_processing/author_p81.c"),
@@ -162,6 +162,14 @@ fn renderer_source_identity() -> String {
         (
             "nut_timing.h",
             include_bytes!("../../../tools/dv_processing/nut_timing.h"),
+        ),
+        (
+            "refit_compose.h",
+            include_bytes!("../../../tools/dv_processing/refit_compose.h"),
+        ),
+        (
+            "refit_mode.h",
+            include_bytes!("../../../tools/dv_processing/refit_mode.h"),
         ),
         (
             "rgb48.h",
