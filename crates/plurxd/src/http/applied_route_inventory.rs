@@ -55,7 +55,7 @@ const STORE_READS: &[(&str, &str, &str, usize)] = &[
     // Ownership and terminal proofs, reads before a mutation (stay).
     (
         "http/hls/create.rs",
-        "create_with_purpose_inner",
+        "create_with_purpose_attempt",
         "Verdict",
         1,
     ),

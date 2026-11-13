@@ -1935,7 +1935,7 @@ impl MediaStore for SqliteStore {
         keys: &[&str],
     ) -> Result<Option<crate::store::PlaybackPlanningSnapshot>, StoreError> {
         self.note_settings_read(keys);
-        let keys = crate::store::selected_settings_json(keys)?;
+        let keys = crate::store::selected_planning_keys_json(keys)?;
         self.with_read(move |conn| {
             conn.query_row(&format!("SELECT {FILE_COLS}, probe_json AS planning_probe, \
                 (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \

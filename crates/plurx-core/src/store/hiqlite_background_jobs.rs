@@ -308,9 +308,10 @@ impl QueueSql for HiqliteAuthStore {
         mutation: bool,
         authoritative: bool,
     ) -> Result<Vec<String>, StoreError> {
+        let method = super::background_jobs::queue_label();
         if mutation {
             self.client()
-                .execute_returning_map::<_, JsonRow>("queue_sql", sql, params!(request))
+                .execute_returning_map::<_, JsonRow>(method, sql, params!(request))
                 .await?
                 .into_iter()
                 .map(|row| row.map(|row| row.0).map_err(database_error))
@@ -319,11 +320,11 @@ impl QueueSql for HiqliteAuthStore {
             let rows = if authoritative {
                 self.client()
                     // authority: claim reconciliation must observe committed ownership.
-                    .query_consistent_map::<JsonRow, _>("queue_sql", sql, params!(request))
+                    .query_consistent_map::<JsonRow, _>(method, sql, params!(request))
                     .await?
             } else {
                 self.client()
-                    .query_map::<JsonRow, _>("queue_sql", sql, params!(request))
+                    .query_map::<JsonRow, _>(method, sql, params!(request))
                     .await?
             };
             Ok(rows.into_iter().map(|row| row.0).collect())

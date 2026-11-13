@@ -3588,12 +3588,12 @@ fn strict_parser_reads_are_capped_to_one_service_quantum() {
         input[1]
             .to_str()
             .and_then(|value| value.parse::<usize>().ok()),
-        Some(source_reads::MAX_READ)
+        Some(1_048_576)
     );
     assert_eq!(input[2], "/dev/fd/3", "the cap precedes the held input");
     assert!(idet_filter(0).starts_with(&format!(
         "movie=/dev/fd/3:format_opts=blocksize={}:",
-        source_reads::MAX_READ
+        1_048_576
     )));
 }
 
