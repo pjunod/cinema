@@ -14,6 +14,7 @@ use super::*;
 
 mod playback_handoffs;
 mod public_copy_wire;
+mod storage_domains;
 mod subtitle_generation;
 
 async fn slow_test_handler() -> &'static str {

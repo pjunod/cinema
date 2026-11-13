@@ -77,6 +77,7 @@ pub(crate) fn note_process_start() {
 
 /// Wall-clock start of this daemon process; `None` only before
 /// `note_process_start` (test binaries).
+#[cfg(target_os = "linux")]
 pub(crate) fn process_started_ms() -> Option<i64> {
     PROCESS_STARTED_MS.get().copied()
 }

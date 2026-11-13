@@ -2185,10 +2185,18 @@ mod tests {
                 })
             })
             .collect();
-        assert!(store
-            .replace_storage_domains(mappings, clock_ms())
+        store
+            .save_storage_domains(mappings, None, clock_ms())
             .await
-            .expect("storage domains"));
+            .expect("save storage domains")
+            .expect("valid roots");
+        assert!(matches!(
+            store
+                .apply_pending_storage_domains(clock_ms())
+                .await
+                .expect("apply storage domains"),
+            plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { .. }
+        ));
         for (library, request) in [(&libraries[1], "beta-full"), (&libraries[2], "gamma-full")] {
             enqueue_full(store.as_ref(), library.id, request, false).await;
             let job_id = request_record(store.as_ref(), request).await.job_id;
@@ -2379,10 +2387,18 @@ mod tests {
                     })
                 })
                 .collect();
-            assert!(store
-                .replace_storage_domains(mappings, clock_ms())
+            store
+                .save_storage_domains(mappings, None, clock_ms())
                 .await
-                .expect("one storage domain for both libraries"));
+                .expect("save storage domains")
+                .expect("valid roots");
+            assert!(matches!(
+                store
+                    .apply_pending_storage_domains(clock_ms())
+                    .await
+                    .expect("apply storage domains"),
+                plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { .. }
+            ));
             enqueue_full(store.as_ref(), beta.id, "beta-running", false).await;
             let full_jobs = JobManager::test_new_for_node(
                 Arc::clone(&store),

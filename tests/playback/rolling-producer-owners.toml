@@ -1,4 +1,3 @@
-# Startup host-identity validation adds no task, timer, child or source opener.
 # S5 source custody / VOD Source-copy yield audit (2026-11-09), authored
 # structural comparison of origin/main c8f8b5aa9 with 3e17df55f using the
 # unchanged rust_structural_source extractor over module_roots. This is static
@@ -5838,9 +5837,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bound, which the owner's planning read ran under before D3b. An awaited
 # request-path deadline: no task, no producer, no process; a timeout answers 503.
 # Merged main into D3b: 2203 base, +1 main, +1 D3b = 2205.
-# Reconcile main#1551: one awaited250ms successor-start poll retains the
-# PendingCandidateGuard/UpgradeRun cancellation owner; five test-only waits
-# in processed_upgrade_runs.rs are two20ms,1s,260ms,2s. No recovery owner.
+# Processed-upgrade successor staging added six reviewed time shapes after
+# that inventory update: one production 250 ms sleep, selected against the
+# pending candidate's cancellation token while the incumbent retains its
+# admitted root; and five test-only timeout/sleep calls that bound or pace
+# the successor scheduling fixture. No new task, producer, or process.
 expected_occurrences = 2211
 
 
