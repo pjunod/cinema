@@ -4129,13 +4129,15 @@ impl MediaStore for HiqliteAuthStore {
                 // prune below: an offloaded leaf is marked before the prune
                 // can see it fileless, and a failed reconcile marks nothing.
                 format!(
-                    "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $3) \
-                     WHERE library_id = $1 \
-                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1) \
-                       AND {}",
+                    // Placeholders must first appear in order: the mark ($1) and
+                    // the keep list ($2, in the shared predicate) come first.
+                    "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $1) \
+                     WHERE {} \
+                       AND library_id = $3 \
+                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $3)",
                     crate::store::offload::MARK_KEPT_PREDICATE
                 ),
-                params!(library_id, &keep_json, offloaded_at),
+                params!(offloaded_at, &keep_json, library_id),
             ),
             (
                 concat!(
