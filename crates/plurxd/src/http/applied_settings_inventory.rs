@@ -205,6 +205,13 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/hls/create.rs",
         "create_with_purpose_attempt",
     ),
+    // D3d: a peers catalog request plans at the senders binding.
+    (
+        "http/hls/start_plan.rs",
+        "owner_plan",
+        "http/hls/start_plan.rs",
+        "peer_catalog_plan",
+    ),
     (
         "http/hls/start_plan.rs",
         "owner_plan",
@@ -410,37 +417,65 @@ pub(super) fn mask(src: &str) -> String {
 }
 
 /// A masked source with every `#[cfg(test)]` item blanked.
+///
+/// An item ends at its `;`, its braced body, or — for a struct field or a
+/// struct-literal entry — at the `,` or closing `}` that ends it; separators
+/// inside parentheses, brackets or generic arguments (a signature's
+/// arguments, `HashMap<K, V>`) do not count.
 pub(super) fn production(masked: &str) -> String {
     let mut out = masked.as_bytes().to_vec();
     let mut at = 0;
     while let Some(offset) = masked[at..].find("#[cfg(test)]") {
         let start = at + offset;
         let item = start + "#[cfg(test)]".len();
-        let semi = masked[item..].find(';').map(|e| item + e);
-        let brace = masked[item..].find('{').map(|e| item + e);
-        let end = match (semi, brace) {
-            (Some(semi), Some(brace)) if semi < brace => semi + 1,
-            (_, Some(brace)) => {
-                let mut depth = 0_usize;
-                let mut end = masked.len();
-                for (index, byte) in masked.bytes().enumerate().skip(brace) {
-                    match byte {
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end = index + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
+        let bytes = masked.as_bytes();
+        let mut nesting = 0_usize;
+        let mut angle = 0_usize;
+        let mut end = masked.len();
+        let mut index = item;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'(' | b'[' => nesting += 1,
+                b')' | b']' => nesting = nesting.saturating_sub(1),
+                // Generic arguments (`Result<(), E>`), not `->` or `=>`.
+                b'<' => angle += 1,
+                b'>' if index > 0 && !matches!(bytes[index - 1], b'-' | b'=') => {
+                    angle = angle.saturating_sub(1);
                 }
-                end
+                b';' if nesting == 0 => {
+                    end = index + 1;
+                    break;
+                }
+                b',' if nesting == 0 && angle == 0 => {
+                    end = index + 1;
+                    break;
+                }
+                // The enclosing struct or literal closes: the field ended.
+                b'}' if nesting == 0 => {
+                    end = index;
+                    break;
+                }
+                b'{' if nesting == 0 => {
+                    let mut depth = 0_usize;
+                    for (close, byte) in masked.bytes().enumerate().skip(index) {
+                        match byte {
+                            b'{' => depth += 1,
+                            b'}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = close + 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    break;
+                }
+                _ => {}
             }
-            (Some(semi), None) => semi + 1,
-            (None, None) => masked.len(),
-        };
+            index += 1;
+        }
         blank(&mut out, start, end);
         at = end.max(item);
     }
@@ -959,12 +994,19 @@ fn the_census_masks_literals_and_skips_test_items() {
                   #[cfg(test)]\nmod tests {\n    fn t() { state.applied.setting(k); { } }\n}\n\
                   #[cfg(test)]\nfn helper() { state.applied.setting(k); }\n\
                   fn c() { store.settings_snapshot(); x.settings(); view.switch(k, true); }\n\
-                  fn d() { state\n    .applied\n    .switch(k, true); }\n";
+                  fn d() { state\n    .applied\n    .switch(k, true); }\n\
+                  struct S {\n    #[cfg(test)]\n    injected: Arc<Mutex<Vec<u8>>>,\n    kept: u8,\n}\n\
+                  #[cfg(test)]\nfn g(a: u8, b: u8) -> Result<(), HashMap<u8, u8>> { state.applied.setting(k); }\n\
+                  impl S {\n    fn e() { state.applied.setting(k); }\n}\n\
+                  fn f() { S {\n        #[cfg(test)]\n        injected: Default::default()\n    }; state.applied.setting(k); }\n";
     let text = production(&mask(source));
     let reads = view_reads(&[("x.rs".to_owned(), text)]);
     let expected: BTreeMap<(String, String), usize> = [
         (("x.rs".to_owned(), "a".to_owned()), 2),
         (("x.rs".to_owned(), "d".to_owned()), 1),
+        // A `#[cfg(test)]` struct field or literal entry blanks only itself.
+        (("x.rs".to_owned(), "e".to_owned()), 1),
+        (("x.rs".to_owned(), "f".to_owned()), 1),
     ]
     .into_iter()
     .collect();
