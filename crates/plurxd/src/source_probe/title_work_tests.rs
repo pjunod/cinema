@@ -279,7 +279,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
             })
             .await
             .expect("join exact running title"),
-        EnqueueOutcome::Existing { .. }
+        EnqueueOutcome::Accepted { job_id, .. } if job_id == title_id
     ));
     assert!(!task
         .should_yield(&state)
