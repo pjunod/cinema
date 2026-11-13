@@ -222,7 +222,12 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
     # Jobs whose container the workflow bounds run on the two-carrier
     # compile pool; host-mode and publishing jobs stay on the heavy host.
     COMPILE_ROUTE = "[ci-nonvoter-compile-amd64]"
-    COMPILE_JOBS = frozenset({"rust_compile", "cluster_daemon"})
+    COMPILE_JOBS = frozenset({"rust_compile", "cluster_daemon", "probe"})
+    # Jobs that size Cargo from their verified container instead of pinning
+    # CARGO_BUILD_JOBS=1 (docs/ci/RUST-GATE-IMAGE.md).
+    SIZED_JOBS = frozenset({(".github/workflows/main-fast-lane.yml", "rust_compile"),
+                            (".github/workflows/effort-ci.yml", "rust_compile"),
+                            (".github/workflows/rust-gate-image.yml", "probe")})
     CAPS = {"--memory": "20g", "--memory-swap": "20g", "--cpus": "4",
             "--cpuset-cpus": "0-3", "--pids-limit": "4096"}
     EFFECTIVE = {"memory.max": "21474836480", "memory.swap.max": "0",
@@ -249,6 +254,8 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                      self.job(".github/workflows/media-runtime.yml", "platform")))
         jobs.append((self.WORKFLOWS[2], "worker_control_proof",
                      self.job(self.WORKFLOWS[2], "worker_control_proof")))
+        jobs.append((".github/workflows/rust-gate-image.yml", "probe",
+                     self.job(".github/workflows/rust-gate-image.yml", "probe")))
         return jobs
 
     def verifier(self, job, package=False):
@@ -324,11 +331,15 @@ class NonvoterHeavyBoundsTests(unittest.TestCase):
                         self.assertEqual(dict(zip(argv[::2], argv[1::2])), self.CAPS)
                     else:
                         self.assertIn(name, {"cluster_wal", "deep-validation", "mutation", "publish_main", "worker_control_proof"})
-                    if name not in {"publish_main", "worker_control_proof"}:
+                    if (path, name) in self.SIZED_JOBS:
+                        self.assertNotIn("CARGO_BUILD_JOBS:", header)
+                        self.assertIn("      - name: Size Cargo parallelism from the container's limits\n"
+                                      "        run: python3 scripts/ci-cargo-jobs >> \"$GITHUB_ENV\"\n", job)
+                    elif name not in {"publish_main", "worker_control_proof"}:
                         self.assertIn('      CARGO_BUILD_JOBS: "1"\n', header)
                 scripts.append(self.verifier(job, name in {"package_smoke", "image", "platform"}))
-        self.assertEqual(len(scripts), 15)
-        self.assertEqual(len(set(scripts)), 1, "all fifteen routes must execute the same actual cgroup checks")
+        self.assertEqual(len(scripts), 16)
+        self.assertEqual(len(set(scripts)), 1, "all sixteen routes must execute the same actual cgroup checks")
 
     def test_actual_posix_verifier_accepts_private_and_host_service_cgroups(self):
         for path, name, job in self.guarded_jobs():
