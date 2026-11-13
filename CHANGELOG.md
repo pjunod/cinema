@@ -23,13 +23,18 @@ bump may break compatibility and a **patch** bump never does.
   errors, verdict and curve digest) is published in one replicated write
   (SQLite v130; a shape-verified hiqlite extension; carried by the SQLite to
   cluster import), and a superseded table stays addressable by digest for
-  seven days. The Developer card lists and deletes the spool. Nothing serves
-  the curves yet.
+  seven days. The Developer card lists and deletes the spool. Indexed copy
+  serving can use fitted curves when its platform switch is on and a typed
+  client platform was accepted at a session boundary.
 - The Dolby Vision helper's `--refit-stats` mode takes `--threads N` and
   `--resume FIRST FIRST_PTS`, reports each scene's RPU scene lengths, exits 3
   for a refusal of the title's content (1 for any other failure), and logs
   nothing from libav.
-- The Profile 7 → 8.1 copy converter can write F+ curves into each converted RPU, choosing the scene from the sample’s presentation time (FEL-RPU-REFIT-BUILD.md milestone 4, part 1). No session uses it yet.
+- The Profile 7 → 8.1 indexed copy converter writes pinned F+ curves into
+  each RPU by exact presentation time. Fitted indexes and cache identities
+  include the curve digest; disabled platforms, unfitted titles and live
+  copy keep v1 identity bytes. An initial session without accepted typed
+  client control remains on v1 until the next session boundary.
 
 ### Fixed
 
