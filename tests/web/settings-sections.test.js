@@ -2541,15 +2541,15 @@ test("storage domains save reports in effect",async()=>{
 
 test("storage domains save reports pending readers and library jobs",async()=>{
   const status={textContent:"",innerHTML:""},error={textContent:""};
-  const roots={dataset:{loaded:"true",edited:"true"},querySelectorAll:()=>[]};
+  const roots={dataset:{loaded:"true",edited:"true",libraries:JSON.stringify([{id:2,name:"Movies"}])},querySelectorAll:()=>[]};
   const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
   const messages=[];
   const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
-    async()=>({saved:true,revision:8,applied:false,waiting_on:[
+    async()=>({saved:true,revision:8,applied:false,pending:{revision:8,state:"pending"},waiting_on:[
       {holder_kind:"foreground",work_id:"reader-123456",node_id:"media1",resource_key:"source_io:nas-a",reason:"old_domain_reader"},
       {holder_kind:"foreground",work_id:"reader-2",node_id:"media2",resource_key:"source_io:nas-a",reason:"old_domain_reader",stuck:true},
       {holder_kind:"job",work_id:"job-123456",node_id:"lab3",library_id:2,reason:"library_job"},
-    ],waiting_total:3,libraries:[{id:2,name:"Movies"}]}),
+    ],waiting_total:3}),
     {getElementById:id=>elements[id]},message=>messages.push(message),esc,
   );
   await save({disabled:false});
@@ -2592,6 +2592,36 @@ test("storage domains superseded asks to save again",async()=>{
   await load({disabled:false});
   assert.equal(calls,1,"reload does not overwrite unsaved root edits");
   assert.match(error.textContent,/unsaved edits/);
+});
+
+test("storage domains concurrent save reports the newer revision",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""},roots={dataset:{loaded:"true",edited:"true"},querySelectorAll:()=>[]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status},messages=[];
+  const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
+    async()=>({saved:true,revision:11,applied:false,pending:{revision:12,state:"pending"},waiting_on:[],waiting_total:0}),
+    {getElementById:id=>elements[id]},message=>messages.push(message),esc,
+  );
+  await save({disabled:false});
+  assert.match(status.textContent,/Your save \(revision 11\) was superseded by a newer save \(revision 12\)/);
+  assert.doesNotMatch(status.textContent,/changed from a node running an older version/);
+  assert.deepEqual(messages,[]);
+});
+
+test("storage domains stale root rejection allows explicit reload",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""};
+  const roots={dataset:{loaded:"true",edited:"true",libraries:JSON.stringify([{id:2,name:"Movies"}])},innerHTML:"",querySelectorAll:()=>[
+    {dataset:{library:"2",root:"/removed"},value:"nas-a"},
+  ]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};let gets=0;
+  const api=async(path,opts)=>{if(opts&&opts.method==="PUT")throw Object.assign(new Error("Library root is stale"),{status:400});gets++;return {libraries:[{id:2,name:"Movies",paths:["/current"]}],mappings:[],pending:null};};
+  const fns=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\n${shippedSource("loadStorageDomains")}\nreturn {saveStorageDomains,loadStorageDomains};`)(api,{getElementById:id=>elements[id]},()=>{},esc);
+  await fns.saveStorageDomains({disabled:false});
+  assert.equal(roots.dataset.reloadRequired,"true");
+  assert.match(error.textContent,/Library root is stale/);
+  await fns.loadStorageDomains({disabled:false});
+  assert.equal(gets,1);
+  assert.match(roots.innerHTML,/data-root="\/current"/);
+  assert.equal(roots.dataset.edited,"false");
 });
 
 test("display targeting remains editable with unavailable or unmet advice",()=>{

@@ -476,6 +476,10 @@ function storageDomainsStatus(data,libraries){
   const status=document.getElementById("storage-domain-status");if(!status)return;
   const revision=Number(data.revision||data.pending&&data.pending.revision||0);
   const pending=data.pending||((data.applied===false||data.state==="pending")?data:null);
+  if(data.saved===true&&pending&&Number(pending.revision)>revision){
+    status.textContent=`Your save (revision ${revision}) was superseded by a newer save (revision ${pending.revision}). Check the roots below and save again.`;
+    return;
+  }
   const state=pending?pending.state||data.state||"pending":data.state;
   let line="",toastText="";
   if(state==="superseded"){
@@ -522,7 +526,7 @@ function storageDomainsStatus(data,libraries){
 }
 async function loadStorageDomains(btn){
   const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
-  if(roots&&roots.dataset.loaded==="true"&&roots.dataset.edited==="true"){
+  if(roots&&roots.dataset.loaded==="true"&&roots.dataset.edited==="true"&&roots.dataset.reloadRequired!=="true"){
     if(error)error.textContent="Roots have unsaved edits. Save them before loading again.";
     return;
   }
@@ -541,7 +545,9 @@ async function loadStorageDomains(btn){
       const now=old||"Shared default";
       return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(desired)}" placeholder="Shared default" oninput="this.closest('#storage-domain-roots').dataset.edited='true'">${changed?` <span class="pill">pending · now ${esc(now)}</span>`:""}</label>`;
     })).join("")||'<p class="hint">No library roots configured.</p>';
-    roots.dataset.loaded="true";roots.dataset.edited="false";
+    roots.innerHTML+=`<button type="button" class="ghost sm" onclick="loadStorageDomains(this)">Reload library roots</button>`;
+    roots.dataset.loaded="true";roots.dataset.edited="false";roots.dataset.reloadRequired="false";
+    roots.dataset.libraries=JSON.stringify(data.libraries||[]);
     storageDomainsStatus({...data,...(data.pending||{}),pending:data.pending},data.libraries||[]);
   }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
 }
@@ -551,8 +557,8 @@ async function saveStorageDomains(btn){
   if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
   const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
   btn.disabled=true;
-  try{const result=await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});roots.dataset.edited="false";storageDomainsStatus(result,result.libraries||[]);}
-  catch(e){if(error)error.textContent=e.message||String(e);}
+  try{const result=await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});roots.dataset.edited="false";roots.dataset.reloadRequired="false";let libraries=[];try{libraries=JSON.parse(roots.dataset.libraries||"[]");}catch(parseError){void parseError;}storageDomainsStatus(result,libraries);}
+  catch(e){if(error)error.textContent=e.message||String(e);if(e&&e.status===400)roots.dataset.reloadRequired="true";}
   finally{btn.disabled=false;}
 }
 // Which row has its drawer open: a library id, "new" for the add form, or
