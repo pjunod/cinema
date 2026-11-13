@@ -73,17 +73,15 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed for PR #1552 and subsequent main changes: the macOS tray and
-    # simulator recipes build arm64 only; main also adds the offload web-unit test.
-    # Pin the exact merged Makefile bytes; no old-to-new receipt adoption is
-    # authorized.
-    'Makefile': 'ebd54967df15db5019f47220642f6543a3ae381d17b330da07e789e273db1c0b',
-    # Reviewed 0.8.0 build 300 (mobile build-counter update): only
-    # CURRENT_PROJECT_VERSION differs from reviewed build 299 bytes; no
-    # resources, scripts, or flags changed. Pin this exact spec; build-299
-    # case receipts do not transfer, and later resource or script changes
-    # still change its digest. Earlier build-counter steps remain documented
-    # in project history.
+    # Reviewed #1552 arm64-only desktop recipes combined with main's #1550
+    # fast-rust-gate/paperwork-fix targets and offload web-test registration.
+    # Recipe changes still require review; project-counter normalization below
+    # does not authorize different recipe bytes or transfer native passes.
+    'Makefile': '297cf73d69babf7880ffad1359cd5d71b07f1ec223aaf9e501fe758b03636758',
+    # Reviewed raw project spec at build 300. Counter-only variants may enter
+    # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
+    # still bind fingerprints and case compatibility. Resource, script, or flag
+    # changes require a newly reviewed boundary, not counter normalization.
     'clients/apple/project.yml': 'e7d701cd716173e28559d4f4104f0c38046ba48ecbb992878c5fe3747f94bce7',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
@@ -117,11 +115,27 @@ def producer(commit, current):
     # native origin evidence; producer output must still be an original pass.
 
 
+# The reviewed input closure is unchanged by the generated positive integer
+# build counter. Actual input fingerprints and case compatibility still use
+# complete Git blobs, so this does not transfer passes between build numbers.
+APPLE_PROJECT_SHAPE = "d5eda692d7c4691cc20926ec85c87ec65cbc60122c6b638853d6cbd57b645c5b"
+APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
+
+
+def reviewed_build_spec(path, data):
+    if hashlib.sha256(data).hexdigest() == BUILD_SPECS[path]:
+        return True
+    if path != 'clients/apple/project.yml':
+        return False
+    normalized, count = APPLE_BUILD_COUNTER.subn(rb'\g<1>0\g<2>', data)
+    return count == 1 and hashlib.sha256(normalized).hexdigest() == APPLE_PROJECT_SHAPE
+
+
 def build_specs(commit, family):
     """Only the reviewed deterministic producers define this input closure."""
     for path in FAMILY_SPECS[family]:
         data = subprocess.check_output(['git', 'show', commit + ':' + path], timeout=10)
-        require(hashlib.sha256(data).hexdigest() == BUILD_SPECS[path],
+        require(reviewed_build_spec(path, data),
                 'Unreviewed native build specification: ' + path)
 
 
@@ -407,7 +421,7 @@ def adopt(api, scope, current, run_id, artifacts):
                 verify_desktop(data)
             # A TV original artifact requires apple scope, whose reviewed job
             # runs apple-build before the journeys. A desktop original XCTest
-            # log requires desktop-macos-check, including both native slices.
+            # log requires desktop-macos-check, including the required arm64 build.
             # Adopted jobs emit no TV original artifact and no desktop XCTest
             # summary, so adoption records cannot become original evidence.
             operations = (['make apple-build', 'make apple-tv-navigation-test']
@@ -474,10 +488,11 @@ def case_input_compatibility(commit, current):
     # Every build specification retains its independently reviewed boundary.
     for source in (commit, current):
         for path in FAMILY_SPECS['tv_navigation']:
-            digest = hashlib.sha256(subprocess.check_output(
-                ['git', 'show', source + ':' + path], timeout=10)).hexdigest()
-            accepted = (BUILD_SPECS[path], CASE_RUNNER_SHA256) if path == 'scripts/apple-tv-navigation-test' else (BUILD_SPECS[path],)
-            require(digest in accepted, 'Unreviewed native build specification: ' + path)
+            data = subprocess.check_output(['git', 'show', source + ':' + path], timeout=10)
+            case_runner = (path == 'scripts/apple-tv-navigation-test'
+                           and hashlib.sha256(data).hexdigest() == CASE_RUNNER_SHA256)
+            require(case_runner or reviewed_build_spec(path, data),
+                    'Unreviewed native build specification: ' + path)
     return TRANSITION_INVALIDATES if changed_fixture else set()
 
 
