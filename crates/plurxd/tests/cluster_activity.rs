@@ -2249,8 +2249,8 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     );
     measured.push(("index miss, rolling copy", line));
     // The fifth shape is the one a current client sends: capabilities (v2)
-    // and an intent envelope. The intent adds the selection write
-    // (`record_desired_selection`), which is pinned. The catalog read is NOT
+    // and an intent envelope. The intent adds the selection write, which
+    // since D3c rides in the claim's transaction (no write of its own). The catalog read is NOT
     // exercised: this fixture runs with the media pool off, so no
     // `playback_planning_snapshot` per offer reads the catalog here. D3d
     // measures that read, and owes its own pin.
@@ -2330,12 +2330,16 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // file read are gone (29/36/30/28/32 -> 23/30/19/20/21; writes
     // unchanged). `docs/streaming/PLAYBACK-START-D3-RECORD.md` §9 has each
     // delta.
+    // D3c folds the selection upsert into the claim's transaction: the
+    // intent shape's separate `record_desired_selection` write is gone (9 ->
+    // 8), and the claim answers the recorded row by one authority read that
+    // replaces the `desired_row` read-back that write made (21 stays 21).
     let expected: [(&str, (u64, u64, u64)); 5] = [
         ("first play, VOD index", (23, 2, 6)),
         ("reopen, new position", (30, 2, 8)),
         ("Auto encode, VOD", (19, 2, 8)),
         ("index miss, rolling copy", (20, 2, 9)),
-        ("caps-v2 Auto, intent", (21, 2, 9)),
+        ("caps-v2 Auto, intent", (21, 2, 8)),
     ];
     let observed = measured
         .iter()
@@ -2478,14 +2482,15 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
-                ("claim_media_session_request", (1, 0, 1)),
+                // The claim's one transaction carries the ask (D3c); its
+                // second authority read is the recorded row.
+                ("claim_media_session_request", (2, 0, 1)),
                 ("get_file_probe_json", (1, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
                 ("local_playback_planning_snapshot", (0, 1, 0)),
                 ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("record_desired_selection", (1, 0, 1)),
                 ("register_foreground_source", (0, 0, 1)),
                 ("session_layout", (9, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),

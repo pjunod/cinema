@@ -43,7 +43,7 @@ use plurx_core::store::{
 use crate::media_pool::PlanningBinding;
 
 /// One create's planning inputs, read once.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct StartPlan {
     /// The file, its probe, the planning keys, the generation and the title.
     pub(crate) snapshot: Arc<PlaybackPlanningSnapshot>,
@@ -185,6 +185,47 @@ pub(crate) async fn owner_plan(
         }
         None => Ok(None),
     }
+}
+
+/// A peer's catalog request at the ingress's binding (D3d, §4.6): the same
+/// one view read and at most one authority read as an owner's start
+/// ([`owner_plan`]), answered as the catalog's own causes. A binding the
+/// view holds is the plan; one only Authority can answer differently is
+/// `StaleSource`, the cause that closes the ingress's view and re-plans its
+/// create ([`replan_once_after_stale`]); a source that is gone is
+/// `StaleSource` too, as the quorum read always answered it.
+pub(crate) async fn peer_catalog_plan(
+    applied: &AppliedView,
+    file_id: i64,
+    expected: &PlanningBinding,
+) -> Result<StartPlan, crate::media_pool::CatalogCause> {
+    use crate::media_pool::CatalogCause;
+    match owner_plan(applied, file_id, Some(expected)).await {
+        Ok(Some(plan)) => {
+            PEER_CATALOG_PLANS.fetch_add(1, Ordering::Relaxed);
+            Ok(plan)
+        }
+        Ok(None) => Err(CatalogCause::StaleSource),
+        Err(OwnerPlanError::Changed) => {
+            PEER_CATALOG_STALE.fetch_add(1, Ordering::Relaxed);
+            Err(CatalogCause::StaleSource)
+        }
+        Err(OwnerPlanError::Store(_)) => Err(CatalogCause::SnapshotUnavailable),
+    }
+}
+
+/// Peer catalog requests planned at the sender's binding.
+static PEER_CATALOG_PLANS: AtomicU64 = AtomicU64::new(0);
+/// Peer catalog requests refused `StaleSource` because Authority held
+/// another binding than the sender planned at.
+static PEER_CATALOG_STALE: AtomicU64 = AtomicU64::new(0);
+
+/// (planned, refused stale) since start, for Settings → Developer.
+pub(crate) fn peer_catalog_counts() -> (u64, u64) {
+    (
+        PEER_CATALOG_PLANS.load(Ordering::Relaxed),
+        PEER_CATALOG_STALE.load(Ordering::Relaxed),
+    )
 }
 
 /// Views closed because an owner refused this node's plan.

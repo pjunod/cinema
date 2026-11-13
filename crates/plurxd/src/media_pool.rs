@@ -372,6 +372,9 @@ pub(crate) struct CreateStartupBudget {
     /// whether a catalog then refuted it by quorum (`StaleSource`) before the
     /// claim, and whether the create has re-planned from Authority.
     plan: std::sync::Arc<CreatePlanFlags>,
+    /// The create's own plan (D3d): what its local catalog answers from
+    /// instead of reading the planning snapshot again.
+    start_plan: std::sync::Arc<std::sync::Mutex<Option<crate::http::hls::start_plan::StartPlan>>>,
 }
 
 /// [`CreateStartupBudget::plan`].
@@ -435,6 +438,7 @@ impl CreateStartupBudget {
             phases: Default::default(),
             owner: Default::default(),
             plan: Default::default(),
+            start_plan: Default::default(),
         }
     }
     /// The bound this create's own work runs to: the viewer's allowance until
@@ -508,7 +512,15 @@ pub(crate) fn spawn_create_worker<T: Send + 'static>(
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> tokio::task::JoinHandle<T> {
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
-    let budget = CREATE_STARTUP_BUDGET.try_with(Clone::clone).ok();
+    // The worker outlives the attempt that spawned it, so it does not carry the
+    // attempt's plan: its catalog calls read by quorum (D3 review N1).
+    let budget = CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            let mut budget = budget.clone();
+            budget.start_plan = Default::default();
+            budget
+        })
+        .ok();
     let future = Box::pin(future);
     tokio::spawn(async move {
         let work = plurx_core::store::scope_http_store_operations(counts, future);
@@ -686,18 +698,73 @@ pub(crate) fn remember_create_source_link(
 
 /// Remember the create's plan: the binding its catalog requests carry, and
 /// whether it was read from this node's view (D3b). A no-op outside a create.
-pub(crate) fn capture_create_plan(plan: &crate::http::hls::start_plan::StartPlan) {
+pub(crate) fn capture_create_plan(plan: &crate::http::hls::start_plan::StartPlan) -> CapturedPlan {
     use std::sync::atomic::Ordering;
-    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+    let held = CREATE_STARTUP_BUDGET.try_with(|budget| {
         *budget
             .binding
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plan.binding.clone());
+        *budget
+            .start_plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plan.clone());
         budget.plan.from_view.store(
             plan.source == plurx_core::store::ViewSource::View,
             Ordering::Relaxed,
         );
+        budget.start_plan.clone()
     });
+    CapturedPlan(held.ok())
+}
+
+/// The create attempt's hold on its captured plan: dropping it, when the
+/// attempt ends or is cancelled, clears the plan, so a later catalog call in
+/// the same scope reads by quorum instead of answering from a plan that
+/// belongs to an attempt that is over.
+#[must_use = "the plan is cleared when this is dropped"]
+pub(crate) struct CapturedPlan(
+    Option<std::sync::Arc<std::sync::Mutex<Option<crate::http::hls::start_plan::StartPlan>>>>,
+);
+
+impl Drop for CapturedPlan {
+    fn drop(&mut self) {
+        if let Some(held) = self.0.take() {
+            *held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+}
+
+/// The plan this create captured for `file_id`, when it is inside a create.
+fn create_plan_for(file_id: i64) -> Option<crate::http::hls::start_plan::StartPlan> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget
+                .start_plan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .ok()
+        .flatten()
+        .filter(|plan| plan.snapshot.file.id == file_id)
+}
+
+/// Whether the create's view plan was refuted by a catalog and is still
+/// unclaimed and not yet re-planned: the attempt ends before it picks a
+/// candidate, and [`take_create_replan`] acts on the same flag.
+pub(crate) fn create_plan_refuted() -> bool {
+    use std::sync::atomic::Ordering;
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget.owner.get().is_none()
+                && budget.plan.from_view.load(Ordering::Relaxed)
+                && budget.plan.refuted.load(Ordering::Relaxed)
+                && !budget.plan.replanned.load(Ordering::Relaxed)
+        })
+        .unwrap_or(false)
 }
 
 /// A catalog answered for this create: `StaleSource` from any node means a
@@ -932,9 +999,31 @@ pub(crate) struct MediaPool {
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
     root_probes: Arc<Mutex<RootProbeRegistry>>,
     root_probe_launcher: Arc<tokio::sync::Semaphore>,
+    /// Peer answers a test queues in place of the transport's (one entry per
+    /// catalog fan-out), so a create can be driven end to end against a peer
+    /// that refutes its plan.
+    #[cfg(test)]
+    injected_peer_answers:
+        Arc<std::sync::Mutex<std::collections::VecDeque<Vec<QualityCatalogResult>>>>,
 }
 
 impl MediaPool {
+    #[cfg(test)]
+    pub(crate) fn inject_peer_answers_for_test(&self, answers: Vec<QualityCatalogResult>) {
+        self.injected_peer_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(answers);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn injected_peer_answers_left_for_test(&self) -> usize {
+        self.injected_peer_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
         let now = tokio::time::Instant::now();
         self.snapshots
@@ -999,6 +1088,8 @@ impl MediaPool {
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
             root_probe_launcher: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            injected_peer_answers: Default::default(),
         })
     }
 
@@ -1544,8 +1635,28 @@ impl MediaPool {
             })
             .ok()
             .flatten();
-        let local = local_quality_catalog(state, &request, deadline, expected_binding.as_ref());
+        // The create's local catalog answers from the create's own plan
+        // (D3d): its planning inputs were read once, behind the view's
+        // floors, and the binding every peer is sent is that plan's. The
+        // quorum read this arm used to make is the peers' now: each checks
+        // the binding against its own view and Authority once, and answers
+        // `StaleSource` when it differs (which re-plans the create).
+        let plan = create_plan_for(request.file_id);
+        let source = match plan.as_ref() {
+            Some(plan) => CatalogSource::Plan(plan),
+            None => CatalogSource::Quorum(expected_binding.as_ref()),
+        };
+        let local = local_quality_catalog(state, &request, deadline, source);
         let remote = async {
+            #[cfg(test)]
+            if let Some(answers) = self
+                .injected_peer_answers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                return answers;
+            }
             let peers = match tokio::time::timeout_at(deadline, self.membership.media_peers()).await
             {
                 Ok(Ok(peers)) => peers,
@@ -2039,11 +2150,25 @@ impl QualityCatalogResult {
     }
 }
 
+/// Where a node's catalog gets the planning snapshot it describes.
+#[derive(Clone, Copy)]
+pub(crate) enum CatalogSource<'a> {
+    /// A quorum read of the snapshot, compared with `expected` when one is
+    /// given: the prepared successor's lookup, the legacy v1 route, a peer
+    /// sent no binding.
+    Quorum(Option<&'a PlanningBinding>),
+    /// The create's own plan (D3d): no read.
+    Plan(&'a crate::http::hls::start_plan::StartPlan),
+    /// A peer's request at the ingress's binding (D3d): this node's view,
+    /// then Authority once, `StaleSource` when Authority differs.
+    PeerView(&'a PlanningBinding),
+}
+
 pub(crate) async fn local_quality_catalog(
     state: &AppState,
     request: &QualityCatalogRequest,
     deadline: tokio::time::Instant,
-    expected_binding: Option<&PlanningBinding>,
+    source: CatalogSource<'_>,
 ) -> QualityCatalogResult {
     if deadline <= tokio::time::Instant::now() {
         return QualityCatalogResult::unavailable(CatalogCause::LocalDeadline);
@@ -2061,31 +2186,52 @@ pub(crate) async fn local_quality_catalog(
         if !state.serving.accepting_new_media().await {
             return Err(CatalogCause::AuthorityRefused);
         }
-        let snapshot = state
-            .store
-            .playback_planning_snapshot(request.file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
-            .await
-            .map_err(|_| CatalogCause::SnapshotUnavailable)?
-            .ok_or(CatalogCause::StaleSource)?;
+        let quorum_snapshot;
+        let peer_plan;
+        let (snapshot, plan_binding): (&plurx_core::store::PlaybackPlanningSnapshot, _) =
+            match source {
+                CatalogSource::Plan(plan) => (&*plan.snapshot, Some(plan.binding.clone())),
+                CatalogSource::PeerView(expected) => {
+                    peer_plan = crate::http::hls::start_plan::peer_catalog_plan(
+                        &state.applied,
+                        request.file_id,
+                        expected,
+                    )
+                    .await?;
+                    (&*peer_plan.snapshot, Some(peer_plan.binding.clone()))
+                }
+                CatalogSource::Quorum(_) => {
+                    quorum_snapshot = state
+                        .store
+                        .playback_planning_snapshot(
+                            request.file_id,
+                            &crate::transcode::QUALITY_PLANNING_KEYS,
+                        )
+                        .await
+                        .map_err(|_| CatalogCause::SnapshotUnavailable)?
+                        .ok_or(CatalogCause::StaleSource)?;
+                    (&quorum_snapshot, None)
+                }
+            };
         if snapshot.file.size != request.source_size || snapshot.file.mtime != request.source_mtime
         {
             return Err(CatalogCause::StaleSource);
         }
-        if expected_binding
-            .is_some_and(|expected| *expected != PlanningBinding::from_snapshot(&snapshot))
-        {
-            return Err(CatalogCause::StaleSource);
+        let this_binding = plan_binding.unwrap_or_else(|| PlanningBinding::from_snapshot(snapshot));
+        if let CatalogSource::Quorum(Some(expected)) = source {
+            if *expected != this_binding {
+                return Err(CatalogCause::StaleSource);
+            }
         }
         *binding
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(PlanningBinding::from_snapshot(&snapshot));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(this_binding);
         // These known descriptions have their own completed construction.
         // An unrelated ordinary planner timeout cannot erase an explicit ID
         // before its subsequent admitted qualification can start.
         let described = state
             .transcode
-            .processed_quality_descriptions(&snapshot, request);
+            .processed_quality_descriptions(snapshot, request);
         *complete_descriptions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -2098,7 +2244,7 @@ pub(crate) async fn local_quality_catalog(
         state
             .transcode
             .quality_catalog_from_snapshot_progress(
-                &snapshot,
+                snapshot,
                 &request.caps,
                 request.audio_index,
                 request.audio_offset_ms,
@@ -2190,7 +2336,13 @@ pub(crate) async fn prepared_vod_owner(
     // it gets that stage's bound; a miss is the conservative cache miss above
     // and leaves the rest of the prime budget to the attachment.
     let deadline = deadline.min(create_stage_deadline(QUALITY_CATALOG_DEADLINE));
-    let result = local_quality_catalog(state, &query, deadline, Some(&catalog.binding)).await;
+    let result = local_quality_catalog(
+        state,
+        &query,
+        deadline,
+        CatalogSource::Quorum(Some(&catalog.binding)),
+    )
+    .await;
     if result.causes.contains(&CatalogCause::LocalDeadline) {
         // The successor then encodes instead of reusing a complete cache.
         tracing::debug!(
