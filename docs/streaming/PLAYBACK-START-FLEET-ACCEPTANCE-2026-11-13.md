@@ -136,3 +136,40 @@ are `media_session_route` 2113, `get_setting` 1254 and `authenticate_token_for` 
 Cluster scope reports `get_setting` 2239 authority, `queue_sql` 546 local and 242
 authority, then `analysis_file_labels` 210 authority. Owner-start scope is included
 in cluster by design; a higher cluster counter is not alone a regression.
+
+## Bounded response capture distinguishes a later subtitle refusal
+
+Paul approved a passive capture of at most 30 HTTP 503 response packets for
+15 minutes, stored privately. It stopped at the 30-packet bound at 20:37:39 UTC.
+Translated-interface duplicates were collapsed by request ID and exact payload:
+10 unique responses remain, 9 learner-policy refusals and 1 leader startup_timeout.
+The capture point is the leader; it includes incoming replies from peers and
+must not be described as only leader-generated responses. Raw headers,
+identifiers and bearer data are not committed to this repository.
+
+The startup_timeout response says the required subtitle sidecar is still being
+built because its source is still being read. Correlated extraction starts
+at 20:34:58.598277 UTC; the create refuses at 20:35:03.630356; the HTTP response
+is 503 at 20:35:03.633412 after 5415 ms. The phase budget is 87 ms Store and 5294 ms
+VOD. This identifies a later create/sidecar-readiness refusal, separate from
+the original 27 ms control/deletion overlap. It does not establish why the track
+read was unfinished at the deadline; that remains a subtitle-path follow-up.
+No control_unavailable response appeared in this bounded capture. Its IPv4
+HTTP/1 header-packet filter and time/packet limits do not prove global absence.
+
+## Source qualification and live evidence remain distinct
+
+Independent final review and the bookkeeping follow-up review are clean.
+Rust 1.97.1 compiled the diagnostic patch and test targets; Clippy passed.
+The backend-privacy regression passed initially. The first interleaving case
+then overflowed the default test-thread stack: the direct command had omitted
+the existing unit harness's RUST_MIN_STACK=8388608 setting. Reusing the same
+compiled binary with that standard setting ran only the failed and unrun
+interleaving cases; both passed in 0.96 s. The passed privacy case was retained.
+No source change or recompilation was used for the failed-only rerun.
+
+The timer inventory and doc-budget regressions passed after their targeted
+bookkeeping fixes; the other 14 paperwork checks were retained. Exact-head
+fast-lane qualification and deployment are recorded when they actually pass.
+The completed learner compiler and task-owned duplicate volumes are removed;
+shared cache seeds and all durable evidence remain preserved.
