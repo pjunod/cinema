@@ -335,6 +335,19 @@ fn class_from_code(code: u8) -> Option<CutClass> {
 /// 2. The identity set is capped at [`MAX_IDENTITIES_PER_FILE`], oldest built
 ///    first, so a fingerprint that no code path asks for any more cannot
 ///    accumulate.
+// Extend the existing metadata JSON, without changing its legacy promotion
+// fields or the packed row format. Decoder promotion ignores these index-only
+// fields; readers retain them explicitly instead of silently losing F+ clocks.
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct IndexMetadata {
+    #[serde(flatten)]
+    promotion: crate::fmp4::PromotionInputs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
+}
+
 pub(crate) fn put(
     conn: &Connection,
     file_id: i64,
@@ -342,7 +355,12 @@ pub(crate) fn put(
     now_ms: i64,
 ) -> Result<(), StoreError> {
     let packed = pack(&index.rows);
-    let promotion = serde_json::to_string(&index.promotion)
+    if index.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+        return Err(StoreError::Task("fitted proof row count mismatch".into()));
+    }
+    let metadata = IndexMetadata { promotion: index.promotion.clone(), dv_refit_origin: index.dv_refit_origin,
+        dv_refit_proofs: index.dv_refit_proofs.clone() };
+    let promotion = serde_json::to_string(&metadata)
         .map_err(|error| StoreError::Migration(error.to_string()))?;
     // The metadata-only status projection may trust this marker and nothing
     // else. Prove exactly the two facts it cannot cheaply derive: the packed
@@ -350,8 +368,8 @@ pub(crate) fn put(
     // round-trips through the type `get` later expects.
     let validated = !index.rows.is_empty()
         && unpack(conn, &packed)? == index.rows
-        && serde_json::from_str::<crate::fmp4::PromotionInputs>(&promotion)
-            .is_ok_and(|decoded| decoded == index.promotion);
+        && serde_json::from_str::<IndexMetadata>(&promotion)
+            .is_ok_and(|decoded| decoded == metadata);
     let validated_revision = if validated {
         i64::from(VALIDATION_REVISION)
     } else {
@@ -505,10 +523,16 @@ pub(crate) fn get(
     // A promotion blob that will not parse is not a reason to serve an index
     // whose promotion inputs are unknown -- that is precisely the state that
     // makes the served init unreproducible. Rebuild instead.
-    index.promotion = match serde_json::from_str(&promotion) {
+    let metadata: IndexMetadata = match serde_json::from_str(&promotion) {
         Ok(inputs) => inputs,
         Err(_) => return Ok(None),
     };
+    if metadata.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+        return Ok(None);
+    }
+    index.promotion = metadata.promotion;
+    index.dv_refit_origin = metadata.dv_refit_origin;
+    index.dv_refit_proofs = metadata.dv_refit_proofs;
     index.parameter_sets_constant = constant != 0;
     Ok(Some(index))
 }
@@ -1203,6 +1227,22 @@ mod tests {
         conn.execute_batch(FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA)
             .expect("typed outcome columns");
         conn
+    }
+
+    #[test]
+    fn fitted_clock_and_row_proofs_survive_local_packing_without_changing_legacy_metadata() {
+        let conn = conn();
+        let mut built = index();
+        let legacy = serde_json::to_string(&built.promotion).expect("legacy promotion");
+        let metadata = IndexMetadata { promotion: built.promotion.clone(), dv_refit_origin: None, dv_refit_proofs: None };
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&metadata).expect("metadata")).expect("JSON"),
+            serde_json::from_str::<serde_json::Value>(&legacy).expect("legacy JSON"));
+        built.dv_refit_origin = Some(crate::segplan::DvRefitOrigin { first_dts: 0, first_pts: 125, time_base_num: 1, time_base_den: 1000 });
+        let proof = serde_json::from_value::<crate::segplan::refit_proof::FittedFragmentProof>(serde_json::json!("a".repeat(64))).expect("proof");
+        built.dv_refit_proofs = Some(vec![proof; built.rows.len()]);
+        put(&conn, 7, &built, 1).expect("publish fitted metadata");
+        let loaded = get(&conn, 7, &built.source).expect("read").expect("retained index");
+        assert_eq!(loaded, built);
     }
 
     fn index_with(fingerprint: &str, size: u64, mtime_ms: i64) -> FragmentIndex {

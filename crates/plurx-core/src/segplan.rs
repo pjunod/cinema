@@ -43,6 +43,7 @@ pub mod copy_cursor;
 pub mod observed_range;
 pub mod packet_clock;
 pub mod ranges;
+pub mod refit_proof;
 pub mod verified_copy;
 
 /// Bumped when a stored index or plan stops being readable by this binary.
@@ -701,6 +702,10 @@ pub struct FragmentIndex {
     /// index, preserving its persisted shape and identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dv_refit_origin: Option<DvRefitOrigin>,
+    /// Pre-conversion coded-sample/cadence identity, one proof per fitted row.
+    /// Legacy/native/processed indices omit this field entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv_refit_proofs: Option<Vec<refit_proof::FittedFragmentProof>>,
     pub source: SourceIdentity,
 }
 
@@ -732,6 +737,7 @@ impl FragmentIndex {
             // The indexer sets this from what it actually walked.
             parameter_sets_constant: true,
             dv_refit_origin: None,
+            dv_refit_proofs: None,
             init_sha256: init_sha256.into(),
             source,
         }

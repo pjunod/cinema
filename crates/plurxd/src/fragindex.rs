@@ -814,55 +814,8 @@ struct RefitPacketOrigin {
     first_sample_sha256: Option<[u8; 32]>,
 }
 
-/// Restore only the Annex-B delimiters emitted by FFmpeg's filter_units CBS
-/// writer. The packet probe hashes that representation, while the MP4 muxer
-/// replaces delimiters with hvcC length prefixes. Preserve every EBSP byte
-/// and NAL order; never unescape or re-encode an already-written NAL.
-/// FFmpeg n8.0.1 libavcodec/cbs_h2645.c, unit_requires_zero_byte and
-/// assemble_fragment (1686–1756); also unchanged in n7.1.1 and n5.1.6.
 fn cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u8; 32], String> {
-    let width = usize::from(length_size);
-    if !matches!(width, 1 | 2 | 4) || sample.is_empty() {
-        return Err("F+ packet identity has invalid HEVC sample framing".into());
-    }
-    // Match the checked prefix/extent walk in fmp4's private
-    // visit_length_prefixed_hevc_nals, additionally requiring a full header.
-    let mut pos = 0usize;
-    let mut count = 0usize;
-    let mut hash = Sha256::new();
-    while pos < sample.len() {
-        let prefix_end = pos
-            .checked_add(width)
-            .filter(|end| *end <= sample.len())
-            .ok_or("F+ packet identity has a truncated NAL prefix")?;
-        let mut length = 0usize;
-        for byte in &sample[pos..prefix_end] {
-            length = length
-                .checked_mul(256)
-                .and_then(|n| n.checked_add(usize::from(*byte)))
-                .ok_or("F+ packet identity NAL length overflows")?;
-        }
-        let end = prefix_end
-            .checked_add(length)
-            .filter(|end| *end <= sample.len())
-            .ok_or("F+ packet identity NAL runs past its sample")?;
-        let nal = &sample[prefix_end..end];
-        if nal.len() < 2 || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) {
-            return Err(
-                "F+ packet identity has a truncated header or an unescaped Annex-B delimiter"
-                    .into(),
-            );
-        }
-        let kind = (nal[0] >> 1) & 63;
-        if count == 0 || matches!(kind, 32..=34) {
-            hash.update([0]);
-        }
-        hash.update([0, 0, 1]);
-        hash.update(nal);
-        count += 1;
-        pos = end;
-    }
-    Ok(hash.finalize().into())
+    fmp4::hevc_cbs_annex_b_sample_hash(sample, length_size).map_err(|error| error.to_string())
 }
 
 impl RefitPacketOrigin {
@@ -1053,6 +1006,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     // fragment carrying one is a different size.
     let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut resolved_refit_origin = None;
+    let mut refit_proofs = Vec::new();
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
@@ -1146,6 +1100,12 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         );
                     };
                     let mut fragment = fragment;
+                    if refit.is_some() {
+                        match plurx_core::segplan::refit_proof::FittedFragmentProof::observe(&fragment, init) {
+                            Ok(proof) => refit_proofs.push(proof),
+                            Err(reason) => return IndexOutcome::Unsupported(reason),
+                        }
+                    }
                     if convert {
                         if converter.is_none() {
                             match crate::dvpipe::Converter::for_init(init) {
@@ -1446,6 +1406,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     built.parameter_sets_constant = parameter_sets_constant;
     if refit.is_some() {
         built.dv_refit_origin = resolved_refit_origin;
+        built.dv_refit_proofs = Some(refit_proofs);
     }
     IndexOutcome::Built(Box::new(built))
 }
@@ -1494,7 +1455,7 @@ pub(crate) fn converted_dolby_vision_record(
 /// token scoped to converting copies so ordinary stripped and preserved
 /// artifacts retain their existing identities.
 pub(crate) const DV_CONVERSION_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v1";
-pub(crate) const DV_REFIT_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v2";
+pub(crate) const DV_REFIT_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v3";
 
 pub(crate) fn output_transform_identity(
     file: &MediaFile,

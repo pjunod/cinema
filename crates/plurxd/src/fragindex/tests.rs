@@ -60,14 +60,26 @@ async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
     let packet_time = |packet: &serde_json::Value, key: &str| -> i64 {
         packet[key].as_i64().expect("integer packet timestamp")
     };
-    let first_dts = packet_time(&packets[0], "dts");
-    assert!(first_dts > 0, "fixture must retain its nonzero start");
+    let first_pts = packet_time(&packets[0], "pts");
+    assert!(first_pts > 0, "fixture must retain its nonzero start");
     assert!(
         packets
             .iter()
-            .any(|packet| packet_time(packet, "pts") != packet_time(packet, "dts")),
+            .any(|packet| packet["dts"].as_i64().is_some_and(|dts| packet_time(packet, "pts") != dts)),
         "fixture must contain reordered B frames"
     );
+
+    // Matroska may omit the reordered head's DTS. Bind the measured first
+    // PTS to the exact same independently hashed packet before resolving it
+    // from the muxer's signed composition offset, as the production pass does.
+    let mut identity_probe = Command::new(testfixtures::ffmpeg());
+    identity_probe.args(filtered_packet_hash_args(source.to_str().expect("fixture path"), 0, false));
+    let identity = testfixtures::run(&mut identity_probe);
+    let origin_probe = RefitPacketOrigin {
+        first_dts: packets[0]["dts"].as_i64(), first_pts,
+        time_base_num: num, time_base_den: den,
+        first_sample_sha256: Some(filtered_packet_hash(&identity, first_pts, (num, den)).expect("independent first packet")),
+    };
 
     let mut command = Command::new(testfixtures::ffmpeg());
     command
@@ -104,8 +116,10 @@ async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
     };
     let video = init.video().expect("video track");
     let mut observed = Vec::new();
+    let mut first_fragment = None;
     while let Some(unit) = reader.next_unit().expect("index fragment") {
         if let Unit::Fragment(fragment) = unit {
+            first_fragment.get_or_insert_with(|| fragment.clone());
             let track = fragment.track(video.id).expect("video fragment");
             let mut dts = track.base_decode_time;
             for sample in track.samples() {
@@ -120,6 +134,9 @@ async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
         "copy must preserve every video packet"
     );
     let output_origin = observed[0].0;
+    let resolved = origin_probe.resolve(&init, &first_fragment.expect("first copy fragment")).expect("exact matched packet clock");
+    let first_dts = resolved.first_dts;
+    assert!(first_dts > 0, "the derived decode origin must retain the nonzero start");
     let origin = SourceTimestamp {
         dts: first_dts,
         time_base_num: num,
@@ -131,27 +148,24 @@ async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
         source_pts: first_dts,
         source_time_base: (num, den),
     };
+    let mut known_decode_times = 0;
     for ((dts, cto), packet) in observed.iter().zip(packets) {
-        let source_dts = packet_time(packet, "dts");
         let source_pts = packet_time(packet, "pts");
-        let indexed_dts = normalize_to_index_ticks(
-            SourceTimestamp {
-                dts: source_dts,
-                time_base_num: num,
-                time_base_den: den,
-            },
-            origin,
-            output_origin,
-            video.timescale,
-        )
-        .expect("exact source DTS normalization");
-        assert_eq!(*dts, indexed_dts, "source DTS and copy fragment diverged");
+        if let Some(source_dts) = packet["dts"].as_i64() {
+            let indexed_dts = normalize_to_index_ticks(
+                SourceTimestamp { dts: source_dts, time_base_num: num, time_base_den: den },
+                origin, output_origin, video.timescale,
+            ).expect("exact source DTS normalization");
+            assert_eq!(*dts, indexed_dts, "known source DTS and copy fragment diverged");
+            known_decode_times += 1;
+        }
         assert_eq!(
             clock.source_pts(i128::from(*dts) + i128::from(*cto)),
             Ok(source_pts),
             "source packet PTS and copy composition offset diverged"
         );
     }
+    assert!(known_decode_times > 0, "later known DTS values independently check the resolved head");
 }
 
 #[tokio::test]

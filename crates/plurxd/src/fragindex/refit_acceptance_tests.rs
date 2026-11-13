@@ -473,7 +473,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         SourceIdentity::new(
             metadata.len(),
             1,
-            format!("dv-p7-to-p81-rpu-v2:{}", table.digest()),
+            format!("dv-p7-to-p81-rpu-v3:{}", table.digest()),
         ),
         None,
         DolbyVisionPass::Rewrite(Box::new(record)),

@@ -2781,6 +2781,8 @@ struct BlobHeader {
     parameter_sets_constant: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
     source_sha256: String,
     pipeline_sha256: String,
     rows: usize,
@@ -2794,6 +2796,7 @@ pub fn encode_cluster_fragment_index_blob(
     if index.version != SEGPLAN_VERSION
         || index.timescale == 0
         || index.rows.is_empty()
+        || index.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len())
         || !is_sha256(source_sha256)
         || !is_sha256(pipeline_sha256)
     {
@@ -2820,6 +2823,7 @@ pub fn encode_cluster_fragment_index_blob(
         promotion,
         parameter_sets_constant: index.parameter_sets_constant,
         dv_refit_origin: index.dv_refit_origin,
+        dv_refit_proofs: index.dv_refit_proofs.clone(),
         source_sha256: source_sha256.to_ascii_lowercase(),
         pipeline_sha256: pipeline_sha256.to_ascii_lowercase(),
         rows: index.rows.len(),
@@ -2939,6 +2943,10 @@ pub fn decode_cluster_fragment_index_blob(
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
     index.dv_refit_origin = header.dv_refit_origin;
+    if header.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+        return Err(StoreError::Task("fitted proof row count mismatch".into()));
+    }
+    index.dv_refit_proofs = header.dv_refit_proofs;
     Ok(index)
 }
 
@@ -3005,6 +3013,8 @@ struct V3BlobHeader {
     parameter_sets_constant: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_proofs: Option<Vec<crate::segplan::refit_proof::FittedFragmentProof>>,
     source_sha256: String,
     output_identity: FragmentIndexOutputIdentity,
     engine: FragmentIndexEngineProvenance,
@@ -3119,6 +3129,12 @@ pub fn cluster_fragment_index_output_identity(
         digest.update(origin.time_base_num.to_be_bytes());
         digest.update(origin.time_base_den.to_be_bytes());
     }
+    if let Some(proofs) = &index.dv_refit_proofs {
+        if proofs.len() != index.rows.len() { return Err(v3_error("fitted proof row count mismatch")); }
+        digest.update(b"plurx/fitted-copy/ordered-coded-cadence/v3\0");
+        digest.update((proofs.len() as u64).to_be_bytes());
+        for proof in proofs { digest.update(proof.as_bytes()); }
+    }
     let value = serde_json::to_value(&promotion)
         .map_err(|error| StoreError::Task(format!("encoding v3 promotion: {error}")))?;
     hash_v3_promotion_value(&mut digest, &value)?;
@@ -3188,6 +3204,7 @@ pub fn encode_cluster_fragment_index_blob_v3(
         promotion: v3_portable_promotion(index, source_sha256)?,
         parameter_sets_constant: index.parameter_sets_constant,
         dv_refit_origin: index.dv_refit_origin,
+        dv_refit_proofs: index.dv_refit_proofs.clone(),
         source_sha256: source_sha256.to_ascii_lowercase(),
         output_identity,
         engine: FragmentIndexEngineProvenance {
@@ -3314,6 +3331,10 @@ pub fn decode_cluster_fragment_index_blob_v3(
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
     index.dv_refit_origin = header.dv_refit_origin;
+    if header.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+        return Err(StoreError::Task("fitted proof row count mismatch".into()));
+    }
+    index.dv_refit_proofs = header.dv_refit_proofs;
     let observed = cluster_fragment_index_output_identity(
         &index,
         &header.source_sha256,

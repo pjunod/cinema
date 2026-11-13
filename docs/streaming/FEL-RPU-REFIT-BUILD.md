@@ -1,7 +1,7 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** open — milestones 1–2 merged; 3–6 implemented in PR #1565,
-final review repaired, qualification pending; 7 remains a follow-up after served
+**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565,
+mandatory fitted timing proof implemented, review complete, qualification pending; 7 remains a follow-up after served
 F+ scores · **Updated:** 2026-11-13 · **Written:** 2026-11-12 ·
 **Owner:** Codex (continuing Claude) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
@@ -304,7 +304,7 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
   time (the fragment's `tfdt` and `trun` cts) against the stored scene table,
   which keys scenes by their first presentation time. It never uses a
   running count, because a seek starts mid-title.
-- A fitted output uses `dv-p7-to-p81-rpu-v2` and its curve digest in the
+- A fitted output uses `dv-p7-to-p81-rpu-v3` and its curve digest in the
   fragment-index identity. The v1 output stays alongside it for disabled
   platforms and titles without a fit. Live `copyseg` stays on v1 until it
   shares the indexed copy engine; no fitted scene is selected from a live
@@ -322,17 +322,38 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
   compared against converted index byte counts. A unique match is required;
   an unmeasured or inconsistent landing refuses the fitted generation.
 
-Decisions (2026-11-12, settled for milestone 4):
+Fitted v3 indexes additionally persist a compact proof for every video row:
+ordered raw coded samples, sample count, durations and composition offsets.
+The local promotion JSON and both cluster index headers retain the source
+clock and proofs. Before conversion, landing checks every buffered row under
+one fixed decode-clock translation; every later fragment is checked under the
+same translation before any media publication. Missing proof, changed coded
+pictures, cadence drift or incomplete EOF coverage refuses the fitted output.
+Legacy/native indexes omit the optional proof metadata and retain their
+existing encoding. The fitted namespace advances from the unqualified v2 to
+v3 so an older fitted index cannot bypass the contract.
+
+This proves that the producer agrees with the canonical video-only index;
+real clock qualification separately compares all source PTS and every
+available DTS. It is not a claim of an independent full-source PTS census in
+production. Combined AAC muxing can change initial video cadence to absorb
+priming. Affected layouts must be refused before fitted media publication,
+even when distinct curves encode to the same byte count. AAC timing alignment
+and audio-bearing acceptance remain open; a video-only positive plus an AAC
+negative must not be reported as full AAC qualification. Developer readiness
+explains this limit without disabling the saved platform choices.
+
+Decisions (2026-11-12; timing proof strengthened 2026-11-13):
 - **Pinned per session.** The digest in the server-owned copy intent is fixed
   at a session boundary. Its producers load the table by file ID and digest.
   If retention has removed the table, a new rendition generation may pin the
   current digest under a new identity before publishing. A refit published
   mid-generation cannot change that generation's bytes.
-- **v2 only for fitted titles.** A title without a fitted table keeps
+- **v3 only for fitted titles.** A title without a fitted table keeps
   `dv-p7-to-p81-rpu-v1`, so its indexes and caches stay valid. A fitted
-  title's identity is `dv-p7-to-p81-rpu-v2` plus the curve digest. Identity
+  title's identity is `dv-p7-to-p81-rpu-v3` plus the curve digest. Identity
   and bytes always agree: if curves cannot be applied, the conversion is
-  refused, never served as identity bytes under v2.
+  refused, never served as identity bytes under v3.
 - **Enable, not gate.** Per-platform settings
   `playback.dolby_vision_refit_{apple,web,android,linux}`, default off, are
   read against the accepted control snapshot's typed `ClientPlatform`.

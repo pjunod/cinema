@@ -268,6 +268,9 @@ where
         generation,
         landing_clock,
         fitted_landing_time: None,
+        fitted_init: None,
+        fitted_next_row: None,
+        fitted_translation: None,
         time_refusal: None,
         sink,
         session_log,
@@ -363,6 +366,9 @@ struct GenerationRun<'a, S> {
     /// Saved after the one-shot seek probe, so a short fitted landing can
     /// collect more fragments without changing the candidate row or clock.
     fitted_landing_time: Option<LandingTime>,
+    fitted_init: Option<Init>,
+    fitted_next_row: Option<usize>,
+    fitted_translation: Option<i128>,
     /// What the landing time said when it could not place the landing, kept
     /// for the refusal should the bytes not settle it either.
     time_refusal: Option<TimeRefusal>,
@@ -405,6 +411,9 @@ impl<S: Sink> GenerationRun<'_, S> {
         match self.generation.identity.served_init_for(&muxer) {
             Ok(served) => {
                 self.video_id = served.video().map(|video| video.id);
+                if self.generation.dv_refit.is_some() {
+                    self.fitted_init = Some(served.clone());
+                }
                 if self.generation.index.is_none() {
                     self.encoded_init = Some(served.clone());
                 }
@@ -500,6 +509,16 @@ impl<S: Sink> GenerationRun<'_, S> {
                 self.deliver(segment).await?;
             }
             return Ok(());
+        }
+        if self.generation.dv_refit.is_some() && self.segmenter.is_some()
+            && self.video_bytes_of(&fragment).is_some() {
+            let row = self.fitted_next_row.ok_or_else(|| landing_failed("fitted producer lost its proof cursor".into()))?;
+            let translation = self.fitted_translation.ok_or_else(|| landing_failed("fitted producer lost its fixed clock".into()))?;
+            let index = self.generation.index.as_ref().ok_or_else(|| landing_failed("fitted producer lost its index".into()))?;
+            let init = self.fitted_init.as_ref().ok_or_else(|| landing_failed("fitted producer lost its proof init".into()))?;
+            plurx_core::segplan::refit_proof::verify_fitted_fragment(index, row, &fragment, init, translation)
+                .map_err(landing_failed)?;
+            self.fitted_next_row = Some(row + 1);
         }
         if let Some(converter) = self.converter.as_mut() {
             let before = converter.report().source_profile;
@@ -777,7 +796,7 @@ impl<S: Sink> GenerationRun<'_, S> {
             .as_ref()
             .ok_or_else(|| landing_failed("fitted conversion lost its pinned table".into()))?;
         let mut match_found = None;
-        for candidate in candidates {
+        'candidate: for candidate in candidates {
             let clock = plurx_core::transcode::dv_refit_serve::SourceClock::for_index_landing(
                 index, candidate, first_dts,
             )
@@ -787,6 +806,17 @@ impl<S: Sink> GenerationRun<'_, S> {
                 .map_err(|error| landing_failed(format!("fitted conversion: {error}")))?;
             let mut converted = Vec::with_capacity(self.landing.len());
             let mut observed = Vec::with_capacity(self.observed.len());
+            let translation = i128::from(index.rows[candidate].dts) - i128::from(first_dts);
+            let mut raw_row = candidate;
+            for original in &self.landing {
+                if original.track(video.id).is_some() {
+                    if plurx_core::segplan::refit_proof::verify_fitted_fragment(
+                        index, raw_row, original, init, translation).is_err() {
+                        continue 'candidate;
+                    }
+                    raw_row += 1;
+                }
+            }
             for original in &self.landing {
                 let mut fragment = original.clone();
                 converter
@@ -811,14 +841,16 @@ impl<S: Sink> GenerationRun<'_, S> {
                         "multiple fitted landing rows agree with the converted bytes".into(),
                     ));
                 }
-                match_found = Some((candidate, converted, observed, converter));
+                match_found = Some((candidate, converted, observed, converter, translation));
             }
         }
-        let Some((landed, converted, observed, converter)) = match_found else {
+        let Some((landed, converted, observed, converter, translation)) = match_found else {
             return Err(landing_failed(
-                "no fitted landing row agrees with converted bytes".into(),
+                "no fitted landing row agrees with coded samples, cadence and converted bytes".into(),
             ));
         };
+        self.fitted_translation = Some(translation);
+        self.fitted_next_row = Some(landed + observed.len());
         self.landing = converted;
         self.observed = observed;
         self.converter = Some(converter);
@@ -1074,6 +1106,10 @@ impl<S: Sink> GenerationRun<'_, S> {
             if let Err(outcome) = self.engage(true).await {
                 return outcome;
             }
+        }
+        if complete && self.generation.dv_refit.is_some()
+            && self.fitted_next_row != self.generation.index.as_ref().map(|index| index.rows.len()) {
+            return landing_failed("fitted producer ended before every indexed row was verified".into());
         }
         let Some(mut segmenter) = self.segmenter.take() else {
             unreachable!("engage constructs the segmenter or fails typed");
@@ -1626,17 +1662,32 @@ mod tests {
         );
 
         let indexed = testfixtures::with_dolby_vision_rpus(&index_pipe_bytes("clean-cra"));
+        // This regression isolates candidate-specific RPU byte matching. The
+        // cached A/V fixture's AAC muxer repairs its first video duration,
+        // so that fixture is not the exact source clock indexed above. Use
+        // the actual video-only indexed pipe for both sides of this proof.
+        film.feed = indexed.clone();
         let mut reader = FragmentReader::new();
         reader.push(&indexed);
         let Some(Unit::Init(init)) = reader.next_unit().expect("index init") else {
             panic!("index init missing");
         };
         let video = init.video().expect("index video");
+        film.video_id = video.id;
+        let mut muxer = init.clone();
+        sanitize_stale_dolby_brand(&mut muxer);
+        film.identity = InitIdentity::establish(&muxer, film.index.promotion.clone())
+            .expect("video-only fitted identity");
+        film.plan = plurx_core::segplan::plan_copy(&film.index, &film.policy,
+            &TrackDurations { video_ms: 12_000, audio_ms: 0, audio_bits_per_second: 0 });
         let mut converter = None;
         let mut row = 0;
         let mut first_cto = None;
+        let mut proofs = Vec::new();
         while let Some(unit) = reader.next_unit().expect("index fragment") {
             if let Unit::Fragment(mut fragment) = unit {
+                proofs.push(plurx_core::segplan::refit_proof::FittedFragmentProof::observe(&fragment, &init)
+                    .expect("raw fitted fixture proof"));
                 if converter.is_none() {
                     let track = fragment.track(video.id).expect("video track");
                     first_cto = track.samples().next().map(|sample| sample.cto);
@@ -1666,6 +1717,7 @@ mod tests {
             }
         }
         assert_eq!(row, film.index.rows.len());
+        film.index.dv_refit_proofs = Some(proofs);
         film.index.dv_refit_origin = Some(plurx_core::segplan::DvRefitOrigin {
             first_dts: 0,
             first_pts: first_cto.expect("first composition offset"),
@@ -1750,6 +1802,45 @@ mod tests {
             sink.taken().first().map(|(entry, _)| *entry),
             Some(start_entry)
         );
+    }
+
+    /// The A/V fixture really has the AAC-induced initial video clock repair
+    /// that exposed this defect. Its coded pictures still weigh the same,
+    /// but a fitted generation must refuse before rewriting/publishing them.
+    #[tokio::test]
+    async fn fitted_copy_refuses_the_aac_muxer_clock_repair_before_publication() {
+        let (film, table) = fitted_film().await;
+        let warped = testfixtures::with_dolby_vision_rpus(&pipe("clean-cra"));
+        let mut muxer = muxer_init(&warped);
+        sanitize_stale_dolby_brand(&mut muxer);
+        let identity = InitIdentity::establish(&muxer, film.index.promotion.clone()).expect("actual A/V init");
+        let mut request = generation(&film, 0);
+        request.identity = identity;
+        request.convert_dolby_vision = true;
+        request.dv_refit = Some(table);
+        let sink = MemSink::default();
+        let outcome = run(&warped[..], request, &sink, "aac-clock-repair").await;
+        assert!(matches!(outcome, Outcome::Failed(Failure::Landing(_))), "{outcome:?}");
+        assert!(sink.taken().is_empty(), "warped cadence cannot publish even its first fitted segment");
+    }
+
+    #[tokio::test]
+    async fn fitted_copy_rejects_a_complete_trailer_that_omits_a_later_indexed_row() {
+        let (film, table) = fitted_film().await;
+        assert!(film.index.rows.len() > LANDING_WINDOW);
+        let cutoff = fragment_boundary_cut(&film.feed, film.index.rows.len() - 1);
+        let mut omitted = film.feed[..cutoff].to_vec();
+        box_walk(&film.feed, |name, body| {
+            if name == b"mfra" {
+                omitted.extend_from_slice(&u32::try_from(body.len() + 8).expect("small trailer").to_be_bytes());
+                omitted.extend_from_slice(name); omitted.extend_from_slice(body);
+            }
+        });
+        let mut request = generation(&film, 0);
+        request.convert_dolby_vision = true; request.dv_refit = Some(table);
+        let sink = MemSink::default();
+        let outcome = run(&omitted[..], request, &sink, "missing-fitted-row").await;
+        assert!(matches!(outcome, Outcome::Failed(Failure::Landing(ref reason)) if reason.contains("every indexed row")), "{outcome:?}");
     }
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {

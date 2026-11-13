@@ -5196,7 +5196,7 @@ impl Plan {
     }
 }
 
-fn visit_length_prefixed_hevc_nals(
+pub(crate) fn visit_length_prefixed_hevc_nals(
     sample: &[u8],
     length_size: u8,
     mut visit: impl FnMut(&[u8], Option<u8>),
@@ -5230,6 +5230,28 @@ fn visit_length_prefixed_hevc_nals(
         pos = end;
     }
     Ok(())
+}
+
+/// Hash HEVC EBSP payloads in FFmpeg CBS Annex-B framing, preserving every
+/// byte and NAL order. CBS emits four-byte delimiters for the first NAL and
+/// types32–34, three otherwise (FFmpeg n8.0.1 cbs_h2645.c1686–1756).
+/// No payload unescaping or re-encoding is performed.
+pub fn hevc_cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u8; 32], Fmp4Error> {
+    use sha2::{Digest, Sha256};
+    if !matches!(length_size, 1 | 2 | 4) || sample.is_empty() {
+        return malformed("fitted packet identity has invalid HEVC sample framing");
+    }
+    let mut hash = Sha256::new();
+    let mut count = 0usize;
+    let mut invalid = false;
+    visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
+        let nal = &framed[usize::from(length_size)..];
+        if kind.is_none() || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) { invalid = true; }
+        if count == 0 || matches!(kind, Some(32..=34)) { hash.update([0]); }
+        hash.update([0, 0, 1]); hash.update(nal); count += 1;
+    })?;
+    if invalid { return malformed("fitted packet has a truncated header or unescaped Annex-B delimiter"); }
+    Ok(hash.finalize().into())
 }
 
 fn hevc_sample_without_parameter_sets_len(
