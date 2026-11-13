@@ -100,11 +100,12 @@ jobs:
     # `fast-lane` label, and the label is what let three lanes merge in one day
     # without this workflow ever running - one of them carrying a fix for the
     # regression the lane before it had shipped to the fleet.
-    # With the merge train on, only the train's own PRs go further (header).
+    # Python compares MERGE_TRAIN exactly: Forgejo expressions fold string
+    # case, so comparing the variable in job conditions would treat ON as on.
+    # Scope runs for every ready PR and switches off heavy outputs for ordinary
+    # PRs only when the variable is exactly on.
     if: >-
-      github.event.pull_request.draft == false &&
-      (vars.MERGE_TRAIN != 'on' || (startsWith(github.event.pull_request.head.ref, 'train/') &&
-       github.event.pull_request.user.login == (vars.MERGE_TRAIN_BOT || 'train-bot')))
+      github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
@@ -118,6 +119,7 @@ jobs:
       preflight: ${{ steps.scope.outputs.preflight }}
       worker_control: ${{ steps.scope.outputs.worker_control }}
       train_selected: ${{ steps.scope.outputs.train_selected }}
+      run_lane: ${{ steps.scope.outputs.run_lane }}
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -129,6 +131,7 @@ jobs:
         env:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
           MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}
+          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}
         # validation/merge_train.py: on a merge-train probe only its
         # `Train-Jobs:` run; anywhere else the scope passes through.
         run: |
@@ -744,8 +747,7 @@ jobs:
       always() &&
       github.event.pull_request.draft == false &&
       needs.scope.outputs.train_selected != 'true' &&
-      (vars.MERGE_TRAIN != 'on' || (startsWith(github.event.pull_request.head.ref, 'train/') &&
-       github.event.pull_request.user.login == (vars.MERGE_TRAIN_BOT || 'train-bot')))
+      needs.scope.outputs.run_lane == 'true'
     needs:
       - paperwork
       - scope

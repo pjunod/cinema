@@ -39,6 +39,15 @@ SURFACES = ("rust", "web_layout", "apple", "desktop_macos", "android_jvm")
 TRAIN_JOBS = re.compile(r"(?m)^Train-Jobs: *(.*?) *$")
 
 
+def lane_enabled(event: dict, switch: str, bot: str) -> bool:
+    """Forgejo expressions fold string case; the switch contract does not."""
+    if switch != "on":
+        return True
+    pull = event.get("pull_request") or {}
+    return ((pull.get("head") or {}).get("ref", "").startswith("train/") and (
+        pull.get("user") or {}).get("login") == bot
+
+
 def selection(event: dict, bot: str) -> list[str] | None:
     """The jobs a probe names, or None when this run is not a probe."""
     pull = event.get("pull_request") if isinstance(event, dict) else None
@@ -52,10 +61,14 @@ def selection(event: dict, bot: str) -> list[str] | None:
     return [job.strip() for job in match.group(1).split(",") if job.strip()]
 
 
-def scope(lines: list[str], jobs: list[str] | None) -> list[str]:
+def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True) -> list[str]:
     values = dict(line.split("=", 1) for line in lines if "=" in line)
-    if jobs is None:
-        values.update(preflight="true", worker_control="true", train_selected="false")
+    if not enabled:
+        for output in SURFACES + ("preflight", "worker_control"):
+            values[output] = "false"
+        values.update(train_selected="false", run_lane="false")
+    elif jobs is None:
+        values.update(preflight="true", worker_control="true", train_selected="false", run_lane="true")
     else:
         unknown = sorted(set(jobs) - set(SELECTABLE))
         if unknown:
@@ -63,7 +76,7 @@ def scope(lines: list[str], jobs: list[str] | None) -> list[str]:
         wanted = {output for job in jobs for output in SELECTABLE[job]}
         for output in SURFACES + ("preflight", "worker_control"):
             values[output] = "true" if output in wanted else "false"
-        values.update(docs_only="false", train_selected="true")
+        values.update(docs_only="false", train_selected="true", run_lane="true")
     return [f"{key}={value}" for key, value in values.items()]
 
 
@@ -73,10 +86,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("usage: python3 -m validation.merge_train scope < ci_scope-output")
     path = os.environ.get("GITHUB_EVENT_PATH")
     event = json.loads(Path(path).read_text()) if path and Path(path).is_file() else {}
-    jobs = selection(event, os.environ.get("MERGE_TRAIN_BOT") or "train-bot")
+    bot = os.environ.get("MERGE_TRAIN_BOT") or "train-bot"
+    enabled = lane_enabled(event, os.environ.get("MERGE_TRAIN", ""), bot)
+    jobs = selection(event, bot)
     if jobs is not None:
         print(f"merge-train probe: running only {', '.join(jobs) or '(nothing)'}", file=sys.stderr)
-    print("\n".join(scope(sys.stdin.read().splitlines(), jobs)))
+    print("\n".join(scope(sys.stdin.read().splitlines(), jobs, enabled)))
     return 0
 
 

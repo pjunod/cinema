@@ -14,7 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from validation.merge_train import scope, selection  # noqa: E402
+from validation.merge_train import lane_enabled, scope, selection  # noqa: E402
 
 LANE = ROOT / ".github/workflows/main-fast-lane.yml"
 SCOPE_LINES = ["rust=false", "apple=false", "desktop_macos=false", "android_jvm=false", "web_layout=true",
@@ -51,11 +51,27 @@ class SelectionCase(unittest.TestCase):
     def test_outside_a_probe_the_scope_passes_through(self):
         out = scope(SCOPE_LINES, None)
         self.assertEqual(out[: len(SCOPE_LINES)], SCOPE_LINES)
-        self.assertEqual(out[len(SCOPE_LINES):], ["preflight=true", "worker_control=true", "train_selected=false"])
+        self.assertEqual(out[len(SCOPE_LINES):], ["preflight=true", "worker_control=true", "train_selected=false", "run_lane=true"])
 
     def test_an_unknown_job_fails_the_scope(self):
         with self.assertRaises(SystemExit):
             scope(SCOPE_LINES, ["promotion_gate"])
+
+    def test_only_exact_on_suspends_an_ordinary_prs_lane(self):
+        ordinary = event(head="feature/x", author="alice")
+        for switch in ("", "off", "ON", "On", "on ", " on"):
+            with self.subTest(switch=switch):
+                self.assertTrue(lane_enabled(ordinary, switch, "train-bot"))
+        self.assertFalse(lane_enabled(ordinary, "on", "train-bot"))
+        self.assertFalse(lane_enabled(event(author="alice"), "on", "train-bot"))
+        self.assertFalse(lane_enabled(event(head="feature/x"), "on", "train-bot"))
+        self.assertTrue(lane_enabled(event(), "on", "train-bot"))
+
+    def test_suspended_lane_disables_every_selectable_job(self):
+        out = dict(line.split("=") for line in scope(SCOPE_LINES, None, enabled=False))
+        for output in ("rust", "apple", "desktop_macos", "android_jvm", "web_layout", "preflight", "worker_control"):
+            self.assertEqual(out[output], "false")
+        self.assertEqual(out["run_lane"], "false")
 
     def test_command_reads_the_event_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,8 +95,9 @@ class LaneCase(unittest.TestCase):
         return " ".join(match.group(1).split())
 
     def test_with_the_train_on_only_train_prs_run_past_paperwork(self):
-        self.assertIn(self.TRAIN, self.condition("scope"))
-        self.assertIn(self.TRAIN, self.condition("promotion_gate"))
+        self.assertNotIn("vars.MERGE_TRAIN", self.condition("scope"))
+        self.assertIn("needs.scope.outputs.run_lane == 'true'", self.condition("promotion_gate"))
+        self.assertIn("MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}", job_block("scope"))
         self.assertNotIn("if:", job_block("paperwork").split("steps:")[0])  # paperwork runs on every PR
 
     def test_probes_select_jobs_through_the_scope_outputs(self):

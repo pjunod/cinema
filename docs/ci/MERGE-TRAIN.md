@@ -82,8 +82,11 @@ The first line gives the mode, the PR's owner and, for a hotfix, who set
 
 ## How the lane knows
 
-`.github/workflows/main-fast-lane.yml` reads `vars.MERGE_TRAIN` in its `scope`
-and `Main promotion gate` conditions. A train PR's head starts with `train/` and
+The lightweight scope job passes `vars.MERGE_TRAIN` to Python for an exact
+comparison. Forgejo expression string comparisons ignore case, so job-level
+`== 'on'` would incorrectly enable train-only lanes for `ON` while the service
+remained off. Only exact `on` switches off ordinary PRs' heavy scope outputs;
+`Main promotion gate` follows the resulting `run_lane` output. A train PR's head starts with `train/` and
 its author is the bot (`vars.MERGE_TRAIN_BOT`, default `train-bot`). The bot's
 re-runs of only some jobs are train PRs too, with a `Train-Jobs:` line in the
 description; `validation/merge_train.py` turns that line into the scope
