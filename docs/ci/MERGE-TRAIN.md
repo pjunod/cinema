@@ -34,15 +34,22 @@ The train service writes nothing to your PR while it is off.
    request for that branch. The fast lane runs on that train PR only — with
    the switch on, the lane's jobs after `paperwork` do not run on ordinary PRs,
    because a per-PR run would test a tree that never lands.
-4. **Green:** the bot merges each PR through its own PR, in order, pinned to the
-   commit that was tested, and checks that `main` now has exactly the tested
-   tree. Your PR shows as merged; the train PR is closed.
+4. **Green:** the train PR's run succeeded and its `Main promotion gate` job
+   passed (a run that skipped the gate is not green: the train halts). The bot
+   merges each PR through its own PR, in order, pinned to the commit that was
+   tested, and after each merge checks that `main` has exactly the tree tested
+   for the PRs so far; the first mismatch (someone merged into `main` meanwhile)
+   halts the train before anything else lands. Your PR shows as merged; the
+   train PR is closed.
 5. **Red:** the bot re-runs only the failed jobs on `main` alone. If they fail
-   there too, the failure was already on `main`: the train lands anyway and the
-   bot opens one issue for it. Otherwise it narrows the failure down to the PR
-   that caused it (re-running only those jobs), puts `WIP:` back on that PR with
-   a comment linking the failing job's log, and lands the rest after they pass
-   the whole lane again without it.
+   there too, with the same failure lines, the failure was already on `main`:
+   the train lands anyway and the bot opens one issue for it (if `main` alone
+   fails differently, the train halts for a person to look). Otherwise it
+   narrows the failure down to the PR that caused it (re-running only those
+   jobs), re-runs them once more on that tree to rule out a flake, then puts
+   `WIP:` back on that PR with a comment linking the failing job's log, and
+   lands the rest after they pass the whole lane again without it. A failure
+   that does not reproduce evicts nobody; the train is rebuilt.
 6. **Conflicts:** a PR that does not merge onto `main` plus the PRs ahead of it
    gets `WIP:` back and a comment naming what it conflicts with.
 
@@ -81,7 +88,9 @@ its author is the bot (`vars.MERGE_TRAIN_BOT`, default `train-bot`). The bot's
 re-runs of only some jobs are train PRs too, with a `Train-Jobs:` line in the
 description; `validation/merge_train.py` turns that line into the scope
 outputs, and the promotion gate does not run on them. The train lands
-through pull requests and never pushes to `main`.
+through pull requests and never pushes to `main`. `paperwork` never fixes a
+bot-authored `train/` head in place (it fails instead); a `train/` branch of
+anyone else is an ordinary PR and keeps the auto-fix.
 
 One limit to know: a probe on `main` alone has an empty diff, so a job that
 decides from the diff what to check (the worker controller proof, the formal

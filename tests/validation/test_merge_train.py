@@ -95,8 +95,19 @@ class LaneCase(unittest.TestCase):
 
     def test_a_train_head_is_never_fixed_in_place(self):
         paperwork = job_block("paperwork")
-        guard = paperwork.index('case "$HEAD_REF" in train/*) exit 1 ;; esac')
-        self.assertLess(guard, paperwork.index("scripts/paperwork-fix"))
+        line = next(row for row in paperwork.splitlines() if 'case "$HEAD_REF" in train/*)' in row)
+        self.assertLess(paperwork.index(line), paperwork.index("scripts/paperwork-fix"))
+        self.assertIn("PR_AUTHOR: ${{ github.event.pull_request.user.login }}", paperwork)
+        self.assertIn("TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT || 'train-bot' }}", paperwork)
+
+        def stops(head, author):
+            env = dict(os.environ, HEAD_REF=head, PR_AUTHOR=author, TRAIN_BOT="train-bot")
+            return subprocess.run(["bash", "-ec", line.strip() + "\nexit 0"], env=env).returncode != 0
+
+        self.assertTrue(stops("train/3", "train-bot"))
+        # Someone else's branch that happens to start with train/ keeps the auto-fix, as with the train off.
+        self.assertFalse(stops("train/my-feature", "alice"))
+        self.assertFalse(stops("feature/x", "train-bot"))
 
 
 if __name__ == "__main__":

@@ -53,6 +53,8 @@ jobs:
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT || 'train-bot' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # The description and title are read from the event payload file
           # (validation/pr_event.py), never the environment: a long
@@ -70,7 +72,8 @@ jobs:
             exit 0
           fi
           # A merge train's tree is exactly the PRs it tests: never fix it in place.
-          case "$HEAD_REF" in train/*) exit 1 ;; esac
+          # Only the bot's train/ heads are trains; anyone else's train/ branch is fixed as before.
+          case "$HEAD_REF" in train/*) if [ "$PR_AUTHOR" = "$TRAIN_BOT" ]; then exit 1; fi ;; esac
           # Derivable bookkeeping is fixed on the branch instead of failing the
           # lane (docs/ci/PAPERWORK.md "What fixes itself"). Anything else, or
           # a head that is already a fix, fails here with paperwork's own fix.
