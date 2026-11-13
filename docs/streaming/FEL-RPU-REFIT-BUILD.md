@@ -243,6 +243,32 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
 - Caller sites: `fragindex.rs`, `copyseg.rs`, `vodgen.rs` and
   `copy_normalization.rs` (survey of 2026-11-12; re-verify at build time).
 
+Decisions (2026-11-12, settled for milestone 4):
+- **Pinned per session.** A session reads the curve table once when it
+  starts, and every fragment it converts uses that table and its digest. A
+  refit published mid-playback reaches only sessions started after it.
+- **v2 only for fitted titles.** A title without a fitted table keeps
+  `dv-p7-to-p81-rpu-v1`, so its indexes and caches stay valid. A fitted
+  title's identity is `dv-p7-to-p81-rpu-v2` plus the curve digest. Identity
+  and bytes always agree: if curves cannot be applied, the conversion is
+  refused, never served as identity bytes under v2.
+- **Enable, not gate.** Per-platform settings
+  `playback.dolby_vision_refit_{macos,ios,tvos,web,android}`, default off,
+  read against the session's client platform. Off ⇒ v1 bytes and identity.
+
+As built so far (milestone 4, part 1):
+- `fmp4::rewrite_timed_video_samples` hands the closure each sample's decode
+  time (`tfdt` plus earlier durations) and composition offset.
+- `transcode::dv_refit_serve`: `ServedCurveTable` (scenes by `first_pts`,
+  servable re-check, identity outside every scene) and `SourceClock`
+  (track ticks to source pts, exact or refused).
+- `dvconvert::convert_length_prefixed` takes the sample's curves and writes
+  them after `To81`; `dvpipe::Converter::with_refit` holds the pinned table
+  and clock and resolves each sample's scene.
+- Not yet wired to the call sites: where each one gets an exact clock, and
+  how a VOD generation lands when converted sizes depend on position, are
+  open (see the milestone 4 PR).
+
 ### 3.6 Serving: permanent on-disk conversion
 
 `dv_disk::build_and_verify` strips the EL first (`filter_units=remove_types=63`)

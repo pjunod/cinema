@@ -18,6 +18,10 @@ bump may break compatibility and a **patch** bump never does.
   or refusal, both statistics sets and the title's verdict, gain and curve
   digest are stored per source (SQLite v130; a shape-verified hiqlite
   extension). Nothing serves the curves yet.
+- The Profile 7 → 8.1 copy converter can write F+ curves into each converted
+  RPU, choosing the scene from the sample's own presentation time, never a
+  frame count (FEL-RPU-REFIT-BUILD.md milestone 4, part 1). No session uses
+  it yet, so served bytes are unchanged.
 
 ### Fixed
 
