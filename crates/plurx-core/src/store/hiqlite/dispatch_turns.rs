@@ -52,7 +52,11 @@ impl HiqliteAuthStore {
         let installed = self
             .client()
             // authority: installation and lost-ack reconciliation require the committed dispatch catalog.
-            .query_consistent_map::<RemoteShapeRow, _>(CATALOG, params!())
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "dispatch_turns_installed",
+                CATALOG,
+                params!(),
+            )
             .await?;
         installed_matches(&installed, expected)
     }

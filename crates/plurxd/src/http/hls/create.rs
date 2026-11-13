@@ -2994,6 +2994,7 @@ async fn create_with_purpose(
     let budget = crate::media_pool::CreateStartupBudget::new(remaining);
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
     let before = counts.snapshot();
+    let methods_before = counts.method_snapshot();
     let store_before = counts.store_time();
     let started = tokio::time::Instant::now();
     budget.begin_phases(before);
@@ -3038,6 +3039,12 @@ async fn create_with_purpose(
         store_ms = counts.store_time().saturating_sub(store_before).as_millis(),
         elapsed_ms = started.elapsed().as_millis(),
         phases = %budget.phases(),
+        // The same operations by the Store method that issued them, as
+        // `method=authority/local/write`: what D3 reads to say which method
+        // makes each count (PLAYBACK-START-D3-BUILD.md section 7.1).
+        methods = %plurx_core::store::format_method_counts(
+            &counts.method_snapshot_since(&methods_before),
+        ),
         "create startup read budget finished"
     );
     let result = match result {

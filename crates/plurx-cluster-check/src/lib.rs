@@ -12562,7 +12562,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
     }
     if !matches!(
         store
-            .reconcile_library(library.id, "stale-root", &[file], 1)
+            .reconcile_library(library.id, "stale-root", &[file], 1, &[], 0)
             .await?,
         ReconcileOutcome::RefusedRoot { .. }
     ) || store.get_file(file).await?.is_none()
@@ -12570,7 +12570,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         bail!("stale-root reconciliation committed a prune");
     }
     if store
-        .reconcile_library(library.id, &fingerprint, &[file], 0)
+        .reconcile_library(library.id, &fingerprint, &[file], 0, &[], 0)
         .await?
         != (ReconcileOutcome::RefusedPrune {
             requested: 1,
@@ -12602,7 +12602,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         .await?;
     if !matches!(
         store
-            .reconcile_library(library.id, &fingerprint, &[disposable_file], 1)
+            .reconcile_library(library.id, &fingerprint, &[disposable_file], 1, &[], 0)
             .await?,
         ReconcileOutcome::Applied {
             deleted_files: 1,

@@ -116,6 +116,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
             StoreError::Database(format!("encode timeline annotations: {error}"))
         })?;
         self.execute(
+            "put_timeline_annotation_set",
             "INSERT INTO timeline_annotation_sets
                 (file_id, source_size, source_mtime, argv_fingerprint,
                  generation_id, version, annotations_json, updated_at_ms,
@@ -157,6 +158,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         let mut rows = self
             .client()
             .query_consistent_map::<SetRow, _>(
+                "timeline_annotation_set",
                 "SELECT generation_id, version, annotations_json
                    FROM timeline_annotation_sets
                   WHERE file_id = $1 AND source_size = $2
@@ -184,6 +186,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         let manual = self
             .client()
             .query_consistent_map::<ManualRow, _>(
+                "timeline_annotation_set",
                 "SELECT kind, start_ticks, end_ticks, timescale, start_ms, end_ms,
                         revision, generation_id
                    FROM timeline_manual_overrides
@@ -243,6 +246,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         })?;
         Ok(self
             .execute(
+                "put_timeline_annotation_set_if_missing",
                 "INSERT INTO timeline_annotation_sets
                     (file_id, source_size, source_mtime, argv_fingerprint,
                      generation_id, version, annotations_json, updated_at_ms,
@@ -286,6 +290,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
     async fn forget_timeline_annotation_set(&self, file_id: i64) -> Result<bool, StoreError> {
         Ok(self
             .execute(
+                "forget_timeline_annotation_set",
                 "DELETE FROM timeline_annotation_sets WHERE file_id = $1",
                 params!(file_id),
             )
@@ -344,6 +349,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         let row = self
             .client()
             .execute_returning_map::<_, RevisionRow>(
+                "set_manual_timeline_annotation",
                 sql,
                 params!(
                     file_id,
@@ -385,6 +391,7 @@ impl TimelineAnnotationStore for HiqliteAuthStore {
         };
         Ok(self
             .execute(
+                "discard_manual_timeline_annotation",
                 "DELETE FROM timeline_manual_overrides
                   WHERE file_id = $1 AND kind = $2 AND source_size = $3
                     AND source_mtime = $4 AND revision = $5",

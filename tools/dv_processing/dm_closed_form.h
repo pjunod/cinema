@@ -13,8 +13,8 @@
  *               ictcp_pre[0] = I_out[i]; dm_cm4_finish(&s, ictcp_pre, rgb_out);
  * Usage, CM2.9: dm_cm29_state s; dm_cm29_prepare(&s, l1, smin_nits, spk_nits, &target, &l2);
  *               dm_cm29_pixel_pre(&s, rgb_in, &pix)           (per pixel: IPT and pointwise intensities)
- *               dm_detail(dm_cm29_detail_in(&s, &pix, 0), Ib, ..., l2.ms, Ib_out)
- *               (and dm_detail(dm_cm29_detail_in(&s, &pix, 1), Io, ...) when cw != 0)
+ *               dm_detail(I, Ib, ..., l2.ms, Ib_out)          (I = pix.I, the source intensity)
+ *               (and dm_detail(I, Io, ...) when cw != 0)
  *               dm_cm29_finish(&s, &pix, Ib_out, Io_out, rgb_out);
  */
 #ifndef DM_CLOSED_FORM_H
@@ -426,7 +426,6 @@ typedef struct {
   double rgb2lms[3][3], lms2rgb[3][3], ipt2lms[3][3], to_t[3][3], from_t[3][3];
   double native_black, native_span, decode_black, decode_span;
   double grid_origin, cube_min;             /* stock gamut cube and resolved output black */
-  double xtop;                              /* intensity at which the tone curve reaches its top clip */
 } dm_cm29_state;
 
 typedef struct { double ipt[3], C, I, Ib, Io; } dm_cm29_pix;
@@ -488,30 +487,23 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   s->decode_span = tg->prim == DM_BT709 ? pow(tg->peak_nits, 1.0 / 2.4) - s->decode_black : 1;
   s->grid_origin = dm_pq_nits(s->cube_min);
   if (!(s->native_span > 0 && s->decode_span > 0)) return 0;
-  /* Where the mapped intensity sits on its top clip the licensed mapping restores no detail: the
-   * detail stage sees the source intensity held at the clip point (measured with cm_offline on
-   * specks over fields above the clip; nothing of the kind happens at the bottom of the curve).
-   * xtop is the smallest intensity that maps to the curve's top value; 1 when the curve never
-   * clips or is flat. */
-  const double top = dm_cm29_tc(s, 1.0);
-  s->xtop = 1.0;
-  if (dm_cm29_tc(s, 0.0) < top) {
-    double lo = 0.0, hi = 1.0;
-    for (int i = 0; i < 64; i++) { const double m = 0.5 * (lo + hi); if (dm_cm29_tc(s, m) >= top) hi = m; else lo = m; }
-    s->xtop = hi;
-  }
   return 1;
 }
+/* Neither the rational curve nor the L2 trim is clamped to the target range: below the shot's crush
+ * the curve falls under the target black (to 0), above the shot's clip it keeps rising, the trim
+ * acts on that value, and the detail stage works on the unclamped mapped intensity. Only the
+ * finished intensity is held to [0, target peak] (dm_cm29_finish). Measured with cm_offline 5.6.4:
+ * ramps running outside the L1 range (a darkening trim keeps its gradation above the L1 clip up to
+ * the peak; a negative lift takes black under the target minimum) and specks on fields above the
+ * clip (a one-pixel speck lands on min(peak, mapped field + speck - field)). */
 DM_STATIC double dm_cm29_curve(const dm_cm29_state *s, double x) {
   double xn = pow(dm_maxd(x, 0.0), s->n);
-  double v = cbrt(dm_maxd((s->a + s->b * xn) / (1 + s->c * xn), 0.0));
-  return dm_clampd(v, s->Tm, s->TM);
+  return cbrt(dm_maxd((s->a + s->b * xn) / (1 + s->c * xn), 0.0));
 }
 DM_STATIC double dm_cm29_sop(const dm_cm29_state *s, double y) {
   const dm_cm29_trim *t = &s->tr;
   if (t->lift == 0 && t->gain == 0 && t->gamma == 0) return y;
-  double v = pow(dm_maxd((1 + t->gain / 2) * ((1 - t->lift / 2) * y + t->lift / 2), 0.0), 2 / (2 + t->gamma));
-  return dm_clampd(v, s->Tm, s->TM);
+  return pow(dm_maxd((1 + t->gain / 2) * ((1 - t->lift / 2) * y + t->lift / 2), 0.0), 2 / (2 + t->gamma));
 }
 DM_STATIC double dm_cm29_tc(const dm_cm29_state *s, double v) { return dm_cm29_sop(s, dm_cm29_curve(s, v)); }
 /* per pixel, before the spatial stage: IPT, chroma, pointwise base (Ib) and chroma-weighted (Io) intensities */
@@ -523,12 +515,6 @@ DM_STATIC void dm_cm29_pixel_pre(const dm_cm29_state *s, const double rgb[3], dm
   p->I = p->ipt[0]; p->C = hypot(p->ipt[1], p->ipt[2]);
   p->Ib = dm_cm29_tc(s, p->I);
   p->Io = s->tr.cw != 0 ? dm_cm29_tc(s, p->I + 0.5 * s->tr.cw * p->C) : p->Ib;
-}
-/* Source intensity as the detail stage reads it, for the base plane (chroma = 0) or the
- * chroma-weighted plane: held at the point where that plane's tone-curve argument reaches the
- * top clip. The chroma-weighted form follows from the base one; only the base plane is measured. */
-DM_STATIC double dm_cm29_detail_in(const dm_cm29_state *s, const dm_cm29_pix *p, int chroma) {
-  return dm_mind(p->I, s->xtop - (chroma ? 0.5 * s->tr.cw * p->C : 0.0));
 }
 /* The gamut operation is trilinear in target-peak-normalized IPT. Evaluate only its
  * eight analytic corners: inverse IPT, PQ EOTF, target matrix/cube, native encoding.
@@ -552,7 +538,7 @@ DM_STATIC void dm_cm29_grid_vertex(const dm_cm29_state *s, const double q[3], do
   }
 }
 DM_STATIC void dm_cm29_finish(const dm_cm29_state *s, const dm_cm29_pix *p, double Ib, double Io, double rgb[3]) {
-  Ib = dm_maxd(Ib, 0); Io = dm_maxd(Io, 0);
+  Ib = dm_clampd(Ib, 0, s->TM); Io = dm_clampd(Io, 0, s->TM);   /* the one range clamp of the mapped intensity */
   const double Ii = dm_maxd(p->I, 1e-6);
   /* Colorfulness compensation, US20160005349A1 eqs. 11-14 (k1=.5, k2=1).
    * Bound the complete scale before the creative saturation trim. */

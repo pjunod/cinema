@@ -10,6 +10,11 @@ use std::time::Duration;
 const FIXTURE: &str = "source_custody::recovery::reader::tests::reader_process_fixture";
 const CONFIG: &str = "PLURX_TEST_READER_CONFIG";
 static REJECT_NEXT_SPAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Held by tests whose ledger waits for every descendant of this test process
+/// started after an escape, and by tests that keep reader children alive
+/// across several replays: those children would otherwise count against the
+/// ledger's bounded wait.
+static DESCENDANTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 fn observe_retry(mediated: bool) -> std::io::Result<()> {
     if REJECT_NEXT_SPAWN.swap(false, std::sync::atomic::Ordering::SeqCst) {
         return Err(std::io::Error::from_raw_os_error(libc::EIO));
@@ -1055,6 +1060,7 @@ fn run_packet_probe(config: &Configuration) {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger() {
+    let _descendants = DESCENDANTS.lock().await;
     use std::sync::Arc;
     fn held(fixture: &Fixture) -> i64 {
         fixture
@@ -1216,6 +1222,7 @@ async fn finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirement() {
+    let _descendants = DESCENDANTS.lock().await;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
     async fn started() -> (
@@ -1419,4 +1426,116 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
 
 async fn quiet_for_veto() {
     tokio::time::sleep(Duration::from_millis(250)).await;
+}
+
+fn namespace(pid_namespace: u64, init: bool) -> DaemonNamespace {
+    DaemonNamespace {
+        pid_namespace,
+        init,
+    }
+}
+
+/// Rewrite the witness's writer namespace in place (same inode and mode), as
+/// the daemon that wrote it would have recorded it.
+fn written_by(proof: &Path, writer: Option<DaemonNamespace>) {
+    let mut evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(proof).expect("witness")).expect("witness json");
+    let object = evidence.as_object_mut().expect("witness object");
+    match writer {
+        Some(writer) => {
+            object.insert(
+                "daemon_namespace".into(),
+                serde_json::to_value(writer).expect("namespace json"),
+            );
+        }
+        None => {
+            object.remove("daemon_namespace");
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(proof)
+        .expect("existing witness");
+    file.write_all(&serde_json::to_vec(&evidence).expect("witness bytes"))
+        .and_then(|()| file.sync_all())
+        .expect("rewritten witness");
+}
+
+#[test]
+fn only_a_torn_down_init_namespace_proves_its_readers_gone() {
+    let (old, other) = (namespace(11, true), namespace(22, true));
+    assert!(namespace_torn_down(Some(&old), Some(&other)));
+    // The same namespace still holds whatever the writer launched.
+    assert!(!namespace_torn_down(Some(&old), Some(&old)));
+    // A writer that was not its namespace's init left children behind.
+    assert!(!namespace_torn_down(
+        Some(&namespace(11, false)),
+        Some(&other)
+    ));
+    // A replay that is not an init cannot speak for a container restart.
+    assert!(!namespace_torn_down(
+        Some(&old),
+        Some(&namespace(22, false))
+    ));
+    // Evidence written before namespaces were recorded keeps its reboot.
+    assert!(!namespace_torn_down(None, Some(&other)));
+    assert!(!namespace_torn_down(Some(&old), None));
+}
+
+#[tokio::test]
+async fn a_restarted_init_daemon_releases_a_raw_launch_from_its_torn_down_namespace() {
+    // 2026-11-12: each plurxd restart during a read left that owner's anchor
+    // invalidated by an unmediated launch. Its custody then fenced every
+    // source reader in the cluster until the next host reboot.
+    let _descendants = DESCENDANTS.lock().await;
+    let (old, restarted) = (namespace(11, true), namespace(22, true));
+    for (family, current, released) in [
+        ("foreground", restarted, true),
+        ("job", restarted, true),
+        ("job", old, false),
+    ] {
+        let fixture = Fixture::new();
+        let record = if family == "foreground" {
+            fixture.foreground()
+        } else {
+            fixture.background(family)
+        };
+        preread(&fixture, &record);
+        let (path, config) = configuration(&fixture, &record, "unmediated");
+        let mut child = OwnedChild::start(&path);
+        child.wait_for("READER_PREPARED");
+        assert!(activate(&fixture, &record, &config.activation_id).await);
+        child.send("arm");
+        child.wait_for("READER_ARMED");
+        let proof = config.directory.join(record.name().expect("name"));
+        written_by(&proof, Some(old));
+        // The writer is alive and holds its lock: nothing is torn down.
+        replay_at_in(
+            &fixture.store,
+            &config.directory,
+            &fixture.dir,
+            NODE,
+            Some(current),
+        )
+        .await
+        .expect("live writer observation");
+        assert_eq!(count(&fixture, &record), 1, "{family}: live writer");
+        child.exit();
+        replay_at_in(
+            &fixture.store,
+            &config.directory,
+            &fixture.dir,
+            NODE,
+            Some(current),
+        )
+        .await
+        .expect("replay after the writer's exit");
+        assert_eq!(
+            count(&fixture, &record),
+            if released { 0 } else { 1 },
+            "{family}: replay as {current:?}"
+        );
+        assert_eq!(proof.exists(), !released, "{family}: evidence cleanup");
+    }
 }
