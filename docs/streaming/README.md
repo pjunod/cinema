@@ -7,6 +7,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
+| [CM29-MEASURED-GAMUT.md](CM29-MEASURED-GAMUT.md) | Measured P3 gamut vertices, acquisition conditioning, exact target scope and qualification. | open |
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
