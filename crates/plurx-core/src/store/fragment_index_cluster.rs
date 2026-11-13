@@ -3765,6 +3765,69 @@ mod tests {
     }
 
     #[test]
+    fn fitted_clock_and_proofs_roundtrip_both_blob_formats_and_bind_output_identity() {
+        use crate::segplan::{refit_proof::FittedFragmentProof, DvRefitOrigin};
+        let source = digest('a');
+        let semantic = digest('9');
+        let engine = codec_engine();
+        let mut index = codec_index();
+        let mut second = index.rows[0].clone();
+        second.dts += second.duration;
+        second.class = CutClass::Dirty;
+        index.rows.push(second);
+        index.dv_refit_origin = Some(DvRefitOrigin {
+            first_dts: -83,
+            first_pts: 0,
+            time_base_num: 1,
+            time_base_den: 1000,
+        });
+        let proof = |digit| {
+            serde_json::from_value::<FittedFragmentProof>(serde_json::json!(digest(digit)))
+                .expect("typed SHA256 proof")
+        };
+        index.dv_refit_proofs = Some(vec![proof('e'), proof('f')]);
+        let output = cluster_fragment_index_output_identity(&index, &source, &semantic)
+            .expect("fitted output identity");
+
+        let legacy = encode_cluster_fragment_index_blob(&index, &source, &engine.pipeline_sha256)
+            .expect("v2 preserves optional fitted metadata");
+        let current = encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &engine)
+            .expect("v3 preserves optional fitted metadata");
+        let decoded = [
+            decode_cluster_fragment_index_blob(&legacy, &source, &engine.pipeline_sha256)
+                .expect("v2 fitted roundtrip"),
+            decode_cluster_fragment_index_blob_v3(&current, &source, &output)
+                .expect("v3 fitted roundtrip")
+                .index,
+        ];
+        for restored in decoded {
+            assert_eq!(restored.rows, index.rows);
+            assert_eq!(restored.dv_refit_origin, index.dv_refit_origin);
+            assert_eq!(restored.dv_refit_proofs, index.dv_refit_proofs);
+            assert_eq!(
+                cluster_fragment_index_output_identity(&restored, &source, &semantic)
+                    .expect("restored fitted identity"),
+                output
+            );
+        }
+
+        let mut changed = index.clone();
+        changed.dv_refit_proofs.as_mut().expect("fitted proofs")[0] = proof('8');
+        assert_ne!(
+            cluster_fragment_index_output_identity(&changed, &source, &semantic)
+                .expect("changed proof identity"),
+            output
+        );
+        let changed_blob =
+            encode_cluster_fragment_index_blob_v3(&changed, &source, &semantic, &engine)
+                .expect("changed fitted metadata");
+        assert!(
+            decode_cluster_fragment_index_blob_v3(&changed_blob, &source, &output).is_err(),
+            "the prior output identity cannot authorize different fitted proofs"
+        );
+    }
+
+    #[test]
     fn v3_round_trips_full_width_rows_without_legacy_identity_aliasing() {
         let source = digest('a');
         let mut index = codec_index();

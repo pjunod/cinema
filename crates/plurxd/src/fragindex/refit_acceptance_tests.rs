@@ -500,6 +500,74 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
             .base_decode_time,
     )
     .expect("index clock");
+    // Independent source census: prove every indexed coded picture and its
+    // source PTS, rather than checking the fitted clock against itself.
+    let mut census_args = filtered_packet_hash_args(&source, stream, false);
+    let limit = census_args
+        .iter()
+        .position(|arg| arg == "-frames:v")
+        .expect("frame limit");
+    census_args.drain(limit..limit + 2);
+    let census = output(&ffmpeg, &census_args).await;
+    std::fs::write(dir.join("source-all-filtered.framehash"), &census)
+        .expect("independent source packet census");
+    let census_text = std::str::from_utf8(&census).expect("source framehash text");
+    let base = census_text
+        .lines()
+        .find_map(|line| line.strip_prefix("#tb 0:"))
+        .and_then(|base| parse_time_base(base.trim()))
+        .expect("census time base");
+    assert_eq!(base, (num, den));
+    let packets = probe["packets"].as_array().expect("source packets");
+    let mut census_rows = census_text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty());
+    let video = init.video().expect("video");
+    let mut packet_at = 0;
+    for fragment in &fragments {
+        let track = fragment.track(video.id).expect("video track");
+        let mut dts = track.base_decode_time;
+        for run in &track.runs {
+            let mut at = run.data_offset;
+            for sample in &run.samples {
+                let fields: Vec<_> = census_rows
+                    .next()
+                    .expect("source picture for every sample")
+                    .split(',')
+                    .map(str::trim)
+                    .collect();
+                assert_eq!(fields.len(), 6);
+                let packet = packets.get(packet_at).expect("source packet");
+                let pts = packet["pts"].as_i64().expect("source PTS");
+                assert_eq!(fields[2].parse::<i64>().expect("census PTS"), pts);
+                assert_eq!(
+                    clock.source_pts(i128::from(dts) + i128::from(sample.cto)),
+                    Ok(pts),
+                    "every coded picture retains its independent source PTS"
+                );
+                if let Some(source_dts) = packet["dts"].as_i64() {
+                    assert_eq!(
+                        clock.source_pts(i128::from(dts)),
+                        Ok(source_dts),
+                        "every available independent source DTS agrees"
+                    );
+                }
+                let end = at.checked_add(sample.size as usize).expect("sample extent");
+                let hash = cbs_annex_b_sample_hash(&fragment.bytes[at..end], video.nal_length_size)
+                    .expect("canonical coded sample identity");
+                assert_eq!(
+                    hex::encode(hash),
+                    fields[5],
+                    "ordered source coded picture identity"
+                );
+                at = end;
+                dts += u64::from(sample.duration);
+                packet_at += 1;
+            }
+        }
+    }
+    assert!(census_rows.next().is_none(), "no source picture omitted");
+    assert_eq!(packet_at, packets.len(), "complete source packet coverage");
     let mut fitted = crate::dvpipe::Converter::for_init(&init)
         .expect("converter")
         .with_refit(Arc::clone(&table), clock)

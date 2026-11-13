@@ -815,172 +815,176 @@ pub(super) fn forget_settled(
         .retain(|key| sources.holds(key));
 }
 
-pub(super) async fn publish_source(
-    context: &CopyAnalysisContext,
-    key: &str,
-    pending: &mut PendingSource,
-) -> Attempt {
-    if pending.source().origin_node_id != context.node_id {
-        // Only the origin node holds the exact object and may read it.
-        return Attempt::Discard("observation is not for this origin".into());
-    }
-    // The exact head epoch and blob these observations contradict, if any.
-    let reconciled = match &mut pending.held {
-        Held::Rows(set) => reconcile_with_head(context, key, set).await,
-        Held::Demand { source, .. } => reconcile_demand(context, key, source).await,
-    };
-    let contradicted = match reconciled {
-        Ok(HeadDecision::Proceed { contradicted }) => contradicted,
-        Ok(HeadDecision::Done) => return Attempt::Done,
-        Ok(HeadDecision::Discard(reason)) => return Attempt::Discard(reason.into()),
-        Err(error) => return Attempt::Retry(error),
-    };
-    let source = pending.source().clone();
-    // An incomplete set needs a physical phase, which the store admits only
-    // while the source domain is idle. While a viewer holds it, a read-only
-    // look answers without enqueueing, claiming or charging anything. A
-    // contradicted head is quarantined whoever is watching: the viewer whose
-    // range found it is the one being served the wrong index.
-    let waits_for_idle = contradicted.is_none() && !pending.is_complete();
-    // A demand lives only in memory until its request exists. Its first
-    // attempt therefore makes the request before it looks at the source
-    // domain, once; a restart then finds the request and takes the demand
-    // up again.
-    let persist_first = pending.demanded && !pending.persist_tried;
-    // Once, whatever it answers: after this attempt a busy source is asked
-    // about without a write, like any other.
-    pending.persist_tried = true;
-    if waits_for_idle && !persist_first {
-        if let Some(busy) = source_is_busy(context, source.file_id).await {
-            return busy;
+pub(super) fn publish_source<'a>(
+    context: &'a CopyAnalysisContext,
+    key: &'a str,
+    pending: &'a mut PendingSource,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Attempt> + Send + 'a>> {
+    // The publication owns physical source phases and their observer handles.
+    // Check their Send proof here, before callers add task/coordinator layers.
+    Box::pin(async move {
+        if pending.source().origin_node_id != context.node_id {
+            // Only the origin node holds the exact object and may read it.
+            return Attempt::Discard("observation is not for this origin".into());
         }
-    }
-    // A build local playback asked for runs under a request that says so.
-    let request_id = pending.asked_by.as_ref().map_or_else(
-        || uuid::Uuid::new_v4().to_string(),
-        super::LocalCopyAuthority::request_id,
-    );
-    let request = match coordination_request(context, &source, request_id).await {
-        Ok(Coordination::Queued(request)) => *request,
-        Ok(Coordination::Busy) => return Attempt::Busy,
-        // Nothing will ever claim this generation again, so holding the
-        // source would only repeat this answer on every pass.
-        Ok(Coordination::Ended) => return Attempt::Ended,
-        Err(reason) => {
-            if persist_first {
-                tracing::warn!(
-                    file_id = source.file_id,
-                    %reason,
-                    "a copy index demand's request was not made; a restart before its build would forget it"
-                );
+        // The exact head epoch and blob these observations contradict, if any.
+        let reconciled = match &mut pending.held {
+            Held::Rows(set) => reconcile_with_head(context, key, set).await,
+            Held::Demand { source, .. } => reconcile_demand(context, key, source).await,
+        };
+        let contradicted = match reconciled {
+            Ok(HeadDecision::Proceed { contradicted }) => contradicted,
+            Ok(HeadDecision::Done) => return Attempt::Done,
+            Ok(HeadDecision::Discard(reason)) => return Attempt::Discard(reason.into()),
+            Err(error) => return Attempt::Retry(error),
+        };
+        let source = pending.source().clone();
+        // An incomplete set needs a physical phase, which the store admits only
+        // while the source domain is idle. While a viewer holds it, a read-only
+        // look answers without enqueueing, claiming or charging anything. A
+        // contradicted head is quarantined whoever is watching: the viewer whose
+        // range found it is the one being served the wrong index.
+        let waits_for_idle = contradicted.is_none() && !pending.is_complete();
+        // A demand lives only in memory until its request exists. Its first
+        // attempt therefore makes the request before it looks at the source
+        // domain, once; a restart then finds the request and takes the demand
+        // up again.
+        let persist_first = pending.demanded && !pending.persist_tried;
+        // Once, whatever it answers: after this attempt a busy source is asked
+        // about without a write, like any other.
+        pending.persist_tried = true;
+        if waits_for_idle && !persist_first {
+            if let Some(busy) = source_is_busy(context, source.file_id).await {
+                return busy;
             }
-            return Attempt::Retry(reason);
         }
-    };
-    if pending.demanded {
-        pending.request_id = Some(request.request_id.clone());
-    }
-    if waits_for_idle && persist_first {
-        if let Some(busy) = source_is_busy(context, source.file_id).await {
-            return busy;
+        // A build local playback asked for runs under a request that says so.
+        let request_id = pending.asked_by.as_ref().map_or_else(
+            || uuid::Uuid::new_v4().to_string(),
+            super::LocalCopyAuthority::request_id,
+        );
+        let request = match coordination_request(context, &source, request_id).await {
+            Ok(Coordination::Queued(request)) => *request,
+            Ok(Coordination::Busy) => return Attempt::Busy,
+            // Nothing will ever claim this generation again, so holding the
+            // source would only repeat this answer on every pass.
+            Ok(Coordination::Ended) => return Attempt::Ended,
+            Err(reason) => {
+                if persist_first {
+                    tracing::warn!(
+                        file_id = source.file_id,
+                        %reason,
+                        "a copy index demand's request was not made; a restart before its build would forget it"
+                    );
+                }
+                return Attempt::Retry(reason);
+            }
+        };
+        if pending.demanded {
+            pending.request_id = Some(request.request_id.clone());
         }
-    }
-    // Record the Source demand on the coordinator. A route that has since
-    // ended simply fails to join; the committed observations stay valid. A
-    // source only local playback asked for has no Source demand to record.
-    if let Some(interest) = &pending.interest {
-        if let Err(error) = context
+        if waits_for_idle && persist_first {
+            if let Some(busy) = source_is_busy(context, source.file_id).await {
+                return busy;
+            }
+        }
+        // Record the Source demand on the coordinator. A route that has since
+        // ended simply fails to join; the committed observations stay valid. A
+        // source only local playback asked for has no Source demand to record.
+        if let Some(interest) = &pending.interest {
+            if let Err(error) = context
+                .store
+                .join_source_analysis_coordination(&request.request_id, &source, interest)
+                .await
+            {
+                tracing::debug!(%error, "Source demand did not join the copy coordinator");
+            }
+        }
+        let now = crate::state::clock_ms();
+        let claim = match context
             .store
-            .join_source_analysis_coordination(&request.request_id, &source, interest)
-            .await
-        {
-            tracing::debug!(%error, "Source demand did not join the copy coordinator");
-        }
-    }
-    let now = crate::state::clock_ms();
-    let claim = match context
-        .store
-        .claim_analysis_coordination(
-            &request.request_id,
-            source.clone(),
-            &context.node_id,
-            request.fence,
-            now,
-            now.saturating_add(context.lease_ms),
-        )
-        .await
-    {
-        Ok(Some(claim)) => claim,
-        Ok(None) => return Attempt::Busy,
-        Err(error) => return Attempt::Retry(error.to_string()),
-    };
-    // The claim is exactly this transition of the queued row; derive the
-    // running row from it so no unreadable re-read can strand the claim.
-    let mut claimed = request.clone();
-    claimed.state = "running".into();
-    claimed.owner_node_id = claim.node_id.clone();
-    claimed.fence = claim.fence;
-    claimed.attempts = claimed.attempts.saturating_add(1);
-    claimed.lease_expires_ms = now.saturating_add(context.lease_ms);
-    let stop = CancellationToken::new();
-    let lost = CancellationToken::new();
-    let heartbeat = heartbeat(context, &claimed, stop.clone(), lost.clone());
-    let quarantined = match &contradicted {
-        Some((epoch, blob)) => {
-            let namespace = pending.catalog_namespace().to_owned();
-            quarantine_head(
-                context,
-                namespace,
-                &source,
-                &claim,
-                *epoch,
-                blob,
-                plurx_core::store::COPY_INDEX_V3_CONTRADICTION_CODE,
+            .claim_analysis_coordination(
+                &request.request_id,
+                source.clone(),
+                &context.node_id,
+                request.fence,
+                now,
+                now.saturating_add(context.lease_ms),
             )
             .await
-        }
-        None => Ok(()),
-    };
-    let outcome = match quarantined {
-        Ok(()) => match fill_gaps(context, pending, &source, &claim, &claimed, &lost).await {
-            Ok(()) => {
-                publish_claimed(context, key, pending, &source, &claim, &claimed, &lost).await
+        {
+            Ok(Some(claim)) => claim,
+            Ok(None) => return Attempt::Busy,
+            Err(error) => return Attempt::Retry(error.to_string()),
+        };
+        // The claim is exactly this transition of the queued row; derive the
+        // running row from it so no unreadable re-read can strand the claim.
+        let mut claimed = request.clone();
+        claimed.state = "running".into();
+        claimed.owner_node_id = claim.node_id.clone();
+        claimed.fence = claim.fence;
+        claimed.attempts = claimed.attempts.saturating_add(1);
+        claimed.lease_expires_ms = now.saturating_add(context.lease_ms);
+        let stop = CancellationToken::new();
+        let lost = CancellationToken::new();
+        let heartbeat = heartbeat(context, &claimed, stop.clone(), lost.clone());
+        let quarantined = match &contradicted {
+            Some((epoch, blob)) => {
+                let namespace = pending.catalog_namespace().to_owned();
+                quarantine_head(
+                    context,
+                    namespace,
+                    &source,
+                    &claim,
+                    *epoch,
+                    blob,
+                    plurx_core::store::COPY_INDEX_V3_CONTRADICTION_CODE,
+                )
+                .await
             }
+            None => Ok(()),
+        };
+        let outcome = match quarantined {
+            Ok(()) => match fill_gaps(context, pending, &source, &claim, &claimed, &lost).await {
+                Ok(()) => {
+                    publish_claimed(context, key, pending, &source, &claim, &claimed, &lost).await
+                }
+                Err(attempt) => Err(attempt),
+            },
             Err(attempt) => Err(attempt),
-        },
-        Err(attempt) => Err(attempt),
-    };
-    // Retire the heartbeat before the outcome write, as the legacy worker does.
-    stop.cancel();
-    let _ = heartbeat.await;
-    match outcome {
-        Ok(()) => Attempt::Done,
-        Err(attempt) => {
-            if !lost.is_cancelled() {
-                let now = crate::state::clock_ms();
-                // A generation is used once (enqueue refuses a second request
-                // for it), so a refused seal is retried under the same request.
-                // Busy is not charged; a failed or refused step is, so a
-                // persistent fault reaches the existing attempt limit and the
-                // request becomes terminal, as a legacy index build does.
-                let code = match &attempt {
-                    Attempt::Discard(_) => "copy_observation_refused",
-                    _ => "copy_publication_retry",
-                };
-                let _ = context
-                    .store
-                    .retry_analysis_request(
-                        &claimed,
-                        code,
-                        now,
-                        now.saturating_add(context.retry_ms),
-                        !matches!(attempt, Attempt::Busy),
-                    )
-                    .await;
+        };
+        // Retire the heartbeat before the outcome write, as the legacy worker does.
+        stop.cancel();
+        let _ = heartbeat.await;
+        match outcome {
+            Ok(()) => Attempt::Done,
+            Err(attempt) => {
+                if !lost.is_cancelled() {
+                    let now = crate::state::clock_ms();
+                    // A generation is used once (enqueue refuses a second request
+                    // for it), so a refused seal is retried under the same request.
+                    // Busy is not charged; a failed or refused step is, so a
+                    // persistent fault reaches the existing attempt limit and the
+                    // request becomes terminal, as a legacy index build does.
+                    let code = match &attempt {
+                        Attempt::Discard(_) => "copy_observation_refused",
+                        _ => "copy_publication_retry",
+                    };
+                    let _ = context
+                        .store
+                        .retry_analysis_request(
+                            &claimed,
+                            code,
+                            now,
+                            now.saturating_add(context.retry_ms),
+                            !matches!(attempt, Attempt::Busy),
+                        )
+                        .await;
+                }
+                attempt
             }
-            attempt
         }
-    }
+    })
 }
 
 /// What the head of a source means for a set of its observations.
