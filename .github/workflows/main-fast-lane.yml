@@ -11,11 +11,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Preserve per-method success journals through head updates and draft changes.
-# Queued runs still fail the current-head/base guard when superseded.
+# A new push (or a draft/ready change) cancels the PR's in-flight run. That
+# run's head is superseded: its promotion gate would refuse the moved head, so
+# finishing it only held the PR's queue slot. Successes recorded by earlier
+# finished runs stay adoptable; what a cancelled job had newly proved is not
+# adopted (it publishes no final journal) and simply runs again
+# (docs/ci/PYTHON-UNIT-PR-RECEIPTS.md, docs/ci/CI-THROUGHPUT.md).
 concurrency:
   group: main-fast-lane-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   # Runs first, on drafts too, in about a minute: the bookkeeping rules that
@@ -37,16 +41,50 @@ jobs:
       - name: Check index rows, release counters, names and Regression-Test fields
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The description and title are read from the event payload file
+          # (validation/pr_event.py), never the environment: a long
+          # description made the runner unable to start this step at all.
           GITHUB_TOKEN: ${{ github.token }}
+          # A push made with the run's own token starts no workflow, so a fix
+          # pushed with it leaves its head without a lane run. With this
+          # secret set the fix's push starts the next run itself.
+          PAPERWORK_PUSH_TOKEN: ${{ secrets.PAPERWORK_PUSH_TOKEN }}
         run: |
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env
+          if python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env; then
+            exit 0
+          fi
+          # Derivable bookkeeping is fixed on the branch instead of failing the
+          # lane (docs/ci/PAPERWORK.md "What fixes itself"). Anything else, or
+          # a head that is already a fix, fails here with paperwork's own fix.
+          [ "$SAME_REPO" = true ] || exit 1
+          python3 scripts/paperwork-fix --ci --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" \
+            --head-sha "$PR_HEAD_SHA" --run-url "$RUN_URL" || exit 1
+          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env || remaining=1
+          push_token="${PAPERWORK_PUSH_TOKEN:-$GITHUB_TOKEN}"
+          push_auth="$(printf 'x-access-token:%s' "$push_token" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $push_auth" push origin "HEAD:refs/heads/$HEAD_REF"
+          fixed="$(git rev-parse HEAD)"
+          echo "::notice::paperwork pushed $fixed to $HEAD_REF with the derivable fixes; pull it before your next push (git pull --rebase)."
+          if [ -n "${remaining:-}" ]; then
+            echo "Paperwork still fails after the derivable fixes; the [FAIL] above is the author's to fix."
+            exit 1
+          fi
+          if [ -n "$PAPERWORK_PUSH_TOKEN" ]; then
+            # The push started the lane on $fixed, which cancels this run.
+            sleep 300
+            echo "The fix push started no new run within five minutes; push any commit to run the lane on $fixed."
+            exit 1
+          fi
+          echo "The fix was pushed with the run's own token, which starts no run: push any commit (git commit --allow-empty) to run the lane on $fixed."
+          exit 1
 
   scope:
     name: fast-lane validation scope
@@ -287,8 +325,9 @@ jobs:
       # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
       # request's `Regression-Test:` lines, judged in the tree the merge will
       # produce. The body and title are payload data on the `pull_request`
-      # event, read from the environment: no API call, no credential, and
-      # nothing interpolated into the script. This checkout is the branch
+      # event, read from the event file (validation/pr_event.py): no API call,
+      # no credential, nothing interpolated into the script, and no size
+      # limit from the environment. This checkout is the branch
       # head, not a merge candidate (the step prints both to keep that
       # visible), so the module builds the candidate with `git merge-tree`.
       # Advisory while validation/merge-errata.toml sets no boundary (phase
@@ -297,7 +336,6 @@ jobs:
       # one without the other.
       - name: Check validation catalog and static contracts
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
           KNOWLEDGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           make validation-lint
@@ -410,23 +448,24 @@ jobs:
     name: fast Rust gate
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
+    # The nonvoter compile pool, in the pinned rust-gate image: no per-run apt
+    # or toolchain downloads. The container's limits are the job's bound on
+    # either carrier; the first step verifies them and CARGO_BUILD_JOBS is
+    # derived from them. The idle high-CPU general runners are not used: a
+    # 2026-11-12 probe there (media1) got memory.max but no cpu.max,
+    # pids.max or swap limit from these options, so a voter would carry an
+    # unbounded, swapping build. docs/ci/RUST-GATE-IMAGE.md.
     runs-on: [ci-nonvoter-compile-amd64]
-    # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
-    # pinned ffmpeg 6 environment used by this lane, while the host label keeps
-    # the job on the high-CPU pool.
     container:
-      image: ubuntu:24.04
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:9bb5c1d51f8b0269a1b58c7d8d2bfa8cab9610707453ff21cd6a2d54324ecac3
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
-    # Compile all targets and enforce workspace/vendor Clippy here. The full
-    # Rust unit and SQLite suites belong to manual full CI, while each change
-    # carries its named, locally run focused regression through preflight.
-    # A cold run spent 21m36s provisioning before compilation. Budget for
-    # that setup plus all-target checking and both Clippy stages; no tests
-    # are added by this ceiling.
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    # All-target Clippy and the vendored hiqlite Clippy; the full Rust unit
+    # and SQLite suites belong to manual full CI, while each change carries
+    # its named, locally run focused regression through preflight.
     timeout-minutes: 60
-    env:
-      # Keep compilation within the shared guest's memory budget.
-      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Verify effective nonvoter resource bounds
         shell: sh
@@ -455,42 +494,24 @@ jobs:
               exit 1
             fi
           done
-      - name: Install Rust gate prerequisites
-        run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get -o Acquire::Retries=3 update
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
-          # Forgejo needs Node before checkout; use the patched upstream build.
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              node_arch=x64
-              node_sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
-              ;;
-            arm64)
-              node_arch=arm64
-              node_sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
-              ;;
-            *) echo "Unsupported Node architecture" >&2; exit 1 ;;
-          esac
-          node_tmp="$(mktemp -d)"
-          trap 'rm -rf "$node_tmp"' EXIT
-          curl --fail --silent --show-error --location --retry 3 \
-            "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-${node_arch}.tar.xz" \
-            -o "$node_tmp/node.tar.xz"
-          echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict
-          tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
-          node --version | grep -Fx 'v22.23.4'
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install the pinned Rust toolchain
-        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-        with:
-          components: rustfmt, clippy
+      - name: Require the gate image built from this tree
+        run: |
+          set -eu
+          want="$(sha256sum Dockerfile.rust-gate | cut -d' ' -f1)"
+          have="$(cat /etc/plurx/rust-gate-input 2>/dev/null || echo none)"
+          if [ "$have" != "$want" ]; then
+            echo "::error::The pinned rust-gate image was built from Dockerfile.rust-gate $have, but this tree's is $want. Run \`scripts/rust-gate-image publish\` and commit the digest with \`scripts/rust-gate-image pin <digest>\` (docs/ci/RUST-GATE-IMAGE.md)."
+            exit 1
+          fi
+          rustc --version | grep -F 'rustc 1.97.1 '
+          cargo clippy --version
+          node --version | grep -Fx 'v22.23.4'
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
       - name: Install the pinned FFmpeg
         uses: ./.github/actions/ffmpeg
         with:
@@ -500,13 +521,8 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: main-fast-rust
-      - name: Compile every Rust target without executing tests
-        run: |
-          make effort-rust-check
-          make hiqlite-vendor-clippy
-      - name: Lint the workspace
-        run: |
-          make lint
+      - name: Run the Rust gate
+        run: make fast-rust-gate
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true

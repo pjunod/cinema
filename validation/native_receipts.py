@@ -73,11 +73,13 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed against main de5928d05: the Docker media runtime changes are
-    # preserved; Cinema adds only Linux Debian frontend comments/help.
-    # Apple/macOS recipes, flags and external inputs are unchanged.
-    # Pin these exact bytes; no old-to-new receipt adoption is authorized.
-    'Makefile': '1d8ba9f31adfe9a8f557e41aecbdded4de4b5cd7b8de017381c04b9ad8956305',
+    # Reviewed 2026-11-12 (PR #1550) against main's reviewed bytes
+    # (2bc2f544…, cfe2c0107/#1545: arm64-only `apple-build`): #1550 adds only
+    # the `fast-rust-gate` and `paperwork-fix` targets, which no Apple or
+    # macOS recipe uses. `apple-tv-navigation-test`, the desktop recipes,
+    # their flags and external inputs are unchanged. Pin these exact bytes;
+    # no old-to-new receipt adoption is authorized.
+    'Makefile': '1be53279f8de316f7b43dbef27f1bdee412404b855a04a0335b478a215c251d2',
     # Reviewed 0.8.0 build 298: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 297 bytes. 297 was set inside a merge commit (8164f7380),
     # which the release guard does not read as a build-number update. Pin this

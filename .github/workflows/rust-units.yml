@@ -94,8 +94,6 @@ jobs:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 120
-    env:
-      CARGO_BUILD_JOBS: "1"
     outputs:
       shards: ${{ steps.plan.outputs.shards || '[]' }}
     steps:
@@ -129,6 +127,8 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - uses: ./.github/actions/rust-native-deps
         with:
@@ -421,8 +421,6 @@ jobs:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 120
-    env:
-      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Verify effective nonvoter resource bounds
         shell: sh
@@ -455,6 +453,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: rust-units-failures-${{ github.run_id }}
