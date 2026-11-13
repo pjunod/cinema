@@ -12,7 +12,9 @@
 //   3. vertical pass, detail stage, colour finish and target-gamut clip -> BT.2020/PQ RGB.
 // CM v2.9 also evaluates its 65x33x33 output lattice once per frame (dv_dm_body_lattice) for the
 // vertices pixels reach most, instead of eight vertex evaluations per pixel; the vertices are the
-// same float32 computation, so the result is the same.
+// same float32 computation, so the result is the same. Measured native vertices
+// are uploaded once per exact target and copied into this lattice; CPU and GPU
+// share the same generated integer data.
 #ifndef PLURX_DV_DM_H
 #define PLURX_DV_DM_H
 #include <math.h>
@@ -24,7 +26,7 @@
 #include "dm_closed_form.h"
 
 #define DV_DM_METHOD_CM4 "dolby-cm4-closed-form-v1"
-#define DV_DM_METHOD_CM29 "dolby-cm29-closed-form-v4"
+#define DV_DM_METHOD_CM29 "dolby-cm29-measured-gamut-v5"
 
 enum { DV_DM_U = 24 };   // vec4 uniforms
 typedef struct {
@@ -708,11 +710,23 @@ static const char dv_dm_body_point_cm4[] =   // pass 1: D (x: base/intensity)
 static const char dv_dm_body_point_cm29[] =  // pass 1: D (x: base/intensity, y: chroma-weighted)
   "vec3 rgb=texelFetch(master,ivec2(gl_FragCoord.xy),0).rgb;\n"
   "vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); vec2 d=c29din(p); color=vec4(d.x-b.x,d.y-b.y,0.0,1.0);\n";
-static const char dv_dm_body_lattice[] = // CM2.9 pass 0: the frame's output lattice
+// An analytic lattice has no measured sampler. Preserve its original shader
+// and descriptor list; aliasing the master under an unused second name breaks
+// this pass on the qualified libplacebo/Vulkan path.
+static const char dv_dm_body_lattice_analytic[] =
   "ivec2 q=ivec2(gl_FragCoord.xy); int X=int(DV_DM_LATTICE_X), R=int(u[18].z);\n"
   "vec3 idx=vec3(float(q.x%X),float(q.x/X-R),float(q.y-R));\n"
   "vec3 origin=vec3(u[10].x,0.0,0.0), step=vec3(u[1].y/64.0,u[1].y/32.0,u[1].y/32.0);\n"
   "color=vec4(c29vertex(origin+idx*step),1.0);\n";
+static const char dv_dm_body_lattice[] = // CM2.9 pass 0: the frame's output lattice
+  "ivec2 q=ivec2(gl_FragCoord.xy); int X=int(DV_DM_LATTICE_X), R=int(u[18].z);\n"
+  "vec3 idx=vec3(float(q.x%X),float(q.x/X-R),float(q.y-R));\n"
+  "vec3 origin=vec3(u[10].x,0.0,0.0), step=vec3(u[1].y/64.0,u[1].y/32.0,u[1].y/32.0);\n"
+  "vec3 value=c29vertex(origin+idx*step);\n"
+  "if(u[21].x>0.5&&idx.x>=0.0&&idx.x<65.0&&all(greaterThanEqual(idx.yz,vec2(-16.0)))&&all(lessThanEqual(idx.yz,vec2(16.0)))){\n"
+  " vec4 measured=texelFetch(mtable,ivec2(int(idx.x)+65*(int(idx.y)+16),int(idx.z)+16),0);\n"
+  " if(measured.a>0.5) value=measured.rgb; }\n"
+  "color=vec4(value,1.0);\n";
 static const char dv_dm_body_h[] =       // pass 2: horizontal Gaussian and derivative
   "ivec2 q=ivec2(gl_FragCoord.xy); int w=textureSize(dpass,0).x; vec4 acc=vec4(0.0);\n"
   "for(int j=-5;j<=5;j++){ int x=clamp(q.x-j,0,w-1); vec2 d=texelFetch(dpass,ivec2(x,q.y),0).xy; float g=GX[j+5], dg=-float(j)/4.0*g;\n"
@@ -761,7 +775,7 @@ static const char dv_dm_body_final_cm29[] =  // pass 3: vertical, detail, finish
   " vec3 res=c29finish(lpass,p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   ;
 
-static struct { pl_dispatch dispatch; pl_tex dtex, htex, ltex, out; } dv_dm_gpu;
+static struct { pl_dispatch dispatch; pl_tex dtex, htex, ltex, mtex, out; const uint16_t *measured; } dv_dm_gpu;
 
 // Only partial CM v2.9 active areas use this shader. Both detail planes (Ib, and Io when the
 // chroma weight is live) filter inside the rectangle; bars take the pointwise mapping alone.
@@ -787,6 +801,38 @@ static inline pl_tex dv_dm_tex(pl_gpu gpu, pl_tex *t, int w, int h) {
     *t = pl_tex_create(gpu, pl_tex_params(.w = w, .h = h, .format = format, .sampleable = true, .renderable = true, .blit_src = true));
   }
   return *t;
+}
+// The native table depends only on the exact display target, not shot metadata.
+// Upload once when that target changes; the shader still computes unsupported vertices.
+static inline pl_tex dv_dm_measured_tex(pl_gpu gpu, const uint16_t *table) {
+  if (!table) return NULL;
+  if (dv_dm_gpu.mtex && dv_dm_gpu.measured == table) return dv_dm_gpu.mtex;
+  const int w = DM_CM29_GAMUT_I * DM_CM29_GAMUT_C, h = DM_CM29_GAMUT_C;
+  if (!dv_dm_gpu.mtex) {
+    pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+    if (!fmt) return NULL;
+    dv_dm_gpu.mtex = pl_tex_create(gpu, pl_tex_params(.w = w, .h = h, .format = fmt,
+                                                   .sampleable = true, .host_writable = true));
+    if (!dv_dm_gpu.mtex) return NULL;
+  }
+  float *values = malloc((size_t)w * h * 4 * sizeof(float));
+  if (!values) return NULL;
+  // CPU storage is [intensity][P][T]; texture x is intensity + I*P, y is T.
+  for (int t = 0; t < h; t++) {
+    for (int x = 0; x < w; x++) {
+      int intensity = x % DM_CM29_GAMUT_I, p = x / DM_CM29_GAMUT_I;
+      size_t src = ((size_t)intensity * DM_CM29_GAMUT_C + p) * DM_CM29_GAMUT_C + t;
+      size_t dst = (size_t)t * w + x;
+      bool valid = table[src * 3] != UINT16_MAX;
+      for (int k = 0; k < 3; k++) values[dst * 4 + k] = valid ? table[src * 3 + k] / 65535.0f : 0;
+      values[dst * 4 + 3] = valid ? 1 : 0;
+    }
+  }
+  bool ok = pl_tex_upload(gpu, pl_tex_transfer_params(.tex = dv_dm_gpu.mtex, .ptr = values));
+  free(values);
+  if (!ok) { dv_dm_gpu.measured = NULL; return NULL; }
+  dv_dm_gpu.measured = table;
+  return dv_dm_gpu.mtex;
 }
 static inline bool dv_dm_pass(pl_shader sh, const char *desc, dv_dm_header header_id, const char *body,
                               pl_tex in, const char *in_name,
@@ -839,9 +885,13 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
     if (r > DV_DM_LATTICE_MAX_R) r = DV_DM_LATTICE_MAX_R;
     int nc = 2 * r + 2;
     dv_dm_put(f->u[18], 29, f->weight, r, nc);
+    pl_tex measured = f->c29.gamut ? dv_dm_measured_tex(gpu, f->c29.gamut) : NULL;
+    if (f->c29.gamut && !measured) return NULL;
+    const char *lattice_body = f->c29.gamut ? dv_dm_body_lattice : dv_dm_body_lattice_analytic;
+    dv_dm_put(f->u[21], f->c29.gamut ? 1 : 0, 0, 0, 0);
     if (!(lattice = dv_dm_tex(gpu, &dv_dm_gpu.ltex, DV_DM_LATTICE_X * nc, nc))) return NULL;
     sh = pl_dispatch_begin(dv_dm_gpu.dispatch);
-    if (!dv_dm_pass(sh, desc, DV_DM_HEADER_LEGACY, dv_dm_body_lattice, source, "master", NULL, "unused", NULL, "unused2", f->u,
+    if (!dv_dm_pass(sh, desc, DV_DM_HEADER_LEGACY, lattice_body, source, "master", measured, "mtable", NULL, "unused2", f->u,
                     DV_DM_LATTICE_X * nc, nc) ||
         !pl_dispatch_finish(dv_dm_gpu.dispatch, pl_dispatch_params(.shader = &sh, .target = lattice))) return NULL;
   }
@@ -866,7 +916,8 @@ static inline pl_tex dv_dm_render(pl_log log, pl_gpu gpu, pl_tex source, dv_dm_f
 }
 static inline void dv_dm_destroy(pl_gpu gpu) {
   pl_tex_destroy(gpu, &dv_dm_gpu.dtex); pl_tex_destroy(gpu, &dv_dm_gpu.htex); pl_tex_destroy(gpu, &dv_dm_gpu.ltex);
-  pl_tex_destroy(gpu, &dv_dm_gpu.out);
+  pl_tex_destroy(gpu, &dv_dm_gpu.out); pl_tex_destroy(gpu, &dv_dm_gpu.mtex);
+  dv_dm_gpu.measured = NULL;
   pl_dispatch_destroy(&dv_dm_gpu.dispatch);
 }
 #endif
