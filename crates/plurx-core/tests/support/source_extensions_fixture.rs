@@ -564,13 +564,13 @@ fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
-/// Rewind v130 (F+ curve fits) to v129: the exact marker is required and
+/// Rewind v131 (F+ curve fits) to v130: the exact marker is required and
 /// stored fits refuse; the extension's own objects go.
-fn rewind_dv_refit_to_v129(connection: &rusqlite::Connection) {
+fn rewind_dv_refit_to_v130(connection: &rusqlite::Connection) {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture F+ ordinal");
-    if version != 130 {
+    if version != 131 {
         return;
     }
     let marker: i64 = connection
@@ -584,7 +584,8 @@ fn rewind_dv_refit_to_v129(connection: &rusqlite::Connection) {
     let rows: i64 = connection
         .query_row(
             "SELECT (SELECT count(*) FROM background_dv_refit_titles)
-              + (SELECT count(*) FROM background_dv_refit_scenes)",
+              + (SELECT count(*) FROM background_dv_refit_scenes)
+              + (SELECT count(*) FROM background_dv_refit_outcomes)",
             [],
             |row| row.get(0),
         )
@@ -604,10 +605,41 @@ fn rewind_dv_refit_to_v129(connection: &rusqlite::Connection) {
         .iter()
         .map(|(kind, name)| format!("DROP {} {name};", kind.to_ascii_uppercase()))
         .collect();
-    plan.push("PRAGMA user_version=129;".into());
+    plan.push("PRAGMA user_version=130;".into());
     connection
         .execute_batch(&plan.join("\n"))
         .expect("published F+ rewind");
+}
+
+/// Rewind v130 (offload: `items.offloaded_at` and its two clearing triggers)
+/// to v129. No item may still be offloaded: an offload mark is accepted data
+/// the rewind would silently discard, so it refuses like every other tail.
+fn rewind_offload_to_v129(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture offload ordinal");
+    if version != 130 {
+        return;
+    }
+    let offloaded: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM items WHERE offloaded_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("offload marks");
+    assert_eq!(
+        offloaded, 0,
+        "historical fixture must not discard offloaded items"
+    );
+    connection
+        .execute_batch(
+            "DROP TRIGGER items_offloaded_clear_on_file_insert;
+             DROP TRIGGER items_offloaded_clear_on_file_move;
+             ALTER TABLE items DROP COLUMN offloaded_at;
+             PRAGMA user_version=129;",
+        )
+        .expect("published offload rewind");
 }
 
 /// Rewind v129 (retention keeps a charged custody's owner job) to v128: the
@@ -659,7 +691,8 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
-    rewind_dv_refit_to_v129(connection);
+    rewind_dv_refit_to_v130(connection);
+    rewind_offload_to_v129(connection);
     rewind_custody_retention_to_v128(connection);
     if let Some(plan) = coordination_tail_rewind_plan(connection) {
         connection

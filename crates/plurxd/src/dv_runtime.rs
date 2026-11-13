@@ -74,8 +74,23 @@ pub(crate) struct ToolSet {
     /// The scanner executable's own digest. It is statically linked, so this
     /// is everything that decides a complete-title aggregate.
     scanner_sha256: String,
+    /// The libav majors the helper decodes with (`avcodec=…,avformat=…,avutil=…`):
+    /// with [`REFIT_MODE_VERSION`], what an F+ fit's statistics depend on.
+    decoder_abi: String,
     artifacts: Arc<Vec<(PathBuf, String)>>,
 }
+
+/// The refit mode's own version: `segment_decode_render --refit-stats`, its
+/// pooling, statistics and resume rules (`refit_mode.h`) and the composition
+/// it measures (`refit_compose.h`). Bump it whenever either changes what a
+/// run prints; [`REFIT_MODE_SOURCES`] makes a change to them fail a test
+/// until it is bumped and re-pinned.
+pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
+/// sha256 of `refit_mode.h` followed by `refit_compose.h`, as
+/// [`REFIT_MODE_VERSION`] was last reviewed against.
+#[cfg(test)]
+pub(crate) const REFIT_MODE_SOURCES: &str =
+    "70c35da4fd0ffaf25309d672cc44caca637282260ff11a016a1bfe069b054303";
 
 #[cfg(all(test, target_os = "linux"))]
 impl ToolSet {
@@ -102,8 +117,28 @@ impl ToolSet {
             renderer_env: Vec::new(),
             identity,
             scanner_sha256: hash(b"/bin/false"),
+            decoder_abi: "avcodec=61,avformat=61,avutil=59".into(),
             artifacts: Arc::new(Vec::new()),
         }
+    }
+
+    /// A fixture whose renderer is `renderer` (a script standing in for
+    /// `segment_decode_render --refit-stats`), current while it is unchanged.
+    pub(crate) fn refit_fixture(renderer: PathBuf) -> Result<Self, String> {
+        let identity = DvBackendIdentity::new(
+            digest(b"refit renderer")?,
+            digest(b"libraries")?,
+            digest(b"parser")?,
+            digest(b"sources")?,
+            1,
+            digest(b"manifest")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let digest = hash_file(&renderer)?;
+        let mut tools = Self::lifecycle_fixture(identity);
+        tools.renderer = renderer.clone();
+        tools.artifacts = Arc::new(vec![(renderer, digest)]);
+        Ok(tools)
     }
 }
 fn hash(bytes: &[u8]) -> String {
@@ -330,12 +365,18 @@ impl ToolSet {
     pub(crate) fn title_scanner_digest(&self) -> String {
         hash(format!("plurx-dv-title-scanner-v1\0{}", self.scanner_sha256).as_bytes())
     }
-    /// What an F+ curve fit depends on: the helper that decodes and composes
-    /// both layers, with the libraries it loads, its parser and its sources.
-    /// The fit method itself is named separately (`dv_refit::FIT_VERSION`).
+    /// What an F+ fit's statistics depend on (decision G): the refit mode's
+    /// version and the decoder ABI it runs on, not the whole backend digest,
+    /// so rebuilding the bundle for an unrelated change does not decode every
+    /// FEL title again. The fit method is named separately
+    /// (`dv_refit::FIT_VERSION`).
     #[cfg(unix)]
-    pub(crate) fn refit_helper_digest(&self) -> String {
-        hash(format!("plurx-dv-refit-helper-v1\0{}", self.backend_digest()).as_bytes())
+    pub(crate) fn refit_helper_identity(&self) -> String {
+        hash(format!("plurx-dv-refit-identity-v1\0{REFIT_MODE_VERSION}\0{}", self.decoder_abi).as_bytes())
+    }
+    /// The decoder ABI, as the Developer card reports it.
+    pub(crate) fn decoder_abi(&self) -> &str {
+        &self.decoder_abi
     }
     /// Configuration is captured by the worker, never supplied by a playback
     /// request. Absence preserves ordinary output and the saved preference.
@@ -455,12 +496,18 @@ impl ToolSet {
                 .ok_or("missing scanner")?
                 .sha256
                 .clone();
+            let decoder_abi = ["avcodec", "avformat", "avutil"]
+                .iter()
+                .map(|key| format!("{key}={}", manifest.abi[*key]))
+                .collect::<Vec<_>>()
+                .join(",");
             Ok(Some(Arc::new(Self {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
                 scanner: tools.remove("scanner").ok_or("missing scanner")?,
                 renderer_env: environment,
                 identity,
                 scanner_sha256,
+                decoder_abi,
                 artifacts: Arc::new(artifacts),
             })))
         })
@@ -3335,6 +3382,29 @@ mod title_scanner_identity_tests {
         assert_ne!(
             before.title_scanner_digest(),
             new_scanner.title_scanner_digest()
+        );
+    }
+
+    /// Decision G: an F+ fit is keyed by the refit mode and the decoder ABI,
+    /// so a rebuilt bundle (another renderer, shaders, libplacebo) keeps
+    /// every stored fit, and a changed refit mode or decoder ABI does not.
+    #[test]
+    fn refit_identity_is_the_refit_mode_and_the_decoder_abi() {
+        let one = ToolSet::lifecycle_fixture(backend(b"renderer one"));
+        let two = ToolSet::lifecycle_fixture(backend(b"renderer two"));
+        assert_ne!(one.backend_digest(), two.backend_digest());
+        assert_eq!(one.refit_helper_identity(), two.refit_helper_identity());
+        let mut newer_abi = ToolSet::lifecycle_fixture(backend(b"renderer one"));
+        newer_abi.decoder_abi = "avcodec=62,avformat=62,avutil=60".into();
+        assert_ne!(one.refit_helper_identity(), newer_abi.refit_helper_identity());
+        use sha2::{Digest, Sha256};
+        let mut sources = Sha256::new();
+        sources.update(include_bytes!("../../../tools/dv_processing/refit_mode.h"));
+        sources.update(include_bytes!("../../../tools/dv_processing/refit_compose.h"));
+        assert_eq!(
+            hex::encode(sources.finalize()),
+            REFIT_MODE_SOURCES,
+            "the refit mode changed: bump REFIT_MODE_VERSION if what it prints changed, then re-pin"
         );
     }
 

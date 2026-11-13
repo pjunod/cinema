@@ -17,6 +17,7 @@
 
 pub mod analysis_coordination;
 mod copy_index_v3;
+pub mod playback_input_keys;
 pub use copy_index_v3::{
     copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
     CopyIndexSourceAttestation, CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState,
@@ -156,6 +157,7 @@ mod sqlite;
 mod telemetry;
 mod timeline_annotations;
 
+pub(crate) mod offload;
 mod publication;
 mod scan_identity_repair;
 mod schema_lineage;
@@ -174,7 +176,7 @@ pub use scan_identity_repair::{
 
 pub mod applied_view;
 pub use applied_view::{
-    AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
+    AppliedRoute, AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
     AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
     ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,
 };
@@ -1203,14 +1205,15 @@ use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
     DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
-    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
-    MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
-    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
-    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    ItemPresence, ItemSort, Library, MediaFile, MediaSessionActivation,
+    MediaSessionActivationOutcome, MediaSessionActivationSettlement,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, OfflineActivityPackage,
+    OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
+    OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease, PlaybackEvent,
+    PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -2274,6 +2277,18 @@ pub mod keys {
     /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
     /// Missing is off; this never overrides the separate DV_CONVERT permission.
     pub const DV_FEL_REENCODE: &str = "playback.dolby_vision_fel_reencode";
+    /// F+ curve fits for Profile 7 FEL titles (FEL-RPU-REFIT-BUILD.md), one
+    /// switch per `playback_control::ClientPlatform`: whether copy playback
+    /// to that platform serves the fitted 8.1 mapping. Missing is off. With
+    /// any one on, idle nodes run the `dv_refit` job; copy-path serving
+    /// (milestone 4) reads each.
+    pub const DV_REFIT_WEB: &str = "playback.dolby_vision_refit_web";
+    pub const DV_REFIT_APPLE: &str = "playback.dolby_vision_refit_apple";
+    pub const DV_REFIT_ANDROID: &str = "playback.dolby_vision_refit_android";
+    pub const DV_REFIT_LINUX: &str = "playback.dolby_vision_refit_linux";
+    /// The four, in `ClientPlatform` order (web, apple, android, linux).
+    pub const DV_REFIT_PLATFORMS: [&str; 4] =
+        [DV_REFIT_WEB, DV_REFIT_APPLE, DV_REFIT_ANDROID, DV_REFIT_LINUX];
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite
@@ -3129,6 +3144,32 @@ pub trait MediaStore: Send + Sync + 'static {
         library_id: i64,
         directory: &str,
     ) -> Result<Vec<Item>, StoreError>;
+    /// The offloaded movie of this library carrying these external ids, for
+    /// placing files that come back after Get it back. Ids only, never a
+    /// title: a re-acquired title must not become a duplicate when its
+    /// release name differs from the library title (`Tar` / `Tár`).
+    async fn find_offloaded_movie(
+        &self,
+        library_id: i64,
+        tmdb_id: Option<i64>,
+        imdb_id: Option<&str>,
+    ) -> Result<Option<Item>, StoreError>;
+    /// The offloaded episode of the show with this TMDB id, by season and
+    /// episode number.
+    async fn find_offloaded_episode(
+        &self,
+        library_id: i64,
+        series_tmdb_id: i64,
+        season_number: i32,
+        episode_number: i32,
+    ) -> Result<Option<Item>, StoreError>;
+    /// How many offloaded leaves sit under each container, of how many in
+    /// all (the item itself counts when it is a leaf). A container with none
+    /// offloaded is absent.
+    async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError>;
     async fn find_book(
         &self,
         library_id: i64,
@@ -3216,6 +3257,28 @@ pub trait MediaStore: Send + Sync + 'static {
         offset: i64,
         limit: i64,
         genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            ItemPresence::Everything,
+        )
+        .await
+    }
+    /// [`list_top_items_in_genre`](Self::list_top_items_in_genre) narrowed by
+    /// whether the title is on disk or offloaded. One `WHERE` term shared by
+    /// the count and the page, like the genre.
+    async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: ItemPresence,
     ) -> Result<ItemPage, StoreError>;
     /// The unfiltered grid: every caller that had no opinion about genres
     /// before this existed and still has none. Provided rather than
@@ -3603,6 +3666,14 @@ pub trait MediaStore: Send + Sync + 'static {
     ) -> Result<Vec<MediaFile>, StoreError>;
     /// All known file paths in a library (for vanished-file detection).
     async fn library_file_paths(&self, library_id: i64) -> Result<Vec<(i64, PathBuf)>, StoreError>;
+    /// The known files at `folder` or anywhere below it, matched by whole
+    /// path component (`/m/Dune` does not match `/m/Dune (2021)/x.mkv`), so a
+    /// folder removal reads only its own subtree instead of the library.
+    async fn library_file_paths_under(
+        &self,
+        library_id: i64,
+        folder: &std::path::Path,
+    ) -> Result<Vec<(i64, PathBuf)>, StoreError>;
     /// Establish the stable identity of the mounted roots for this library,
     /// or compare a later scanner's observation with cluster truth.
     /// `configured_paths` is the path set the scan walked; when the library
@@ -3623,12 +3694,19 @@ pub trait MediaStore: Send + Sync + 'static {
     /// Atomically remove vanished files and their empty item hierarchy only
     /// when the scanner sees the expected roots and stays within its deletion
     /// budget. This is the M1c publication boundary; M4 adds its lease fence.
+    ///
+    /// `offload_keep` names movie/episode items an offload wants kept: any
+    /// of them left with no files by this very removal is marked offloaded
+    /// (`offloaded_at`) between the file delete and the leaf prune, in the
+    /// same transaction, so nothing can observe it fileless and unmarked.
     async fn reconcile_library(
         &self,
         library_id: i64,
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError>;
     /// Remove `file_ids` — files of the library that the caller found under
     /// none of `configured_paths`, which is what an operator removing a
@@ -5017,6 +5095,8 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
@@ -6193,6 +6273,39 @@ pub struct HttpStoreOperationCounts {
     /// exceed the request's elapsed time; on the serial create path it is
     /// the share of the handler spent waiting on the Store.
     store_nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The same operations split by the Store method that issued them.
+    methods: std::sync::Arc<std::sync::Mutex<MethodOperationCounts>>,
+}
+
+/// The most distinct Store-method labels one request records. A request that
+/// touches more folds the rest into [`METHOD_OVERFLOW_LABEL`], so a request's
+/// map (and the `methods=` log line built from it) is bounded whatever the
+/// call graph does. The widest request measured touches fewer than 40.
+pub const MAX_METHODS_PER_REQUEST: usize = 128;
+
+/// The label the operations of a request's 129th and later distinct methods
+/// are counted under.
+pub const METHOD_OVERFLOW_LABEL: &str = "other";
+
+/// Operations by Store method for one request: (local, authority, write)
+/// in [`HttpStoreOperationCounts::snapshot`]'s class order.
+#[derive(Default)]
+struct MethodOperationCounts {
+    by_method: std::collections::BTreeMap<&'static str, [u64; 3]>,
+}
+
+impl MethodOperationCounts {
+    fn record(&mut self, method: &'static str, class_index: usize) {
+        let key = if self.by_method.contains_key(method)
+            || self.by_method.len() < MAX_METHODS_PER_REQUEST
+        {
+            method
+        } else {
+            METHOD_OVERFLOW_LABEL
+        };
+        let cell = self.by_method.entry(key).or_default();
+        cell[class_index] = cell[class_index].saturating_add(1);
+    }
 }
 
 impl HttpStoreOperationCounts {
@@ -6230,15 +6343,59 @@ impl HttpStoreOperationCounts {
         self.watch_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// [`Self::snapshot`] split by the Store method that issued each
+    /// operation, sorted by method name; each entry is `(method, [local,
+    /// authority, write])`. The entries sum to [`Self::snapshot`]. A method
+    /// beyond [`MAX_METHODS_PER_REQUEST`] distinct ones is counted under
+    /// [`METHOD_OVERFLOW_LABEL`].
+    #[must_use]
+    pub fn method_snapshot(&self) -> Vec<(&'static str, [u64; 3])> {
+        let methods = self
+            .methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        methods
+            .by_method
+            .iter()
+            .map(|(method, counts)| (*method, *counts))
+            .collect()
+    }
+
+    /// What this request did since `before`, a snapshot taken earlier from
+    /// [`Self::method_snapshot`], by Store method; only methods that did
+    /// something. The create budget line and the owner's start line log
+    /// this, so they describe their own window and not the whole request.
+    #[must_use]
+    pub fn method_snapshot_since(
+        &self,
+        before: &[(&'static str, [u64; 3])],
+    ) -> Vec<(&'static str, [u64; 3])> {
+        self.method_snapshot()
+            .into_iter()
+            .filter_map(|(method, now)| {
+                let was = before
+                    .iter()
+                    .find(|(name, _)| *name == method)
+                    .map_or([0; 3], |(_, counts)| *counts);
+                let delta = std::array::from_fn(|class| now[class].saturating_sub(was[class]));
+                (delta != [0; 3]).then_some((method, delta))
+            })
+            .collect()
+    }
+
     /// Summed wall time of every operation counted in [`Self::snapshot`].
     #[must_use]
     pub fn store_time(&self) -> std::time::Duration {
         std::time::Duration::from_nanos(self.store_nanos.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    fn record(&self, class_index: usize, elapsed: std::time::Duration) {
+    fn record(&self, class_index: usize, method: &'static str, elapsed: std::time::Duration) {
         use std::sync::atomic::Ordering;
 
+        self.methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(method, class_index);
         let _ =
             self.counts[class_index].try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 (current != u64::MAX).then(|| current.saturating_add(1))
@@ -6250,6 +6407,18 @@ impl HttpStoreOperationCounts {
                 Some(current.saturating_add(nanos))
             });
     }
+}
+
+/// Render [`HttpStoreOperationCounts::method_snapshot`]-shaped counts as the
+/// `method=authority/local/write` list a log line carries, in the order the
+/// create budget line prints its totals.
+#[must_use]
+pub fn format_method_counts(methods: &[(&'static str, [u64; 3])]) -> String {
+    methods
+        .iter()
+        .map(|(method, [local, authority, write])| format!("{method}={authority}/{local}/{write}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 tokio::task_local! {
@@ -6272,8 +6441,29 @@ pub fn scope_http_store_operations<T>(
     HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
-pub(super) fn record_http_store_operation(class_index: usize, elapsed: std::time::Duration) {
-    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, elapsed));
+/// Spawn a detached task that counts its Store operations into the request
+/// that spawned it. A task-local scope is not inherited by `tokio::spawn`, so
+/// a bare spawn makes every operation inside it count nowhere, and an absent
+/// operation looks like a saved one. `make` gets the request's counts (a fresh
+/// set outside any request) so the task can report its own window with
+/// [`HttpStoreOperationCounts::method_snapshot_since`].
+pub fn spawn_in_http_store_scope<F, Fut>(make: F) -> tokio::task::JoinHandle<Fut::Output>
+where
+    F: FnOnce(HttpStoreOperationCounts) -> Fut,
+    Fut: std::future::Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    let counts = current_http_store_operations().unwrap_or_default();
+    tokio::spawn(scope_http_store_operations(counts.clone(), make(counts)))
+}
+
+pub(super) fn record_http_store_operation(
+    class_index: usize,
+    method: &'static str,
+    elapsed: std::time::Duration,
+) {
+    let _ =
+        HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, method, elapsed));
 }
 
 /// Count one watch-state read into the current request, if any. Called by
@@ -6737,6 +6927,27 @@ impl CatalogueReader {
         self.authority.get_item(id).await
     }
 
+    /// Offloaded leaves under each container, from the bounded replica when
+    /// it is proven fresh enough, like the item reads beside it.
+    pub async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let owned = ids.to_vec();
+            if let Some(result) = self
+                .bounded(
+                    move |store| async move { store.local_offloaded_leaf_counts(&owned).await },
+                )
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.offloaded_leaf_counts(ids).await
+    }
+
     pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
@@ -6756,6 +6967,26 @@ impl CatalogueReader {
         limit: i64,
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            crate::domain::ItemPresence::Everything,
+        )
+        .await
+    }
+
+    pub async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: crate::domain::ItemPresence,
+    ) -> Result<ItemPage, StoreError> {
         // Both the existing Authority implementation and this local variant
         // read the page and count in separate statements. The bounded permit
         // covers that whole operation but deliberately does not promise a
@@ -6772,6 +7003,7 @@ impl CatalogueReader {
                             offset,
                             limit,
                             genre.as_deref(),
+                            presence,
                         )
                         .await
                 })
@@ -6781,7 +7013,7 @@ impl CatalogueReader {
             }
         }
         self.authority
-            .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+            .list_top_items_filtered(library_id, sort, offset, limit, genre, presence)
             .await
     }
 
@@ -6913,7 +7145,7 @@ impl CatalogueReader {
         // is not a new transaction spanning these independent aggregates.
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
-            .bounded(|store| async move { store.local_media_shape().await })
+            .bounded(|store| async move { store.local_media_shape("media_shape").await })
             .await
         {
             return Ok(result);
@@ -7005,3 +7237,6 @@ mod item_sort_order_tests;
 
 #[cfg(test)]
 mod sharing_recovery_principal_tests;
+
+#[cfg(test)]
+mod http_operation_method_tests;

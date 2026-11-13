@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // F+ statistics modes of segment_decode_render (FEL-RPU-REFIT-BUILD.md §3.2):
 //
-//   segment_decode_render --refit-stats SOURCE VIDEO_INDEX [--frames FIRST LAST]
+//   segment_decode_render --refit-stats SOURCE VIDEO_INDEX [--threads N]
+//                         [--frames FIRST LAST | --resume FIRST FIRST_PTS]
 //   segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
 //
 // Either takes a trailing diagnostic [--area LEFT RIGHT TOP BOTTOM], which
@@ -17,10 +18,11 @@
 //
 // --refit-stats writes JSON lines to stdout: one per pooled scene,
 //   {"kind":"refit_scene","first_frame":N,"frames":K,"first_pts":TICKS,
-//    "end_pts":TICKS,"time_base":"NUM/DEN","fit":RefitStats,
-//    "held_out":RefitStats}
+//    "end_pts":TICKS,"time_base":"NUM/DEN","rpu_scene_frames":[L,...],
+//    "fit":RefitStats,"held_out":RefitStats}
 // in presentation order (end_pts: the scene's last frame's pts plus its
-// duration), then one
+// duration; rpu_scene_frames: the lengths of the RPU's own scenes pooled
+// into it, in order, summing to K), then one
 //   {"kind":"refit_summary","frames":N,"scenes":S,"rpu_scenes":R,
 //    "median_scene_frames":M,"degenerate":BOOL,"fit_samples":F,
 //    "held_out_samples":H,"first_pts":TICKS,"end_pts":TICKS,
@@ -28,29 +30,48 @@
 // where M is the median length of the RPU's own scenes before pooling and
 // degenerate is M < 24 (scene_refresh_flag too frequent to mean scene cuts).
 // RefitStats is plurx-core's dv_refit::RefitStats serde layout. Exit 0 only
-// after a complete read; any refusal is exit 1 with one line on stderr, and
-// the caller discards everything written.
+// after a complete read. A refusal writes one line on stderr (libav's own
+// logging is silenced) and states its class in the exit status:
+// - 3 (REFIT_EXIT_CONTENT): the title's content is refused — not a dual-layer
+//   Profile 7 FEL stream, an enhancement layer the frozen pairing does not
+//   cover, RPU metadata the composer or the parser refuses, an invalid
+//   active area. The same bits refuse the same way every time.
+// - 1: anything else — the source could not be read, an allocation, the
+//   decoder, a write. Worth another attempt.
+// Scenes already written before a refusal are complete; the caller decides
+// what to keep.
 //
-// --dump-composed writes the lattice samples of frames FIRST..LAST
-// ("plurx-composed-v1"): a JSON header line, then per frame one JSON line
-//   {"kind":"composed_frame","frame":N,"pts":TICKS,"bl":[W,H],"el":[W,H],
-//    "active_area":[LEFT,RIGHT,TOP,BOTTOM],"scene_refresh":BOOL,
-//    "fit_samples":KF,"held_out_samples":KH}
-// followed immediately by (KF + KH) binary records of eight little-endian
-// uint16: x, y, base Y, Cb, Cr, composed Y, Cb, Cr. Fit-lattice records come
-// first, each lattice row-major. A final {"kind":"dump_complete","frames":K}
-// line ends a complete dump. compare_composed.py reads it.
+// --threads N sets the frame workers of each of the two layer decoders
+// (default 4); the process then runs 2N decoder workers and this thread.
 //
-// The playback window path is unchanged: these modes are dispatched before
-// its argument parsing and share only its decode functions.
+// --resume FIRST FIRST_PTS continues an interrupted run at a pooled scene
+// it already wrote: frame ordinal FIRST, presenting at FIRST_PTS. The run
+// seeks to the random-access point at or before FIRST_PTS, decodes the
+// preroll without composing it, and composes and pools from that frame on,
+// numbering it FIRST. A pooled scene's start is a point where pooling holds
+// nothing pending, so every scene from FIRST on is exactly the uninterrupted
+// run's (controls/test_refit_resume.py checks it at every boundary). The
+// summary describes this run's frames only; with every scene's
+// rpu_scene_frames the caller rebuilds the whole title's summary from the
+// scenes before FIRST and this run's. FIRST_PTS must be a frame's pts after
+// a random-access point (exit 1 otherwise).
 
 #include "refit_compose.h"
 
 // About 11.5 hours at 24 frames per second.
 #define REFIT_MAX_TITLE_FRAMES 1000000
+// Frames decoded between the random-access point and a resume point.
+#define REFIT_MAX_PREROLL 4096
 #define REFIT_MAX_PACKET_BYTES (16 * 1024 * 1024)
 
+#define REFIT_EXIT_CONTENT 3
+
 static bool refit_dump, refit_area_override;
+// --resume: the resume point, and the preroll decoded before it.
+static int64_t refit_resume_frame = -1, refit_resume_pts, refit_preroll;
+static bool refit_resume_started, refit_preroll_seen;
+// The next RPU scene length a written pooled scene has not yet claimed.
+static size_t refit_lengths_cursor;
 static int refit_area[4];
 static int64_t refit_first, refit_last = INT64_MAX, refit_paired, refit_composed;
 static int64_t refit_first_pts, refit_end_pts;
@@ -65,13 +86,45 @@ static size_t refit_records_capacity;
 static struct budget_io refit_io = {.fd = -1, .upstream = -1};
 static AVIOContext *refit_avio;
 
+// A presentation time in stream ticks, as a scene line wrote it.
+static int64_t refit_ticks(const char *text) {
+  char *end;
+  errno = 0;
+  long long value = strtoll(text, &end, 10);
+  need(!errno && end != text && !*end && value > INT64_MIN && value < INT64_MAX,
+       "integer resume presentation time");
+  return value;
+}
+
+// A refusal of the title's content (see the header): exit REFIT_EXIT_CONTENT.
+static void refit_content(int ok, const char *reason) {
+  if (!ok) {
+    refusal_exit = REFIT_EXIT_CONTENT;
+    need(0, reason);
+  }
+}
+
 static bool refit_emit(const struct refit_scene *scene, void *unused) {
   (void)unused;
-  return printf("{\"kind\":\"refit_scene\",\"first_frame\":%lld,\"frames\":%lld,"
-                "\"first_pts\":%lld,\"end_pts\":%lld,\"time_base\":\"%d/%d\",\"fit\":",
-                (long long)scene->first_frame, (long long)scene->frames,
-                (long long)scene->first_pts, (long long)scene->end_pts, source_time_base.num,
-                source_time_base.den) > 0 &&
+  if (printf("{\"kind\":\"refit_scene\",\"first_frame\":%lld,\"frames\":%lld,"
+             "\"first_pts\":%lld,\"end_pts\":%lld,\"time_base\":\"%d/%d\","
+             "\"rpu_scene_frames\":[",
+             (long long)scene->first_frame, (long long)scene->frames,
+             (long long)scene->first_pts, (long long)scene->end_pts, source_time_base.num,
+             source_time_base.den) <= 0)
+    return false;
+  // Pooled scenes are written in frame order and cover whole RPU scenes, so
+  // the RPU scenes pooled into this one are the next unclaimed lengths.
+  int64_t covered = 0;
+  for (bool first = true; covered < scene->frames; first = false) {
+    if (refit_lengths_cursor >= refit_lengths_count)
+      return false;
+    int64_t length = refit_lengths[refit_lengths_cursor++];
+    if (printf(first ? "%lld" : ",%lld", (long long)length) <= 0)
+      return false;
+    covered += length;
+  }
+  return covered == scene->frames && fputs("],\"fit\":", stdout) != EOF &&
          refit_stats_json(stdout, &scene->fit) && fputs(",\"held_out\":", stdout) != EOF &&
          refit_stats_json(stdout, &scene->held_out) && fputs("}\n", stdout) != EOF;
 }
@@ -107,10 +160,10 @@ static inline int64_t refit_fixed(int64_t integer, uint64_t fraction) {
 }
 static bool refit_scene_refresh(const uint8_t *nalu, size_t size, const AVDOVIMetadata *data) {
   DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(nalu, size);
-  need(rpu != NULL && dovi_rpu_get_error(rpu) == NULL, "RPU parser cross-check");
+  refit_content(rpu != NULL && dovi_rpu_get_error(rpu) == NULL, "RPU parser cross-check");
   const DoviRpuDataMapping *raw = dovi_rpu_get_data_mapping(rpu);
   const DoviVdrDmData *dm = dovi_rpu_get_vdr_dm_data(rpu);
-  need(raw != NULL && dm != NULL, "fresh RPU mapping and DM data");
+  refit_content(raw != NULL && dm != NULL, "fresh RPU mapping and DM data");
   const AVDOVIDataMapping *parsed = av_dovi_get_mapping(data);
   bool same = true;
   for (int c = 0; c < 3 && same; c++) {
@@ -164,32 +217,35 @@ static bool refit_scene_refresh(const uint8_t *nalu, size_t size, const AVDOVIMe
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free_data_mapping(raw);
   dovi_rpu_free(rpu);
-  need(agree, "decoder and RPU parser mappings agree");
+  refit_content(agree, "decoder and RPU parser mappings agree");
   return refresh;
 }
 
 static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
   need(bl->pts <= INT64_MAX - bl->duration, "frame end overflow");
   AVFrameSideData *raw = av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_RPU_BUFFER);
-  need(raw && raw->size > 0 && raw->size < 4096,
-       "fresh decoder-attached RPU required; cached metadata insufficient");
+  refit_content(raw && raw->size > 0 && raw->size < 4096,
+                "fresh decoder-attached RPU required; cached metadata insufficient");
   uint8_t nalu[4098] = {0x7c, 0x01};
   memcpy(nalu + 2, raw->data, raw->size);
   // The playback path's admission, refusals included; it prints nothing here.
   struct pl_dovi_metadata admitted;
+  // Its refusals are refusals of this RPU's content.
+  refusal_exit = REFIT_EXIT_CONTENT;
   map_fel_rpu(bl, nalu, raw->size + 2, &admitted, false, bl->width, bl->height);
+  refusal_exit = 1;
   const AVFrameSideData *side = av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_METADATA);
-  need(side != NULL, "decoder-derived FEL metadata");
+  refit_content(side != NULL, "decoder-derived FEL metadata");
   const AVDOVIMetadata *data = (const void *)side->data;
   struct refit_mapping mapping;
   const char *refused = refit_mapping_from_dovi(data, &mapping);
-  need(refused == NULL, refused ? refused : "");
+  refit_content(refused == NULL, refused ? refused : "");
   bool refresh = refit_scene_refresh(nalu, raw->size + 2, data);
 
   int w = bl->width, h = bl->height, ew = el->width, eh = el->height;
   // The frozen pairing covers a half-resolution EL only.
-  need(2 * ew == w && 2 * eh == h, "half-resolution enhancement layer");
-  need(bl->format == AV_PIX_FMT_YUV420P10LE && el->format == AV_PIX_FMT_YUV420P10LE &&
+  refit_content(2 * ew == w && 2 * eh == h, "half-resolution enhancement layer");
+  refit_content(bl->format == AV_PIX_FMT_YUV420P10LE && el->format == AV_PIX_FMT_YUV420P10LE &&
            bl->linesize[0] >= 2 * w && bl->linesize[1] >= w && bl->linesize[2] >= w &&
            el->linesize[0] >= 2 * ew && el->linesize[1] >= ew && el->linesize[2] >= ew,
        "software-decoded planar ten-bit layers");
@@ -203,7 +259,7 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
     area[2] = l5->l5.top_offset;
     area[3] = l5->l5.bottom_offset;
   }
-  need(area[0] + area[1] < w && area[2] + area[3] < h, "invalid active area metadata");
+  refit_content(area[0] + area[1] < w && area[2] + area[3] < h, "invalid active area metadata");
   int x0 = area[0], x1 = w - area[1], y0 = area[2], y1 = h - area[3];
   const int phases[2] = {REFIT_FIT_PHASE, REFIT_HELD_OUT_PHASE};
   int64_t counts[2];
@@ -295,6 +351,24 @@ static void refit_pairs(void) {
     need(last_pts == AV_NOPTS_VALUE || bl->pts > last_pts,
          "duplicate/out-of-order paired frame");
     last_pts = bl->pts;
+    if (refit_resume_frame >= 0 && !refit_resume_started) {
+      // The window path's rule: decoding starts at an independent BL/EL
+      // random-access pair at or before the point composition starts.
+      if (!refit_preroll_seen) {
+        need((bl->flags & AV_FRAME_FLAG_KEY) && (el->flags & AV_FRAME_FLAG_KEY) &&
+                 bl->pts <= refit_resume_pts,
+             "independent BL/EL random-access preroll required before the resume point");
+        refit_preroll_seen = true;
+      }
+      if (bl->pts < refit_resume_pts) {
+        need(++refit_preroll <= REFIT_MAX_PREROLL, "bounded resume preroll");
+        drop_pair();
+        continue;
+      }
+      need(bl->pts == refit_resume_pts, "resume point is a frame of the title");
+      refit_resume_started = true;
+      refit_paired = refit_resume_frame;
+    }
     int64_t ordinal = refit_paired++;
     need(refit_paired <= REFIT_MAX_TITLE_FRAMES, "bounded title frame count");
     if (ordinal > refit_last) {
@@ -369,18 +443,43 @@ static int refit_main(int argc, char **argv) {
     need(argc == 6, "usage: segment_decode_render --dump-composed SOURCE VIDEO_INDEX "
                     "FIRST LAST [--area LEFT RIGHT TOP BOTTOM]");
   else
-    need(argc == 4 || (argc == 7 && !strcmp(argv[4], "--frames")),
-         "usage: segment_decode_render --refit-stats SOURCE VIDEO_INDEX "
-         "[--frames FIRST LAST] [--area LEFT RIGHT TOP BOTTOM]");
+    need(argc >= 4, "usage: segment_decode_render --refit-stats SOURCE VIDEO_INDEX "
+                    "[--threads N] [--frames FIRST LAST | --resume FIRST FIRST_PTS] "
+                    "[--area LEFT RIGHT TOP BOTTOM]");
   refit_mode = true;
   // Refusals leave without exit-time teardown while decoder threads run.
   dv_threads_live = true;
   int stream_index = number(argv[3], 0, 255);
-  if (argc >= 6) {
-    refit_first = number(argv[argc - 2], 0, REFIT_MAX_TITLE_FRAMES - 1);
-    refit_last = number(argv[argc - 1], 0, REFIT_MAX_TITLE_FRAMES - 1);
+  if (refit_dump) {
+    refit_first = number(argv[4], 0, REFIT_MAX_TITLE_FRAMES - 1);
+    refit_last = number(argv[5], 0, REFIT_MAX_TITLE_FRAMES - 1);
     need(refit_first <= refit_last, "ordered frame range");
+  } else {
+    bool ranged = false, resumed = false;
+    for (int i = 4; i < argc;) {
+      if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
+        refit_threads = number(argv[i + 1], 1, 16);
+        i += 2;
+      } else if (!strcmp(argv[i], "--frames") && i + 2 < argc && !ranged && !resumed) {
+        refit_first = number(argv[i + 1], 0, REFIT_MAX_TITLE_FRAMES - 1);
+        refit_last = number(argv[i + 2], 0, REFIT_MAX_TITLE_FRAMES - 1);
+        need(refit_first <= refit_last, "ordered frame range");
+        ranged = true;
+        i += 3;
+      } else if (!strcmp(argv[i], "--resume") && i + 2 < argc && !ranged && !resumed) {
+        refit_resume_frame = number(argv[i + 1], 1, REFIT_MAX_TITLE_FRAMES - 1);
+        refit_resume_pts = refit_ticks(argv[i + 2]);
+        resumed = true;
+        i += 3;
+      } else {
+        need(0, "usage: segment_decode_render --refit-stats SOURCE VIDEO_INDEX "
+                "[--threads N] [--frames FIRST LAST | --resume FIRST FIRST_PTS] "
+                "[--area LEFT RIGHT TOP BOTTOM]");
+      }
+    }
   }
+  // Decoder chatter must not change what a refusal looks like on stderr.
+  av_log_set_level(AV_LOG_QUIET);
   av_max_alloc(64ULL * 1024 * 1024);
   static char stdout_buffer[1 << 20];
   setvbuf(stdout, stdout_buffer, _IOFBF, sizeof(stdout_buffer));
@@ -420,7 +519,7 @@ static int refit_main(int argc, char **argv) {
   for (unsigned i = 0; i < input->nb_streams; i++)
     av_dict_free(&probe_options[i]);
   need(probed >= 0, "bounded stream discovery");
-  need((unsigned)stream_index < input->nb_streams &&
+  refit_content((unsigned)stream_index < input->nb_streams &&
            input->streams[stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
            input->streams[stream_index]->codecpar->codec_id == AV_CODEC_ID_HEVC,
        "selected absolute HEVC video stream");
@@ -433,19 +532,23 @@ static int refit_main(int argc, char **argv) {
   const AVPacketSideData *config = av_packet_side_data_get(
       stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,
       AV_PKT_DATA_DOVI_CONF);
-  need(config && config->size >= sizeof(AVDOVIDecoderConfigurationRecord),
-       "declared source Dolby Vision configuration");
+  refit_content(config && config->size >= sizeof(AVDOVIDecoderConfigurationRecord),
+                "declared source Dolby Vision configuration");
   const AVDOVIDecoderConfigurationRecord *cfg = (const void *)config->data;
-  need(cfg->dv_profile == 7 && cfg->bl_present_flag && cfg->el_present_flag &&
-           cfg->rpu_present_flag,
-       "Profile 7 dual-layer source");
+  refit_content(cfg->dv_profile == 7 && cfg->bl_present_flag && cfg->el_present_flag &&
+                    cfg->rpu_present_flag,
+                "Profile 7 dual-layer source");
   expected_w[0] = stream->codecpar->width;
   expected_h[0] = stream->codecpar->height;
-  need(expected_w[0] >= 64 && expected_w[0] <= 4096 && expected_h[0] >= 64 &&
-           expected_h[0] <= 2160 && expected_w[0] % 2 == 0 && expected_h[0] % 2 == 0,
-       "supported even raster bound");
+  refit_content(expected_w[0] >= 64 && expected_w[0] <= 4096 && expected_h[0] >= 64 &&
+                    expected_h[0] <= 2160 && expected_w[0] % 2 == 0 && expected_h[0] % 2 == 0,
+                "supported even raster bound");
   expected_w[1] = expected_h[1] = 0;
   discover_el = true;
+  if (refit_resume_frame >= 0)
+    need(avformat_seek_file(input, stream_index, INT64_MIN, refit_resume_pts, refit_resume_pts,
+                            AVSEEK_FLAG_BACKWARD) >= 0,
+         "keyframe seek before the resume point");
 
   refit_raw = calloc(1, sizeof(*refit_raw));
   refit_pooled = calloc(1, sizeof(*refit_pooled));

@@ -642,6 +642,10 @@ pub struct PretranscodeFence {
 
 pub(crate) struct FragmentAdmission {
     pub(super) threads: usize,
+    /// Runs beside live sessions instead of only on an idle node (the F+
+    /// fit): it yields when a viewer waits for capacity, not whenever one
+    /// holds some ([`super::TranscodeManager::fragment_worker_idle`]).
+    pub(super) coexist: bool,
     /// A second bundle the same background job admitted for a heavier step
     /// (the FEL qualification's GPU graph inside a title scan). It is the
     /// job's own capacity, so the idle check counts it as the job's.
@@ -668,10 +672,16 @@ impl FragmentAdmission {
     pub(crate) fn probe_only() -> Self {
         Self {
             threads: 1,
+            coexist: false,
             extension: std::sync::Mutex::new(None),
             _permit: None,
             _heavy: None,
         }
+    }
+
+    /// Whether this admission coexists with live sessions (see `coexist`).
+    pub(crate) fn coexists(&self) -> bool {
+        self.coexist
     }
 
     pub(crate) fn is_probe_only(&self) -> bool {

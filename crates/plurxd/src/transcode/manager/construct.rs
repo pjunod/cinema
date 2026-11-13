@@ -1330,6 +1330,7 @@ impl TranscodeManager {
                         Priority::Live,
                     ) {
                         let admission = FragmentAdmission {
+                            coexist: false,
                             _heavy: Some(heavy),
                             threads: 2,
                             _permit: Some(permit),
@@ -1399,6 +1400,7 @@ impl TranscodeManager {
                 Priority::Speculative,
             )
             .map(|permit| FragmentAdmission {
+                coexist: false,
                 _heavy: Some(heavy),
                 threads,
                 _permit: Some(permit),
@@ -1471,11 +1473,40 @@ impl TranscodeManager {
     }
 
     /// An F+ curve fit decodes and composes both layers of a whole title on
-    /// the CPU with frame threads, so it holds the software budget the way
-    /// the fragment index pass does, on the same one heavy lane.
-    pub(crate) async fn admit_dv_refit(&self) -> Option<FragmentAdmission> {
-        self.admit_source_work(self.software_budget().await.max(1))
-            .await
+    /// the CPU with an explicit thread count, and reserves exactly what it
+    /// measured (`threads`), on the one heavy lane. It coexists with live
+    /// sessions: it is admitted while the reservation fits beside them and
+    /// no viewer waits, and it yields only when a viewer waits for capacity
+    /// or an offline download does (decision F), not whenever one plays.
+    pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
+        if self.admissions.live_is_waiting()
+            || self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        self.admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                self.software_budget().await,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: threads,
+                    decoder_threads: None,
+                },
+                Priority::Background,
+            )
+            .map(|permit| FragmentAdmission {
+                coexist: true,
+                _heavy: Some(heavy),
+                threads,
+                extension: std::sync::Mutex::new(None),
+                _permit: Some(permit),
+            })
     }
 
     /// The node-local fragment index pass's queued turn on the heavy lane.
@@ -1521,6 +1552,7 @@ impl TranscodeManager {
                 Priority::Background,
             )
             .map(|permit| FragmentAdmission {
+                coexist: false,
                 _heavy: Some(heavy),
                 threads,
                 extension: std::sync::Mutex::new(None),
@@ -1582,6 +1614,15 @@ impl TranscodeManager {
             // reclaim by stopping it: a targeted scan's `stat` + `ffprobe`
             // keeps going while a viewer plays (contract v2 §5.1).
             return true;
+        }
+        if admission.coexists() {
+            // Its reservation was admitted beside the sessions that hold
+            // capacity now; only a viewer (or a download) left waiting for
+            // capacity reclaims it.
+            return !self.admissions.live_is_waiting()
+                && !self
+                    .offline_waiting
+                    .load(std::sync::atomic::Ordering::Acquire);
         }
         let (hardware, threads) = admission.claimed();
         !self.admissions.live_is_waiting()

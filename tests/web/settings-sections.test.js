@@ -700,6 +700,8 @@ function developerPanels(){
       // whole gate reports one failure instead of checking anything.
       shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
       shippedSource("dolbyVisionHdrProcessingCard"), shippedSource("dolbyVisionFelReencodeCard"),
+      "const DV_REFIT_PLATFORMS=[[\"web\",\"Web\"],[\"apple\",\"Apple\"],[\"android\",\"Android\"],[\"linux\",\"Linux (plurx Player)\"]];",
+      shippedSource("dolbyVisionRefitCard"),
       shippedSource("displayTargetHdr10Card"),
       shippedSource("sdrMasterCodecsCard"),
       // The main-merge defects build (2026-10-04): complete-output
@@ -1053,8 +1055,10 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.ok(developerCards.length >= 15, `Developer renders its cards (${developerCards.length})`);
   // 21 since D1 (2026-11-07): the processed DV upgrade waits on its measured
   // switches. 22 since E1a (2026-11-11): the applied view waits on its
-  // readers. The bound still catches a card that should have graduated.
-  assert.ok(developerCards.length <= 22, `Developer holds only what still waits (${developerCards.length})`);
+  // readers. 23 since F+ milestone 3 (2026-11-12): the per-platform F+
+  // curve switches wait on copy-path serving and physical playback. The
+  // bound still catches a card that should have graduated.
+  assert.ok(developerCards.length <= 23, `Developer holds only what still waits (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
@@ -2286,6 +2290,32 @@ test("DV preferences stay independent and editable with unmet or unavailable rea
   }
   for(const name of ["dolbyVisionHdrProcessingCard","dolbyVisionFelReencodeCard"])
     assert.doesNotMatch(shippedSource(name),/disabled|HDR10-E/);
+});
+
+test("F+ curve switches are four independent, advisory, default-off choices", async () => {
+  const panels=developerPanels();
+  for(const readiness of [{items:[]},{unavailable:"Reading failed"},{items:[
+    {id:"dolby_vision_refit_apple",requirements:[{id:"refit_helper",status:"unmet",evidence:"No DV processing bundle on this node."}]}
+  ]}]) {
+    const html=panels.developerPanel({dolby_vision_convert:false,dolby_vision_refit_apple:true},readiness);
+    for(const [key,checked] of [["web",false],["apple",true],["android",false],["linux",false]])
+      assert.match(html,new RegExp(`TOG:dv-refit-${key}\\|[^|]*\\|[^|]*\\|checked=${checked}`));
+    assert.match(html,/FOOT:saveDolbyVisionRefit/);
+    assert.match(html,/Readiness never prevents saving/);
+    assert.match(html,/Delete this node's spool/);
+  }
+  const nodes={"dv-refit-card":{dataset:{revision:"0"},outerHTML:""},"dv-refit-error":{textContent:""}};
+  for(const key of ["web","apple","android","linux"])nodes[`dv-refit-${key}`]={checked:key==="android"};
+  const writes=[];
+  const save=new Function("document","api","cacheSettings","dolbyVisionRefitCard","DEVELOPER_READINESS","toast","DV_REFIT_PLATFORMS",
+    `${shippedSource("saveDolbyVisionRefit")}\nreturn saveDolbyVisionRefit;`)(
+    {getElementById:key=>nodes[key]},
+    async(path,request)=>{writes.push([path,request.method,request.body]);return request.body;},
+    value=>value,settings=>`saved:${settings.dolby_vision_refit_android}`,{},()=>{},
+    [["web","Web"],["apple","Apple"],["android","Android"],["linux","Linux"]]);
+  await save({disabled:false});
+  assert.deepEqual(writes,[["/settings","PUT",{dolby_vision_refit_web:false,dolby_vision_refit_apple:false,dolby_vision_refit_android:true,dolby_vision_refit_linux:false}]]);
+  assert.equal(nodes["dv-refit-card"].outerHTML,"saved:true");
 });
 
 test("DV preference saves roundtrip either choice and preserve advisory failures", async () => {

@@ -8,7 +8,9 @@ use plurx_core::store::background_jobs::EnqueueOutcome;
 use plurx_core::store::background_jobs_library::{
     LibraryWorkInput, LibraryWorkQuery, NewLibraryWork,
 };
-use plurx_core::store::scan_request_v2::{ExpectedFile, PlacedReport, ScanRequestV2Seed};
+use plurx_core::store::scan_request_v2::{
+    ExpectedFile, PlacedReport, PresentReason, RetainedCode, ScanRequestV2Seed,
+};
 
 fn targeted(library_id: i64, path: &str) -> NewLibraryWork {
     NewLibraryWork {
@@ -35,6 +37,9 @@ fn seed(key_id: i64, request_key: &str) -> ScanRequestV2Seed {
             bytes: 8_123_456_789,
             mtime_ns: 1_794_076_138_123_456_789,
         }],
+        removed_paths: Vec::new(),
+        offloaded_paths: Vec::new(),
+        probe_only: false,
     }
 }
 
@@ -200,6 +205,162 @@ async fn scan_request_sidecar_round_trips_and_key_is_unique_on_every_backend() {
                 .await
                 .expect("original lookup"),
             Some(first.request_id)
+        );
+    })
+    .await;
+}
+
+/// Contract amendment `removed_paths`: the removed paths a request names are
+/// stored with it in the admission and read back apart from its expected
+/// files, and the report's removal states round-trip, on every backend.
+#[tokio::test]
+async fn scan_request_removed_paths_round_trip_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Removed {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![format!("/movies-{backend}").into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let request = targeted(library.id, "/movies");
+        let mut moved = seed(9, "op/41/abc/1");
+        moved.removed_paths = vec![
+            "/movies/Dune (1984)/Dune.1984.mkv".into(),
+            "/movies/Dune (1984)".into(),
+        ];
+        store
+            .enqueue_library_work_v2(request.clone(), moved.clone())
+            .await
+            .expect("admission");
+        let row = store
+            .scan_request_v2(&request.request_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.expected_files, moved.expected_files, "{backend}");
+        assert_eq!(row.removed_paths, moved.removed_paths, "{backend}");
+        let files = vec![
+            PlacedReport::Gone {
+                path: "/movies/Dune (1984)/Dune.1984.mkv".into(),
+                item_id: 77,
+                item_ids: vec![77, 78],
+                item_removed: true,
+            },
+            PlacedReport::Unknown {
+                path: "/movies/Dune (1984)".into(),
+            },
+            PlacedReport::Present {
+                path: "/movies/Other".into(),
+                reason: PresentReason::SymlinkInChain,
+            },
+            PlacedReport::Retained {
+                path: "/movies/Kept".into(),
+                item_id: 79,
+                code: RetainedCode::RootIdentityUnset,
+                retryable: true,
+                reason: "no root identity".into(),
+            },
+        ];
+        assert!(store
+            .set_scan_request_files(&request.request_id, &files, 3_000)
+            .await
+            .expect("files"));
+        let row = store
+            .scan_request_v2(&request.request_id)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.files, files, "{backend}");
+        assert_eq!(row.removed_paths, moved.removed_paths, "{backend}");
+        assert!(row.probe_only, "removed paths imply probe-only, {backend}");
+
+        // The same key again is a replay: the first row, removed paths and
+        // all, is what the key names, and the second admission wrote nothing.
+        let replay = targeted(library.id, "/movies");
+        let mut again = seed(9, "op/41/abc/1");
+        again.removed_paths = vec!["/movies/Other".into()];
+        assert!(
+            store
+                .enqueue_library_work_v2(replay.clone(), again)
+                .await
+                .is_err(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .scan_request_by_key(&moved.key_hash, "op/41/abc/1")
+                .await
+                .expect("by key"),
+            Some(request.request_id.clone()),
+            "{backend}"
+        );
+        assert!(store
+            .scan_request_v2(&replay.request_id)
+            .await
+            .expect("read")
+            .is_none());
+    })
+    .await;
+}
+
+/// A probe-only request never shares a job with one that is not, whatever the
+/// path; probe-only requests share one with each other. Neither becomes
+/// whole-library work.
+#[tokio::test]
+async fn probe_only_requests_are_their_own_job_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Probe only {backend}"),
+                kind: LibraryKind::Movies,
+                paths: vec![format!("/movies-{backend}").into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let job_of = |id: String| {
+            let store = store.clone();
+            async move {
+                let record = store
+                    .library_work_requests(LibraryWorkQuery {
+                        request_id: Some(id),
+                        limit: 1,
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("record")
+                    .remove(0);
+                assert!(
+                    matches!(record.input, LibraryWorkInput::Targeted { .. }),
+                    "never whole-library work"
+                );
+                record.job_id
+            }
+        };
+        let mut removal = seed(11, "op/1/a/1");
+        removal.removed_paths = vec!["/movies/Dune/Dune.mkv".into()];
+        let plain = seed(11, "op/2/b/1");
+        let mut flagged = seed(11, "op/3/c/1");
+        flagged.probe_only = true;
+        let mut ids = Vec::new();
+        for (key, seed) in [("a", removal), ("b", plain), ("c", flagged)] {
+            let request = targeted(library.id, "/movies");
+            store
+                .enqueue_library_work_v2(request.clone(), seed)
+                .await
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            ids.push(job_of(request.request_id).await);
+        }
+        assert_ne!(
+            ids[0], ids[1],
+            "a removal never joins a walking request, {backend}"
+        );
+        assert_eq!(
+            ids[0], ids[2],
+            "probe-only requests share a pass, {backend}"
         );
     })
     .await;

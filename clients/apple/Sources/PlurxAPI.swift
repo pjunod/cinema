@@ -391,14 +391,26 @@ struct PlurxAPI {
         _ id: Int,
         sort: LibrarySort = .title,
         offset: Int = 0,
-        limit: Int = 200
+        limit: Int = 200,
+        presence: LibraryPresence = .disk
     ) async throws -> Page {
-        try await get("libraries/\(id)/items", query: [
+        var query = [
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "offset", value: String(offset)),
             URLQueryItem(name: "sort", value: sort.rawValue),
-        ])
+        ]
+        // The server's default is what is on disk, so an older server that
+        // does not know the parameter is only ever asked for the default.
+        if presence != .disk { query.append(URLQueryItem(name: "presence", value: presence.rawValue)) }
+        return try await get("libraries/\(id)/items", query: query)
     }
+
+    /// Admin: ask Curator to download an offloaded title again.
+    func getItBack(itemId: Int) async throws -> OffloadAnswer {
+        try await post("items/\(itemId)/get-it-back", body: [String: String]())
+    }
+    /// What Curator reports for an offloaded title right now (never stored).
+    func offloadStatus(itemId: Int) async throws -> OffloadAnswer { try await get("items/\(itemId)/offload-status") }
 
     /// Signed in: the answering node's hostname and the server's label.
     func serverNode() async throws -> ServerNode { try await get("server/node") }
@@ -743,6 +755,24 @@ struct PlurxAPI {
 
     func developerReadiness() async throws -> DeveloperReadiness {
         try await get("developer/readiness")
+    }
+
+    /// A Developer switch is a named `PUT /settings` field (the readiness
+    /// item's `setting`); the server answers with the saved settings.
+    func setDeveloperSwitch(field: String, enabled: Bool) async throws {
+        struct Saved: Decodable {}
+        let _: Saved = try await put("settings", body: [field: enabled])
+    }
+
+    /// `DELETE /developer/dv-refit/spool`: this node's F+ statistics spool.
+    func clearDolbyVisionRefitSpool() async throws -> Int {
+        struct Cleared: Decodable { let removed: Int }
+        guard let url = makeURL("developer/dv-refit/spool") else { throw APIError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        Session.shared.authorize(&req)
+        let cleared: Cleared = try await run(req)
+        return cleared.removed
     }
 
     /// `vod` describes the presentation the server selected; it is not a

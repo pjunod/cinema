@@ -9,6 +9,8 @@ a document to this folder.
 |---|---|---|
 | [PROJECT-BACKLOG.md](PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
 | [PIPELINE-CONTRACT.md](PIPELINE-CONTRACT.md) | What plurx promises Curator at the scan seam, and what it gets back. | built |
+| [PIPELINE-CONTRACT-REMOVED-PATHS.md](PIPELINE-CONTRACT-REMOVED-PATHS.md) | The scan request's removed-paths and probe-only detail: states, retained codes, retry rules, unreadable roots, mixed clusters. | built |
+| [PIPELINE-CONTRACT-OFFLOAD.md](PIPELINE-CONTRACT-OFFLOAD.md) | Offload and Get it back: `offloaded_paths`, kept titles, placement by ids, the reacquire webhook and its states. | built |
 | [PIPELINE-CONTRACT-RUNNER-CURATOR.md](PIPELINE-CONTRACT-RUNNER-CURATOR.md) | Pipeline contract v2 §2–§3, verbatim: Runner's terminal fact and Curator's reducer, which plurx does not implement. | open |
 | [SUBTITLE-COMPLETION-STATUS.md](SUBTITLE-COMPLETION-STATUS.md) | Live ownership, implementation and acceptance ledger for completing progressive generation, translation, native delivery and existing-file translation. | built |
 | [ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md](ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md) | Independent Fable plan-review findings, author corrections, source answers and exact-candidate approval. | done |

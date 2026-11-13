@@ -100,6 +100,34 @@ struct Watch: Codable, Hashable {
 struct WatchRollup: Codable, Hashable {
     var leaves: Int
     var watched: Int
+    /// How many of the leaves Curator offloaded (files removed to free disk).
+    /// Absent from servers that predate Offload.
+    var offloaded: Int? = nil
+}
+
+/// Which titles a library page lists. The server's default, `disk`, is what
+/// plays now; `offloaded` and `everything` bring back the titles whose files
+/// Curator removed to free disk.
+enum LibraryPresence: String, CaseIterable, Identifiable {
+    case disk
+    case offloaded
+    case everything
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .disk: return "On disk"
+        case .offloaded: return "Offloaded"
+        case .everything: return "Everything"
+        }
+    }
+}
+
+/// What the server answers to Get it back and to the status read.
+struct OffloadAnswer: Codable, Equatable {
+    var matched: Bool
+    var state: String
+    var message: String
 }
 
 struct Item: Codable, Identifiable, Hashable {
@@ -131,6 +159,13 @@ struct Item: Codable, Identifiable, Hashable {
     var updatedAt: Int?
     var watch: Watch?
     var rollup: WatchRollup?
+    /// Curator removed this title's files to free disk; the item, its
+    /// metadata and its watch history stay. For a show or season, true only
+    /// when every leaf is (`rollup.offloaded` counts a partial offload).
+    var offloaded: Bool? = nil
+
+    var isOffloaded: Bool { offloaded == true }
+    var hasOffloadedLeaves: Bool { isOffloaded || (rollup?.offloaded ?? 0) > 0 }
 
     var isMovieOrEpisode: Bool { kind == "movie" || kind == "episode" }
     var isPlayable: Bool { isMovieOrEpisode || kind == "video" || kind == "audiobook" }

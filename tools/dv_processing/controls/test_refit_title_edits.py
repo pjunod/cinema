@@ -11,8 +11,9 @@ the source and on each:
 - cut: a scene cut on a frame that the coded order reorders (its decode
   index differs from its presentation index) starts a scene at that frame's
   presentation time;
-- bad: an invalid active area at frame 200 refuses the run with exit 1
-  after the scenes already complete were written.
+- bad: an invalid active area at frame 200 refuses the run as content
+  (exit 3, REFIT_EXIT_CONTENT) after the scenes already complete were
+  written.
 
 Usage: python3 test_refit_title_edits.py HELPER SOURCE.mkv WORK_DIR
 (HELPER may be a wrapper that sets the helper's library path.)
@@ -98,7 +99,8 @@ def test_refit_title_edits(helper, source, work):
     bad = derive(source, work, "bad", {"active_area": {"crop": False, "presets": [
         {"id": 2, "left": 2000, "right": 2000, "top": 0, "bottom": 0}], "edits": {"200-200": 2}}})
     code, lines, err = run(helper, bad)
-    assert code == 1 and err.strip().endswith("invalid active area metadata"), (code, err)
+    assert code == 3 and err.strip().endswith("invalid active area metadata"), (code, err)
+    assert len(err.strip().splitlines()) == 1, err
     assert lines and all(l["kind"] == "refit_scene" for l in lines)
     assert lines[-1]["first_frame"] + lines[-1]["frames"] <= 200
     for name in ("l5", "cut", "bad"):

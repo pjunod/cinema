@@ -126,6 +126,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         Ok(self
             .client()
             .query_consistent_map::<JobRow, _>(
+                "pretranscode_job",
                 format!("SELECT {JOB_COLS} FROM pretranscode_jobs WHERE id = $1"),
                 params!(id),
             )
@@ -151,6 +152,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         let legacy = self
             .client()
             .query_consistent_map::<StagingJobRow, _>(
+                "pretranscode_staging_jobs",
                 "SELECT id FROM pretranscode_jobs
                   WHERE staging_node_id = $1 AND state IN ('queued', 'running')
                     AND NOT EXISTS (SELECT 1 FROM background_jobs WHERE id = pretranscode_jobs.id)

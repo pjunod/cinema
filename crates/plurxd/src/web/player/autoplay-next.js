@@ -51,7 +51,9 @@ async function resolveNextEpisodePage(itemId,preparation){
       next=(nsd?.children||[]).find(c=>c.kind==="episode");
     }
   }
-  if(!next)return null;
+  // An offloaded successor has no file: stop here, prepare nothing. Next Up
+  // still lists it, flagged, and Get it back is on its page.
+  if(!next||next.offloaded)return null;
   const id=exactWireId(next);
   const data=await read(`/items/${id}`);
   const libs=await preparation.run(()=>libsCached());

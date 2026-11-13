@@ -41,6 +41,8 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/library_schedule.rs"]
 mod library_schedule;
+#[path = "store_contract/offload.rs"]
+mod offload;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -622,12 +624,17 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
-    // F+ curve fits: demand, bounded staging, fenced publication and the
-    // current curve table, on every backend in store_contract/dv_refit_jobs.rs.
+    // F+ curve fits: demand, the one-write fenced publication, the current
+    // and digest-addressed curve tables, the generation rebind, retention
+    // and the Developer card's counts, on every backend in
+    // store_contract/dv_refit_jobs.rs.
     "dv_refit_demands",
-    "stage_dv_refit_scenes",
     "publish_dv_refit_job",
     "dv_refit_curves",
+    "dv_refit_curves_by_digest",
+    "rebind_dv_refit",
+    "prune_dv_refit",
+    "dv_refit_progress",
     // Contract v2 targeted-scan sidecar: admission with its sidecar, reads by
     // request and by creating key, and the later report/waiting writes. All
     // six run on every backend in store_contract/scan_request_v2.rs.
@@ -1024,6 +1031,38 @@ enum StrandedFieldOrder {
 }
 
 impl StrandedFieldOrder {
+    /// Delete one settings row by key: the Store trait has no setting delete,
+    /// and the planning triggers must be shown to fire on one.
+    async fn delete_setting(&self, key: &str) {
+        match self {
+            Self::Sqlite(path) => {
+                let connection = rusqlite::Connection::open(path).expect("open raw SQLite handle");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("raw SQLite busy timeout");
+                assert_eq!(
+                    connection
+                        .execute(
+                            "DELETE FROM settings WHERE key = ?1",
+                            rusqlite::params![key]
+                        )
+                        .expect("delete SQLite setting"),
+                    1
+                );
+            }
+            #[cfg(feature = "hiqlite-contract-tests")]
+            Self::Hiqlite(client) => {
+                assert_eq!(
+                    client
+                        .execute("DELETE FROM settings WHERE key = $1", hiqlite::params!(key))
+                        .await
+                        .expect("delete replicated setting"),
+                    1
+                );
+            }
+        }
+    }
+
     async fn strand(&self, file_id: i64) {
         match self {
             Self::Sqlite(path) => {
@@ -9294,6 +9333,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "fenced-root",
                 &[baseline_file],
                 1,
+                &[],
+                0,
                 &first,
                 &stale_replacement,
             ),
@@ -9582,6 +9623,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 .reconcile_library_fenced(
                     library.id,
                     "fenced-root",
+                    &[],
+                    0,
                     &[],
                     0,
                     &successor_current,
@@ -18957,6 +19000,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
             "DROP TRIGGER IF EXISTS playback_settings_insert;
              DROP TRIGGER IF EXISTS playback_settings_update;
              DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_insert;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_update;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_delete;
+             DROP TABLE IF EXISTS playback_input_keys_schema;
              DROP TABLE IF EXISTS playback_input_generation;
              ",
         )
@@ -21313,10 +21360,11 @@ fn contract_inventory_matches_every_store_method() {
     // main declared (551) without naming them here; named above.
     // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
     // exercised by the source-fenced DV title-job contracts.
-    // +4: F+ curve-fit demand, staging, publication and the curve table,
-    // named in BACKGROUND_JOB_METHODS and covered on both backends by the
-    // store_contract/dv_refit_jobs.rs contracts. No new trait.
-    assert_eq!(declared.len(), 563, "review the Store method count");
+    // +7: F+ curve-fit demand, publication, the current and by-digest curve
+    // tables, rebind, prune and progress, named in BACKGROUND_JOB_METHODS
+    // and covered on both backends by the store_contract/dv_refit_jobs.rs
+    // contracts. No new trait.
+    assert_eq!(declared.len(), 566, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -21562,6 +21610,86 @@ async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
                 .expect("unknown source")
                 .is_none(),
             "{backend}"
+        );
+    })
+    .await;
+}
+
+/// D3t: the planning binding covers every planning key, on both stores. A
+/// write (insert, update, delete) to every key the planning snapshot reads and
+/// to every key of the extension moves the generation, as does a
+/// representative of each glob family; a job key does not. Before the
+/// extension `cache.max_gb`, `vod.output_preparation`, `vod.rolling_retention`,
+/// the two cluster switches and `subtitles.stored_sources` moved nothing.
+#[tokio::test]
+async fn every_planning_key_write_moves_the_playback_input_generation() {
+    for_each_strandable_backend(|store, backend, raw| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "binding".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/binding".into()],
+                anime: false,
+            })
+            .await
+            .expect("binding library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "binding".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("binding item");
+        let file = store
+            .upsert_file(item, "/binding/movie.mkv", 100, 42, &ProbeResult::default())
+            .await
+            .expect("binding file");
+        let generation = || async {
+            store
+                .playback_planning_snapshot(file, &[])
+                .await
+                .expect("binding snapshot")
+                .expect("known source")
+                .generation
+        };
+        // Every key the planning snapshot reads, every extension key, and a
+        // representative of each glob family (a `plurxd` test pins the first
+        // list equal to `QUALITY_PLANNING_KEYS`).
+        let mut bound = plurx_core::store::playback_input_keys::PLAYBACK_PLANNING_KEYS.to_vec();
+        bound.extend(plurx_core::store::playback_input_keys::PLAYBACK_INPUT_EXTRA_KEYS);
+        bound.extend(["playback.binding_fixture", "transcode.binding_fixture"]);
+        bound.sort_unstable();
+        bound.dedup();
+        for key in bound {
+            let before = generation().await;
+            store.put_setting(key, "one").await.expect("insert");
+            let inserted = generation().await;
+            assert!(inserted > before, "{backend}: insert {key}");
+            store.put_setting(key, "two").await.expect("update");
+            let updated = generation().await;
+            assert!(updated > inserted, "{backend}: update {key}");
+            raw.delete_setting(key).await;
+            assert!(generation().await > updated, "{backend}: delete {key}");
+        }
+        let before = generation().await;
+        store
+            .put_setting("jobs.binding_fixture", "one")
+            .await
+            .expect("job insert");
+        store
+            .put_setting("jobs.binding_fixture", "two")
+            .await
+            .expect("job update");
+        raw.delete_setting("jobs.binding_fixture").await;
+        assert_eq!(
+            generation().await,
+            before,
+            "{backend}: job keys do not move planning"
         );
     })
     .await;
@@ -32477,7 +32605,7 @@ async fn media_contract_runs_through_dyn_store() {
         );
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "stale-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "stale-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("reject root"),
             ReconcileOutcome::RefusedRoot { .. }
@@ -32489,7 +32617,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert_eq!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 0)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 0, &[], 0)
                 .await
                 .expect("reject bound"),
             ReconcileOutcome::RefusedPrune {
@@ -32504,7 +32632,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("bounded reconcile"),
             ReconcileOutcome::Applied {
@@ -33027,7 +33155,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
         );
         assert_eq!(
             store
-                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1)
+                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1, &[], 0)
                 .await
                 .expect("reconcile verified conversion"),
             ReconcileOutcome::Applied {

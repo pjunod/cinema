@@ -391,7 +391,7 @@ function developerPanel(settings,readiness,httpsCard=""){
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
-      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${processedDvUpgradeCard(readiness)}
+      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${dolbyVisionRefitCard(settings,readiness)}${processedDvUpgradeCard(readiness)}
       <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E / SDR</h2><p>Per-shot L1 mapping for the viewer's reported HDR peak or explicit SDR capability. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
@@ -682,6 +682,45 @@ async function saveDolbyVisionFelReencode(btn){
     if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
     card.outerHTML=dolbyVisionFelReencodeCard(saved,DEVELOPER_READINESS);
     toast("FEL preservation preference saved; applies to new playback decisions");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+// F+ curves (FEL-RPU-REFIT-BUILD.md): one switch per client platform the
+// server can tell apart (playback_control::ClientPlatform). Any one on lets
+// nodes fit Profile 7 FEL titles in the background; copy playback (milestone
+// 4) serves the curves only to the platforms switched on.
+const DV_REFIT_PLATFORMS=[["web","Web"],["apple","Apple"],["android","Android"],["linux","Linux (plurx Player)"]];
+function dolbyVisionRefitCard(settings,readiness){
+  const rows=DV_REFIT_PLATFORMS.map(([key,label])=>togRow(`dv-refit-${key}`,`Serve F+ curves to ${label} clients`,"Default off.",!!settings[`dolby_vision_refit_${key}`])).join("");
+  return setCard(`${cardHead("Dolby Vision F+ curves","Fit each Profile 7 FEL title's Profile 8.1 mapping so copy playback carries its enhancement layer's effect.","")}
+    ${rows}
+    <p class="hint">With any switch on, nodes fit Profile 7 FEL titles in the background, beside playback, and resume where they stopped when a viewer needs the capacity. A failed or cancelled title is not fitted again until its source changes or you retry it in Activity. Readiness never prevents saving.</p>
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_helper","Helper on this node","Whether this node's DV processing bundle supports --refit-stats.")}
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_coverage","Titles fitted","How many Profile 7 FEL titles have a curve table for their current source.")}
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_clients","Clients that apply the mapping","What each client platform was measured to do with a served 8.1 mapping.")}
+    ${devReq(readiness,"dolby_vision_refit_apple","refit_spool","Statistics spool on this node","The node-local helper output fits are solved from, kept so a new fit method need not decode again.")}
+    <p><button class="ghost sm" id="dv-refit-spool-clear" onclick="clearDolbyVisionRefitSpool(this)">Delete this node's spool</button></p>
+    ${devGraduation("copy-path serving of the curves (milestone 4) and physical playback on each platform are recorded.","the per-platform switches move to Settings → Playback.")}
+    <div class="err" id="dv-refit-error" role="alert"></div>${setCardFoot("saveDolbyVisionRefit")}`,{id:"dv-refit-card"});
+}
+async function saveDolbyVisionRefit(btn){
+  const card=document.getElementById("dv-refit-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-refit-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const body={};
+    for(const [key] of DV_REFIT_PLATFORMS)body[`dolby_vision_refit_${key}`]=(/** @type {HTMLInputElement} */ (document.getElementById(`dv-refit-${key}`))).checked;
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body}));
+    if(!card||document.getElementById("dv-refit-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=dolbyVisionRefitCard(saved,DEVELOPER_READINESS);
+    toast("F+ curve preferences saved");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
+}
+async function clearDolbyVisionRefitSpool(btn){
+  const err=document.getElementById("dv-refit-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const done=await api("/developer/dv-refit/spool",{method:"DELETE"});
+    toast(`Deleted ${Number(done&&done.removed||0)} spool files on this node`);
   }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
 }
 function contentEncodingCard(settings){

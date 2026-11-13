@@ -403,11 +403,11 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_type(body, '$.retry_of') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_jobs original WHERE original.id = json_extract(body, '$.retry_of')
         AND original.state IN ('failed','cancelled') AND original.payload_version = 1
-        AND original.kind IN ('transcode_prepare','artifact_hydrate')
+        AND original.kind IN ('transcode_prepare','artifact_hydrate','dv_refit')
         AND original.dedupe_key = json_extract(body, '$.dedupe_key')
     ) THEN 'conflict'
     WHEN json_type(body, '$.retry_of') IS NOT NULL
-      AND json_extract(body, '$.payload.kind') = 'transcode_prepare' AND NOT EXISTS (
+      AND json_extract(body, '$.payload.kind') IN ('transcode_prepare','dv_refit') AND NOT EXISTS (
         SELECT 1 FROM files WHERE id = json_extract(body, '$.payload.file_id')
           AND size = json_extract(body, '$.payload.source_size')
           AND mtime = json_extract(body, '$.payload.source_mtime')
@@ -616,7 +616,7 @@ WHERE id = json_extract($1, '$.job_id')
           WHERE interest.job_id = background_jobs.id
             AND interest.state IN ('pending','awaiting_hydration')
             AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-            AND (interest.consumer_kind = 'playback_fragment'
+            AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
               OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
                   SELECT 1 FROM background_job_waiters viewer
                   WHERE viewer.job_id = interest.consumer_ref
@@ -648,7 +648,7 @@ WHERE id = json_extract($1, '$.job_id')
                 WHERE interest.job_id = held.job_id
                   AND interest.state IN ('pending','awaiting_hydration')
                   AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-                  AND (interest.consumer_kind = 'playback_fragment'
+                  AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
                     OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
                         SELECT 1 FROM background_job_waiters viewer
                         WHERE viewer.job_id = interest.consumer_ref
@@ -1180,14 +1180,17 @@ pub enum JobPayload {
         probe_revision: i64,
         scanner_digest: String,
     },
-    /// The identity of one title's fit: its source, the title-scan generation
-    /// whose facts it read, the helper that decodes it and the fit method.
+    /// One title's fit. Its identity (and dedupe key) is the source, the
+    /// selected video stream, the helper's refit identity (refit mode and
+    /// decoder ABI) and the fit method; `probe_revision` records the
+    /// title-scan generation it read and is not part of the identity.
     DvRefit {
         file_id: i64,
         source_size: i64,
         source_mtime: i64,
+        video_index: i64,
         probe_revision: i64,
-        helper_digest: String,
+        helper_identity: String,
         fit_version: String,
     },
 }
@@ -1616,15 +1619,17 @@ impl JobPayload {
                 file_id,
                 source_size,
                 source_mtime,
+                video_index,
                 probe_revision,
-                helper_digest,
+                helper_identity,
                 fit_version,
             } => {
                 *file_id > 0
                     && *source_size >= 0
                     && *source_mtime >= 0
+                    && (0..=255).contains(video_index)
                     && *probe_revision > 0
-                    && digest(helper_digest)
+                    && digest(helper_identity)
                     && super::dv_refit_jobs::valid_fit_version(fit_version)
             }
             Self::MediaProbe {
@@ -2523,6 +2528,15 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
     ) -> Result<bool, StoreError>;
+    /// Hold `viewer`'s bounded live demand on `file_id`'s title scan; see
+    /// `dv_title_jobs::attach_viewer`. False when no scan is queued or running.
+    async fn attach_dv_title_viewer(
+        &self,
+        file_id: i64,
+        viewer: &str,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
@@ -2561,12 +2575,8 @@ pub trait BackgroundJobStore: Send + Sync {
         after_file_id: i64,
         limit: u32,
     ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError>;
-    /// Stage one bounded page of a running F+ attempt's scenes.
-    async fn stage_dv_refit_scenes(
-        &self,
-        request: super::dv_refit_jobs::StageRefitScenes,
-    ) -> Result<bool, StoreError>;
-    /// Adopt the attempt's staged scenes as the file's fit and settle the job.
+    /// Publish a running F+ attempt's whole curve table in one replicated
+    /// write, supersede the file's previous table and settle the job.
     async fn publish_dv_refit_job(
         &self,
         request: super::dv_refit_jobs::PublishRefitJob,
@@ -2576,6 +2586,26 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         file_id: i64,
     ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError>;
+    /// One of the file's F+ curve tables by digest: the current one, or one
+    /// superseded within the last seven days.
+    async fn dv_refit_curves_by_digest(
+        &self,
+        file_id: i64,
+        curve_digest: &str,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError>;
+    /// Move a stored F+ table's and outcome's title-scan generation forward
+    /// when the newer generation selects the same stream of the same source.
+    async fn rebind_dv_refit(
+        &self,
+        request: super::dv_refit_jobs::RebindRefit,
+    ) -> Result<(), StoreError>;
+    /// Drop F+ tables superseded more than seven days before `now_ms`, and
+    /// outcomes of sources the catalogue no longer has.
+    async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError>;
+    /// Profile 7 FEL titles and their current F+ tables, by verdict.
+    async fn dv_refit_progress(
+        &self,
+    ) -> Result<super::dv_refit_jobs::RefitProgress, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -3567,6 +3597,15 @@ LIMIT 1
     ) -> Result<bool, StoreError> {
         super::dv_title_jobs::request_fel_variant(self, file_id, request).await
     }
+    async fn attach_dv_title_viewer(
+        &self,
+        file_id: i64,
+        viewer: &str,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::attach_viewer(self, file_id, viewer, deadline_ms, now_ms).await
+    }
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
@@ -3619,12 +3658,6 @@ LIMIT 1
     ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError> {
         super::dv_refit_jobs::demands(self, helper, fit_version, after_file_id, limit).await
     }
-    async fn stage_dv_refit_scenes(
-        &self,
-        request: super::dv_refit_jobs::StageRefitScenes,
-    ) -> Result<bool, StoreError> {
-        super::dv_refit_jobs::stage(self, request).await
-    }
     async fn publish_dv_refit_job(
         &self,
         request: super::dv_refit_jobs::PublishRefitJob,
@@ -3636,6 +3669,27 @@ LIMIT 1
         file_id: i64,
     ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError> {
         super::dv_refit_jobs::curves(self, file_id).await
+    }
+    async fn dv_refit_curves_by_digest(
+        &self,
+        file_id: i64,
+        curve_digest: &str,
+    ) -> Result<Option<super::dv_refit_jobs::RefitCurveTable>, StoreError> {
+        super::dv_refit_jobs::curves_by_digest(self, file_id, curve_digest).await
+    }
+    async fn rebind_dv_refit(
+        &self,
+        request: super::dv_refit_jobs::RebindRefit,
+    ) -> Result<(), StoreError> {
+        super::dv_refit_jobs::rebind(self, request).await
+    }
+    async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError> {
+        super::dv_refit_jobs::prune(self, now_ms).await
+    }
+    async fn dv_refit_progress(
+        &self,
+    ) -> Result<super::dv_refit_jobs::RefitProgress, StoreError> {
+        super::dv_refit_jobs::progress(self).await
     }
     async fn probe_can_preempt_title(
         &self,

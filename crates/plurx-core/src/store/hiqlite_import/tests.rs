@@ -207,9 +207,11 @@ fn pre_v21_item_projection_supplies_null_book_facts() {
         .expect("items table plan");
     let v20 = value_projection(table, 20, false);
     let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
-    assert!(v20.ends_with("artwork_error, genres, NULL, NULL, NULL, NULL"));
+    // Book facts (v21) and the offload mark (v130) are both absent from a v20
+    // source, so each crosses as NULL.
+    assert!(v20.ends_with("artwork_error, genres, NULL, NULL, NULL, NULL, NULL"));
     assert!(current.ends_with(
-        "artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source"
+        "artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source, offloaded_at"
     ));
 }
 
@@ -474,9 +476,19 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // schema marker is installed locally, like the annotations marker.
     assert!(names.contains(&"background_scan_request_v2"));
     assert!(!names.contains(&"background_scan_request_v2_schema"));
+    // F+ curve tables, their scenes and fit outcomes are durable job
+    // results; their schema marker is installed locally.
+    for name in [
+        "background_dv_refit_titles",
+        "background_dv_refit_scenes",
+        "background_dv_refit_outcomes",
+    ] {
+        assert!(names.contains(&name), "durable F+ table: {name}");
+    }
+    assert!(!names.contains(&"background_dv_refit_schema"));
     // 104 with the source arbitration tables (SQLite v122), 105 with the scan
-    // request sidecar (SQLite v125).
-    assert_eq!(names.len(), 105, "review every imported durable table");
+    // request sidecar (SQLite v125), 108 with the F+ curve tables (SQLite v130).
+    assert_eq!(names.len(), 108, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1065,6 +1077,9 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 | "background_source_service_epochs"
                 | "background_source_service_grants" => 122,
                 "background_scan_request_v2" => 125,
+                "background_dv_refit_titles"
+                | "background_dv_refit_scenes"
+                | "background_dv_refit_outcomes" => 130,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);
