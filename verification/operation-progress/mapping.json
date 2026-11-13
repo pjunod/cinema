@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "eca3a4b4f463b9c25850a5fab6012d06b59b4d057c503d36567a62388828ba08"
+        "sha256": "76427b267194297778d54772d02aa326575fae0a053277ac7ff3c2291fe4df1c"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "eca3a4b4f463b9c25850a5fab6012d06b59b4d057c503d36567a62388828ba08"
+        "sha256": "76427b267194297778d54772d02aa326575fae0a053277ac7ff3c2291fe4df1c"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "eca3a4b4f463b9c25850a5fab6012d06b59b4d057c503d36567a62388828ba08"
+        "sha256": "76427b267194297778d54772d02aa326575fae0a053277ac7ff3c2291fe4df1c"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "6f35151a98039245414a5ed61f5f5d1363d3bcf156396dd8a7634c63f4f448aa"
+        "sha256": "0007c11fe3cbd3b801b5f514674eba16d9ee489ca9fe116fa1d6a3a0efd84ec4"
       },
       {
         "table": "31 authority implementation",

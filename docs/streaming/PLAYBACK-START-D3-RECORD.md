@@ -1,7 +1,7 @@
 # Playback start — D3 build records
 
-**Status:** open — what each D3 sub-lane built against [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) and where it departs from that contract. D3a recorded and its adversarial review applied ([PLAYBACK-START-D3A-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3A-REVIEW-2026-11-12.md)); D3t recorded and its adversarial review applied ([PLAYBACK-START-D3T-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3T-REVIEW-2026-11-12.md)); D3b–D3e not built. Section numbers (§7.1, §9-1 …) refer to the contract.
-**Author:** Claude (claude-sonnet-5-5, session 01BCWL9xwmpSjitHqZMTRAht).
+**Status:** open — what each D3 sub-lane built against [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) and where it departs from that contract. D3a recorded and its adversarial review applied ([PLAYBACK-START-D3A-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3A-REVIEW-2026-11-12.md)); D3t recorded and its adversarial review applied ([PLAYBACK-START-D3T-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3T-REVIEW-2026-11-12.md)); D3b recorded (§9–10 and [its own record](PLAYBACK-START-D3B-RECORD.md)); D3c–D3e not built. Section numbers (§7.1, §9-1 …) refer to the contract.
+**Author:** Claude (claude-sonnet-5-5, session 01BCWL9xwmpSjitHqZMTRAht); D3b: claude-opus-5-5, same session.
 
 ## 1. D3a build record (2026-11-12)
 
@@ -116,3 +116,51 @@ The hand-typed list that derivation produced missed the burn guard, so it is now
 ## 8. D3t gates
 
 On the build host, none against CI: `cargo fmt --check`; clippy `-D warnings` for `-p plurxd -p plurx-core --features plurx-core/hiqlite-store --tests` and with `plurx-core/hiqlite-contract-tests,plurxd/cluster-integration-tests`; the new tests and the planning-snapshot store-contract case on both backends; the core lib census, label and placeholder rules and the migration, lineage, fixture and ordinal tests; the `cluster_activity` per-shape pin; `scripts/check-formal check-mapping` for the three packages (hiqlite.rs, sqlite/mod.rs and store_contract.rs rebound, reviewed in the commit messages); `scripts/paperwork --merge-target origin/main`, `scripts/history-audit`, `scripts/validate lint`, `scripts/knowledge lint`, `scripts/scrub-infra-names --check`. Results are in the report to the coordinator. The store-contract migration and bootstrap cases that fail on the unmodified D3a base (the managed schema marker is 6, the tests expect 5) fail the same way here; they are not D3t's.
+
+## 9. D3b build record (2026-11-12)
+
+Built on `claude/ps-d3b` from `claude/ps-e1c-d3a-d3t` (PR #1554): the create reads its planning inputs once, as one `StartPlan` from the applied view behind the settings and new files floors (`AppliedView::planning`, `admit_unstamped`), and every chain of §6.1 takes `plan: Option<&StartPlan>` instead of reading again; a remote owner plans once at the ingress's binding (`owner_plan`), and its refusal closes the ingress's view. What was built per contract item, the decisions and the gates are in [PLAYBACK-START-D3B-RECORD.md](PLAYBACK-START-D3B-RECORD.md) (kept apart for this record's size budget). The per-shape table and each delta are below.
+
+## 10. The "after": operations per shape, by Store method (D3b)
+
+Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured on the D3b build (pasted from `create-path store operations by method`, identical on both gate runs).
+
+| Store method | first play | reopen | Auto encode | rolling copy | caps-v2 + intent |
+|---|---:|---:|---:|---:|---:|
+| `local_playback_planning_snapshot` | 0/1/0 | 0/1/0 | 0/1/0 | 0/1/0 | 0/1/0 |
+| `local_get_settings` | 0/1/0 | 0/1/0 | 0/1/0 | 0/1/0 | 0/1/0 |
+| `get_setting` | 1/0/0 | · | · | · | · |
+| `get_file_probe_json` | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 |
+| `fragment_index_source` | 1/0/0 | 1/0/0 | · | 1/0/0 | · |
+| `copy_index_v3_variant` | 1/0/0 | 1/0/0 | · | 1/0/0 | · |
+| `copy_index_source_attestation` | 1/0/0 | 1/0/0 | · | 1/0/0 | · |
+| `timeline_annotation_set` | 2/0/0 | 2/0/0 | 2/0/0 | · | 2/0/0 |
+| `record_desired_selection` | · | · | · | · | 1/0/1 |
+| `maintain_media_sessions` | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 |
+| `claim_media_session_request` | 1/0/1 | 1/0/1 | 1/0/1 | 1/0/1 | 1/0/1 |
+| `assign_media_session_request_owner` | 0/0/1 | 0/0/1 | 0/0/1 | 0/0/1 | 0/0/1 |
+| `media_session_route_for_playback` | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 |
+| `media_session_route_by_incarnation` | · | 1/0/0 | · | · | · |
+| `activate_media_session` | 2/0/1 | 3/0/1 | 2/0/1 | 2/0/1 | 2/0/1 |
+| `complete_media_session_terminal_projection` | · | 1/0/1 | · | · | · |
+| `complete_media_session_handoff` | · | 1/0/1 | · | · | · |
+| `register_foreground_source` | · | · | 0/0/1 | 0/0/1 | 0/0/1 |
+| `activate_foreground_source_custody` | · | · | 0/0/1 | 0/0/1 | 0/0/1 |
+| `suspend_playback_analysis_interest` | · | · | · | 0/0/1 | · |
+| `settle_media_session_activation` | 1/0/2 | 1/0/2 | 1/0/2 | 1/0/2 | 1/0/2 |
+| `publish_media_session_activation` | 2/0/1 | 2/0/1 | 2/0/1 | 2/0/1 | 2/0/1 |
+| `session_layout` (layout reads) | 8/0/0 | 12/0/0 | 8/0/0 | 8/0/0 | 9/0/0 |
+| **total** | **23/2/6** | **30/2/8** | **19/2/8** | **20/2/9** | **21/2/9** |
+
+**Each delta and its cause** (against §2's 29/1/6, 36/1/8, 30/1/8, 28/1/9, 32/1/9; site names from a backtrace of every planning-input read on the D3a build).
+
+- **Every shape, +1 local:** the create's one plan, `local_playback_planning_snapshot` (node B's view), replaces the ingress's quorum snapshot (`create_with_purpose_inner`).
+- **Every shape, −2 `get_settings`:** `cluster_playlist_is_typeless` (the recorded playlist shape) and `vod_settings` (the VOD policy) answer from the plan.
+- **First play −6 authority:** `playback_planning_snapshot` −3 (the ingress snapshot, now local; `try_vod_session`'s keyless source read; `vod_preparation_snapshot`), `get_settings` −2, `get_setting` −1 (`remote_placement_ready`). `queue_sql` 2/0/0 becomes `copy_index_v3_variant` + `copy_index_source_attestation` (relabelled, no delta).
+- **Reopen −6:** the same three snapshots, two settings reads and placement read.
+- **Auto encode −11:** snapshots −3, `get_settings` −2, `get_setting` −4 (placement; `encoder_and_grade_for`'s HWACCEL; `software_budget` for the frozen thread count and for `refuse_unadmittable_encoding`), `get_file_probe_json` −2 (the encoded preparation's stored probe; the decoder plan's `resolve_movie_plan_with_processing_exclusion`). `queue_sql` 0/0/2 becomes `register_foreground_source` + `activate_foreground_source_custody`.
+- **Rolling copy −8:** snapshots −4 (the three above and `rolling_start_inputs`), `get_settings` −2, `get_setting` −1 (placement), `get_file` −1 (the fallback's source row for the analysis-interest receipt). `queue_sql` 2/0/3 becomes the two copy-index reads and the custody and `suspend_playback_analysis_interest` writes.
+- **Caps-v2 + intent −11:** as Auto encode.
+- **Writes:** unchanged in every shape (6/8/8/9/9).
+
+**What stays, and why.** `get_file_probe_json` 1/0/0 in every shape is `hevc_census::probe_json_for_copy` inside `vod/serve/create.rs::prepare_recipe` (the VOD rendition's copy probe): `vod/` is A1's (§3.6, review S6), so it is the one planning-input read left, and A1 can take it from the plan. The copy-index reads and `instance_id`: [D3b record](PLAYBACK-START-D3B-RECORD.md) §1. `timeline_annotation_set`, the claim, activation, Confirm, publication and layout reads and the fences are out of scope (§10). The §9-1 target holds: for each shape authority = pinned − (the planning, settings, probe and file re-reads the plan answers) and +1 local; writes unchanged.
