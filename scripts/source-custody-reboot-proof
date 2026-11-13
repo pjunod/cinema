@@ -197,17 +197,39 @@ def enrollment_value(raw):
     return value
 
 
+def proc_boot_started_at_ms(raw):
+    entries = [line.split() for line in raw.splitlines() if line.startswith(b'btime ')]
+    require(len(entries) == 1 and len(entries[0]) == 2, 'missing or ambiguous procfs boot timestamp')
+    value = entries[0][1]
+    require(re.fullmatch(b'[0-9]{1,20}', value), 'invalid procfs boot timestamp')
+    milliseconds = int(value) * 1000
+    require(0 < milliseconds <= time.time_ns() // 1_000_000, 'procfs boot timestamp is not sane')
+    return milliseconds
+
+
+def inputs_precede_boot(inputs, boot_started_at_ms):
+    require(type(boot_started_at_ms) is int and 0 < boot_started_at_ms <= 2**63 - 1,
+            'invalid actual host boot timestamp')
+    for item in inputs:
+        item.verify()
+        # Check nanoseconds without rounding them down: an input changed even
+        # just after the boot-second boundary cannot acquire historical authority.
+        require(all(0 < stamp <= boot_started_at_ms * 1_000_000 for stamp in item.stamp[3:5]),
+                'worker input was created or changed after the actual host boot')
+
+
 def actual_host(expected):
     require(sys.platform == 'linux' and os.getuid() == os.geteuid() == 0,
             'actual Linux host root is required')
     with walk_directory('/proc') as proc:
         context = host_context(expected, proc)
+        boot_started_at_ms = proc_boot_started_at_ms(read_at(proc, 'stat', 1024 * 1024))
     with walk_directory('/etc') as etc:
         machine = read_at(etc, 'machine-id', 128).decode('ascii').strip()
     require(re.fullmatch('[0-9a-f]{32}', machine), 'invalid actual host machine ID')
     require(hashlib.sha256(machine.encode()).hexdigest() == expected['machine_id_sha256'],
             'host machine identity changed')
-    return machine, canonical_uuid(context['boot_id'])
+    return machine, canonical_uuid(context['boot_id']), boot_started_at_ms
 
 
 def trusted_data_ancestors(data_dir, data, owner):
@@ -462,13 +484,16 @@ def verify(enrollment_path, custody, publish=False):
     canonical_uuid(custody)
     with admin_input(enrollment_path) as enrollment:
         expected = enrollment_value(enrollment.raw)
-        machine, current = actual_host(expected)
+        machine, current, boot_started_at_ms = actual_host(expected)
         with private_inputs(expected['data_dir'], custody) as (witness, legacy, armed):
+            inputs_precede_boot((witness, legacy, armed), boot_started_at_ms)
             at_ms = time.time_ns() // 1_000_000
+            require(boot_started_at_ms <= at_ms, 'host boot timestamp is in the future')
             activation, previous = validate_witnesses(witness.raw, legacy.raw, armed.raw,
                 expected['node_id'], custody, current, at_ms)
             entry_ms = prior_boot_entry(machine, previous, at_ms)
-            require(actual_host(expected) == (machine, current), 'actual host changed')
+            inputs_precede_boot((witness, legacy, armed), boot_started_at_ms)
+            require(actual_host(expected) == (machine, current, boot_started_at_ms), 'actual host changed')
             enrollment.verify(); witness.verify(); legacy.verify(); armed.verify()
             proof = {'version': 1, 'model': 'host_journal_reboot_v1', 'node_id': expected['node_id'],
                      'custody_id': custody, 'activation_id': activation, 'machine_id': machine,

@@ -111,6 +111,13 @@ class WitnessValidationTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(helper.Refused):
                 helper.strict_json(raw)
 
+    def test_procfs_boot_time_is_unique_positive_and_not_future(self):
+        with mock.patch.object(helper.time, 'time_ns', return_value=AT * 1_000_000):
+            self.assertEqual(helper.proc_boot_started_at_ms(b'cpu 1 2 3\nbtime 10\n'), 10_000)
+            for raw in (b'', b'btime 10\nbtime 11\n', b'btime 0\n', b'btime -1\n', b'btime 21\n'):
+                with self.subTest(raw=raw), self.assertRaises(helper.Refused):
+                    helper.proc_boot_started_at_ms(raw)
+
     def test_journal_requires_exact_local_boot_and_sane_timestamp(self):
         self.assertEqual(helper.journal_entry(entry(), MACHINE, OLD, AT), 5000)
         for raw in (b'', entry(_MACHINE_ID='0' * 32), entry(_BOOT_ID=CURRENT.replace('-', '')),
@@ -156,10 +163,15 @@ class RebootProofFixtureTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(helper.os, 'getuid', return_value=0))
         self.stack.enter_context(mock.patch.object(helper.os, 'geteuid', return_value=0))
         self.stack.enter_context(mock.patch.object(helper.sys, 'platform', 'linux'))
-        self.host = self.stack.enter_context(mock.patch.object(helper, 'actual_host', return_value=(MACHINE, CURRENT)))
+        # Model an actual host reboot after the original fixture files existed.
+        self.boot_started_at_ms = max(path.stat().st_ctime_ns for path in
+                                     (self.witness, self.legacy, self.armed)) // 1_000_000 + 1000
+        self.observed_at_ms = self.boot_started_at_ms + 1000
+        self.host = self.stack.enter_context(mock.patch.object(helper, 'actual_host',
+            return_value=(MACHINE, CURRENT, self.boot_started_at_ms)))
         self.journal = self.stack.enter_context(mock.patch.object(helper, 'prior_boot_entry', return_value=5000))
         self.publisher = self.stack.enter_context(mock.patch.object(helper, 'publish_fixed'))
-        self.stack.enter_context(mock.patch.object(helper.time, 'time_ns', return_value=AT * 1_000_000))
+        self.stack.enter_context(mock.patch.object(helper.time, 'time_ns', return_value=self.observed_at_ms * 1_000_000))
 
     def tearDown(self):
         self.stack.close(); self.temporary.cleanup()
@@ -191,6 +203,39 @@ class RebootProofFixtureTests(unittest.TestCase):
         self.assertNotEqual(original['witness_sha256'], changed['witness_sha256'])
         self.assertEqual(original['legacy_sha256'], changed['legacy_sha256'])
 
+    def test_inputs_modified_after_boot_cannot_receive_a_proof(self):
+        for path in (self.witness, self.legacy, self.armed):
+            before = path.stat()
+            future = (self.boot_started_at_ms + 1) * 1_000_000
+            os.utime(path, ns=(before.st_atime_ns, future))
+            with self.subTest(path=path), self.assertRaisesRegex(helper.Refused, 'after the actual host boot'):
+                self.verify(True)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.publisher.assert_not_called(); self.journal.assert_not_called()
+
+    def test_new_or_metadata_changed_postboot_input_is_refused_even_with_old_mtime(self):
+        original_stamp = helper.fd_stamp
+        target = self.witness.stat().st_ino
+        def stamp(fd):
+            value = original_stamp(fd)
+            if value[1] == target:
+                return value[:4] + ((self.boot_started_at_ms * 1_000_000) + 1,)
+            return value
+        with mock.patch.object(helper, 'fd_stamp', side_effect=stamp):
+            with self.assertRaisesRegex(helper.Refused, 'after the actual host boot'):
+                self.verify(True)
+        self.publisher.assert_not_called(); self.journal.assert_not_called()
+
+    def test_change_during_journal_query_refuses_publication(self):
+        def journal(*args):
+            before = self.armed.stat()
+            os.utime(self.armed, ns=(before.st_atime_ns, (self.boot_started_at_ms + 1) * 1_000_000))
+            return 5000
+        self.journal.side_effect = journal
+        with self.assertRaisesRegex(helper.Refused, 'pinned input changed'):
+            self.verify(True)
+        self.publisher.assert_not_called()
+
     def test_missing_marker_or_unsafe_private_file_never_publishes(self):
         self.armed.unlink()
         with self.assertRaises(FileNotFoundError): self.verify(True)
@@ -199,7 +244,8 @@ class RebootProofFixtureTests(unittest.TestCase):
         self.publisher.assert_not_called()
 
     def test_changed_host_or_missing_local_prior_boot_never_publishes(self):
-        self.host.side_effect = [(MACHINE, CURRENT), ('0' * 32, CURRENT)]
+        self.host.side_effect = [(MACHINE, CURRENT, self.boot_started_at_ms),
+                                 ('0' * 32, CURRENT, self.boot_started_at_ms)]
         with self.assertRaisesRegex(helper.Refused, 'host changed'): self.verify(True)
         self.host.side_effect = None
         self.journal.side_effect = helper.Refused('no matching local prior boot')

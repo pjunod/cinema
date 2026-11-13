@@ -310,7 +310,9 @@ independent `host_journal_reboot_v1` evidence for one expired background Job.
 It requires an independently prepared root-owned host enrollment, verifies
 actual initial-host namespaces, filesystem root, machine/node identity and
 current boot, then finds the witness's different kernel UUID in this machine's
-root-protected persistent journal. The kernel reboot proves all its old tasks
+root-protected persistent journal. All three pinned worker inputs must have
+unchanged modification and kernel change times from before this host boot;
+current-worker bytes cannot be relabelled as historical reboot evidence. The kernel reboot proves all its old tasks
 ended, including raw children. A worker cannot publish this evidence.
 
 The [consumer](../../crates/plurxd/src/source_custody/recovery/reboot_proof.rs)
