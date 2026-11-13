@@ -541,31 +541,31 @@
       },
       {
         "anchor": "    async fn run_targeted(",
-        "sha256": "e834063bfb4996aa9c88617fe055e50c73563cf299b090db1bd0ecccc9466273",
+        "sha256": "7a2c037acc4ae187b18ece0e0b2c488bca62a5c4e6c3e0570dbf939f0582766a",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
       },
       {
         "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
-        "sha256": "e834063bfb4996aa9c88617fe055e50c73563cf299b090db1bd0ecccc9466273",
+        "sha256": "7a2c037acc4ae187b18ece0e0b2c488bca62a5c4e6c3e0570dbf939f0582766a",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
       },
       {
         "anchor": "    async fn run_scan(",
-        "sha256": "e834063bfb4996aa9c88617fe055e50c73563cf299b090db1bd0ecccc9466273",
+        "sha256": "7a2c037acc4ae187b18ece0e0b2c488bca62a5c4e6c3e0570dbf939f0582766a",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
       },
       {
         "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
-        "sha256": "e834063bfb4996aa9c88617fe055e50c73563cf299b090db1bd0ecccc9466273",
+        "sha256": "7a2c037acc4ae187b18ece0e0b2c488bca62a5c4e6c3e0570dbf939f0582766a",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
       },
       {
         "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
-        "sha256": "e834063bfb4996aa9c88617fe055e50c73563cf299b090db1bd0ecccc9466273",
+        "sha256": "7a2c037acc4ae187b18ece0e0b2c488bca62a5c4e6c3e0570dbf939f0582766a",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
       },
@@ -613,13 +613,13 @@
       },
       {
         "anchor": "async fn title_publication_is_atomic_idempotent_and_never_self_enqueues() {",
-        "sha256": "550e2dd7c256bac17b0e52d58b9b8f01923b34cb656c6e89857097cf51aef67e",
+        "sha256": "7bb6c7891f5677c062c7ecff1dc4652732716845b430bb809a88bf642f0e740b",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: atomic idempotent publication"
       },
       {
         "anchor": "async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield() {",
-        "sha256": "550e2dd7c256bac17b0e52d58b9b8f01923b34cb656c6e89857097cf51aef67e",
+        "sha256": "7bb6c7891f5677c062c7ecff1dc4652732716845b430bb809a88bf642f0e740b",
         "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
         "table": "DV excluded runtime example: cancellation rejects stale publication"
       },

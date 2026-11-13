@@ -1032,7 +1032,9 @@ async fn live_title_admission_uses_spare_capacity_and_yields_to_waiting_viewers(
 }
 
 #[tokio::test]
+#[allow(clippy::disallowed_methods)] // A real producer fixture proves physical teardown ownership.
 async fn playback_qualification_reclaims_local_index_heavy_turn_without_encoder_waiter() {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let dir = crate::test_tempdir().expect("scratch");
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
     store
@@ -1049,38 +1051,73 @@ async fn playback_qualification_reclaims_local_index_heavy_turn_without_encoder_
         .admit_fragment()
         .await
         .expect("ordinary local-index admission");
-    let mut waiters = manager.subscribe_playback_qualification_waiters();
+    let mut child = tokio::process::Command::new("sleep")
+        .arg("60")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("live producer");
+    assert!(child.try_wait().expect("producer state").is_none());
+    let reaped = Arc::new(AtomicBool::new(false));
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel();
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let index = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let reaped = Arc::clone(&reaped);
+        async move {
+            let result =
+                crate::state::local_index_until_foreground(&manager, &admission, async move {
+                    let cancel = plurx_core::process::bounded::cancellation()
+                        .expect("inherited cancellation");
+                    let _ = started_tx.send(());
+                    cancel.cancelled().await;
+                    child.start_kill().expect("signal producer stop");
+                    let _ = stopping_tx.send(());
+                    // A kill request is not a reap acknowledgment. Keep ownership
+                    // while the physical producer/companion cleanup is pending.
+                    let _ = ack_rx.await;
+                    child.wait().await.expect("physically reap producer");
+                    reaped.store(true, Ordering::Release);
+                })
+                .await;
+            drop(admission);
+            result
+        }
+    });
+    tokio::time::timeout(crate::admission::QUEUE_WAIT, started_rx)
+        .await
+        .expect("producer starts")
+        .expect("started");
     let qualification = tokio::spawn({
         let manager = Arc::clone(&manager);
         async move { manager.admit_dv_title(true).await }
     });
-
-    tokio::time::timeout(
-        crate::admission::QUEUE_WAIT,
-        waiters.wait_for(|count| *count == 1),
-    )
-    .await
-    .expect("qualification wait is bounded")
-    .expect("qualification waiter counter remains open");
-    assert!(!qualification.is_finished());
-    let index = crate::state::local_index_until_foreground(
-        manager.as_ref(),
-        &admission,
-        std::future::pending::<()>(),
-    )
-    .await;
+    tokio::time::timeout(crate::admission::QUEUE_WAIT, stopping_rx)
+        .await
+        .expect("index observes pressure")
+        .expect("stop signalled");
     assert!(
-        index.is_none(),
-        "pending qualification reclaims maintenance"
+        !qualification.is_finished(),
+        "the heavy lane cannot pass a pending physical cleanup"
     );
-    drop(admission);
-    assert_eq!(manager.test_software_threads_in_use(), 0);
-
+    assert_eq!(
+        manager.test_software_threads_in_use(),
+        4,
+        "the old CPU claim remains held"
+    );
+    assert!(!reaped.load(Ordering::Acquire));
+    let _ = ack_tx.send(());
+    assert!(tokio::time::timeout(crate::admission::QUEUE_WAIT, index)
+        .await
+        .expect("cleanup completes")
+        .expect("index task")
+        .is_none());
     let qualified = tokio::time::timeout(crate::admission::QUEUE_WAIT, qualification)
         .await
-        .expect("qualification receives the released heavy turn")
-        .expect("qualification task completed")
-        .expect("qualification fits after maintenance yields");
+        .expect("qualification receives released lane")
+        .expect("qualification task")
+        .expect("bounded admission");
+    assert!(reaped.load(Ordering::Acquire), "reap precedes lane handoff");
     assert_eq!(manager.test_software_threads_in_use(), 1);
     drop(qualified);
 }
