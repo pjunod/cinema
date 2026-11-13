@@ -325,5 +325,56 @@
       2.5213674234692007e-05
     ],
     "linear_blue_before_pq_nits": 3.994856356825949e-08
+  },
+  "docker_cpu_controls": {
+    "control_source_sha256": "b06a57a96f247bfa31749659c0498b406f735ae866392e8deca28dda3d8402af",
+    "wrapper_source_sha256": "626f50367a093ac27533512f5b37da1bfbf4485c4a918457803f66bab984ddd9",
+    "cases": 9,
+    "analytic_and_measured_l5_and_chroma_coverage": true,
+    "unchanged_chroma_tolerance": 1e-06,
+    "analytic_lattice_fnv1a": "03994d4550df62ee",
+    "measured_lattice_fnv1a": "9c89edecf8b2f9e9",
+    "macos_libplacebo_7_387": {
+      "all_nine_passed": true,
+      "log_sha256": "335ed3abfa12ff29e79f5b80ce2ca7f5aba4f7aed8a830b4f084365d195eb9d6"
+    },
+    "linux_cached_compiler_libplacebo_sdk_7_360": {
+      "all_nine_passed": true,
+      "image_sha256": "1c87411e470f01819ad878418d4857469c5f15d20020121df242ddd7a759ed0b",
+      "log_sha256": "335ed3abfa12ff29e79f5b80ce2ca7f5aba4f7aed8a830b4f084365d195eb9d6",
+      "source_manifest_sha256": "ee6ec9e1fdaf62ad2e399a89ec6c963a3c3d8b16db65c65afe7a701b40770bc5"
+    },
+    "chroma_plane_mutations": [
+      {
+        "model": "analytic",
+        "raw_chroma_weight": 1000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "analytic raw 1000 chroma speck: 0.630306482f,0.509516954f,0.328891009f pinned 0.673840880"
+      },
+      {
+        "model": "analytic",
+        "raw_chroma_weight": 3000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "analytic raw 3000 chroma speck: 0.681254566f,0.636733413f,0.469366312f pinned 0.674729228"
+      },
+      {
+        "model": "measured",
+        "raw_chroma_weight": 1000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "measured raw 1000 chroma speck: 0.630320251f,0.509533286f,0.328904748f pinned 0.673847616"
+      },
+      {
+        "model": "measured",
+        "raw_chroma_weight": 3000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "measured raw 3000 chroma speck: 0.681497693f,0.637223363f,0.492536277f pinned 0.674735844"
+      }
+    ],
+    "receipt_boundary": "Measured table header included; source-bound wrapper rejects a changed table even when the C control and other headers are unchanged.",
+    "full_application_docker_build_claimed": false
   }
 }

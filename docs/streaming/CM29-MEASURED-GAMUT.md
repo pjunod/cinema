@@ -146,6 +146,24 @@ retain their evidence: all other 102 build inputs and the complete 1000/2000
 arrays are byte-identical. The existing renderer uses the extended table
 through its ordinary source identity and lattice upload path.
 
+## Docker controls distinguish analytic and measured models
+
+The measured-gamut integration also exposed stale build-time test assumptions.
+The original analytic lattice literal is still byte-identical under
+`dv_dm_body_lattice_analytic`; the measured lattice is a separate literal.
+The active-area control pins both independently. L5 absent/zero and adversarial
+bar-domain cases exercise both analytic and measured CPU paths.
+
+The chroma-detail fixture retains its original analytic goldens and adds
+separate measured-model goldens at the unchanged `1e-6` tolerance. These are
+CPU-model characterizations, not licensed chroma-plane measurements. Removing
+only the chroma detail pass fails all four combinations of analytic/measured
+model and negative/positive chroma weight. All nine Docker C controls pass on
+macOS with libplacebo 7.387 and in the cached Linux compiler/SDK 7.360 environment.
+This is source-bound CPU-control execution, not a claim to have built the full
+application image. Its receipt wrapper also binds the generated table header;
+a regression proves a table-only change rejects a stale compiled receipt.
+
 ## Parity distinguishes matrix precision from transfer-helper exactness
 
 The old CM4 crop test applies a 1.5e-6 PQ limit to every channel. At a nearly
