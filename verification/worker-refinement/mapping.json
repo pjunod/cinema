@@ -4,7 +4,7 @@
   "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
   "correspondence": {
     "path": "verification/worker-refinement/correspondence.json",
-    "sha256": "52d917d8b01cc0dc02a9f0d1004b4fa186cb196224a3edada83f07a14d3b2cad"
+    "sha256": "aeedcef31d5069fbd5326f22d0ec55c094be781dce202b6879a8c503cd5983da"
   },
   "configs": {
     "progress.cfg": {
@@ -667,5 +667,5 @@
       "minimum_trace_states": 2
     }
   },
-  "review_basis": "Codex source-only correspondence reconciliation (2026-11-09) for the reviewed pipeline-v2 security corrections. Refreshed 14 library_work.rs action pins after verifying every mapped anchor remains present. The worker correspondence continues to cover queue admission/claim, scan start/finish, completion, acknowledgement timeout, detached drain, reconciliation, wake, and arrival; their selected claim/domain/settlement transitions are unchanged. Credential ownership now uses a keyed hash and expected-file resolution scopes/no-follows probes; those identity and file-selection details are outside the modeled claim/domain protocol. This is source correspondence only and does not claim Rust test or model-check execution."
+  "review_basis": "Codex source-only correspondence reconciliation (2026-11-09) for the reviewed pipeline-v2 security corrections. Refreshed 14 library_work.rs action pins after verifying every mapped anchor remains present. The worker correspondence continues to cover queue admission/claim, scan start/finish, completion, acknowledgement timeout, detached drain, reconciliation, wake, and arrival; their selected claim/domain/settlement transitions are unchanged. Credential ownership now uses a keyed hash and expected-file resolution scopes/no-follows probes; those identity and file-selection details are outside the modeled claim/domain protocol. This is source correspondence only and does not claim Rust test or model-check execution. Independent Codex source-correspondence review on 2026-11-13 for PR #1565 at integrated candidate 410453bc6 against main e503f8bf3: daemon background_jobs.rs adds the separate RefitPublication enum and publish_dv_refit method. Mapped claim_library, bind_library, complete_library, renew, finish and retire action bodies, their held-across-await ownership and existing conformance schedules remain unchanged and their anchors remain unique. Only whole-file action source hashes and the correspondence-file digest are rebound; no actions, trust levels, schedules or gap claims are altered. F+ fitting, source-clock/coded-picture proofs and disk publication are outside the selected library-worker refinement correspondence. No model/configuration/bound/property/fairness change or new execution/refinement claim is made."
 }
