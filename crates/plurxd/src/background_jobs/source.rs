@@ -375,7 +375,6 @@ impl SourceReadBudget {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn invalidate_grant(&self) {
         self.invalidated
             .store(true, std::sync::atomic::Ordering::Release);
