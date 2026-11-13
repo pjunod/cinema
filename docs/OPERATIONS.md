@@ -3364,12 +3364,14 @@ The rule for a rolling upgrade:
    or move first, because no new-protocol worker will accept its placement.
 
 A build skew with the same protocol is ordinary and needs none of this; the
-card flags it so it is noticed, not because placement refuses it.
+card flags it only so it is noticed.
 
-Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
-(run by `make paperwork`) refuses a change to a strict media-pool envelope
-without a `PROTOCOL_VERSION` bump and a dated line here naming it:
+Protocol changes, newest first. `make paperwork` refuses a strict
+envelope change without a `PROTOCOL_VERSION` bump and a dated line naming
+it:
 
+- 2026-11-12: protocol 10 — `SessionRequest.dv_refit` (pinned F+ digest);
+  roll out as above.
 - 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
   `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
 
