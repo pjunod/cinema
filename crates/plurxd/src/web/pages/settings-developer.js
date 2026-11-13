@@ -720,6 +720,7 @@ async function saveDolbyVisionRefit(btn){
   const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
   const err=document.getElementById("dv-refit-error");if(err)err.textContent="";if(btn)btn.disabled=true;
   try{
+    /** @type {Record<string, unknown>} */
     const body={};
     for(const [key] of DV_REFIT_PLATFORMS)body[`dolby_vision_refit_${key}`]=(/** @type {HTMLInputElement} */ (document.getElementById(`dv-refit-${key}`))).checked;
     const saved=cacheSettings(await api("/settings",{method:"PUT",body}));
