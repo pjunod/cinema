@@ -364,8 +364,9 @@ Qualification is recorded on the PR and in the ledger below. Prepared Rust
 regressions exercise startup validation, poisoned-witness recovery, foreign and
 stale proof refusals, ownership replacement, release retry, and the normal v1
 fallback. Prepared Python tests exercise protected host/journal boundaries and
-check-only/publication behavior. Review found and is correcting the local-filesystem
-provenance requirement and acknowledged partial-cleanup retry. These definitions
+check-only/publication behavior. Final review required local-filesystem
+provenance and acknowledged partial-cleanup retry; both corrections were
+confirmed by the reviewer before execution. These definitions
 are not execution evidence.
 
 ## 2. The journal never impersonates an activation or completed join
