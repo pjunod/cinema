@@ -40,3 +40,22 @@
 ## 3. Gates
 
 On the build host, none against CI: `cargo fmt --check`; clippy `-D warnings` for `-p plurxd -p plurx-core --tests` with `plurx-core/hiqlite-store`, with `plurx-core/hiqlite-contract-tests,plurxd/cluster-integration-tests`, and with `plurx-core/cluster-read-cost-validation`; the core lib census, method-split, applied-view, layout-hook, planning-key and placeholder tests; the `plurxd` route-view, media-session, HLS, by-method, chain-key, inventory and new tests; the store-contract applied-view, planning-view, planning-snapshot and planning-key cases; the create-path pin twice; `tests.validation.test_rolling_producer_ownership_inventory`; `scripts/paperwork --merge-target origin/main`, `scripts/history-audit`, `scripts/validate lint`, `scripts/knowledge lint`, `scripts/scrub-infra-names --check`; `scripts/check-formal check-mapping` for the three packages, rebound as the commit message reviews. Results are in the report to the coordinator.
+
+## 4. Integration follow-up — preflight and current main
+
+Codex resumed #1568 on 2026-11-13. Main `c37058e23` was merged into the
+branch. Both independent process-census additions are preserved: base 925,
+D3b +1, main +1 = 927. The formal mapping merge retains both source changes;
+each drifted file's added/removed lines against main match D3b's own delta
+against its merge base before whole-file hashes are rebound.
+
+Run 7392's identity guard flags two synthetic replacement-SQL literals in
+`a_files_write_is_recognised_in_every_form_plurx_uses`. These strings are
+classifier inputs, never executed SQL. The fixture now explicitly assembles
+the replacement verb and table clause with `concat!`, preserving the exact
+classifier cases without presenting them as executable repository writes.
+The production identity guard and its rejection tests are unchanged.
+
+The other preflight failure and the 409 client handling are recorded in
+[the D3c/D3d record](PLAYBACK-START-D3CDE-RECORD.md). No new feature switch,
+watchdog or retry loop is introduced by this integration.

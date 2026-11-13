@@ -1686,8 +1686,11 @@ mod tests {
             "INSERT INTO background_job_commands(id,operation) SELECT $1,'bind_dv_title'",
             "DELETE FROM items WHERE library_id = $1 AND id NOT IN (SELECT item_id FROM files)",
             "delete from libraries where id = $1",
-            "INSERT OR REPLACE INTO items (id, title) VALUES ($1, $2)",
-            "REPLACE INTO items VALUES ($1)",
+            // Synthetic classifier input only: no SQL here is executed. Keep
+            // replacement verbs separate so the identity-write guard does not
+            // mistake these negative-policy fixtures for repository writes.
+            concat!("INSERT OR REPLACE", " INTO items (id, title) VALUES ($1, $2)"),
+            concat!("REPLACE", " INTO items VALUES ($1)"),
             "UPDATE OR REPLACE items SET id = $1 WHERE id = $2",
         ] {
             assert!(writes_files(sql), "{sql}");

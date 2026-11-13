@@ -35,6 +35,14 @@
 - The arrival predicate removed (hiqlite and sqlite): `an_earlier_but_slower_create_does_not_replace_a_newer_ask` fails (the older arrival replaced the newer ask: revision 2, digest `a…`, where revision 1, `b…`, stands); the other three claim tests pass.
 - The same restored code against the new pin: `create_path_store_operations_are_pinned_per_shape` fails, the intent shape reading 21/2/9 against the pinned 21/2/8.
 
+**Integration follow-up (Codex, 2026-11-13).** Fast-lane run 7392 exposed
+`selection_superseded` missing from the surface contract's
+`create_codes_outside_the_table` list. It is now listed there: this 409 ends
+the superseded ask and must not retry it. Web, Apple and Android fence an
+obsolete local request before surfacing its failure; a still-current request
+can report that another actor's newer selection won. No retry-list expansion
+is needed or made.
+
 ## 2. D3d — the catalog reads the create's StartPlan
 
 **Built.** `media_pool::CatalogSource { Quorum(Option<&PlanningBinding>), Plan(&StartPlan), PeerView(&PlanningBinding) }` replaces the `expected_binding` parameter of `local_quality_catalog`.
