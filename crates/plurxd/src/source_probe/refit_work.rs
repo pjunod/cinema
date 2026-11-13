@@ -60,6 +60,7 @@ pub(super) struct RefitTask {
     pub(super) work: Pin<Box<dyn Future<Output = bool> + Send>>,
     cancel: CancellationToken,
     job_id: String,
+    file_id: i64,
     probe_pipeline: String,
     probe_after: Option<CandidateCursor>,
 }
@@ -117,12 +118,11 @@ pub(super) fn enqueue_request(source: &RefitSource, now: i64) -> EnqueueJob {
 
 /// Whether any client platform's F+ switch is on: the demand runs only then.
 pub(crate) async fn enabled(state: &AppState) -> Result<bool, StoreError> {
-    for key in plurx_core::store::keys::DV_REFIT_PLATFORMS {
-        if plurx_core::store::stored_switch(state.store.get_setting(key).await?.as_deref(), false) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let keys = plurx_core::store::keys::DV_REFIT_PLATFORMS;
+    let settings = state.store.get_settings(&keys).await?;
+    Ok(keys.iter().any(|key| {
+        plurx_core::store::stored_switch(settings.get(*key).map(String::as_str), false)
+    }))
 }
 
 /// The demand's source for the stream its probe selects, or `None` when the
@@ -315,6 +315,7 @@ impl RefitTask {
             )
             .await?;
             let cancel = CancellationToken::new();
+            let file_id = file.id;
             let work = execute(
                 state.clone(),
                 file,
@@ -329,6 +330,7 @@ impl RefitTask {
                 work: Box::pin(work),
                 cancel,
                 job_id: id,
+                file_id,
                 probe_pipeline,
                 probe_after: None,
             }));
@@ -337,6 +339,17 @@ impl RefitTask {
     }
 
     pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {
+        if !enabled(state).await? {
+            let disk_needs_fit = state.store.dv_conversion(self.file_id).await?
+                .is_some_and(|row| matches!(row.state,
+                    plurx_core::store::DvConversionState::Queued
+                    | plurx_core::store::DvConversionState::Running));
+            if !disk_needs_fit {
+                // Existing stop/execute ownership reaps and yields with the
+                // spool intact. Re-enabling can resume the same identity.
+                return Ok(true);
+            }
+        }
         super::title_work::probe_preempts(
             state,
             &self.job_id,

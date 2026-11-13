@@ -1217,3 +1217,21 @@ async fn rows_that_fail_their_check_fail_the_attempt() {
         .expect("curves")
         .is_none());
 }
+
+#[tokio::test]
+async fn disabling_all_platforms_yields_active_catalogue_work_until_reenabled() {
+    let fx = fixture().await;
+    let state = app(&fx);
+    let mut task = RefitTask {
+        work: Box::pin(async { false }),
+        cancel: CancellationToken::new(),
+        job_id: "paused-refit".into(),
+        file_id: 1,
+        probe_pipeline: "probe".into(),
+        probe_after: None,
+    };
+    assert!(task.should_yield(&state).await.expect("disabled"));
+    fx.store.put_setting(plurx_core::store::keys::DV_REFIT_PLATFORMS[0], "1")
+        .await.expect("enable");
+    assert!(!task.should_yield(&state).await.expect("enabled without preempting probes"));
+}
