@@ -7000,7 +7000,7 @@ async fn auto_transcode_selects_an_executable_route_before_normalization() {
         raw_json:Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","sample_rate":"48000"}]}).to_string()),..Default::default()
     }).await.expect("file");
     let source = state.store.get_file(id).await.expect("source read").expect("source");
-    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","profiles":["high"],"present":["sdr"],"max_width":3840,"max_height":2160,"max_frame_rate":60}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","profiles":["high"],"present":["sdr"],"max_width":3840,"max_height":2160,"max_frame_rate":{"numerator":60,"denominator":1}}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
     for copy in [None,Some(false),Some(true)] {
         let result = resolve_plan(PlanInputs { snapshot:None,state:&state,user_id:1,file_id:id,source:Some(&source),network_prior:None,network_identity:None,incumbent_receipt:None },None,
             CreateSession { playback_id:"auto-carrier".into(),quality_auto:Some(true),copy,caps:Some(caps.clone()),..bare_create() }).await.expect("selection chooses a carrier it can execute");

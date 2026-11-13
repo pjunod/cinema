@@ -1486,7 +1486,7 @@ async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance
     let snapshot = fixture.store.playback_planning_snapshot(fixture.file_id(), &crate::transcode::QUALITY_PLANNING_KEYS)
         .await.expect("planning read").expect("planning snapshot");
     let source = &snapshot.file;
-    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_width":3840,"max_height":2160,"max_frame_rate":24}],
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_width":3840,"max_height":2160,"max_frame_rate":{"numerator":24,"denominator":1}}],
         "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
         "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
             {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
