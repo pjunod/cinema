@@ -86,13 +86,13 @@ def fix_android(merge_target: str) -> list[str]:
     return [ANDROID_GRADLE, ANDROID_README]
 
 
-def fix_counters(base: str, merge_target: str) -> list[str]:
-    errors = counter_errors(base, merge_target)
+def fix_counters(base: str, counter_target: str) -> list[str]:
+    errors = counter_errors(base, counter_target)
     changed: list[str] = []
     if any(error.startswith("Apple release inputs changed") for error in errors):
-        changed += fix_apple(merge_target)
+        changed += fix_apple(counter_target)
     if any(error.startswith("Android release inputs changed") for error in errors):
-        changed += fix_android(merge_target)
+        changed += fix_android(counter_target)
     return changed
 
 
@@ -160,7 +160,8 @@ def fix_docs_index() -> list[str]:
             continue
         lines = read(index).splitlines(keepends=True)
         for i, line in enumerate(lines):
-            if re.match(r"^\|\s*-{3,}", line) and i > 0 and lines[i - 1].startswith("|"):
+            # The folder index is the first table whose header starts `| File |`.
+            if re.match(r"^\|\s*-{3,}", line) and i > 0 and re.match(r"^\|\s*File\s*\|", lines[i - 1]):
                 columns = lines[i - 1].count("|") - 1
                 lines.insert(i + 1, index_row(path, columns) + "\n")
                 write(index, "".join(lines))
@@ -205,8 +206,8 @@ def non_bookkeeping(paths: list[str]) -> list[str]:
 
 # --- entry points ------------------------------------------------------------
 
-def apply(base: str, merge_target: str) -> list[str]:
-    changed = fix_counters(base, merge_target) + fix_infra_names() + fix_docs_index()
+def apply(base: str, counter_target: str) -> list[str]:
+    changed = fix_counters(base, counter_target) + fix_infra_names() + fix_docs_index()
     return sorted(set(changed))
 
 
@@ -225,7 +226,7 @@ def ci(args: argparse.Namespace) -> int:
     if git("status", "--porcelain=1").strip():
         print("paperwork-fix: the checkout is not clean; not fixing")
         return 1
-    changed = apply(args.base, args.merge_target)
+    changed = apply(args.base, args.counter_target or args.merge_target)
     if not changed:
         print("paperwork-fix: nothing derivable to fix")
         return 1
@@ -251,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--base", help="branch point (default: merge base with --merge-target)")
     parser.add_argument("--merge-target", default="origin/main")
+    parser.add_argument("--counter-target", help="branch whose release counters to exceed (default: --merge-target)")
     parser.add_argument("--ci", action="store_true", help="commit the fix (fast lane only)")
     parser.add_argument("--head-sha", help="--ci: the pull request head the checkout must be")
     parser.add_argument("--run-url", default="", help="--ci: recorded in the commit trailer")
@@ -261,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.head_sha:
             parser.error("--ci needs --head-sha")
         return ci(args)
-    changed = apply(args.base, args.merge_target)
+    changed = apply(args.base, args.counter_target or args.merge_target)
     if not changed:
         print("paperwork-fix: nothing derivable to fix")
         return 0

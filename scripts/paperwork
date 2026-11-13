@@ -193,7 +193,9 @@ def check_regression_fields(base: str, body: str | None, title: str) -> Result:
     hint = (
         "put one `Regression-Test: <path>::<test name>` line per fixed behavior in the pull "
         "request description; whoever merges copies them into the landing commit "
-        "(`python3 -m validation.regression_field --body-file <description> --landing-lines`)"
+        "(`python3 -m validation.regression_field --body-file <description> --landing-lines`). "
+        "Check it with `scripts/paperwork --body-file <description>`. Editing the description "
+        "does not start the lane: push afterwards (`git commit --allow-empty -m 'chore: rerun lane'`)"
     )
     name = "Regression-Test fields for fix(/perf( commits"
     if body is None:

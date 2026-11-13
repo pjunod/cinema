@@ -248,6 +248,14 @@ class PaperworkFixTests(unittest.TestCase):
                 self.assertEqual(len(push), 1)
                 self.assertNotIn("--force", push[0])
                 self.assertNotIn("+HEAD", push[0])
+        effort_fix = [line for line in run_text(steps(PAPERWORK_PR, "paperwork")[
+            "Check index rows, release counters, names and Regression-Test fields"]).splitlines()
+            if "scripts/paperwork-fix --ci" in line]
+        self.assertEqual(len(effort_fix), 1)
+        self.assertIn("--counter-target origin/main", effort_fix[0])
+        with mock.patch("sys.stdout"), self.assertRaises(SystemExit) as done:
+            self.fix.main(["--counter-target", "origin/main", "--help"])
+        self.assertEqual(done.exception.code, 0)
 
 
 if __name__ == "__main__":

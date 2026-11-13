@@ -31,14 +31,17 @@ Applies to the main fast lane's `fast Rust gate` and the effort lane's
 ## Timings
 
 Fast Rust gate, from the job logs of 2026-11-12 (before) and this PR's
-dispatched probes and lane (after). "Provision" is job start to the first
-cargo command.
+dispatched probe, rust-gate-image run 7483 (after). "Provision" is job start
+to the first cargo command; the "before" check column is the separate
+`cargo check` pass the gate no longer runs. A cold-cache timing on the new
+image was not measured (it needs a wiped runner cache); the image removes the
+per-run apt and toolchain provisioning whether the cache is warm or cold.
 
 | | Runner | Provision | Check | Clippy | Total |
 |---|---|---|---|---|---|
 | before | lab1 guests (`-j1`) | 2.1–2.8 min | 9.2–10.7 min | 10.5–12.1 min | 22.4–25.0 min |
 | before | lab5 compile slot (`-j1`) | 2.2–2.6 min | 5.8–6.8 min | 6.6–7.9 min | 14.6–17.4 min |
-| after | see PR #1550 | | — | | |
+| after | lab1 guest `gha-lab1-plurx-heavy-02` (`-j4`, warm cache, first pull of the image) | 1.0 min | — | 6.7 min (+0.2 vendored) | 8.2 min |
 
 ## Bumping the image (one command per step)
 
