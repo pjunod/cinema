@@ -564,7 +564,7 @@ pub(in crate::http) async fn viewer_film_time_ms(
 /// of the ordinary catalog, on this node, at the height the trial renders.
 /// Its recipe digest and bitrate are what recovery and link evidence are kept
 /// under, so admission can refuse it before the trial spends the GPU.
-fn projected_processed_candidate(
+pub(in crate::http) fn projected_processed_candidate(
     state: &AppState,
     intent: &UpgradeIntent,
     source: &plurx_core::domain::MediaFile,
@@ -603,7 +603,7 @@ pub(in crate::http) fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> O
         .then_some(verified_ms.max(viewer_ms))
 }
 
-async fn await_successor_start(
+pub(in crate::http) async fn await_successor_start(
     state: &AppState,
     intent: &UpgradeIntent,
     run: &UpgradeRun,
@@ -723,9 +723,10 @@ where
         return "not_applicable";
     };
     // Admission before the GPU (review 3 S6): when this node has already
-    // described the processed recipe for this query, the evidence kept under
-    // its digest and bitrate decides now, and a refused recipe costs no
-    // trial. A read that misses its deadline is not a refusal: the trial runs
+    // described the processed recipe for this query, the recovery and link
+    // evidence kept under its digest and bitrate decides now, and a refused
+    // recipe costs no trial; its production is proven by the trial itself.
+    // A read that misses its deadline is not a refusal: the trial runs
     // unproven and the check after it is the admission. Without a description
     // there is no evidence about the recipe yet (recovery and link memory are
     // kept under its digest, which only exists once it has been rendered), and
@@ -858,6 +859,12 @@ where
             run.skipped(&reason);
             return "admission_refused";
         }
+    }
+    if let Err(reason) = trial_proved_production(&candidate) {
+        tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
+            "processed upgrade not admitted; the ordinary session keeps playing");
+        run.skipped(reason);
+        return "admission_refused";
     }
     // The actual prepared entry, not the requested trial timestamp, decides
     // the start. If playback has already passed that entry, current media must
@@ -1075,10 +1082,27 @@ async fn admit_processed_candidate(
         )
         .await;
     }
-    if super::create::processed_candidate_is_admitted(&admitted, candidate) {
+    // Production is not part of this: before the trial the recipe is not
+    // producing, so a description of it from an earlier trial has no current
+    // proof, and the trial is what proves it (checked on the frozen recipe
+    // after the trial, whatever this admission found).
+    if super::create::processed_candidate_kept(&admitted, candidate).is_some() {
         Ok(admission)
     } else {
         Err("Auto's link evidence for this playback does not admit the processed candidate's bitrate".into())
+    }
+}
+
+/// The recipe the trial froze is only staged when the trial proved it
+/// sustains production: [`QualityCandidate::playable`] on the trial's own
+/// candidate, which carries the trial's production proof.
+fn trial_proved_production(
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> Result<(), &'static str> {
+    if candidate.playable() {
+        Ok(())
+    } else {
+        Err("the processed trial did not prove the recipe sustains realtime production")
     }
 }
 

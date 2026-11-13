@@ -317,6 +317,17 @@ fn a_processed_successor_begins_at_its_verified_window_unless_the_viewer_passed_
 }
 
 #[test]
+fn a_trial_that_did_not_prove_production_is_never_staged() {
+    let mut candidate = processed_candidate_fixture();
+    candidate.planned_codec = Some("hevc".into());
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+    candidate.sustainable = false;
+    assert!(super::trial_proved_production(&candidate).is_err());
+    candidate.complete_cache = true;
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+}
+
+#[test]
 fn an_upgrade_displaced_by_another_preparation_waits_for_the_free_slot() {
     // 2026-11-12: every Twilight play's in-session preparation took the
     // playback's slot, which cancelled the processed upgrade for good.
