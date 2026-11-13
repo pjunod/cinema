@@ -16,16 +16,15 @@ beside every failure, and runs in three places so nobody has to remember it:
 |---|---|---|
 | Your checkout | `make paperwork` | never — it reports |
 | Your push | pre-push hook from `make hooks` | the push (bypass: `git push --no-verify`) |
-| Forgejo | first job of the main fast lane, the effort lane, and `paperwork.yml` for pull requests into effort branches; drafts included | every other job: they `needs:` it, and the gates require it to be `success`. Derivable failures are fixed on the branch instead (below) |
+| Forgejo | first job of the main fast lane, the effort lane, and `paperwork.yml` for pull requests into effort branches; drafts included | every other job: they `needs:` it, and the gates require it to be `success`. Derivable fixes are published separately (below) |
 
 The CI job is the guarantee; the hook only moves the failure earlier.
 
 ## What fixes itself
 
-Some rules have exactly one correct answer, so the lane writes it instead of
-failing. When paperwork fails in the fast lane or in `paperwork.yml`, the job
-runs `scripts/paperwork-fix --ci`, and locally `make paperwork-fix` does the
-same to your working tree without committing:
+Some rules have exactly one correct answer. `make paperwork-fix` applies
+those fixes to your working tree without committing. PR jobs check and report
+failures; they never execute a publisher with a persistent credential:
 
 | Rule | The fix it applies |
 |---|---|
@@ -34,34 +33,27 @@ same to your working tree without committing:
 | Real host names | `scripts/scrub-infra-names --write`, kept only in Markdown files |
 | Missing index row | a row in `docs/<area>/README.md` with the doc's `# ` title and its `**Status:**` word (`open` if none); improve the wording later if you like |
 
-In the lane the fix is committed as `chore(paperwork): apply derivable
-bookkeeping fixes` with a `Paperwork-Fix: <run URL>` trailer, paperwork runs
-again on it, and the commit is pushed to the PR branch. Guards:
+For main-bound PRs, the separate trusted publisher in `noirr/ci-fleet` can
+apply the same policy from an explicitly pinned approved commit. It runs that
+policy in a credential-free Linux sandbox, independently computes the exact
+edits and validates authoritative PR/run identities. A dedicated bot publishes
+one child with a lease on the original work-branch head. That ordinary bot push
+starts the replacement PR lane; the original failing run is never made green.
+A durable intent records the commit before publication, so an uncertain reply
+can be observed without creating another fix. Commit trailers are not authority.
 
-- every changed file is Markdown, or a release file whose changed lines differ
-  only in numbers; nothing is added or deleted, otherwise nothing is committed;
-- a head that is already a `Paperwork-Fix:` commit is never fixed again, so a
-  fix that does not converge fails instead of looping;
-- only same-repository PRs, and only when the checkout is the event's head;
-- the push (`scripts/paperwork-fix --push`) is leased to the head the run
-  checked: if the branch moved at all meanwhile (your new commit, or a
-  force-push that dropped one), it is refused and your push's run takes over;
-  it goes only to an ordinary work branch, never `main`, the base or a
-  `refs/…` head, and its token reaches git through the environment, never a
-  command line, with hooks off.
+Only existing regular files and bounded canonical bookkeeping edits are allowed.
+Forks, protected/base/train refs, shared work refs and moved heads are refused.
+If the base advances during publication, replacement paperwork must recheck it.
+After a bot fix, `git pull --rebase` before your next push.
 
-The push uses the run's own token, which starts no workflow; the job then
-fails saying the fix is on the branch and any push runs the lane on it.
-`git pull --rebase` before your next push.
-
-Do not expose a persistent `PAPERWORK_PUSH_TOKEN` to these workflows: they
-execute PR-controlled scripts and can be edited by the PR. Seamless publication
-requires a dedicated repository-write bot behind a separately trusted publisher,
-with the credential outside this repository's PR Actions secrets. That publisher
-must independently verify the generated bookkeeping edits, exact parent and
-current open same-repository PR head before a leased push, reject protected and
-train branches, and prove that exactly one replacement lane starts. This trusted
-publisher is not implemented here; adding a secret alone is not a safe setup.
+Paul installs the dedicated publisher account, token and service outside PR
+runners. Source implementation and installation acceptance are distinct: until
+that installation and its disposable-PR canary pass, use the local fixer.
+Effort-bound PRs currently use the local fixer; their CI job checks without
+publishing. The source runbook is ci-fleet's `docs/PAPERWORK-PUBLISHER.md`.
+Never add `PAPERWORK_PUSH_TOKEN` to a PR workflow: adding a secret alone does
+not establish this trust boundary.
 
 Rules that need a decision (a `Regression-Test:` line, a functionality point,
 a doc split, a status move) still fail, with the fix printed under them. A

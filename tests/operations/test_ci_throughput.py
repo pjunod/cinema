@@ -240,28 +240,21 @@ class PaperworkFixTests(unittest.TestCase):
         for path in (LANE, PAPERWORK_PR):
             self.assertNotIn("secrets.PAPERWORK_PUSH_TOKEN", path.read_text())
 
-    def test_both_paperwork_jobs_fix_then_push_and_never_loop(self):
+    def test_pr_paperwork_jobs_report_failure_without_publishing_pr_code(self):
         for path in (LANE, PAPERWORK_PR):
             with self.subTest(workflow=path.name):
                 run = run_text(steps(path, "paperwork")["Check index rows, release counters, names and Regression-Test fields"])
-                self.assertLess(run.index("scripts/paperwork --base"), run.index("scripts/paperwork-fix --ci"))
-                self.assertIn('--head-sha "$PR_HEAD_SHA"', run)
-                self.assertIn('[ "$SAME_REPO" = true ] || exit 1', run)
-                # The push is the script's leased, tested one; the workflow
-                # neither pushes nor puts a credential on a command line.
-                self.assertIn('python3 scripts/paperwork-fix --push --head-ref "$HEAD_REF" --base-ref "$BASE_REF" \\\n'
-                              '  --head-sha "$PR_HEAD_SHA" || exit 1', run)
-                self.assertNotRegex(run, r"\bgit\b[^\n]*\bpush\b")
-                self.assertNotIn("extraheader", run.split("scripts/paperwork-fix --ci", 1)[1])
-                self.assertLess(run.index("scripts/paperwork-fix --ci"), run.index("scripts/paperwork-fix --push"))
-        effort_fix = [line for line in run_text(steps(PAPERWORK_PR, "paperwork")[
-            "Check index rows, release counters, names and Regression-Test fields"]).splitlines()
-            if "scripts/paperwork-fix --ci" in line]
-        self.assertEqual(len(effort_fix), 1)
-        self.assertIn("--counter-target origin/main", effort_fix[0])
-        with mock.patch("sys.stdout"), self.assertRaises(SystemExit) as done:
-            self.fix.main(["--counter-target", "origin/main", "--help"])
-        self.assertEqual(done.exception.code, 0)
+                self.assertIn("scripts/paperwork --base", run)
+                self.assertNotIn("scripts/paperwork-fix", run)
+                self.assertNotRegex(run, r"\bgit\b[^\n]*\b(?:push|commit)\b")
+                self.assertIn("trusted publisher status", run)
+                self.assertTrue(run.rstrip().endswith("exit 1"))
+                if path == LANE:
+                    self.assertIn("needs: paperwork", path.read_text())
+        effort_check = run_text(steps(PAPERWORK_PR, "paperwork")[
+            "Check index rows, release counters, names and Regression-Test fields"])
+        self.assertIn("--counter-target origin/main", effort_check)
+
 
 
 class PaperworkFixCommitAndPushTests(unittest.TestCase):

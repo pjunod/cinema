@@ -14,7 +14,7 @@ make paperwork-fix      # applies the fixes that are derivable (below) to your w
 scripts/paperwork --body-file <description.md>   # also checks your PR description's Regression-Test: lines
 ```
 
-`make hooks` runs `make paperwork` on every push. After the lane has pushed a
+`make hooks` runs `make paperwork` on every push. After the trusted publisher has pushed a
 `chore(paperwork)` commit to your branch (below), `git pull --rebase` before
 your next push.
 
@@ -44,15 +44,18 @@ never wedges a PR ([PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md)).
 
 ### 2. Derivable paperwork fixes itself
 
-The `paperwork` job (fast lane, and `paperwork.yml` for PRs into effort
-branches) runs `scripts/paperwork`. When it fails it runs
-`scripts/paperwork-fix --ci`, which applies only fixes whose correct output is
-derivable, commits them as `chore(paperwork): apply derivable bookkeeping
-fixes` with a `Paperwork-Fix:` trailer, re-runs paperwork, and pushes the
-commit to the PR branch. [PAPERWORK.md](PAPERWORK.md) lists what is fixed and
-the guards. The PR description and title are read from the event payload, not
-an environment variable: a long description used to stop the runner from
-starting the step (`argument list too long`).
+The PR `paperwork` jobs run `scripts/paperwork` and stop on failure before
+compiler jobs. They carry no persistent publisher credential and do not commit
+or push PR-controlled output. The separate ci-fleet publisher uses pinned policy
+in a credential-free sandbox, validates the live same-repository PR identity,
+and leases a canonical fix commit to the original head. Its dedicated bot push
+starts the replacement main-bound lane. Installation and a real replacement-run
+canary remain operational acceptance; effort PRs use the local fixer meanwhile.
+[PAPERWORK.md](PAPERWORK.md) describes the boundary and supported edits.
+
+The description and title are read from the event payload, not an environment
+variable: a long description used to stop the runner from starting the step
+(`argument list too long`).
 
 Paperwork failures, 62 job logs of the 65 failed `paperwork` jobs (a run can
 fail several rules):
