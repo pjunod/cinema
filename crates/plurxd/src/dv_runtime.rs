@@ -370,7 +370,6 @@ impl ToolSet {
     /// so rebuilding the bundle for an unrelated change does not decode every
     /// FEL title again. The fit method is named separately
     /// (`dv_refit::FIT_VERSION`).
-    #[cfg(unix)]
     pub(crate) fn refit_helper_identity(&self) -> String {
         hash(format!("plurx-dv-refit-identity-v1\0{REFIT_MODE_VERSION}\0{}", self.decoder_abi).as_bytes())
     }
