@@ -160,10 +160,10 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
                     mastering_luminance: TitleConstant::Unknown,
                     mastering_primaries: TitleConstant::Unknown,
                     el_kind: if fel && profile == 7 {
-                    TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
-                } else {
-                    TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
-                },
+                        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
+                    } else {
+                        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
+                    },
                 },
             },
             now_ms: now(),
@@ -329,8 +329,10 @@ async fn refit_demand_selects_current_profile7_fel_titles() {
         let fel = title(&store, "refit-demand-fel", true).await;
         let mel = title(&store, "refit-demand-mel", false).await;
         let no_recipe = title(&store, "refit-demand-no-recipe", true).await;
-        assert!(demand(&store, no_recipe.id, &helper()).await.is_some(),
-            "{backend}: complete FEL fact does not require a legacy recipe");
+        assert!(
+            demand(&store, no_recipe.id, &helper()).await.is_some(),
+            "{backend}: complete FEL fact does not require a legacy recipe"
+        );
         let found = demand(&store, fel.id, &helper())
             .await
             .expect("FEL title demanded");

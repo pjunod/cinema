@@ -601,12 +601,15 @@ pub async fn build_and_verify(
             &tool_source,
             "source during F+ timeline scan",
             loss,
-        ).await?;
+        )
+        .await?;
         let scanned: plurx_core::scan::dv_title::DvTitleStats =
             serde_json::from_str(&summary).map_err(|e| format!("F+ timeline aggregate: {e}"))?;
         if !scanned.complete
-            || scanned.el_kind != plurx_core::scan::dv_title::TitleConstant::Consistent(
-                plurx_core::scan::dv_title::TitleElKind::Fel)
+            || scanned.el_kind
+                != plurx_core::scan::dv_title::TitleConstant::Consistent(
+                    plurx_core::scan::dv_title::TitleElKind::Fel,
+                )
             || i64::try_from(scanned.decoded_frames).ok() != Some(table.title.frames)
         {
             return Err("F+ timeline no longer describes the fitted FEL title".into());
@@ -622,7 +625,12 @@ pub async fn build_and_verify(
             "-i".into(),
             OsString::new(),
             "-map".into(),
-            fitted.map_or_else(|| "0:v:0".to_owned(), |(table, _)| format!("0:{}", table.title.video_index)).into(),
+            fitted
+                .map_or_else(
+                    || "0:v:0".to_owned(),
+                    |(table, _)| format!("0:{}", table.title.video_index),
+                )
+                .into(),
             "-c:v".into(),
             "copy".into(),
             "-bsf:v".into(),
@@ -672,33 +680,45 @@ pub async fn build_and_verify(
         let timeline = paths.rpu_timeline.clone();
         let output = paths.fitted_rpu.clone();
         let table = table.clone();
-        let expected = tokio::task::spawn_blocking(move ||
-            refit::author(&rpu, &timeline, &output, &table)
-        ).await.map_err(|e| format!("joining F+ disk author: {e}"))??;
-        if loss.is_cancelled() { return Err("conversion lease lost before F+ injection".into()); }
-        run_tool(&tools.dovi_tool, &[
-            "inject-rpu".into(), "-i".into(), paths.raw.as_os_str().to_owned(),
-            "--rpu-in".into(), paths.fitted_rpu.as_os_str().to_owned(),
-            "-o".into(), paths.converted.as_os_str().to_owned(),
-        ], loss).await?;
+        let expected =
+            tokio::task::spawn_blocking(move || refit::author(&rpu, &timeline, &output, &table))
+                .await
+                .map_err(|e| format!("joining F+ disk author: {e}"))??;
+        if loss.is_cancelled() {
+            return Err("conversion lease lost before F+ injection".into());
+        }
+        run_tool(
+            &tools.dovi_tool,
+            &[
+                "inject-rpu".into(),
+                "-i".into(),
+                paths.raw.as_os_str().to_owned(),
+                "--rpu-in".into(),
+                paths.fitted_rpu.as_os_str().to_owned(),
+                "-o".into(),
+                paths.converted.as_os_str().to_owned(),
+            ],
+            loss,
+        )
+        .await?;
         Some(expected)
     } else {
         run_tool(
-        &tools.dovi_tool,
-        &[
-            "-m".into(),
-            "2".into(),
-            "convert".into(),
-            "--discard".into(),
-            "-i".into(),
-            paths.raw.as_os_str().to_owned(),
-            "-o".into(),
-            paths.converted.as_os_str().to_owned(),
-        ],
-        loss,
-    )
-    .await?;
-    require_nonempty(&paths.converted).await?;
+            &tools.dovi_tool,
+            &[
+                "-m".into(),
+                "2".into(),
+                "convert".into(),
+                "--discard".into(),
+                "-i".into(),
+                paths.raw.as_os_str().to_owned(),
+                "-o".into(),
+                paths.converted.as_os_str().to_owned(),
+            ],
+            loss,
+        )
+        .await?;
+        require_nonempty(&paths.converted).await?;
         None
     };
     require_nonempty(&paths.converted).await?;
@@ -720,21 +740,53 @@ pub async fn build_and_verify(
     .await?;
     require_nonempty(&paths.replacement).await?;
     if let Some(expected) = expected_rpus {
-        let candidate = bind_child_fresh(&scratch.directory, "replacement.mkv", loss,
-            "replacement during F+ readback").await?;
-        run_tool_with_bound_media(&tools.ffmpeg, &[
-            "-nostdin".into(), "-v".into(), "error".into(), "-i".into(), OsString::new(),
-            "-map".into(), "0:v:0".into(), "-c:v".into(), "copy".into(),
-            "-bsf:v".into(), "hevc_mp4toannexb".into(), "-f".into(), "hevc".into(),
-            paths.verify_video.as_os_str().to_owned(),
-        ], 4, &candidate, "replacement during F+ readback", loss).await?;
-        run_tool(&tools.dovi_tool, &[
-            "extract-rpu".into(), "-i".into(), paths.verify_video.as_os_str().to_owned(),
-            "-o".into(), paths.verify_rpu.as_os_str().to_owned(),
-        ], loss).await?;
+        let candidate = bind_child_fresh(
+            &scratch.directory,
+            "replacement.mkv",
+            loss,
+            "replacement during F+ readback",
+        )
+        .await?;
+        run_tool_with_bound_media(
+            &tools.ffmpeg,
+            &[
+                "-nostdin".into(),
+                "-v".into(),
+                "error".into(),
+                "-i".into(),
+                OsString::new(),
+                "-map".into(),
+                "0:v:0".into(),
+                "-c:v".into(),
+                "copy".into(),
+                "-bsf:v".into(),
+                "hevc_mp4toannexb".into(),
+                "-f".into(),
+                "hevc".into(),
+                paths.verify_video.as_os_str().to_owned(),
+            ],
+            4,
+            &candidate,
+            "replacement during F+ readback",
+            loss,
+        )
+        .await?;
+        run_tool(
+            &tools.dovi_tool,
+            &[
+                "extract-rpu".into(),
+                "-i".into(),
+                paths.verify_video.as_os_str().to_owned(),
+                "-o".into(),
+                paths.verify_rpu.as_os_str().to_owned(),
+            ],
+            loss,
+        )
+        .await?;
         let readback = paths.verify_rpu.clone();
         tokio::task::spawn_blocking(move || refit::verify_readback(&readback, &expected))
-            .await.map_err(|e| format!("joining F+ replacement readback: {e}"))??;
+            .await
+            .map_err(|e| format!("joining F+ replacement readback: {e}"))??;
     }
 
     let (source, source_rebound) = bind_expected_content(
@@ -4810,7 +4862,15 @@ async fn prune_published_scratch(
     context: &PublicationContext,
     loss: &CancellationToken,
 ) -> Result<(), String> {
-    for name in ["BL_RPU.hevc", "BL_RPU.p81.hevc", "RPU.bin", "RPU.timeline", "RPU.fitted.bin", "replacement.verify.hevc", "replacement.verify.rpu"] {
+    for name in [
+        "BL_RPU.hevc",
+        "BL_RPU.p81.hevc",
+        "RPU.bin",
+        "RPU.timeline",
+        "RPU.fitted.bin",
+        "replacement.verify.hevc",
+        "replacement.verify.rpu",
+    ] {
         if child_exists(&context.scratch.directory, name).await? {
             if loss.is_cancelled() {
                 return Err("conversion lease was lost before scratch pruning".to_owned());

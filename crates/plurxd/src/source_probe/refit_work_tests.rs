@@ -305,10 +305,10 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
         el_kind: if fel && profile == 7 {
-        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
-    } else {
-        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
-    },
+            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
+        } else {
+            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
+        },
     };
     store
         .publish_dv_title_job(PublishTitleJob {

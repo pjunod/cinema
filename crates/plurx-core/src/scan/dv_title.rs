@@ -25,7 +25,6 @@ fn unknown_el_kind() -> TitleConstant<TitleElKind> {
     TitleConstant::Unknown
 }
 
-
 /// A title constant cannot be selected by taking the last frame's value.
 /// Missing metadata anywhere leaves it unknown; conflicting observations leave
 /// it inconsistent. Neither can supply an endpoint or mastering declaration.
@@ -284,8 +283,12 @@ mod tests {
         doc[PROBE_FIELD].as_object_mut().unwrap().remove("el_kind");
         assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()), Some(good));
         doc[PROBE_FIELD]["el_kind"] = serde_json::json!({"state":"consistent","value":"fel"});
-        assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()).unwrap().el_kind,
-            TitleConstant::Consistent(TitleElKind::Fel));
+        assert_eq!(
+            DvTitleStats::from_probe_json(&doc.to_string())
+                .unwrap()
+                .el_kind,
+            TitleConstant::Consistent(TitleElKind::Fel)
+        );
         doc[PROBE_FIELD]["schema"] = serde_json::json!(2);
         assert!(DvTitleStats::from_probe_json(&doc.to_string()).is_none());
     }

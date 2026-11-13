@@ -3656,7 +3656,8 @@ LIMIT 1
         after_file_id: i64,
         limit: u32,
     ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError> {
-        super::dv_refit_jobs::demands(self, helper, fit_version, include_all, after_file_id, limit).await
+        super::dv_refit_jobs::demands(self, helper, fit_version, include_all, after_file_id, limit)
+            .await
     }
     async fn publish_dv_refit_job(
         &self,
