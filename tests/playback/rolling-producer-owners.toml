@@ -3956,7 +3956,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merged main again: 1144 base, +4 main (#1546), +2 this branch.
 # Merged main into E1c: 1148 base, +1 main, +2 E1c.
 # Offload integration: main 1151 plus the fake_curator test task above.
-expected_occurrences = 1152
+# Reader B0/B1: +1 bounded source-recovery diagnostic spawn_blocking. One
+# try-acquired owned semaphore permit remains in the closure through completion
+# even after request cancellation; contention returns unavailable, never queues.
+expected_occurrences = 1153
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5837,7 +5840,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bound, which the owner's planning read ran under before D3b. An awaited
 # request-path deadline: no task, no producer, no process; a timeout answers 503.
 # Merged main into D3b: 2203 base, +1 main, +1 D3b = 2205.
-expected_occurrences = 2205
+# Main #1568 follow-through, 2205 -> 2211: processed_upgrade::await_successor_start
+# adds one awaited 250 ms pacing sleep while its existing UpgradeRun and pending
+# preparation guard retain the incumbent until cancellation/supersession/end.
+# This schedules an admitted handoff; it neither replaces a producer nor proves
+# physical closure. The two scheduled-handoff regressions add five test-only
+# constructors (four timeouts and one control-cadence sleep) in
+# http/hls/tests/processed_upgrade_runs.rs. Their deadlines assert cancellation
+# or the actual prepared entry; no timeout grants recovery authority. These six
+# shapes are already present on main 882d4b691, not added by storage-domain apply.
+expected_occurrences = 2211
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6345,7 +6357,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # #1546, +1 test-only (341 -> 342): http/tests.rs makes one real Matroska
 # fixture with ffmpeg via testfixtures::run, which waits for and reaps the child
 # before the test continues. No production producer.
-expected_occurrences = 342
+# Reader B0/B1: +6 net test-only command constructors. Four process fixtures
+# exercise inherited/explicit loader isolation, refusal and failed startup;
+# one policy fixture constructs but never launches commands; one descriptor
+# fixture exercises fd198/cwd/file-stdio. The real no-source true helper replaces
+# one former reader test command (net zero there). Actual spawned children use
+# the production launcher and are joined before their fixture returns.
+expected_occurrences = 348
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7372,7 +7390,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # stops waiting when generation retirement is cancelled, kills the child once,
 # and keeps waiting under the same retained admission. There is still exactly
 # one reaper per child; the added wait/start_kill sites are its select arms.
-expected_occurrences = 389
+# Reader B0/B1: +1 explicit wait for the verified native true fixture. The
+# fixture retains ChildJob through the positive physical join. The output-pipe
+# collision fixture now calls status instead of output (net zero lifecycle).
+expected_occurrences = 390
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7611,7 +7632,10 @@ pattern = "kill_on_drop\\s*\\("
 # 126 -> 127 with the A1/B1 batch (#1495): prodrun's natural-exit test builds
 # one real `/bin/sh` child with kill_on_drop and attaches it to a ChildJob.
 # Test-only; no shipped launch path changes.
-expected_occurrences = 127
+# Reader B0/B1: -1 former reader-fixture kill_on_drop configuration. Its
+# isolated real no-source true helper uses the production ChildJob and awaits
+# actual exit; no production kill-on-drop guarantee is removed.
+expected_occurrences = 126
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

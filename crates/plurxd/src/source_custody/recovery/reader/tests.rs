@@ -15,11 +15,16 @@ static REJECT_NEXT_SPAWN: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 /// across several replays: those children would otherwise count against the
 /// ledger's bounded wait.
 static DESCENDANTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-fn observe_retry(mediated: bool) -> std::io::Result<()> {
+fn observe_retry(observation: &LaunchObservation) -> std::io::Result<()> {
     if REJECT_NEXT_SPAWN.swap(false, std::sync::atomic::Ordering::SeqCst) {
         return Err(std::io::Error::from_raw_os_error(libc::EIO));
     }
-    observe_children(mediated)
+    observe_children(observation)
+}
+
+#[cfg(target_os = "linux")]
+fn unknown_launch() -> LaunchObservation {
+    LaunchObservation::unknown("reader recovery test raw launch", false, true)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -161,7 +166,10 @@ fn configuration(fixture: &Fixture, record: &Record, mode: &str) -> (PathBuf, Co
 #[tokio::test]
 async fn mediated_reader_crash_recovers_same_kernel_on_native_mac_and_linux() {
     assert!(kernel_instance().is_some(), "real platform kernel provider");
-    for family in ["foreground", "job", "analysis", "lease", "offline"] {
+    for (family, mode) in ["foreground", "job", "analysis", "lease", "offline"]
+        .into_iter()
+        .flat_map(|family| ["mediated", "no_source_child"].map(|mode| (family, mode)))
+    {
         let fixture = Fixture::new();
         configure_backend(&fixture.store, fixture.root.path(), true)
             .expect("authoritative context");
@@ -173,7 +181,7 @@ async fn mediated_reader_crash_recovers_same_kernel_on_native_mac_and_linux() {
         preread(&fixture, &record);
         // Empty legacy host identity must not be guessed or rewritten.
         write_active_at(&fixture.dir, record.clone(), None).expect("legacy evidence");
-        let (path, config) = configuration(&fixture, &record, "mediated");
+        let (path, config) = configuration(&fixture, &record, mode);
         let mut child = OwnedChild::start(&path);
         child.wait_for("READER_PREPARED");
         assert!(activate(&fixture, &record, &config.activation_id).await);
@@ -258,15 +266,15 @@ async fn brokered_cache_parts_keep_reader_recovery_but_raw_fallbacks_remain_fenc
             .expect("replay exact lifetime witness");
         assert_eq!(
             count(&fixture, &record),
-            if mode == "brokered_cache" { 0 } else { 1 },
-            "{mode}: only the real HTTP input/output child retains mediated proof"
+            1,
+            "{mode}: URL-only declarations and raw fallbacks lack content confinement proof"
         );
-        assert_eq!(
+        assert!(
             config
                 .directory
                 .join(record.name().expect("record name"))
                 .exists(),
-            mode != "brokered_cache"
+            "{mode}: unverified child retains its exact recovery evidence"
         );
     }
 }
@@ -513,8 +521,12 @@ async fn mediated_packet_probe_withholds_original_source_descriptor() {
     child.exit();
     replay_at(&fixture.store, &config.directory, &fixture.dir, NODE)
         .await
-        .expect("URL-only packet helper retained reader proof");
-    assert_eq!(count(&fixture, &record), 0);
+        .expect("URL-only packet helper remains conservatively fenced");
+    assert_eq!(
+        count(&fixture, &record),
+        1,
+        "withholding the original fd does not prove content-driven path confinement"
+    );
 }
 
 #[test]
@@ -616,6 +628,22 @@ fn reader_process_fixture() {
         assert_eq!(line.trim(), "exit");
         return;
     }
+    if config.mode == "no_source_child" {
+        // Only this separately reexecuted fixture mutates the process registry.
+        // The positive child has no media arguments or inherited capabilities.
+        let owned = config
+            .source
+            .parent()
+            .expect("fixture root")
+            .join("no-source-owned");
+        std::fs::create_dir(&owned).expect("owned child cwd");
+        let tool = std::fs::canonicalize("/usr/bin/true").expect("native no-source program");
+        plurx_core::process::source_lifetime::set_daemon_roots(
+            &[owned.canonicalize().expect("canonical owned cwd")],
+            &[tool.parent().expect("tool directory").to_owned()],
+        )
+        .expect("isolated immutable reader roots");
+    }
     plurx_core::process::source_lifetime::install_observer(if config.mode == "retry_descriptor" {
         observe_retry
     } else {
@@ -656,19 +684,19 @@ fn reader_process_fixture() {
                     .expect("live witness")
                     .arm(&config.activation_id)
                     .expect("Store CAS acknowledged nonce");
-                if config.mode == "mediated" {
+                if matches!(config.mode.as_str(), "mediated" | "no_source_child") {
                     run_mediated_child(&config.source);
                 }
                 if config.mode == "packet" {
                     run_packet_probe(&config);
                 }
                 if config.mode == "brokered_cache" {
-                    run_mediated_child_inner(&config.source, true);
+                    run_mediated_child_inner(&config.source);
                 }
                 if config.mode.starts_with("cache_") {
                     run_raw_cache_child(&config.source, &config.mode);
                 }
-                if config.mode == "mediated" {
+                if matches!(config.mode.as_str(), "mediated" | "no_source_child") {
                     // A cancelled request can leave a detached read actor with
                     // an original capability. Its process still owns the lock.
                     let source = config.source.clone();
@@ -684,12 +712,17 @@ fn reader_process_fixture() {
                     opened
                         .recv_timeout(Duration::from_secs(5))
                         .expect("real detached reader owns descriptor");
+                    if config.mode == "no_source_child" {
+                        run_no_source_child(&config.source);
+                    }
                 }
                 if let Some((mut command, _source)) = prepared.take() {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("prepared command runtime");
+                    // `mediated` is a Brokered declaration alias: neither
+                    // raw descriptors nor this retry become verified by it.
                     if config.mode == "retry_descriptor" {
                         REJECT_NEXT_SPAWN.store(true, std::sync::atomic::Ordering::SeqCst);
                         let error = runtime
@@ -772,16 +805,67 @@ fn reader_process_fixture() {
 }
 
 fn run_mediated_child(source: &Path) {
-    run_mediated_child_inner(source, false);
+    // Preserve the native daemon-reader positive proof without declaring an
+    // unconstrained media-consuming child safe merely because it uses HTTP.
+    let mut file = std::fs::File::open(source).expect("daemon source capability");
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .expect("actual owning-daemon read");
+    assert_eq!(bytes, vec![42u8; 4096]);
 }
 
-fn run_mediated_child_inner(source: &Path, cache_part: bool) {
+fn run_no_source_child(source: &Path) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("no-source child runtime");
+    runtime.block_on(async {
+        let tool = std::fs::canonicalize("/usr/bin/true").expect("native no-source program");
+        let mut command = tokio::process::Command::new(tool);
+        command.env_clear().current_dir(
+            source
+                .parent()
+                .expect("fixture root")
+                .join("no-source-owned"),
+        );
+        let manifest = plurx_core::process::source_lifetime::prepare_stdio_std(
+            command.as_std_mut(),
+            plurx_core::process::source_lifetime::StdioFacts::NULL,
+        )
+        .expect("bound actual null stdio");
+        let (mut child, _job) = plurx_core::process::source_lifetime::no_source_spawn(|| {
+            plurx_core::process::source_lifetime::with_descriptors(manifest, || {
+                plurx_core::process::spawn_job_owned(
+                    &mut command,
+                    plurx_core::process::ChildWork::background("reader no-source true fixture"),
+                )
+            })
+        })
+        .expect("verified native no-source child");
+        drop(command);
+        assert!(child
+            .wait()
+            .await
+            .expect("physical no-source join")
+            .success());
+        let launches = plurx_core::process::source_lifetime::launch_snapshot();
+        assert_eq!(
+            launches.no_source, 1,
+            "actual child passed NoSource verification"
+        );
+        assert_eq!(
+            launches.unknown, 0,
+            "the isolated positive proof had no escape"
+        );
+    });
+}
+
+fn run_mediated_child_inner(source: &Path) {
     let mut file = std::fs::File::open(source).expect("daemon original descriptor");
     let metadata = file.metadata().expect("physical identity");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("daemon source bridge");
     let address = listener.local_addr().expect("bridge address");
-    let output_listener =
-        cache_part.then(|| std::net::TcpListener::bind("127.0.0.1:0").expect("output broker"));
+    let output_listener = Some(std::net::TcpListener::bind("127.0.0.1:0").expect("output broker"));
     let output_address = output_listener
         .as_ref()
         .map(|listener| listener.local_addr().expect("output address"));
@@ -835,7 +919,9 @@ fn run_mediated_child_inner(source: &Path, cache_part: bool) {
         .enable_all()
         .build()
         .expect("fixture runtime");
-    let output = if cache_part {
+    // This actual HTTP consumer proves descriptor withholding, while its
+    // Brokered declaration remains unverified without a confinement profile.
+    let output = {
         use std::os::fd::AsRawFd;
         let original = std::fs::File::open(source).expect("held source capability");
         let directory = std::fs::File::open(source.parent().expect("source parent"))
@@ -897,31 +983,6 @@ fn run_mediated_child_inner(source: &Path, cache_part: bool) {
             .expect("same production brokered cache spawn");
             joined_producer_output(spawned).await
         })
-    } else {
-        runtime.block_on(plurx_core::process::source_lifetime::mediated(async {
-            let mut command =
-                tokio::process::Command::new(std::env::current_exe().expect("test binary"));
-            command
-                .args(["--exact", FIXTURE, "--nocapture"])
-                .env_clear()
-                .env("PLURX_TEST_READER_CONSUMER", "1")
-                .env("PLURX_TEST_SOURCE_DEVICE", metadata.dev().to_string())
-                .env("PLURX_TEST_SOURCE_INODE", metadata.ino().to_string())
-                .env("PLURX_TEST_READER_ADDRESS", address.to_string())
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            let (child, _owner) = plurx_core::process::spawn_job_owned(
-                &mut command,
-                plurx_core::process::ChildWork::background("mediated source fixture"),
-            )
-            .expect("audited HTTP-only child");
-            child
-                .wait_with_output()
-                .await
-                .expect("join HTTP-only child")
-        }))
     };
     assert!(
         output.status.success(),
@@ -1172,7 +1233,7 @@ async fn finish_during_blocked_enrolled_read_leaves_settlement_to_the_ledger() {
         .enroll_preparation(original(&fixture))
         .expect("enrollment")
         .expect("Linux completion ledger");
-    observe_children(false).expect("foreign unmediated launch");
+    observe_children(&unknown_launch()).expect("foreign unmediated launch");
     #[allow(clippy::disallowed_methods)] // The fixture owns and reaps this exact child.
     let mut child = std::process::Command::new("/bin/sh")
         .args(["-c", "cat >/dev/null"])
@@ -1397,10 +1458,10 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
             .expect("registration")
             .expect("tracked raw child");
         retirement
-            .spawn(|| observe_children(false))
+            .spawn(|| observe_children(&unknown_launch()))
             .expect("declared raw launch");
         if unknown {
-            observe_children(false).expect("unknown raw escape");
+            observe_children(&unknown_launch()).expect("unknown raw escape");
             retirement.joined();
         } else {
             drop(retirement);
@@ -1424,6 +1485,7 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn quiet_for_veto() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 }
@@ -1538,4 +1600,281 @@ async fn a_restarted_init_daemon_releases_a_raw_launch_from_its_torn_down_namesp
         );
         assert_eq!(proof.exists(), !released, "{family}: evidence cleanup");
     }
+}
+
+/// Construct isolated witnesses without registering in OWNED: parallel tests'
+/// real child launches must not alter the diagnostic under test.
+fn diagnostic_witness(directory: &Path, record: Record) -> Witness {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(directory).expect("diagnostic directory");
+    for private in [directory.parent().expect("recovery parent"), directory] {
+        std::fs::set_permissions(private, std::fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+    }
+    let name = record
+        .name()
+        .expect("owner name")
+        .trim_end_matches(".json")
+        .to_owned();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let mut anchor = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(format!("{name}.anchor")))
+        .expect("anchor");
+    anchor.write_all(nonce.as_bytes()).expect("nonce");
+    anchor.sync_all().expect("durable anchor");
+    let metadata = anchor.metadata().expect("anchor metadata");
+    let evidence = Evidence {
+        version: 2,
+        reader_model: "daemon_mediated_v1".into(),
+        kernel_instance: "diagnostic-test-kernel".into(),
+        activation_id: uuid::Uuid::new_v4().to_string(),
+        node_id: record.node().into(),
+        anchor_nonce: nonce,
+        anchor_device: metadata.dev(),
+        anchor_inode: metadata.ino(),
+        anchor_ctime: Some(anchor_ctime(&metadata)),
+        daemon_namespace: None,
+        record: record.clone(),
+    };
+    let mut json = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(format!("{name}.json")))
+        .expect("evidence");
+    json.write_all(&serde_json::to_vec(&evidence).expect("evidence bytes"))
+        .expect("evidence write");
+    Witness {
+        directory: directory.into(),
+        name,
+        activation_id: evidence.activation_id,
+        record,
+        _anchor: anchor,
+        anchor_ctime: anchor_ctime(&metadata),
+        disqualified: Mutex::new(false),
+        unknown_escape: std::sync::atomic::AtomicBool::new(false),
+        escape_tick: std::sync::atomic::AtomicU64::new(u64::MAX),
+    }
+}
+
+#[test]
+fn poisoned_diagnostic_preserves_first_purpose_and_declared_raw_escape_semantics() {
+    let fixture = Fixture::new();
+    let directory = fixture.dir.with_file_name("v2");
+    let witness = diagnostic_witness(&directory, fixture.foreground());
+    let path = directory.join(format!("{}.poisoned", witness.name));
+    witness
+        .observe_launch(true, false, "mediated diagnostic test")
+        .expect("mediated");
+    assert!(!path.exists());
+    witness
+        .observe_launch(false, true, "first declared raw diagnostic test")
+        .expect("declared raw");
+    assert!(!witness
+        .unknown_escape
+        .load(std::sync::atomic::Ordering::Acquire));
+    let first = std::fs::read(&path).expect("first diagnostic");
+    let diagnostic = read_poisoned_diagnostic(&path).expect("private diagnostic");
+    assert_eq!(diagnostic.purpose, "first declared raw diagnostic test");
+    assert!(diagnostic.boot_tick <= crate::source_custody::boot_tick());
+    assert_eq!(
+        std::fs::read(directory.join(format!("{}.anchor", witness.name))).expect("anchor")[0],
+        b'!'
+    );
+    witness
+        .observe_launch(false, false, "later unknown diagnostic test")
+        .expect("unknown raw");
+    assert!(witness
+        .unknown_escape
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        std::fs::read(path).expect("immutable first diagnostic"),
+        first
+    );
+}
+
+#[test]
+fn poisoned_diagnostic_bounds_utf8_json_and_refuses_symlink_substitution() {
+    const PURPOSE: &str = concat!(
+        "quoted \"purpose\" \\ newline\n snowman ☃☃☃☃☃☃☃☃☃☃☃☃☃☃☃☃ ",
+        "quoted \"purpose\" \\ newline\n snowman ☃☃☃☃☃☃☃☃☃☃☃☃☃☃☃☃ ",
+        "quoted \"purpose\" \\ newline\n snowman ☃☃☃☃☃☃☃☃☃☃☃☃☃☃☃☃ ",
+    );
+    let fixture = Fixture::new();
+    let directory = fixture.dir.with_file_name("v2");
+    let witness = diagnostic_witness(&directory, fixture.foreground());
+    witness
+        .observe_launch(false, false, PURPOSE)
+        .expect("bounded diagnostic");
+    let path = directory.join(format!("{}.poisoned", witness.name));
+    let bytes = std::fs::read(&path).expect("diagnostic bytes");
+    assert!(bytes.len() <= 128);
+    let diagnostic = read_poisoned_diagnostic(&path).expect("escaped UTF-8 JSON");
+    assert!(PURPOSE.starts_with(&diagnostic.purpose));
+    assert!(!diagnostic.purpose.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+    assert_eq!(value.as_object().expect("object").len(), 2);
+    let metadata = path.metadata().expect("private metadata");
+    assert_eq!(metadata.mode() & 0o777, 0o600);
+    assert_eq!(metadata.nlink(), 1);
+
+    let other = diagnostic_witness(&directory, fixture.foreground());
+    let other_sidecar = directory.join(format!("{}.poisoned", other.name));
+    let target = directory.join("unrelated-diagnostic-target");
+    std::fs::write(&target, b"must remain untouched").expect("target");
+    std::os::unix::fs::symlink(&target, &other_sidecar).expect("substituted sidecar");
+    let anchor = directory.join(format!("{}.anchor", other.name));
+    let before = std::fs::read(&anchor).expect("unchanged anchor");
+    assert!(other
+        .observe_launch(false, false, "symlink diagnostic test")
+        .is_err());
+    assert_eq!(std::fs::read(anchor).expect("anchor after refusal"), before);
+    assert_eq!(
+        std::fs::read(target).expect("target after refusal"),
+        b"must remain untouched"
+    );
+}
+
+#[test]
+fn completion_removes_exact_owners_poisoned_and_lifetime_sidecars_only() {
+    let fixture = Fixture::new();
+    let directory = fixture.dir.with_file_name("v2");
+    let first = diagnostic_witness(&directory, fixture.foreground());
+    let other = diagnostic_witness(&directory, fixture.foreground());
+    for witness in [&first, &other] {
+        witness
+            .observe_launch(false, false, "owner cleanup diagnostic test")
+            .expect("poisoning");
+        std::fs::write(
+            directory.join(format!("{}.lifetime", witness.name)),
+            b"future lifetime fixture",
+        )
+        .expect("future lifetime sidecar");
+    }
+    let other_diagnostic = std::fs::read(directory.join(format!("{}.poisoned", other.name)))
+        .expect("other diagnostic");
+    let snapshot = poisoned_witnesses(&directory).expect("two poisoned owners");
+    assert_eq!(snapshot.total, 2);
+    assert_eq!(snapshot.witnesses.len(), 2);
+    assert!(snapshot
+        .witnesses
+        .iter()
+        .all(|owner| owner.boot_tick.is_some()));
+    assert!(snapshot
+        .witnesses
+        .iter()
+        .all(|owner| owner.family == "foreground"));
+    complete_at(&directory, &first.record).expect("exact owner completion");
+    for suffix in ["json", "anchor", "poisoned", "lifetime"] {
+        assert!(!directory.join(format!("{}.{suffix}", first.name)).exists());
+        assert!(directory.join(format!("{}.{suffix}", other.name)).exists());
+    }
+    assert_eq!(
+        std::fs::read(directory.join(format!("{}.poisoned", other.name)))
+            .expect("preserved other owner"),
+        other_diagnostic
+    );
+    let snapshot = poisoned_witnesses(&directory).expect("remaining exact owner");
+    assert_eq!(snapshot.total, 1);
+    assert_eq!(
+        snapshot.witnesses[0].owner_id,
+        other.name.strip_prefix("foreground-").expect("owner id")
+    );
+    let value = serde_json::to_value(snapshot).expect("bounded diagnostic response");
+    assert!(!value
+        .to_string()
+        .contains(directory.to_str().expect("fixture directory")));
+    std::fs::write(directory.join("orphan.poisoned"), b"malformed").expect("malformed orphan");
+    assert!(
+        poisoned_witnesses(&directory).is_err(),
+        "unreadable sidecar must not look healthy"
+    );
+}
+
+#[test]
+fn poisoned_snapshot_bounds_rows_and_refuses_mismatched_owner_evidence() {
+    let fixture = Fixture::new();
+    let directory = fixture.dir.with_file_name("v2");
+    let mut evidence_path = None;
+    for _ in 0..33 {
+        let witness = diagnostic_witness(&directory, fixture.foreground());
+        witness
+            .record_poisoned("bounded snapshot test")
+            .expect("diagnostic");
+        evidence_path = Some(directory.join(format!("{}.json", witness.name)));
+    }
+    let snapshot = poisoned_witnesses(&directory).expect("bounded snapshot");
+    assert_eq!(snapshot.total, 33);
+    assert_eq!(snapshot.witnesses.len(), 32);
+    let evidence_path = evidence_path.expect("owner evidence");
+    let mut evidence: Evidence = read_private_json(&evidence_path).expect("exact evidence");
+    let Record::Foreground { token } = &mut evidence.record else {
+        panic!("foreground fixture");
+    };
+    token.owner.owner_id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(
+        &evidence_path,
+        serde_json::to_vec(&evidence).expect("substituted identity"),
+    )
+    .expect("mismatched evidence");
+    assert!(
+        poisoned_witnesses(&directory).is_err(),
+        "sidecar must match its exact evidence owner"
+    );
+}
+
+#[test]
+fn older_invalidated_witness_without_diagnostic_is_counted_with_unknown_purpose() {
+    use std::os::unix::fs::FileExt;
+    let fixture = Fixture::new();
+    let directory = fixture.dir.with_file_name("v2");
+    let old = diagnostic_witness(&directory, fixture.foreground());
+    let clean = diagnostic_witness(&directory, fixture.foreground());
+    // Simulate a pre-B0 raw launch: it altered the exact existing anchor but
+    // had no poisoning-purpose sidecar to write.
+    old._anchor.write_all_at(b"!", 0).expect("old invalidation");
+    old._anchor.sync_all().expect("durable old invalidation");
+    assert!(!directory.join(format!("{}.poisoned", old.name)).exists());
+    let snapshot = poisoned_witnesses(&directory).expect("older poisoned witness");
+    assert_eq!(snapshot.total, 1);
+    assert_eq!(snapshot.witnesses.len(), 1);
+    let witness = &snapshot.witnesses[0];
+    assert_eq!(witness.family, "foreground");
+    assert_eq!(
+        witness.owner_id,
+        old.name.strip_prefix("foreground-").expect("old owner")
+    );
+    assert_eq!(
+        witness.purpose,
+        "Unknown (older witness; no launch diagnostic)"
+    );
+    assert_eq!(witness.boot_tick, None);
+    assert!(
+        serde_json::to_value(&snapshot).expect("diagnostic JSON")["witnesses"][0]["boot_tick"]
+            .is_null()
+    );
+
+    // The older marker disqualifies an otherwise pristine anchor as replay
+    // already requires, and does not invent a launch timestamp either.
+    std::fs::write(
+        directory.join(format!("{}.unmediated", clean.name)),
+        b"legacy",
+    )
+    .expect("legacy disqualification");
+    let snapshot = poisoned_witnesses(&directory).expect("legacy disqualification witnesses");
+    assert_eq!(snapshot.total, 2);
+    assert!(snapshot
+        .witnesses
+        .iter()
+        .all(|owner| owner.boot_tick.is_none()));
+    std::fs::remove_file(directory.join(format!("{}.anchor", old.name)))
+        .expect("concurrent cleanup");
+    assert!(
+        poisoned_witnesses(&directory).is_err(),
+        "missing anchor must not look healthy"
+    );
 }

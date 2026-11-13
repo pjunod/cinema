@@ -3584,28 +3584,16 @@ async fn run_subtitle_source_pass_owned(
     let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
-    {
+    let descriptors = {
         use std::os::fd::AsRawFd;
-        let source_fd = source.as_raw_fd();
-        unsafe {
-            command.pre_exec(move || {
-                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::dup2(duplicate, 3) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        if input_url.is_some() {
+            crate::producer_spawn::Descriptors::default()
+        } else {
+            crate::producer_spawn::Descriptors::from_mappings(&[(source.as_raw_fd(), 3)], None)
         }
-    }
+    };
+    #[cfg(not(unix))]
+    let descriptors = crate::producer_spawn::Descriptors::default();
     #[cfg(windows)]
     if input_url.is_none() {
         crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
@@ -3619,14 +3607,29 @@ async fn run_subtitle_source_pass_owned(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::background("subtitle source extraction"),
-    )
-    .map_err(|_| AnalysisResolutionError::Retry {
-        code: "source_process_failed",
-        charge_attempt: true,
-    })?;
+    let stdio = crate::producer_spawn::ChildStdios {
+        stdin: crate::producer_spawn::ChildStdio::Null,
+        stdout: crate::producer_spawn::ChildStdio::Null,
+        stderr: crate::producer_spawn::ChildStdio::Piped,
+    };
+    let manifest =
+        descriptors
+            .prepare(&mut command, stdio)
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_process_failed",
+                charge_attempt: true,
+            })?;
+    let (mut child, _child_job) =
+        crate::producer_spawn::with_manifest(&manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(
+                command,
+                crate::process_control::ChildWork::background("subtitle source extraction"),
+            )
+        })
+        .map_err(|_| AnalysisResolutionError::Retry {
+            code: "source_process_failed",
+            charge_attempt: true,
+        })?;
     let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
         code: "source_process_failed",
         charge_attempt: true,

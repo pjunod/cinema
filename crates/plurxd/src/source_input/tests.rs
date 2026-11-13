@@ -580,3 +580,34 @@ async fn verified_seek_bootstrap_unlocks_only_its_fresh_primary_input() {
     other.close_and_wait().await.expect("reader closes");
     census.close_and_wait().await.expect("reader closes");
 }
+
+#[tokio::test]
+async fn broker_verification_is_revoked_on_join_cleanup_and_drop() {
+    use plurx_core::process::source_lifetime::is_registered_broker;
+    let (input, _source, _budget) = input(b"broker lifetime", 16, None).await;
+    let url = input.url().to_owned();
+    assert!(is_registered_broker(&url));
+    input.close_and_wait().await.expect("joined input");
+    assert!(
+        !is_registered_broker(&url),
+        "joined listener cannot verify a later launch"
+    );
+
+    let (input, _source, _budget) = self::input(b"pending cleanup", 16, None).await;
+    let url = input.url().to_owned();
+    assert!(is_registered_broker(&url));
+    input.cleanup_pending();
+    assert!(
+        !is_registered_broker(&url),
+        "pending cleanup revokes before cancellation"
+    );
+
+    let (input, _source, _budget) = self::input(b"dropped input", 16, None).await;
+    let url = input.url().to_owned();
+    assert!(is_registered_broker(&url));
+    drop(input);
+    assert!(
+        !is_registered_broker(&url),
+        "Drop cannot leave a verifying bearer behind"
+    );
+}

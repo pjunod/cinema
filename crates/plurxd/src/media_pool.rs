@@ -2051,7 +2051,7 @@ fn spawn_library_root_probe(
     // to a regular file fails instead of being mistaken for an empty readable
     // directory by `find -H`.
     let directory = root.join(".");
-    let mut command = tokio::process::Command::new("find");
+    let mut command = tokio::process::Command::new("/usr/bin/find");
     command
         .arg("-H")
         .arg(directory)
@@ -2060,10 +2060,16 @@ fn spawn_library_root_probe(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    crate::process_control::spawn_job_owned(
+    let manifest = plurx_core::process::source_lifetime::prepare_stdio(
         &mut command,
-        crate::process_control::ChildWork::background("library root reachability probe"),
-    )
+        plurx_core::process::source_lifetime::StdioFacts::NULL,
+    )?;
+    let work = crate::process_control::ChildWork::background("library root reachability probe");
+    plurx_core::process::source_lifetime::metadata_only_spawn(|| {
+        plurx_core::process::source_lifetime::with_descriptors(manifest, || {
+            crate::process_control::spawn_job_owned(&mut command, work)
+        })
+    })
 }
 
 async fn fetch_offer(

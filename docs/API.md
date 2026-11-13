@@ -510,6 +510,7 @@ of never storing it.
 | POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
 | GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
+| GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes. Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |

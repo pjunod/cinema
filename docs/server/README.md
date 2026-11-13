@@ -13,6 +13,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 | [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) | P42 physical recovery: same-kernel macOS/Linux reader witnesses, legacy evidence limits, and validation ledger. | open |
 | [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md) | November queue incident, recovered scan requests, cross-type scheduling, Activity completion rates, and remaining acceptance milestones. | open |
 | [STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md](STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md) | Plan: a storage-domain save always succeeds and applies once no live holder or library job depends on the changed keys; Settings shows it pending. | proposed |
+| [PLAYBACK-READER-WITNESS-STATUS.md](PLAYBACK-READER-WITNESS-STATUS.md) | Playback witness ownership, phase execution, census safety findings and remaining qualification. | open |
 | [PLAYBACK-READER-WITNESS-PLAN.md](PLAYBACK-READER-WITNESS-PLAN.md) | Plan: every child launch declares its source access, checked fail-closed at spawn, so playback witnesses stay valid and a daemon restart releases its readers with no host step. | proposed |
 | [HTTPS-IMPLEMENTATION.md](HTTPS-IMPLEMENTATION.md) | Optional public HTTPS, certificate ownership and administration contract; physical acceptance open. | built |
 | [HTTPS-BUILD.md](HTTPS-BUILD.md) | HTTPS implementation built, physical acceptance open; qualification receipts and merge outcome tracked by [promotion PR #1134](http://forge.lan:3000/noirr/plurx/pulls/1134). | built |
