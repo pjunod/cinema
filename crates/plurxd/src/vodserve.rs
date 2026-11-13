@@ -775,7 +775,6 @@ pub struct VodDeliveryInfo {
 pub struct VodStart {
     pub session_id: String,
     pub duration_ms: i64,
-    pub dv_refit_digest: Option<String>,
 }
 
 /// Actual init-verified media and exact catalog provenance for one parent.

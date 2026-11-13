@@ -51,6 +51,16 @@ static void require(bool condition, const char *message) {
   }
 }
 
+// Metadata admission is a content refusal in the CPU F+ job. Allocation
+// and other runtime failures continue to use require() and exit 1.
+static int dv_content_refusal_exit = EXIT_FAILURE;
+static void require_content(bool condition, const char *message) {
+  if (!condition) {
+    fprintf(stderr, "Probe failed: %s\n", message);
+    dv_exit(dv_content_refusal_exit);
+  }
+}
+
 #include "display_target.h"
 
 // Resample only the already reconstructed and master-clipped native RGB/PQ
@@ -94,7 +104,7 @@ static void probe_log(void *priv, enum pl_log_level level,
 static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
                            struct pl_dovi_metadata *out, bool observations,
                            int picture_width, int picture_height) {
-  require(bytes && size > 0 && size <= 65536,
+  require_content(bytes && size > 0 && size <= 65536,
           "bounded fresh decoder-attached RPU bytes");
   DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(bytes, size);
   require(rpu != NULL, "RPU parser allocation");
@@ -105,11 +115,11 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     dv_exit(EXIT_FAILURE);
   }
   const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
-  require(header != NULL, "parsed RPU header");
-  require(header->guessed_profile == 7 && header->el_type &&
+  require_content(header != NULL, "parsed RPU header");
+  require_content(header->guessed_profile == 7 && header->el_type &&
               strcmp(header->el_type, "FEL") == 0,
           frame ? "fresh P7 FEL profile" : "synthetic P7 FEL profile");
-  require(!header->disable_residual_flag && !header->use_prev_vdr_rpu_flag &&
+  require_content(!header->disable_residual_flag && !header->use_prev_vdr_rpu_flag &&
               header->vdr_dm_metadata_present_flag &&
               header->coefficient_data_type == 0 &&
               header->coefficient_log2_denom == 23 &&
@@ -117,7 +127,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
               header->el_bit_depth_minus8 == 2 &&
               header->vdr_bit_depth_minus8 == 4,
           frame ? "bounded fresh P7 header subset" : "bounded fresh P7 control header subset");
-  require(header->rpu_type == 2 && header->rpu_format == 18 &&
+  require_content(header->rpu_type == 2 && header->rpu_format == 18 &&
               header->vdr_rpu_profile == 1 && header->vdr_rpu_level == 0 &&
               header->vdr_seq_info_present_flag &&
               !header->chroma_resampling_explicit_filter_flag &&
@@ -126,21 +136,21 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
           "unsupported normalization/explicit filter header");
   const DoviRpuDataMapping *mapping = dovi_rpu_get_data_mapping(rpu);
   const DoviVdrDmData *dm = dovi_rpu_get_vdr_dm_data(rpu);
-  require(!header->bl_video_full_range_flag,
+  require_content(!header->bl_video_full_range_flag,
           "unsupported full-range base metadata");
-  require(!header->spatial_resampling_filter_flag &&
+  require_content(!header->spatial_resampling_filter_flag &&
               header->el_spatial_resampling_filter_flag,
           "unsupported spatial resampling flags");
-  require(mapping && mapping->num_x_partitions_minus1 == 0 &&
+  require_content(mapping && mapping->num_x_partitions_minus1 == 0 &&
               mapping->num_y_partitions_minus1 == 0,
           "unsupported mapping partitions");
-  require(dm && dm->signal_bit_depth == 12 && dm->signal_color_space == 0 &&
+  require_content(dm && dm->signal_bit_depth == 12 && dm->signal_color_space == 0 &&
               dm->signal_chroma_format == 0,
           "unsupported reconstructed signal representation");
-  require(mapping && dm && mapping->nlq && mapping->nlq_method_idc == 0 &&
+  require_content(mapping && dm && mapping->nlq && mapping->nlq_method_idc == 0 &&
               mapping->nlq_num_pivots_minus2 == 0,
           "LINEAR_DZ mapping and DM metadata");
-  require(dm->signal_eotf == 65535 && dm->signal_full_range_flag == 1,
+  require_content(dm->signal_eotf == 65535 && dm->signal_full_range_flag == 1,
           "PQ full-range reconstructed control representation");
   dv_target_metadata(dm);
   // Without a display target this master-domain reconstruction maps no display:
@@ -150,14 +160,14 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
   // L255) is carried unapplied by this master reconstruction and exported in
   // the original RPU: any version is accepted.
   if (dm->dm_data.level5)
-    require((unsigned)dm->dm_data.level5->active_area_left_offset +
+    require_content((unsigned)dm->dm_data.level5->active_area_left_offset +
                     dm->dm_data.level5->active_area_right_offset <
                 (unsigned)picture_width &&
                 (unsigned)dm->dm_data.level5->active_area_top_offset +
                     dm->dm_data.level5->active_area_bottom_offset <
                 (unsigned)picture_height,
             "invalid active area metadata");
-  require(dm->signal_eotf_param0 == 0 && dm->signal_eotf_param1 == 0 &&
+  require_content(dm->signal_eotf_param0 == 0 && dm->signal_eotf_param1 == 0 &&
               dm->signal_eotf_param2 == 0,
           "unsupported EOTF parameters");
   struct dv_decoded_mapping decoded = {0};
@@ -167,7 +177,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     if (!frame) {
       const DoviReshapingCurve *curve = &mapping->curves[component];
       const DoviPolynomialCurve *poly = curve->polynomial;
-      require(curve->mapping_idc == 0 && curve->pivots.len == 2 &&
+      require_content(curve->mapping_idc == 0 && curve->pivots.len == 2 &&
                   curve->pivots.data && curve->pivots.data[0] == 0 &&
                   curve->pivots.data[1] == 1023 && poly &&
                   poly->poly_order_minus1.len == 1 &&
@@ -181,7 +191,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
               "single identity polynomial segment");
       const int64_t *integer = poly->poly_coef_int.list[0]->data;
       const uint64_t *fraction = poly->poly_coef.list[0]->data;
-      require(integer && fraction && integer[0] == 0 && integer[1] == 1 &&
+      require_content(integer && fraction && integer[0] == 0 && integer[1] == 1 &&
                   fraction[0] == 0 && fraction[1] == 0,
               "identity polynomial coefficient control");
       out->comp[component].num_pivots = 2;
@@ -190,13 +200,13 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
           integer[1] + fraction[1] / denominator;
     }
     const DoviRpuDataNlq *nlq = mapping->nlq;
-    require(nlq->nlq_offset[component] <= 1023 &&
+    require_content(nlq->nlq_offset[component] <= 1023 &&
                 nlq->linear_deadzone_slope_int[component] == 0 &&
                 nlq->linear_deadzone_threshold_int[component] == 0 &&
                 nlq->linear_deadzone_slope[component] < (1ULL << 23) &&
                 nlq->linear_deadzone_threshold[component] < (1ULL << 23),
             "bounded fractional NLQ parameters");
-    require(nlq_clip_is_nonbinding(nlq->nlq_offset[component],
+    require_content(nlq_clip_is_nonbinding(nlq->nlq_offset[component],
                                    nlq->linear_deadzone_slope[component],
                                    nlq->linear_deadzone_threshold[component],
                                    nlq->vdr_in_max_int[component],
@@ -215,14 +225,14 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     }
   }
   if (frame) {
-    require(dv_map_decoded_metadata(frame, 7, true, &decoded),
+    require_content(dv_map_decoded_metadata(frame, 7, true, &decoded),
             "bounded decoder-derived FEL metadata mapping");
     *out = decoded.dovi;
     for (int component = 0; component < 3; component++) {
       const DoviRpuDataNlq *nlq = mapping->nlq;
       const AVDOVINLQParams *actual =
           &av_dovi_get_mapping(decoded.source)->nlq[component];
-      require(actual->nlq_offset == nlq->nlq_offset[component] &&
+      require_content(actual->nlq_offset == nlq->nlq_offset[component] &&
                   actual->linear_deadzone_slope == nlq->linear_deadzone_slope[component] &&
                   actual->linear_deadzone_threshold == nlq->linear_deadzone_threshold[component] &&
                   actual->vdr_in_max == (nlq->vdr_in_max_int[component] << 23) +
@@ -254,19 +264,19 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     const AVDOVIColorMetadata *color = av_dovi_get_color(decoded.source);
     for (int i = 0; i < 3; i++) {
       AVRational offset = color->ycc_to_rgb_offset[i];
-      require((int64_t)offset.num * (INT64_C(1) << 28) ==
+      require_content((int64_t)offset.num * (INT64_C(1) << 28) ==
                   (int64_t)offsets[i] * offset.den,
               "raw and decoded FEL color offsets agree");
       for (int j = 0; j < 3; j++) {
         AVRational n = color->ycc_to_rgb_matrix[3 * i + j];
         AVRational l = color->rgb_to_lms_matrix[3 * i + j];
-        require((int64_t)n.num * 8192 == (int64_t)nonlinear[3 * i + j] * n.den &&
+        require_content((int64_t)n.num * 8192 == (int64_t)nonlinear[3 * i + j] * n.den &&
                     (int64_t)l.num * 16384 == (int64_t)linear[3 * i + j] * l.den,
                 "raw and decoded FEL color matrices agree");
       }
     }
   } else {
-    require(memcmp(nonlinear, expected_nonlinear, sizeof(nonlinear)) == 0 &&
+    require_content(memcmp(nonlinear, expected_nonlinear, sizeof(nonlinear)) == 0 &&
                 memcmp(linear, expected_linear, sizeof(linear)) == 0 &&
                 memcmp(offsets, expected_offsets, sizeof(offsets)) == 0,
             "unsupported source color matrix/offset subset");

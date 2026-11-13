@@ -231,9 +231,9 @@ static void refit_frame(const AVFrame *bl, const AVFrame *el, int64_t ordinal) {
   // The playback path's admission, refusals included; it prints nothing here.
   struct pl_dovi_metadata admitted;
   // Its refusals are refusals of this RPU's content.
-  refusal_exit = REFIT_EXIT_CONTENT;
+  dv_content_refusal_exit = REFIT_EXIT_CONTENT;
   map_fel_rpu(bl, nalu, raw->size + 2, &admitted, false, bl->width, bl->height);
-  refusal_exit = 1;
+  dv_content_refusal_exit = EXIT_FAILURE;
   const AVFrameSideData *side = av_frame_get_side_data(bl, AV_FRAME_DATA_DOVI_METADATA);
   refit_content(side != NULL, "decoder-derived FEL metadata");
   const AVDOVIMetadata *data = (const void *)side->data;

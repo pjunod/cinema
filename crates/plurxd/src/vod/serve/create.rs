@@ -1889,7 +1889,6 @@ impl VodServe {
         Ok(VodStart {
             session_id,
             duration_ms,
-            dv_refit_digest: rendition.recipe.video.dolby_vision_refit().map(hex::encode),
         })
     }
 }
@@ -2609,7 +2608,6 @@ impl VodServe {
         Ok(VodStart {
             session_id,
             duration_ms,
-            dv_refit_digest: rendition.recipe.video.dolby_vision_refit().map(hex::encode),
         })
     }
 

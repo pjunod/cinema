@@ -474,7 +474,6 @@ impl VodServe {
             start: VodStart {
                 session_id: session_id.to_owned(),
                 duration_ms: plan_duration_ms(&session.live_rendition()?.plan),
-                dv_refit_digest: session
                     .live_rendition()?
                     .recipe
                     .video
