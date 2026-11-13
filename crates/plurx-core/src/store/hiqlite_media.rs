@@ -3836,6 +3836,27 @@ impl MediaStore for HiqliteAuthStore {
             .collect())
     }
 
+    async fn library_file_paths_under(
+        &self,
+        library_id: i64,
+        folder: &std::path::Path,
+    ) -> Result<Vec<(i64, PathBuf)>, StoreError> {
+        let folder = folder.to_string_lossy().trim_end_matches('/').to_owned();
+        Ok(self
+            .client()
+            .query_consistent_map::<PathRow, _>(
+                "SELECT f.id AS id, f.path AS path FROM files f \
+                 JOIN items i ON i.id = f.item_id WHERE i.library_id = $1 \
+                 AND (f.path = $2 OR substr(f.path, 1, length($2) + 1) = $2 || '/')",
+                params!(library_id, folder),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| (row.id, PathBuf::from(row.path)))
+            .collect())
+    }
+
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,

@@ -132,6 +132,35 @@ retried on the schedule and surfaced after 30 min. The delivery log row shows
 `visible → plurx item <id>` with the real item id, or the exact `waiting_on`
 / skip text from cinema.
 
+#### 4.2.1 Amendment `removed_paths` (cinema side shipped; Curator side open)
+
+Two further optional request fields serve a Re-match, where a media file moves
+from one folder to another under the same library root:
+
+- `"removed_paths": ["<abs path>", …]` (at most 64, each under `path`) — files,
+  or folders once emptied and removed, that no longer exist. A request that
+  sends any is **probe-only**: cinema probes exactly `expected_files` and
+  `removed_paths`, walks nothing else under `path` (which may be a library root)
+  and admits no full scan. It then reports each removed path in `files` as
+  `gone{item_id,item_ids,item_removed}`, `unknown`, `present{reason}`,
+  `retained{item_id,code,retryable,reason}` or `skipped{reason}`. Removal runs
+  after the expected files are placed, and not at all while one is not `placed`.
+- `"probe_only": true` — the same probe-only mode without removed paths. A
+  probe-only request never shares a pass with one that did not send the flag.
+
+Absence (`ENOENT`, `ENOTDIR`) is the expected answer and never `503
+path_unreadable`; any other error on the chain, an unlistable root, a root that
+lists nothing and is not its own mount point, or a nested mount on another
+filesystem is, and changes nothing. Curator treats `gone`, `unknown` and `present`
+(`exists`, `case_variant`) as satisfied, `retained` with `retryable` as a new
+attempt, and `symlink_in_chain` as a warning. A replay after a newer attempt
+reports `unknown`, which is satisfied. The connection test answers `"features":
+["removed_paths","probe_only"]`; Curator sends the fields only to a cinema that
+lists them, and only after **every** cinema node is upgraded (an older node
+cannot decode the request's sidecar, leaves it pending for a newer one, and
+answers `500` on status reads of it). Wire, states and codes:
+[INTEGRATION.md](../INTEGRATION.md) §1.10, [API.md](../API.md) §6.3.
+
 ### 4.3 Path check at setup
 
 The notifier's **Test** sends the configured library roots (from Settings →
@@ -216,7 +245,7 @@ recommend preserve-and-opt-in over a silent migration.)*
 ### 5.3 Connection test
 
 `POST /api/v1/scan` with `"probe_paths": [...]` and no `path` answers
-`200 {"roots": [...], "visible": [...], "missing": [...]}`; needs
+`200 {"features": [...], "roots": [...], "visible": [...], "missing": [...]}`; needs
 `scan:trigger`. Probe paths are accepted only when each is a configured
 library root or a descendant of one; anything else is reported as
 `outside_roots`, never `stat`ed.

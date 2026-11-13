@@ -15,6 +15,7 @@ pub mod parse;
 pub mod probe;
 mod probe_batch;
 pub mod recordings;
+pub mod removed;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1290,6 +1291,10 @@ pub struct TargetedOptions {
     /// Files probed even when their size and whole-second mtime match the
     /// stored record, compared as canonical paths.
     pub force_probe: HashSet<PathBuf>,
+    /// Probe-only (a request that names removed paths): record exactly these
+    /// canonical files and walk nothing. Each must be under the target; one
+    /// that is not, or is not a file, is left out.
+    pub only: Option<Vec<PathBuf>>,
 }
 
 /// What a targeted scan observed per file but does not keep in its durable
@@ -1381,7 +1386,19 @@ pub async fn scan_path_targeted(
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let mut report = ScanReport::default();
     let walk_started = Instant::now();
-    if target_is_file {
+    if let Some(only) = &options.only {
+        for path in only {
+            if !(path == &canonical || path.starts_with(&canonical)) {
+                continue;
+            }
+            let is_file = tokio::fs::metadata(path)
+                .await
+                .is_ok_and(|meta| meta.is_file());
+            if is_file && wanted_file(library, path) && !candidates.contains(path) {
+                candidates.push(path.clone());
+            }
+        }
+    } else if target_is_file {
         if wanted_file(library, &canonical) {
             candidates.push(canonical.clone());
         }
@@ -1427,7 +1444,7 @@ pub async fn scan_path_targeted(
         .collect();
     detail.canonical_target = canonical.clone();
 
-    if candidates.is_empty() {
+    if candidates.is_empty() && options.only.is_none() {
         report.note(format!(
             "no media files found under `{}` — the path exists but holds nothing \
              recognized ({})",
