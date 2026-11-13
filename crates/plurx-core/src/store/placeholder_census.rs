@@ -227,6 +227,7 @@ const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
         include_str!("fragment_index_cluster.rs"),
     ),
     ("mod.rs", include_str!("mod.rs")),
+    ("offload.rs", include_str!("offload.rs")),
     ("publication.rs", include_str!("publication.rs")),
     ("renditionplan.rs", include_str!("renditionplan.rs")),
     ("telemetry.rs", include_str!("telemetry.rs")),
@@ -1258,9 +1259,19 @@ fn completed_library_path_publication(
     let open = start + call.end() - 1;
     let (arguments, close) = parenthesis_arguments(source, is_code, open + 1);
     if close >= end
-        || arguments.len() != 3
-        || arguments[0].trim() != "lease"
-        || arguments[1].trim() != "replacement"
+        || arguments.len() != 4
+        || !arguments[0]
+            .trim()
+            .strip_prefix('"')
+            .and_then(|label| label.strip_suffix('"'))
+            .is_some_and(|label| {
+                !label.is_empty()
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+        || arguments[1].trim() != "lease"
+        || arguments[2].trim() != "replacement"
         || source[close + 1..end]
             .split_whitespace()
             .collect::<String>()
@@ -1268,13 +1279,20 @@ fn completed_library_path_publication(
     {
         return false;
     }
-    let vector = arguments[2].trim();
+    let vector = arguments[3].trim();
     if !vector.starts_with("vec![") {
         return false;
     }
-    let vector_start =
-        open + 1 + arguments[0].len() + 1 + arguments[1].len() + 1 + arguments[2].len()
-            - arguments[2].trim_start().len();
+    let vector_start = open
+        + 1
+        + arguments[0].len()
+        + 1
+        + arguments[1].len()
+        + 1
+        + arguments[2].len()
+        + 1
+        + arguments[3].len()
+        - arguments[3].trim_start().len();
     let (entries, vector_close) = delimited_arguments(source, is_code, vector_start + 5, b']');
     if entries.is_empty()
         || vector_close >= close
@@ -3003,7 +3021,7 @@ mod scanner {
     #[test]
     fn completed_atomic_publication_does_not_own_later_path_reads() {
         let source = r#"fn query() {
-            let results = self.atomic_publication(lease, replacement, vec![
+            let results = self.atomic_publication("fixture", lease, replacement, vec![
                 (format!("INSERT INTO roots SELECT $1, $2 WHERE $3 AND {}",
                     crate::store::library_paths_are_sql("$1", "$4")),
                     params!(library, fingerprint, establish, paths)),
@@ -3031,11 +3049,11 @@ mod scanner {
     #[test]
     fn atomic_publication_completion_refuses_helpers_outside_modeled_sql() {
         for expression in [
-            r#"self.atomic_publication(crate::store::library_paths_are_sql("$1", "$2"), replacement, vec![("SELECT $1".to_owned(), params!(library))]).await?"#,
-            r#"self.atomic_publication(lease, replacement, vec![("SELECT $1".to_owned(), params!(crate::store::library_paths_are_sql("$1", "$2")))]).await?"#,
-            r#"self.atomic_publication(lease, replacement, vec![(format!("not SQL {}", crate::store::library_paths_are_sql("$1", "$2")), params!(library, paths))]).await?"#,
-            r#"other.atomic_publication(lease, replacement, vec![(format!("SELECT {}", crate::store::library_paths_are_sql("$1", "$2")), params!(library, paths))]).await?"#,
-            r#"self.atomic_publication(lease, replacement, vec![(wrapper(format!("SELECT {}", crate::store::library_paths_are_sql("$1", "$2"))), params!(library, paths))]).await?"#,
+            r#"self.atomic_publication("fixture", crate::store::library_paths_are_sql("$1", "$2"), replacement, vec![("SELECT $1".to_owned(), params!(library))]).await?"#,
+            r#"self.atomic_publication("fixture", lease, replacement, vec![("SELECT $1".to_owned(), params!(crate::store::library_paths_are_sql("$1", "$2")))]).await?"#,
+            r#"self.atomic_publication("fixture", lease, replacement, vec![(format!("not SQL {}", crate::store::library_paths_are_sql("$1", "$2")), params!(library, paths))]).await?"#,
+            r#"other.atomic_publication("fixture", lease, replacement, vec![(format!("SELECT {}", crate::store::library_paths_are_sql("$1", "$2")), params!(library, paths))]).await?"#,
+            r#"self.atomic_publication("fixture", lease, replacement, vec![(wrapper(format!("SELECT {}", crate::store::library_paths_are_sql("$1", "$2"))), params!(library, paths))]).await?"#,
         ] {
             let source = format!(
                 r#"fn query() {{ let results = {expression}; let rows = self.client().query("SELECT id FROM roots WHERE id = $1"); }}"#
@@ -3065,7 +3083,7 @@ mod scanner {
     #[test]
     fn atomic_publication_completion_refuses_dynamic_path_placeholders() {
         let source = r#"fn query() {
-            let results = self.atomic_publication(lease, replacement, vec![
+            let results = self.atomic_publication("fixture", lease, replacement, vec![
                 (format!("SELECT {}", crate::store::library_paths_are_sql(slot, "$2")), params!(library, paths)),
             ]).await?;
             let rows = self.client().query("SELECT id FROM roots WHERE id = $1");

@@ -22,6 +22,11 @@
 //! unknown fields) and leaves the job to a node that understands it, instead
 //! of walking the request's common parent as a plain targeted scan.
 //!
+//! **Offloaded paths** (contract amendment `offload`) are removed paths whose
+//! titles cinema keeps: stored as `{"offloaded_path": "…"}` entries, a form an
+//! older binary refuses exactly as it refuses `removed_path`, so an older node
+//! never turns an offload into a delete of the title and its watch history.
+//!
 //! **What an older node does with such a row** (verified in
 //! `process_library_requests`): it reads the sidecar with
 //! `scan_request_v2(id)?`, the decode fails, and that error ends the whole
@@ -106,6 +111,19 @@ pub enum PlacedReport {
         item_ids: Vec<i64>,
         item_removed: bool,
     },
+    /// An offloaded path: absent on disk, its file records are gone, and the
+    /// item(s) stay. `item_id` is the item of the first file removed;
+    /// `item_ids` every distinct item. `offloaded_items` counts those that
+    /// were left with no files and now carry `offloaded_at` (an item with
+    /// another copy elsewhere keeps its remaining file and stays on disk).
+    Offloaded {
+        path: String,
+        item_id: i64,
+        #[serde(default)]
+        item_ids: Vec<i64>,
+        #[serde(default)]
+        offloaded_items: u64,
+    },
     /// A removed path that is absent and that plurx never had.
     Unknown { path: String },
     /// A removed path that still exists; nothing was removed. `reason` says
@@ -171,11 +189,19 @@ pub enum RetainedCode {
     ExpectedNotPlaced,
     /// The chain could not be re-read just before removal. Retryable.
     ChainUnreadable,
+    /// An offload emptied the library root on its parent's own filesystem,
+    /// which this node cannot tell from an unmounted share, so it removed
+    /// nothing. Lasting rather than `path_unreadable`: sending it again
+    /// changes nothing until a full scan or a new placement runs.
+    RootEmpty,
 }
 
 impl RetainedCode {
     pub const fn retryable(self) -> bool {
-        !matches!(self, Self::RootIdentityMismatch | Self::PruneBound)
+        !matches!(
+            self,
+            Self::RootIdentityMismatch | Self::PruneBound | Self::RootEmpty
+        )
     }
 }
 
@@ -186,6 +212,7 @@ impl PlacedReport {
             | Self::Skipped { path, .. }
             | Self::Missing { path }
             | Self::Gone { path, .. }
+            | Self::Offloaded { path, .. }
             | Self::Unknown { path }
             | Self::Present { path, .. }
             | Self::Retained { path, .. } => path,
@@ -200,7 +227,15 @@ impl PlacedReport {
 enum StoredPath {
     Expected(ExpectedFile),
     Removed(RemovedPath),
+    Offloaded(OffloadedPath),
     ProbeOnly(ProbeOnlyMarker),
+}
+
+/// A path Curator offloaded: its files go, its item stays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OffloadedPath {
+    offloaded_path: String,
 }
 
 /// The explicit `probe_only` flag, stored as an entry an older binary's
@@ -227,6 +262,11 @@ fn stored_paths(seed: &ScanRequestV2Seed) -> Vec<StoredPath> {
                 removed_path: path.clone(),
             })
         }))
+        .chain(seed.offloaded_paths.iter().map(|path| {
+            StoredPath::Offloaded(OffloadedPath {
+                offloaded_path: path.clone(),
+            })
+        }))
         .chain(
             seed.probe_only
                 .then_some(StoredPath::ProbeOnly(ProbeOnlyMarker { probe_only: true })),
@@ -249,6 +289,10 @@ pub struct ScanRequestV2Seed {
     /// its expected and removed paths and walks nothing else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_paths: Vec<String>,
+    /// Like `removed_paths`, but the title is kept: the files' records go, the
+    /// item stays with `offloaded_at` set once it has no files left.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offloaded_paths: Vec<String>,
     /// Explicit probe-only: record exactly the expected files and walk
     /// nothing, never sharing a pass with a request that did not ask for it.
     /// A request with removed paths is probe-only whatever this says.
@@ -259,7 +303,7 @@ pub struct ScanRequestV2Seed {
 impl ScanRequestV2Seed {
     /// Whether the request is probe-only, asked for or implied.
     pub fn is_probe_only(&self) -> bool {
-        self.probe_only || !self.removed_paths.is_empty()
+        self.probe_only || !self.removed_paths.is_empty() || !self.offloaded_paths.is_empty()
     }
 
     /// The `scan_request_v2` object of the enqueue command. Its
@@ -318,6 +362,23 @@ impl ScanRequestV2Seed {
         {
             return invalid("removed_paths need a path of at most 4096 non-control bytes");
         }
+        if self.offloaded_paths.len() > MAX_REMOVED_PATHS {
+            return invalid("at most 64 offloaded_paths");
+        }
+        if self
+            .offloaded_paths
+            .iter()
+            .any(|path| path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control))
+        {
+            return invalid("offloaded_paths need a path of at most 4096 non-control bytes");
+        }
+        if self
+            .offloaded_paths
+            .iter()
+            .any(|path| self.removed_paths.contains(path))
+        {
+            return invalid("a path is either removed or offloaded, not both");
+        }
         if encode(&stored_paths(self))?.len() > MAX_EXPECTED_JSON_BYTES {
             return invalid("expected_files and removed_paths exceed 16 KiB together");
         }
@@ -336,8 +397,11 @@ pub struct ScanRequestV2 {
     /// See [`ScanRequestV2Seed::removed_paths`].
     #[serde(default)]
     pub removed_paths: Vec<String>,
-    /// See [`ScanRequestV2Seed::probe_only`]; true too when removed paths are
-    /// named.
+    /// See [`ScanRequestV2Seed::offloaded_paths`].
+    #[serde(default)]
+    pub offloaded_paths: Vec<String>,
+    /// See [`ScanRequestV2Seed::probe_only`]; true too when removed or
+    /// offloaded paths are named.
     #[serde(default)]
     pub probe_only: bool,
     /// `full_scan:<library>` · `root_unreadable:<path>` · `queue_position:<n>`,
@@ -401,15 +465,17 @@ struct StoredRow {
 impl From<StoredRow> for ScanRequestV2 {
     fn from(row: StoredRow) -> Self {
         let (mut expected_files, mut removed_paths) = (Vec::new(), Vec::new());
+        let mut offloaded_paths = Vec::new();
         let mut probe_only = false;
         for entry in row.expected_files {
             match entry {
                 StoredPath::Expected(file) => expected_files.push(file),
                 StoredPath::Removed(removed) => removed_paths.push(removed.removed_path),
+                StoredPath::Offloaded(off) => offloaded_paths.push(off.offloaded_path),
                 StoredPath::ProbeOnly(marker) => probe_only |= marker.probe_only,
             }
         }
-        probe_only |= !removed_paths.is_empty();
+        probe_only |= !removed_paths.is_empty() || !offloaded_paths.is_empty();
         Self {
             request_id: row.request_id,
             key_id: row.key_id,
@@ -417,6 +483,7 @@ impl From<StoredRow> for ScanRequestV2 {
             request_key: row.request_key,
             expected_files,
             removed_paths,
+            offloaded_paths,
             probe_only,
             waiting_on: row.waiting_on,
             files: row.files,
@@ -642,8 +709,60 @@ mod tests {
                 mtime_ns: 1_794_076_138_123_456_789,
             }],
             removed_paths: Vec::new(),
+            offloaded_paths: Vec::new(),
             probe_only: false,
         }
+    }
+
+    /// Offloaded paths are stored as `{"offloaded_path"}` entries, a form an
+    /// older binary refuses exactly as it refuses `removed_path`, so an older
+    /// node can never turn an offload into a delete of the title.
+    #[test]
+    fn offloaded_paths_are_stored_in_a_form_older_decoders_refuse() {
+        let mut offload = seed(3, "op/2/abc/1");
+        offload.offloaded_paths = vec!["/m/Heat/Heat.mkv".into()];
+        offload.validate().expect("valid");
+        assert!(offload.is_probe_only(), "an offload is probe-only");
+        let value = offload.admission_value().expect("admission");
+        let stored = value["expected_files"].as_array().expect("array");
+        assert_eq!(
+            stored.len(),
+            3,
+            "expected, offloaded path, probe-only marker"
+        );
+        assert_eq!(
+            stored[1],
+            serde_json::json!({"offloaded_path": "/m/Heat/Heat.mkv"})
+        );
+        assert!(
+            serde_json::from_value::<Vec<ExpectedFile>>(value["expected_files"].clone()).is_err(),
+            "an older binary cannot mistake an offloaded path for an expected file"
+        );
+        let decoded: Vec<StoredPath> =
+            serde_json::from_value(value["expected_files"].clone()).expect("decode");
+        assert!(
+            matches!(&decoded[1], StoredPath::Offloaded(o) if o.offloaded_path == "/m/Heat/Heat.mkv")
+        );
+        // A path is removed or offloaded, never both, and the paths are bounded.
+        let mut both = offload.clone();
+        both.removed_paths = both.offloaded_paths.clone();
+        assert!(both.validate().is_err());
+        let mut many = seed(3, "k");
+        many.offloaded_paths = (0..=MAX_REMOVED_PATHS)
+            .map(|i| format!("/m/{i}.mkv"))
+            .collect();
+        assert!(many.validate().is_err());
+        assert_eq!(
+            serde_json::to_value(PlacedReport::Offloaded {
+                path: "/m/Heat/Heat.mkv".into(),
+                item_id: 4,
+                item_ids: vec![4],
+                offloaded_items: 1
+            })
+            .expect("wire"),
+            serde_json::json!({"state": "offloaded", "path": "/m/Heat/Heat.mkv", "item_id": 4,
+                "item_ids": [4], "offloaded_items": 1})
+        );
     }
 
     /// Removed paths share `expected_files_json` with the expected files.

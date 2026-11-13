@@ -1158,21 +1158,42 @@ pub(crate) fn applied_view(
             },
         ),
     };
+    use plurx_core::store::AppliedTable;
     let view_reads = observation.total(ViewSource::View);
     let authority_reads = observation.total(ViewSource::Authority);
     let (reads_status, reads_evidence) = if view_reads == 0 && authority_reads == 0 {
         (
             Unknown,
-            "No view reads since start: settings read through this view once a request or page asks for one; media-session routes join it with E1c.".to_owned(),
+            "No view reads since start: settings and media-session routes read through this view once a request or page asks for one.".to_owned(),
         )
     } else {
+        let per_view = |table: AppliedTable, noun: &str| {
+            format!(
+                "{noun}: {} view, {} quorum",
+                observation.view_total(table, ViewSource::View),
+                observation.view_total(table, ViewSource::Authority)
+            )
+        };
         (
             if view_reads > 0 { Met } else { Unmet },
             format!(
-                "Since start: {view_reads} view reads, {authority_reads} quorum reads; last fallback {}.",
-                observation.last_fallback.map_or("none", |reason| reason.label())
+                "Since start: {}; {}; last fallback {}.",
+                per_view(AppliedTable::Settings, "settings"),
+                per_view(AppliedTable::MediaSessions, "routes"),
+                observation
+                    .last_fallback
+                    .map_or("none", |reason| reason.label())
             ),
         )
+    };
+    // The last fallback is one cell for both views; say outright when the
+    // route view cannot open at all.
+    let reads_evidence = if observation.route_view_open == Some(false) {
+        format!(
+            "{reads_evidence} Routes: this replica's session table is still in the legacy layout (no Source installation yet), so every route read is a quorum read (reason legacy_layout)."
+        )
+    } else {
+        reads_evidence
     };
     DeveloperEnableItem {
         id: "applied_view",
@@ -4039,6 +4060,28 @@ mod tests {
         let (reads, evidence) = status(&item, "applied_view_reads");
         assert_eq!(reads, super::RequirementStatus::Unknown);
         assert!(evidence.starts_with("No view reads since start"));
+
+        // E1c: the row names the route view's reads beside the settings'.
+        observation.reads.extend([
+            ("route", "view", "ok", 3),
+            ("route", "authority", "no_proof", 1),
+            ("settings", "authority", "floor", 2),
+        ]);
+        let item = super::applied_view(&observation);
+        let (reads, evidence) = status(&item, "applied_view_reads");
+        assert_eq!(reads, super::RequirementStatus::Met);
+        assert!(
+            evidence.contains("settings: 0 view, 2 quorum; routes: 3 view, 1 quorum"),
+            "{evidence}"
+        );
+        assert!(!evidence.contains("legacy layout"), "{evidence}");
+        observation.route_view_open = Some(false);
+        let (_, evidence) = status(&super::applied_view(&observation), "applied_view_reads");
+        assert!(
+            evidence.contains("still in the legacy layout"),
+            "{evidence}"
+        );
+        observation.route_view_open = None;
 
         observation.mode = "replicated";
         observation.proof_present = false;

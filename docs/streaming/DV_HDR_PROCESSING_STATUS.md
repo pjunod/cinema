@@ -27,12 +27,14 @@ filter too. It had blended bars into two boundary rows: on four native frames,
 up to 27,652 pixels and 4.32 dE ITP worse than P8 (CPU reference with the
 fix: 1,658 to 3). Bars map pointwise; no partial L5, no change.
 
-**CM v2.9 detail at the top clip (2026-11-12):** `cm_offline` restores no
-detail on the tone curve's top clip; the model did. The detail input is now
-held at the clip point (`dm_cm29_detail_in`, shader `c29din`), at the top only,
-because holding it at the bottom moved 258 Godfather II pixels away from the
-reference. On synthetic fields above the clip, pixels over 0.05 dE ITP went
-from 6,180–12,443 to 0. Smile w33 and Godfather II w28 render byte-identically.
+**CM v2.9 range clamp and L2 selection (2026-11-12):** `cm_offline` clamps
+once, after trim and detail; the model clamped the curve first (and held the
+detail input at the clip). Outside a shot's L1 range it now matches ramps and
+specks within 1.5 codes (was up to 2,284). Without an exact L2 the reference
+interpolates in PQ between the nearest L2 below and above (also at or above
+the mastering peak), neutral at the mastering minimum and peak: 52 grid cases
+match as exact-L2 ones do. Its "default trim" was the harness: an XML target
+black applies only where an L2 names the target.
 
 **CM4 transfer precision (2026-11-11):** CM4 point and final passes now use
 the normative ST 2084 helpers (candidate C: precise split-float PQ OETF/EOTF,

@@ -38,6 +38,7 @@ fn seed(key_id: i64, request_key: &str) -> ScanRequestV2Seed {
             mtime_ns: 1_794_076_138_123_456_789,
         }],
         removed_paths: Vec::new(),
+        offloaded_paths: Vec::new(),
         probe_only: false,
     }
 }

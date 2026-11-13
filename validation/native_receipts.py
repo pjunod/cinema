@@ -78,13 +78,18 @@ BUILD_SPECS = {
     # `apple-tv-navigation-test`, the desktop recipes, their flags and external
     # inputs are unchanged. Pin these exact bytes; no old-to-new receipt
     # adoption is authorized.
-    'Makefile': '2bc2f5446114f87797e09a87c0555099a8b0355779f4477ce8405a22666c2a82',
-    # Reviewed 0.8.0 build 298: only CURRENT_PROJECT_VERSION differs from the
-    # reviewed build 297 bytes. 297 was set inside a merge commit (8164f7380),
-    # which the release guard does not read as a build-number update. Pin this
-    # exact spec; build-297 case receipts do not transfer, and added resources
-    # or scripts still change its digest.
-    'clients/apple/project.yml': 'a17751186292399825cf45355c88ea9f66618553afed3869b0233f2266570a65',
+    # Reviewed offload: one added `node --test tests/web/offload.test.js` line in
+    # `web-unit-check`. The Apple and desktop recipes, their flags and external
+    # inputs are exactly the bytes reviewed above.
+    'Makefile': '05c65563d6663d77ce2daa1bdd57eb27c510c070dfdf141cb685bd0beeabf581',
+    # Reviewed 0.8.0 build 299 (offload client sources): only
+    # CURRENT_PROJECT_VERSION differs from the reviewed build 298 bytes
+    # (`make apple-build-bump`; no resources or scripts added). Build 298 had
+    # differed from build 297 the same way; 297 was set inside a merge commit
+    # (8164f7380), which the release guard does not read as a build-number
+    # update. Pin this exact spec; earlier-build case receipts do not
+    # transfer, and added resources or scripts still change its digest.
+    'clients/apple/project.yml': '83c6bd08bb59a8e6f28dbd036c4a36320aec52c90b2648e50dc95e501f486b2e',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
