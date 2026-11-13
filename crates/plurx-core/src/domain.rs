@@ -1336,6 +1336,12 @@ pub struct DesiredOwnership {
 pub struct DesiredSelectionWrite<'a> {
     pub digest: &'a str,
     pub canonical_form: &'a str,
+    /// When the viewer's request arrived, not when its claim was made: the
+    /// claim follows the plan and the catalog fan-out, so two creates for one
+    /// playback can reach their claims in the opposite order to their
+    /// arrival. The upsert never replaces an ask stamped later than this one
+    /// (D3 review S2); equal stamps replace.
+    pub arrived_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]

@@ -331,6 +331,109 @@ async fn an_overloaded_create_records_no_ask() {
     );
 }
 
+/// D3 review B1/S3: a peer that is ahead answers `StaleSource` for the plan
+/// this node's view gave the create. The local catalog, built from that same
+/// plan, is complete and holds candidates, so only the refutation itself can
+/// stop the create from picking one and building at the superseded revision:
+/// the attempt ends before any pick, the view closes, and the create plans
+/// once more from Authority. Driven through the real `create`, with the peer's
+/// answer queued in place of the transport's.
+#[tokio::test]
+async fn a_peers_stale_answer_ends_a_view_plan_before_any_candidate_is_picked() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    let state = resolver_state();
+    state
+        .store
+        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
+        .await
+        .expect("candidate route on");
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Stale peer".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Stale peer".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let user = state
+        .store
+        .create_user("stale-peer", "hash", false)
+        .await
+        .expect("user");
+    let file_id = state
+        .store
+        .upsert_file(item, "/media/stale-peer.mkv", 4096, 1, &ProbeResult {
+            container: Some("mkv".into()),
+            video_codec: Some("h264".into()),
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            raw_json: Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"}]}).to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("file");
+    let caps = caps_v2(
+        r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#,
+    );
+    // The first fan-out: a peer whose view and Authority hold another
+    // revision. The second (the re-planned attempt): nothing more to say.
+    state.media_pool.inject_peer_answers_for_test(vec![
+        crate::media_pool::QualityCatalogResult::unavailable(
+            crate::media_pool::CatalogCause::StaleSource,
+        ),
+    ]);
+    state.media_pool.inject_peer_answers_for_test(Vec::new());
+    let replans = crate::http::hls::start_plan::stale_replans();
+    let _ = create(
+        crate::http::extract::AuthUser(user.clone()),
+        State(state.clone()),
+        AxPath(file_id),
+        HeaderMap::new(),
+        super::super::network::RemoteAddress(None),
+        Json(CreateSession {
+            playback_id: "stale-peer-player".into(),
+            request_id: Some("stale-peer-request".into()),
+            quality_auto: Some(true),
+            copy: Some(false),
+            caps: Some(caps),
+            ..bare_create()
+        }),
+    )
+    .await;
+    assert_eq!(
+        crate::http::hls::start_plan::stale_replans(),
+        replans + 1,
+        "the peer's refutation re-planned the create once"
+    );
+    assert_eq!(
+        state.media_pool.injected_peer_answers_left_for_test(),
+        0,
+        "both attempts ran their catalog fan-out"
+    );
+    assert!(
+        state
+            .applied
+            .floor_noted(plurx_core::store::AppliedTable::Settings),
+        "the view was closed"
+    );
+}
+
 /// The control protocol being off must not make the ask disappear.
 ///
 /// This is the configuration the handoff singles out. With the setting off

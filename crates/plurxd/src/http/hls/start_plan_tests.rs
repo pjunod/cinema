@@ -178,7 +178,7 @@ async fn a_stale_view_plan_replans_once_from_authority_before_the_claim() {
                 .await
                 .expect("plan")
                 .expect("source");
-            crate::media_pool::capture_create_plan(&plan);
+            let _held = crate::media_pool::capture_create_plan(&plan);
             if first {
                 // What `quality_catalog` notes when a node's quorum read
                 // answers another binding than the plan's.
@@ -245,7 +245,7 @@ async fn a_create_replans_only_before_its_claim_and_only_once() {
                     .await
                     .expect("plan")
                     .expect("source");
-                crate::media_pool::capture_create_plan(&plan);
+                let _held = crate::media_pool::capture_create_plan(&plan);
                 match case {
                     "after the claim" => {
                         crate::media_pool::own_create_until(
@@ -433,7 +433,7 @@ async fn the_create_catalog_answers_from_the_create_plan_and_reads_nothing() {
     let budget = crate::media_pool::CreateStartupBudget::new(5_000);
     let through_scope = budget
         .scope(async {
-            crate::media_pool::capture_create_plan(&plan);
+            let _held = crate::media_pool::capture_create_plan(&plan);
             state
                 .media_pool
                 .quality_catalog(&state, request.clone())
@@ -479,7 +479,7 @@ async fn the_create_catalog_answers_from_the_create_plan_and_reads_nothing() {
     let budget = crate::media_pool::CreateStartupBudget::new(5_000);
     let unplanned = budget
         .scope(async {
-            crate::media_pool::capture_create_plan(&plan);
+            let _held = crate::media_pool::capture_create_plan(&plan);
             state.media_pool.quality_catalog(&state, other).await
         })
         .await;
@@ -490,13 +490,70 @@ async fn the_create_catalog_answers_from_the_create_plan_and_reads_nothing() {
     );
 }
 
+/// D3 review N1: the create's plan belongs to its attempt. Once the attempt
+/// lets go of it, a catalog call in the same scope reads by quorum (the store
+/// has moved on, so it is `StaleSource`) instead of answering from a plan whose
+/// attempt is over; a worker spawned inside the attempt never carries it.
+#[tokio::test]
+async fn a_captured_plan_does_not_outlive_its_attempt() {
+    let (state, file) = catalog_node().await;
+    let plan = ingress_plan(&state.applied, file)
+        .await
+        .expect("plan")
+        .expect("source");
+    let request = catalog_request(&plan);
+    state
+        .store
+        .put_setting(plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS, "20")
+        .await
+        .expect("a planning key moves after the plan");
+    let budget = crate::media_pool::CreateStartupBudget::new(5_000);
+    let (during, in_worker, after) = budget
+        .scope(async {
+            let held = crate::media_pool::capture_create_plan(&plan);
+            let during = state
+                .media_pool
+                .quality_catalog(&state, request.clone())
+                .await;
+            let worker_state = state.clone();
+            let worker_request = request.clone();
+            let in_worker = crate::media_pool::spawn_create_worker(async move {
+                worker_state
+                    .media_pool
+                    .quality_catalog(&worker_state, worker_request)
+                    .await
+            })
+            .await
+            .expect("worker");
+            drop(held);
+            let after = state
+                .media_pool
+                .quality_catalog(&state, request.clone())
+                .await;
+            (during, in_worker, after)
+        })
+        .await;
+    assert!(during.complete, "inside the attempt: the plan's catalog");
+    assert_eq!(
+        in_worker.causes,
+        vec![crate::media_pool::CatalogCause::StaleSource],
+        "the worker does not carry the attempt's plan"
+    );
+    assert_eq!(
+        after.causes,
+        vec![crate::media_pool::CatalogCause::StaleSource],
+        "after the attempt: by quorum"
+    );
+}
+
 /// D3d, §4.6: a peer's catalog request reads this node's view at the binding
 /// it is sent; the same binding is answered from the view, a binding Authority
 /// holds differently is `StaleSource` after one authority read, a request with
-/// no binding reads quorum as before, and `StaleSource` is the cause that
-/// re-plans the sending create, through the same wire answer a peer sends.
+/// no binding reads quorum as before. That `StaleSource` ends the sending
+/// create's attempt and re-plans it is
+/// `a_peers_stale_answer_ends_a_view_plan_before_any_candidate_is_picked`.
 #[tokio::test]
-async fn a_peers_catalog_reads_its_view_and_a_stale_sender_replans() {
+async fn a_peers_catalog_reads_its_view_and_answers_a_stale_binding() {
     let (state, file) = catalog_node().await;
     let ingress = ingress_plan(&state.applied, file)
         .await
@@ -567,52 +624,6 @@ async fn a_peers_catalog_reads_its_view_and_a_stale_sender_replans() {
         missing.causes,
         vec![crate::media_pool::CatalogCause::StaleSource]
     );
-
-    // The whole path: the peer's answer crosses the wire as JSON, the
-    // ingress notes it, and the create closes its view and plans once more
-    // from Authority; that attempt's answer is the create's.
-    let wire: crate::media_pool::QualityCatalogResult =
-        serde_json::from_slice(&serde_json::to_vec(&stale).expect("serialize"))
-            .expect("the peer's answer round-trips");
-    let attempts = std::sync::atomic::AtomicUsize::new(0);
-    let before = stale_replans();
-    let budget = crate::media_pool::CreateStartupBudget::new(5_000);
-    let answer = budget
-        .scope(replan_once_after_stale(&state.applied, || async {
-            let first = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0;
-            let plan = ingress_plan(&state.applied, file)
-                .await
-                .expect("plan")
-                .expect("source");
-            crate::media_pool::capture_create_plan(&plan);
-            if first {
-                // `quality_catalog` notes what its peers answered.
-                crate::media_pool::note_create_catalog(&wire);
-                return Err(crate::http::error::ApiError::typed(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "quality_catalog_unavailable",
-                    "quality discovery is incomplete",
-                ));
-            }
-            // The re-plan is at the revision the peer holds: it agrees.
-            let agreed = crate::media_pool::local_quality_catalog(
-                &state,
-                &catalog_request(&plan),
-                soon(),
-                crate::media_pool::CatalogSource::PeerView(&plan.binding),
-            )
-            .await;
-            assert!(agreed.complete, "{:?}", agreed.causes);
-            Ok(plan.source)
-        }))
-        .await;
-    assert_eq!(
-        answer.expect("the re-planned create succeeds"),
-        ViewSource::Authority
-    );
-    assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
-    assert_eq!(stale_replans(), before + 1);
-    assert!(state.applied.floor_noted(AppliedTable::Settings));
 
     // No binding, no view: quorum, with nothing to compare.
     let legacy = crate::media_pool::local_quality_catalog(

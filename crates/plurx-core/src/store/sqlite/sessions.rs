@@ -271,7 +271,8 @@ fn validate_activation_shape(activation: &MediaSessionActivation) -> Result<(), 
 /// The selection upsert of [`record_desired_selection`], run inside the
 /// claim's transaction (D3c) under the same predicate the replicated store
 /// states: it writes only while this attempt's claim row is there, `starting`
-/// and unexpired. The incarnation is a fresh UUID, so no earlier attempt
+/// and unexpired, and never over an ask stamped with a later arrival
+/// (`arrived_at_ms`, D3 review S2). The incarnation is a fresh UUID, so no earlier attempt
 /// matches. SQLite rolls back with the transaction, but the predicate is kept
 /// so both stores answer the same cases the same way, not by relying on the
 /// rollback.
@@ -286,15 +287,16 @@ fn record_claimed_selection(
     request_id: &str,
     incarnation_id: &str,
     now_ms: i64,
+    arrived_at_ms: i64,
 ) -> Result<crate::domain::DesiredOwnership, StoreError> {
     let owner_1 = local_owner_predicate(rebuilt, 1);
     let (columns, values, conflict) = if rebuilt {
         ("owner_key, principal_kind, user_id, share_grant_id, share_viewer_key, playback_id, revision, digest, canonical_form, updated_at_ms",
-         "('local:' || ?1), 'local', ?1, NULL, NULL, ?2, 1, ?3, ?4, ?5", "owner_key, playback_id")
+         "('local:' || ?1), 'local', ?1, NULL, NULL, ?2, 1, ?3, ?4, ?8", "owner_key, playback_id")
     } else {
         (
             "user_id, playback_id, revision, digest, canonical_form, updated_at_ms",
-            "?1, ?2, 1, ?3, ?4, ?5",
+            "?1, ?2, 1, ?3, ?4, ?8",
             "user_id, playback_id",
         )
     };
@@ -318,7 +320,8 @@ fn record_claimed_selection(
                  WHEN media_playback_desired.digest = excluded.digest
                      THEN media_playback_desired.updated_at_ms
                  ELSE excluded.updated_at_ms
-             END"
+             END
+          WHERE media_playback_desired.updated_at_ms <= excluded.updated_at_ms"
         ),
         rusqlite::params![
             user_id,
@@ -327,16 +330,19 @@ fn record_claimed_selection(
             canonical_form,
             now_ms,
             request_id,
-            incarnation_id
+            incarnation_id,
+            arrived_at_ms
         ],
     )?;
-    if changed != 1 {
+    // No row changed: an older arrival that did not replace a newer ask. The
+    // row that stands is the answer; with none, the principal is unavailable.
+    let standing = desired_within(tx, user_id, playback_id)?;
+    if changed != 1 && standing.is_none() {
         return Err(StoreError::Task(
             "desired-selection principal is unavailable".into(),
         ));
     }
-    desired_within(tx, user_id, playback_id)?
-        .ok_or_else(|| StoreError::Database("desired selection vanished".into()))
+    standing.ok_or_else(|| StoreError::Database("desired selection vanished".into()))
 }
 
 /// The bounds the table's own CHECK constraints enforce, refused before the
@@ -1581,14 +1587,22 @@ impl MediaSessionStore for SqliteStore {
                 desired.canonical_form,
                 now_ms,
             )?;
+            if desired.arrived_at_ms <= 0 {
+                return Err(StoreError::Task("invalid desired selection".to_owned()));
+            }
         }
         self.maintain_media_sessions(now_ms).await?;
         let request_id = request_id.to_owned();
         let request_fingerprint = request_fingerprint.to_ascii_lowercase();
         let playback_id = playback_id.to_owned();
         let incarnation_id = incarnation_id.to_owned();
-        let desired =
-            desired.map(|desired| (desired.digest.to_owned(), desired.canonical_form.to_owned()));
+        let desired = desired.map(|desired| {
+            (
+                desired.digest.to_owned(),
+                desired.canonical_form.to_owned(),
+                desired.arrived_at_ms,
+            )
+        });
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let rebuilt = route_projection(&tx)? == PRINCIPAL_ROUTE_COLS;
@@ -1701,7 +1715,7 @@ impl MediaSessionStore for SqliteStore {
                         MediaSessionRequestClaim::Conflict
                     };
                 let recorded = match (&outcome, desired.as_ref()) {
-                    (MediaSessionRequestClaim::Acquired { .. }, Some((digest, canonical_form))) => {
+                    (MediaSessionRequestClaim::Acquired { .. }, Some((digest, canonical_form, arrived_at_ms))) => {
                         Some(record_claimed_selection(
                             &tx,
                             rebuilt,
@@ -1712,6 +1726,7 @@ impl MediaSessionStore for SqliteStore {
                             &request_id,
                             &incarnation_id,
                             now_ms,
+                            *arrived_at_ms,
                         )?)
                     }
                     _ => None,
@@ -1775,7 +1790,7 @@ impl MediaSessionStore for SqliteStore {
             )?;
             let recorded = desired
                 .as_ref()
-                .map(|(digest, canonical_form)| {
+                .map(|(digest, canonical_form, arrived_at_ms)| {
                     record_claimed_selection(
                         &tx,
                         rebuilt,
@@ -1786,6 +1801,7 @@ impl MediaSessionStore for SqliteStore {
                         &request_id,
                         &incarnation_id,
                         now_ms,
+                        *arrived_at_ms,
                     )
                 })
                 .transpose()?;

@@ -12,9 +12,14 @@ fn incarnation(n: u128) -> String {
 }
 
 fn ask<'a>(digest: &'a str, form: &'a str) -> DesiredSelectionWrite<'a> {
+    ask_at(digest, form, 1_000)
+}
+
+fn ask_at<'a>(digest: &'a str, form: &'a str, arrived_at_ms: i64) -> DesiredSelectionWrite<'a> {
     DesiredSelectionWrite {
         digest,
         canonical_form: form,
+        arrived_at_ms,
     }
 }
 
@@ -397,6 +402,167 @@ async fn concurrent_claims_for_one_request_record_one_ask() {
         assert_eq!(
             row.digest, digests[winners[0]],
             "{backend}: it is the winner's ask"
+        );
+    })
+    .await;
+}
+
+/// Asks stay ordered by arrival, not by which create reaches its claim first
+/// (D3 review S2): the create that arrived earlier but claims later answers
+/// with the ask that stands and replaces nothing; a later arrival, and an
+/// equal stamp, replace; a re-acquired claim follows the same rule.
+#[tokio::test]
+async fn an_earlier_but_slower_create_does_not_replace_a_newer_ask() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("claim-order", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let store = store.as_ref();
+
+        // B arrived second (5_000) and claims first.
+        let (outcome, recorded) = claim(
+            store,
+            user.id,
+            "req-b",
+            FP,
+            "pb-order",
+            &incarnation(10),
+            10_000,
+            70_000,
+            Some(&ask_at(&b, "v1;quality=b", 5_000)),
+            backend,
+        )
+        .await;
+        assert!(
+            matches!(outcome, MediaSessionRequestClaim::Acquired { .. }),
+            "{backend}"
+        );
+        let b_row = recorded.unwrap_or_else(|| panic!("{backend}: B records"));
+        assert_eq!(
+            (b_row.revision, b_row.digest.as_str()),
+            (1, b.as_str()),
+            "{backend}"
+        );
+
+        // A arrived first (4_000) and claims second: acquired, but its ask
+        // replaces nothing and the answer is the row that stands.
+        let (outcome, recorded) = claim(
+            store,
+            user.id,
+            "req-a",
+            FP,
+            "pb-order",
+            &incarnation(11),
+            10_100,
+            70_100,
+            Some(&ask_at(&a, "v1;quality=a", 4_000)),
+            backend,
+        )
+        .await;
+        assert!(
+            matches!(outcome, MediaSessionRequestClaim::Acquired { .. }),
+            "{backend}"
+        );
+        assert_eq!(
+            recorded,
+            Some(b_row.clone()),
+            "{backend}: the newer ask stands"
+        );
+        assert_eq!(
+            desired(store, user.id, "pb-order").await,
+            Some(b_row.clone()),
+            "{backend}"
+        );
+
+        // A later arrival replaces.
+        let (_, recorded) = claim(
+            store,
+            user.id,
+            "req-a2",
+            FP,
+            "pb-order",
+            &incarnation(12),
+            10_200,
+            70_200,
+            Some(&ask_at(&a, "v1;quality=a", 6_000)),
+            backend,
+        )
+        .await;
+        let a_row = recorded.unwrap_or_else(|| panic!("{backend}: a later arrival records"));
+        assert_eq!(
+            (a_row.revision, a_row.digest.as_str()),
+            (2, a.as_str()),
+            "{backend}"
+        );
+
+        // An equal stamp replaces.
+        let (_, recorded) = claim(
+            store,
+            user.id,
+            "req-c",
+            FP,
+            "pb-order",
+            &incarnation(13),
+            10_300,
+            70_300,
+            Some(&ask_at(&c, "v1;quality=c", 6_000)),
+            backend,
+        )
+        .await;
+        let c_row = recorded.unwrap_or_else(|| panic!("{backend}: an equal stamp records"));
+        assert_eq!(
+            (c_row.revision, c_row.digest.as_str()),
+            (3, c.as_str()),
+            "{backend}"
+        );
+
+        // A re-acquired claim follows the same rule: its older arrival
+        // replaces nothing.
+        let (outcome, _) = claim(
+            store,
+            user.id,
+            "req-r",
+            FP,
+            "pb-order",
+            &incarnation(14),
+            10_400,
+            10_500,
+            None,
+            backend,
+        )
+        .await;
+        assert!(
+            matches!(outcome, MediaSessionRequestClaim::Acquired { .. }),
+            "{backend}"
+        );
+        let (outcome, recorded) = claim(
+            store,
+            user.id,
+            "req-r",
+            FP,
+            "pb-order",
+            &incarnation(15),
+            20_000,
+            80_000,
+            Some(&ask_at(&a, "v1;quality=a", 2_000)),
+            backend,
+        )
+        .await;
+        assert!(
+            matches!(outcome, MediaSessionRequestClaim::Acquired { .. }),
+            "{backend}: {outcome:?}"
+        );
+        assert_eq!(
+            recorded,
+            Some(c_row.clone()),
+            "{backend}: a re-acquired older ask replaces nothing"
+        );
+        assert_eq!(
+            desired(store, user.id, "pb-order").await,
+            Some(c_row),
+            "{backend}"
         );
     })
     .await;

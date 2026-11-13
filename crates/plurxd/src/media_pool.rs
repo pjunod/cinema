@@ -512,7 +512,15 @@ pub(crate) fn spawn_create_worker<T: Send + 'static>(
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> tokio::task::JoinHandle<T> {
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
-    let budget = CREATE_STARTUP_BUDGET.try_with(Clone::clone).ok();
+    // The worker outlives the attempt that spawned it, so it does not carry the
+    // attempt's plan: its catalog calls read by quorum (D3 review N1).
+    let budget = CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            let mut budget = budget.clone();
+            budget.start_plan = Default::default();
+            budget
+        })
+        .ok();
     let future = Box::pin(future);
     tokio::spawn(async move {
         let work = plurx_core::store::scope_http_store_operations(counts, future);
@@ -690,9 +698,9 @@ pub(crate) fn remember_create_source_link(
 
 /// Remember the create's plan: the binding its catalog requests carry, and
 /// whether it was read from this node's view (D3b). A no-op outside a create.
-pub(crate) fn capture_create_plan(plan: &crate::http::hls::start_plan::StartPlan) {
+pub(crate) fn capture_create_plan(plan: &crate::http::hls::start_plan::StartPlan) -> CapturedPlan {
     use std::sync::atomic::Ordering;
-    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+    let held = CREATE_STARTUP_BUDGET.try_with(|budget| {
         *budget
             .binding
             .lock()
@@ -705,7 +713,28 @@ pub(crate) fn capture_create_plan(plan: &crate::http::hls::start_plan::StartPlan
             plan.source == plurx_core::store::ViewSource::View,
             Ordering::Relaxed,
         );
+        budget.start_plan.clone()
     });
+    CapturedPlan(held.ok())
+}
+
+/// The create attempt's hold on its captured plan: dropping it, when the
+/// attempt ends or is cancelled, clears the plan, so a later catalog call in
+/// the same scope reads by quorum instead of answering from a plan that
+/// belongs to an attempt that is over.
+#[must_use = "the plan is cleared when this is dropped"]
+pub(crate) struct CapturedPlan(
+    Option<std::sync::Arc<std::sync::Mutex<Option<crate::http::hls::start_plan::StartPlan>>>>,
+);
+
+impl Drop for CapturedPlan {
+    fn drop(&mut self) {
+        if let Some(held) = self.0.take() {
+            *held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
 }
 
 /// The plan this create captured for `file_id`, when it is inside a create.
@@ -721,6 +750,21 @@ fn create_plan_for(file_id: i64) -> Option<crate::http::hls::start_plan::StartPl
         .ok()
         .flatten()
         .filter(|plan| plan.snapshot.file.id == file_id)
+}
+
+/// Whether the create's view plan was refuted by a catalog and is still
+/// unclaimed and not yet re-planned: the attempt ends before it picks a
+/// candidate, and [`take_create_replan`] acts on the same flag.
+pub(crate) fn create_plan_refuted() -> bool {
+    use std::sync::atomic::Ordering;
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget.owner.get().is_none()
+                && budget.plan.from_view.load(Ordering::Relaxed)
+                && budget.plan.refuted.load(Ordering::Relaxed)
+                && !budget.plan.replanned.load(Ordering::Relaxed)
+        })
+        .unwrap_or(false)
 }
 
 /// A catalog answered for this create: `StaleSource` from any node means a
@@ -955,9 +999,31 @@ pub(crate) struct MediaPool {
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
     root_probes: Arc<Mutex<RootProbeRegistry>>,
     root_probe_launcher: Arc<tokio::sync::Semaphore>,
+    /// Peer answers a test queues in place of the transport's (one entry per
+    /// catalog fan-out), so a create can be driven end to end against a peer
+    /// that refutes its plan.
+    #[cfg(test)]
+    injected_peer_answers:
+        Arc<std::sync::Mutex<std::collections::VecDeque<Vec<QualityCatalogResult>>>>,
 }
 
 impl MediaPool {
+    #[cfg(test)]
+    pub(crate) fn inject_peer_answers_for_test(&self, answers: Vec<QualityCatalogResult>) {
+        self.injected_peer_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(answers);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn injected_peer_answers_left_for_test(&self) -> usize {
+        self.injected_peer_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
         let now = tokio::time::Instant::now();
         self.snapshots
@@ -1022,6 +1088,8 @@ impl MediaPool {
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
             root_probe_launcher: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            injected_peer_answers: Default::default(),
         })
     }
 
@@ -1580,6 +1648,15 @@ impl MediaPool {
         };
         let local = local_quality_catalog(state, &request, deadline, source);
         let remote = async {
+            #[cfg(test)]
+            if let Some(answers) = self
+                .injected_peer_answers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                return answers;
+            }
             let peers = match tokio::time::timeout_at(deadline, self.membership.media_peers()).await
             {
                 Ok(Ok(peers)) => peers,

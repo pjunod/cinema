@@ -2207,9 +2207,12 @@ async fn request_row(
 /// of `record_desired_selection`, with an added predicate tying it to **this
 /// attempt's** claim row. The incarnation is a fresh UUID, so no earlier
 /// attempt matches, and a refused, joined or overloaded claim (no row with this
-/// incarnation, or one no longer `starting`) upserts nothing. Replicated
-/// statements in one transaction do not roll back together, so the predicate
-/// is the only thing that keeps the ask from landing without its claim.
+/// incarnation, or one no longer `starting`) upserts nothing. A statement
+/// that *errors* rolls the whole replicated transaction back (hiqlite's
+/// writer), but one that matches no row is a success that leaves its sibling
+/// committed, so the predicate is what keeps the ask from landing without its
+/// claim. A second predicate on the conflict arm keeps an older arrival from
+/// replacing a newer ask (D3 review S2).
 struct FoldedSelection<'a> {
     user_id: i64,
     request_id: &'a str,
@@ -2235,7 +2238,7 @@ impl FoldedSelection<'_> {
              SELECT $1, $2, 1, $3, $4, $5{extra_values}
               WHERE EXISTS (SELECT 1 FROM media_session_requests
                              WHERE {claim_owner} AND request_id = $6 AND incarnation_id = $7
-                               AND state = 'starting' AND claim_expires_at_ms > $5){owner_exists}
+                               AND state = 'starting' AND claim_expires_at_ms > $8){owner_exists}
              ON CONFLICT({owner_column}, playback_id) DO UPDATE SET
                  revision = CASE
                      WHEN media_playback_desired.digest = excluded.digest
@@ -2248,7 +2251,8 @@ impl FoldedSelection<'_> {
                      WHEN media_playback_desired.digest = excluded.digest
                          THEN media_playback_desired.updated_at_ms
                      ELSE excluded.updated_at_ms
-                 END");
+                 END
+              WHERE media_playback_desired.updated_at_ms <= excluded.updated_at_ms");
         validate_sql(&sql)?;
         Ok((
             sql,
@@ -2257,9 +2261,10 @@ impl FoldedSelection<'_> {
                 self.playback_id,
                 self.write.digest,
                 self.write.canonical_form,
-                self.now_ms,
+                self.write.arrived_at_ms,
                 self.request_id,
-                self.incarnation_id
+                self.incarnation_id,
+                self.now_ms
             ),
         ))
     }
@@ -2334,12 +2339,9 @@ async fn claim_new_request(
         let [claimed, selected] = <[_; 2]>::try_from(counts)
             .map_err(|_| StoreError::Task("incomplete folded selection transaction".into()))?;
         let claimed = claimed.map_err(database_error)?;
-        let selected = selected.map_err(database_error)?;
-        if claimed == 1 && selected != 1 {
-            return Err(StoreError::Task(
-                "desired-selection principal is unavailable".into(),
-            ));
-        }
+        // Zero rows is an older arrival that did not replace a newer ask; the
+        // read-back after the claim answers with the row that stands.
+        selected.map_err(database_error)?;
         claimed
     } else {
         store
@@ -2472,12 +2474,7 @@ async fn claim_existing_or_reacquire(
             let [claimed, selected] = <[_; 2]>::try_from(counts)
                 .map_err(|_| StoreError::Task("incomplete folded selection transaction".into()))?;
             let claimed = claimed.map_err(database_error)? == 1;
-            let selected = selected.map_err(database_error)?;
-            if claimed && selected != 1 {
-                return Err(StoreError::Task(
-                    "desired-selection principal is unavailable".into(),
-                ));
-            }
+            selected.map_err(database_error)?;
             claimed
         } else {
             store
@@ -3230,6 +3227,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                 desired.canonical_form,
                 now_ms,
             )?;
+            if desired.arrived_at_ms <= 0 {
+                return Err(StoreError::Task("invalid desired selection".to_owned()));
+            }
         }
         let selection = desired.map(|write| FoldedSelection {
             user_id,

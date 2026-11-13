@@ -2187,6 +2187,20 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     serde_json::json!({"clause": error.clause, "observed": error.observed, "limit": error.limit}),
                 ));
             }
+            // A peer's quorum read refuted the plan this node's view answered
+            // (`StaleSource`): the local catalog, built from that same plan, is
+            // complete and would still pick a candidate, so the refutation
+            // itself ends the attempt, before any pick. `replan_once_after_stale`
+            // then closes the view and plans once from Authority (D3b review B1,
+            // D3 review B1). A plan read from Authority is not ended here.
+            if crate::media_pool::create_plan_refuted() {
+                return Err(ApiError::typed_detail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "quality_catalog_unavailable",
+                    "quality discovery is incomplete; retry with the existing startup owner",
+                    serde_json::json!({"complete": false, "causes": catalogue_result.causes}),
+                ));
+            }
             let authority_refused = catalogue_result.authority_refused;
             // A create never dispatches a processed candidate: it has no
             // qualified graph before the first frame. Nor does a prepared
@@ -3267,6 +3281,9 @@ async fn create_with_purpose_inner(
     purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
     let applied = state.applied.clone();
+    // The ask's arrival order, taken once here: a re-planned attempt is the
+    // same request and keeps its place (D3 review S2).
+    let arrived_at_ms = unix_ms();
     super::start_plan::replan_once_after_stale(&applied, || {
         Box::pin(create_with_purpose_attempt(
             user.clone(),
@@ -3275,6 +3292,7 @@ async fn create_with_purpose_inner(
             headers.clone(),
             remote,
             req.clone(),
+            arrived_at_ms,
             purpose.clone(),
         ))
     })
@@ -3288,6 +3306,7 @@ async fn create_with_purpose_attempt(
     headers: HeaderMap,
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
+    arrived_at_ms: i64,
     purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
     let library_channel = match &purpose {
@@ -3346,6 +3365,7 @@ async fn create_with_purpose_attempt(
     // A parser-floor create must not reinterpret a future route as ordinary
     // Auto or persist acceptance of a candidate it cannot dispatch.
     let mut recorded_ask_revision: Option<i64> = None;
+    let mut ask_superseded = false;
     let desired_ask: Option<(String, String)> = match req.intent.as_ref() {
         Some(intent) => {
             intent
@@ -3369,9 +3389,11 @@ async fn create_with_purpose_attempt(
         .map_err(|error| session_store_error("reading playback planning inputs", error))?
         .map(Arc::new);
     let planning_snapshot = start_plan.as_deref().map(|plan| &*plan.snapshot);
-    if let Some(plan) = start_plan.as_deref() {
-        crate::media_pool::capture_create_plan(plan);
-    }
+    // Held for this attempt only: dropping it clears the budget's copy of the
+    // plan (D3 review N1).
+    let _captured_plan = start_plan
+        .as_deref()
+        .map(crate::media_pool::capture_create_plan);
     crate::media_pool::mark_create_phase("lookup");
     let source = planning_snapshot.map(|snapshot| snapshot.file.clone());
     // The HDR subtitle-burn guard used to stand here, keyed on the source's
@@ -3650,6 +3672,7 @@ async fn create_with_purpose_attempt(
                         plurx_core::domain::DesiredSelectionWrite {
                             digest,
                             canonical_form,
+                            arrived_at_ms,
                         }
                     });
                     let (claim, recorded) = state
@@ -3666,6 +3689,12 @@ async fn create_with_purpose_attempt(
                         )
                         .await?;
                     if let Some(recorded) = recorded {
+                        // A newer arrival's ask stands: the upsert did not
+                        // replace it, so this create's ask is not the one
+                        // recorded (D3 review S2).
+                        ask_superseded = desired_ask
+                            .as_ref()
+                            .is_some_and(|(digest, _)| *digest != recorded.digest);
                         recorded_ask_revision = Some(recorded.revision);
                     }
                     Ok(claim)
@@ -3676,6 +3705,14 @@ async fn create_with_purpose_attempt(
             {
                 Ok((guard, acquired)) => {
                     incarnation_id = acquired;
+                    if ask_superseded {
+                        // Dropping the armed guard settles this claim as failed.
+                        return Err(ApiError::typed(
+                            StatusCode::CONFLICT,
+                            "selection_superseded",
+                            "a newer selection for this playback arrived first",
+                        ));
+                    }
                     // From here this create is the claim's owner, not the
                     // viewer's request: it runs to activation for as long as
                     // its viewer can still take the answer, inside the
