@@ -234,5 +234,42 @@ class SyntheticChannelTolerance(unittest.TestCase):
                 self.assertFalse(self.match(0, bad, 0, 0, 2000))
 
 
+class PreciseRealChannelTolerance(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        script = ROOT / "tools/dv_processing/controls/run_dm_parity.py"
+        tree = ast.parse(script.read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name == "precise_cm4_channel_ok")
+        namespace = {}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(script), "exec"), namespace)
+        cls.match = staticmethod(namespace["precise_cm4_channel_ok"])
+
+    def test_real_channel_tolerance_accepts_measured_matrix_cancellation(self):
+        # Retained lavapipe failures: PQ exaggerates the matrix's tiny blue residue.
+        self.assertTrue(self.match(1.005452759e-5, 8.769299029e-7,
+                                   3.696186862e-9, 6.285448058e-17, .1775264471))
+        self.assertTrue(self.match(2.521367423e-5, 9.673170780e-7,
+                                   3.994856040e-8, 9.811133310e-16, .5388778437))
+        self.assertTrue(self.match(.4, .400001, 32.447, 32.448, 32.448))
+
+    def test_real_channel_tolerance_rejects_larger_light_errors(self):
+        self.assertFalse(self.match(.01, 0, .0001, 0, .5))
+        self.assertFalse(self.match(.300002, .3, 1.00003, 1, 1.00003))
+        # It scales with the pixel, not the display target: a shadow gets a
+        # much tighter light budget than a peak-white pixel.
+        self.assertFalse(self.match(2.521367423e-5, 9.673170780e-7,
+                                    3.994856040e-8, 9.811133310e-16, .001))
+
+    def test_real_channel_tolerance_rejects_invalid_values(self):
+        for bad in (-1, 1.2, math.inf, -math.inf, math.nan):
+            with self.subTest(bad=bad):
+                self.assertFalse(self.match(bad, 0, 0, 0, 1))
+                self.assertFalse(self.match(0, bad, 0, 0, 1))
+        for bad in (-1, math.inf, math.nan):
+            with self.subTest(pixel_peak=bad):
+                self.assertFalse(self.match(0, 0, 0, 0, bad))
+
+
 if __name__ == "__main__":
     unittest.main()

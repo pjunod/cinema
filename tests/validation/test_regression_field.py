@@ -88,6 +88,9 @@ class RegressionFieldCase(unittest.TestCase):
         self.assertIn("warning:", out)
         self.assertIn("does not execute", out)
 
+    # This fixture judges its own commit range, not the enclosing CI pull
+    # request. Clear both title sources for this test and restore them after.
+    @patch.dict("os.environ", {"PR_TITLE": "", "GITHUB_EVENT_PATH": ""})
     def test_a_corrective_commit_with_no_field_fails_naming_the_subject(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
