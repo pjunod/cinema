@@ -7,6 +7,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | E1/D3 fleet measurements, the control/deletion overlap, diagnostic attribution limits and remaining acceptance. | open |
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
