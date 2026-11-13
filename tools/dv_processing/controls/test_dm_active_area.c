@@ -119,7 +119,9 @@ static void test_l5_absent_and_zero_preserve_full_frame(void) {
 // The common header was re-pinned twice since: when the CM v2.9 detail input was held at the tone
 // curve's top clip (c29din, which also re-pinned the two CM v2.9 full-frame bodies), and when that
 // hold was removed and the range clamp moved from c29curve/c29sop into c29finish (the bodies kept
-// their bytes: c29din remains, as the source intensity). The lattice and horizontal bodies are as then.
+// their bytes: c29din remains, as the source intensity). The horizontal body is as then.
+// Measured gamut retained the original lattice as dv_dm_body_lattice_analytic and
+// added a measured-table lattice. Pin both bodies independently.
 static uint64_t fnv1a(const char *s) {
   uint64_t h=UINT64_C(0xcbf29ce484222325);
   for(;*s;s++){ h^=(unsigned char)*s; h*=UINT64_C(0x100000001b3); }
@@ -130,7 +132,8 @@ static void test_l5_cm29_absent_and_zero_preserve_full_frame(void) {
   const struct { const char *name,*text; size_t bytes; uint64_t hash; } pinned[]={
     {"dv_dm_glsl_common",dv_dm_glsl_common,sizeof(dv_dm_glsl_common)-1,UINT64_C(0xc3cf0592537b3c26)},
     {"dv_dm_body_point_cm29",dv_dm_body_point_cm29,sizeof(dv_dm_body_point_cm29)-1,UINT64_C(0x91b13abfbd77aa08)},
-    {"dv_dm_body_lattice",dv_dm_body_lattice,sizeof(dv_dm_body_lattice)-1,UINT64_C(0x03994d4550df62ee)},
+    {"dv_dm_body_lattice_analytic",dv_dm_body_lattice_analytic,sizeof(dv_dm_body_lattice_analytic)-1,UINT64_C(0x03994d4550df62ee)},
+    {"dv_dm_body_lattice",dv_dm_body_lattice,sizeof(dv_dm_body_lattice)-1,UINT64_C(0x9c89edecf8b2f9e9)},
     {"dv_dm_body_h",dv_dm_body_h,sizeof(dv_dm_body_h)-1,UINT64_C(0xf0a6ba996a6b0485)},
     {"dv_dm_body_final_cm29",dv_dm_body_final_cm29,sizeof(dv_dm_body_final_cm29)-1,UINT64_C(0x5ec91d4ca829f8ec)},
     {"dv_dm_body_final_cm4",dv_dm_body_final_cm4,sizeof(dv_dm_body_final_cm4)-1,UINT64_C(0xa8af44f878d1b639)},
@@ -141,9 +144,11 @@ static void test_l5_cm29_absent_and_zero_preserve_full_frame(void) {
     assert(strlen(pinned[i].text)==pinned[i].bytes);
     if(fnv1a(pinned[i].text)!=pinned[i].hash){ fprintf(stderr,"literal changed: %s\n",pinned[i].name); abort(); }
   }
-  for(int planes=0;planes<2;planes++) {
+  for(int measured=0;measured<2;measured++) for(int planes=0;planes<2;planes++) {
     DoviExtMetadataBlockLevel5 zero={0},side={.active_area_bottom_offset=1};
     dv_dm_frame absent=frame29(NULL,planes),present=frame29(&zero,planes),partial=frame29(&side,planes);
+    assert(absent.c29.gamut && present.c29.gamut && partial.c29.gamut);
+    if(!measured) absent.c29.gamut=present.c29.gamut=partial.c29.gamut=NULL;
     assert(!absent.has_l5 && present.has_l5 && partial.has_l5 && partial.l5_bottom==1);
     assert(!memcmp(absent.u,present.u,sizeof(absent.u)) && !memcmp(absent.u,partial.u,sizeof(absent.u)));
     enum {W=9,H=7}; float in[W*H*4],a[W*H*4],b[W*H*4],c[W*H*4];
@@ -164,10 +169,14 @@ static void test_l5_cm29_absent_and_zero_preserve_full_frame(void) {
   puts("test_l5_cm29_absent_and_zero_preserve_full_frame: PASS");
 }
 
-static void crop_domain_case(int cm,int w,int h,int left,int right,int top,int bottom,bool constant) {
+static void crop_domain_case(int cm,bool measured,int w,int h,int left,int right,int top,int bottom,bool constant) {
   DoviExtMetadataBlockLevel5 l5={.active_area_left_offset=left,
       .active_area_right_offset=right,.active_area_top_offset=top,.active_area_bottom_offset=bottom};
   dv_dm_frame bounded=cm==4?frame(&l5):frame29(&l5,cm==292),plain=cm==4?frame(NULL):frame29(NULL,cm==292);
+  if(cm!=4) {
+    assert(bounded.c29.gamut && plain.c29.gamut);
+    if(!measured) bounded.c29.gamut=plain.c29.gamut=NULL;
+  }
   assert(!memcmp(bounded.u,plain.u,sizeof(plain.u))); // L5 changes no colour/curve parameter.
   int cw=w-left-right,ch=h-top-bottom;
   size_t n=(size_t)w*h,cn=(size_t)cw*ch;
@@ -212,23 +221,23 @@ static void crop_domain_case(int cm,int w,int h,int left,int right,int top,int b
 }
 
 static void test_l5_crop_domain_excludes_adversarial_bars(void) {
-  crop_domain_case(4,19,13,3,4,2,3,false); // all four edges, asymmetric nonconstant picture
-  crop_domain_case(4,19,13,0,0,2,3,true);  // top/bottom constant picture
-  crop_domain_case(4,19,13,3,4,0,0,true);  // left/right constant picture
-  crop_domain_case(4,11,5,2,1,2,2,false); // height1 with a nonconstant horizontal picture
-  crop_domain_case(4,7,5,3,3,2,2,true);   // width1/height1, repeated neighbors
+  crop_domain_case(4,true,19,13,3,4,2,3,false); // all four edges, asymmetric nonconstant picture
+  crop_domain_case(4,true,19,13,0,0,2,3,true);  // top/bottom constant picture
+  crop_domain_case(4,true,19,13,3,4,0,0,true);  // left/right constant picture
+  crop_domain_case(4,true,11,5,2,1,2,2,false); // height1 with a nonconstant horizontal picture
+  crop_domain_case(4,true,7,5,3,3,2,2,true);   // width1/height1, repeated neighbors
   puts("test_l5_crop_domain_excludes_adversarial_bars: PASS");
 }
 
 // 291: one detail plane (Io follows Ib); 292: both planes filter (live chroma weight).
 static void test_l5_cm29_crop_domain_excludes_adversarial_bars(void) {
-  for(int cm=291;cm<=292;cm++) {
-    crop_domain_case(cm,19,13,3,4,2,3,false);
-    crop_domain_case(cm,19,13,0,0,2,3,true);
-    crop_domain_case(cm,19,13,3,4,0,0,true);
-    crop_domain_case(cm,11,5,2,1,2,2,false);
-    crop_domain_case(cm,7,5,3,3,2,2,true);
-    crop_domain_case(cm,23,17,0,0,1,0,false); // a single bar row above a larger picture
+  for(int measured=0;measured<2;measured++) for(int cm=291;cm<=292;cm++) {
+    crop_domain_case(cm,measured,19,13,3,4,2,3,false);
+    crop_domain_case(cm,measured,19,13,0,0,2,3,true);
+    crop_domain_case(cm,measured,19,13,3,4,0,0,true);
+    crop_domain_case(cm,measured,11,5,2,1,2,2,false);
+    crop_domain_case(cm,measured,7,5,3,3,2,2,true);
+    crop_domain_case(cm,measured,23,17,0,0,1,0,false); // a single bar row above a larger picture
   }
   puts("test_l5_cm29_crop_domain_excludes_adversarial_bars: PASS");
 }
@@ -283,17 +292,19 @@ static void test_cm29_detail_runs_on_the_unclamped_mapping(void) {
 // takes its detail from the same unclamped mapping as the base plane. The CPU reference must
 // (a) leave a gray speck above the clip at its pointwise value even with the chroma plane live (both
 // of its planes stay above the peak), and (b) give a chroma-rich speck on a field below the clip,
-// where the chroma-weighted plane finishes under the peak, the pinned CPU-reference value. The pins
-// differ per weight and move when the chroma plane's detail pass is dropped (checked by deleting
-// that dm_detail call: the test fails). They characterize the CPU model at this commit: there is
-// no licensed measurement of the chroma plane.
-static void test_cm29_detail_chroma_weight(void) {
-  static const struct { unsigned raw; double cw; float gold[3]; } cw[] = {
-    {1000,(1000-2048)/2048.0,{0.6738409f,0.5725778f,0.3964595f}}, {3000,(3000-2048)/2048.0,{0.6747292f,0.5822781f,0.4078794f}},
+// where the chroma-weighted plane finishes under the peak, a pinned CPU-model value.
+// Keep the historical analytic pins and measured-table pins separate; neither is a
+// licensed chroma-plane measurement. Dropping only the chroma detail pass must fail
+// both models at the unchanged 1e-6 tolerance (qualified by isolated mutations).
+static void cm29_detail_chroma_weight_case(bool measured) {
+  static const struct { unsigned raw; double cw; float analytic[3], measured[3]; } cw[] = {
+    {1000,(1000-2048)/2048.0,{0.6738409f,0.5725778f,0.3964595f},{0.673847616f,0.572595716f,0.396473944f}},
+    {3000,(3000-2048)/2048.0,{0.6747292f,0.5822781f,0.4078794f},{0.674735844f,0.582295001f,0.407888472f}},
   };
   const float speck[3]={0.70f,0.58f,0.40f};
   enum { W=33, H=17 };
-  assert(memcmp(cw[0].gold,cw[1].gold,sizeof(cw[0].gold)));
+  assert(memcmp(cw[0].analytic,cw[1].analytic,sizeof(cw[0].analytic)));
+  assert(memcmp(cw[0].measured,cw[1].measured,sizeof(cw[0].measured)));
   for(size_t k=0;k<sizeof(cw)/sizeof(cw[0]);k++) {
     DoviExtMetadataBlockLevel1 l1 = {.min_pq=0, .avg_pq=1229, .max_pq=2841};
     DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=1000, .min_display_mastering_luminance=1};
@@ -305,6 +316,9 @@ static void test_cm29_detail_chroma_weight(void) {
     dm.dm_data.level2.list=(__typeof__(dm.dm_data.level2.list))list; dm.dm_data.level2.len=1;
     dv_dm_frame f;
     assert(dv_dm_prepare(&dm,600,.005,DM_P3D65,1000,true,true,&f)==NULL);
+    assert(f.c29.gamut);
+    if(!measured) f.c29.gamut=NULL;
+    const float *gold=measured?cw[k].measured:cw[k].analytic;
     assert(f.algo==29 && f.weight>-1 && fabs(f.c29.tr.cw-cw[k].cw)<1e-12 && !strcmp(f.trim,"l2-exact"));
     dm_cm29_pix px; const double rgb[3]={speck[0],speck[1],speck[2]};
     dm_cm29_pixel_pre(&f.c29,rgb,&px);
@@ -323,9 +337,14 @@ static void test_cm29_detail_chroma_weight(void) {
     for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.62f; in[4*i+3]=1; }
     in[4*c]=speck[0]; in[4*c+1]=speck[1]; in[4*c+2]=speck[2];
     assert(dv_dm_cpu_render(&f,in,W,H,out));
-    for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cw[k].gold[ch])>1e-6) {
-      fprintf(stderr,"raw %u chroma speck: %.7ff,%.7ff,%.7ff pinned %.7f\n",cw[k].raw,out[4*c],out[4*c+1],out[4*c+2],cw[k].gold[ch]); abort(); }
+    for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-gold[ch])>1e-6) {
+      fprintf(stderr,"%s raw %u chroma speck: %.9ff,%.9ff,%.9ff pinned %.9f\n",measured?"measured":"analytic",cw[k].raw,out[4*c],out[4*c+1],out[4*c+2],gold[ch]); abort(); }
   }
+}
+
+static void test_cm29_detail_chroma_weight(void) {
+  cm29_detail_chroma_weight_case(false);
+  cm29_detail_chroma_weight_case(true);
   puts("test_cm29_detail_chroma_weight: PASS");
 }
 

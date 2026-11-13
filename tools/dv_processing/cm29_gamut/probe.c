@@ -1,5 +1,5 @@
 /* Research-only CM v2.9 lattice probe generator.
- * Usage: probe PEAK_NITS MIN_NITS FRAME SEED OUT_YUV OUT_COORDS [LIFT]
+ * Usage: probe PEAK_NITS MIN_NITS FRAME SEED OUT_YUV OUT_COORDS [LIFT [SATURATION_GAIN]]
  * Flat 11x5 tiles retain the original pointwise probe layout. Float raster I/O
  * is native IEEE-754 little-endian, matching the f32 input format on LE hosts.
  */
@@ -36,7 +36,7 @@ static int colour(double u0, double u1, double u2, float rgb[3]) {
   }
   double I = 0.5 * (lo + hi);
   if (I < 1e-4) return 0;
-  double sc = dm_clampd((Ib / I) * (2 + I) / (2 + Ib), .5, 2);
+  double sc = dm_clampd((Ib / I) * (2 + I) / (2 + Ib), .5, 2) * (1 + .5 * s.tr.sg);
   double q[3] = {I, u1 * sC / sc, u2 * sC / sc}, lmsp[3], lin[3], o[3];
   dm_mat_vec(s.ipt2lms, q, lmsp);
   for (int k = 0; k < 3; k++) {
@@ -58,8 +58,8 @@ static int parse_int(const char *text, int *out) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7 && argc != 8) {
-    fprintf(stderr, "usage: %s PEAK_NITS MIN_NITS FRAME SEED OUT_YUV OUT_COORDS [LIFT]\n", argv[0]);
+  if (argc != 7 && argc != 8 && argc != 9) {
+    fprintf(stderr, "usage: %s PEAK_NITS MIN_NITS FRAME SEED OUT_YUV OUT_COORDS [LIFT [SATURATION_GAIN]]\n", argv[0]);
     return 2;
   }
   char *peak_end, *min_end, *seed_end;
@@ -80,6 +80,10 @@ int main(int argc, char **argv) {
   if (argc > 7) {
     char *end; trim.lift = strtod(argv[7], &end);
     if (!*argv[7] || *end || !isfinite(trim.lift) || trim.lift < -1 || trim.lift > 1) return 2;
+  }
+  if (argc > 8) {
+    char *end; trim.sg = strtod(argv[8], &end);
+    if (!*argv[8] || *end || !isfinite(trim.sg) || trim.sg < -1 || trim.sg > 1) return 2;
   }
   if (!dm_cm29_prepare(&s, L1, 0.005, 4000.0, &target, &trim)) {
     fprintf(stderr, "invalid target configuration\n"); return 3;
