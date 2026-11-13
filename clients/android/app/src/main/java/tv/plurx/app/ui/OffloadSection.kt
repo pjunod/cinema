@@ -15,6 +15,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -39,19 +42,26 @@ internal fun OffloadSection(vm: AppViewModel, item: Item, onReload: () -> Unit =
     var line by remember(item.id) { mutableStateOf("Offloaded \u00b7 the files were removed to free disk space") }
     var asking by remember(item.id) { mutableStateOf(false) }
     if (item.offloaded) {
-        LaunchedEffect(item.id) {
-            while (true) {
-                try {
-                    val answer = vm.offloadStatus(item.id)
-                    if (offloadComeBack(answer)) { onReload(); break }
-                    line = offloadStatusLine(answer)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    if (offloadNoLongerOffloaded(e)) { onReload(); break }
-                    line = OFFLOAD_UNREACHABLE
+        // The poll runs only while the app is in the foreground: repeatOnLifecycle
+        // cancels it when the activity stops and restarts it (an immediate read,
+        // then every OFFLOAD_POLL_MS) when it starts again.
+        val lifecycle = LocalLifecycleOwner.current.lifecycle
+        LaunchedEffect(item.id, lifecycle) {
+            var done = false
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (!done) {
+                    try {
+                        val answer = vm.offloadStatus(item.id)
+                        if (offloadComeBack(answer)) { done = true; onReload(); break }
+                        line = offloadStatusLine(answer)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        if (offloadNoLongerOffloaded(e)) { done = true; onReload(); break }
+                        line = OFFLOAD_UNREACHABLE
+                    }
+                    delay(OFFLOAD_POLL_MS)
                 }
-                delay(OFFLOAD_POLL_MS)
             }
         }
     }
