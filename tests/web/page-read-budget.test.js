@@ -1710,7 +1710,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the
     // local applied roster.
-    developer:{required:["/settings"],secondary:["/developer/readiness","/system/https"]},
+    developer:{required:["/settings"],secondary:["/developer/readiness","/system/https","/developer/source-recovery"]},
     standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
     sqlite:{tab:"cluster",legacy:true,roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
@@ -1724,9 +1724,9 @@ test("Settings executes exact required and secondary waves for every tab", async
     const harness=new Function(
       "location","SETTINGS_ENDPOINTS","SETTINGS_MANIFEST","settingsTab","renderSettings",
       "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
-      "setPageFailure","setPagePhase","document",
+      "setPageFailure","setPagePhase","document","applySourceRecovery",
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-         SETTINGS_HTTPS_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
+         SETTINGS_HTTPS_EPOCH=0,SETTINGS_SOURCE_RECOVERY_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
        const SERVER={cluster_enabled:${expected.legacy?"undefined":expected.clustered!==false}};
        ${shippedSource("settingsClusterEnabled")};
@@ -1736,6 +1736,7 @@ test("Settings executes exact required and secondary waves for every tab", async
        ${shippedSource("cacheSettings")};
        ${shippedSource("cacheTrakt")};
        ${shippedSource("loadSettingsKey")};
+       ${shippedSource("loadSourceRecoveryCard")};
        ${shippedSource("loadSettingsTab")};
        return {load:()=>loadSettingsTab(1,${JSON.stringify(tab)})};`,
     )(
@@ -1743,7 +1744,7 @@ test("Settings executes exact required and secondary waves for every tab", async
       ()=>phases.push("secondary-patch"),()=>phases.push("secondary-error"),
       ()=>new Promise(resolve=>logReleases.push({kind:"system-log",resolve})),
       ()=>new Promise(resolve=>logReleases.push({kind:"cluster-log",resolve})),
-      ()=>{},(_,__,phase)=>phases.push(phase),{getElementById:()=>null},
+      ()=>{},(_,__,phase)=>phases.push(phase),{getElementById:()=>null},()=>phases.push("secondary-patch"),
     );
     const load=harness.load(); await nextTurn();
     assert.deepEqual(requests.map(request=>request.url),expected.required,`${tab} required wave`);
