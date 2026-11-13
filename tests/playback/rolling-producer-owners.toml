@@ -5839,7 +5839,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main again: +1 main (#1546 test poll) = 2204.
-expected_occurrences = 2204
+# Reconcile main #1551 (694455592): +6, unrelated to reboot recovery.
+# processed_upgrade.rs::await_successor_start adds one awaited 250ms poll
+# under the existing PendingCandidateGuard/UpgradeRun cancellation owner;
+# it retains the admitted predecessor root and never proves source closure.
+# processed_upgrade_runs.rs adds five fixture time calls: two 20ms wait
+# assertions, one 1s cancellation bound, one 260ms control cadence sleep,
+# and one 2s prepared-entry bound. No new task or recovery owner is added.
+expected_occurrences = 2210
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

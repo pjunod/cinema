@@ -110,6 +110,7 @@ class RegressionFieldCase(unittest.TestCase):
 
             code, _out, err = self.run_main(
                 "--root", str(root), "--body", "no field here",
+                "--title", "feat(test): synthetic fixture",
                 "--base", base, "--head", "HEAD",
             )
             self.assertEqual(code, 1)
@@ -124,6 +125,7 @@ class RegressionFieldCase(unittest.TestCase):
             )
             code, _out, _err = self.run_main(
                 "--root", str(root), "--body", "no field here",
+                "--title", "feat(test): synthetic fixture",
                 "--base", base, "--head", "HEAD",
             )
             self.assertEqual(code, 0)

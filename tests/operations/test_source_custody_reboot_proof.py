@@ -364,21 +364,26 @@ class RebootProofFixtureTests(unittest.TestCase):
                 boundary.chmod(0o2755)
 
     def test_persistent_journal_query_binds_fixed_directory_and_filters(self):
+        # Exercise the real query boundary independently of setUp's proof stub.
+        journal_helper = importlib.util.module_from_spec(SPEC)
+        LOADER.exec_module(journal_helper)
         journal_root = self.root / 'journal'; journal_root.mkdir(mode=0o755)
         machine_dir = journal_root / MACHINE; machine_dir.mkdir(mode=0o755)
         journal_file = machine_dir / 'system.journal'
         journal_file.write_bytes(b'fixture'); journal_file.chmod(0o640)
-        with mock.patch.object(helper, 'JOURNAL_ROOT', journal_root), \
-                mock.patch.object(helper, 'local_filesystem', return_value=True), \
-                mock.patch.object(helper, 'bounded_journalctl', return_value=entry()) as query:
-            self.assertEqual(helper.prior_boot_entry(MACHINE, OLD, AT), 5000)
+        with mock.patch.object(journal_helper, 'ADMIN_UID', self.root.stat().st_uid), \
+                mock.patch.object(journal_helper, 'journal_ancestor'), \
+                mock.patch.object(journal_helper, 'JOURNAL_ROOT', journal_root), \
+                mock.patch.object(journal_helper, 'local_filesystem', return_value=True), \
+                mock.patch.object(journal_helper, 'bounded_journalctl', return_value=entry()) as query:
+            self.assertEqual(journal_helper.prior_boot_entry(MACHINE, OLD, AT), 5000)
             self.assertEqual(query.call_args.args[1:], (MACHINE, OLD))
             journal_file.chmod(0o660)
             with self.assertRaisesRegex(helper.Refused, 'untrusted'):
-                helper.prior_boot_entry(MACHINE, OLD, AT)
+                journal_helper.prior_boot_entry(MACHINE, OLD, AT)
             journal_file.chmod(0o640); journal_file.unlink(); journal_file.symlink_to(self.witness)
             with self.assertRaisesRegex(helper.Refused, 'untrusted'):
-                helper.prior_boot_entry(MACHINE, OLD, AT)
+                journal_helper.prior_boot_entry(MACHINE, OLD, AT)
 
     def test_publication_preserves_existing_different_proof_and_refuses_symlink(self):
         with mock.patch.object(helper, 'local_filesystem', return_value=True):
