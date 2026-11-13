@@ -134,6 +134,96 @@ fn media_file(path: PathBuf) -> MediaFile {
     }
 }
 
+/// Real FEL acceptance (§6.5). Explicit run only; every input is required:
+/// PLURX_FEL_REAL_SOURCE, PLURX_FEL_REAL_SCRATCH_ROOT,
+/// PLURX_FEL_REAL_HELPER, PLURX_FEL_REAL_SCANNER, PLURX_FEL_REAL_VIDEO_INDEX,
+/// PLURX_FFMPEG, PLURX_FFPROBE, PLURX_DOVI_TOOL, PLURX_MKVMERGE.
+/// `cargo test -p plurxd --bin plurxd dv_disk::tests::real_fel_fit_is_written_and_read_back -- --ignored --exact`
+#[tokio::test]
+#[ignore = "requires the Michael5400 FEL media and pinned media toolchain"]
+async fn real_fel_fit_is_written_and_read_back() {
+    use plurx_core::store::dv_refit_jobs::{RefitCurveScene, RefitCurveTable, RefitVerdict};
+    use plurx_core::transcode::dv_refit::{ServableCurves, FIT_VERSION};
+    use plurx_core::transcode::dv_refit_title::{self, RefitSource};
+
+    let required = |key: &str| std::env::var(key).unwrap_or_else(|_| panic!("missing {key}"));
+    let source = PathBuf::from(required("PLURX_FEL_REAL_SOURCE"));
+    let scratch_root = PathBuf::from(required("PLURX_FEL_REAL_SCRATCH_ROOT"));
+    let helper = required("PLURX_FEL_REAL_HELPER");
+    let scanner = PathBuf::from(required("PLURX_FEL_REAL_SCANNER"));
+    let video_index: u8 = required("PLURX_FEL_REAL_VIDEO_INDEX")
+        .parse()
+        .expect("selected video stream index");
+    let ffmpeg = required("PLURX_FFMPEG");
+    let ffprobe = required("PLURX_FFPROBE");
+    let dovi = required("PLURX_DOVI_TOOL");
+    let mkvmerge = required("PLURX_MKVMERGE");
+    for path in [&source, &scratch_root, &scanner] {
+        assert!(path.exists(), "required path is absent: {}", path.display());
+    }
+    for path in [&helper, &ffmpeg, &ffprobe, &dovi, &mkvmerge] {
+        assert!(Path::new(path).is_file(), "required tool is absent: {path}");
+    }
+    let owned = tempfile::Builder::new()
+        .prefix("plurx-real-fel-disk-")
+        .tempdir_in(&scratch_root)
+        .expect("owned real-media scratch directory");
+    let copy = owned.path().join("michael5400-source.mkv");
+    tokio::fs::copy(&source, &copy).await.expect("copy FEL source");
+    let file = media_file(copy.clone());
+    let loss = CancellationToken::new();
+    let mut held_source = tokio::fs::File::open(&copy).await.expect("copied source");
+    let source_hash = hash_held_exact(&mut held_source, file.size as u64, &loss,
+        tokio::time::Instant::now() + Duration::from_secs(12 * 60 * 60), "real FEL source before")
+        .await.expect("hash copied source");
+
+    let helper_output = tokio::process::Command::new(&helper)
+        .args(["--refit-stats", copy.to_str().expect("UTF-8 source"),
+            &video_index.to_string(), "--threads", "2"])
+        .output()
+        .await
+        .expect("run real F+ helper");
+    assert!(helper_output.status.success(), "helper: {}",
+        String::from_utf8_lossy(&helper_output.stderr));
+    let fit = dv_refit_title::fit(
+        dv_refit_title::parse(&helper_output.stdout).expect("complete helper JSON lines"),
+    );
+    assert_eq!(fit.verdict, RefitVerdict::Fitted, "fixture must exercise fitted curves");
+    let source = RefitSource {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        video_index: i64::from(video_index),
+        probe_revision: 1,
+        helper_identity: hex::encode(Sha256::digest(tokio::fs::read(&helper).await.expect("helper bytes"))),
+    };
+    let (title, rows) = fit.rows(&source).expect("quantized fit rows");
+    assert_eq!(title.fit_version, FIT_VERSION);
+    let scenes = rows.into_iter().map(|row| RefitCurveScene {
+        first_frame: row.first_frame,
+        frames: row.frames,
+        first_pts: row.first_pts,
+        end_pts: row.end_pts,
+        time_base: row.time_base,
+        curves: row.coefficients.as_ref().map(ServableCurves::from_quantised)
+            .transpose().expect("stored quantized curves serve"),
+    }).collect();
+    let table = RefitCurveTable { title, superseded_at_ms: None, scenes };
+    let tools = DvDiskTools::new(ffmpeg, dovi, mkvmerge);
+    let verified = build_and_verify(&tools, &file, TEST_NODE_ID,
+        &loss, true, Some((&table, &scanner)))
+        .await.expect("full fitted disk authoring and frame-by-frame replacement readback");
+    assert_eq!(verified.el_type, Some("fel"));
+    let paths = ConversionPaths::for_file(&file).expect("owned conversion paths");
+    assert!(tokio::fs::metadata(&paths.fitted_rpu).await.expect("fitted RPU").len() > 0);
+    assert!(tokio::fs::metadata(&paths.replacement).await.expect("verified replacement").len() > 0);
+    let mut retained_source = tokio::fs::File::open(&copy).await.expect("retained source");
+    let retained_hash = hash_held_exact(&mut retained_source, file.size as u64, &loss,
+        tokio::time::Instant::now() + Duration::from_secs(12 * 60 * 60), "real FEL source after")
+        .await.expect("hash retained source");
+    assert_eq!(retained_hash, source_hash);
+}
+
 fn probe(profile: i64, el: bool, duration_ms: i64, chapters: usize) -> ProbeResult {
     ProbeResult {
         duration_ms: Some(duration_ms),
