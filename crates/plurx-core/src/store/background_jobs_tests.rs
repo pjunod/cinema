@@ -2525,7 +2525,10 @@ async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work
         request
     };
     let background = job(0, None);
-    store.enqueue_job(background.clone()).await.expect("background");
+    store
+        .enqueue_job(background.clone())
+        .await
+        .expect("background");
     claimed(&store, claim(&background.id, 0, 1_000)).await;
     let ordinary = job(1, None);
     let lapsed = job(2, Some(1_001));
@@ -2579,7 +2582,30 @@ async fn a_waiting_viewer_attaches_and_renews_its_demand_on_the_title_scan() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("viewer waiter");
-    assert_eq!((count, deadline), (1, 90_000), "one renewed waiter per viewer");
+    assert_eq!(
+        (count, deadline),
+        (1, 90_000),
+        "one renewed waiter per viewer"
+    );
+    // The viewer paused past its deadline and upkeep cancelled the demand; a
+    // resumed viewer's renewal revives it.
+    db.execute(
+        "UPDATE background_job_waiters SET state='cancelled' WHERE consumer_kind='playback_qualification'",
+        [],
+    )
+    .expect("lapsed demand");
+    assert!(store
+        .attach_dv_title_viewer(7, "viewer-1", 200_000, 110_000)
+        .await
+        .expect("revived"));
+    let state: String = db
+        .query_row(
+            "SELECT state FROM background_job_waiters WHERE consumer_kind='playback_qualification'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("revived waiter");
+    assert_eq!(state, "pending");
     assert!(store
         .attach_dv_title_viewer(7, "viewer-1", 1_000, 2_000)
         .await

@@ -25,15 +25,20 @@ pub(super) struct AwaitingQualification {
 
 /// How long a waiting viewer's live demand on its title's scan lasts, and how
 /// often its rendering exchanges renew it. Background source readers take
-/// turns one at a time and only playback demand reads alongside them, so a
+/// turns one at a time and only playback demand may read beside them, so a
 /// viewer that is not counted waits for every library and subtitle job ahead
-/// of its title. Upkeep cancels the demand once the viewer stops renewing it.
+/// of its title. The demand does not lift the cap on concurrent readers or the
+/// viewer's own playback priority; upkeep cancels it once renewals stop.
 const VIEWER_DEMAND_MS: i64 = 90_000;
 const VIEWER_RENEWAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Hold (or renew) the live demand of `session_id`, awaiting its title's FEL
 /// measurement as `generation`, on that title's scan.
-pub(in crate::http::hls) fn hold_viewer_demand(state: &AppState, session_id: &str, generation: &str) {
+pub(in crate::http::hls) fn hold_viewer_demand(
+    state: &AppState,
+    session_id: &str,
+    generation: &str,
+) {
     let file_id = {
         let mut entries = lock();
         match entries.get_mut(session_id) {

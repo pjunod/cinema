@@ -263,6 +263,15 @@ lock, and close-on-exec keeps that descriptor from its children. The container
 runtime starts the replacement daemon in a new namespace only after the old
 init has exited.
 
+The proof depends on that runtime ordering. The anchor lock is released when
+the old init's descriptors close, slightly before the kernel finishes killing
+the rest of its namespace, and a reader blocked on a hung hard NFS mount can
+take minutes to die. `docker restart` and Compose recreation report the old
+container stopped only after its whole namespace is reaped, so the new daemon
+cannot exist sooner. Never run two daemons on one data directory at once (a
+second container, or a rolling update sharing the volume): that breaks the
+ordering the proof relies on.
+
 A same-namespace replay, a daemon that is not an init, and evidence written
 before this field existed prove nothing and keep their reboot or census path.
 An older daemon refuses the new evidence field and so skips the record, the
@@ -438,6 +447,11 @@ binaries ignore the separate namespace and cannot confuse its active records
 with old activation-abort or joined receipts. Drain/join/release active owners
 before downgrade. If that is impossible, preserve the recovery-capable binary
 and all journals; reverting binaries alone does not recover abandoned work.
+
+A daemon older than §1.4 cannot parse a witness that records its namespace:
+it logs `invalid reader evidence retained` and skips that record, which then
+needs a host reboot or the §1.3 census. Downgrade only after those owners have
+settled.
 
 Do not delete an unresolved record to downgrade. A missing identity source is
 a recovery limitation, not permission to manufacture proof. New same-kernel v2 witnesses cover native macOS/Linux and containers. Legacy

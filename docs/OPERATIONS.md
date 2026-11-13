@@ -6098,7 +6098,9 @@ open gaps).
 
 `plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
 upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
-`admission_refused`, `not_applicable`, `cancelled`).
+`admission_refused`, `not_applicable`, `qualification_pending`, `displaced`,
+`cancelled`). `qualification_pending` waits for its title's FEL measurement;
+`displaced` lost the playback's preparation slot and waits for it again.
 `plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
 prepared switches the clients reported at their seam (`committed`, `refused`,
 `switched_without_a_frame`) and

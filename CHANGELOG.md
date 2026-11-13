@@ -15,9 +15,9 @@ bump may break compatibility and a **patch** bump never does.
   stranded. A new daemon now releases it when the old daemon's whole PID
   namespace is proven torn down.
 - A play waiting on its title's FEL measurement now counts as playback demand
-  for that title's scan. The scan runs beside background work instead of
-  waiting behind every library and subtitle job, and the upgrade lands in the
-  same play.
+  for that title's scan. The scan no longer queues behind every library and
+  subtitle job: it reads whenever the viewer's own playback and the reader cap
+  allow, and the upgrade lands in the same play once it is measured.
 - A processed upgrade that lost the playback's preparation slot to another
   preparation now waits for the free slot instead of being dropped. The
   processed-upgrade metric now reports waiting-on-measurement and displaced
