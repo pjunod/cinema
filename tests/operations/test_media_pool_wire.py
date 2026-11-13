@@ -38,9 +38,10 @@ container attributes that shape the wire (`tag`, `content`, `rename_all`,
 baseline and is not checked until it exists at the base; a type with no
 in-repo `Deserialize` derive (std, serde_json, a hand-written impl) is opaque.
 
-The base comes from `PLURX_VALIDATION_BASE` (set by `scripts/paperwork`) or
-`git merge-base HEAD origin/main`. The rule functions are also exercised on
-fixed sources, so the check is proven even where no base resolves.
+The base is the merge base of HEAD and `PLURX_VALIDATION_BASE` (set by
+`scripts/paperwork`), or `origin/main` when that comparison ref is absent.
+An advanced target tip must not turn target-only wire changes into PR changes.
+The rule functions are also exercised on fixed sources, so the check is proven even where no base resolves.
 """
 
 from __future__ import annotations
@@ -48,9 +49,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 WIRE_FILES = (
@@ -649,11 +652,9 @@ def _git(*args: str) -> str:
 
 
 def resolve_base() -> str | None:
-    explicit = os.environ.get("PLURX_VALIDATION_BASE")
+    comparison = os.environ.get("PLURX_VALIDATION_BASE") or "origin/main"
     try:
-        if explicit:
-            return _git("rev-parse", "--verify", f"{explicit}^{{commit}}").strip()
-        return _git("merge-base", "HEAD", "origin/main").strip()
+        return _git("merge-base", "HEAD", comparison).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
@@ -683,6 +684,71 @@ pub(crate) struct MediaNodeSnapshot {
     pub io: MediaIoObservation,
 }
 """
+
+
+class BaseResolutionTests(unittest.TestCase):
+    """Real diverged Git histories distinguish PR edits from target-only edits."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.repo = Path(temporary.name)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "Wire boundary test")
+        self.git("config", "user.email", "wire@example.invalid")
+        self.git("config", "commit.gpgsign", "false")
+        self.git("config", "core.hooksPath", "/dev/null")
+        self.write_wire(STRICT_SNAPSHOT, 9)
+        self.git("add", ".")
+        self.git("commit", "-qm", "shared protocol 9")
+        self.shared = self.git("rev-parse", "HEAD")
+        self.git("switch", "-qc", "pr")
+        (self.repo / "ci-only.txt").write_text("CI-only PR edit\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "unrelated CI edit")
+        self.git("switch", "-q", "main")
+        self.write_wire(STRICT_SNAPSHOT.replace("    pub file_id: i64,", "    pub file_id: i64,\n    pub main_only: bool,"), 10)
+        self.git("add", ".")
+        self.git("commit", "-qm", "main-only protocol 10 addition")
+        self.target = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", self.target)
+        self.git("switch", "-q", "pr")
+        root = mock.patch(__name__ + ".ROOT", self.repo)
+        root.start()
+        self.addCleanup(root.stop)
+        environment = mock.patch.dict(os.environ, {"PLURX_VALIDATION_BASE": self.target})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def git(self, *arguments):
+        return subprocess.run(["git", *arguments], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def write_wire(self, body, version):
+        path = self.repo / PROTOCOL_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"pub const PROTOCOL_VERSION: i64 = {version};\n" + body)
+
+    def findings(self):
+        before, after = GitTree(resolve_base()), GitTree(None)
+        return wire_findings(collect_wire(before, (PROTOCOL_FILE,)), collect_wire(after, (PROTOCOL_FILE,)),
+                             protocol_version(before.read(PROTOCOL_FILE) or ""),
+                             protocol_version(after.read(PROTOCOL_FILE) or ""), "")
+
+    def test_advanced_main_does_not_turn_untouched_wire_into_pr_changes(self):
+        self.assertEqual(resolve_base(), self.shared)
+        self.assertEqual(self.findings(), [])
+
+    def test_pr_wire_change_still_requires_a_bump_when_main_advanced(self):
+        self.write_wire(STRICT_SNAPSHOT.replace("    pub file_id: i64,", "    pub file_id: i64,\n    pub pr_only: bool,"), 9)
+        findings = self.findings()
+        self.assertTrue(any("PROTOCOL_VERSION bump" in finding and "pr_only" in finding for finding in findings), findings)
+
+    def test_ancestor_base_and_default_target_keep_the_same_patch_boundary(self):
+        with mock.patch.dict(os.environ, {"PLURX_VALIDATION_BASE": self.shared}):
+            self.assertEqual(resolve_base(), self.shared)
+        with mock.patch.dict(os.environ, {"PLURX_VALIDATION_BASE": ""}):
+            self.assertEqual(resolve_base(), self.shared)
 
 
 class RuleTests(unittest.TestCase):
