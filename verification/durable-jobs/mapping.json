@@ -739,13 +739,13 @@
       },
       {
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "c364421f3298c5243e93bab48631ccbc1941434bee0b672528eb9d54065587fc",
+        "sha256": "885fac09d2e643ccf8fef99660ce7765115a6037f6106b11e70abc3bf921cdcf",
         "source": "crates/plurxd/src/source_custody.rs",
         "table": "recovery dependency outside model: custody activation and cleanup"
       },
       {
         "anchor": "pub(super) fn configure_backend(",
-        "sha256": "8d1d5c725e5d107fef4d612f807181c8e81e4506afb3a45e58220698b601269b",
+        "sha256": "323ea9e39d82164abee8a031ee956331f66313ab8838f0833d2268acfb49b58b",
         "source": "crates/plurxd/src/source_custody/recovery.rs",
         "table": "recovery dependency outside model: exact-Store verified boot replay"
       },
