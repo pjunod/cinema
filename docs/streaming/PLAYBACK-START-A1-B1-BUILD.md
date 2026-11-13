@@ -335,16 +335,17 @@ EOF seen from a 90-minute seek cannot masquerade as a complete title.
 
 ### 5.1 One coherent snapshot backs plans, bytes and playlists
 
-Replace immutable-only rendition assumptions with a proposed
-`CopyPlanState::Growing(CommittedRangeSnapshot) | Frozen(CompletePlan)` in
-[session.rs](../../crates/plurxd/src/vod/session.rs), shared attachment and
-manifest generation. Source generation, contract, init identity, committed
-segments, coverage, fixed target and completion are observed together.
-`Frozen` retains put-if-absent; rendition and final v3 blob keys stay distinct.
+Ruling 2026-11-12 (Paul delegated to Fable; Fable chose the rolling shape):
+a growing range is served by the rolling session in `transcode/manager` as an
+EVENT presentation (`vod: false`), as the Source range is. VOD plans stay
+`Frozen` with put-if-absent. One `CommittedRangeSnapshot` backs plan, bytes
+and playlist: source generation, contract, init identity, committed segments,
+coverage, fixed target and completion are observed together. Rendition and
+final v3 blob keys stay distinct.
 
 A held EVENT URI only appends complete verified segments and eventually
-`ENDLIST`. A whole-title immutable VOD playlist receives a separate URI after
-completion. Range views preserve their original origin, segment numbering,
+`ENDLIST`. Promotion to a whole-title immutable VOD playlist is the existing
+prepared replacement, under its own URI. Range views preserve their original origin, segment numbering,
 init and discontinuity sequence; sealing the complete index cannot renumber
 them. Attach/reuse includes serving namespace and range view identity, even
 when canonical file-level observations are shared.
@@ -552,8 +553,8 @@ New files follow their module conventions; do not add a second index service.
 | 1. Contract and readers | Core `segplan`, `store/fragment_index_cluster`, local `store/fragindex`, v3 decoder/provenance and both store migrations | V2 decoding/key meaning unchanged; V3 deterministic observations; old/new startup and rollback defined before writer activation |
 | 2. One computation | Core analysis Store types, SQLite/Hiqlite analysis twins, daemon `state`, background admission/resources, `source_input`/custody | Equivalent pre-hash requests join; typed Source authority survives; physical reads charged once; observers hold no slot |
 | 3. Common measurement and range sink | Daemon `fragindex`, `fragment_index_cluster`, `vodgen`, `vod/generation`, `renditiondir`; core `fmp4`/`segplan` where shared extraction requires it | Seeked and sequential canonical rows equal; every segment has a source-bound verified checkpoint; stale writer cannot commit |
-| 4. Growing attachment and admission | `vod/session`, `vod/shared`, `vod/serve/create`, manifest/retained paths and existing A1-N publication helper | One coherent view; 48-second native rate-1 case; fixed target; explicit oversized-GOP/init outcomes; held EVENT views stable |
-| 5. Source and client integration | `transcode/source_actor`, Source create path, receiver relay, shared descriptors and relevant web/Apple/Android attachment/seek clients | Source scanner removed; one engine and file computation; grants/namespaces isolated; correct nonzero-origin time and first reload |
+| 4. Growing attachment and admission | `transcode/manager` rolling copy start and rolling session, existing A1-N publication helper | One coherent view; 48-second native rate-1 case; fixed target; explicit oversized-GOP/init outcomes; held EVENT views stable |
+| 5. Source integration and device acceptance | `transcode/source_actor`, Source create path, receiver relay; device acceptance of the existing rolling descriptors on web/Apple/Android | Source scanner removed; one engine and file computation; grants/namespaces isolated; nonzero-origin time and first reload accepted on devices |
 | 6. Seal, adoption and quarantine | Analysis→Job store submission twins, fenced publication, cluster hydrate, per-fragment verifier and cached delivery | No retired-fence writes; complete-only publication; legacy adoption without engine-key retirement; one scoped rebuild |
 | 7. Reconciliation and A2 handoff | Existing start plan/status docs, producer ownership inventory, control-wire corpus, encoded publication consumer | Exact final behavior/metrics/regressions recorded; encoded caller shares admission without losing actor budget |
 

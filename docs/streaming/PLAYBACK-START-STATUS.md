@@ -155,15 +155,22 @@ range yet and no serving path changed:
   directory is refused `copy_range_session_settling`; the session then
   serves that start another way.
 
-Ruling needed (Paul): which session owns the attachment. The plan names
-the VOD session. A VOD session is `vod: true` with origin 0 and no rolling
-lease, and every client reads `vod` as a whole-title timeline, so serving
-a growing range from it needs a growing plan state through the VOD serving
-stack, plus EVENT support on web, Apple and Android (contract step 5). The
-other choice is the rolling copy start the `vod_index_pending` fallback
-already makes. It would serve the range rolling-shaped, as the Source range
-is served, which every client plays today, and step 5's API was built
-against that session's lease. The plan's step 6 lays out both options.
+Ruling (2026-11-12): Paul delegated to Fable; Fable chose (b). The range
+attaches in the rolling copy start that the `vod_index_pending` fallback
+makes (`start_copy_with_audio_offset`). It is served rolling-shaped, as the
+Source range is, with no client change, and copyseg answers every refusal.
+The build contract (§5.1, steps 4 and 5) and plan steps 6, 8 and 10 are
+amended to match.
+
+Found, and stopped before (Paul away): the rolling session has no backing
+seam. `Session` is the copyseg producer. It reads `dir`, locks its child
+to suspend, replace and reap, feeds `SegmentIndex` from copyseg's playlist,
+and owns copyseg's scratch, upload, retention and retained collection. The
+cached asset is already a second backing, built as `cache_manifest`
+branches. The seam is a typed `RollingBacking` with copyseg, cached and
+range implementations. It rewrites every rolling and cached serve path and
+the hand-built `Session` test fixtures, so it is its own change, made
+before the attachment. Plan step 6 lists what it must answer.
 
 ## Previous batch — a local range's input admission (item 6, plan step 5)
 

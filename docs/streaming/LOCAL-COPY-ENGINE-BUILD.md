@@ -2,7 +2,7 @@
 
 **Status:** open — steps 1, 3, 4 and 5 built (`item6b`, `step3`,
 `step4`, `step5`), step 6's range half built on `step6` and its
-attachment awaiting a ruling, steps 2 and 7–10 not started ·
+rolling-session seam next, steps 2 and 7–10 not started ·
 **Executes:** item 6 of [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md)
 under the [A1/B1 build contract](PLAYBACK-START-A1-B1-BUILD.md) ·
 **Written:** 2026-11-12 against `item6` @ `92c0e28`
@@ -150,154 +150,45 @@ A demand survives a restart.
 ### Step 3 — The copy index rides the content-analysis pass (built)
 
 Paul's standing rule: every analysis job rides along with the analyze
-pass, reading the same unfiltered input, and also runs standalone. The
-standalone form exists (item 6 step 1). This step is the ride-along.
+pass, reading the same unfiltered input, and also runs standalone (item 6
+step 1). This step is the ride-along; the ledger's step-3 batch and the
+code (`copy_ride_along.rs`, `fragindex.rs`) hold the detail.
 
-- **Owner surfaces:** `fragindex.rs` (`build_attested_pass`,
-  `build_with_args_owned`, `index_stream_with_progress`, `LeadFragments`,
-  `IndexPass::riding_args`), a new `copy_ride_along.rs` beside
-  `subtitle_ride_along.rs`, `copy_analysis.rs` and `copy_analysis/work.rs`
-  (a third observation source), `copyrange/observed.rs`
-  (`inspect_canonical_row`, `copy_cut_policy`) and `census.rs`
-  (`head_origin`) for the shared row and inspection extraction,
-  `copy_normalization.rs` (`begin_canonical`, `admit`),
-  `state.rs::pass_may_ride` and `settle_copy_ride`.
-- **Authority, with no second claim service:** the pass runs under its own
-  claimed `fragment_index` build job, the source custody that claim holds
-  and its `SourceReadBudget`; those stay the only authority for its read.
-  The ride-along does not claim the coordinator. It hands the worker one
-  whole-title observation that names the pass's claim and custody:
-  `IndexPassCustody`, whose only constructor reads a `JobFence` that is
-  live when asked, of kind `FragmentIndexBuild`, with custody owned by
-  that exact claim, and binds it to the job's file id and the object
-  version the job attested. The worker, which is the one coordinator, then
-  takes the metadata-only coordination claim itself (it reserves no
-  reader) and seals and publishes. The set accepts the observation on the
-  same checks as an Analysis fill (`CopyObservationSet::observe_pass`),
-  with the pass's custody in place of a coordination phase, only for that
-  file and object, and only as a whole title. The pass awaits room in the
-  worker's inbox while it holds the claim; losing the claim ends the wait.
-- **Which passes ride:** the cluster build job's pass
-  (`run_cluster_fragment_index_job`), for its lead identity, when all of
-  these hold: this node runs the Analysis worker; the container is
-  Matroska or ISO base media (`mkv`, `webm`, `mp4`, `m4v`, `mov`); the
-  probe gives a clock; one `copy_index_v3_variant(...).readable()` read
-  finds no healthy, current head; and this source's last riding pass did
-  not fail (`FAILED_RIDES`, in memory, per file and source stamp, as
-  `subtitle_ride_along` keeps). The non-cluster local pass holds no claim
-  or custody to name and does not ride. Sibling identities of a shared
-  read are not ridden. Each of those is still built by the standalone
-  form.
-- **Rows, and why a video-only observation is enough:** an `IndexRow` is
-  defined on the video-only canonical pipe, which is what the pass emits on
-  `pipe:1`. The engine checks an AV companion only because it also serves
-  AV; the index does not contain it. The ride consumes the lead reader's
-  own parsed fragments, by move, once the index has measured them: no byte
-  copy, no second parse and no second Dolby Vision conversion (the lead's
-  converter is the engine's, over the same track; a converting pass keeps
-  the unconverted sample tables, not the media, for the clock). Each
-  fragment is paired with its packets by the engine's
-  `associate_fragment_clock`, checked against
-  `CopyNormalizationContract::from_head`, inspected by
-  `inspect_canonical_row` and measured by `CopyCompanionVerifier` with the
-  canonical stream standing as its own companion. A row or a segment of
-  rows longer than the engine's 16 s target is refused as the engine's
-  kernel refuses it.
-  - **Not removed, and why:** `inspect_canonical_row` still walks each
-    fragment's NAL headers for HDR10 SEI. It is the engine's own
-    inspection and reads length prefixes and NAL header bytes, not
-    payload. Taking the per-row facts from the lead reader instead would
-    mean changing the lead's cumulative HDR10 scan in `plurx-core`, which
-    is what keeps the node-local index byte-identical with and without
-    the ride.
-  - A divergence that slipped through is still caught at use: every
-    generation is verified against the index, and item 5 quarantines a
-    contradicted head.
-- **No task, no backlog:** the ride has no observer task and no queue of
-  copied bytes. Its state is fed in place, under one lock, by the three
-  readers the pass already runs (lead output, stderr header trace, clock).
-  It holds a fragment only until its packets and inspections arrive, and
-  is abandoned if that ever exceeds the engine's own `MAX_HELD` (96 MiB).
-- **Clock:** the ride-along appends the engine's packet clock block
-  (`transcode::copy_packet_clock_output_args`) after the index outputs, on
-  descriptor 7, never inside `copy_index_pipe_args*` (the rule
-  `subtitle_ride_along` keeps, so no cluster cache key changes). It does
-  **not** add the engine's global `-copyts`. That option would move the
-  timestamps of every other output of the pass; the stored subtitle tracks
-  are written without it and their cue times depend on that
-  (`subtitles.rs`, "`-copyts` and no `-start_at_zero`"). Without it
-  FFmpeg's input clock sits the format start time before the source's.
-  Rows are differences from the first packet, so they are unaffected. The
-  source origin is recovered from the pass's own probe of the held
-  descriptor: the format start, only when it is a whole number of stream
-  ticks, and checked against the video stream's probed first presentation
-  time. Anything else abandons the ride. The clock reader drains to end
-  of file whatever the ride does. A read error abandons the ride; the
-  reader then stops reading and holds the descriptor open, with no retry,
-  until the pass ends, so the child never sees a broken pipe. The reader is joined only when the lead built (the child exited
-  and closed the clock); otherwise it is stopped. Nothing waits on it
-  without a bound.
-- **A ride only adds:** rows that disagree with rows already held are
-  dropped and the held set stands. `ridden` means a set holds a pass's
-  rows and nothing else: such a set never quarantines a healthy head. A
-  viewer's range folding in clears it, a pass folding into a viewer's or a
-  fill's rows never sets it, and a viewer's range that disagrees with a
-  pass's rows replaces them, so a viewer's own contradicting range still
-  quarantines. At the pending bound a pass may evict only another ridden
-  set, never a demand or a viewer's set.
-- **Attestation:** not a second read where the pass records its own
-  full-source receipt, which `physical::cached_full_source` already accepts
-  (`LegacyFull`). That is every HEVC pass (`attest_copy_source_persistent`
-  hashes the whole file under `hevc-full-v1:`). A pass of any other codec
-  records only a sampled receipt, so one whole-file hash phase remains for
-  it; that is a second read of the file, not of the video.
-- **Product:** the Analysis page's live row says the pass is also observing
-  the copy index, with its row count, or that the observation was
-  abandoned (`copy_index_riding`, `copy_index_rows`,
-  `copy_index_abandoned` on the progress row), beside the subtitle
-  ride-along's line. Rides are counted in
-  `plurx_copy_index_ride_total{outcome}` (`observed`, `abandoned`,
-  `not_built`), and an abandonment is a warn log with the observer's own
-  reason. Cancelling the Analysis job stops both: the ride has no child
-  and no timer of its own.
-- **Cost added to the pass:** no source read. In the child: one more
-  output, which runs the copy recipe's bitstream-filter chain a second
-  time over the video and has `framecrc` checksum every packet, and writes
-  a text line per packet to a pipe. In the daemon: per fragment, a
-  sample-table comparison, a NAL-header walk and one row measurement, in
-  the reader that delivered the last piece; memory is the fragments held
-  unpaired, by move, bounded by `MAX_HELD` (96 MiB), plus up to
-  `MAX_PACKETS` packet records. There is no separate backlog.
-- **Acceptance:** a title the pass indexes gets a v3 head from that read;
-  its blob equals the one `fill_copy_gap` seals for the same file and
-  recipe; the node-local index and its cluster cache key are byte-identical
-  with and without the ride-along; a failed ride-along, and one that falls
-  behind for longer than the pass runs, cost the index nothing and do not
-  lengthen the pass.
-- **Post-deploy acceptance, not yet run:** on the fleet, a UHD HDR10 remux
-  and a Dolby Vision title (profile 7 and 8, preserved and converted
-  identities) each ride to `observed` with no abandonment, their v3 blob
-  equal to a standalone fill's of the same title, and the pass's wall time
-  and the node's memory within noise of a non-riding pass. Until then the
-  ride is proven only on the 12-second generated fixtures. Record the
-  titles, `plurx_copy_index_ride_total` and any abandonment reason in the
-  ledger.
-- **Tests (written):** row, inspection, origin, init and blob equality
-  against a whole-title fill on the HEVC and H.264 fixtures
-  (`copy_analysis/gap_fill_tests.rs`); the index equal with and without
-  the ride, the hashed argv unchanged, a failed ride leaving
-  `IndexOutcome::Built` and not riding again, a ride that falls behind
-  (`fragindex/copy_ride_tests.rs`); the origin recovery, the container
-  allow-list, abandonment counted and latched, no unbounded join
-  (`copy_ride_along/tests.rs`); the worker's fold, custody binding,
-  `ridden`, eviction, and a viewer's range still quarantining
-  (`copy_analysis/quarantine_tests.rs`); the Analysis row
-  (`tests/web/analysis-node-names.test.js`).
-- **Not covered by a test:** `pass_may_ride` and `settle_copy_ride` under
-  a real claim, the awaited hand-over, and the publication that follows,
-  run only on a cluster. No fixture converts Dolby Vision, so the
-  converting path's use of the lead's conversion is covered only by the
-  post-deploy acceptance.
+- **Owner surfaces:** `fragindex.rs`, `copy_ride_along.rs`,
+  `copy_analysis.rs`, `copy_analysis/work.rs`, `copyrange/observed.rs`,
+  `census.rs`, `copy_normalization.rs`, `state.rs` (`pass_may_ride`,
+  `settle_copy_ride`).
+- **Authority, no second claim service:** the pass's own claimed
+  `fragment_index` build job, its custody and `SourceReadBudget`. The ride
+  hands the worker one whole-title observation naming that claim
+  (`IndexPassCustody`, made only from a live `FragmentIndexBuild` fence and
+  bound to the file and attested object); the worker takes the
+  metadata-only coordination claim, seals and publishes.
+- **Which passes ride:** the cluster build job's lead identity, on a node
+  running the Analysis worker, Matroska or ISO base media, a probed clock,
+  no healthy current head, and no failed ride of this source. Others are
+  built by the standalone form.
+- **Rows:** the lead reader's own parsed video-only fragments, by move,
+  paired with packets by `associate_fragment_clock`, checked against
+  `CopyNormalizationContract::from_head`, inspected and measured as the
+  engine does; over-target rows refused as the kernel refuses them. No
+  observer task or backlog; held fragments bounded by `MAX_HELD`.
+- **Clock:** the engine's packet clock on descriptor 7 after the index
+  outputs, never inside the hashed argv, without the global `-copyts`
+  (it would move the stored subtitle tracks); the source origin comes
+  from the pass's probe, else the ride is abandoned.
+- **A ride only adds:** it never displaces held rows, never quarantines a
+  healthy head (`ridden`), and evicts only another ridden set.
+- **Product:** the Analysis row's `copy_index_riding`, `copy_index_rows`,
+  `copy_index_abandoned`; `plurx_copy_index_ride_total{outcome}`; a warn
+  log per abandonment. Cancelling the job stops both.
+- **Post-deploy acceptance, not yet run:** a UHD HDR10 remux and Dolby
+  Vision profile 7 and 8 titles ride to `observed`, seal a standalone
+  fill's blob, within noise of a non-riding pass. Record it in the ledger.
+- **Tests (written):** `copy_analysis/gap_fill_tests.rs`,
+  `fragindex/copy_ride_tests.rs`, `copy_ride_along/tests.rs`,
+  `copy_analysis/quarantine_tests.rs`,
+  `tests/web/analysis-node-names.test.js`.
 
 ### Step 4 — A local owner at P1, P2 and P5 (built)
 
@@ -468,31 +359,23 @@ the attachment in step 6.
 - **Left for step 6, with the attachment:** the session's calls
   (`observe_control`, `refresh`, `settle`); see step 6 for their owner.
 
-### Step 6 — Local serving attachment and rendered milestone (P4, P9; build contract step 4) (range half built)
+### Step 6 — Local serving attachment and rendered milestone (P4, P9; build contract step 4) (range half built; seam next)
 
-- **Owner surfaces:** `vod/session.rs`, `vod/shared.rs`,
-  `vod/serve/create.rs`, the retained-manifest path, the A1-N publication
-  helper, playback-control's rendered report.
-- **Change:** a local VOD session can attach to a growing range as its
-  rendition: one coherent snapshot backs plan, bytes and playlist (contract
-  §5.1), the target is fixed before publication (§5.2), held EVENT views
-  stay stable (§5.3), and admission is A1-N's. The first use is the cold
-  local copy start, the case the rolling path serves today. Create still
-  answers without awaiting an Analysis write. The session's accepted
-  rendered report sets the range's `first_frame_rendered`. The rolling
-  path remains the answer for any start the range refuses (unknown clock,
-  oversized GOP, changed init), by the engine's own typed refusals.
-- **Product:** a local range's payload is charged to the playback cache
-  budget and shown with its session in Activity; stopping the session
-  retires the range and its payload.
-- **Acceptance:** the contract's 48-second native rate-1 case; a cold
-  local start at 0 and at 90 minutes plays from the range on web, Apple and
-  Android; a leader restart during such a session does not interrupt it;
-  every refusal falls to the rolling path and plays. Device and fleet
-  checks are run by us or by Paul.
-- **Tests:** attachment, snapshot coherence and refusal fallbacks in
-  `vod/tests`; client attachment and seek tests named by the contract's
-  step 5.
+- **Ruling (2026-11-12): Paul delegated to Fable; Fable chose (b).** The
+  range attaches in the rolling copy start the `vod_index_pending`
+  fallback makes (`transcode/manager`, `start_copy_with_audio_offset`) and
+  is served rolling-shaped, as the Source range is: EVENT, `vod: false`,
+  rolling lease, nonzero origin. No client change; copyseg answers every
+  refusal. VOD sessions are untouched.
+- **Owner surfaces:** `transcode/manager` (start, publication, control,
+  maintenance), `transcode/rolling` (session, flow, retention,
+  retirement), `copyrange/local.rs`, Activity.
+- **Change:** the cold local copy start attaches a local range. Its flow
+  evaluation calls `observe_control` and `refresh`, its retirement
+  `settle`, its rendered report `mark_rendered`; its Activity line shows
+  the range's `payload_bytes` and Stop retires it. A typed range refusal
+  starts copyseg for that start, as today. A1-N is the session's own
+  publication clock, the same rule `wait_admitted` applies.
 - **Built (6a), the range's serving half, `copyrange/local.rs`:**
   `snapshot()`, one view under one lock (playlist, its committed segments,
   init, origin, completion, the bytes held in the playback cache);
@@ -500,25 +383,32 @@ the attachment in step 6.
   (`transcode::startup_admission_window_ms`) that rolling publication and
   the Source range also call; a second range of a session whose
   settlement is removing its directory refused
-  `copy_range_session_settling`. Tests in `copyrange/local_tests.rs`. No
-  session attaches a range, so no serving path changed.
-- **Stopped for Paul's ruling, the attachment's owner.** A VOD session is
-  an immutable-plan, `vod: true`, origin-0 presentation with no rolling
-  lease, and clients read `vod` as a whole-title timeline (web:
-  `t.vod=!!info.vod&&t.offset===0`). A growing range is an EVENT range
-  presentation, as the Source range and today's rolling fallback are
-  (`vod: false`, rolling lease, nonzero origin), which every client plays
-  today; step 5's `startup_protected` is that lease's. (a) Attach in the
-  VOD session: `CopyPlanState::Growing` through session, shared attach,
-  delivery, playlist, retained and control, plus contract step 5's EVENT
-  work on web, Apple and Android before any start uses it. (b) Attach in
-  the rolling copy start the `vod_index_pending` fallback makes
-  (`start_copy_with_audio_offset`), served rolling-shaped: its flow
-  evaluation calls `observe_control`/`refresh`, retirement `settle`, the
-  rendered report `mark_rendered`, its Activity line shows
-  `payload_bytes` and Stop retires it; copyseg answers every refusal. (b)
-  needs no client change; (a) is what this plan names. Neither fits one
-  safe PR beside 6a.
+  `copy_range_session_settling`. Nothing serves from a range yet.
+- **Found: the rolling session has no backing seam.** `Session` is the
+  copyseg producer: it reads `dir/index.m3u8` and `dir/<segment>` (about
+  25 sites), locks its `AttemptChild` to suspend, replace and reap (about
+  15), feeds `SegmentIndex` from that playlist (about 23), and owns
+  copyseg's scratch grant, upload endpoint, retained collection,
+  retention and permits. The cached asset is a second backing already,
+  done as 12 `cache_manifest` branches. A range must not be a third.
+- **Next, its own change before the attachment: the seam.** A typed
+  `RollingBacking` the session serves, with one implementation per
+  producer: copyseg (child, `dir`, scratch, upload, retention, retained
+  collection), the cached manifest, and the local range. It answers the
+  playlist read, the object open and size, the produced end, hold and
+  resume (copyseg: stop the child; range: its read bank), retention (the
+  range keeps its committed segments under its playback-cache charge) and
+  retirement (reap; `settle`). Copyseg's and the cache's behaviour must be
+  unchanged, held by the existing `transcode/tests` suites, which build
+  `Session` by hand and move with it. No branch is added inside copyseg.
+- **Acceptance:** the contract's 48-second native rate-1 case; a cold
+  local start at 0 and at 90 minutes plays from the range on web, Apple and
+  Android (device acceptance of the existing rolling descriptors); a
+  leader restart does not interrupt it; every refusal falls to copyseg and
+  plays; Activity shows the range and Stop retires it.
+- **Tests:** a cold local copy start served from a range; a refusal
+  falling back to copyseg; Stop retiring the range; the Activity disk use;
+  the existing rolling and cached suites unchanged.
 
 ### Step 7 — Local ranges commit observations
 
@@ -545,9 +435,10 @@ the attachment in step 6.
 
 - **Owner surfaces:** `vod/generation.rs`, `vod/plan.rs`,
   `vod/serve/create.rs`.
-- **Change:** an indexed local copy start runs a seeked range of the engine
-  verified against the index. The plan-verified generation stays in the
-  tree and serves every start the range refuses. Nothing is removed.
+- **Change:** an indexed local copy start stays a `Frozen` VOD plan, fed
+  by a seeked range of the engine verified against the index. The
+  plan-verified generation stays in the tree and serves every start the
+  range refuses. Nothing is removed.
 - **Acceptance:** seeked and sequential rows equal (contract step 3);
   every refusal plays through the existing generation.
 - **Tests:** the seeked-range verifier; each typed refusal falling back.
@@ -571,9 +462,10 @@ Record the counts and the titles behind each refusal in the status ledger.
   leaves that list only when the engine has learned to serve it and a
   later fleet window counts it at zero. Live HLS therefore plays every
   title before, during and after this step.
-- **Change:** remove the plan-verified copy generation and the rolling
-  path's use for starts the engine serves; remove a refusal class's
-  rolling code only under the rule above.
+- **Change:** the rolling session shell stays permanently as the EVENT
+  presentation. Only copyseg as the default for starts the engine serves
+  and the plan-verified generation are removed; a refusal class's copyseg
+  code goes only under the rule above.
 - **Acceptance:** no title that played before fails to play.
 - **Tests:** the inventory shrinks by exactly the removed producers; each
   retained refusal class still has its fallback test.
@@ -599,4 +491,4 @@ session id or URL. **Tests** says whether the step's tests have been run.
 | 2026-11-12 | 3 Copy index rides the content-analysis pass | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step3` (local, on `item6b`) | Built, with its review fixes (2 majors, 9 minors): the ride consumes the lead reader's parsed fragments in place, `ridden` is pass-only, custody is bound to file and object. Clippy `-D warnings` and fmt clean, inventory and pins green. Post-deploy UHD/DV qualification open | Written, not yet run: the fast lane is their one run |
 | 2026-11-12 | 4 A local owner at P1, P2 and P5 | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step4` (local, on `step3`) | Built, with its review fixes (2 majors, 8 minors): `CopyRangeOwner` and `CopyGenerationOwner::Local`, constructed only by tests and only from a live named playback; one copy pipeline derivation (capability and probe evidence) for the Source range, Source and local renditions and the planning hint, which re-keys stripped Dolby Vision Source copies on nodes with the strip filter. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
 | 2026-11-12 | 5 Local input admission, liveness, control and reaping | claude-fable-5-2 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step5` (local, on #1548) | Built, with its review fixes (8 findings): `LocalCopyRange` reads under one custody carried from census to primary, presses by the rolling rule (`rolling_source_observation`, shared with maintenance), takes no copy admission, has no lease or timer, retires on drop, survives a panicking run task, and is reaped at boot; nothing starts one yet. The session's calls into it are left to step 6. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
-| 2026-11-12 | 6 Local serving attachment | claude-opus-5-5 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step6` (local, on #1555) | 6a built (range serving half: snapshot, A1-N admission, settling refusal). Attachment stopped for the owner ruling above; nothing serves from a range. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
+| 2026-11-12 | 6 Local serving attachment | claude-opus-5-5 | session_01BCWL9ypnQEiQUyRaZtMhh3 | `step6` (local, on #1555) | 6a built (range serving half: snapshot, A1-N admission, settling refusal). Ruling: Paul delegated to Fable; Fable chose (b). Stopped before the rolling-session seam (step 6, "Next"); nothing serves from a range. Clippy `-D warnings` and fmt clean, inventory and pins green | Written, not yet run: the fast lane is their one run |
