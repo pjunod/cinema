@@ -43,10 +43,13 @@ impl Recipe {
         if let Some(report) = self.fitted_refit_report() {
             return Some(report);
         }
-        (self.video.converts_dolby_vision() && self.video.dolby_vision_refit().is_none())
-            .then(|| crate::transcode::RefitPlaybackReport::identity(
-                "No F+ curve table is pinned to this rendition".to_owned(),
-            ))
+        (self.video.converts_dolby_vision() && self.video.dolby_vision_refit().is_none()).then(
+            || {
+                crate::transcode::RefitPlaybackReport::identity(
+                    "No F+ curve table is pinned to this rendition".to_owned(),
+                )
+            },
+        )
     }
 }
 

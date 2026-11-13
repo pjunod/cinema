@@ -1,9 +1,10 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** in progress — milestones 1–2 merged; milestone 3 recovered by
-Codex for completion in PR #1565; milestones 4–7 are open · **Written:** 2026-11-12 ·
-**Owner:** Codex (continuing Claude) · **Decision:** Paul approved building F+ and per-title
-re-encode trials against it, 2026-11-12
+**Status:** milestones 1–2 merged; 3–6 built in the PR #1565 candidate,
+awaiting final review and qualification; 7 remains a follow-up after served
+F+ scores · **Updated:** 2026-11-13 · **Written:** 2026-11-12 ·
+**Owner:** Codex (continuing Claude) · **Decision:** Paul approved building F+
+and per-title re-encode trials against it, 2026-11-12
 
 Companion to the offline result,
 [RPU-REFIT.md](../../tools/dv_processing/diagnostics/fel_quality/RPU-REFIT.md),
@@ -11,7 +12,9 @@ and the investigation ledger,
 [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md).
 This file says how F+ gets into the product. Work milestone by milestone
 (§6). If a step seems to need a change to the processed FEL→8.1 route or to
-a client, stop and flag it: F+ is a server-side change to RPU bytes only.
+a decoder or client protocol signal, stop and flag it: F+ changes RPU bytes
+on the server. Developer controls and playback-info presentation are part of
+§4 and §6, without changing how clients decode or identify their platform.
 
 ## 1. Objective
 
@@ -389,15 +392,18 @@ hash, owned-scratch and recovery-guard checks of `dv_disk`.
 ## 4. Developer tab and visibility
 
 Developer gets an enable section, "F+ curves for converted Dolby Vision"
-(settings `playback.dolby_vision_refit_{apple,web,android,linux}`). Its requirements are advisory, per
-the house rule, and never block the enable:
+(settings `playback.dolby_vision_refit_{apple,web,android,linux}`). Its
+requirements are advisory, per the house rule, and never block the enable:
 - the helper supports `--refit-stats` on this node;
 - *N of M* P7 FEL titles have been fitted;
 - clients measured to apply 8.1 mapping: macOS yes, Lenovo TB322FC no, the
   others unobservable.
 
 Playback info for a converted P7 title gains a line: "F+ curves: fitted,
-−N% code error" or "identity (why)".
+−N%" or "identity (why)". The percentage is held-out squared code error
+removed versus identity mapping, not measured display improvement. It is
+captured with the resolved digest and read from the attached rendition;
+status polls perform no curve-store query.
 
 ## 5. Per-title re-encode trials against F+
 
@@ -418,8 +424,10 @@ that the cluster can carry the work.
 
 ## 6. Milestones
 
-One PR each, in order. Each lands only after an adversarial review and one
-green fast lane.
+Milestones 1–2 landed separately. At Paul's request, milestones 3–6 are
+batched in PR #1565 with proper commits, one final adversarial review, then
+the acceptance and fast-lane checks. Rerun only failed checks; preserve
+completed applicable results.
 
 1. **The arithmetic** (`plurx-core/src/transcode/dv_refit.rs`):
    - **Contents:** stats, safe solve, diagnostics, composer domain,
@@ -452,15 +460,20 @@ green fast lane.
    - **Contents:** the ordering and the injection.
    - **Acceptance:** a disk conversion of a fitted title reads back the
      stored curves frame by frame, and an unfitted FEL title waits.
-6. **Developer section and playback info:**
+6. **Developer section and playback info:** built, acceptance pending.
+   - The report comes from the attached rendition's pinned digest and
+     captured gain. Status polls do not read the curve store. Identity is
+     reported only for actual To81 conversion, with the generation's reason.
    - **Acceptance:** each state renders on the web and Apple Settings, and
      a dv_patch_clips run on macOS against a served fragment shows A == B.
 7. **Re-encode trials (§5):** plan first, then build.
 
 ## 7. Non-goals
 
-- **No client change.** Clients that ignore the mapping lose nothing, and
-  making them apply it is not ours to do.
+- **No decoder or client protocol change.** Clients that ignore the mapping
+  keep their current picture. The Apple Developer and playback-info UI in
+  milestones 3 and 6 reports existing server facts; it adds no platform
+  signal or decoder behaviour.
 - **No change to the processed route.** It already composes the EL.
 - **No per-frame curves.** They gained under 0.002 offline and would invite
   flicker.

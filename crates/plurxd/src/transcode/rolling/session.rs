@@ -2910,11 +2910,15 @@ pub(super) async fn session_info(
     };
     let dv_refit_identity_reason = matches!(
         &s.kind,
-        SessionKind::Copy { convert_dolby_vision: true, .. }
+        SessionKind::Copy {
+            convert_dolby_vision: true,
+            ..
+        }
     )
     .then(|| "Live copy uses the v1 identity converter".to_owned());
     SessionInfo {
-        dolby_vision_refit: dv_refit_identity_reason.clone()
+        dolby_vision_refit: dv_refit_identity_reason
+            .clone()
             .map(crate::transcode::RefitPlaybackReport::identity),
         vod_observation: None,
         dv_refit_digest: None,

@@ -97,11 +97,14 @@ fn fitted_selection(table: &RefitCurveTable) -> Result<Option<FittedSelection>, 
     let Some(served) = served_table(table)? else {
         return Ok(None);
     };
-    let digest = digest_bytes(served.digest())
-        .ok_or("the fitted F+ curve table has an invalid digest")?;
+    let digest =
+        digest_bytes(served.digest()).ok_or("the fitted F+ curve table has an invalid digest")?;
     Ok(Some(FittedSelection {
         table: Arc::new(served),
-        fact: PinnedRefitGain { digest, gain: table.title.gain },
+        fact: PinnedRefitGain {
+            digest,
+            gain: table.title.gain,
+        },
     }))
 }
 
@@ -131,7 +134,9 @@ pub(crate) async fn current_table(
     store: &dyn Store,
     file: &MediaFile,
 ) -> Result<Option<Arc<ServedCurveTable>>, String> {
-    Ok(current_selection(store, file).await?.map(|selection| selection.table))
+    Ok(current_selection(store, file)
+        .await?
+        .map(|selection| selection.table))
 }
 
 async fn current_selection(
@@ -159,7 +164,9 @@ pub(crate) async fn pinned_table(
     file: &MediaFile,
     digest: [u8; 32],
 ) -> Result<Option<Arc<ServedCurveTable>>, String> {
-    Ok(pinned_selection(store, file, digest).await?.map(|selection| selection.table))
+    Ok(pinned_selection(store, file, digest)
+        .await?
+        .map(|selection| selection.table))
 }
 
 async fn pinned_selection(
@@ -173,8 +180,8 @@ async fn pinned_selection(
         .map_err(|error| error.to_string())?;
     match table {
         Some(table) => {
-            let selection = fitted_selection(&table)?
-                .ok_or("a pinned F+ table has no fitted scenes")?;
+            let selection =
+                fitted_selection(&table)?.ok_or("a pinned F+ table has no fitted scenes")?;
             if selection.fact.digest != digest {
                 return Err("the pinned F+ table's digest disagrees with its identity".into());
             }

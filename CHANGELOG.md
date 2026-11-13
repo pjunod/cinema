@@ -11,8 +11,8 @@ bump may break compatibility and a **patch** bump never does.
 ### Added
 
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
-  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while any of four new
-  Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
+  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while an explicit FEL disk
+  conversion is waiting or any of four new Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
   `_android`, `_linux`, default off; web and Apple Settings). It runs the
   Dolby Vision helper's `--refit-stats` mode over the whole title beside
   playback on a 3-thread reservation, shows as "Dolby Vision F+ curve fit" in
@@ -35,6 +35,15 @@ bump may break compatibility and a **patch** bump never does.
   include the curve digest; disabled platforms, unfitted titles and live
   copy keep v1 identity bytes. An initial session without accepted typed
   client control remains on v1 until the next session boundary.
+
+- Permanent FEL disk conversion waits for a current fit, identity verdict or
+  recorded content refusal before dropping the enhancement layer. Complete
+  title scans record FEL/MEL classification; fitted RPUs are authored by exact
+  source PTS, injected, and read back frame by frame before publication.
+  Waiting conversions explain their queue state in file details.
+- Web and Apple playback information reports the attached conversion's F+
+  mapping and held-out gain, or its identity reason. This metadata comes from
+  the pinned rendition and adds no curve-store read to status polls.
 
 ### Fixed
 

@@ -25,34 +25,77 @@ async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
         .arg(&source);
     testfixtures::run(&mut encode);
     let probe = Command::new(testfixtures::ffprobe())
-        .args(["-v", "error", "-select_streams", "v:0", "-show_packets",
-            "-show_streams", "-show_entries", "packet=dts,pts:stream=time_base",
-            "-of", "json"])
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_packets",
+            "-show_streams",
+            "-show_entries",
+            "packet=dts,pts:stream=time_base",
+            "-of",
+            "json",
+        ])
         .arg(&source)
-        .output().expect("ffprobe packet census");
-    assert!(probe.status.success(), "{}", String::from_utf8_lossy(&probe.stderr));
-    let document: serde_json::Value = serde_json::from_slice(&probe.stdout)
-        .expect("ffprobe JSON");
+        .output()
+        .expect("ffprobe packet census");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&probe.stdout).expect("ffprobe JSON");
     let packets = document["packets"].as_array().expect("video packets");
-    let (num, den) = parse_time_base(document["streams"][0]["time_base"]
-        .as_str().expect("source time base")).expect("rational time base");
-    let (num, den) = (u32::try_from(num).expect("num"), u32::try_from(den).expect("den"));
+    let (num, den) = parse_time_base(
+        document["streams"][0]["time_base"]
+            .as_str()
+            .expect("source time base"),
+    )
+    .expect("rational time base");
+    let (num, den) = (
+        u32::try_from(num).expect("num"),
+        u32::try_from(den).expect("den"),
+    );
     let packet_time = |packet: &serde_json::Value, key: &str| -> i64 {
         packet[key].as_i64().expect("integer packet timestamp")
     };
     let first_dts = packet_time(&packets[0], "dts");
     assert!(first_dts > 0, "fixture must retain its nonzero start");
-    assert!(packets.iter().any(|packet| packet_time(packet, "pts") != packet_time(packet, "dts")),
-        "fixture must contain reordered B frames");
+    assert!(
+        packets
+            .iter()
+            .any(|packet| packet_time(packet, "pts") != packet_time(packet, "dts")),
+        "fixture must contain reordered B frames"
+    );
 
     let mut command = Command::new(testfixtures::ffmpeg());
-    command.args(["-hide_banner", "-loglevel", "error", "-i"])
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(&source)
-        .args(["-map_chapters", "-1", "-map", "0:v:0?", "-an", "-sn",
-            "-c:v", "copy", "-tag:v", "hvc1", "-bsf:v",
-            "filter_units=remove_types=32-34", "-avoid_negative_ts", "make_zero",
-            "-movflags", "frag_keyframe+empty_moov+default_base_moof+delay_moov",
-            "-use_editlist", "0", "-f", "mp4", "pipe:1"]);
+        .args([
+            "-map_chapters",
+            "-1",
+            "-map",
+            "0:v:0?",
+            "-an",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-tag:v",
+            "hvc1",
+            "-bsf:v",
+            "filter_units=remove_types=32-34",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
     let output = testfixtures::run(&mut command);
     let mut reader = FragmentReader::new();
     reader.push(&output);
@@ -71,24 +114,43 @@ async fn fitted_index_clock_matches_nonzero_start_b_frame_packet_pts() {
             }
         }
     }
-    assert_eq!(observed.len(), packets.len(), "copy must preserve every video packet");
+    assert_eq!(
+        observed.len(),
+        packets.len(),
+        "copy must preserve every video packet"
+    );
     let output_origin = observed[0].0;
-    let origin = SourceTimestamp { dts: first_dts,
-        time_base_num: num, time_base_den: den };
-    let clock = SourceClock { track_timescale: video.timescale,
-        track_ticks: i128::from(output_origin), source_pts: first_dts,
-        source_time_base: (num, den) };
+    let origin = SourceTimestamp {
+        dts: first_dts,
+        time_base_num: num,
+        time_base_den: den,
+    };
+    let clock = SourceClock {
+        track_timescale: video.timescale,
+        track_ticks: i128::from(output_origin),
+        source_pts: first_dts,
+        source_time_base: (num, den),
+    };
     for ((dts, cto), packet) in observed.iter().zip(packets) {
         let source_dts = packet_time(packet, "dts");
         let source_pts = packet_time(packet, "pts");
         let indexed_dts = normalize_to_index_ticks(
-            SourceTimestamp { dts: source_dts,
-                time_base_num: num, time_base_den: den },
-            origin, output_origin, video.timescale,
-        ).expect("exact source DTS normalization");
+            SourceTimestamp {
+                dts: source_dts,
+                time_base_num: num,
+                time_base_den: den,
+            },
+            origin,
+            output_origin,
+            video.timescale,
+        )
+        .expect("exact source DTS normalization");
         assert_eq!(*dts, indexed_dts, "source DTS and copy fragment diverged");
-        assert_eq!(clock.source_pts(i128::from(*dts) + i128::from(*cto)),
-            Ok(source_pts), "source packet PTS and copy composition offset diverged");
+        assert_eq!(
+            clock.source_pts(i128::from(*dts) + i128::from(*cto)),
+            Ok(source_pts),
+            "source packet PTS and copy composition offset diverged"
+        );
     }
 }
 

@@ -13,11 +13,19 @@ pub struct RefitPlaybackReport {
 
 impl RefitPlaybackReport {
     pub fn fitted(gain: Option<f64>) -> Self {
-        Self { state: "fitted", gain, reason: None }
+        Self {
+            state: "fitted",
+            gain,
+            reason: None,
+        }
     }
 
     pub fn identity(reason: String) -> Self {
-        Self { state: "identity", gain: None, reason: Some(reason) }
+        Self {
+            state: "identity",
+            gain: None,
+            reason: Some(reason),
+        }
     }
 }
 
