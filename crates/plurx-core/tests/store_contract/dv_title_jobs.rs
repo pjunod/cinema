@@ -34,6 +34,7 @@ fn stats() -> DvTitleStats {
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
     }
+el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
 }
 async fn reprobe(store: &Arc<dyn Store>, file: &MediaFile) {
     store

@@ -304,6 +304,11 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
         max_l1_pq: Some(3900),
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
+    el_kind: if fel && profile == 7 {
+        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
+    } else {
+        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
+    },
     };
     store
         .publish_dv_title_job(PublishTitleJob {
@@ -355,7 +360,7 @@ async fn claim(store: &Arc<dyn Store>, id: &str, kind: JobKind) -> BackgroundJob
 
 async fn demand_for(store: &Arc<dyn Store>, file: i64, helper: &str) -> Option<RefitDemand> {
     store
-        .dv_refit_demands(helper, FIT_VERSION, 0, 16)
+        .dv_refit_demands(helper, FIT_VERSION, true, 0, 16)
         .await
         .expect("F+ demand")
         .into_iter()

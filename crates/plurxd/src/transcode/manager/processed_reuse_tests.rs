@@ -1162,6 +1162,7 @@ async fn fixture_with_encoder(
                     }
                     _ => TitleConstant::Unknown,
                 },
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
             }
         };
         let raw_rpus = vec![

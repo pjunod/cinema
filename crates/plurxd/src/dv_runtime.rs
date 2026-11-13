@@ -2468,6 +2468,7 @@ mod helper_decoder_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+        el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let DvDisplayTargetChoice::Target(target) =
             DvDisplayTarget::for_title(1000, Some(stats)).expect("title")
@@ -2515,6 +2516,7 @@ mod helper_decoder_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+        el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let DvDisplayTargetChoice::Target(target) = DvDisplayTarget::for_title(1600, Some(stats))
             .expect("1600-nit bucket and complete high-peak title")
@@ -2571,6 +2573,7 @@ mod helper_decoder_tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+        el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let DvDisplayTargetChoice::Target(target) =
             DvDisplayTarget::for_title(1600, Some(stats)).expect("title")

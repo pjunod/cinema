@@ -974,6 +974,7 @@ mod tests {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+        el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let DvDisplayTargetChoice::Target(target) =
             DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
