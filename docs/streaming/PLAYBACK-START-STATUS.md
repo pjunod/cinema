@@ -13,6 +13,14 @@ open: media1's 20:23 snapshot reported degraded, 3,841 eligible requests and
 0 ready in 24 hours; no newer queue measurement is claimed here. Persisted
 failure counts are not new failures in that interval.
 
+## E1/D3 fleet qualification — 2026-11-13
+
+Codex owns the resumed E1/D3 fleet reading and control503 investigation.
+#1568 landed as882d4b691; all four nodes report it at19:22 UTC. #1573
+landed the Developer renderer correction as746cb0500. [Measured results and
+attribution limits](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) separate completed source work from runtime
+acceptance. Earlier fleet snapshots below are historical.
+
 ## Merged batch — index timestamp repair and Source locate eligibility
 
 S4 removes the index-only fatal muxer-diagnostic policy while retaining
