@@ -1309,13 +1309,48 @@ pub(crate) fn normalized_directory(directory: &str) -> Result<&str, StoreError> 
     Ok(trimmed)
 }
 
+/// Curator keeps additional physical copies in generated sibling folders.
+/// Their exact reserved suffix identifies one logical series directory; it
+/// does not change file paths or make arbitrary editions equivalent.
+pub(crate) fn show_directory_identity(directory: &str) -> String {
+    static COPY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^(.+) \(Manual copy [0-9a-f]{10}\)(?: \(([2-9]|[1-9][0-9]+)\))?$")
+            .expect("valid manual copy suffix")
+    });
+    let separator = if directory.contains('/') { '/' } else { '\\' };
+    let directory = directory.trim_end_matches(separator);
+    let Some((parent, name)) = directory.rsplit_once(separator) else {
+        return directory.to_owned();
+    };
+    match COPY.captures(name).and_then(|caps| caps.get(1)) {
+        // Nested copies have no unambiguous single family identity.
+        Some(base) if !COPY.is_match(base.as_str()) => {
+            format!("{parent}{separator}{}", base.as_str())
+        }
+        _ => directory.to_owned(),
+    }
+}
+
+/// Indexable conservative range covering the physical base directory and
+/// generated siblings. Callers must validate exact family membership in Rust.
+/// Repair also snapshots every owner in this range for its atomic SQL guard:
+/// a new neighboring owner can refuse a repair, never silently join it.
+pub(crate) fn show_directory_path_bounds(directory: &str) -> Result<(String, String), StoreError> {
+    let directory = show_directory_identity(normalized_directory(directory)?);
+    let (_, upper) = directory_path_bounds(&directory)?;
+    Ok((format!("{directory} "), upper))
+}
+
 pub(crate) fn directory_matches_show_path(path: &str, directory: &str) -> bool {
     let path = std::path::Path::new(path);
     crate::scan::parse::parse_episode(path)
         .or_else(|_| crate::scan::parse::parse_anime_episode(path))
         .ok()
         .and_then(|parsed| parsed.source_directory)
-        .is_some_and(|candidate| candidate.to_string_lossy() == directory)
+        .is_some_and(|candidate| {
+            show_directory_identity(&candidate.to_string_lossy())
+                == show_directory_identity(directory)
+        })
 }
 
 pub(crate) fn directory_matches_movie_path(path: &str, directory: &str) -> bool {

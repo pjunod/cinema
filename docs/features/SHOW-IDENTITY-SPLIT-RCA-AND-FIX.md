@@ -20,6 +20,42 @@ task order, parser rules, store/API interfaces, test commands and release
 acceptance. Its explicit build decisions refine this proposal; use this
 document for the incident evidence and review provenance.
 
+## 2026-11-13 — Curator additional-copy folders
+
+Live inspection found a separate cause for newly split episodes: interactive
+Curator grabs request `additional_copy`, allocating a request-specific sibling
+show folder. Each folder was correctly indexed as a separate physical source,
+then metadata gave all resulting show cards the same canonical title. Older
+same-directory title splits are a separate incident class; their creation
+timestamps predate these copies.
+
+For TV imports, Curator's generated sibling folders `Show (Manual copy <10
+lowercase hex digits>)`, optionally followed by ` (N)` for a collision counter
+of at least two, belong to the same logical show directory as `Show`. Cinema
+keeps their files and paths separate and attaches matching episode numbers as
+versions of one episode. The exact suffix is naming evidence, not proof that
+Curator authored a folder; other editions and malformed lookalikes remain
+separate. Nested manual-copy suffixes are excluded. This rule also works when
+only additional-copy folders exist and the unsuffixed folder is absent.
+
+The follow-up groups only this exact generated manual-copy directory family. It preserves physical paths and
+provider-ID guards. Scanner lookup, repair evidence, and both storage backends
+use the same family identity. Repair still requires all exact family owners,
+valid library roots and compatible provider IDs. Its replicated apply guard
+also captures every owner in a conservative indexed neighborhood, so a newly
+introduced sibling refuses a stale plan instead of escaping its preimage.
+Unrelated neighbors can invalidate a preview but never join the repair.
+
+Focused regressions cover targeted imports after title enrichment, a family
+without a physical base directory, overlapping file versions and watch-state
+preservation, exact suffix boundaries, and backend-neutral consolidation.
+The operator authorized production consolidation on 2026-11-13. Three
+historical same-directory groups have been repaired through the supported API;
+an independent comparison preserved all 95 file IDs and paths and all 15
+watch-state rows and values. The generated-copy group remains pending the
+follow-up deployment. Private backups and per-item mappings stay outside the
+repository in owned task storage.
+
 ## 1. Verdict — display-title matching causes splits and can erase watch state
 
 For newly placed shows and movies, the scanner matches parsed titles against

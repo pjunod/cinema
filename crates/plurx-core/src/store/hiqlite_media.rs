@@ -13,13 +13,13 @@ use super::hiqlite::{
 use super::offload::MARK_KEPT_PREDICATE;
 use super::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
-    item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
-    IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
-    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ProgressRails,
-    ReconcileOutcome, RootFingerprintStatus, RootRemovalOutcome, SeriesHintOutcome, WatchStore,
-    WatchSummary, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
-    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
-    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
+    item_sort_order_by, normalized_directory, show_directory_identity, show_directory_path_bounds,
+    ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker, IdentityRepairFile,
+    IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch, MediaStore, MissingFieldOrder,
+    MissingVideoCodecTag, ProgressRails, ReconcileOutcome, RootFingerprintStatus,
+    RootRemovalOutcome, SeriesHintOutcome, WatchStore, WatchSummary, IDENTITY_REPAIR_EPISODES_MAX,
+    IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
+    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
 use crate::domain::{
@@ -1741,14 +1741,15 @@ impl MediaStore for HiqliteAuthStore {
                     })
                     .ok()
                     .and_then(|parsed| parsed.source_directory)
-                    .map(|path| path.to_string_lossy().into_owned())
+                    .map(|path| show_directory_identity(&path.to_string_lossy()))
             })
             .collect::<Vec<_>>();
         directories.sort();
         directories.dedup();
         let mut directory_owner_ids = Vec::new();
+        let mut directory_guard_rows = Vec::new();
         for directory in &directories {
-            let (lower, upper) = directory_path_bounds(directory)?;
+            let (lower, upper) = show_directory_path_bounds(directory)?;
             let owners = self
                 .client()
                 .query_consistent_map::<IdentityRepairOwnerRow, _>("identity_repair_snapshot", 
@@ -1764,6 +1765,10 @@ impl MediaStore for HiqliteAuthStore {
                 .await
                 .map_err(database_error)?;
             for owner in owners {
+                directory_guard_rows.push(
+                    serde_json::to_string(&(&owner.evidence_path, owner.show_id))
+                        .map_err(database_error)?,
+                );
                 if directory_matches_show_path(&owner.evidence_path, directory) {
                     directory_owner_ids.push(owner.show_id);
                 }
@@ -1771,6 +1776,8 @@ impl MediaStore for HiqliteAuthStore {
         }
         directory_owner_ids.sort_unstable();
         directory_owner_ids.dedup();
+        directory_guard_rows.sort_unstable();
+        directory_guard_rows.dedup();
 
         let retiring_ids = super::plan_identity_repair(IdentityRepairSnapshot {
             library_id,
@@ -1781,6 +1788,7 @@ impl MediaStore for HiqliteAuthStore {
             files: files.clone(),
             watches: watches.clone(),
             directory_owner_ids: directory_owner_ids.clone(),
+            directory_guard_rows: directory_guard_rows.clone(),
             dependency_rows: Vec::new(),
             blockers: Vec::new(),
         })?
@@ -1973,6 +1981,7 @@ impl MediaStore for HiqliteAuthStore {
             files,
             watches,
             directory_owner_ids,
+            directory_guard_rows,
             dependency_rows: artwork_table_exists
                 .then(|| "artwork_table_present".to_owned())
                 .into_iter()
@@ -2202,7 +2211,7 @@ impl MediaStore for HiqliteAuthStore {
         season_number: i32,
     ) -> Result<Vec<Item>, StoreError> {
         let directory = normalized_directory(directory)?;
-        let (lower, upper) = directory_path_bounds(directory)?;
+        let (lower, upper) = show_directory_path_bounds(directory)?;
         let item_columns = item_cols("show");
         let rows = self
             .client()
