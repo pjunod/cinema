@@ -161,11 +161,12 @@ pub(super) fn rebind_of(demand: &RefitDemand, source: &RefitSource) -> Option<Re
     })
 }
 
-fn claimed_source(mut source: RefitSource, job: &plurx_core::store::background_jobs::BackgroundJob) -> RefitSource {
-    if let JobPayload::DvRefit { probe_revision, .. } = &job.payload {
-        source.probe_revision = *probe_revision;
-    }
-    source
+fn claimed_source(mut source: RefitSource, job: &plurx_core::store::background_jobs::BackgroundJob) -> Result<RefitSource, StoreError> {
+    let JobPayload::DvRefit { probe_revision, .. } = job.supported_payload()? else {
+        return Err(StoreError::Task("claimed F+ job has another payload kind".into()));
+    };
+    source.probe_revision = probe_revision;
+    Ok(source)
 }
 
 async fn prune(state: &AppState) {
@@ -324,7 +325,7 @@ impl RefitTask {
             // Same-source probe generations share a job identity. Publish
             // against the claimed payload; the normal rebind pass then moves
             // the completed table to the latest title-scan generation.
-            let source = claimed_source(source, &job);
+            let source = claimed_source(source, &job)?;
             let cancel = CancellationToken::new();
             let file_id = file.id;
             let work = execute(

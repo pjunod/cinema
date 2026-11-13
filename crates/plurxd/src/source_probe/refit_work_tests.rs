@@ -1249,7 +1249,7 @@ async fn a_queued_same_source_fit_publishes_under_its_claimed_probe_generation()
     fx.store.enqueue_job(enqueue_request(&old, now_ms())).await.expect("enqueue old generation");
     let fresh = RefitSource { probe_revision: old.probe_revision + 7, ..old.clone() };
     let (job, active) = attempt(&fx.store, &fresh).await;
-    let claimed = claimed_source(fresh, &job);
+    let claimed = claimed_source(fresh, &job).expect("supported fit payload");
     assert_eq!(claimed.probe_revision, old.probe_revision);
     let run = run_fake(&fx.root, &fake(&fx.root, "queued-generation", &mixed(), "")).await;
     let fence = active.fence();
