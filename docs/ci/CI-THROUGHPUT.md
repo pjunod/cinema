@@ -42,6 +42,31 @@ head guard anyway (33 of the 117 analysed preflight failures). It is now
 The receipt rules treat a cancelled preflight as a terminal job, so a cancel
 never wedges a PR ([PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md)).
 
+### 1a. A job retry can erase the run's artifacts
+
+The inspected Forgejo 17 job-rerun implementation shares the run reset in
+`services/actions/rerun.go`: retrying one job deletes **all artifacts of that
+workflow run**, including artifacts from successful sibling jobs. Selecting a
+failed setup job does not preserve previously published test evidence.
+
+`scripts/ci-failures --retry-job JOB_ID` therefore checks the selected job's
+whole run and its paginated artifact inventory before requesting a retry. It
+requires terminal run metadata and no unexpired artifacts, including ordinary
+build data. Missing or inconsistent identities, unknown expiry, failed API
+reads and incomplete pagination refuse the retry. `--dry-run` performs the
+same checks and sends no retry request.
+
+```sh
+scripts/ci-failures --retry-job JOB_ID --dry-run  # inspect artifact safety before a retry
+```
+
+When it refuses, start a fresh lane and let authenticated adoption reuse
+finished evidence. Keep the artifact-bearing run intact. This is a client
+preflight, not an atomic server-side retention guarantee: another actor can
+change the run or publish an artifact between the inventory read and the rerun
+request. Requiring a terminal run avoids retrying while its jobs can still
+publish; it cannot serialize other clients against Forgejo's deletion.
+
 ### 2. Derivable paperwork fixes itself
 
 The PR `paperwork` jobs run `scripts/paperwork` and stop on failure before
