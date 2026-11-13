@@ -950,6 +950,71 @@ impl RouteReadSite {
     }
 }
 
+/// Provenance of a refused control route read. Keep release fencing distinct
+/// from backend failure without changing the caller's fail-closed policy.
+#[derive(Debug)]
+pub(crate) enum ControlRouteError {
+    ReleasePendingBeforeRead,
+    ReleasePendingAfterRead,
+    AdmissionTimeout,
+    LookupTimeout,
+    Store(StoreError),
+}
+
+impl ControlRouteError {
+    pub(crate) fn stage(&self) -> &'static str {
+        match self {
+            Self::ReleasePendingBeforeRead => "release_pending_before_read",
+            Self::ReleasePendingAfterRead => "release_pending_after_read",
+            Self::AdmissionTimeout => "admission_timeout",
+            Self::LookupTimeout => "lookup_timeout",
+            Self::Store(_) => "store_error",
+        }
+    }
+
+    /// Only the bounded variant name is suitable for request diagnostics.
+    pub(crate) fn store_error_class(&self) -> Option<&'static str> {
+        let Self::Store(error) = self else {
+            return None;
+        };
+        Some(match error {
+            StoreError::Database(_) => "database",
+            StoreError::Migration(_) => "migration",
+            StoreError::JoinRefused(_) => "join_refused",
+            StoreError::Task(_) => "task",
+            StoreError::Identity(_) => "identity",
+            StoreError::Credential(_) => "credential",
+            StoreError::FenceRejected { .. } => "fence_rejected",
+        })
+    }
+}
+
+impl std::fmt::Display for ControlRouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReleasePendingBeforeRead | Self::ReleasePendingAfterRead => {
+                f.write_str("database error: media-session release reconciliation in progress")
+            }
+            Self::AdmissionTimeout => {
+                f.write_str("database error: media-session control route admission timed out")
+            }
+            Self::LookupTimeout => {
+                f.write_str("database error: media-session control route lookup timed out")
+            }
+            Self::Store(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for ControlRouteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// What answered a route read: a Store (quorum) read, or the applied view.
 /// Only `read_media_session_route_view`'s callers (routing, status first,
 /// the Activity observer) can count `view`.
@@ -2510,6 +2575,8 @@ pub(crate) struct MediaSessionCoordinator {
     /// observe what concurrent lookups of the same capability do meanwhile.
     #[cfg(test)]
     route_store_gate: Arc<StdMutex<Option<Arc<tokio::sync::Semaphore>>>>,
+    #[cfg(test)]
+    route_store_entered: Arc<tokio::sync::Notify>,
 }
 
 /// One route-cache entry (§4.4). No entry carries a clock of its own: a
@@ -2696,6 +2763,8 @@ impl MediaSessionCoordinator {
             route_sequence: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             route_store_gate: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            route_store_entered: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -2728,8 +2797,21 @@ impl MediaSessionCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(gate) = gate {
+            self.route_store_entered.notify_one();
             let _ = gate.acquire().await;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_route_store_for_test(
+        &self,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Semaphore>) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .route_store_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        (Arc::clone(&self.route_store_entered), gate)
     }
 
     /// Fixed-window admission before any durable lookup. The session budget
@@ -3150,24 +3232,26 @@ impl MediaSessionCoordinator {
     pub(crate) async fn control_route(
         &self,
         session_id: &str,
-    ) -> Result<Option<MediaSessionRoute>, StoreError> {
-        self.reject_pending_release(session_id).await?;
+    ) -> Result<Option<MediaSessionRoute>, ControlRouteError> {
+        self.reject_pending_release(session_id)
+            .await
+            .map_err(|_| ControlRouteError::ReleasePendingBeforeRead)?;
         let deadline = tokio::time::Instant::now() + ROUTE_QUERY_DEADLINE;
         let shard = route_hash(session_id) % self.route_queries.len();
         let _query = tokio::time::timeout_at(deadline, self.route_queries[shard].lock())
             .await
-            .map_err(|_| {
-                StoreError::Database("media-session control route admission timed out".to_owned())
-            })?;
-        let route = tokio::time::timeout_at(
-            deadline,
-            read_media_session_route(&*self.store, RouteReadSite::Control, session_id),
-        )
+            .map_err(|_| ControlRouteError::AdmissionTimeout)?;
+        let route = tokio::time::timeout_at(deadline, async {
+            #[cfg(test)]
+            self.wait_route_store_gate().await;
+            read_media_session_route(&*self.store, RouteReadSite::Control, session_id).await
+        })
         .await
-        .map_err(|_| {
-            StoreError::Database("media-session control route lookup timed out".to_owned())
-        })??;
-        self.reject_pending_release(session_id).await?;
+        .map_err(|_| ControlRouteError::LookupTimeout)?
+        .map_err(ControlRouteError::Store)?;
+        self.reject_pending_release(session_id)
+            .await
+            .map_err(|_| ControlRouteError::ReleasePendingAfterRead)?;
         Ok(route)
     }
 
