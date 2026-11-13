@@ -28,6 +28,7 @@ impl TranscodeManager {
                     .filter(|encoding| encoding.preserves_processed_dv())
                     .map(|_| 8),
                 processed_fel: encoding.and_then(|encoding| encoding.processed_fel()),
+                dv_refit_digest: recovered.start.dv_refit_digest,
                 degraded_processing: None,
                 processing_note: None,
                 retained_output: facts.response_owner.retained_output_facts(),
@@ -63,6 +64,7 @@ impl TranscodeManager {
         Some(StartInfo {
             processed_dv_profile: None,
             processed_fel: None,
+            dv_refit_digest: None,
             degraded_processing: None,
             processing_note: None,
             retained_output: None,

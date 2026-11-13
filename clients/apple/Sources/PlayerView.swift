@@ -3309,6 +3309,7 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("device_audio", "Device audio output", "NOW DECODING", [.standard, .details, .debug], always: true),
     .init("dynamic_range", "Dynamic range", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("enhancement", "Enhancement", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
+    .init("dv_refit", "F+ curves", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("decode_audio", "Stream audio track", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("player_state", "Player state", "NOW DECODING", [.mini, .standard, .details, .debug]),
     .init("waiting_reason", "Waiting reason", "NOW DECODING", [.debug], placement: .notes),
@@ -3514,6 +3515,9 @@ struct PlaybackStatsView: View {
                 delivered: controller.deliveredRange
             ) else { return nil }
             return ContractFieldValue(value: summary.value, lines: summary.lines)
+        case "dv_refit":
+            guard let status, status.id == controller.currentSessionId else { return nil }
+            return status.dolbyVisionRefit?.label.map { ContractFieldValue(value: $0) }
         case "decode_audio":
             return nil
         case "source_read":

@@ -305,10 +305,10 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
         el_kind: if fel && profile == 7 {
-        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
-    } else {
-        TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
-    },
+            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
+        } else {
+            TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
+        },
     };
     store
         .publish_dv_title_job(PublishTitleJob {
@@ -455,7 +455,10 @@ async fn state(store: &Arc<dyn Store>, job: &BackgroundJob) -> JobState {
         .state
 }
 
-async fn table(store: &Arc<dyn Store>, file: i64) -> plurx_core::store::dv_refit_jobs::RefitCurveTable {
+async fn table(
+    store: &Arc<dyn Store>,
+    file: i64,
+) -> plurx_core::store::dv_refit_jobs::RefitCurveTable {
     store
         .dv_refit_curves(file)
         .await
@@ -509,7 +512,9 @@ async fn demand_selects_current_fel_titles_only() {
         "current after publication"
     );
     assert!(
-        demand_for(&fx.store, fel.id, &"f".repeat(64)).await.is_some(),
+        demand_for(&fx.store, fel.id, &"f".repeat(64))
+            .await
+            .is_some(),
         "another helper identity makes the fit stale"
     );
     // A fresh probe moves the title generation and drops the published
@@ -560,7 +565,10 @@ async fn demand_runs_only_while_a_platform_switch_is_on() {
 async fn a_fake_helper_run_publishes_solved_and_refused_scenes() {
     let fx = fixture().await;
     let file = title(&fx, "mixed", 7, true).await;
-    let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+    let src = source(
+        &demand(&fx.store, file.id).await.expect("demand"),
+        &helper(),
+    );
     let run = run_fake(&fx.root, &fake(&fx.root, "mixed", &mixed(), "")).await;
     assert!(matches!(run, Ok(HelperRun::Stats(_))), "{run:?}");
     let (_, settlement) = fit_with(&fx.store, &src, run).await;
@@ -613,7 +621,10 @@ async fn degenerate_and_low_gain_titles_store_identity_curves() {
         ),
     ] {
         let file = title(&fx, name, 7, true).await;
-        let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+        let src = source(
+            &demand(&fx.store, file.id).await.expect("demand"),
+            &helper(),
+        );
         let run = run_fake(&fx.root, &fake(&fx.root, name, &output, "")).await;
         let (_, settlement) = fit_with(&fx.store, &src, run).await;
         assert!(settlement.is_none(), "{name}: {settlement:?}");
@@ -640,7 +651,10 @@ async fn the_digest_is_stable_across_two_identical_runs() {
     let mut digests = Vec::new();
     for name in ["first", "second"] {
         let file = title(&fx, name, 7, true).await;
-        let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+        let src = source(
+            &demand(&fx.store, file.id).await.expect("demand"),
+            &helper(),
+        );
         let run = run_fake(&fx.root, &fake(&fx.root, name, MICHAEL5400, "")).await;
         fit_with(&fx.store, &src, run).await;
         digests.push(table(&fx.store, file.id).await.title.curve_digest);
@@ -656,7 +670,10 @@ async fn the_digest_is_stable_across_two_identical_runs() {
 async fn a_content_refusal_is_recorded_and_other_failures_retry() {
     let fx = fixture().await;
     let file = title(&fx, "refused", 7, true).await;
-    let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+    let src = source(
+        &demand(&fx.store, file.id).await.expect("demand"),
+        &helper(),
+    );
     let reason = "full-resolution enhancement layer is not supported";
     let run = run_fake(
         &fx.root,
@@ -680,14 +697,23 @@ async fn a_content_refusal_is_recorded_and_other_failures_retry() {
     assert!(table.scenes.is_empty());
     assert!(demand(&fx.store, file.id).await.is_none());
     for (name, tail) in [
-        ("io", "echo 'Segment refused: cannot read the source' >&2; exit 1"),
+        (
+            "io",
+            "echo 'Segment refused: cannot read the source' >&2; exit 1",
+        ),
         ("silent", "exit 1"),
         ("killed", "kill -9 $$"),
     ] {
         let run = run_fake(&fx.root, &fake(&fx.root, name, "", tail)).await;
-        assert!(matches!(run, Err(RunError::Transient(_))), "{name}: {run:?}");
+        assert!(
+            matches!(run, Err(RunError::Transient(_))),
+            "{name}: {run:?}"
+        );
         let file = title(&fx, name, 7, true).await;
-        let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+        let src = source(
+            &demand(&fx.store, file.id).await.expect("demand"),
+            &helper(),
+        );
         let (job, settlement) = fit_with(&fx.store, &src, run).await;
         assert!(
             matches!(settlement, Some(JobSettlement::Retry { .. })),
@@ -712,7 +738,10 @@ async fn malformed_output_fails_terminally_until_retried() {
         ("garbage", "not json\n".to_owned()),
     ] {
         let file = title(&fx, name, 7, true).await;
-        let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+        let src = source(
+            &demand(&fx.store, file.id).await.expect("demand"),
+            &helper(),
+        );
         let run = run_fake(&fx.root, &fake(&fx.root, name, &output, "")).await;
         assert!(
             matches!(run, Err(RunError::Malformed(_))),
@@ -723,7 +752,12 @@ async fn malformed_output_fails_terminally_until_retried() {
             matches!(settlement, Some(JobSettlement::Fail { .. })),
             "{name}"
         );
-        let failed = fx.store.background_job(&job.id).await.expect("job").expect("job");
+        let failed = fx
+            .store
+            .background_job(&job.id)
+            .await
+            .expect("job")
+            .expect("job");
         assert_eq!(failed.state, JobState::Failed, "{name}");
         assert_eq!(
             crate::http::background_jobs::summary(&failed, now_ms())["retry_supported"],
@@ -731,7 +765,11 @@ async fn malformed_output_fails_terminally_until_retried() {
             "{name}: Retry is offered"
         );
         assert!(
-            fx.store.dv_refit_curves(file.id).await.expect("curves").is_none(),
+            fx.store
+                .dv_refit_curves(file.id)
+                .await
+                .expect("curves")
+                .is_none(),
             "{name}"
         );
         assert!(
@@ -777,7 +815,9 @@ async fn a_newer_generation_of_the_same_stream_rebinds() {
     .expect("a known stream rebinds");
     older.probe_revision += 7;
     fx.store.rebind_dv_refit(older).await.expect("rebind");
-    let stale = demand(&fx.store, file.id).await.expect("generation differs");
+    let stale = demand(&fx.store, file.id)
+        .await
+        .expect("generation differs");
     assert_eq!(stale.stored_video_index, Some(0));
     let rebind = rebind_of(&stale, &source(&stale, &helper())).expect("rebind, no fit");
     fx.store.rebind_dv_refit(rebind).await.expect("rebind");
@@ -796,16 +836,25 @@ async fn a_newer_generation_of_the_same_stream_rebinds() {
 async fn stalled_yields_are_bounded() {
     let fx = fixture().await;
     let file = title(&fx, "stalled", 7, true).await;
-    let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+    let src = source(
+        &demand(&fx.store, file.id).await.expect("demand"),
+        &helper(),
+    );
     let (mut job, active) = attempt(&fx.store, &src).await;
     let stalled = |settlement: JobSettlement| match settlement {
-        JobSettlement::Yield { checkpoint, .. } => checkpoint
-            .and_then(|c| c.get("refit_stalled_yields").and_then(serde_json::Value::as_i64)),
+        JobSettlement::Yield { checkpoint, .. } => checkpoint.and_then(|c| {
+            c.get("refit_stalled_yields")
+                .and_then(serde_json::Value::as_i64)
+        }),
         _ => None,
     };
     assert_eq!(stalled(interrupted(&job, 0, 0)), Some(1));
     job.checkpoint = Some(serde_json::json!({ "refit_stalled_yields": 3 }));
-    assert_eq!(stalled(interrupted(&job, 2, 5)), Some(0), "progress resets it");
+    assert_eq!(
+        stalled(interrupted(&job, 2, 5)),
+        Some(0),
+        "progress resets it"
+    );
     assert_eq!(stalled(interrupted(&job, 2, 2)), Some(4));
     job.checkpoint = Some(serde_json::json!({ "refit_stalled_yields": MAX_STALLED_YIELDS }));
     assert!(matches!(
@@ -840,7 +889,79 @@ async fn a_complete_spool_re_solves_without_decoding() {
     let Ok(HelperRun::Stats(output)) = run else {
         panic!("{run:?}");
     };
-    assert_eq!(output, dv_refit_title::parse(MICHAEL5400.as_bytes()).expect("run"));
+    assert_eq!(
+        output,
+        dv_refit_title::parse(MICHAEL5400.as_bytes()).expect("run")
+    );
+}
+
+/// A node crash bypasses `settle_child`; the next attempt recovers whole
+/// initial or resumed lines before `open_run` truncates the old file.
+#[tokio::test]
+async fn a_crashed_fit_recovers_its_initial_and_resumed_scene_lines() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("scratch");
+    let spool = spool_in(dir.path(), "crashed-helper");
+    let lines: Vec<_> = MICHAEL5400
+        .lines()
+        .filter(|line| line.contains("refit_scene"))
+        .map(str::to_owned)
+        .collect();
+    assert!(lines.len() >= 5, "fixture exercises both crash boundaries");
+    let mut run = spool.open_run().await.expect("run file");
+    write!(
+        run,
+        "{}\n{}",
+        lines[..3].join("\n"),
+        &lines[3][..lines[3].len() / 2]
+    )
+    .expect("interrupted initial output");
+    drop(run);
+    spool
+        .recover_interrupted()
+        .await
+        .expect("initial crash recovered");
+    assert_eq!(
+        spool
+            .partial()
+            .await
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<Vec<_>>(),
+        lines[..3]
+    );
+    let mut run = spool.open_run().await.expect("resumed run file");
+    write!(
+        run,
+        "{}\n{}",
+        lines[2..4].join("\n"),
+        &lines[4][..lines[4].len() / 2]
+    )
+    .expect("interrupted resumed output");
+    drop(run);
+    spool
+        .recover_interrupted()
+        .await
+        .expect("resumed crash recovered");
+    assert_eq!(
+        spool
+            .partial()
+            .await
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<Vec<_>>(),
+        lines[..4]
+    );
+    drop(spool.open_run().await.expect("empty run file"));
+    spool
+        .recover_interrupted()
+        .await
+        .expect("crash before first line");
+    assert_eq!(
+        spool.partial().await.len(),
+        4,
+        "empty output preserves previous progress"
+    );
 }
 
 /// Decision F through `execute`: a preemption mid-run keeps the helper's
@@ -854,16 +975,33 @@ async fn a_preempted_fit_resumes_and_equals_an_uninterrupted_one() {
     let file = title(&fx, "resumed", 7, true).await;
     let found = demand(&fx.store, file.id).await.expect("demand");
     let scenes: Vec<_> = (0..5)
-        .map(|i| (48 + 8 * i as u64, stats(12 - 3 * i, 1, i as u32), stats(12 - 3 * i, 1, 10 + i as u32)))
+        .map(|i| {
+            (
+                48 + 8 * i as u64,
+                stats(12 - 3 * i, 1, i as u32),
+                stats(12 - 3 * i, 1, 10 + i as u32),
+            )
+        })
         .collect();
     let lines = scene_lines(&scenes, 24);
     let whole = with_summary(&lines);
-    let parsed: Vec<RefitScene> = lines.iter().map(|l| RefitScene::from_line(l).expect("scene")).collect();
+    let parsed: Vec<RefitScene> = lines
+        .iter()
+        .map(|l| RefitScene::from_line(l).expect("scene"))
+        .collect();
     // The uninterrupted answer, for comparison.
     let expected = dv_refit_title::fit(dv_refit_title::parse(whole.as_bytes()).expect("whole"));
     // First run: three whole lines and half of a fourth, then it hangs.
     let first = fx.root.join("first.jsonl");
-    std::fs::write(&first, format!("{}\n{}", lines[..3].join("\n"), &lines[3][..lines[3].len() / 2])).expect("first");
+    std::fs::write(
+        &first,
+        format!(
+            "{}\n{}",
+            lines[..3].join("\n"),
+            &lines[3][..lines[3].len() / 2]
+        ),
+    )
+    .expect("first");
     // Second run: only from the third scene's start, as `--resume` asks.
     let rest = fx.root.join("rest.jsonl");
     std::fs::write(&rest, with_summary(&lines[2..])).expect("rest");
@@ -912,7 +1050,12 @@ async fn a_preempted_fit_resumes_and_equals_an_uninterrupted_one() {
     for _ in 0..200 {
         let written = std::fs::read_dir(&run_file)
             .ok()
-            .and_then(|mut d| d.find_map(|e| e.ok().filter(|e| e.path().extension().is_some_and(|x| x == "run"))))
+            .and_then(|mut d| {
+                d.find_map(|e| {
+                    e.ok()
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "run"))
+                })
+            })
             .and_then(|e| std::fs::read(e.path()).ok())
             .map_or(0, |b| b.len());
         if written > lines[..3].join("\n").len() {
@@ -926,16 +1069,27 @@ async fn a_preempted_fit_resumes_and_equals_an_uninterrupted_one() {
         .expect("execute returns")
         .expect("task");
     assert!(!published);
-    let yielded = fx.store.background_job(&job.id).await.expect("job").expect("job");
+    let yielded = fx
+        .store
+        .background_job(&job.id)
+        .await
+        .expect("job")
+        .expect("job");
     assert_eq!(yielded.state, JobState::Queued, "a preemption yields");
     assert_eq!(
-        yielded.checkpoint.as_ref().and_then(|c| c.get("refit_stalled_yields")),
+        yielded
+            .checkpoint
+            .as_ref()
+            .and_then(|c| c.get("refit_stalled_yields")),
         Some(&serde_json::json!(0)),
         "progress was kept"
     );
     let kept = spool.partial().await;
     assert_eq!(kept.len(), 3, "the torn fourth line is not kept");
-    assert!(kept.iter().zip(&lines).all(|((line, _), want)| line == want));
+    assert!(kept
+        .iter()
+        .zip(&lines)
+        .all(|((line, _), want)| line == want));
     // The next attempt resumes and publishes the uninterrupted table, once
     // the yield's short back-off has passed.
     let wait = yielded.not_before_ms.saturating_sub(now_ms()).max(0) as u64 + 50;
@@ -958,7 +1112,10 @@ async fn a_preempted_fit_resumes_and_equals_an_uninterrupted_one() {
     let table = table(&fx.store, file.id).await;
     assert_eq!(table.title.curve_digest, expected.curve_digest);
     assert_eq!(table.scenes.len(), 5);
-    assert!(spool.partial().await.is_empty(), "the partial lines became the complete spool");
+    assert!(
+        spool.partial().await.is_empty(),
+        "the partial lines became the complete spool"
+    );
     assert!(spool.complete().await.is_some());
     let listed = super::super::dv_refit::list(&Spool::root(state.transcode.runtime_cache_dir()));
     assert_eq!(listed.iter().filter(|e| e.complete).count(), 1);
@@ -1008,13 +1165,20 @@ async fn a_cancelled_fit_publishes_nothing_and_stays_terminal() {
         .expect("reaped")
         .expect("task");
     assert!(!published);
-    assert!(fx.store.dv_refit_curves(file.id).await.expect("curves").is_none());
+    assert!(fx
+        .store
+        .dv_refit_curves(file.id)
+        .await
+        .expect("curves")
+        .is_none());
     assert!(matches!(
         self::state(&fx.store, &job).await,
         JobState::Cancelling | JobState::Cancelled
     ));
     assert!(
-        demand_for(&fx.store, file.id, &src.helper_identity).await.is_none(),
+        demand_for(&fx.store, file.id, &src.helper_identity)
+            .await
+            .is_none(),
         "a cancel stops automatic demand"
     );
 }
@@ -1025,7 +1189,10 @@ async fn a_cancelled_fit_publishes_nothing_and_stays_terminal() {
 async fn rows_that_fail_their_check_fail_the_attempt() {
     let fx = fixture().await;
     let file = title(&fx, "invalid", 7, true).await;
-    let src = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+    let src = source(
+        &demand(&fx.store, file.id).await.expect("demand"),
+        &helper(),
+    );
     let output = dv_refit_title::parse(mixed().as_bytes()).expect("run");
     let (mut title_row, scenes) = dv_refit_title::fit(output).rows(&src).expect("rows");
     title_row.curve_digest = "0".repeat(64);
@@ -1043,5 +1210,10 @@ async fn rows_that_fail_their_check_fail_the_attempt() {
         .expect("settle"));
     active.finish().await;
     assert_eq!(state(&fx.store, &job).await, JobState::Failed);
-    assert!(fx.store.dv_refit_curves(file.id).await.expect("curves").is_none());
+    assert!(fx
+        .store
+        .dv_refit_curves(file.id)
+        .await
+        .expect("curves")
+        .is_none());
 }

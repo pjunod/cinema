@@ -30,8 +30,8 @@ use plurx_core::{
     error::StoreError,
     store::{
         background_jobs::{
-            CandidateCursor, CancelJob, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind,
-            JobPayload, JobRequest, JobSettlement,
+            CancelJob, CandidateCursor, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind, JobPayload,
+            JobRequest, JobSettlement,
         },
         dv_refit_jobs::{RebindRefit, RefitDemand, RefitSceneRow, RefitTitle},
     },
@@ -118,8 +118,7 @@ pub(super) fn enqueue_request(source: &RefitSource, now: i64) -> EnqueueJob {
 /// Whether any client platform's F+ switch is on: the demand runs only then.
 pub(crate) async fn enabled(state: &AppState) -> Result<bool, StoreError> {
     for key in plurx_core::store::keys::DV_REFIT_PLATFORMS {
-        if plurx_core::store::stored_switch(state.store.get_setting(key).await?.as_deref(), false)
-        {
+        if plurx_core::store::stored_switch(state.store.get_setting(key).await?.as_deref(), false) {
             return Ok(true);
         }
     }

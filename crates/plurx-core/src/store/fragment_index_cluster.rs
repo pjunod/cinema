@@ -2779,6 +2779,8 @@ struct BlobHeader {
     init_sha256: String,
     promotion: PromotionInputs,
     parameter_sets_constant: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
     source_sha256: String,
     pipeline_sha256: String,
     rows: usize,
@@ -2817,6 +2819,7 @@ pub fn encode_cluster_fragment_index_blob(
         init_sha256: index.init_sha256.clone(),
         promotion,
         parameter_sets_constant: index.parameter_sets_constant,
+        dv_refit_origin: index.dv_refit_origin,
         source_sha256: source_sha256.to_ascii_lowercase(),
         pipeline_sha256: pipeline_sha256.to_ascii_lowercase(),
         rows: index.rows.len(),
@@ -2935,6 +2938,7 @@ pub fn decode_cluster_fragment_index_blob(
         FragmentIndex::new(header.timescale, rows, header.init_sha256, canonical_source);
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
+    index.dv_refit_origin = header.dv_refit_origin;
     Ok(index)
 }
 
@@ -2999,6 +3003,8 @@ struct V3BlobHeader {
     init_contract_sha256: String,
     promotion: PromotionInputs,
     parameter_sets_constant: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dv_refit_origin: Option<crate::segplan::DvRefitOrigin>,
     source_sha256: String,
     output_identity: FragmentIndexOutputIdentity,
     engine: FragmentIndexEngineProvenance,
@@ -3106,6 +3112,13 @@ pub fn cluster_fragment_index_output_identity(
         init_contract_sha256.to_ascii_lowercase().as_bytes(),
     );
     digest.update([u8::from(index.parameter_sets_constant)]);
+    if let Some(origin) = index.dv_refit_origin {
+        digest.update([1]);
+        digest.update(origin.first_dts.to_be_bytes());
+        digest.update(origin.first_pts.to_be_bytes());
+        digest.update(origin.time_base_num.to_be_bytes());
+        digest.update(origin.time_base_den.to_be_bytes());
+    }
     let value = serde_json::to_value(&promotion)
         .map_err(|error| StoreError::Task(format!("encoding v3 promotion: {error}")))?;
     hash_v3_promotion_value(&mut digest, &value)?;
@@ -3174,6 +3187,7 @@ pub fn encode_cluster_fragment_index_blob_v3(
         init_contract_sha256: init_contract_sha256.to_ascii_lowercase(),
         promotion: v3_portable_promotion(index, source_sha256)?,
         parameter_sets_constant: index.parameter_sets_constant,
+        dv_refit_origin: index.dv_refit_origin,
         source_sha256: source_sha256.to_ascii_lowercase(),
         output_identity,
         engine: FragmentIndexEngineProvenance {
@@ -3299,6 +3313,7 @@ pub fn decode_cluster_fragment_index_blob_v3(
     );
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
+    index.dv_refit_origin = header.dv_refit_origin;
     let observed = cluster_fragment_index_output_identity(
         &index,
         &header.source_sha256,

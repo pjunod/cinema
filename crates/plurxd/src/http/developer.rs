@@ -256,10 +256,14 @@ pub(crate) async fn refit_spool(
     State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
     let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
-    let entries = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_entries(&root))
-        .await
-        .unwrap_or_default();
-    let bytes: u64 = entries.iter().map(|e| e["bytes"].as_u64().unwrap_or(0)).sum();
+    let entries =
+        tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_entries(&root))
+            .await
+            .unwrap_or_default();
+    let bytes: u64 = entries
+        .iter()
+        .map(|e| e["bytes"].as_u64().unwrap_or(0))
+        .sum();
     Json(serde_json::json!({"node_id": state.node_id, "entries": entries, "bytes": bytes}))
 }
 
@@ -271,11 +275,14 @@ pub(crate) async fn clear_refit_spool(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
-    let removed = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_clear(&root))
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(serde_json::json!({"node_id": state.node_id, "removed": removed})))
+    let removed =
+        tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_clear(&root))
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({"node_id": state.node_id, "removed": removed}),
+    ))
 }
 
 /// Neutral admin entry point; saved Mac choices do not govern Linux probing.
@@ -2242,7 +2249,8 @@ async fn dolby_vision_refit(
     state: &AppState,
     settings: &std::collections::BTreeMap<String, String>,
 ) -> [DeveloperEnableItem; 4] {
-    let on = |key: &str| plurx_core::store::stored_switch(settings.get(key).map(String::as_str), false);
+    let on =
+        |key: &str| plurx_core::store::stored_switch(settings.get(key).map(String::as_str), false);
     let keys = plurx_core::store::keys::DV_REFIT_PLATFORMS;
     #[cfg(target_os = "linux")]
     let helper = match crate::vodencode::dv_runtime::ToolSet::capture().await {
@@ -2265,8 +2273,12 @@ async fn dolby_vision_refit(
     let spool = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_list(&root))
         .await
         .unwrap_or_default();
-    let [web, apple, android, linux] =
-        dolby_vision_refit_items([on(keys[0]), on(keys[1]), on(keys[2]), on(keys[3])], helper, progress, &spool);
+    let [web, apple, android, linux] = dolby_vision_refit_items(
+        [on(keys[0]), on(keys[1]), on(keys[2]), on(keys[3])],
+        helper,
+        progress,
+        &spool,
+    );
     [web, apple, android, linux]
 }
 
@@ -2276,11 +2288,13 @@ fn dolby_vision_refit_items(
     progress: Result<plurx_core::store::dv_refit_jobs::RefitProgress, String>,
     spool: &[(bool, u64)],
 ) -> [DeveloperEnableItem; 4] {
-    let clients = || DeveloperRequirement {
+    let clients = || {
+        DeveloperRequirement {
         id: "refit_clients",
         title: "Clients that apply the 8.1 mapping",
         status: RequirementStatus::Unobservable,
         evidence: format!("{DV_REFIT_CLIENTS}. Serving the curves to a platform that ignores them changes nothing it shows."),
+    }
     };
     let helper = match helper {
         Ok(Some(identity)) => DeveloperRequirement {
@@ -2324,7 +2338,11 @@ fn dolby_vision_refit_items(
         },
     };
     let (complete, partial, bytes) = spool.iter().fold((0, 0, 0u64), |(c, p, b), (done, size)| {
-        if *done { (c + 1, p, b + size) } else { (c, p + 1, b + size) }
+        if *done {
+            (c + 1, p, b + size)
+        } else {
+            (c, p + 1, b + size)
+        }
     });
     let spool = DeveloperRequirement {
         id: "refit_spool",
@@ -2336,23 +2354,39 @@ fn dolby_vision_refit_items(
             crate::source_probe::REFIT_SPOOL_DIR
         ),
     };
-    let item = |id: &'static str, title: &'static str, enabled: bool, requirements| DeveloperEnableItem {
-        id,
-        title,
-        enabled: Some(enabled),
-        setting: Some(id),
-        requirements,
-    };
+    let item =
+        |id: &'static str, title: &'static str, enabled: bool, requirements| DeveloperEnableItem {
+            id,
+            title,
+            enabled: Some(enabled),
+            setting: Some(id),
+            requirements,
+        };
     [
-        item("dolby_vision_refit_web", "Dolby Vision F+ curves: web", enabled[0], vec![clients()]),
+        item(
+            "dolby_vision_refit_web",
+            "Dolby Vision F+ curves: web",
+            enabled[0],
+            vec![clients()],
+        ),
         item(
             "dolby_vision_refit_apple",
             "Dolby Vision F+ curves: Apple",
             enabled[1],
             vec![helper, coverage, clients(), spool],
         ),
-        item("dolby_vision_refit_android", "Dolby Vision F+ curves: Android", enabled[2], vec![clients()]),
-        item("dolby_vision_refit_linux", "Dolby Vision F+ curves: Linux", enabled[3], vec![clients()]),
+        item(
+            "dolby_vision_refit_android",
+            "Dolby Vision F+ curves: Android",
+            enabled[2],
+            vec![clients()],
+        ),
+        item(
+            "dolby_vision_refit_linux",
+            "Dolby Vision F+ curves: Linux",
+            enabled[3],
+            vec![clients()],
+        ),
     ]
 }
 

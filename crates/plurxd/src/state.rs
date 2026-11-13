@@ -3704,11 +3704,15 @@ async fn fragment_index_video_identities(
     convert: bool,
 ) -> Result<Vec<plurx_core::transcode::CopyVideoOptions>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    Ok(crate::fragindex::video_identities(
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
+    Ok(crate::fragindex::video_identities_with_refit(
         file,
         probe_json.as_deref(),
         have_dovi,
         convert,
+        refit,
     ))
 }
 
@@ -3736,8 +3740,13 @@ pub(crate) async fn fragment_index_video_identity_options(
     convert: bool,
 ) -> Result<Vec<(plurx_core::transcode::CopyVideoOptions, String)>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
     Ok(
-        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert)
+        crate::fragindex::video_identities_with_refit(
+            file, probe_json.as_deref(), have_dovi, convert, refit,
+        )
             .into_iter()
             .map(|video| {
                 let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
@@ -4789,10 +4798,14 @@ impl JobManager {
                 if self.store.dv_refit_curves(file_id).await?.is_some() {
                     Ok(Some("Waiting for conversion slot and current F+ fit verification"))
                 } else {
-                    Ok(Some("Waiting for F+ fit or recorded content refusal before EL discard"))
+                    Ok(Some(
+                        "Waiting for F+ fit or recorded content refusal before EL discard",
+                    ))
                 }
             }
-            _ => Ok(Some("Waiting for consistent FEL or MEL title classification")),
+            _ => Ok(Some(
+                "Waiting for consistent FEL or MEL title classification",
+            )),
         }
     }
 
@@ -4802,11 +4815,19 @@ impl JobManager {
     async fn disk_refit_ready(
         &self,
         file: &MediaFile,
-    ) -> Result<Option<(plurx_core::store::dv_refit_jobs::RefitCurveTable,
-                     std::sync::Arc<crate::vodencode::dv_runtime::ToolSet>)>, String> {
+    ) -> Result<
+        Option<(
+            plurx_core::store::dv_refit_jobs::RefitCurveTable,
+            std::sync::Arc<crate::vodencode::dv_runtime::ToolSet>,
+        )>,
+        String,
+    > {
         use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
         use plurx_core::store::dv_refit_jobs::RefitVerdict;
-        let document = self.store.get_file_probe_json(file.id).await
+        let document = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
             .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
             .ok_or("complete title facts are not yet available")?;
         let stats = DvTitleStats::from_probe_json(&document)
@@ -4814,17 +4835,25 @@ impl JobManager {
             .ok_or("complete title facts are not yet available")?;
         match stats.el_kind {
             TitleConstant::Consistent(TitleElKind::Mel) => return Ok(None),
-            TitleConstant::Consistent(TitleElKind::Fel) => {},
+            TitleConstant::Consistent(TitleElKind::Fel) => {}
             _ => return Err("waiting for a complete, consistent FEL or MEL title scan".into()),
         }
-        let probe: serde_json::Value = serde_json::from_str(&document)
-            .map_err(|_| "invalid title probe document")?;
-        let video_index = probe.get("streams").and_then(serde_json::Value::as_array)
-            .and_then(|streams| streams.iter().find(|stream| {
-                stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
-                    && stream.get("disposition").and_then(|value| value.get("attached_pic"))
-                        .and_then(serde_json::Value::as_i64).unwrap_or(0) == 0
-            }))
+        let probe: serde_json::Value =
+            serde_json::from_str(&document).map_err(|_| "invalid title probe document")?;
+        let video_index = probe
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|streams| {
+                streams.iter().find(|stream| {
+                    stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                        && stream
+                            .get("disposition")
+                            .and_then(|value| value.get("attached_pic"))
+                            .and_then(serde_json::Value::as_i64)
+                            .unwrap_or(0)
+                            == 0
+                })
+            })
             .and_then(|stream| stream.get("index"))
             .and_then(serde_json::Value::as_u64)
             .and_then(|index| i64::try_from(index).ok())
@@ -5001,7 +5030,9 @@ impl JobManager {
                 self.coordinator.node_id(),
                 loss,
                 keep_original,
-                fitted.as_ref().map(|(table, tools)| (table, tools.scanner.as_path())),
+                fitted
+                    .as_ref()
+                    .map(|(table, tools)| (table, tools.scanner.as_path())),
             )
             .await
             {
@@ -5017,13 +5048,25 @@ impl JobManager {
             }
             if let Some((table, tools)) = &fitted {
                 let still_current = tools.is_current().await
-                    && self.store.dv_refit_curves(file.id).await.ok().flatten()
-                        .is_some_and(|current| current.superseded_at_ms.is_none()
-                            && current.title.curve_digest == table.title.curve_digest
-                            && current.title.helper_identity == table.title.helper_identity);
+                    && self
+                        .store
+                        .dv_refit_curves(file.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|current| {
+                            current.superseded_at_ms.is_none()
+                                && current.title.curve_digest == table.title.curve_digest
+                                && current.title.helper_identity == table.title.helper_identity
+                        });
                 if !still_current {
-                    self.fail_dv_conversion(&publisher, &file, loss,
-                        "F+ fit or helper changed before disk publication").await;
+                    self.fail_dv_conversion(
+                        &publisher,
+                        &file,
+                        loss,
+                        "F+ fit or helper changed before disk publication",
+                    )
+                    .await;
                     return;
                 }
             }
@@ -9169,7 +9212,7 @@ impl JobManager {
             let Some(mut builds) = local_index_until_foreground(
                 &transcode,
                 &admission,
-                crate::fragindex::build_riding_shared(
+                crate::fragindex::build_riding_shared_with_store(
                     &file,
                     &missing
                         .iter()
@@ -9185,6 +9228,7 @@ impl JobManager {
                         .unwrap_or_else(|| index_file_budget(file.duration_ms, file.size, None)),
                     ride_along.as_ref(),
                     Some(reporter),
+                    Some(self.store.as_ref()),
                 ),
             )
             .await
@@ -9224,13 +9268,14 @@ impl JobManager {
                     let Some(build) = local_index_until_foreground(
                         &transcode,
                         &admission,
-                        crate::fragindex::build_riding(
+                        crate::fragindex::build_riding_with_store(
                             &file,
                             *video,
                             &runtime_cache,
                             index_file_budget(file.duration_ms, file.size, previous.as_ref()),
                             None,
                             Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                            Some(self.store.as_ref()),
                         ),
                     )
                     .await
@@ -12081,7 +12126,7 @@ impl JobManager {
             },
             async {
                 Ok::<_, String>(
-                    crate::fragindex::build_shared_from_attested_file_with_progress(
+                    crate::fragindex::build_shared_from_attested_file_with_progress_and_store(
                         &file,
                         &attested.handle,
                         &attested.observation.object_version,
@@ -12091,6 +12136,7 @@ impl JobManager {
                         report_progress,
                         ride_along.as_ref(),
                         &cancel,
+                        Some(self.store.as_ref()),
                     )
                     .await,
                 )

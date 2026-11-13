@@ -21,7 +21,7 @@ bump may break compatibility and a **patch** bump never does.
   title is not fitted again until its source changes or it is retried. Each
   title's curve table (scene spans, the quantised served coefficients, held-out
   errors, verdict and curve digest) is published in one replicated write
-  (SQLite v130; a shape-verified hiqlite extension; carried by the SQLite to
+  (SQLite v131; a shape-verified hiqlite extension; carried by the SQLite to
   cluster import), and a superseded table stays addressable by digest for
   seven days. The Developer card lists and deletes the spool. Nothing serves
   the curves yet.
@@ -29,6 +29,7 @@ bump may break compatibility and a **patch** bump never does.
   `--resume FIRST FIRST_PTS`, reports each scene's RPU scene lengths, exits 3
   for a refusal of the title's content (1 for any other failure), and logs
   nothing from libav.
+- The Profile 7 → 8.1 copy converter can write F+ curves into each converted RPU, choosing the scene from the sample’s presentation time (FEL-RPU-REFIT-BUILD.md milestone 4, part 1). No session uses it yet.
 
 ### Fixed
 

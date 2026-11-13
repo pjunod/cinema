@@ -771,7 +771,7 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                 provenance: CompletionProvenance::StreamSeconds,
                 source_object_version: "test-helper".to_owned(),
             });
-    index_stream_with_progress(src, identity, expectation.as_ref(), dolby_vision, None).await
+    index_stream_with_progress(src, identity, expectation.as_ref(), dolby_vision, None, None, None).await
 }
 
 /// What this index pass does about the muxer's Dolby Vision record.
@@ -799,6 +799,8 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     expectation: Option<&VideoCompletionExpectation>,
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
+    refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
+    refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
 ) -> IndexOutcome {
     let convert = matches!(dolby_vision, DolbyVisionPass::Rewrite(_));
     // A converting identity's index has to describe the CONVERTED bytes. An
@@ -904,7 +906,39 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     if convert {
                         if converter.is_none() {
                             match crate::dvpipe::Converter::for_init(init) {
-                                Ok(ready) => converter = Some(ready),
+                                Ok(ready) => {
+                                    let ready = if let Some(table) = &refit {
+                                        let Some(origin) = refit_origin else {
+                                            return IndexOutcome::Unsupported(
+                                                "fitted conversion has no exact source packet origin".into());
+                                        };
+                                        let Some(video) = init.video() else {
+                                            return IndexOutcome::Unsupported("fitted conversion has no video track".into());
+                                        };
+                                        let Some(track) = fragment.track(video.id) else {
+                                            return IndexOutcome::Unsupported("fitted conversion has no first video packet".into());
+                                        };
+                                        let Some(sample) = track.samples().next() else {
+                                            return IndexOutcome::Unsupported("fitted conversion has no first video sample".into());
+                                        };
+                                        let clock = plurx_core::transcode::dv_refit_serve::SourceClock {
+                                            track_timescale: video.timescale,
+                                            track_ticks: i128::from(track.base_decode_time),
+                                            source_pts: origin.first_dts,
+                                            source_time_base: (origin.time_base_num, origin.time_base_den),
+                                        };
+                                        let presentation = i128::from(track.base_decode_time) + i128::from(sample.cto);
+                                        if clock.source_pts(presentation).ok() != Some(origin.first_pts) {
+                                            return IndexOutcome::Unsupported(
+                                                "the source packet PTS disagrees with the first fragment's composition offset".into());
+                                        }
+                                        match ready.with_refit(Arc::clone(table), clock) {
+                                            Ok(ready) => ready,
+                                            Err(refused) => return IndexOutcome::Unsupported(refused.to_string()),
+                                        }
+                                    } else { ready };
+                                    converter = Some(ready);
+                                }
                                 Err(refused) => {
                                     return IndexOutcome::Unsupported(format!(
                                         "this stream cannot be converted: {refused}"
@@ -1139,6 +1173,9 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     let mut built = FragmentIndex::new(timescale, rows, init_sha, identity);
     built.promotion = promotion;
     built.parameter_sets_constant = parameter_sets_constant;
+    if refit.is_some() {
+        built.dv_refit_origin = refit_origin;
+    }
     IndexOutcome::Built(Box::new(built))
 }
 
@@ -1186,13 +1223,18 @@ pub(crate) fn converted_dolby_vision_record(
 /// token scoped to converting copies so ordinary stripped and preserved
 /// artifacts retain their existing identities.
 pub(crate) const DV_CONVERSION_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v1";
+pub(crate) const DV_REFIT_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v2";
 
 pub(crate) fn output_transform_identity(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
 ) -> Option<&'static str> {
     (video.converts_dolby_vision() && file.hdr.as_deref() == Some("dolby_vision"))
-        .then_some(DV_CONVERSION_TRANSFORM_REVISION)
+        .then_some(if video.dolby_vision_refit().is_some() {
+            DV_REFIT_TRANSFORM_REVISION
+        } else {
+            DV_CONVERSION_TRANSFORM_REVISION
+        })
 }
 
 fn identity_for_transform(
@@ -1220,6 +1262,9 @@ fn identity_for_transform(
     }
     if let (true, Some(transform)) = (video.converts_dolby_vision(), transform) {
         recipe.push(format!("--plurx-output-transform={transform}"));
+        if let Some(digest) = video.dolby_vision_refit() {
+            recipe.push(format!("--plurx-dv-refit-digest={}", hex::encode(digest)));
+        }
     }
     SourceIdentity::new(
         file.size.max(0) as u64,
@@ -1276,6 +1321,18 @@ pub fn video_identities(
     have_dovi: bool,
     convert: bool,
 ) -> Vec<transcode::CopyVideoOptions> {
+    video_identities_with_refit(file, probe_json, have_dovi, convert, None)
+}
+
+/// Include a fitted copy alongside the historical v1 identity when an
+/// enabled platform may request it. The old variant remains byte-identical.
+pub fn video_identities_with_refit(
+    file: &MediaFile,
+    probe_json: Option<&str>,
+    have_dovi: bool,
+    convert: bool,
+    refit_digest: Option<[u8; 32]>,
+) -> Vec<transcode::CopyVideoOptions> {
     let preserve_choices: &[bool] = if plurx_core::playback::is_dolby_vision(file) {
         &[false, true]
     } else {
@@ -1294,6 +1351,12 @@ pub fn video_identities(
             .with_dolby_vision_conversion(true);
         if seen.insert(identity_for(file, video).argv_fingerprint) {
             identities.push(video);
+        }
+        if let Some(digest) = refit_digest {
+            let fitted = video.with_dolby_vision_refit(Some(digest));
+            if seen.insert(identity_for(file, fitted).argv_fingerprint) {
+                identities.push(fitted);
+            }
         }
     }
     identities
@@ -1354,6 +1417,7 @@ struct IndexPass {
     /// source, one index per output.
     outputs: Vec<IndexOutput>,
     expectation: VideoCompletionExpectation,
+    refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
     /// The PGS tracks this pass also keeps, and the stage it keeps them in.
     /// Its argv is already at the end of `args`; the plan rides with the pass
     /// so the verdict and the stage's removal belong to the same owner.
@@ -1577,6 +1641,7 @@ fn dv_title_aggregate(
 struct IndexOutput {
     video: transcode::CopyVideoOptions,
     dolby_vision: DolbyVisionPass,
+    refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
 }
 
 impl IndexOutput {
@@ -1584,6 +1649,7 @@ impl IndexOutput {
         Ok(Self {
             video,
             dolby_vision: dolby_vision_pass_for(file, video)?,
+            refit: None,
         })
     }
 }
@@ -1628,6 +1694,7 @@ fn shared_index_pass(
         args: shared_index_argv(file, &videos, input, ride_along.as_ref()),
         outputs,
         expectation,
+        refit_origin: None,
         ride_along,
     }
 }
@@ -1703,6 +1770,7 @@ impl IndexBuild {
 struct ProbedSource {
     expectation: VideoCompletionExpectation,
     subtitle_tracks: Vec<crate::subtitle_ride_along::ProbedTrack>,
+    dv_refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
 }
 
 async fn probe_completion_expectation(
@@ -1710,9 +1778,10 @@ async fn probe_completion_expectation(
     source_object_version: &str,
     budget: Duration,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    need_refit_origin: bool,
 ) -> Result<(ProbedSource, Instant), IndexFailure> {
     let started = Instant::now();
-    match probe_completion_expectation_inner(source, source_object_version, budget, started, cancel)
+    match probe_completion_expectation_inner(source, source_object_version, budget, started, cancel, need_refit_origin)
         .await
     {
         Ok(probed) => Ok((probed, started)),
@@ -1732,6 +1801,7 @@ async fn probe_completion_expectation_inner(
     budget: Duration,
     started: Instant,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    need_refit_origin: bool,
 ) -> Result<ProbedSource, IndexFailure> {
     let mut view = source;
     view.seek(SeekFrom::Start(0)).map_err(|error| {
@@ -1822,9 +1892,49 @@ async fn probe_completion_expectation_inner(
                 })
         }
     }?;
+    let dv_refit_origin = if need_refit_origin {
+        let context = packet_probe_context_from_metadata(&raw).map_err(|error| {
+            IndexFailure::new(IndexFailureCode::IndexCompletionUnverified,
+                format!("F+ source packet time base: {error:?}"), 0)
+        })?;
+        let first = packet_probe_attempt(
+            source,
+            crate::ffmpeg::HeldPacketProbeRequest {
+                stream_index: context.stream_index,
+                start_seconds: None,
+                packet_limit: Some(1),
+            },
+            budget.saturating_sub(started.elapsed()),
+        ).await.map_err(|error| IndexFailure::new(
+            IndexFailureCode::IndexCompletionUnverified,
+            format!("F+ source packet origin: {}", error.reason()), 0,
+        ))?;
+        let document = packet_document(&first).map_err(|error| IndexFailure::new(
+            IndexFailureCode::IndexCompletionUnverified,
+            format!("F+ source packet origin: {error:?}"), 0,
+        ))?;
+        let packet = document.get("packets").and_then(serde_json::Value::as_array)
+            .and_then(|packets| packets.first())
+            .ok_or_else(|| IndexFailure::new(IndexFailureCode::IndexCompletionUnverified,
+                "F+ source packet origin is missing", 0))?;
+        let first_dts = packet_integer(packet.get("dts")).and_then(|n| i64::try_from(n).ok());
+        let first_pts = packet_integer(packet.get("pts")).and_then(|n| i64::try_from(n).ok());
+        let (Some(first_dts), Some(first_pts), Ok(time_base_num), Ok(time_base_den)) = (
+            first_dts, first_pts,
+            u32::try_from(context.time_base.0),
+            u32::try_from(context.time_base.1),
+        ) else {
+            return Err(IndexFailure::new(IndexFailureCode::IndexCompletionUnverified,
+                "F+ source packet clock is unrepresentable", 0));
+        };
+        Some(plurx_core::segplan::DvRefitOrigin {
+            first_dts, first_pts, time_base_num, time_base_den,
+        })
+    } else { None };
     Ok(ProbedSource {
         expectation,
         subtitle_tracks,
+        dv_refit_origin,
     })
 }
 
@@ -2194,8 +2304,21 @@ pub(crate) async fn build_riding(
     ride_along: Option<&RideAlongGate>,
     progress: Option<SharedIndexProgress>,
 ) -> IndexBuild {
+    build_riding_with_store(file, video, runtime_cache, budget, ride_along, progress, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_riding_with_store(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: &Path,
+    budget: Duration,
+    ride_along: Option<&RideAlongGate>,
+    progress: Option<SharedIndexProgress>,
+    store: Option<&dyn plurx_core::store::Store>,
+) -> IndexBuild {
     first_build(
-        build_riding_shared(file, &[video], runtime_cache, budget, ride_along, progress).await,
+        build_riding_shared_with_store(file, &[video], runtime_cache, budget, ride_along, progress, store).await,
     )
 }
 
@@ -2209,6 +2332,19 @@ pub(crate) async fn build_riding_shared(
     budget: Duration,
     ride_along: Option<&RideAlongGate>,
     progress: Option<SharedIndexProgress>,
+) -> Vec<IndexBuild> {
+    build_riding_shared_with_store(file, videos, runtime_cache, budget, ride_along, progress, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_riding_shared_with_store(
+    file: &MediaFile,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    ride_along: Option<&RideAlongGate>,
+    progress: Option<SharedIndexProgress>,
+    store: Option<&dyn plurx_core::store::Store>,
 ) -> Vec<IndexBuild> {
     let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
         Ok(source) => source,
@@ -2224,7 +2360,7 @@ pub(crate) async fn build_riding_shared(
                 .collect();
         }
     };
-    let mut builds = build_shared_attested(
+    let mut builds = build_shared_attested_with_store(
         file,
         &source.handle,
         source.object_version(),
@@ -2234,6 +2370,7 @@ pub(crate) async fn build_riding_shared(
         progress,
         ride_along,
         None,
+        store,
     )
     .await;
     let unchanged = source.unchanged();
@@ -2322,7 +2459,29 @@ pub(crate) async fn build_shared_from_attested_file_with_progress<F>(
 where
     F: Fn(&PassProgress) + Send + Sync + 'static,
 {
-    build_shared_attested(
+    build_shared_from_attested_file_with_progress_and_store(
+        file, source, source_object_version, videos, runtime_cache, budget,
+        progress, ride_along, cancel, None,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_shared_from_attested_file_with_progress_and_store<F>(
+    file: &MediaFile,
+    source: &std::fs::File,
+    source_object_version: &str,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: F,
+    ride_along: Option<&RideAlongGate>,
+    cancel: &tokio_util::sync::CancellationToken,
+    store: Option<&dyn plurx_core::store::Store>,
+) -> Vec<IndexBuild>
+where
+    F: Fn(&PassProgress) + Send + Sync + 'static,
+{
+    build_shared_attested_with_store(
         file,
         source,
         source_object_version,
@@ -2332,6 +2491,7 @@ where
         Some(Arc::new(progress)),
         ride_along,
         Some(cancel),
+        store,
     )
     .await
 }
@@ -2361,6 +2521,7 @@ async fn build_attested(
             progress,
             ride_along,
             cancel,
+            None,
         )
         .await,
     )
@@ -2399,6 +2560,24 @@ pub(crate) async fn build_shared_attested(
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Vec<IndexBuild> {
+    build_shared_attested_with_store(file, source, source_object_version, videos,
+        runtime_cache, budget, progress, ride_along, cancel, None).await
+}
+
+#[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
+async fn build_shared_attested_with_store(
+    file: &MediaFile,
+    source: &std::fs::File,
+    source_object_version: &str,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: Option<SharedIndexProgress>,
+    ride_along: Option<&RideAlongGate>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    store: Option<&dyn plurx_core::store::Store>,
+) -> Vec<IndexBuild> {
     build_attested_pass(
         file,
         source,
@@ -2409,6 +2588,7 @@ pub(crate) async fn build_shared_attested(
         progress,
         ride_along,
         cancel,
+        store,
     )
     .await
 }
@@ -2429,6 +2609,24 @@ pub(crate) async fn build_shared_attested(
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Vec<IndexBuild> {
+    build_shared_attested_with_store(file, source, source_object_version, videos,
+        runtime_cache, budget, progress, ride_along, cancel, None).await
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+async fn build_shared_attested_with_store(
+    file: &MediaFile,
+    source: &std::fs::File,
+    source_object_version: &str,
+    videos: &[transcode::CopyVideoOptions],
+    runtime_cache: &Path,
+    budget: Duration,
+    progress: Option<SharedIndexProgress>,
+    ride_along: Option<&RideAlongGate>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    store: Option<&dyn plurx_core::store::Store>,
+) -> Vec<IndexBuild> {
     let mut builds = Vec::with_capacity(videos.len());
     for (at, video) in videos.iter().enumerate() {
         builds.extend(
@@ -2442,6 +2640,7 @@ pub(crate) async fn build_shared_attested(
                 progress.clone(),
                 ride_along.filter(|_| at == 0),
                 cancel,
+                store,
             )
             .await,
         );
@@ -2464,6 +2663,7 @@ async fn build_attested_pass(
     progress: Option<SharedIndexProgress>,
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    store: Option<&dyn plurx_core::store::Store>,
 ) -> Vec<IndexBuild> {
     let refuse_all = |outcome: IndexOutcome| {
         videos
@@ -2486,7 +2686,8 @@ async fn build_attested_pass(
         Err(reason) => return refuse_all(IndexOutcome::Unsupported(reason)),
     };
     let (probed, started) =
-        match probe_completion_expectation(source, source_object_version, budget, cancel).await {
+        match probe_completion_expectation(source, source_object_version, budget, cancel,
+            videos.iter().any(|video| video.dolby_vision_refit().is_some())).await {
             Ok(value) => value,
             Err(failure) => return refuse_all(IndexOutcome::Failed(Box::new(failure))),
         };
@@ -2497,7 +2698,26 @@ async fn build_attested_pass(
     let mut slots = Vec::with_capacity(videos.len());
     for (slot, video) in videos.iter().enumerate() {
         match IndexOutput::new(file, *video) {
-            Ok(output) => {
+            Ok(mut output) => {
+                if let Some(digest) = video.dolby_vision_refit() {
+                    let Some(store) = store else {
+                        builds[slot] = Some(IndexBuild::plain(IndexOutcome::Unsupported(
+                            "a fitted index needs its curve store".into())));
+                        continue;
+                    };
+                    match crate::dv_refit_serving::pinned_table(store, file, digest).await {
+                        Ok(Some(table)) => output.refit = Some(table),
+                        Ok(None) => {
+                            builds[slot] = Some(IndexBuild::plain(IndexOutcome::Unsupported(
+                                "the fitted index's curve digest is no longer kept".into())));
+                            continue;
+                        }
+                        Err(error) => {
+                            builds[slot] = Some(IndexBuild::plain(IndexOutcome::Unsupported(error)));
+                            continue;
+                        }
+                    }
+                }
                 outputs.push(output);
                 slots.push(slot);
             }
@@ -2555,7 +2775,8 @@ async fn build_attested_pass(
             .as_ref()
             .map_or(input, |bridge| bridge.url().to_owned());
         let output_count = outputs.len();
-        let pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
+        let mut pass = shared_index_pass(file, outputs, Some(&input), probed.expectation, plan);
+        pass.refit_origin = probed.dv_refit_origin;
         #[cfg(unix)]
         let (source_fd, source_handoff) = {
             use std::os::fd::AsRawFd;
@@ -2699,6 +2920,7 @@ async fn build_with_args_owned(
         args,
         outputs,
         expectation,
+        refit_origin,
         ride_along,
     } = pass;
     let identities = outputs
@@ -3007,22 +3229,27 @@ async fn build_with_args_owned(
     // would have in a pass of its own. A one-identity pass keeps today's
     // behaviour: its reader closes with the refusal and the child ends early.
     let shared = identities.len() > 1;
-    let mut dolby_vision = outputs.into_iter().map(|output| output.dolby_vision);
+    let mut outputs = outputs.into_iter();
     let mut streams: Vec<OutputRead<'_>> = Vec::with_capacity(identities.len());
+    let first = outputs.next().expect("an index pass has an output");
     streams.push(Box::pin(index_output(
         stdout,
         identities[0].clone(),
         &expectation,
-        dolby_vision.next().unwrap_or_default(),
+        first.dolby_vision,
+        first.refit,
+        refit_origin,
         Some(&record_progress),
         shared,
     )));
-    for (reader, identity) in sibling_readers.into_iter().zip(identities.iter().skip(1)) {
+    for ((reader, identity), output) in sibling_readers.into_iter().zip(identities.iter().skip(1)).zip(outputs) {
         streams.push(Box::pin(index_output(
             reader,
             identity.clone(),
             &expectation,
-            dolby_vision.next().unwrap_or_default(),
+            output.dolby_vision,
+            output.refit,
+            refit_origin,
             None,
             shared,
         )));
@@ -3299,6 +3526,8 @@ async fn index_output<R: AsyncRead + Unpin>(
     identity: SourceIdentity,
     expectation: &VideoCompletionExpectation,
     dolby_vision: DolbyVisionPass,
+    refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
+    refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
     progress: Option<&IndexProgress>,
     drain: bool,
 ) -> (IndexOutcome, bool) {
@@ -3308,6 +3537,8 @@ async fn index_output<R: AsyncRead + Unpin>(
         Some(expectation),
         dolby_vision,
         progress,
+        refit,
+        refit_origin,
     )
     .await;
     // Whether the stream answered before its output ended: a refusal of

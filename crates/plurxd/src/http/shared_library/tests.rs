@@ -3441,6 +3441,7 @@ async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_e
     let info = crate::transcode::StartInfo {
         processed_dv_profile: None,
         processed_fel: None,
+        dv_refit_digest: None,
         degraded_processing: None,
         processing_note: None,
         audio_delivery: prepared.request().audio_delivery.clone(),

@@ -1722,7 +1722,10 @@ impl JobFence {
                 return Ok(RefitPublication::Invalid(reason));
             }
             match self.0.store.publish_dv_refit_job(request).await {
-                Ok(JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }) => {
+                Ok(
+                    JobPublishOutcome::Published { .. }
+                    | JobPublishOutcome::AlreadyPublished { .. },
+                ) => {
                     metrics::event(self.0.kind, Event::Published);
                     state.token = None;
                     return Ok(RefitPublication::Published);

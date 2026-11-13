@@ -2604,9 +2604,7 @@ pub trait BackgroundJobStore: Send + Sync {
     /// outcomes of sources the catalogue no longer has.
     async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError>;
     /// Profile 7 FEL titles and their current F+ tables, by verdict.
-    async fn dv_refit_progress(
-        &self,
-    ) -> Result<super::dv_refit_jobs::RefitProgress, StoreError>;
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -3658,7 +3656,8 @@ LIMIT 1
         after_file_id: i64,
         limit: u32,
     ) -> Result<Vec<super::dv_refit_jobs::RefitDemand>, StoreError> {
-        super::dv_refit_jobs::demands(self, helper, fit_version, include_all, after_file_id, limit).await
+        super::dv_refit_jobs::demands(self, helper, fit_version, include_all, after_file_id, limit)
+            .await
     }
     async fn publish_dv_refit_job(
         &self,
@@ -3688,9 +3687,7 @@ LIMIT 1
     async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError> {
         super::dv_refit_jobs::prune(self, now_ms).await
     }
-    async fn dv_refit_progress(
-        &self,
-    ) -> Result<super::dv_refit_jobs::RefitProgress, StoreError> {
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError> {
         super::dv_refit_jobs::progress(self).await
     }
     async fn probe_can_preempt_title(

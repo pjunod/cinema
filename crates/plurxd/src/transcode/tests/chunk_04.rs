@@ -1117,6 +1117,7 @@
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,

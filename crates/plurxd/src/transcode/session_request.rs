@@ -4,6 +4,8 @@ use super::*;
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vod_observation: Option<crate::vodserve::VodActivityObservation>,
     pub id: String,
     /// `vod` for the immutable presentation; `live-recovery` for the
@@ -688,6 +690,11 @@ pub struct SessionRequest {
     /// switch's current value instead.
     #[serde(skip)]
     pub(crate) sdr_master_codecs: Option<bool>,
+    /// The fitted copy table selected from a typed session platform at a
+    /// generation boundary. Service-owned; absent preserves v1 semantics and
+    /// old durable recipe bytes. A newer fit does not mutate this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dv_refit_digest: Option<String>,
     /// Trusted service policy, retained by durable and worker envelopes. Native
     /// HTTP create never takes this from the client. A VOD-only request may
     /// not allocate the rolling recovery engine, even when globally enabled.
@@ -1276,6 +1283,7 @@ impl SessionRequest {
 }
 
 pub struct StartInfo {
+    pub(crate) dv_refit_digest: Option<String>,
     /// Profile of an admitted, prepared processed presentation. Independent
     /// of the physical transcode kind and its PQ base grade; never source tags.
     pub(crate) processed_dv_profile: Option<u8>,

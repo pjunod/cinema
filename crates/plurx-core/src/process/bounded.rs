@@ -270,11 +270,13 @@ pub async fn output_command_bundle_env(
 /// [`output_command_bundle_env`] with the child's stdout written straight to
 /// `stdout` (an open, writable file) as it is produced, so whatever a long
 /// run printed survives its interruption. The returned output's `stdout` is
-/// empty; `max_stderr_bytes` bounds what is kept of stderr.
+/// empty; `max_stderr_bytes` bounds stderr and `max_stdout_bytes` bounds
+/// the child's regular-file writes. Exceeding it terminates the writer.
 pub async fn output_command_bundle_env_to_file(
     command: &mut Command,
     wall_time: Duration,
     max_stderr_bytes: usize,
+    max_stdout_bytes: usize,
     work: super::ChildWork,
     bundle_env: &[(String, std::ffi::OsString)],
     stdout: std::fs::File,
@@ -283,6 +285,35 @@ pub async fn output_command_bundle_env_to_file(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "managed child executable must be absolute",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        // Keep stdout as a direct child descriptor: cancellation/reaping
+        // then settles every write before the caller reads its progress.
+        // A separate async file pump could outlive cancellation with an
+        // in-flight filesystem write. The kernel bounds the child's file.
+        let limit = max_stdout_bytes as libc::rlim_t;
+        unsafe {
+            command.pre_exec(move || {
+                let bounds = libc::rlimit {
+                    rlim_cur: limit,
+                    rlim_max: limit,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &bounds) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = max_stdout_bytes;
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file-backed helper output needs Unix file limits",
         ));
     }
     output_command_environment(
@@ -335,6 +366,10 @@ enum Environment {
     Inherited,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one process owner binds environment, pipe selection and retained output destination"
+)]
 async fn output_command_environment(
     command: &mut Command,
     wall_time: Duration,
@@ -564,6 +599,33 @@ mod tests {
     use super::*;
 
     const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_output_is_kernel_bounded_and_owned_until_reaped() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let path = dir.path().join("stdout");
+        let file = std::fs::File::create(&path).expect("stdout file");
+        let mut command = Command::new("/usr/bin/head");
+        command.args(["-c", "131072", "/dev/zero"]);
+        let output = output_command_bundle_env_to_file(
+            &mut command,
+            Duration::from_secs(5),
+            1024,
+            17,
+            TEST_WORK,
+            &[],
+            file,
+        )
+        .await
+        .expect("file limit still reaps the owned child");
+        assert!(
+            !output.status.success(),
+            "the writer must observe its file limit"
+        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(std::fs::read(path).expect("saved prefix"), vec![0; 17]);
+    }
 
     fn selected_record(line: &[u8]) -> bool {
         line.starts_with(b"frame:")

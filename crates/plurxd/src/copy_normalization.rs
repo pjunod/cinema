@@ -95,6 +95,9 @@ impl CopyNormalizationContract {
         if digest != self.init_contract_sha256 {
             return Err(CopyNormalizationError::ContractChanged);
         }
+        // The live copy engine has no candidate index row for its rebased
+        // fragment clock. It deliberately keeps v1 identity curves; F+ is
+        // selected only by an indexed VOD rendition whose landing is proved.
         let converter = if self.convert {
             Some(
                 crate::dvpipe::Converter::for_init(&served_init)

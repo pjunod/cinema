@@ -199,7 +199,10 @@ impl Spool {
             .take(MAX_SPOOL_BYTES + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_SPOOL_BYTES {
-            return Err(std::io::Error::other("F+ spool exceeds its bound"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "F+ spool exceeds its bound",
+            ));
         }
         Ok(bytes)
     }
@@ -210,7 +213,8 @@ impl Spool {
         {
             let file = std::fs::File::create(&temp)?;
             if gzip {
-                let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+                let mut encoder =
+                    flate2::write::GzEncoder::new(file, flate2::Compression::default());
                 encoder.write_all(bytes)?;
                 encoder.finish()?.sync_all()?;
             } else {
@@ -277,6 +281,38 @@ impl Spool {
         .map_err(|e| format!("F+ spool: {e}"))
     }
 
+    /// Recover whole scene lines left by a node crash before truncating the
+    /// next run file. A resumed run replaces the last kept scene, just as
+    /// normal interruption settlement does; torn lines never become progress.
+    pub(super) async fn recover_interrupted(&self) -> Result<(), String> {
+        self.blocking(|spool| {
+            let Ok(bytes) = Self::read_bounded(&spool.path(".run")) else {
+                return Ok::<_, std::io::Error>(());
+            };
+            let kept = Self::read_bounded(&spool.path(".partial"))
+                .map(|bytes| dv_refit_title::complete_scenes(&bytes))
+                .unwrap_or_default();
+            let scenes: Vec<_> = kept.iter().map(|(_, scene)| scene.clone()).collect();
+            let keep = dv_refit_title::resume_point(&scenes).map_or(0, |(keep, _)| keep);
+            let mut prefix: Vec<_> = kept.into_iter().take(keep).collect();
+            let recovered = dv_refit_title::continue_scenes(prefix.last().map(|(_, s)| s), &bytes);
+            if !recovered.is_empty() {
+                prefix.extend(recovered);
+                let mut text = prefix
+                    .into_iter()
+                    .map(|(line, _)| line)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                text.push('\n');
+                spool.write_atomically(".partial", text.as_bytes(), false)?;
+            }
+            std::fs::remove_file(spool.path(".run"))?;
+            Ok(())
+        })
+        .await?
+        .map_err(|e| format!("recovering F+ progress: {e}"))
+    }
+
     /// A fresh file for the helper's stdout.
     pub(super) async fn open_run(&self) -> Result<std::fs::File, String> {
         self.blocking(|spool| {
@@ -287,10 +323,17 @@ impl Spool {
         .map_err(|e| format!("F+ spool: {e}"))
     }
 
-    pub(super) async fn run_output(&self) -> Vec<u8> {
-        self.blocking(|spool| Self::read_bounded(&spool.path(".run")).unwrap_or_default())
+    pub(super) async fn run_output(&self) -> Result<Vec<u8>, RunError> {
+        self.blocking(|spool| Self::read_bounded(&spool.path(".run")))
             .await
-            .unwrap_or_default()
+            .map_err(RunError::Transient)?
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    RunError::Malformed(error.to_string())
+                } else {
+                    RunError::Transient(format!("reading F+ output: {error}"))
+                }
+            })
     }
 
     pub(super) async fn discard(&self) {
@@ -310,7 +353,10 @@ fn spool_name(name: &str) -> Option<(&str, bool)> {
     } else if let Some(key) = name
         .strip_suffix(".partial")
         .or_else(|| name.strip_suffix(".run"))
-        .or_else(|| name.strip_suffix(".tmp").map(|n| n.trim_end_matches(".jsonl.gz").trim_end_matches(".partial")))
+        .or_else(|| {
+            name.strip_suffix(".tmp")
+                .map(|n| n.trim_end_matches(".jsonl.gz").trim_end_matches(".partial"))
+        })
     {
         (key, false)
     } else {
@@ -398,6 +444,7 @@ pub(super) async fn spawn(
         &mut command,
         WALL_TIME,
         MAX_STDERR_BYTES,
+        (MAX_SPOOL_BYTES + 1) as usize,
         plurx_core::process::ChildWork::background(ACTIVITY),
         environment,
         stdout,
@@ -430,7 +477,14 @@ pub(super) async fn settle_child(
         prefix_lines.push(line);
         prefix.push(scene);
     }
-    let bytes = spool.run_output().await;
+    let bytes = match spool.run_output().await {
+        Ok(bytes) => bytes,
+        Err(error @ RunError::Malformed(_)) => {
+            spool.discard().await;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     match exit {
         Exit::Success => {
             let at = resume.map(|(_, at)| at);
@@ -516,6 +570,7 @@ pub(super) async fn run(
             }
         }
     }
+    spool.recover_interrupted().await.map_err(transient)?;
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
         .await
         .map_err(transient)?;
@@ -594,7 +649,10 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
 
-    fn output(status: i32, stderr: &str) -> Result<plurx_core::process::bounded::Output, std::io::Error> {
+    fn output(
+        status: i32,
+        stderr: &str,
+    ) -> Result<plurx_core::process::bounded::Output, std::io::Error> {
         Ok(plurx_core::process::bounded::Output {
             status: std::process::ExitStatus::from_raw(status),
             stdout: Vec::new(),
@@ -609,11 +667,17 @@ mod tests {
     fn the_exit_status_classifies_a_run() {
         assert_eq!(classify(&output(0, "noise\nmore noise\n")), Exit::Success);
         assert_eq!(
-            classify(&output(3 << 8, "Segment refused: full-resolution enhancement layer\n")),
+            classify(&output(
+                3 << 8,
+                "Segment refused: full-resolution enhancement layer\n"
+            )),
             Exit::Refused("full-resolution enhancement layer".into())
         );
         assert_eq!(
-            classify(&output(3 << 8, "a decoder warning\nSegment refused: not FEL\n\n")),
+            classify(&output(
+                3 << 8,
+                "a decoder warning\nSegment refused: not FEL\n\n"
+            )),
             Exit::Refused("not FEL".into()),
             "the last line, however many there are"
         );
@@ -622,7 +686,9 @@ mod tests {
             Exit::Failed(reason) if reason.contains("cannot allocate")
         ));
         assert!(matches!(classify(&output(1 << 8, "")), Exit::Failed(_)));
-        assert!(matches!(classify(&output(9, "")), Exit::Failed(reason) if reason.contains("signal 9")));
+        assert!(
+            matches!(classify(&output(9, "")), Exit::Failed(reason) if reason.contains("signal 9"))
+        );
         assert!(matches!(
             classify(&Err(std::io::Error::other("spawn"))),
             Exit::Failed(_)
@@ -644,7 +710,10 @@ mod tests {
         std::fs::write(root.join("unrelated.txt"), b"keep").expect("other");
         let entries = list(&root);
         assert_eq!(
-            entries.iter().map(|e| (e.complete, e.bytes)).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|e| (e.complete, e.bytes))
+                .collect::<Vec<_>>(),
             [(true, 1), (false, 2)]
         );
         assert_eq!(clear(&root).expect("clear"), 2);

@@ -204,6 +204,9 @@ pub struct Generation {
     /// index built the other way describes media this generation never
     /// produces.
     pub convert_dolby_vision: bool,
+    /// The exact fitted table named by this generation's rendition identity.
+    /// Its source clock is established only after the index landing is known.
+    pub dv_refit: Option<std::sync::Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
     /// Keep the video samples' in-band HEVC parameter sets when merging.
     ///
     /// The recipe's own answer, for the same reason as
@@ -425,7 +428,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                         .map_err(|error| landing_failed(error.to_string()))?,
                     );
                 }
-                if self.generation.convert_dolby_vision {
+                if self.generation.convert_dolby_vision && self.generation.dv_refit.is_none() {
                     match crate::dvpipe::Converter::for_init(&served) {
                         Ok(converter) => self.converter = Some(converter),
                         Err(refused) => {
@@ -696,6 +699,70 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// buffer holds less than one segment's byte ceiling — the memory the
     /// segmenter is entitled to hold pending anyway. Past that, or at the end
     /// of the pipe, it is the typed failure.
+    async fn match_fitted_landing(
+        &mut self,
+        index: &FragmentIndex,
+        target: usize,
+    ) -> Result<usize, Outcome> {
+        let time = match self.landing_clock.take() {
+            Some(probe) => Some(probe().await.map_err(|why| landing_failed(
+                format!("fitted conversion could not measure its landing: {why}")))?),
+            None if self.generation.start_entry == 0 => None,
+            None => return Err(landing_failed(
+                "fitted seek conversion needs an index landing clock".into())),
+        };
+        let candidate = if let Some(time) = time {
+            let after = index.rows.partition_point(|row| row.dts <= time.ticks);
+            [after.checked_sub(1), (after < index.rows.len()).then_some(after)]
+                .into_iter().flatten()
+                .min_by_key(|&row| index.rows[row].dts.abs_diff(time.ticks))
+                .ok_or_else(|| landing_failed("the fitted index has no landing row".into()))?
+        } else { 0 };
+        let init = self.served.as_ref().ok_or_else(||
+            landing_failed("fitted conversion has no served init".into()))?;
+        let video = init.video().ok_or_else(||
+            landing_failed("fitted conversion has no video track".into()))?;
+        let first_dts = self.landing.iter()
+            .find_map(|fragment| fragment.track(video.id).map(|track| track.base_decode_time))
+            .ok_or_else(|| landing_failed("fitted conversion has no first video fragment".into()))?;
+        let clock = plurx_core::transcode::dv_refit_serve::SourceClock::for_index_landing(
+            index, candidate, first_dts,
+        ).map_err(|error| landing_failed(format!("fitted landing clock: {error}")))?;
+        let table = self.generation.dv_refit.as_ref().ok_or_else(||
+            landing_failed("fitted conversion lost its pinned table".into()))?;
+        let mut converter = crate::dvpipe::Converter::for_init(init)
+            .and_then(|ready| ready.with_refit(std::sync::Arc::clone(table), clock))
+            .map_err(|error| landing_failed(format!("fitted conversion: {error}")))?;
+        let mut converted = Vec::with_capacity(self.landing.len());
+        let mut observed = Vec::with_capacity(self.observed.len());
+        for original in &self.landing {
+            let mut fragment = original.clone();
+            converter.convert(&mut fragment).map_err(|error|
+                landing_failed(format!("fitted conversion: {error}")))?;
+            if let Some(bytes) = self.video_bytes_of(&fragment) {
+                observed.push(bytes);
+            }
+            converted.push(fragment);
+        }
+        let landed = if let Some(time) = time {
+            match_landing_at(index, &observed, target, time.ticks, time.frame_ticks)
+                .map_err(|error| landing_failed(format!("fitted landing: {error}")))?
+        } else {
+            if index.rows.iter().take(observed.len()).map(|row| row.video_bytes)
+                .ne(observed.iter().copied()) {
+                return Err(landing_failed("fitted opening bytes disagree with index row zero".into()));
+            }
+            0
+        };
+        if landed != candidate {
+            return Err(landing_failed("fitted landing candidate changed after conversion".into()));
+        }
+        self.landing = converted;
+        self.observed = observed;
+        self.converter = Some(converter);
+        Ok(landed)
+    }
+
     async fn engage(&mut self, at_end: bool) -> Result<(), Outcome> {
         let start_entry = self.generation.start_entry;
         let Some(entry) = self.generation.plan.entry(start_entry) else {
@@ -717,7 +784,10 @@ impl<S: Sink> GenerationRun<'_, S> {
             // Copy's demuxer may land before, but never after, the plan RAP,
             // so the target row bounds every possible landing.
             let readable = !at_end && self.landing_bytes < self.generation.policy.max_bytes;
-            let row = match match_landing(index, &self.observed, target) {
+            let row = if self.generation.dv_refit.is_some() {
+                let index = index.clone();
+                self.match_fitted_landing(&index, target).await?
+            } else { match match_landing(index, &self.observed, target) {
                 Ok(row) => row,
                 Err(ambiguous @ LandingError::Ambiguous { .. }) if self.landing_clock.is_some() => {
                     let clock = self.landing_clock.take().expect("checked by the guard");
@@ -753,7 +823,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                     return Err(unplaced(&ambiguous, self.time_refusal.as_ref()))
                 }
                 Err(error) => return Err(landing_failed(error.to_string())),
-            };
+            }};
             landed = Some(row);
             target - row
         } else {
@@ -1122,6 +1192,7 @@ mod tests {
             start_entry: 1,
             policy: CutPolicy::new(2, 2, 48_000_000, 15, 24),
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: true,
         };
         let sink = MemSink::default();
@@ -1262,6 +1333,7 @@ mod tests {
             start_entry: 0,
             policy: CutPolicy::new(2, 2, 48_000_000, 15, 24000),
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
         };
         let sink = MemSink::default();
@@ -1619,6 +1691,7 @@ mod tests {
     fn generation(film: &Film, start_entry: u32) -> Generation {
         Generation {
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
