@@ -5,11 +5,12 @@ name: main fast lane
 # longer skip the gate, which is what an opt-in label allowed.
 #
 # With the merge train on (repository variable MERGE_TRAIN = on) the lane's
-# jobs after paperwork run only on the train's own pull requests: head
+# heavy jobs run only on the train's own pull requests: head
 # `train/...`, opened by the train's bot (MERGE_TRAIN_BOT, default train-bot).
 # A train PR is main plus the boarded PRs, so its promotion gate is the gate
 # for every one of them; a per-PR run would test a tree that never lands.
-# Off (unset or anything but `on`), every PR runs the whole lane as before.
+# Ordinary ready PRs still run the lightweight scope job to read the switch
+# exactly. Off (unset or anything but `on`), every PR runs the whole lane.
 # docs/ci/MERGE-TRAIN.md.
 on:
   pull_request:
@@ -476,7 +477,13 @@ jobs:
   rust_compile:
     name: fast Rust gate
     needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.rust == 'true')
     # The nonvoter compile pool, in the pinned rust-gate image: no per-run apt
     # or toolchain downloads. The container's limits are the job's bound on
     # either carrier; the first step verifies them and CARGO_BUILD_JOBS is
@@ -573,7 +580,13 @@ jobs:
   rust_units:
     name: Rust unit tests
     needs: [scope, preflight]
-    if: needs.scope.outputs.rust_units == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.rust_units == 'true')
     uses: ./.github/workflows/rust-units.yml
     with:
       base: ${{ github.event.pull_request.base.sha }}
@@ -582,7 +595,13 @@ jobs:
   web_compile:
     name: fast web syntax gate
     needs: [scope, preflight]
-    if: needs.scope.outputs.web_layout == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.web_layout == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     # web-unit-check measured 103 s serial on two cores; the rest is checkout,
     # node and the pinned tsc.
@@ -636,7 +655,13 @@ jobs:
   apple_compile:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true')
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
@@ -721,7 +746,13 @@ jobs:
   android_compile:
     name: fast Android compile
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.android_jvm == 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
     steps:
@@ -763,7 +794,7 @@ jobs:
       always() &&
       github.event.pull_request.draft == false &&
       needs.scope.outputs.train_selected != 'true' &&
-      needs.scope.outputs.run_lane == 'true'
+      needs.scope.outputs.run_lane != 'false'
     needs:
       - paperwork
       - scope

@@ -51,7 +51,15 @@ class SelectionCase(unittest.TestCase):
     def test_outside_a_probe_the_scope_passes_through(self):
         out = scope(SCOPE_LINES, None)
         self.assertEqual(out[: len(SCOPE_LINES)], SCOPE_LINES)
-        self.assertEqual(out[len(SCOPE_LINES):], ["preflight=true", "worker_control=true", "train_selected=false", "run_lane=true"])
+        self.assertEqual(out[len(SCOPE_LINES):], ["rust_units=true", "preflight=true", "worker_control=true", "train_selected=false", "run_lane=true"])
+
+    def test_rust_compile_and_unit_probes_select_independent_stages(self):
+        for selected, rust, units in (("rust_compile", "true", "false"), ("rust_units", "false", "true")):
+            with self.subTest(selected=selected):
+                out = dict(line.split("=") for line in scope(SCOPE_LINES, [selected]))
+                self.assertEqual(out["rust"], rust)
+                self.assertEqual(out["rust_units"], units)
+                self.assertEqual(out["preflight"], "false")
 
     def test_an_unknown_job_fails_the_scope(self):
         with self.assertRaises(SystemExit):
@@ -69,7 +77,7 @@ class SelectionCase(unittest.TestCase):
 
     def test_suspended_lane_disables_every_selectable_job(self):
         out = dict(line.split("=") for line in scope(SCOPE_LINES, None, enabled=False))
-        for output in ("rust", "apple", "desktop_macos", "android_jvm", "web_layout", "preflight", "worker_control"):
+        for output in ("rust_units", "rust", "apple", "desktop_macos", "android_jvm", "web_layout", "preflight", "worker_control"):
             self.assertEqual(out[output], "false")
         self.assertEqual(out["run_lane"], "false")
 
@@ -86,9 +94,6 @@ class SelectionCase(unittest.TestCase):
 
 
 class LaneCase(unittest.TestCase):
-    TRAIN = ("vars.MERGE_TRAIN != 'on' || (startsWith(github.event.pull_request.head.ref, 'train/') && "
-             "github.event.pull_request.user.login == (vars.MERGE_TRAIN_BOT || 'train-bot'))")
-
     def condition(self, job: str) -> str:
         block = job_block(job)
         match = re.search(r"(?m)^    if: >-\n((?:      .*\n)+)", block) or re.search(r"(?m)^    if: (.+)\n", block)
@@ -96,7 +101,7 @@ class LaneCase(unittest.TestCase):
 
     def test_with_the_train_on_only_train_prs_run_past_paperwork(self):
         self.assertNotIn("vars.MERGE_TRAIN", self.condition("scope"))
-        self.assertIn("needs.scope.outputs.run_lane == 'true'", self.condition("promotion_gate"))
+        self.assertIn("needs.scope.outputs.run_lane != 'false'", self.condition("promotion_gate"))
         self.assertIn("MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}", job_block("scope"))
         self.assertNotIn("if:", job_block("paperwork").split("steps:")[0])  # paperwork runs on every PR
 
@@ -109,6 +114,15 @@ class LaneCase(unittest.TestCase):
         for job, output in (("rust_compile", "rust"), ("web_compile", "web_layout"),
                             ("android_compile", "android_jvm")):
             self.assertIn(f"needs.scope.outputs.{output} == 'true'", self.condition(job))
+
+    def test_selected_probe_jobs_can_run_without_an_unrequested_preflight(self):
+        for job in ("rust_compile", "rust_units", "web_compile", "apple_compile", "android_compile"):
+            with self.subTest(job=job):
+                condition = self.condition(job)
+                self.assertIn("!cancelled()", condition)
+                self.assertIn("needs.scope.result == 'success'", condition)
+                self.assertIn("needs.preflight.result == 'success'", condition)
+                self.assertIn("needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped'", condition)
 
     def test_a_train_head_is_never_fixed_in_place(self):
         paperwork = job_block("paperwork")

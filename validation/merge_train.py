@@ -31,11 +31,12 @@ SELECTABLE = {
     "preflight": ("preflight",),
     "worker_control_proof": ("worker_control",),
     "rust_compile": ("rust",),
+    "rust_units": ("rust_units",),
     "web_compile": ("web_layout",),
     "apple_compile": ("apple", "desktop_macos"),
     "android_compile": ("android_jvm",),
 }
-SURFACES = ("rust", "web_layout", "apple", "desktop_macos", "android_jvm")
+SURFACES = ("rust_units", "rust", "web_layout", "apple", "desktop_macos", "android_jvm")
 TRAIN_JOBS = re.compile(r"(?m)^Train-Jobs: *(.*?) *$")
 
 
@@ -44,8 +45,8 @@ def lane_enabled(event: dict, switch: str, bot: str) -> bool:
     if switch != "on":
         return True
     pull = event.get("pull_request") or {}
-    return ((pull.get("head") or {}).get("ref", "").startswith("train/") and (
-        pull.get("user") or {}).get("login") == bot
+    return ((pull.get("head") or {}).get("ref", "").startswith("train/")
+            and (pull.get("user") or {}).get("login") == bot)
 
 
 def selection(event: dict, bot: str) -> list[str] | None:
@@ -63,6 +64,9 @@ def selection(event: dict, bot: str) -> list[str] | None:
 
 def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True) -> list[str]:
     values = dict(line.split("=", 1) for line in lines if "=" in line)
+    # Rust tests can read files compile scope ignores; selection must see
+    # every ordinary ready PR and no-op on unchanged content keys.
+    values.setdefault("rust_units", "true")
     if not enabled:
         for output in SURFACES + ("preflight", "worker_control"):
             values[output] = "false"

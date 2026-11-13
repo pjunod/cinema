@@ -489,7 +489,7 @@ class RepositoryContractTests(unittest.TestCase):
     def test_unit_selection_is_independent_of_the_compile_surface_scope(self):
         lane = (ROOT / ".github/workflows/main-fast-lane.yml").read_text()
         unit_job = lane.split("\n  rust_units:\n", 1)[1].split("\n  web_compile:", 1)[0]
-        self.assertIn("if: needs.scope.outputs.rust_units == 'true'", unit_job)
+        self.assertIn("needs.scope.outputs.rust_units == 'true'", unit_job)
         self.assertNotIn("needs.scope.outputs.rust ==", unit_job)
         self.assertIn("rust_units: ${{ steps.scope.outputs.rust_units || 'true' }}", lane)
 

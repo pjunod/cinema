@@ -1,6 +1,6 @@
 # The merge train — how a pull request lands on `main`
 
-**Status:** built (the train service is in [noirr/ci-fleet](http://forge.lan:3000/noirr/ci-fleet), `ci-fleet train`); off until the owner switches it on · **Updated:** 2026-11-12 · **Owner:** Claude (claude-opus, session 01BCWLA2)
+**Status:** built (the train service is in [noirr/ci-fleet](http://forge.lan:3000/noirr/ci-fleet), `ci-fleet train`); off until the owner switches it on · **Updated:** 2026-11-13 · **Owner:** Codex continuation of Claude session 01BCWLA2
 
 Any agent — Claude, GPT, OpenRouter — or person can follow this page. It says
 how a pull request into `main` lands with the train **off** and **on**, the
@@ -90,13 +90,17 @@ remained off. Only exact `on` switches off ordinary PRs' heavy scope outputs;
 its author is the bot (`vars.MERGE_TRAIN_BOT`, default `train-bot`). The bot's
 re-runs of only some jobs are train PRs too, with a `Train-Jobs:` line in the
 description; `validation/merge_train.py` turns that line into the scope
-outputs, and the promotion gate does not run on them. The train lands
+outputs, and the promotion gate does not run on them. Rust compile and Rust
+unit fan-out are separate selectable stages: a compile probe does not rerun
+units, and a unit probe still runs its content selector on an empty main diff.
+Selected probe jobs may run when their unrequested preflight is skipped;
+ordinary lanes still require preflight success before allocating compile work. The train lands
 through pull requests and never pushes to `main`. `paperwork` never fixes a
 bot-authored `train/` head in place (it fails instead); a `train/` branch of
 anyone else is an ordinary PR and keeps the auto-fix.
 
 One limit to know: a probe on `main` alone has an empty diff, so a job that
 decides from the diff what to check (the worker controller proof, the formal
-mapping, `web-types --base`) can pass there vacuously. Such a failure is then
+mapping, `web-types --base`, the Rust unit content selector) can pass there vacuously. Such a failure is then
 treated as caused by the train and bisected; the PR whose diff triggers the
 failing check is the one returned, as its own lane run would have failed too.
