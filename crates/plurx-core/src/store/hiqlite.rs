@@ -5724,6 +5724,10 @@ impl HiqliteAuthStore {
                 params!(),
             ),
             (
+                "DELETE FROM background_storage_domain_pending".to_owned(),
+                params!(),
+            ),
+            (
                 "DELETE FROM background_provider_budgets".to_owned(),
                 params!(),
             ),

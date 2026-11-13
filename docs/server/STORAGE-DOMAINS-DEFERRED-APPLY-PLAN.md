@@ -1,6 +1,7 @@
 # Storage domains — save always, apply when safe
 
-**Status:** proposed · revised after Fable review · plan only, nothing built ·
+**Status:** implementation in progress · owned by Codex · see
+[execution status](STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) ·
 **Updated:** 2026-11-12 · **Source baseline:** `origin/main` at `54aebebf9`
 (after PR #1546)
 
@@ -68,7 +69,7 @@ would not help in a rolling upgrade: an older node sends its own SQL.
 
 | Site | What it derives | Why applying is safe |
 |---|---|---|
-| `analysis_coordination.rs` ≈289 (physical phase start), `analysis_coordination.sql` ≈89, `background_jobs_viewer_analysis.sql` ≈319/≈333 | inserts `analysis_source_reservations` from the current mapping, behind `analysis_source_capacity_clause` | a new acquisition under the new mapping, capacity-checked against stored holders. Old rows stay (`PRIMARY KEY (request_id, resource_key)`), so the request holds the union, which only adds conflicts. Requires that a capacity refusal at phase start is a retry, not a loss (§8.1 test) |
+| `analysis_coordination.rs` ≈289 (physical phase start), `analysis_coordination.sql` ≈89, `background_jobs_viewer_analysis.sql` ≈319/≈333 | inserts `analysis_source_reservations` from the current mapping, behind `analysis_source_capacity_clause` | a new acquisition under the new mapping, capacity-checked against stored holders. Existing reservations continue to charge their stored keys. Current physical-phase completion clears its reservation before a later phase begins; that later acquisition derives the applied keys and retries a capacity refusal without losing the coordinator claim (§8.1 test) |
 | `fragment_index_cluster.rs` ≈293 `analysis_source_admission_sql` | capacity check for an already-claimed request, current keys | same: an admission decision under the new mapping, never an ownership loss |
 | `background_job_turns.sql` ≈40, ≈87–89; `background_job_turns.rs` ≈36, ≈60 | a *candidate* scan's keys from the current mapping, compared with stored held keys | candidate side only; equivalent to a new claim. `dispatch_turn_wait.keys_json` is fairness state, not capacity; a stale entry misorders at most one turn |
 | `background_jobs_resources.rs` ≈571 `foreground_pressure`; ≈3430 ReadAttestation/Offline registration | a new request's keys | new claims |
@@ -592,4 +593,4 @@ Fable reviewed the first draft against `origin/main` at `54aebebf9`.
 
 | Date | Agent model | Agent session | Step | Result |
 |---|---|---|---|---|
-| | | | | |
+| 2026-11-13 | Codex + delegated lower-cost agents | storage-domain apply | Claimed | Schema, API and UI under implementation; review and qualification pending. |

@@ -474,6 +474,10 @@ function storageDomainsCard(){
 }
 function storageDomainsStatus(data,libraries){
   const status=document.getElementById("storage-domain-status");if(!status)return;
+  if(!data.saved&&!data.pending&&data.applied!==false&&!data.revision){
+    status.textContent="Current storage domains are in effect.";
+    return;
+  }
   const revision=Number(data.revision||data.pending&&data.pending.revision||0);
   const pending=data.pending||((data.applied===false||data.state==="pending")?data:null);
   if(data.saved===true&&pending&&Number(pending.revision)>revision){
@@ -486,34 +490,39 @@ function storageDomainsStatus(data,libraries){
     line=`Revision ${revision} was not applied: storage domains were changed from a node running an older version. Check the roots below and save again.`;
   }else if(state==="pending"||data.applied===false){
     const holders=data.waiting_on||pending.waiting_on||[];
-    const readers=new Map(),jobs=new Map();let stuckReaders=0;
+    const identity=holder=>JSON.stringify([String(holder.work_id??""),String(holder.fence??"")]);
+    const readers=new Map(),jobs=new Map(),stuckIdentities=new Set(),identities=new Set(),rowKeys=new Set(),rows=[];
     for(const holder of holders){
+      const key=identity(holder);identities.add(key);
       if(holder.reason==="old_domain_reader"){
         const domain=String(holder.resource_key||"").replace(/^source_io:/,"")||"Shared default";
-        const group=readers.get(domain)||{count:0,stuck:0};group.count++;if(holder.stuck){group.stuck++;stuckReaders++;}readers.set(domain,group);
+        const group=readers.get(domain)||new Set();group.add(key);readers.set(domain,group);
+        if(holder.stuck)stuckIdentities.add(key);
       }else if(holder.reason==="library_job"){
         const library=(libraries||[]).find(row=>String(row.id)===String(holder.library_id));
         const name=library&&library.name||`Library ${holder.library_id}`;
-        jobs.set(name,(jobs.get(name)||0)+1);
+        const group=jobs.get(name)||new Set();group.add(key);jobs.set(name,group);
       }
+      const rowKey=JSON.stringify([key,holder.reason||"",holder.resource_key||"",holder.library_id??""]);
+      if(!rowKeys.has(rowKey)){rowKeys.add(rowKey);rows.push(holder);}
     }
     const waiting=[];
-    for(const [domain,group] of readers)waiting.push(`Waiting on ${group.count} ${group.count===1?"reader":"readers"} on ${esc(domain)} to finish before it takes effect.`);
-    for(const [name,count] of jobs)waiting.push(`Waiting on ${count} ${count===1?"library job":"library jobs"} in ${esc(name)} to finish before it takes effect.`);
-    const total=Number(data.waiting_total||pending.waiting_total||holders.length);
+    for(const [domain,group] of readers){const count=group.size;waiting.push(`Waiting on ${count} ${count===1?"reader":"readers"} on ${esc(domain)} to finish before it takes effect.`);}
+    for(const [name,group] of jobs){const count=group.size;waiting.push(`Waiting on ${count} ${count===1?"library job":"library jobs"} in ${esc(name)} to finish before it takes effect.`);}
+    const total=Number(data.waiting_total??pending.waiting_total??identities.size);
     line=`Saved (revision ${revision}). ${waiting.join(" ")}`;
-    if(total>holders.length)line+=` Waiting on ${total} holders in total.`;
-    if(stuckReaders)line+=` ${stuckReaders} of the readers belong to a process that is no longer running. They clear when source custody recovery settles them (Activity → Source readers).`;
+    if(total>identities.size)line+=` Waiting on ${total} holders in total.`;
+    if(stuckIdentities.size)line+=` ${stuckIdentities.size} of the readers ${stuckIdentities.size===1?"belongs":"belong"} to a process that is no longer running. They clear when source custody recovery settles them (Activity → Source readers).`;
     line+=` Playback and jobs keep their current budgets until then.`;
     const kindLabels={job:"Background job",analysis:"Analysis",lease:"Library lease",offline:"Offline download",foreground:"Playback",pause:"Paused job"};
-    const rows=holders.slice(0,8).map(holder=>{
+    const visibleRows=rows.slice(0,8).map(holder=>{
       const kind=kindLabels[holder.holder_kind]||"Reader";
       const id=String(holder.work_id||"").slice(0,8)||"unknown";
       const node=holder.node_id?` on ${esc(holder.node_id)}`:"";
       const label=holder.reason==="old_domain_reader"?String(holder.resource_key||"").replace(/^source_io:/,""):(libraries||[]).find(row=>String(row.id)===String(holder.library_id))?.name||`Library ${holder.library_id}`;
       return `<li>${kind} ${esc(id)}${node} · ${esc(label)}</li>`;
     }).join("");
-    status.innerHTML=`<p>${line}</p>${rows?`<ul>${rows}</ul>`:""}`;
+    status.innerHTML=`<p>${line}</p>${visibleRows?`<ul>${visibleRows}</ul>`:""}`;
     toastText="Storage domains saved — takes effect when current work finishes";
     if(data.saved===true)toast(toastText);
     return;
@@ -526,15 +535,26 @@ function storageDomainsStatus(data,libraries){
 }
 async function loadStorageDomains(btn){
   const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
-  if(roots&&roots.dataset.loaded==="true"&&roots.dataset.edited==="true"&&roots.dataset.reloadRequired!=="true"){
-    if(error)error.textContent="Roots have unsaved edits. Save them before loading again.";
-    return;
+  if(roots&&roots.dataset.loaded==="true"&&roots.dataset.edited==="true"){
+    if(roots.dataset.reloadRequired!=="true"){
+      if(error)error.textContent="Roots have unsaved edits. Save them before loading again.";
+      return;
+    }
+    if(!confirm("The server rejected a root as stale. Reload current roots and discard these unsaved edits?"))return;
+    roots.dataset.edited="false";roots.dataset.reloadRequired="false";
   }
+  const generation=Number(roots&&roots.dataset.editGeneration||0);
   btn.disabled=true;
   if(error)error.textContent="";
   try{
     const data=await api("/cluster/work/storage-domains");
     if(!roots)return;
+    if(Number(roots.dataset.editGeneration||0)!==generation){
+      btn.disabled=false;
+      const status=document.getElementById("storage-domain-status");
+      if(status)status.textContent="Roots changed while this response was pending. The current values were kept; load again if you still need a refresh.";
+      return;
+    }
     const pending=data.pending&&data.pending.state==="pending"?data.pending:null;
     const values=pending?pending.mappings:data.mappings||[];
     roots.innerHTML=(data.libraries||[]).flatMap(library=>(library.paths||[]).map(root=>{
@@ -543,10 +563,10 @@ async function loadStorageDomains(btn){
       const desired=mapping?mapping.domain_id:"",old=applied?applied.domain_id:"";
       const changed=pending&&desired!==old;
       const now=old||"Shared default";
-      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(desired)}" placeholder="Shared default" oninput="this.closest('#storage-domain-roots').dataset.edited='true'">${changed?` <span class="pill">pending · now ${esc(now)}</span>`:""}</label>`;
+      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(desired)}" placeholder="Shared default" oninput="const roots=this.closest('#storage-domain-roots');roots.dataset.edited='true';roots.dataset.editGeneration=String(Number(roots.dataset.editGeneration||0)+1)">${changed?` <span class="pill">pending · now ${esc(now)}</span>`:""}</label>`;
     })).join("")||'<p class="hint">No library roots configured.</p>';
     roots.innerHTML+=`<button type="button" class="ghost sm" onclick="loadStorageDomains(this)">Reload library roots</button>`;
-    roots.dataset.loaded="true";roots.dataset.edited="false";roots.dataset.reloadRequired="false";
+    roots.dataset.loaded="true";roots.dataset.edited="false";roots.dataset.reloadRequired="false";roots.dataset.editGeneration=String(generation+1);
     roots.dataset.libraries=JSON.stringify(data.libraries||[]);
     storageDomainsStatus({...data,...(data.pending||{}),pending:data.pending},data.libraries||[]);
   }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
@@ -555,9 +575,10 @@ async function saveStorageDomains(btn){
   const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
   if(error)error.textContent="";
   if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
+  const generation=Number(roots.dataset.editGeneration||0);
   const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
   btn.disabled=true;
-  try{const result=await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});roots.dataset.edited="false";roots.dataset.reloadRequired="false";let libraries=[];try{libraries=JSON.parse(roots.dataset.libraries||"[]");}catch(parseError){void parseError;}storageDomainsStatus(result,libraries);}
+  try{const result=await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});const unchanged=Number(roots.dataset.editGeneration||0)===generation;roots.dataset.edited=unchanged?"false":"true";roots.dataset.reloadRequired="false";let libraries=[];try{libraries=JSON.parse(roots.dataset.libraries||"[]");}catch(parseError){void parseError;}storageDomainsStatus(result,libraries);if(!unchanged){const status=document.getElementById("storage-domain-status");if(status)status.innerHTML+=`<p>The response is for the submitted values. Newer edits remain unsaved.</p>`;}}
   catch(e){if(error)error.textContent=e.message||String(e);if(e&&e.status===400)roots.dataset.reloadRequired="true";}
   finally{btn.disabled=false;}
 }
