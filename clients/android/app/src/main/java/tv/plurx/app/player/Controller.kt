@@ -5289,7 +5289,7 @@ class Controller internal constructor(
         // From here the rendezvous owns this preparation. This tick keeps the
         // readiness bound and the terminal failures; it is far too coarse for
         // anything measured against a 250 ms window.
-        val hold = RendezvousHold()
+        val hold = RendezvousHold(floorFilmMs = originMs)
         rendezvous = hold
         // The incumbent is *not* touched here, and that is the change. It keeps
         // playing all the way to the meeting point.
