@@ -112,7 +112,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
   if (error) {
     fprintf(stderr, "RPU parser rejected input: %s\n", error);
     dovi_rpu_free(rpu);
-    dv_exit(EXIT_FAILURE);
+    dv_exit(dv_content_refusal_exit);
   }
   const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
   require_content(header != NULL, "parsed RPU header");

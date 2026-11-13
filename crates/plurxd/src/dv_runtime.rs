@@ -90,7 +90,7 @@ pub(crate) const REFIT_MODE_VERSION: &str = "plurx-refit-mode-v2";
 /// [`REFIT_MODE_VERSION`] was last reviewed against.
 #[cfg(test)]
 pub(crate) const REFIT_MODE_SOURCES: &str =
-    "70c35da4fd0ffaf25309d672cc44caca637282260ff11a016a1bfe069b054303";
+    "37bc7f9cf0f7a2ea9cf660f624875ea42ffe0fc158b3db09461b2f796f0e6f4e";
 
 #[cfg(all(test, target_os = "linux"))]
 impl ToolSet {
