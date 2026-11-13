@@ -83,6 +83,29 @@ class CinemaModel(unittest.TestCase):
         self.assertEqual(player.delete_session.call_args_list,
                          [mock.call({'session_id': 'incumbent'}), mock.call(candidate)])
 
+    def test_advertised_generation_or_owner_epoch_restarts_same_session_sequence(self):
+        for field, replacement in (('generation', 'new-generation'), ('control_epoch', 2)):
+            with self.subTest(field=field):
+                mpv, http = mock.Mock(), mock.Mock()
+                mpv.get.side_effect = lambda _name, default=None: default
+                http.request.return_value = (200, {})
+                player = Playback(http, mpv, {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
+                player.position_ms = mock.Mock(return_value=65000)
+                player.session = {'session_id': 'same-session',
+                                  'control': {'url': '/same/control', 'generation': 'initial-generation',
+                                              'control_epoch': 1}}
+                player.heartbeat()
+                player.heartbeat()
+                player.session['control'][field] = replacement
+                player.heartbeat()
+                player.heartbeat()
+                controls = [call.args[2] for call in http.request.call_args_list]
+                self.assertEqual([body['sequence'] for body in controls], [1, 2, 1, 2])
+                initial = 'initial-generation' if field == 'generation' else 1
+                self.assertEqual([body[field] for body in controls], [initial, initial, replacement, replacement])
+                self.assertEqual([call.args[1] for call in http.request.call_args_list], ['/same/control'] * 4)
+                self.assertEqual({body['client_instance_id'] for body in controls}, {player.client_instance_id})
+
     def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls(self):
         mpv, http = mock.Mock(), mock.Mock()
         mpv.get.side_effect = lambda _name, default=None: default
