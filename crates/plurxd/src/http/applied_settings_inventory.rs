@@ -62,6 +62,10 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("http/preparation.rs", "status", 2, false),
     ("http/stream.rs", "decision_for_file", 2, true),
     ("http/stream.rs", "readrate_setting", 1, true),
+    // D3b: the create's one planning read, for the ingress and a remote
+    // owner (`planning`, and `planning_from_authority` twice for an owner).
+    ("http/hls/start_plan.rs", "ingress_plan", 1, true),
+    ("http/hls/start_plan.rs", "owner_plan", 3, true),
 ];
 
 /// The direct callers of each helper above, `(helper file, helper,
@@ -188,7 +192,30 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/internal_media.rs",
         "directory",
     ),
+    (
+        "http/hls/start_plan.rs",
+        "ingress_plan",
+        "http/hls/create.rs",
+        "create_with_purpose_inner",
+    ),
+    (
+        "http/hls/start_plan.rs",
+        "owner_plan",
+        "http/internal_media_sessions.rs",
+        "start",
+    ),
 ];
+
+/// The one path from a stays file to a view read, by contract (D3b §4.3):
+/// a remote owner's start plans once at the ingress's binding, and every
+/// fence, ownership and admission read in that file stays a Store read.
+/// `(helper file, helper, caller file, caller)`.
+const STAYS_CHAINS: &[(&str, &str, &str, &str)] = &[(
+    "http/hls/start_plan.rs",
+    "owner_plan",
+    "http/internal_media_sessions.rs",
+    "start",
+)];
 
 /// How a helper is called: bare in its own file and `module::name(`
 /// elsewhere, or as a method on a field of this name.
@@ -228,6 +255,8 @@ const STAYS: &[&str] = &[
 ];
 
 const VIEW_METHODS: &[&str] = &[
+    "planning",
+    "planning_from_authority",
     "setting",
     "setting_pair",
     "setting_values",
@@ -584,11 +613,169 @@ fn every_settings_view_read_and_its_callers_are_pinned_by_function() {
             "{path}::{function} reads the view in a stays file"
         );
     }
-    for (_, helper, path, caller) in &found_callers {
+    for (file, helper, path, caller) in &found_callers {
+        let pinned = STAYS_CHAINS.iter().any(|(a, b, c, d)| {
+            (*a, *b, *c, *d)
+                == (
+                    file.as_str(),
+                    helper.as_str(),
+                    path.as_str(),
+                    caller.as_str(),
+                )
+        });
         assert!(
-            !in_stays(path),
+            !in_stays(path) || pinned,
             "{path}::{caller} reaches the view through {helper} from a stays file"
         );
+    }
+    // Every pinned exception is live, and the helper it names is not itself
+    // in a stays file.
+    for (file, helper, path, caller) in STAYS_CHAINS {
+        assert!(!in_stays(file), "{file}::{helper} sits in a stays file");
+        assert!(
+            found_callers.contains(&(
+                (*file).to_owned(),
+                (*helper).to_owned(),
+                (*path).to_owned(),
+                (*caller).to_owned()
+            )),
+            "stale stays chain {path}::{caller} -> {helper}"
+        );
+    }
+}
+
+/// The helpers that take the create's plan (D3b, contract §4.2): each takes
+/// `plan: Option<&StartPlan>` as its last argument, and `None` reads the
+/// Store exactly as before.
+const PLANNED_HELPERS: &[&str] = &[
+    "cluster_playlist_is_typeless",
+    "create_cluster_session",
+    "create_cluster_session_for_receiver",
+    "create_cluster_session_with_priority",
+    "create_session_inner",
+    "prepare_vod_encoding_noting",
+    "prepare_vod_encoding_with_source",
+    "prepare_vod_encoding_with_source_scoped",
+    "refuse_unadmittable_encoding",
+    "remote_placement_ready",
+    "resolve_held_movie_plan_with_fonts",
+    "resolve_movie_plan_with_processing_exclusion",
+    "resolve_vod_movie_plan_with_fonts",
+    "restore_candidate_context_with_deadline",
+    "restore_catalog_context_planned",
+    "rolling_start_inputs",
+    "software_budget_planned",
+    "start_copy_with_audio_offset",
+    "start_live_recovery_session",
+    "start_with_audio_offset",
+    "try_vod_session",
+    "validate_candidate_planning_binding",
+    "validate_hevc_copy_transport",
+    "vod_preparation_snapshot_planned",
+    "vod_settings_planned",
+];
+
+/// Where a plan comes from: the ingress create and the remote owner's start,
+/// the two functions that read one (§4.2, pinned by `HELPER_CALLERS`).
+const PLAN_ORIGINS: &[(&str, &str)] = &[
+    ("http/hls/create.rs", "create_with_purpose_inner"),
+    ("http/internal_media_sessions.rs", "start"),
+];
+
+/// The caller chains of §6.1, by call: `(file, caller, helper, plan
+/// argument)` for every production call of a planned helper. `None` is a
+/// caller that is not a create (takeover, resurrection, a prepared
+/// successor, a processed upgrade, a Source preparation, the Live TV
+/// worker choice, a compatibility wrapper); anything else forwards the
+/// caller's own `plan` or, in a plan origin, hands it over.
+const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[];
+
+/// The last top-level argument of the call whose `(` is at `open`, with its
+/// whitespace collapsed.
+fn last_argument(text: &str, open: usize) -> String {
+    let bytes = text.as_bytes();
+    let mut depth = 0_i32;
+    let mut start = open + 1;
+    let mut last = String::new();
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let arg = text[start..index].trim();
+                    if !arg.is_empty() {
+                        last = arg.to_owned();
+                    }
+                    break;
+                }
+            }
+            b',' if depth == 1 => {
+                let arg = text[start..index].trim();
+                if !arg.is_empty() {
+                    last = arg.to_owned();
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    last.split_whitespace().collect::<Vec<_>>().join("")
+}
+
+#[test]
+fn every_plan_argument_is_pinned_by_call() {
+    let mut found = BTreeSet::new();
+    for (path, text) in sources() {
+        let bytes = text.as_bytes();
+        for helper in PLANNED_HELPERS {
+            for (pos, _) in text.match_indices(helper) {
+                let end = pos + helper.len();
+                if (pos > 0 && is_ident(bytes[pos - 1]))
+                    || bytes.get(end).is_some_and(|byte| is_ident(*byte))
+                {
+                    continue;
+                }
+                let rest = &text[end..];
+                if !rest.trim_start().starts_with('(') {
+                    continue;
+                }
+                if text[..pos].trim_end().ends_with("fn") {
+                    continue;
+                }
+                let open = end + (rest.len() - rest.trim_start().len());
+                found.insert((
+                    path.clone(),
+                    enclosing(&text, pos),
+                    (*helper).to_owned(),
+                    last_argument(&text, open),
+                ));
+            }
+        }
+    }
+    let pinned: BTreeSet<(String, String, String, String)> = PLAN_CALLS
+        .iter()
+        .map(|(a, b, c, d)| ((*a).into(), (*b).into(), (*c).into(), (*d).into()))
+        .collect();
+    let render: String = found
+        .iter()
+        .map(|(a, b, c, d)| format!("    (\"{a}\", \"{b}\", \"{c}\", \"{d}\"),\n"))
+        .collect();
+    assert!(
+        found == pinned,
+        "the plan's caller chains moved (contract §6.1); found:\nPLAN_CALLS\n{render}"
+    );
+    for (path, caller, helper, argument) in &found {
+        let origin = PLAN_ORIGINS
+            .iter()
+            .any(|(file, function)| file == path && function == caller);
+        assert!(
+            argument == "None" || argument.starts_with("plan") || origin,
+            "{path}::{caller} hands {helper} a plan it did not receive: {argument}"
+        );
+        if argument != "None" && !argument.starts_with("plan") {
+            assert!(origin, "{path}::{caller}: {argument}");
+        }
     }
 }
 

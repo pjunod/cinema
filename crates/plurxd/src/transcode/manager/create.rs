@@ -350,6 +350,7 @@ impl TranscodeManager {
             None,
             None,
             (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+            None,
         )
         .await
         .map(|creation| creation.info)
@@ -357,6 +358,8 @@ impl TranscodeManager {
 
     /// Start a cluster-owned replacement while retaining its process-local
     /// serialization gate for the ingress activation verdict.
+    /// `plan` is the ingress create's one planning read (D3b): `Some` only
+    /// from `create_with_purpose_inner`, pinned by a source test.
     pub async fn create_cluster_session(
         &self,
         req: &SessionRequest,
@@ -364,6 +367,7 @@ impl TranscodeManager {
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ClusterSessionStart, String> {
         self.create_cluster_session_with_priority(
             req,
@@ -372,11 +376,14 @@ impl TranscodeManager {
             deadline,
             admitted_serving_generation,
             (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+            plan,
         )
         .await
     }
 
     /// Start a provisional make-before-break worker only from spare capacity.
+    /// `plan` is the owner's plan at the ingress's binding (D3b,
+    /// `start_plan::owner_plan`).
     pub(crate) async fn create_cluster_session_for_receiver(
         &self,
         request: (&SessionRequest, Option<u8>, Option<&RetainedOutputFacts>),
@@ -384,6 +391,7 @@ impl TranscodeManager {
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ClusterSessionStart, String> {
         let capture = if request.1 == Some(1) {
             request
@@ -402,6 +410,7 @@ impl TranscodeManager {
             deadline,
             admitted_serving_generation,
             (Priority::Live, capture),
+            plan,
         )
         .await
     }
@@ -428,10 +437,12 @@ impl TranscodeManager {
                 Priority::Speculative,
                 crate::vodserve::RetainedOutputCapture::New,
             ),
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // the start's identity, budget, priority and plan
     async fn create_cluster_session_with_priority(
         &self,
         req: &SessionRequest,
@@ -440,6 +451,7 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
         priority: (Priority, crate::vodserve::RetainedOutputCapture),
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ClusterSessionStart, String> {
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
@@ -470,6 +482,7 @@ impl TranscodeManager {
                 None,
                 Some(serving_admission),
                 priority,
+                plan,
             )
             .await?;
         replacement.publish_fenceable(&creation.info.session_id);
@@ -549,6 +562,7 @@ impl TranscodeManager {
                 Priority::Live,
                 crate::vodserve::RetainedOutputCapture::ReceiverUnavailable,
             ),
+            None,
         )
         .await
         .map(|creation| creation.info)
@@ -732,10 +746,15 @@ impl TranscodeManager {
     /// there is no binding to check) so the VOD attempt that follows in the
     /// same task can take its source row and HWACCEL preference from it
     /// instead of reading them again.
+    /// The dispatch revalidation of a candidate route's binding. With the
+    /// create's plan (D3b) the binding is checked against the plan this
+    /// request already read — one revision, no second read; without one the
+    /// source and settings are read again, as before.
     pub(crate) async fn validate_candidate_planning_binding(
         &self,
         request: &SessionRequest,
         deadline: Option<tokio::time::Instant>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<Option<plurx_core::store::PlaybackPlanningSnapshot>, String> {
         let Some(binding) = request
             .candidate_context
@@ -744,6 +763,14 @@ impl TranscodeManager {
         else {
             return Ok(None);
         };
+        if let Some(plan) = plan.filter(|plan| plan.snapshot.file.id == request.file_id) {
+            if *binding != plan.binding {
+                return Err(catalog_input_error(
+                    "candidate source or settings changed before admission",
+                ));
+            }
+            return Ok(Some((*plan.snapshot).clone()));
+        }
         let deadline = deadline
             .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
         let snapshot = tokio::time::timeout_at(
@@ -774,6 +801,7 @@ impl TranscodeManager {
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
         priority: (Priority, crate::vodserve::RetainedOutputCapture),
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<SessionCreation, String> {
         req.dv_processing_route()
             .map_err(|error| vod_refusal_error("vod_processed_contract_invalid", error))?;
@@ -846,8 +874,13 @@ impl TranscodeManager {
         }
 
         let revalidated = self
-            .validate_candidate_planning_binding(req, replacement_deadline)
+            .validate_candidate_planning_binding(req, replacement_deadline, plan)
             .await?;
+        // The source row and its title for the VOD attempt: the dispatch
+        // revalidation's on a candidate route, else the create's plan.
+        let planned_source = revalidated
+            .as_ref()
+            .or_else(|| plan.map(|plan| &*plan.snapshot));
         crate::media_pool::mark_create_phase("worker");
 
         if req.passive_vod
@@ -883,6 +916,7 @@ impl TranscodeManager {
                     replacement_deadline,
                     takeover,
                     priority,
+                    plan,
                 )
                 .await?;
             // Not a fallback decision: the request named the live presentation
@@ -894,13 +928,14 @@ impl TranscodeManager {
             let vod_lookup_at = Instant::now();
             // Read once here and handed down, so the fallback below decides
             // from the same snapshot the VOD attempt was admitted under.
-            let vod_settings = self.vod_settings(req).await?;
-            let live_recovery_enabled = match vod_settings.as_ref() {
-                Some(settings) => settings.live_recovery,
+            let vod_settings = self.vod_settings_planned(req, plan).await?;
+            let live_recovery_enabled = match (vod_settings.as_ref(), plan) {
+                (Some(settings), _) => settings.live_recovery,
                 // VOD is switched off, so its settings snapshot is absent and
                 // the rolling engine is the only presentation left. It still
                 // answers to the operator's live-recovery switch.
-                None => self.live_hls_recovery_enabled().await?,
+                (None, Some(plan)) => plan.switch(plurx_core::store::keys::VOD_LIVE_RECOVERY, true),
+                (None, None) => self.live_hls_recovery_enabled().await?,
             };
             let vod = self
                 .try_vod_session(
@@ -919,7 +954,8 @@ impl TranscodeManager {
                     takeover.is_some(),
                     serving_admission,
                     retained_capture,
-                    revalidated.as_ref(),
+                    planned_source,
+                    plan,
                 )
                 .await;
             tracing::info!(
@@ -961,8 +997,12 @@ impl TranscodeManager {
                             // never authorizes stale execution. A legacy
                             // route carries no binding and its rolling start
                             // reads the source itself.
-                            self.validate_candidate_planning_binding(req, replacement_deadline)
-                                .await?;
+                            self.validate_candidate_planning_binding(
+                                req,
+                                replacement_deadline,
+                                plan,
+                            )
+                            .await?;
                             let mut fallback_interest = FallbackAnalysisInterestOwner {
                                 store: Arc::clone(&self.store),
                                 receipt: None,
@@ -970,7 +1010,13 @@ impl TranscodeManager {
                             if let Some(identity) = recovery
                                 .filter(|identity| identity.principal.local_user_id().is_some())
                             {
-                                if let Ok(Some(file)) = self.store.get_file(req.file_id).await {
+                                let file = match plan
+                                    .filter(|plan| plan.snapshot.file.id == req.file_id)
+                                {
+                                    Some(plan) => Some(plan.snapshot.file.clone()),
+                                    None => self.store.get_file(req.file_id).await.ok().flatten(),
+                                };
+                                if let Some(file) = file {
                                     let receipt=plurx_core::store::background_jobs_resources::PlaybackAnalysisSuspension {
                                         receipt_id:uuid::Uuid::new_v4().to_string(),principal:identity.principal.clone(),
                                         playback_id:req.playback_id.clone(),incarnation_id:identity.incarnation_id.clone(),
@@ -1000,6 +1046,7 @@ impl TranscodeManager {
                                     replacement_deadline,
                                     takeover,
                                     priority,
+                                    plan,
                                 )
                                 .await?;
                             // Counted after the start succeeded. `?` above is
@@ -1089,6 +1136,7 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
         // The rolling engine has no processing graph: a processed candidate
         // can only be served by the prepared VOD root it was qualified with.
@@ -1149,6 +1197,7 @@ impl TranscodeManager {
                     req.audio_delivery.as_ref(),
                     req.sdr_master_codecs,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
+                    plan,
                 )
                 .await
             }
@@ -1179,6 +1228,7 @@ impl TranscodeManager {
                     req.audio_delivery.as_ref(),
                     req.sdr_master_codecs,
                     req.source_telemetry == Some(crate::transcode::SourceTelemetry::FilmV1),
+                    plan,
                 )
                 .await
             }
@@ -1219,6 +1269,17 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        self.vod_preparation_snapshot_planned(req, file, None).await
+    }
+
+    /// [`Self::vod_preparation_snapshot`] that answers from the create's plan
+    /// (D3b) where the request carries no accepted snapshot of its own.
+    pub(super) async fn vod_preparation_snapshot_planned(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
+    ) -> Result<Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
         let context = req.candidate_context.as_ref();
         if context.is_some_and(|context| context.planning_binding.is_none()) {
             return Err(catalog_input_error(
@@ -1234,6 +1295,8 @@ impl TranscodeManager {
                 return Err(catalog_input_error("accepted planning snapshot is unbound"));
             }
             Arc::clone(snapshot)
+        } else if let Some(plan) = plan.filter(|plan| plan.snapshot.file.id == req.file_id) {
+            Arc::clone(&plan.snapshot)
         } else {
             Arc::new(
                 tokio::time::timeout_at(
@@ -2266,7 +2329,7 @@ impl TranscodeManager {
         {
             use plurx_core::transcode::dv_processing::DvDestination;
             let Some(planning) = self
-                .validate_candidate_planning_binding(request, None)
+                .validate_candidate_planning_binding(request, None, None)
                 .await?
             else {
                 return Ok(None);
@@ -2431,6 +2494,7 @@ impl TranscodeManager {
                             None,
                             Some(super::planning_hwaccel_preference(&planning)),
                             Some((&mut credit, deadline)),
+                            None,
                             None,
                         )
                         .await?
@@ -2668,7 +2732,7 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         hwaccel: Option<&str>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        self.prepare_vod_encoding_noting(req, file, hwaccel, None)
+        self.prepare_vod_encoding_noting(req, file, hwaccel, None, None)
             .await
     }
 
@@ -2681,13 +2745,14 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         hwaccel: Option<&str>,
         decline: Option<&mut Option<String>>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         let encoding = Box::pin(
-            self.prepare_vod_encoding_with_source(req, file, None, hwaccel, None, decline),
+            self.prepare_vod_encoding_with_source(req, file, None, hwaccel, None, decline, plan),
         )
         .await?;
         if let Some(encoding) = encoding.as_ref() {
-            self.refuse_unadmittable_encoding(encoding).await?;
+            self.refuse_unadmittable_encoding(encoding, plan).await?;
         }
         Ok(encoding)
     }
@@ -2698,8 +2763,9 @@ impl TranscodeManager {
     async fn refuse_unadmittable_encoding(
         &self,
         encoding: &crate::vodencode::Encoding,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<(), String> {
-        let software_budget = self.software_budget().await;
+        let software_budget = self.software_budget_planned(plan).await;
         match encoding.unadmittable_software_floor(software_budget) {
             Some(floor) => Err(vod_refusal_error(
                 "vod_transcode_unavailable",
@@ -2738,13 +2804,15 @@ impl TranscodeManager {
             None,
             None,
             None,
+            None,
         ))
         .await?
         .ok_or_else(|| "Source encoding recipe missing".to_owned())?;
-        self.refuse_unadmittable_encoding(&encoding).await?;
+        self.refuse_unadmittable_encoding(&encoding, None).await?;
         Ok(encoding)
     }
 
+    #[allow(clippy::too_many_arguments)] // the preparation's inputs and the create's plan
     async fn prepare_vod_encoding_with_source(
         &self,
         req: &SessionRequest,
@@ -2759,6 +2827,7 @@ impl TranscodeManager {
             tokio::time::Instant,
         )>,
         _decline: Option<&mut Option<String>>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         let request = crate::source_custody::current_request().or_else(|| {
             self.foreground_source_request(
@@ -2782,10 +2851,12 @@ impl TranscodeManager {
             hwaccel,
             prepared_admission,
             _decline,
+            plan,
         ));
         crate::source_custody::with_request(request, planning).await
     }
 
+    #[allow(clippy::too_many_arguments)] // the preparation's inputs and the create's plan
     async fn prepare_vod_encoding_with_source_scoped(
         &self,
         req: &SessionRequest,
@@ -2800,7 +2871,12 @@ impl TranscodeManager {
             tokio::time::Instant,
         )>,
         _decline: Option<&mut Option<String>>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        // The create's plan answers the HWACCEL preference when the caller
+        // brought none (D3b); a caller-held preference still wins.
+        let hwaccel =
+            hwaccel.or_else(|| plan.map(|plan| super::planning_hwaccel_preference(&plan.snapshot)));
         #[cfg(target_os = "linux")]
         let mut decline = _decline;
         let processed_trial = prepared_admission.is_some();
@@ -2831,7 +2907,9 @@ impl TranscodeManager {
                 "invalid finite bitrate policy",
             ));
         }
-        let planning = self.vod_preparation_snapshot(req, file).await?;
+        let planning = self
+            .vod_preparation_snapshot_planned(req, file, plan)
+            .await?;
         let dv_processing = Self::vod_dv_processing_from_snapshot(&planning, req)?;
         if processed_trial {
             if let plurx_core::transcode::dv_processing::DvSelection::KeepExisting(reason) =
@@ -3034,6 +3112,9 @@ impl TranscodeManager {
         }
         let probe = if let Some((_, proof)) = source_evidence {
             self.store.source_index_probe_evidence(proof).await
+        } else if let Some(probe) = plan.and_then(|plan| plan.probe_for(file)) {
+            // The plan read this revision's probe with the file (D3b).
+            Ok(probe.map(str::to_owned))
         } else {
             self.store.get_file_probe_json(file.id).await
         }
@@ -3275,7 +3356,7 @@ impl TranscodeManager {
         };
         let software_threads = crate::vodencode::frozen_software_threads(
             &Workload::of(file, target_height),
-            self.software_budget().await,
+            self.software_budget_planned(plan).await,
         );
         let mut options = self.live_lookup_options(
             self.rate_control_snapshot(),
@@ -3437,6 +3518,7 @@ impl TranscodeManager {
                 encoder,
                 held_plan_handle,
                 held_font_digest,
+                plan,
             )
             .await?
         };
@@ -4345,10 +4427,12 @@ impl TranscodeManager {
         is_takeover: bool,
         serving_admission: Option<ClusterServingAdmission>,
         retained_capture: crate::vodserve::RetainedOutputCapture,
-        // The dispatch revalidation's fresh read, on a candidate route. The
-        // source row and HWACCEL preference come from it: it was taken in
-        // this task, moments ago, and a second read would answer the same.
+        // The dispatch revalidation's fresh read, on a candidate route, or
+        // the create's plan (D3b). The source row and HWACCEL preference come
+        // from it: it was taken for this request, and a second read would
+        // answer the same.
         revalidated: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -4448,6 +4532,7 @@ impl TranscodeManager {
                 &file,
                 revalidated.map(super::planning_hwaccel_preference),
                 Some(&mut processing_note),
+                plan,
             )
             .await?;
         let processed_dv_profile = encoding
@@ -4653,6 +4738,19 @@ impl TranscodeManager {
         &self,
         req: &SessionRequest,
     ) -> Result<Option<crate::vodserve::VodSettings>, String> {
+        self.vod_settings_planned(req, None).await
+    }
+
+    /// [`Self::vod_settings`] from the create's plan (D3b), which carries
+    /// every key below; `None` reads them in one statement, as before.
+    pub(super) async fn vod_settings_planned(
+        &self,
+        req: &SessionRequest,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
+    ) -> Result<Option<crate::vodserve::VodSettings>, String> {
+        if let Some(plan) = plan {
+            return Ok(self.vod_settings_from(req, &plan.snapshot.settings));
+        }
         // These values define one admission policy. Read them from one
         // snapshot rather than paying six serial linearizable Store reads on
         // every Play request (including a missing-index rolling fallback).
@@ -4681,10 +4779,19 @@ impl TranscodeManager {
             .map_err(|error| {
                 start_infrastructure_error(format!("reading VOD serving settings: {error}"))
             })?;
+        Ok(self.vod_settings_from(req, &settings))
+    }
+
+    /// The VOD admission policy from settings already read: a pure parse.
+    fn vod_settings_from(
+        &self,
+        req: &SessionRequest,
+        settings: &std::collections::BTreeMap<String, String>,
+    ) -> Option<crate::vodserve::VodSettings> {
         let read = |key: &str| settings.get(key);
         if read(plurx_core::store::keys::VOD_PRESENTATION).is_some_and(|value| value.trim() == "0")
         {
-            return Ok(None);
+            return None;
         }
         /// Un-admitted working sets across the node when the operator has not
         /// said otherwise: enough for a handful of concurrent films' ahead
@@ -4768,7 +4875,7 @@ impl TranscodeManager {
         let switch = |key: &str, absent: bool| {
             plurx_core::store::stored_switch(read(key).map(String::as_str), absent)
         };
-        Ok(Some(crate::vodserve::VodSettings {
+        Some(crate::vodserve::VodSettings {
             working_set_bytes,
             completed_cache_bytes,
             block_budget: Duration::from_secs_f64(block_secs),
@@ -4793,7 +4900,7 @@ impl TranscodeManager {
                 read(plurx_core::store::keys::CACHE_MAX_GB).map(String::as_str),
             )
             .unwrap_or(0),
-        }))
+        })
     }
 
     /// The VOD dispatch half of [`Self::playlist`]: `None` when the id is not
@@ -5528,6 +5635,7 @@ impl TranscodeManager {
                     .restore_candidate_context_with_deadline(
                         &mut remote,
                         tokio::time::Instant::from_std(deadline),
+                        None,
                     )
                     .await
                     .is_err()

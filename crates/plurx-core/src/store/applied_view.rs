@@ -532,10 +532,7 @@ impl SettingsWriteFloor {
     /// timed out here and committed later) is not covered; its caller was
     /// never told it succeeded, and read-your-write is owed for acknowledged
     /// writes.
-    pub(crate) fn arm<'a>(
-        &self,
-        statements: impl IntoIterator<Item = &'a str>,
-    ) -> WriteFloorGuard {
+    pub(crate) fn arm<'a>(&self, statements: impl IntoIterator<Item = &'a str>) -> WriteFloorGuard {
         self.guard(WrittenTables::any(statements))
     }
 
@@ -630,7 +627,10 @@ impl Replicated {
     /// Step 1 for an unstamped read (D3b): no slot and no revision — nothing
     /// caches the answer — so only the image generation, the proof and every
     /// floor the read depends on.
-    fn admit_unstamped(&self, floors: &[Option<Instant>]) -> Result<(ServingProof, u64), ViewFallback> {
+    fn admit_unstamped(
+        &self,
+        floors: &[Option<Instant>],
+    ) -> Result<(ServingProof, u64), ViewFallback> {
         let generation = self.mark.generation();
         if generation & 1 != 0 {
             return Err(ViewFallback::ImageReplacing);
@@ -1350,7 +1350,10 @@ impl AppliedView {
         let table = AppliedTable::Files;
         let local = match &self.mode {
             Mode::Standalone => {
-                let snapshot = self.authority.playback_planning_snapshot(file_id, keys).await?;
+                let snapshot = self
+                    .authority
+                    .playback_planning_snapshot(file_id, keys)
+                    .await?;
                 self.counters.view(table);
                 return Ok(snapshot.map(|snapshot| (snapshot, ViewSource::View)));
             }
@@ -1695,13 +1698,14 @@ mod tests {
     /// `TimedClient` classifies every statement it runs with this function.
     #[test]
     fn the_dv_title_commands_and_the_probe_result_raise_the_files_floor() {
-        let commands: Vec<&str> = sql_texts("store/dv_title_jobs.rs", include_str!("dv_title_jobs.rs"))
-            .into_iter()
-            .filter(|sql| {
-                sql.contains("INSERT INTO background_job_commands")
-                    && (sql.contains("'publish_dv_title'") || sql.contains("'bind_dv_title'"))
-            })
-            .collect();
+        let commands: Vec<&str> =
+            sql_texts("store/dv_title_jobs.rs", include_str!("dv_title_jobs.rs"))
+                .into_iter()
+                .filter(|sql| {
+                    sql.contains("INSERT INTO background_job_commands")
+                        && (sql.contains("'publish_dv_title'") || sql.contains("'bind_dv_title'"))
+                })
+                .collect();
         assert_eq!(commands.len(), 3, "bind, publish and analysis publish");
         for sql in commands {
             assert!(writes_files(sql), "{sql}");
@@ -1726,7 +1730,11 @@ mod tests {
         let floor = SettingsWriteFloor::detached();
         let floors = floor.floors();
         let guard = floor.guard(WrittenTables::of("DELETE FROM items WHERE id = $1"));
-        assert_eq!(floors.get(AppliedTable::Files), None, "raised before the write ended");
+        assert_eq!(
+            floors.get(AppliedTable::Files),
+            None,
+            "raised before the write ended"
+        );
         drop(guard);
         assert!(floors.get(AppliedTable::Files).is_some());
         assert_eq!(floors.get(AppliedTable::Settings), None);
@@ -2212,17 +2220,19 @@ mod tests {
             }
         }
         assert!(
-            edges
-                .iter()
-                .any(|(child, parent, clause)| child == "files"
-                    && parent == "items"
-                    && clause.contains("on delete cascade")),
+            edges.iter().any(|(child, parent, clause)| child == "files"
+                && parent == "items"
+                && clause.contains("on delete cascade")),
             "the census must see files' own reference to items: {edges:?}"
         );
         let acts = |clause: &str| {
-            ["on delete cascade", "on delete set null", "on delete set default"]
-                .iter()
-                .any(|action| clause.contains(action))
+            [
+                "on delete cascade",
+                "on delete set null",
+                "on delete set default",
+            ]
+            .iter()
+            .any(|action| clause.contains(action))
         };
         let mut reach: std::collections::BTreeSet<String> = edges
             .iter()

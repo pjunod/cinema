@@ -1285,7 +1285,7 @@ impl MediaPool {
     /// Observed capacity ranks candidates; the selected worker still reserves
     /// the actual delivery plan atomically before starting its encoder.
     pub(crate) async fn live_tv_worker(&self, state: &AppState) -> String {
-        if !self.remote_placement_ready(state).await {
+        if !self.remote_placement_ready(state, None).await {
             return state.node_id.clone();
         }
         let voters = match self.membership.activity_peers().await {
@@ -1357,7 +1357,20 @@ impl MediaPool {
     /// Quorum, not the applied view (E1b, contract §6.3): this read admits a
     /// forwarded start on the worker and chooses the ingress placement before
     /// either allocates, so it precedes a reservation in the same operation.
-    pub(crate) async fn remote_placement_ready(&self, state: &AppState) -> bool {
+    ///
+    /// A create answers it from its plan (D3b, contract §12-1): the binding
+    /// covers [`plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED`] since
+    /// D3t, so the value is the one the whole start was planned at; a changed
+    /// switch reaches a start in flight at most one plan late. `None` (the
+    /// Live TV worker choice) reads it by quorum, as before.
+    pub(crate) async fn remote_placement_ready(
+        &self,
+        state: &AppState,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
+    ) -> bool {
+        if let Some(plan) = plan {
+            return plan.setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED) == Some("1");
+        }
         state
             .store
             .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)

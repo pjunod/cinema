@@ -15,7 +15,9 @@
 use super::*;
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::cluster::migration::status::PassiveRaftMetrics;
-use plurx_core::store::{AppliedTable, AppliedView, PlaybackPlanningSnapshot, ViewFallback, ViewSource};
+use plurx_core::store::{
+    AppliedTable, AppliedView, PlaybackPlanningSnapshot, ViewFallback, ViewSource,
+};
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{SettingsStore, StampCheck};
 
@@ -1386,7 +1388,6 @@ async fn applied_route_view_never_meets_the_floor_of_a_release_its_replica_holds
     );
 }
 
-
 /// A library, an item and one probed file, through the Store as production
 /// writes them.
 async fn planning_source(store: &dyn Store, path: &str) -> (i64, i64, i64) {
@@ -1451,7 +1452,11 @@ async fn applied_planning_view_on_sqlite_is_the_store() {
         .expect("source");
     assert_eq!(source, ViewSource::View);
     assert!(same_plan(&plan, &expected));
-    assert!(view.planning(file + 1_000, &keys).await.expect("plan").is_none());
+    assert!(view
+        .planning(file + 1_000, &keys)
+        .await
+        .expect("plan")
+        .is_none());
     assert_eq!(
         view.observation()
             .view_total(AppliedTable::Files, ViewSource::View),
@@ -1498,7 +1503,11 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
     // The source and the setting were written by this process: both floors
     // are raised until a confirmation started after them is applied here.
     node.store.validation_reset_operation_counts();
-    let (_, source) = view.planning(file, &keys).await.expect("plan").expect("source");
+    let (_, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
     assert_eq!(source, ViewSource::Authority);
     assert_eq!(
         view.observation().last_planning_fallback,
@@ -1507,22 +1516,42 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
     metrics.validation_confirm_now(node.applied_index());
     node.store.validation_reset_operation_counts();
     for _ in 0..4 {
-        let (plan, source) = view.planning(file, &keys).await.expect("plan").expect("source");
+        let (plan, source) = view
+            .planning(file, &keys)
+            .await
+            .expect("plan")
+            .expect("source");
         assert_eq!(source, ViewSource::View);
         assert!(same_plan(&plan, &expected));
     }
     let counts = node.store.validation_operation_counts();
-    assert_eq!(counts.consistent_query_calls, 0, "a proven plan never asks the leader");
+    assert_eq!(
+        counts.consistent_query_calls, 0,
+        "a proven plan never asks the leader"
+    );
     assert_eq!(counts.non_consistent_query_calls, 4);
-    assert!(view.planning(file + 1_000, &keys).await.expect("plan").is_none());
+    assert!(view
+        .planning(file + 1_000, &keys)
+        .await
+        .expect("plan")
+        .is_none());
 
     // Revocation while the statement runs: discarded, Authority once.
     view.validation_revoke_after_next_local();
     node.store.validation_reset_operation_counts();
-    let (plan, source) = view.planning(file, &keys).await.expect("plan").expect("source");
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
     assert_eq!(source, ViewSource::Authority);
     assert!(same_plan(&plan, &expected));
-    assert_eq!(node.store.validation_operation_counts().consistent_query_calls, 1);
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1
+    );
     assert_eq!(
         view.observation().last_planning_fallback,
         Some(ViewFallback::RevokedDuringRead)
@@ -1533,7 +1562,12 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
     metrics.validation_confirm_now(node.applied_index());
     let reopened = |view: &AppliedView| {
         let view = view.clone();
-        async move { view.planning(file, &keys).await.expect("plan").map(|(_, source)| source) }
+        async move {
+            view.planning(file, &keys)
+                .await
+                .expect("plan")
+                .map(|(_, source)| source)
+        }
     };
     assert_eq!(reopened(&view).await, Some(ViewSource::View));
 
@@ -1542,8 +1576,15 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
         .put_setting("playback.d3b", "after")
         .await
         .expect("save");
-    let (plan, source) = view.planning(file, &keys).await.expect("plan").expect("source");
-    assert_eq!((source, plan.settings["playback.d3b"].as_str()), (ViewSource::Authority, "after"));
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(
+        (source, plan.settings["playback.d3b"].as_str()),
+        (ViewSource::Authority, "after")
+    );
     metrics.validation_confirm_now(node.applied_index());
     assert_eq!(reopened(&view).await, Some(ViewSource::View));
 
@@ -1557,7 +1598,11 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
         .upsert_file(item, "/replica/movie.mkv", 200, 43, &probe)
         .await
         .expect("rescan");
-    let (plan, source) = view.planning(file, &keys).await.expect("plan").expect("source");
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
     assert_eq!((source, plan.file.size), (ViewSource::Authority, 200));
     assert_eq!(
         view.observation().last_planning_fallback,
@@ -1565,7 +1610,10 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
     );
     // The settings view is not closed by a `files` write.
     assert_eq!(
-        view.settings(&["playback.d3b"]).await.expect("settings").source,
+        view.settings(&["playback.d3b"])
+            .await
+            .expect("settings")
+            .source,
         ViewSource::View
     );
     metrics.validation_confirm_now(node.applied_index());
@@ -1573,10 +1621,19 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
 
     // A delete that reaches `files` only by cascade (libraries -> items ->
     // files): the files floor again, and the plan sees the source gone.
-    assert!(node.store.delete_library(library).await.expect("delete library"));
+    assert!(node
+        .store
+        .delete_library(library)
+        .await
+        .expect("delete library"));
     node.store.validation_reset_operation_counts();
     assert!(view.planning(file, &keys).await.expect("plan").is_none());
-    assert_eq!(node.store.validation_operation_counts().consistent_query_calls, 1);
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1
+    );
     assert_eq!(
         view.observation().last_planning_fallback,
         Some(ViewFallback::Floor)
@@ -1584,7 +1641,12 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
     metrics.validation_confirm_now(node.applied_index());
     node.store.validation_reset_operation_counts();
     assert!(view.planning(file, &keys).await.expect("plan").is_none());
-    assert_eq!(node.store.validation_operation_counts().consistent_query_calls, 0);
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        0
+    );
 
     // An owner's authority plan is counted under its own reason.
     assert!(view

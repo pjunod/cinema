@@ -1578,6 +1578,7 @@ impl TranscodeManager {
         self.restore_candidate_context_with_deadline(
             envelope,
             crate::media_pool::create_stage_deadline(Duration::from_secs(2)),
+            None,
         )
         .await
     }
@@ -1585,10 +1586,16 @@ impl TranscodeManager {
     /// Ingress and takeover retain their original deadline even before the
     /// startup-budget task-local scope is installed. Compatibility tests can
     /// still use the existing bounded wrapper above.
+    ///
+    /// `plan` is a remote owner's plan at the ingress's binding (D3b,
+    /// `start_plan::owner_plan`): the restore checks the candidate against
+    /// it instead of reading the source and settings again. Takeover and
+    /// resurrection pass `None` and read, as before.
     pub(crate) async fn restore_candidate_context_with_deadline(
         &self,
         envelope: &mut crate::media_sessions::RemoteStartRequest,
         deadline: tokio::time::Instant,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<(), CandidateRestoreError> {
         let Some(id) = envelope.candidate_id else {
             if envelope
@@ -1610,7 +1617,7 @@ impl TranscodeManager {
             Duration::from_secs(2),
         ));
         let context = self
-            .restore_catalog_context(
+            .restore_catalog_context_planned(
                 &envelope.request,
                 catalog,
                 id,
@@ -1618,6 +1625,7 @@ impl TranscodeManager {
                 envelope.source_mtime,
                 envelope.decoder_caps.as_ref(),
                 restore_deadline,
+                plan,
             )
             .await?;
         let companion_context = match envelope
@@ -1726,6 +1734,7 @@ impl TranscodeManager {
     /// Worker envelopes and claimed background intents re-enter the same
     /// catalog authority. Neither persistence nor an id alone grants dispatch.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn restore_catalog_context(
         &self,
         request: &SessionRequest,
@@ -1735,6 +1744,33 @@ impl TranscodeManager {
         source_mtime: i64,
         decoder: Option<&crate::playback_control::DecoderCapsSnapshot>,
         deadline: tokio::time::Instant,
+    ) -> Result<CandidateExecutionContext, CandidateRestoreError> {
+        self.restore_catalog_context_planned(
+            request,
+            catalog,
+            id,
+            source_size,
+            source_mtime,
+            decoder,
+            deadline,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::restore_catalog_context`] against a remote owner's plan at
+    /// the ingress's binding (D3b) instead of a second source read.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn restore_catalog_context_planned(
+        &self,
+        request: &SessionRequest,
+        catalog: &crate::media_sessions::CandidateCatalogContext,
+        id: CandidateId,
+        source_size: i64,
+        source_mtime: i64,
+        decoder: Option<&crate::playback_control::DecoderCapsSnapshot>,
+        deadline: tokio::time::Instant,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<CandidateExecutionContext, CandidateRestoreError> {
         if catalog.candidate.processed_dv {
             return Err(CandidateRestoreError::Unavailable(
@@ -1778,14 +1814,20 @@ impl TranscodeManager {
                     .validate()
                     .map_err(|error| CandidateRestoreError::Incompatible(format!("{error:?}")))?;
             }
-            let planning = self
-                .store
-                .playback_planning_snapshot(request.file_id, &QUALITY_PLANNING_KEYS)
-                .await
-                .map_err(|error| CandidateRestoreError::Unavailable(error.to_string()))?
-                .ok_or_else(|| {
-                    CandidateRestoreError::Incompatible("candidate source missing".to_owned())
-                })?;
+            let planning = match plan.filter(|plan| plan.snapshot.file.id == request.file_id) {
+                Some(plan) => Arc::clone(&plan.snapshot),
+                None => Arc::new(
+                    self.store
+                        .playback_planning_snapshot(request.file_id, &QUALITY_PLANNING_KEYS)
+                        .await
+                        .map_err(|error| CandidateRestoreError::Unavailable(error.to_string()))?
+                        .ok_or_else(|| {
+                            CandidateRestoreError::Incompatible(
+                                "candidate source missing".to_owned(),
+                            )
+                        })?,
+                ),
+            };
             if catalog.binding != crate::media_pool::PlanningBinding::from_snapshot(&planning) {
                 return Err(CandidateRestoreError::Incompatible(
                     "candidate source or settings changed".to_owned(),
@@ -1870,7 +1912,7 @@ impl TranscodeManager {
             context.canonical_caps = Some(canonical_caps);
             context.planning_binding =
                 Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
-            context.planning_snapshot = Some(Arc::new(planning));
+            context.planning_snapshot = Some(planning);
             Ok(context)
         })
         .await
@@ -2261,7 +2303,7 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
 /// some of them as unset. Widening it changes no planning identity:
 /// `PlanningBinding::from_snapshot` hashes the file, probe, reorder flag and
 /// generation, never this map.
-pub(crate) const QUALITY_PLANNING_KEYS: [&str; 25] = [
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 36] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::DV_HDR_PROCESSING,
@@ -2293,6 +2335,21 @@ pub(crate) const QUALITY_PLANNING_KEYS: [&str; 25] = [
     keys::HLS_SCRATCH_MAX_BYTES,
     keys::VOD_OUTPUT_PREPARATION,
     keys::VOD_ROLLING_RETENTION,
+    // D3b (§4.2): the settings the create chain read after the snapshot,
+    // so the one plan answers them. `vod_settings`' admission policy:
+    keys::VOD_PRESENTATION,
+    keys::VOD_WORKING_SET_BYTES,
+    keys::VOD_BLOCK_BUDGET_SECS,
+    keys::VOD_MATERIALIZE_BUDGET_SECS,
+    keys::VOD_BLOCKED_GET_CAP,
+    keys::VOD_INDEX_CLUSTER_CACHE,
+    keys::HEVC_UNVERIFIED_COPY,
+    keys::VOD_LIVE_RECOVERY,
+    // the recorded playlist shape (`cluster_playlist_is_typeless`):
+    keys::HLS_TYPELESS_SLIDING,
+    keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+    // and placement (`remote_placement_ready`).
+    keys::CLUSTER_MEDIA_POOL_ENABLED,
 ];
 
 /// The [`keys::HWACCEL`] preference a planning snapshot carries; empty
@@ -4598,11 +4655,11 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 25);
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 36);
         assert!(QUALITY_PLANNING_KEYS.contains(&keys::DV_DISPLAY_TARGET));
         assert!(
-            QUALITY_PLANNING_KEYS.len() <= 32,
-            "one settings statement binds at most 32 keys"
+            QUALITY_PLANNING_KEYS.len() <= plurx_core::store::PLANNING_SNAPSHOT_KEYS_MAX,
+            "one planning snapshot binds at most PLANNING_SNAPSHOT_KEYS_MAX keys"
         );
         assert!(QUALITY_PLANNING_KEYS.contains(&keys::PLAYBACK_SDR_MASTER_CODECS));
         assert!(QUALITY_PLANNING_KEYS.contains(&"playback.vod_reorder_frames"));
@@ -5198,6 +5255,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             .restore_candidate_context_with_deadline(
                 &mut expired_envelope,
                 tokio::time::Instant::now() - Duration::from_millis(1),
+                None,
             )
             .await
             .expect_err("entry retains expired ingress deadline")
@@ -5771,7 +5829,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             transport: None,
         };
         manager
-            .validate_candidate_planning_binding(&request, None)
+            .validate_candidate_planning_binding(&request, None, None)
             .await
             .expect("unchanged snapshot is admissible");
         // A later settings revision must not leak into this enumeration.

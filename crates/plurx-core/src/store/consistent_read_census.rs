@@ -586,13 +586,12 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
         "the session-layout marker and guard reads, one bounded label",
     ),
     // The queue bridge is generic over `QueueSql`, shared by both stores and
-    // the formally pinned background-jobs code; its create-path writes are
-    // named in the per-shape pin. Deferred to D3b.
-    ("queue_sql", "the queue bridge's statement path (D3b)"),
-    (
-        "queue_transaction",
-        "the queue bridge's transaction path (D3b)",
-    ),
+    // the formally pinned background-jobs code. Its statements carry the
+    // Store method a caller names through `background_jobs::queue_method`
+    // (D3b: the create path's custody, analysis-interest and copy-index
+    // calls), else the default `queue_sql` that `queue_label` returns, which
+    // no call site spells. Transactions keep the bridge's own name.
+    ("queue_transaction", "the queue bridge's transaction path"),
     // The live-TV resource ledger's own two operations behind its private
     // `Backend` trait, which is not a `Store`.
     ("read_ledger", "live-TV resource ledger `Backend` read"),

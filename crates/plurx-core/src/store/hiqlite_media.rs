@@ -3231,11 +3231,16 @@ impl MediaStore for HiqliteAuthStore {
         keys: &[&str],
     ) -> Result<Option<super::PlaybackPlanningSnapshot>, StoreError> {
         let keys = super::selected_planning_keys_json(keys)?;
-        let rows = self.client()
-        // authority: all planning inputs and generation share one committed read.
-        .query_consistent_map::<PlanningSnapshotRow, _>("playback_planning_snapshot", 
-            planning_snapshot_sql(), params!(file_id, keys),
-        ).await.map_err(database_error)?;
+        let rows = self
+            .client()
+            // authority: all planning inputs and generation share one committed read.
+            .query_consistent_map::<PlanningSnapshotRow, _>(
+                "playback_planning_snapshot",
+                planning_snapshot_sql(),
+                params!(file_id, keys),
+            )
+            .await
+            .map_err(database_error)?;
         planning_snapshot_from_rows(rows)
     }
 

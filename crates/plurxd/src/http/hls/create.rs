@@ -2647,13 +2647,25 @@ pub(super) async fn validate_hevc_copy_transport(
     source: &MediaFile,
     caps: &plurx_core::playback::DeviceCaps,
     request: &crate::transcode::SessionRequest,
+    plan: Option<&super::start_plan::StartPlan>,
 ) -> Result<(), ApiError> {
     if !matches!(request.kind, crate::transcode::SessionKind::Copy { .. })
         || caps.progressive_hevc_sample_entries.is_none()
     {
         return Ok(());
     }
-    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?;
+    // The create's plan read this revision's probe with the file (D3b).
+    let probe_json = match plan.and_then(|plan| plan.probe_for(source)) {
+        Some(probe) => {
+            crate::hevc_census::probe_json_for_copy_from(
+                state.store.as_ref(),
+                source,
+                probe.map(str::to_owned),
+            )
+            .await?
+        }
+        None => crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?,
+    };
     validate_hevc_copy_transport_from_probe(source, caps, request, probe_json.as_deref())
 }
 
@@ -2919,7 +2931,7 @@ pub(crate) async fn preview_for_compatibility(
         body,
     )
     .await?;
-    validate_hevc_copy_transport(state, file, &caps, &resolved.request).await?;
+    validate_hevc_copy_transport(state, file, &caps, &resolved.request, None).await?;
     if burn_would_discard_this_session_hdr(
         state,
         Some(file),
@@ -3341,20 +3353,20 @@ async fn create_with_purpose_inner(
         .admit()
         .ok_or_else(|| create_owner_transition("the ingress node has no serving authority"))?;
     // The source height answers three things now: Auto, the ladder in the
-    // response, and the snap's source-height escape. One Authority read: the
-    // file row, its probe and the planning settings in one statement.
-    let planning_snapshot = state
-        .store
-        .playback_planning_snapshot(id, &crate::transcode::QUALITY_PLANNING_KEYS)
+    // response, and the snap's source-height escape. The create's one plan
+    // (D3b): the file row, its probe and every planning setting in one
+    // statement, from this node's applied view behind its floors, else from
+    // Authority. Every chain below takes it instead of reading again.
+    let start_plan = super::start_plan::ingress_plan(&state.applied, id)
         .await
-        .map_err(|error| session_store_error("reading playback planning inputs", error))?;
-    if let Some(snapshot) = planning_snapshot.as_ref() {
+        .map_err(|error| session_store_error("reading playback planning inputs", error))?
+        .map(Arc::new);
+    let planning_snapshot = start_plan.as_deref().map(|plan| &*plan.snapshot);
+    if let Some(snapshot) = planning_snapshot {
         crate::media_pool::capture_create_planning_binding(snapshot);
     }
     crate::media_pool::mark_create_phase("lookup");
-    let source = planning_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.file.clone());
+    let source = planning_snapshot.map(|snapshot| snapshot.file.clone());
     // The HDR subtitle-burn guard used to stand here, keyed on the source's
     // own `hdr` column. It now runs after `resolve_plan`, against the grade
     // this request actually resolves to — see
@@ -3429,7 +3441,7 @@ async fn create_with_purpose_inner(
             req.caps.as_ref(),
             req.overrides.as_ref(),
             file,
-            &match planning_snapshot.as_ref() {
+            &match planning_snapshot {
                 Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
                 None => super::super::stream::render_caps(&state).await,
             },
@@ -3450,7 +3462,7 @@ async fn create_with_purpose_inner(
     let source_height = source.as_ref().and_then(|f| f.height);
     // The HWACCEL preference is in the snapshot read above, in this task,
     // with nothing in between: decide from it rather than reading it again.
-    let ladder_ceiling = match planning_snapshot.as_ref() {
+    let ladder_ceiling = match planning_snapshot {
         Some(snapshot) => {
             state
                 .transcode
@@ -3489,7 +3501,7 @@ async fn create_with_purpose_inner(
     crate::media_pool::mark_create_phase("settings");
     let resolved = resolve_plan_with_continuous(
         PlanInputs {
-            snapshot: planning_snapshot.as_ref(),
+            snapshot: planning_snapshot,
             state: &state,
             user_id: user.id,
             file_id: id,
@@ -3540,7 +3552,7 @@ async fn create_with_purpose_inner(
         None
     };
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
-        validate_hevc_copy_transport(&state, source, caps, &request).await?;
+        validate_hevc_copy_transport(&state, source, caps, &request, start_plan.as_deref()).await?;
     }
     let height = resolved.height;
     if burn_would_discard_this_session_hdr(
@@ -4011,7 +4023,7 @@ async fn create_with_purpose_inner(
         .as_ref()
         .is_none_or(|owner| owner == &state.node_id)
     {
-        match planning_snapshot.as_ref().map(|snapshot| {
+        match planning_snapshot.map(|snapshot| {
             crate::transcode::TranscodeManager::processed_upgrade_gates(
                 &request,
                 snapshot,
@@ -4034,7 +4046,6 @@ async fn create_with_purpose_inner(
 
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
-            .as_ref()
             .and_then(|snapshot| {
                 snapshot
                     .settings
@@ -4054,7 +4065,6 @@ async fn create_with_purpose_inner(
 
     let quality_enabled = continuous.is_some()
         || planning_snapshot
-            .as_ref()
             .and_then(|snapshot| {
                 snapshot
                     .settings
@@ -4161,7 +4171,10 @@ async fn create_with_purpose_inner(
         // Recorded from the same decision the worker will make, so a later
         // takeover can tell whether this URL was ever serving a shape a
         // successor is allowed to continue.
-        typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
+        typeless_playlist: state
+            .transcode
+            .cluster_playlist_is_typeless(start_plan.as_deref())
+            .await,
         library_channel: library_channel.as_ref().map(|purpose| {
             serde_json::to_value(purpose).expect("bounded Library-channel purpose serializes")
         }),
@@ -4193,7 +4206,11 @@ async fn create_with_purpose_inner(
         .and_then(|context| context.owner_node_id.clone());
     let mut owner_candidates = if let Some(owner) = candidate_owner.or(pinned_owner) {
         vec![owner]
-    } else if !state.media_pool.remote_placement_ready(&state).await {
+    } else if !state
+        .media_pool
+        .remote_placement_ready(&state, start_plan.as_deref())
+        .await
+    {
         vec![state.node_id.clone()]
     } else {
         match MediaOfferRequest::new(
@@ -4268,6 +4285,7 @@ async fn create_with_purpose_inner(
                 recovery_epoch: recovery_epoch.clone(),
             };
             let worker_serving_authority = ingress_serving_authority.clone();
+            let worker_plan = start_plan.clone();
             let mut start_task = crate::media_pool::spawn_create_worker(async move {
                 let started = transcode
                     .create_cluster_session(
@@ -4276,6 +4294,7 @@ async fn create_with_purpose_inner(
                         &user_name,
                         placement_deadline,
                         admitted_serving_generation,
+                        worker_plan.as_deref(),
                     )
                     .await?;
                 let crate::transcode::ClusterSessionStart {
@@ -4419,6 +4438,23 @@ async fn create_with_purpose_inner(
                     Err(create_owner_transition(format!(
                         "media worker {candidate} could not start the session: {error:?}"
                     )))
+                }
+                // The worker's plan at this create's binding differs from
+                // this node's (D3b, contract §4.3): this replica may be the
+                // stale side, so its view closes and the viewer's retry plans
+                // from Authority. The next candidate is offered the same
+                // plan, as before; the answer, if none takes it, is the typed
+                // retryable `quality_catalog_unavailable`.
+                Err(crate::media_sessions::RemoteStartFailure::PlanChanged) => {
+                    super::start_plan::close_after_refusal(&state.applied);
+                    Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "quality_catalog_unavailable",
+                        format!(
+                            "media worker {candidate} holds another revision of this source \
+                             or its settings"
+                        ),
+                    ))
                 }
             }
         };
@@ -4645,7 +4681,7 @@ async fn create_with_purpose_inner(
             source,
             &catalog_request,
             &accepted,
-            planning_snapshot.as_ref(),
+            planning_snapshot,
             link_receipts::advisory_deadline(),
         )
         .await
@@ -4663,7 +4699,7 @@ async fn create_with_purpose_inner(
         info.processed_dv_profile,
         info.processed_fel,
         effective_processing.as_ref(),
-        planning_snapshot.as_ref(),
+        planning_snapshot,
         processing_decline.as_deref(),
     );
     let response = StartResponse {

@@ -1730,8 +1730,9 @@ impl TimedClient {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
-        let floors =
-            self.write_floors(WrittenTables::any(statements.iter().map(|(sql, _)| sql.as_ref())));
+        let floors = self.write_floors(WrittenTables::any(
+            statements.iter().map(|(sql, _)| sql.as_ref()),
+        ));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1756,8 +1757,9 @@ impl TimedClient {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
-        let floors =
-            self.write_floors(WrittenTables::any(statements.iter().map(|(sql, _)| sql.as_ref())));
+        let floors = self.write_floors(WrittenTables::any(
+            statements.iter().map(|(sql, _)| sql.as_ref()),
+        ));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
