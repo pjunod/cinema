@@ -8,6 +8,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | File | Answers | |
 |---|---|---|
 | [PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | E1/D3 fleet measurements, the control/deletion overlap, diagnostic attribution limits and remaining acceptance. | open |
+| [CM29 gamut](CM29-MEASURED-GAMUT.md) | Measured vertices and qualification. | built |
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
@@ -105,7 +106,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-STARTUP-PATH-FINDINGS.md](PLAYBACK-STARTUP-PATH-FINDINGS.md) | Play-to-first-frame waits across routes: fixed 40 ms consistent-read ACK stall and web scrim, plus ranked remaining waits and owners. | open |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW.md](PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |
 | [Playback startup build status](PLAYBACK-STARTUP-LATENCY-STATUS.html) | Live Sol build status: phase, PR, evidence, review, lane, decisions. | open |
-| [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, refused destination poisons the incumbent's control snapshot. | open |
+| [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why seeks refuse playback and reap the incumbent: retained reservations and poisoned control snapshots. | open |
 | [WEB-SEEK-LATENCY-RCA-AND-FIX.md](WEB-SEEK-LATENCY-RCA-AND-FIX.md) | October 2 VOD loader deadlock, false seek-presentation evidence and native rolling reopen latency: controlled causal evidence, proposed repair and adversarial review. | open |
 | [Web seek incident evidence](../evidence/web-seek-rca-2026-10-02.json) · [mechanism replay](../evidence/web-seek-mechanism-replay.cjs) | Sanitized live seek traces, same-session loader intervention and executable incident-source mechanisms. | done |
 | [SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md](SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md) | The build order for that repair: one scratch ledger, writer barrier, exact release grace, growing reservations, ownership boundaries and the evidence each unit owes. | open |
