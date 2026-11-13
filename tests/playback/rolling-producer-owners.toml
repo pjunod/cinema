@@ -3904,7 +3904,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # spawn_blocking; state.rs run_targeted scopes a probe-only group to the nearest
 # existing folder on one awaited spawn_blocking. Each JoinHandle is awaited by
 # the request's own future, so cancellation and panics surface as task errors.
-expected_occurrences = 1148
+# #1566, +1 detached bounded store write: processed_upgrade_qualification.rs
+# `hold_viewer_demand` records a waiting viewer's live demand on its title scan
+# in one spawned task that makes a single store call and logs its outcome. It
+# holds no lock, resource or source, is throttled to one per viewer per 30 s by
+# the registry entry, and a lost write only delays that viewer's next renewal.
+expected_occurrences = 1149
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
