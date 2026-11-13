@@ -79,6 +79,13 @@ pub struct ScanRequestBody {
     /// `present` or `retained`.
     #[serde(default)]
     pub removed_paths: Option<Vec<String>>,
+    /// Like `removed_paths`, but the title is kept (contract amendment
+    /// `offload`): each path's file records are removed and the item stays,
+    /// marked offloaded once it has no files left. Probe-only. Send it only to
+    /// a cinema that advertises `offload`; an older node refuses the request
+    /// rather than deleting the title.
+    #[serde(default)]
+    pub offloaded_paths: Option<Vec<String>>,
     /// Record exactly `expected_files` and walk nothing, even at a library
     /// root, and never share a pass with a request that did not ask for it.
     /// Default `false`; a request with `removed_paths` is always probe-only.
@@ -196,12 +203,22 @@ pub async fn scan(
             "every `removed_paths[]` entry must be absolute and under `path`".to_owned(),
         ));
     }
+    let offloaded_paths = body.offloaded_paths.clone().unwrap_or_default();
+    if offloaded_paths.iter().any(|offloaded| {
+        let offloaded = std::path::Path::new(offloaded);
+        !offloaded.is_absolute() || !containment::lexical(offloaded).starts_with(&scope)
+    }) {
+        return Err(ApiError::BadRequest(
+            "every `offloaded_paths[]` entry must be absolute and under `path`".to_owned(),
+        ));
+    }
     let seed = ScanRequestV2Seed {
         key_id: key.0.id,
         key_hash: key.0.key_hash.clone(),
         request_key,
         expected_files,
         removed_paths,
+        offloaded_paths,
         probe_only: body.probe_only.unwrap_or(false),
     };
     let probe_only = seed.is_probe_only();
@@ -412,7 +429,7 @@ async fn answer(
 
 /// Optional contract features this build implements, advertised on the
 /// connection-test answer.
-pub const FEATURES: &[&str] = &["removed_paths", "probe_only"];
+pub const FEATURES: &[&str] = &["removed_paths", "probe_only", "offload"];
 
 /// The most paths one connection test may name.
 pub const MAX_PROBE_PATHS: usize = 64;
