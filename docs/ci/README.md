@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [RUST-GATE-IMAGE.md](RUST-GATE-IMAGE.md) | The Rust gate's image, pool and parallelism | built |
 | [MEDIA-RUNTIME.md](MEDIA-RUNTIME.md) | Publishing the pinned media base separately, consuming it in application builds, and updating or rolling back its digest. | built |
 | [UNIT-COVERAGE-REPAIR.md](UNIT-COVERAGE-REPAIR.md) | The 24 baseline failures, owned fixes, added behavioral tests, and the 85–90% coverage target and evidence. | open |
 | [ENGINEERING-KNOWLEDGE.md](ENGINEERING-KNOWLEDGE.md) | Code/diff queries, source-backed record maintenance, advisory PR capture and evidence limits for the bounded knowledge pilot. | open |
