@@ -1,7 +1,7 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** in progress — milestones 1 (the arithmetic) and 3 (the job and
-store) are in main or review; 2 and 4–7 are open · **Written:** 2026-11-12 ·
+**Status:** in progress — milestones 1–2 are in main, 3 (the job and
+store) and 4 (copy-path serving) are in review; 5–7 are open · **Written:** 2026-11-12 ·
 **Owner:** Claude · **Decision:** Paul approved building F+ and per-title
 re-encode trials against it, 2026-11-12
 
@@ -244,30 +244,58 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
   `copy_normalization.rs` (survey of 2026-11-12; re-verify at build time).
 
 Decisions (2026-11-12, settled for milestone 4):
-- **Pinned per session.** A session reads the curve table once when it
-  starts, and every fragment it converts uses that table and its digest. A
+- **Pinned per session.** A session's curve digest is chosen once, at HLS
+  create, from the reconciled plan's conversion and its platform's enable,
+  and rides in its request. Every fragment it converts uses that table. A
   refit published mid-playback reaches only sessions started after it.
+  A producer loads the table by the pinned digest. Milestone 3 keeps a
+  superseded table for 7 days; when one is gone (only after a fit-version
+  or helper change, since a source change already ends sessions) the
+  session re-pins to the current fit at its next rendition.
 - **v2 only for fitted titles.** A title without a fitted table keeps
   `dv-p7-to-p81-rpu-v1`, so its indexes and caches stay valid. A fitted
-  title's identity is `dv-p7-to-p81-rpu-v2` plus the curve digest. Identity
-  and bytes always agree: if curves cannot be applied, the conversion is
-  refused, never served as identity bytes under v2.
-- **Enable, not gate.** Per-platform settings
-  `playback.dolby_vision_refit_{macos,ios,tvos,web,android}`, default off,
-  read against the session's client platform. Off ⇒ v1 bytes and identity.
+  title's copy is `dv-p7-to-p81-rpu-v2+<digest>`; the indexer builds it
+  beside v1 whenever any platform's enable is on. Identity and bytes always
+  agree: a v2 output whose table or anchor is missing is refused, never
+  served with identity curves.
+- **Enable, not gate.** `playback.dolby_vision_refit_{apple,web,android,linux}`,
+  one per `playback_control::ClientPlatform`, default off (milestone 3
+  registers them). At create the only platform signal is the capability
+  document's `client.kind` (`web`, `ios`/`tvos`, `android`, `linux-player`);
+  a session without one has no platform, so no enable applies. Off ⇒ v1.
+- **Placed by presentation time, exactly.** A sample's source pts is its
+  presentation time mapped through a clock anchored on the source's first
+  video keyframe (ffprobe pts; a Matroska B-frame head has no dts), with
+  rational arithmetic; a time that is not a whole source tick is refused.
 
-As built so far (milestone 4, part 1):
-- `fmp4::rewrite_timed_video_samples` hands the closure each sample's decode
-  time (`tfdt` plus earlier durations) and composition offset.
-- `transcode::dv_refit_serve`: `ServedCurveTable` (scenes by `first_pts`,
-  servable re-check, identity outside every scene) and `SourceClock`
-  (track ticks to source pts, exact or refused).
-- `dvconvert::convert_length_prefixed` takes the sample's curves and writes
-  them after `To81`; `dvpipe::Converter::with_refit` holds the pinned table
-  and clock and resolves each sample's scene.
-- Not yet wired to the call sites: where each one gets an exact clock, and
-  how a VOD generation lands when converted sizes depend on position, are
-  open (see the milestone 4 PR).
+As built (milestone 4):
+- `fmp4::rewrite_timed_video_samples`, `transcode::dv_refit_serve`
+  (`ServedCurveTable`, `SourceClock`, `SourceKeyframe`, `written_curves`),
+  `dvconvert::convert_length_prefixed(…, curves, …)` and
+  `dvpipe::Converter::{with_refit, with_curves, convert_placed,
+  convert_anchored}`; `plurxd::dv_refit_serving` is the one adapter to the
+  store and the settings.
+- **Index pass** (`fragindex`): the v2 output anchors on the source's first
+  keyframe and its first sample's presentation time.
+- **VOD** (`vodgen`): a converting F+ generation does not convert before its
+  landing. Its buffered fragments are converted once per candidate index
+  row, placed by that row's `dts`, and matched on those bytes; each later
+  fragment is converted at its own row. The rendition anchors its clock by
+  re-running the index argv for one frame
+  (`fragindex::index_first_presentation`). **Open:** the production A/V
+  pipe's video timeline is not a shift of the video-only index's (with an
+  audio lead the mov muxer shifts it and pins the first sample to zero;
+  measured on the `clean-cra` fixture), so placement refuses and an F+
+  rendition fails loudly. Exact VOD placement needs each sample's packet
+  identity: the packet-clock engine (ruling A1) or per-row sample timing in
+  the index.
+- **Copy ranges** (`copy_normalization`, v3 analysis): each fragment is
+  anchored by its own packet clock's first packet.
+- **Identity curves (v1) stay** for the legacy live copy session
+  (`copyseg`) and shared Source copies. Live copy gains F+ when it moves
+  onto the one copy engine with the packet clock (Paul's 2026-11-07 ruling
+  A1). A session moving from live copy to indexed VOD changes from identity
+  to F+ curves at that switch.
 
 ### 3.6 Serving: permanent on-disk conversion
 

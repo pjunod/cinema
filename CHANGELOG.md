@@ -18,10 +18,13 @@ bump may break compatibility and a **patch** bump never does.
   or refusal, both statistics sets and the title's verdict, gain and curve
   digest are stored per source (SQLite v130; a shape-verified hiqlite
   extension). Nothing serves the curves yet.
-- The Profile 7 → 8.1 copy converter can write F+ curves into each converted
-  RPU, choosing the scene from the sample's own presentation time, never a
-  frame count (FEL-RPU-REFIT-BUILD.md milestone 4, part 1). No session uses
-  it yet, so served bytes are unchanged.
+- F+ curve serving, part 1 (FEL-RPU-REFIT-BUILD.md milestone 4): per-platform
+  enables `playback.dolby_vision_refit_{apple,web,android,linux}` (off by
+  default) pin a session to its title's curve set, and a fitted title's v2
+  index writes each sample's scene curves, placed by its own presentation
+  time. VOD generations of an F+ rendition refuse until their placement on
+  the A/V pipe is exact, so nothing serves F+ bytes yet; titles without a
+  fit, platforms left off, live copy and shared Source copies are unchanged.
 
 ### Fixed
 
