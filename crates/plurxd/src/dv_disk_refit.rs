@@ -92,7 +92,8 @@ pub(super) fn author(input: &Path, timeline_path: &Path, output: &Path, table: &
     let mut expected = Vec::with_capacity(rows.len());
     let count = units(&bytes, |nal, ordinal| {
         let (pts, source_hash) = rows.get(ordinal).ok_or("more extracted RPUs than source pictures")?;
-        let actual: Hash = Sha256::digest(nal).into();
+        let mut actual: Hash = [0; 32];
+        actual.copy_from_slice(&Sha256::digest(nal));
         if &actual != source_hash {
             return Err(format!("source RPU hash differs at decode ordinal {ordinal}"));
         }
@@ -112,7 +113,9 @@ pub(super) fn author(input: &Path, timeline_path: &Path, output: &Path, table: &
             .map_err(|e| format!("writing RPU {ordinal}: {e}"))?;
         writer.write_all(&[0, 0, 0, 1]).map_err(|e| e.to_string())?;
         writer.write_all(&written).map_err(|e| e.to_string())?;
-        expected.push(Sha256::digest(&written).into());
+        let mut hash: Hash = [0; 32];
+        hash.copy_from_slice(&Sha256::digest(&written));
+        expected.push(hash);
         Ok(())
     })?;
     if count != rows.len() { return Err("extracted RPU count differs from source pictures".into()); }
@@ -128,7 +131,8 @@ pub(super) fn verify_readback(path: &Path, expected: &[Hash]) -> Result<(), Stri
         let want = expected.get(ordinal).ok_or("replacement has extra RPUs")?;
         DoviRpu::parse_unspec62_nalu(nal)
             .map_err(|e| format!("replacement RPU {ordinal} did not parse: {e}"))?;
-        let actual: Hash = Sha256::digest(nal).into();
+        let mut actual: Hash = [0; 32];
+        actual.copy_from_slice(&Sha256::digest(nal));
         if &actual != want {
             return Err(format!("replacement RPU {ordinal} differs from fitted curves"));
         }
