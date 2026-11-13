@@ -322,6 +322,31 @@ and its EL are then deleted.
   them with `dovi_tool inject-rpu` instead of `convert`. The replacement's
   verification also reads the curves back.
 
+The complete-title scanner now records a source-fenced `el_kind` aggregate:
+consistent FEL · consistent MEL · unknown · inconsistent. An old schema-1
+probe without this optional field reads as unknown, and the changed scanner
+binary causes a fresh title-scan generation. Only a complete, consistent FEL
+fact enters F+ demand; a legacy recipe verdict cannot infer FEL. The fit's
+identity remains source size/mtime, selected video stream, helper mode/ABI and
+`FIT_VERSION`. A pending disk conversion requests fitting even while all
+client F+ switches are off, because the operator's conversion request requires
+that prerequisite. The disk worker leaves the conversion queued with a visible
+waiting reason until a current `Fitted`, `Identity` or content `Refused` outcome
+exists; it does not occupy a conversion slot for the duration of the fit.
+
+For a fitted title the existing scanner makes an optional sidecar from the same
+held source: selected-stream time base, then each displayed RPU's exact packet
+PTS and SHA-256 in decode order. The raw HEVC extraction has no presentation
+clock. Before authoring, the converter matches every extracted RPU to that
+sidecar hash and the stored title frame count. It selects each stored scene by
+PTS, converts that RPU with `To81`, applies its stored curve when present, and
+injects the resulting RPU stream. After remuxing, it extracts RPUs from the
+replacement and compares every one to the authored bytes. Any mismatch or
+incomplete mapping refuses the candidate while the original source remains.
+MEL and recorded identity/refusal outcomes retain the existing `-m 2 convert`
+path. The source and replacement still pass the held-inode binding, content
+hash, owned-scratch and recovery-guard checks of `dv_disk`.
+
 ## 4. Developer tab and visibility
 
 Developer gets an enable section, "F+ curves for converted Dolby Vision"

@@ -4770,6 +4770,89 @@ impl JobManager {
         }
     }
 
+    /// Read-only queue explanation from stored title facts and fit rows. The
+    /// status API never captures a helper or probes media on a poll.
+    pub(crate) async fn disk_refit_waiting_reason(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<&'static str>, StoreError> {
+        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
+        let Some(document) = self.store.get_file_probe_json(file_id).await? else {
+            return Ok(Some("Waiting for complete-title Dolby Vision scan"));
+        };
+        let Some(stats) = DvTitleStats::from_probe_json(&document).filter(|s| s.complete) else {
+            return Ok(Some("Waiting for complete-title Dolby Vision scan"));
+        };
+        match stats.el_kind {
+            TitleConstant::Consistent(TitleElKind::Mel) => Ok(None),
+            TitleConstant::Consistent(TitleElKind::Fel) => {
+                if self.store.dv_refit_curves(file_id).await?.is_some() {
+                    Ok(None)
+                } else {
+                    Ok(Some("Waiting for F+ fit or recorded content refusal before EL discard"))
+                }
+            }
+            _ => Ok(Some("Waiting for consistent FEL or MEL title classification")),
+        }
+    }
+
+    // A queued disk request is itself a fitting consumer. The title scanner
+    // must first identify every displayed RPU as FEL or MEL; a legacy recipe
+    // fact cannot authorize deletion of the enhancement layer.
+    async fn disk_refit_ready(
+        &self,
+        file: &MediaFile,
+    ) -> Result<Option<(plurx_core::store::dv_refit_jobs::RefitCurveTable,
+                     std::sync::Arc<crate::vodencode::dv_runtime::ToolSet>)>, String> {
+        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, TitleElKind};
+        use plurx_core::store::dv_refit_jobs::RefitVerdict;
+        let document = self.store.get_file_probe_json(file.id).await
+            .map_err(|e| format!("reading title facts for disk conversion: {e}"))?
+            .ok_or("complete title facts are not yet available")?;
+        let stats = DvTitleStats::from_probe_json(&document)
+            .filter(|stats| stats.complete)
+            .ok_or("complete title facts are not yet available")?;
+        match stats.el_kind {
+            TitleConstant::Consistent(TitleElKind::Mel) => return Ok(None),
+            TitleConstant::Consistent(TitleElKind::Fel) => {},
+            _ => return Err("waiting for a complete, consistent FEL or MEL title scan".into()),
+        }
+        let probe: serde_json::Value = serde_json::from_str(&document)
+            .map_err(|_| "invalid title probe document")?;
+        let video_index = probe.get("streams").and_then(serde_json::Value::as_array)
+            .and_then(|streams| streams.iter().find(|stream| {
+                stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                    && stream.get("disposition").and_then(|value| value.get("attached_pic"))
+                        .and_then(serde_json::Value::as_i64).unwrap_or(0) == 0
+            }))
+            .and_then(|stream| stream.get("index"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| i64::try_from(index).ok())
+            .ok_or("waiting for selected FEL video stream")?;
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture().await
+            .map_err(|e| format!("waiting for F+ helper: {e}"))?
+            .ok_or("waiting for F+ helper installation")?;
+        let table = self.store.dv_refit_curves(file.id).await
+            .map_err(|e| format!("reading F+ curves for disk conversion: {e}"))?
+            .ok_or("waiting for a current F+ fit or recorded content refusal")?;
+        if table.superseded_at_ms.is_some()
+            || table.title.source_size != file.size
+            || table.title.source_mtime != file.mtime
+            || table.title.video_index != video_index
+            || table.title.helper_identity != tools.refit_helper_identity()
+            || table.title.fit_version != plurx_core::transcode::dv_refit::FIT_VERSION
+        {
+            return Err("waiting for a current F+ fit for this source, stream and helper".into());
+        }
+        if table.title.verdict == RefitVerdict::Fitted {
+            Ok(Some((table, tools)))
+        } else {
+            // Identity and content refusal are terminal fit outcomes. The
+            // existing dovi_tool conversion stays correct for both.
+            Ok(None)
+        }
+    }
+
     async fn process_dv_candidate(
         &self,
         file_id: i64,
@@ -4893,6 +4976,13 @@ impl JobManager {
                     return;
                 }
             };
+            let fitted = match self.disk_refit_ready(&file).await {
+                Ok(fitted) => fitted,
+                Err(waiting) => {
+                    tracing::info!(file_id, %waiting, "Dolby Vision disk conversion remains queued");
+                    return;
+                }
+            };
             match publisher
                 .mark_dv_conversion_running(file_id, file.size)
                 .await
@@ -4911,6 +5001,7 @@ impl JobManager {
                 self.coordinator.node_id(),
                 loss,
                 keep_original,
+                fitted.as_ref().map(|(table, tools)| (table, tools.scanner.as_path())),
             )
             .await
             {
@@ -4923,6 +5014,18 @@ impl JobManager {
             };
             if loss.is_cancelled() {
                 return;
+            }
+            if let Some((table, tools)) = &fitted {
+                let still_current = tools.is_current().await
+                    && self.store.dv_refit_curves(file.id).await.ok().flatten()
+                        .is_some_and(|current| current.superseded_at_ms.is_none()
+                            && current.title.curve_digest == table.title.curve_digest
+                            && current.title.helper_identity == table.title.helper_identity);
+                if !still_current {
+                    self.fail_dv_conversion(&publisher, &file, loss,
+                        "F+ fit or helper changed before disk publication").await;
+                    return;
+                }
             }
             match publisher
                 .mark_dv_conversion_verified(file_id, verified.el_type, verified.bytes_after)

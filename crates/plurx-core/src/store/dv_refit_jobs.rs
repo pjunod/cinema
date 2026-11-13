@@ -435,30 +435,15 @@ FROM verdict RETURNING result_json
     )
 });
 
-/// The FEL route's facts for a title's current source: a pending FEL recipe
-/// request, a stored recipe verdict, or a legacy verdict. Only the FEL route
-/// writes those, and it plans only for a source whose RPUs parse as FEL
-/// (`DvElKind::Fel`); no other durable fact separates FEL from MEL.
+/// Only a current, complete title scan may assert FEL. A legacy recipe fact
+/// is neither complete-title coverage nor evidence that every RPU was FEL.
 fn fel_sql() -> String {
-    let fel = |key: &str, size: &str| {
-        format!(
-            "EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.{key}')='object'
-   THEN json_extract(f.probe_json,'$.{key}') ELSE '{{}}' END) fact
-   WHERE json_extract(fact.value,'$.{size}source_size')=f.size AND json_extract(fact.value,'$.{size}source_mtime')=f.mtime)"
-        )
-    };
-    let legacy = crate::transcode::dv_fel_qualification::PROBE_KEY;
+    let field = crate::scan::dv_title::PROBE_FIELD;
     format!(
         "f.video_codec='hevc' AND f.dv_profile=7 AND f.dv_el_present=1 AND f.dv_rpu_present=1
  AND json_valid(f.probe_json)
- AND ({requests} OR {variants}
-  OR (json_type(f.probe_json,'$.{legacy}')='object' AND json_extract(f.probe_json,'$.{legacy}.source_size')=f.size
-   AND json_extract(f.probe_json,'$.{legacy}.source_mtime')=f.mtime))",
-        requests = fel(crate::transcode::dv_fel_qualification::REQUESTS_KEY, ""),
-        variants = fel(
-            crate::transcode::dv_fel_qualification::VARIANTS_KEY,
-            "verdict."
-        ),
+ AND json_extract(f.probe_json,'$.{field}.el_kind.state')='consistent'
+ AND json_extract(f.probe_json,'$.{field}.el_kind.value')='fel'"
     )
 }
 
@@ -471,6 +456,7 @@ pub(super) async fn demands<T: QueueSql>(
     store: &T,
     helper: &str,
     fit_version: &str,
+    include_all: bool,
     after_file_id: i64,
     limit: u32,
 ) -> Result<Vec<RefitDemand>, StoreError> {
@@ -501,6 +487,8 @@ SELECT json_object('file_id',f.id,'source_size',f.size,'source_mtime',f.mtime,'p
   ORDER BY j.created_at_ms,j.id LIMIT 1))) AS result_json
 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
 WHERE f.id>json_extract($1,'$.after') AND {fel}
+ AND (json_extract($1,'$.all')=1 OR EXISTS(SELECT 1 FROM dv_conversions disk
+  WHERE disk.file_id=f.id AND disk.state IN ('queued','running')))
  AND json_type(f.probe_json,'$.{complete}')='object' AND json_extract(f.probe_json,'$.{complete}.complete')=1
  AND NOT EXISTS(SELECT 1 FROM background_dv_refit_titles t WHERE t.superseded_at_ms IS NULL AND {title}
   AND t.probe_revision=d.revision)
@@ -517,7 +505,7 @@ ORDER BY f.id LIMIT json_extract($1,'$.limit')
     let rows = store
         .queue_sql(
             sql,
-            encode(&serde_json::json!({"helper":helper,"fit":fit_version,"after":after_file_id,"limit":limit}))?,
+            encode(&serde_json::json!({"helper":helper,"fit":fit_version,"all":include_all,"after":after_file_id,"limit":limit}))?,
             false,
             true,
         )

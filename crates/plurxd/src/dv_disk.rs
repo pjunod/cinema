@@ -4,6 +4,9 @@
 //! proved as a complete replacement before the source pathname moves, and the
 //! scanner then sees an ordinary Profile 8 file on its next read.
 
+#[path = "dv_disk_refit.rs"]
+mod refit;
+
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
@@ -334,6 +337,10 @@ pub struct ConversionPaths {
     pub raw: PathBuf,
     pub converted: PathBuf,
     pub rpu: PathBuf,
+    pub rpu_timeline: PathBuf,
+    pub fitted_rpu: PathBuf,
+    pub verify_video: PathBuf,
+    pub verify_rpu: PathBuf,
     pub replacement: PathBuf,
     pub staged_original: PathBuf,
     pub retained_original: PathBuf,
@@ -363,6 +370,10 @@ impl ConversionPaths {
             raw: directory.join("BL_RPU.hevc"),
             converted: directory.join("BL_RPU.p81.hevc"),
             rpu: directory.join("RPU.bin"),
+            rpu_timeline: directory.join("RPU.timeline"),
+            fitted_rpu: directory.join("RPU.fitted.bin"),
+            verify_video: directory.join("replacement.verify.hevc"),
+            verify_rpu: directory.join("replacement.verify.rpu"),
             replacement: directory.join("replacement.mkv"),
             staged_original: directory.join("source.p7.original"),
             retained_original: PathBuf::from(format!("{path}.p7.orig")),
@@ -545,6 +556,7 @@ pub async fn build_and_verify(
     node_id: &str,
     loss: &CancellationToken,
     keep_original: bool,
+    fitted: Option<(&plurx_core::store::dv_refit_jobs::RefitCurveTable, &Path)>,
 ) -> Result<VerifiedReplacement, String> {
     let paths = ConversionPaths::for_file(file)?;
     prepare_fresh_directory(&paths, file, node_id, loss).await?;
@@ -572,6 +584,35 @@ pub async fn build_and_verify(
         write_scratch_owner(&scratch.directory, &scratch.owner).await?;
     }
 
+    // The complete scanner observes the same held source and records each
+    // displayed RPU's exact source PTS and byte hash in decode order. The raw
+    // HEVC extraction has no presentation clock of its own.
+    if let Some((table, scanner)) = fitted {
+        let scanner = scanner.to_str().ok_or("non-UTF8 DV title scanner path")?;
+        let summary = run_tool_with_bound_media(
+            scanner,
+            &[
+                OsString::new(),
+                table.title.video_index.to_string().into(),
+                "--rpu-timeline".into(),
+                paths.rpu_timeline.as_os_str().to_owned(),
+            ],
+            0,
+            &tool_source,
+            "source during F+ timeline scan",
+            loss,
+        ).await?;
+        let scanned: plurx_core::scan::dv_title::DvTitleStats =
+            serde_json::from_str(&summary).map_err(|e| format!("F+ timeline aggregate: {e}"))?;
+        if !scanned.complete
+            || scanned.el_kind != plurx_core::scan::dv_title::TitleConstant::Consistent(
+                plurx_core::scan::dv_title::TitleElKind::Fel)
+            || i64::try_from(scanned.decoded_frames).ok() != Some(table.title.frames)
+        {
+            return Err("F+ timeline no longer describes the fitted FEL title".into());
+        }
+    }
+
     run_tool_with_bound_media(
         &tools.ffmpeg,
         &[
@@ -581,7 +622,7 @@ pub async fn build_and_verify(
             "-i".into(),
             OsString::new(),
             "-map".into(),
-            "0:v:0".into(),
+            fitted.map_or_else(|| "0:v:0".to_owned(), |(table, _)| format!("0:{}", table.title.video_index)).into(),
             "-c:v".into(),
             "copy".into(),
             "-bsf:v".into(),
@@ -597,23 +638,6 @@ pub async fn build_and_verify(
     )
     .await?;
     require_nonempty(&paths.raw).await?;
-
-    run_tool(
-        &tools.dovi_tool,
-        &[
-            "-m".into(),
-            "2".into(),
-            "convert".into(),
-            "--discard".into(),
-            "-i".into(),
-            paths.raw.as_os_str().to_owned(),
-            "-o".into(),
-            paths.converted.as_os_str().to_owned(),
-        ],
-        loss,
-    )
-    .await?;
-    require_nonempty(&paths.converted).await?;
 
     run_tool(
         &tools.dovi_tool,
@@ -640,6 +664,44 @@ pub async fn build_and_verify(
     )
     .await?;
     let el_type = parse_el_type(&summary);
+    let expected_rpus = if let Some((table, _)) = fitted {
+        if el_type != Some("fel") {
+            return Err("extracted title is not FEL despite current F+ fit".into());
+        }
+        let rpu = paths.rpu.clone();
+        let timeline = paths.rpu_timeline.clone();
+        let output = paths.fitted_rpu.clone();
+        let table = table.clone();
+        let expected = tokio::task::spawn_blocking(move ||
+            refit::author(&rpu, &timeline, &output, &table)
+        ).await.map_err(|e| format!("joining F+ disk author: {e}"))??;
+        if loss.is_cancelled() { return Err("conversion lease lost before F+ injection".into()); }
+        run_tool(&tools.dovi_tool, &[
+            "inject-rpu".into(), "-i".into(), paths.raw.as_os_str().to_owned(),
+            "--rpu-in".into(), paths.fitted_rpu.as_os_str().to_owned(),
+            "-o".into(), paths.converted.as_os_str().to_owned(),
+        ], loss).await?;
+        Some(expected)
+    } else {
+        run_tool(
+        &tools.dovi_tool,
+        &[
+            "-m".into(),
+            "2".into(),
+            "convert".into(),
+            "--discard".into(),
+            "-i".into(),
+            paths.raw.as_os_str().to_owned(),
+            "-o".into(),
+            paths.converted.as_os_str().to_owned(),
+        ],
+        loss,
+    )
+    .await?;
+    require_nonempty(&paths.converted).await?;
+        None
+    };
+    require_nonempty(&paths.converted).await?;
 
     run_tool_with_bound_media(
         &tools.mkvmerge,
@@ -657,6 +719,23 @@ pub async fn build_and_verify(
     )
     .await?;
     require_nonempty(&paths.replacement).await?;
+    if let Some(expected) = expected_rpus {
+        let candidate = bind_child_fresh(&scratch.directory, "replacement.mkv", loss,
+            "replacement during F+ readback").await?;
+        run_tool_with_bound_media(&tools.ffmpeg, &[
+            "-nostdin".into(), "-v".into(), "error".into(), "-i".into(), OsString::new(),
+            "-map".into(), "0:v:0".into(), "-c:v".into(), "copy".into(),
+            "-bsf:v".into(), "hevc_mp4toannexb".into(), "-f".into(), "hevc".into(),
+            paths.verify_video.as_os_str().to_owned(),
+        ], 4, &candidate, "replacement during F+ readback", loss).await?;
+        run_tool(&tools.dovi_tool, &[
+            "extract-rpu".into(), "-i".into(), paths.verify_video.as_os_str().to_owned(),
+            "-o".into(), paths.verify_rpu.as_os_str().to_owned(),
+        ], loss).await?;
+        let readback = paths.verify_rpu.clone();
+        tokio::task::spawn_blocking(move || refit::verify_readback(&readback, &expected))
+            .await.map_err(|e| format!("joining F+ replacement readback: {e}"))??;
+    }
 
     let (source, source_rebound) = bind_expected_content(
         &source_parent,
@@ -2972,6 +3051,10 @@ async fn drain_private_delete_anchor(
             "BL_RPU.hevc",
             "BL_RPU.p81.hevc",
             "RPU.bin",
+            "RPU.timeline",
+            "RPU.fitted.bin",
+            "replacement.verify.hevc",
+            "replacement.verify.rpu",
             "replacement.mkv",
             "source.p7.original",
             DISCARD_PENDING_FILE,
@@ -4727,7 +4810,7 @@ async fn prune_published_scratch(
     context: &PublicationContext,
     loss: &CancellationToken,
 ) -> Result<(), String> {
-    for name in ["BL_RPU.hevc", "BL_RPU.p81.hevc", "RPU.bin"] {
+    for name in ["BL_RPU.hevc", "BL_RPU.p81.hevc", "RPU.bin", "RPU.timeline", "RPU.fitted.bin", "replacement.verify.hevc", "replacement.verify.rpu"] {
         if child_exists(&context.scratch.directory, name).await? {
             if loss.is_cancelled() {
                 return Err("conversion lease was lost before scratch pruning".to_owned());

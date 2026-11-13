@@ -12,6 +12,20 @@ use serde::{Deserialize, Serialize};
 pub const PROBE_FIELD: &str = "plurx_dv_title_v1";
 pub const SCHEMA: u32 = 1;
 
+/// Enhancement layer declaration across every displayed RPU of this source.
+/// Old schema-1 documents lack the field and remain unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleElKind {
+    Fel,
+    Mel,
+}
+
+fn unknown_el_kind() -> TitleConstant<TitleElKind> {
+    TitleConstant::Unknown
+}
+
+
 /// A title constant cannot be selected by taking the last frame's value.
 /// Missing metadata anywhere leaves it unknown; conflicting observations leave
 /// it inconsistent. Neither can supply an endpoint or mastering declaration.
@@ -57,6 +71,8 @@ pub struct DvTitleStats {
     pub max_l1_pq: Option<u16>,
     pub mastering_luminance: TitleConstant<MasteringLuminance>,
     pub mastering_primaries: TitleConstant<MasteringPrimaries>,
+    #[serde(default = "unknown_el_kind")]
+    pub el_kind: TitleConstant<TitleElKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +181,7 @@ mod tests {
             max_l1_pq: Some(0),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
+            el_kind: TitleConstant::Unknown,
         }
     }
 
@@ -264,6 +281,11 @@ mod tests {
         assert!(DvTitleStats::from_probe_json("{}").is_none());
         let mut doc = serde_json::json!({ PROBE_FIELD: good });
         assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()), Some(good));
+        doc[PROBE_FIELD].as_object_mut().unwrap().remove("el_kind");
+        assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()), Some(good));
+        doc[PROBE_FIELD]["el_kind"] = serde_json::json!({"state":"consistent","value":"fel"});
+        assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()).unwrap().el_kind,
+            TitleConstant::Consistent(TitleElKind::Fel));
         doc[PROBE_FIELD]["schema"] = serde_json::json!(2);
         assert!(DvTitleStats::from_probe_json(&doc.to_string()).is_none());
     }

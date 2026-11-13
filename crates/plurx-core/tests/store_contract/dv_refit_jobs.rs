@@ -159,6 +159,11 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
                     max_l1_pq: Some(3900),
                     mastering_luminance: TitleConstant::Unknown,
                     mastering_primaries: TitleConstant::Unknown,
+                el_kind: if fel && profile == 7 {
+                    TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Fel)
+                } else {
+                    TitleConstant::Consistent(plurx_core::scan::dv_title::TitleElKind::Mel)
+                },
                 },
             },
             now_ms: now(),
@@ -166,7 +171,7 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
         .await
         .expect("title facts");
     assert!(matches!(published, JobPublishOutcome::Published { .. }));
-    if fel && profile == 7 {
+    if fel && profile == 7 && !name.contains("no-recipe") {
         assert!(store
             .put_dv_fel_verdict(id, file.size, file.mtime, &verdict)
             .await
@@ -176,7 +181,7 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
 }
 async fn demand(store: &Arc<dyn Store>, file: i64, helper: &str) -> Option<RefitDemand> {
     store
-        .dv_refit_demands(helper, FIT_VERSION, 0, 16)
+        .dv_refit_demands(helper, FIT_VERSION, true, 0, 16)
         .await
         .expect("F+ demand")
         .into_iter()
@@ -323,6 +328,9 @@ async fn refit_demand_selects_current_profile7_fel_titles() {
     for_each_backend(|store, backend| async move {
         let fel = title(&store, "refit-demand-fel", true).await;
         let mel = title(&store, "refit-demand-mel", false).await;
+        let no_recipe = title(&store, "refit-demand-no-recipe", true).await;
+        assert!(demand(&store, no_recipe.id, &helper()).await.is_some(),
+            "{backend}: complete FEL fact does not require a legacy recipe");
         let found = demand(&store, fel.id, &helper())
             .await
             .expect("FEL title demanded");

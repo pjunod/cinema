@@ -817,6 +817,7 @@ mod tests {
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
         }
+    el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
     }
     #[test]
     fn sdr_resolves_one_floor_without_hdr_primaries_and_freezes_its_identity() {

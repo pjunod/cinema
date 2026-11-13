@@ -4,7 +4,8 @@
 //! shared request identity, a fenced claim with lease and heartbeat, the
 //! held-source helper run labelled for Activity, and one fenced publication.
 //!
-//! It runs only while at least one client platform's F+ switch is on
+//! It runs while at least one client platform's F+ switch is on, or a
+//! pending disk conversion requires a fit before discarding a FEL,
 //! (`playback.dolby_vision_refit_*`, Settings → Developer). It coexists with
 //! live sessions on an explicit thread reservation and yields only when a
 //! viewer waits for capacity, or to an ordinary media probe; a yield keeps
@@ -182,7 +183,7 @@ impl RefitTask {
         after: &mut i64,
     ) -> Result<Option<Self>, StoreError> {
         let authority = state.jobs.execution_authority();
-        if !authority.may_execute_job(JobKind::DvRefit).await || !enabled(state).await? {
+        if !authority.may_execute_job(JobKind::DvRefit).await {
             return Ok(None);
         }
         let tools = match ToolSet::capture().await {
@@ -208,9 +209,10 @@ impl RefitTask {
     ) -> Result<Option<Self>, StoreError> {
         let authority = state.jobs.execution_authority();
         let helper = tools.refit_helper_identity();
+        let include_all = enabled(state).await?;
         let demands = state
             .store
-            .dv_refit_demands(&helper, FIT_VERSION, *after, 16)
+            .dv_refit_demands(&helper, FIT_VERSION, include_all, *after, 16)
             .await?;
         if demands.is_empty() {
             *after = 0;
