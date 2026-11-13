@@ -4780,7 +4780,11 @@ impl HiqliteAuthStore {
         let rows = self
             .client()
             // authority: committed F+ shape fences extension migration and admission.
-            .query_consistent_map::<RemoteShapeRow, _>(super::dv_refit_jobs::SHAPE_SQL, params!())
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "dv_refit_schema_version",
+                super::dv_refit_jobs::SHAPE_SQL,
+                params!(),
+            )
             .await?;
         let shape = rows
             .into_iter()
@@ -4791,7 +4795,11 @@ impl HiqliteAuthStore {
             let rows = self
                 .client()
                 // authority: admission must observe the committed marker paired with the shape.
-                .query_consistent_map::<CountRow, _>(super::dv_refit_jobs::MARKER_SQL, params!())
+                .query_consistent_map::<CountRow, _>(
+                    "dv_refit_schema_version",
+                    super::dv_refit_jobs::MARKER_SQL,
+                    params!(),
+                )
                 .await?;
             if !matches!(rows.as_slice(), [row] if row.count == 1) {
                 return Err(StoreError::Migration(
