@@ -268,6 +268,77 @@ fn validate_activation_shape(activation: &MediaSessionActivation) -> Result<(), 
     }
 }
 
+/// The selection upsert of [`record_desired_selection`], run inside the
+/// claim's transaction (D3c) under the same predicate the replicated store
+/// states: it writes only while this attempt's claim row is there, `starting`
+/// and unexpired. The incarnation is a fresh UUID, so no earlier attempt
+/// matches. SQLite rolls back with the transaction, but the predicate is kept
+/// so both stores answer the same cases the same way, not by relying on the
+/// rollback.
+#[allow(clippy::too_many_arguments)]
+fn record_claimed_selection(
+    tx: &rusqlite::Transaction<'_>,
+    rebuilt: bool,
+    user_id: i64,
+    playback_id: &str,
+    digest: &str,
+    canonical_form: &str,
+    request_id: &str,
+    incarnation_id: &str,
+    now_ms: i64,
+) -> Result<crate::domain::DesiredOwnership, StoreError> {
+    let owner_1 = local_owner_predicate(rebuilt, 1);
+    let (columns, values, conflict) = if rebuilt {
+        ("owner_key, principal_kind, user_id, share_grant_id, share_viewer_key, playback_id, revision, digest, canonical_form, updated_at_ms",
+         "('local:' || ?1), 'local', ?1, NULL, NULL, ?2, 1, ?3, ?4, ?5", "owner_key, playback_id")
+    } else {
+        (
+            "user_id, playback_id, revision, digest, canonical_form, updated_at_ms",
+            "?1, ?2, 1, ?3, ?4, ?5",
+            "user_id, playback_id",
+        )
+    };
+    let changed = tx.execute(
+        &format!(
+            "INSERT INTO media_playback_desired
+             ({columns})
+         SELECT {values}
+          WHERE EXISTS (SELECT 1 FROM media_session_requests
+                         WHERE {owner_1} AND request_id = ?6 AND incarnation_id = ?7
+                           AND state = 'starting' AND claim_expires_at_ms > ?5)
+         ON CONFLICT({conflict}) DO UPDATE SET
+             revision = CASE
+                 WHEN media_playback_desired.digest = excluded.digest
+                     THEN media_playback_desired.revision
+                 ELSE media_playback_desired.revision + 1
+             END,
+             digest = excluded.digest,
+             canonical_form = excluded.canonical_form,
+             updated_at_ms = CASE
+                 WHEN media_playback_desired.digest = excluded.digest
+                     THEN media_playback_desired.updated_at_ms
+                 ELSE excluded.updated_at_ms
+             END"
+        ),
+        rusqlite::params![
+            user_id,
+            playback_id,
+            digest,
+            canonical_form,
+            now_ms,
+            request_id,
+            incarnation_id
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Task(
+            "desired-selection principal is unavailable".into(),
+        ));
+    }
+    desired_within(tx, user_id, playback_id)?
+        .ok_or_else(|| StoreError::Database("desired selection vanished".into()))
+}
+
 /// The bounds the table's own CHECK constraints enforce, refused before the
 /// statement rather than as a database error.
 ///
@@ -1476,7 +1547,7 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
-    async fn claim_media_session_request(
+    async fn claim_media_session_request_recording(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
@@ -1485,7 +1556,14 @@ impl MediaSessionStore for SqliteStore {
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
-    ) -> Result<MediaSessionRequestClaim, StoreError> {
+        desired: Option<&crate::domain::DesiredSelectionWrite<'_>>,
+    ) -> Result<
+        (
+            MediaSessionRequestClaim,
+            Option<crate::domain::DesiredOwnership>,
+        ),
+        StoreError,
+    > {
         let user_id = crate::store::local_media_principal_id(principal)?;
         validate_claim(
             user_id,
@@ -1496,16 +1574,26 @@ impl MediaSessionStore for SqliteStore {
             now_ms,
             claim_expires_at_ms,
         )?;
+        if let Some(desired) = desired {
+            validate_desired_selection(
+                playback_id,
+                desired.digest,
+                desired.canonical_form,
+                now_ms,
+            )?;
+        }
         self.maintain_media_sessions(now_ms).await?;
         let request_id = request_id.to_owned();
         let request_fingerprint = request_fingerprint.to_ascii_lowercase();
         let playback_id = playback_id.to_owned();
         let incarnation_id = incarnation_id.to_owned();
+        let desired =
+            desired.map(|desired| (desired.digest.to_owned(), desired.canonical_form.to_owned()));
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let rebuilt = route_projection(&tx)? == PRINCIPAL_ROUTE_COLS;
             if rebuilt && !tx.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE id=?1)", [user_id], |row| row.get::<_, bool>(0))? {
-                return Ok(MediaSessionRequestClaim::Overloaded);
+                return Ok((MediaSessionRequestClaim::Overloaded, None));
             }
             let owner_1 = local_owner_predicate(rebuilt, 1);
             let owner_4 = local_owner_predicate(rebuilt, 4);
@@ -1575,7 +1663,9 @@ impl MediaSessionStore for SqliteStore {
                             ],
                         )? == 1;
                         if reacquired {
-                            MediaSessionRequestClaim::Acquired { incarnation_id }
+                            MediaSessionRequestClaim::Acquired {
+                                incarnation_id: incarnation_id.clone(),
+                            }
                         } else {
                             MediaSessionRequestClaim::Overloaded
                         }
@@ -1610,8 +1700,24 @@ impl MediaSessionStore for SqliteStore {
                     } else {
                         MediaSessionRequestClaim::Conflict
                     };
+                let recorded = match (&outcome, desired.as_ref()) {
+                    (MediaSessionRequestClaim::Acquired { .. }, Some((digest, canonical_form))) => {
+                        Some(record_claimed_selection(
+                            &tx,
+                            rebuilt,
+                            user_id,
+                            &playback_id,
+                            digest,
+                            canonical_form,
+                            &request_id,
+                            &incarnation_id,
+                            now_ms,
+                        )?)
+                    }
+                    _ => None,
+                };
                 tx.commit()?;
-                return Ok(outcome);
+                return Ok((outcome, recorded));
             }
             let in_flight: i64 = tx.query_row(
                 &format!("SELECT COUNT(*) FROM media_session_requests
@@ -1645,7 +1751,7 @@ impl MediaSessionStore for SqliteStore {
                 || session_rows >= MAX_SESSION_ROWS_PER_USER
             {
                 tx.commit()?;
-                return Ok(MediaSessionRequestClaim::Overloaded);
+                return Ok((MediaSessionRequestClaim::Overloaded, None));
             }
             tx.execute(
                 if rebuilt { "INSERT INTO media_session_requests
@@ -1667,8 +1773,24 @@ impl MediaSessionStore for SqliteStore {
                     now_ms,
                 ],
             )?;
+            let recorded = desired
+                .as_ref()
+                .map(|(digest, canonical_form)| {
+                    record_claimed_selection(
+                        &tx,
+                        rebuilt,
+                        user_id,
+                        &playback_id,
+                        digest,
+                        canonical_form,
+                        &request_id,
+                        &incarnation_id,
+                        now_ms,
+                    )
+                })
+                .transpose()?;
             tx.commit()?;
-            Ok(MediaSessionRequestClaim::Acquired { incarnation_id })
+            Ok((MediaSessionRequestClaim::Acquired { incarnation_id }, recorded))
         })
         .await
     }

@@ -1326,6 +1326,18 @@ pub struct DesiredOwnership {
     pub updated_at_ms: i64,
 }
 
+/// A viewer's ask, recorded by the claim that starts the session built for it
+/// (D3c) instead of by a write of its own before the claim.
+///
+/// The claim upserts it in its own transaction under a predicate that ties the
+/// upsert to *this attempt's* claim row (this incarnation, still `starting`,
+/// unexpired), so a refused, joined or overloaded claim records nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesiredSelectionWrite<'a> {
+    pub digest: &'a str,
+    pub canonical_form: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionPreparation {
     /// Independent cancellation is checked inside resource admission, so a

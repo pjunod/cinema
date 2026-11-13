@@ -154,6 +154,183 @@ async fn an_ask_on_create_is_recorded_before_the_create_is_answered() {
     );
 }
 
+/// D3c: the ask rides in the claim, so a create refused before its claim
+/// records none (D3 contract §4.5, §12-6), where it used to record the ask on
+/// its way to the refusal. The refusal here is the HEVC copy-transport one,
+/// which stands before the claim.
+#[tokio::test]
+async fn a_create_refused_before_its_claim_records_no_ask() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::playback::DesiredQuality;
+    let state = resolver_state();
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Refused before claim".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "HEVC copy ingress".into(),
+            year: Some(2026),
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let user = state
+        .store
+        .create_user("no-ask-before-claim", "hash", false)
+        .await
+        .expect("user");
+    let file_id = state
+        .store
+        .upsert_file(
+            item,
+            "/media/refused-hvcc.mp4",
+            1_023,
+            1,
+            &ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mp4".into()),
+                video_codec: Some("hevc".into()),
+                video_codec_tag: Some("hvc1".into()),
+                field_order: None,
+                video_profile: Some("Main".into()),
+                width: Some(1920),
+                height: Some(1080),
+                bit_depth: Some(8),
+                raw_json: Some(
+                    r#"{"streams":[{"codec_type":"video","codec_name":"hevc","codec_tag_string":"hvc1","extradata_size":23}]}"#
+                        .to_owned(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let ask = envelope(1, DesiredQuality::Original);
+    let caps = caps_v2(
+        r#"{"v":2,
+                "video":[{"codec":"hevc","present":["sdr"],"max_height":2160}],
+                "audio":["aac"],"containers":["mp4"],
+                "transports":["progressive"],
+                "progressive_hevc_sample_entries":["hvc1"],
+                "display":{"hdr":false,"dolby_vision":false}}"#,
+    );
+    let playback = "no-ask-before-claim-player";
+    let error = match create(
+        crate::http::extract::AuthUser(user.clone()),
+        State(state.clone()),
+        AxPath(file_id),
+        HeaderMap::new(),
+        super::super::network::RemoteAddress(None),
+        Json(CreateSession {
+            playback_id: playback.into(),
+            request_id: Some("no-ask-before-claim".into()),
+            copy: Some(true),
+            caps: Some(caps),
+            intent: Some(ask),
+            ..bare_create()
+        }),
+    )
+    .await
+    {
+        Ok(_) => panic!("a client that omitted HLS cannot execute copy-HLS"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            ApiError::Typed {
+                code: "unsupported_hevc_delivery",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let recorded = state
+        .store
+        .desired_selection(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            playback,
+        )
+        .await
+        .expect("reading the desired row");
+    assert!(
+        recorded.is_none(),
+        "a create refused before its claim records no ask: {recorded:?}"
+    );
+}
+
+/// D3c: a claim the user's allowance refuses is not a viewer who asked: the
+/// ask rides in the claim, so an overloaded create records none.
+#[tokio::test]
+async fn an_overloaded_create_records_no_ask() {
+    use plurx_core::playback::DesiredQuality;
+    let state = resolver_state();
+    let now = unix_ms();
+    for n in 0..32 {
+        let claimed = state
+            .store
+            .claim_media_session_request(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                &format!("fill-{n}"),
+                &"c".repeat(64),
+                &format!("fill-playback-{n}"),
+                &uuid::Uuid::new_v4().to_string(),
+                now,
+                now + 60_000,
+            )
+            .await
+            .expect("fill the in-flight allowance");
+        assert!(matches!(
+            claimed,
+            plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+    }
+    let answer = create_with(
+        &state,
+        CreateSession {
+            playback_id: "overloaded-player".into(),
+            intent: Some(envelope(1, DesiredQuality::Original)),
+            ..bare_create()
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            answer,
+            Err(ApiError::TypedRetry {
+                code: "media_session_overloaded",
+                ..
+            })
+        ),
+        "the claim is refused: {:?}",
+        answer.as_ref().err()
+    );
+    let recorded = state
+        .store
+        .desired_selection(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+            "overloaded-player",
+        )
+        .await
+        .expect("reading the desired row");
+    assert!(
+        recorded.is_none(),
+        "an overloaded claim records no ask: {recorded:?}"
+    );
+}
+
 /// The control protocol being off must not make the ask disappear.
 ///
 /// This is the configuration the handoff singles out. With the setting off

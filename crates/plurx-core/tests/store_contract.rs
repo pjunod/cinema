@@ -23,6 +23,8 @@ use queue_fixture::QueueFixture;
 mod applied_view;
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/claim_selection.rs"]
+mod claim_selection;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -875,6 +877,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "validation_playback_pointer_desired_revision",
     "validation_write_legacy_playback_pointer",
     "claim_media_session_request",
+    "claim_media_session_request_recording",
     "record_library_channel_session_recipe",
     "assign_media_session_request_owner",
     "activate_media_session",
@@ -21341,7 +21344,11 @@ fn contract_inventory_matches_every_store_method() {
     // main declared (551) without naming them here; named above.
     // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
     // exercised by the source-fenced DV title-job contracts.
-    assert_eq!(declared.len(), 559, "review the Store method count");
+    // +1: `claim_media_session_request_recording` (D3c), the claim that also
+    // records the viewer's ask in its own transaction, in
+    // `MEDIA_SESSION_METHODS` and covered on both backends by
+    // `store_contract/claim_selection.rs`.
+    assert_eq!(declared.len(), 560, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

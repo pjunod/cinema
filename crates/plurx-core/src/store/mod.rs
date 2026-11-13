@@ -5184,7 +5184,50 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
-    ) -> Result<MediaSessionRequestClaim, StoreError>;
+    ) -> Result<MediaSessionRequestClaim, StoreError> {
+        Ok(self
+            .claim_media_session_request_recording(
+                principal,
+                request_id,
+                request_fingerprint,
+                playback_id,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+                None,
+            )
+            .await?
+            .0)
+    }
+
+    /// [`claim_media_session_request`](Self::claim_media_session_request) that
+    /// also records the viewer's ask (D3c). With `desired`, the claim that is
+    /// `Acquired` (a new row or a re-acquired one) upserts the selection in the
+    /// same transaction, under a predicate that matches only *this* claim
+    /// (this `incarnation_id`, `starting`, unexpired), and the answer carries
+    /// the recorded row. Every other answer (`InFlight`, `Resolved`,
+    /// `Conflict`, `Overloaded`) records nothing and carries `None`. The
+    /// upsert is [`record_desired_selection`](Self::record_desired_selection)'s
+    /// statement, so a repeated digest does not move the revision. Without
+    /// `desired` this is the plain claim.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_media_session_request_recording(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+        request_fingerprint: &str,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+        claim_expires_at_ms: i64,
+        desired: Option<&crate::domain::DesiredSelectionWrite<'_>>,
+    ) -> Result<
+        (
+            MediaSessionRequestClaim,
+            Option<crate::domain::DesiredOwnership>,
+        ),
+        StoreError,
+    >;
 
     /// The claim row of `request_id`, read only. A retry waiting on an owner
     /// that is still starting reads this between ticks instead of re-running

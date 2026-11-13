@@ -3323,18 +3323,22 @@ async fn create_with_purpose_attempt(
             "the growing live HLS presentation has been removed; request VOD",
         ));
     }
-    // The ask is made durable before anything is built for it, and before this
-    // request can be answered.
+    // The ask is made durable by the claim, not before it (D3c).
     //
-    // Placed here, above every other decision, rather than beside the response:
-    // a create that goes on to fail is still a viewer who asked, and the row
-    // records the asking, not the outcome. The order that matters is the one
-    // §1 names — canonical desired ownership persisted *before* an
-    // intent-changing request is reported accepted — and answering first would
-    // tell a client its selection was taken while nothing anywhere had recorded
-    // it. A restart or an owner change in that window loses the ask entirely.
+    // The order that matters is still the one §1 names: canonical desired
+    // ownership is persisted *before* an intent-changing request is reported
+    // accepted. The claim is the first write this create makes, so it carries
+    // the ask in its own transaction, under a predicate that matches only this
+    // attempt's claim row (`claim_media_session_request_recording`). The ask
+    // lands exactly when the create becomes its request's owner, which is
+    // what "a viewer who asked" has always meant for a create that goes on:
+    // a create refused before the claim (invalid intent or capabilities, the
+    // HDR burn guard, the HEVC copy-transport refusal, `quality_catalog_unavailable`,
+    // an overloaded or joined claim) records no ask, where it used to record
+    // one on the way to its refusal. None of those answers was ever reported
+    // accepted, and each is retryable (D3 contract §12-6).
     //
-    // A failed write refuses the create for the same reason the control
+    // A failed claim refuses the create for the same reason the control
     // exchange refuses: a retry costs one request, and a phantom acceptance
     // costs a viewer their selection with nothing to point at.
     // `None` for a body that carried no ask: a playback with nothing recorded
@@ -3342,42 +3346,15 @@ async fn create_with_purpose_attempt(
     // A parser-floor create must not reinterpret a future route as ordinary
     // Auto or persist acceptance of a candidate it cannot dispatch.
     let mut recorded_ask_revision: Option<i64> = None;
-    if let Some(intent) = req.intent.as_ref() {
-        intent
-            .validate()
-            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
-        let selection = intent.selection;
-        recorded_ask_revision = Some(
-            state
-                .store
-                .record_desired_selection(
-                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                        user_id: user.id,
-                    },
-                    &req.playback_id,
-                    &intent.digest(),
-                    &selection.canonical_form(),
-                    unix_ms(),
-                )
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        target: "plurxd::http::hls",
-                        playback = %req.playback_id,
-                        "recording the viewer's selection on create failed: {error}"
-                    );
-                    ApiError::ServiceUnavailable(
-                        "this selection could not be recorded; retry shortly".to_owned(),
-                    )
-                })?
-                .revision,
-        );
-        state
-            .hls_route_hooks
-            .get()
-            .after_create_ask_recorded()
-            .await;
-    }
+    let desired_ask: Option<(String, String)> = match req.intent.as_ref() {
+        Some(intent) => {
+            intent
+                .validate()
+                .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+            Some((intent.digest(), intent.selection.canonical_form()))
+        }
+        None => None,
+    };
     let ingress_serving_authority = state.serving.authority();
     let ingress_serving_generation = ingress_serving_authority
         .admit()
@@ -3668,15 +3645,31 @@ async fn create_with_purpose_attempt(
                 claim_principal.clone(),
                 request_claim_id.clone(),
                 incarnation_id.clone(),
-                state.store.claim_media_session_request(
-                    &claim_principal,
-                    &request_claim_id,
-                    &fingerprint,
-                    &request.playback_id,
-                    &incarnation_id,
-                    claim_now_ms,
-                    claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
-                ),
+                async {
+                    let desired_write = desired_ask.as_ref().map(|(digest, canonical_form)| {
+                        plurx_core::domain::DesiredSelectionWrite {
+                            digest,
+                            canonical_form,
+                        }
+                    });
+                    let (claim, recorded) = state
+                        .store
+                        .claim_media_session_request_recording(
+                            &claim_principal,
+                            &request_claim_id,
+                            &fingerprint,
+                            &request.playback_id,
+                            &incarnation_id,
+                            claim_now_ms,
+                            claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
+                            desired_write.as_ref(),
+                        )
+                        .await?;
+                    if let Some(recorded) = recorded {
+                        recorded_ask_revision = Some(recorded.revision);
+                    }
+                    Ok(claim)
+                },
             )
             .await
             .map_err(|error| session_store_error("claiming the media-session request", error))?
@@ -3693,6 +3686,13 @@ async fn create_with_purpose_attempt(
                             .unwrap_or(claim_window_ends),
                         OWNED_CREATE_REPOST_GRACE,
                     );
+                    if desired_ask.is_some() {
+                        state
+                            .hls_route_hooks
+                            .get()
+                            .after_create_ask_recorded()
+                            .await;
+                    }
                     break guard;
                 }
                 Err(claim) => claim,
