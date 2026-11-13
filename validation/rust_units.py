@@ -602,9 +602,14 @@ def ensure_commit(commit, repository="."):
     if token:
         import base64
         auth = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        subprocess.run(["git", "-C", repository, "-c", f"http.extraheader=AUTHORIZATION: basic {auth}",
-                        "fetch", "--quiet", "--no-tags", "origin", commit],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        try:
+            subprocess.run(["git", "-C", repository, "-c", f"http.extraheader=AUTHORIZATION: basic {auth}",
+                            "fetch", "--quiet", "--no-tags", "origin", commit],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        except subprocess.TimeoutExpired:
+            # Historical evidence is optional. A timed-out fetch cannot
+            # authenticate its commit, so the current tests must run instead.
+            return False
     return present()
 
 
@@ -712,13 +717,17 @@ def history(forge, authenticator, crate, key):
     name = receipt_name(crate, key)
     try:
         artifacts = forge.get("/actions/artifacts", {"name": name, "page": 1, "limit": 50})
-    except NotAdopted as error:
-        print(f"{crate}: receipt lookup unavailable ({error}); its tests run")
+        if isinstance(artifacts, dict):
+            artifacts = artifacts.get("artifacts")
+        require(isinstance(artifacts, list), "artifact listing is not a list", NotAdopted)
+        # Malformed metadata is never evidence, and must not turn mixed
+        # run-id types into a sorting error before authentication starts.
+        artifacts = sorted((a for a in artifacts if isinstance(a, dict) and a.get("name") == name
+                            and type(a.get("run_id")) is int and a["run_id"] > 0),
+                           key=lambda a: a["run_id"], reverse=True)[:MAX_CANDIDATES]
+    except (NotAdopted, ValueError, TypeError) as error:
+        print(f"{crate}: receipt lookup unavailable ({type(error).__name__}); its tests run")
         return {"passed": set(), "failed": set(), "listings": [], "runs": []}
-    if isinstance(artifacts, dict):
-        artifacts = artifacts.get("artifacts", [])
-    artifacts = sorted((a for a in artifacts if isinstance(a, dict) and a.get("name") == name),
-                       key=lambda a: a.get("run_id", 0), reverse=True)[:MAX_CANDIDATES]
     passed, failed, listings, runs = set(), set(), [], []
     for artifact in artifacts:
         try:
