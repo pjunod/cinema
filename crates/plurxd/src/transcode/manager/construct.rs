@@ -1461,8 +1461,13 @@ impl TranscodeManager {
         loop {
             while *waiters.borrow() > 0 || *qualification_waiters.borrow() > 0 {
                 let (library_idle, qualification_idle) = tokio::join!(
-                    waiters.wait_for(|n| *n == 0),
-                    qualification_waiters.wait_for(|n| *n == 0),
+                    async { waiters.wait_for(|n| *n == 0).await.map(|_| ()) },
+                    async {
+                        qualification_waiters
+                            .wait_for(|n| *n == 0)
+                            .await
+                            .map(|_| ())
+                    },
                 );
                 library_idle.ok()?;
                 qualification_idle.ok()?;

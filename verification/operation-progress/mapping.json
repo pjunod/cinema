@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "200496b94104cabaa6fd788645045f230d7942d33e9721e02ca5992c5a802381"
+        "sha256": "d5c05e99f63411a57b0433527c668cde376b83453bc18b0295d713cb12592121"
       },
       {
         "table": "42 daemon schedule loop no token",

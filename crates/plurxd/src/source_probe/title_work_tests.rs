@@ -1120,10 +1120,7 @@ async fn qualification_pressure_does_not_preempt_speech_and_cleans_up_on_cancel(
     assert!(manager.speech_capacity_available(&speech));
 
     qualification.abort();
-    assert!(qualification
-        .await
-        .expect_err("waiter was cancelled")
-        .is_cancelled());
+    assert!(matches!(qualification.await, Err(error) if error.is_cancelled()));
     tokio::time::timeout(
         crate::admission::QUEUE_WAIT,
         waiters.wait_for(|count| *count == 0),
@@ -1151,10 +1148,7 @@ async fn qualification_pressure_does_not_preempt_speech_and_cleans_up_on_cancel(
     .expect("qualification waiter counter remains open");
     assert!(manager.fragment_worker_idle(&held_qualification));
     peer_qualification.abort();
-    assert!(peer_qualification
-        .await
-        .expect_err("peer waiter was cancelled")
-        .is_cancelled());
+    assert!(matches!(peer_qualification.await, Err(error) if error.is_cancelled()));
     tokio::time::timeout(
         crate::admission::QUEUE_WAIT,
         peer_waiters.wait_for(|count| *count == 0),
