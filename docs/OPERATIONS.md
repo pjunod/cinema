@@ -3341,30 +3341,23 @@ with a newly issued token. Never copy the removed directory back into service.
 
 ## Rolling upgrades
 
-Media placement between nodes compares three facts **independently**, and
-Settings → Cluster shows all three on every node card: the **build** the node
-reports, its **media protocol** (`PROTOCOL_VERSION` in
-`crates/plurxd/src/media_pool.rs`; placement requires an exact match), and
-whether the node you are looking from would place on it now (**eligible
-owner** — a fresh, exact-protocol advertisement with an available egress and
-an encoder; the card names the reason when it is not). A node on another
-protocol never appears in placement at all, so during a protocol-changing
-upgrade the fleet is two placement cohorts: old nodes place among old nodes,
-new among new.
+Settings → Cluster shows each node's build, media protocol
+(`PROTOCOL_VERSION` in `crates/plurxd/src/media_pool.rs`), and independent
+*eligible owner* verdict. Placement requires a fresh, exact-protocol
+advertisement, available egress and an encoder. The card names any refusal.
+Different protocols never share placement, so a protocol upgrade creates two
+cohorts: old nodes place among old nodes, new among new.
 
-The rule for a rolling upgrade:
+1. Upgrade one serving cohort at a time. Before the next node, confirm its
+   Cluster card reports ready, the new build/protocol, and *eligible owner*.
+2. Keep an eligible worker in each cohort. While old ingress accepts requests,
+   keep an old-protocol worker eligible; otherwise that ingress starts only
+   locally.
+3. Drain old ingress before the last old node: finish or move its sessions
+   first, because new-protocol workers refuse old-protocol placement.
 
-1. Upgrade one serving cohort at a time — one node, then confirm on the
-   Cluster card that it reads ready, its new build and protocol, and
-   *eligible owner* before the next.
-2. Keep at least one eligible owner in each cohort. While any old-build
-   ingress still takes requests, at least one old-protocol worker must stay
-   eligible, or that ingress can only start locally.
-3. Drain old ingress before upgrading the last old node: its sessions finish
-   or move first, because no new-protocol worker will accept its placement.
-
-A build skew with the same protocol is ordinary and needs none of this; the
-card flags it so it is noticed, not because placement refuses it.
+Same-protocol build skew is ordinary. The card flags it for visibility;
+placement does not refuse it.
 
 Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
 (run by `make paperwork`) refuses a change to a strict media-pool envelope
