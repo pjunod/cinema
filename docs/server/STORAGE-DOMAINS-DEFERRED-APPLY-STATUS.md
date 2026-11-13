@@ -9,12 +9,12 @@ ownership remain valid. Saving itself never waits for runtime state.
 
 | Milestone | State | Evidence or next action |
 |---|---|---|
-| Atomic pending schema and migration | Implemented; unqualified | v131, both backends, strict shape verification |
-| Save/apply and consistent diagnostics | Implemented; unqualified | Final review and focused store contracts pending |
-| HTTP and existing scheduler integration | Implemented; unqualified | Admin-only save; voter applies; no new task/timer |
+| Atomic pending schema and migration | Focused checks pass | v131, both backends, strict shape verification |
+| Save/apply and consistent diagnostics | Focused checks pass | Six storage behavior contracts on SQLite and real replicated voters; interface inventory reconciled separately |
+| HTTP and existing scheduler integration | Focused command passed | Admin-only save; voter applies; no new task/timer |
 | Settings status and pending values | Focused regressions pass | 89 cases passed initially; corrected the remaining fixture expectation and reran that case successfully |
 | Adversarial review | Findings addressed | Protected edits made during GET/PUT; reviewer accepted targeted disposition; atomic ownership logic had no blocker |
-| Focused regressions and fast lane | Running | Rust focused checks use the shared external cache; retry only failed checks |
+| Focused regressions and fast lane | Local checks pass; PR lane next | Seven schema/migration cases, six behavior contracts, Store inventory, HTTP/scheduler command and Settings cases; retry only failed checks |
 | Merge and deployment | Pending | Merge only qualified candidate; operator deploys |
 
 ## Decisions and limits

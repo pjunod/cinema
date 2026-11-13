@@ -1665,6 +1665,7 @@ paths = [
   "validation/pr_event.py",
   "scripts/outline",
   "scripts/quiet",
+  "tests/operations/test_quiet.py",
   "scripts/ci-failures",
   "scripts/ci-failures.fleet.example.json",
   "swarm/*.txt",
