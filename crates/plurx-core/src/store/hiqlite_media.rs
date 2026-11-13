@@ -460,6 +460,35 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      (probe_json IS NOT NULL) AS probed, video_codec_tag, field_order, \
      max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
 
+/// The planning snapshot's one statement: the file row, its probe, the
+/// selected settings, `playback_input_generation` and the item title. The
+/// quorum read and the replica read run exactly this text.
+fn planning_snapshot_sql() -> String {
+    format!("WITH input AS (SELECT $1 AS file_id, $2 AS keys) SELECT {FILE_COLS}, probe_json AS planning_probe, \
+        (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
+        (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings, \
+        (SELECT title FROM items WHERE items.id = files.item_id) AS planning_item_title \
+        FROM files WHERE id = (SELECT file_id FROM input)")
+}
+
+fn planning_snapshot_from_rows(
+    rows: Vec<PlanningSnapshotRow>,
+) -> Result<Option<super::PlaybackPlanningSnapshot>, StoreError> {
+    rows.into_iter()
+        .next()
+        .map(|row| {
+            Ok(super::PlaybackPlanningSnapshot {
+                file: row.file.try_into()?,
+                probe_json: row.probe_json,
+                generation: row.generation,
+                settings: serde_json::from_str(&row.settings)
+                    .map_err(|error| StoreError::Database(error.to_string()))?,
+                item_title: row.item_title,
+            })
+        })
+        .transpose()
+}
+
 struct PlanningSnapshotRow {
     file: FileRow,
     probe_json: Option<String>,
@@ -1409,6 +1438,27 @@ impl HiqliteAuthStore {
                 (row.item_id, MediaFacts::from(facts))
             })
             .collect())
+    }
+
+    /// [`super::MediaStore::playback_planning_snapshot`] from this node's
+    /// replica: the same one statement, for the applied view's planning read
+    /// (D3b) under its proof and floors only.
+    pub(super) async fn local_playback_planning_snapshot(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+    ) -> Result<Option<super::PlaybackPlanningSnapshot>, StoreError> {
+        let keys = super::selected_planning_keys_json(keys)?;
+        let rows = self
+            .client()
+            .query_map::<PlanningSnapshotRow, _>(
+                "local_playback_planning_snapshot",
+                planning_snapshot_sql(),
+                params!(file_id, keys),
+            )
+            .await
+            .map_err(database_error)?;
+        planning_snapshot_from_rows(rows)
     }
 
     pub(super) async fn local_get_file_probe_json(
@@ -3180,29 +3230,13 @@ impl MediaStore for HiqliteAuthStore {
         file_id: i64,
         keys: &[&str],
     ) -> Result<Option<super::PlaybackPlanningSnapshot>, StoreError> {
-        let keys = super::selected_settings_json(keys)?;
+        let keys = super::selected_planning_keys_json(keys)?;
         let rows = self.client()
         // authority: all planning inputs and generation share one committed read.
         .query_consistent_map::<PlanningSnapshotRow, _>("playback_planning_snapshot", 
-            format!("WITH input AS (SELECT $1 AS file_id, $2 AS keys) SELECT {FILE_COLS}, probe_json AS planning_probe, \
-                (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
-                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings, \
-                (SELECT title FROM items WHERE items.id = files.item_id) AS planning_item_title \
-                FROM files WHERE id = (SELECT file_id FROM input)"), params!(file_id, keys),
+            planning_snapshot_sql(), params!(file_id, keys),
         ).await.map_err(database_error)?;
-        rows.into_iter()
-            .next()
-            .map(|row| {
-                Ok(super::PlaybackPlanningSnapshot {
-                    file: row.file.try_into()?,
-                    probe_json: row.probe_json,
-                    generation: row.generation,
-                    settings: serde_json::from_str(&row.settings)
-                        .map_err(|error| StoreError::Database(error.to_string()))?,
-                    item_title: row.item_title,
-                })
-            })
-            .transpose()
+        planning_snapshot_from_rows(rows)
     }
 
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {

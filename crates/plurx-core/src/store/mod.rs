@@ -2509,6 +2509,23 @@ pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError
     serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
+/// How many settings keys one planning snapshot may carry. The create reads
+/// every planning input in that one statement (playback-start D3b), which
+/// outgrew the keyed read's 32; the bound is still a bound.
+pub const PLANNING_SNAPSHOT_KEYS_MAX: usize = 64;
+
+/// [`selected_settings_json`] for the planning snapshot's own bound.
+pub(crate) fn selected_planning_keys_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > PLANNING_SNAPSHOT_KEYS_MAX
+        || keys.iter().any(|key| key.is_empty() || key.len() > 256)
+    {
+        return Err(StoreError::Task(format!(
+            "a planning snapshot requires at most {PLANNING_SNAPSHOT_KEYS_MAX} nonempty bounded keys"
+        )));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
+}
+
 pub(crate) fn validate_generated_settings(
     generation_key: &str,
     expected_generation: i64,
