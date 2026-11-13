@@ -371,7 +371,6 @@ pub(crate) async fn a_source_owner_through_its_real_binding(assignment: &SourceD
                 owners: &owners,
                 dispatch: owners.begin_generation().expect("a dispatch"),
                 viewer: &local,
-                permit: None,
             },
             Arc::new(crate::prodrun::ProducerSlot::new()),
         )
@@ -619,7 +618,6 @@ mod engine {
                 owners: &owners,
                 dispatch: owners.begin_generation().map_err(str::to_owned)?,
                 viewer: &viewer,
-                permit: None,
             },
             Arc::new(ProducerSlot::new()),
             cache.path(),
@@ -691,7 +689,6 @@ mod engine {
                 owners: &owners,
                 dispatch: owners.begin_generation().map_err(str::to_owned)?,
                 viewer: &viewer,
-                permit: None,
             },
             Arc::new(ProducerSlot::new()),
         )

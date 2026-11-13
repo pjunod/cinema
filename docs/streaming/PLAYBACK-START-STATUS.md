@@ -134,74 +134,71 @@ Decisions (Paul away):
 Still open: fleet acceptance of the items below and the limits listed under
 items 4 and 5.
 
-## Current batch — a local owner for the copy engine (item 6, plan step 4)
+## Current batch — a local range's input admission (item 6, plan step 5)
 
 Owner: Claude (claude-opus-5-5), same session; written by a claude-fable-5-2
-agent on local branch `step4`, stacked on `step3`, not pushed.
-[Plan step 4](LOCAL-COPY-ENGINE-BUILD.md) is built, with the fixes from its
-adversarial review (2 majors, 8 minors). Clippy `-D warnings` and fmt are
-clean, the inventory and formal pins are green. No unit test has been run:
-the step's tests are written and wait for the fast lane.
+agent on local branch `step5`, stacked on #1548, not pushed.
+[Plan step 5](LOCAL-COPY-ENGINE-BUILD.md) is built, with the fixes from its
+review (8 findings). Clippy `-D warnings` and fmt are clean, the inventory
+and formal pins are green. No unit test has been run: the step's tests are
+written and wait for the fast lane.
 
-The engine's range storage and its generation ownership each have a typed
-local owner beside the Source one. Nothing constructs a local owner outside
-tests yet, so local playback is served exactly as before; steps 5 and 6
-give it an Input, a lifetime and a serving attachment.
+`LocalCopyRange` is the range half of a local VOD session. Nothing starts
+one yet and nothing is served from one; step 6 attaches a session to it.
 
-- `CopyRangeFiles::create` takes a `CopyRangeOwner`. A Source owner keeps
-  its directories and writes the manifest it always wrote, byte for byte,
-  held to a committed golden file through its real binding. A local
-  owner's payload is `local-copy-ranges/<session>/<range>` and its
-  manifests are under `copy-ranges/local-observations`, named `owner:
-  "local"` with the session and viewer.
-- A local owner is a `LocalPlaybackOwner`, made only from a live local
-  viewer with a named playback. An authority read back from a durable
-  request can never own a range or a generation.
-- `CopyGenerationOwner::Local` is the session rendition's dispatch ledger
-  with no Source assignment, the owner, and the session's admission claim
-  when it holds one, released only after the registered reap. A local
-  generation is refused on a rendition a Source viewer is attached to,
-  before any child and again at registration under the ledger lock.
-- One copy pipeline derivation, `node_copy_video_pipeline`, for the
-  growing Source range, Source and local renditions and the `vod_indexed`
-  hint. It takes the node's capability from the transcode manager's
-  injected boot measurement and reads the one stored probe itself. For one
-  file, recipe, node and stored probe they derive one copy-index source
-  key, and an index one of them published is the one the others find.
-- Not unified, by decision: only a local copy start measures a missing
-  HEVC parameter-set census. Shared playback uses the census once one is
-  recorded and never measures one, so a file's key can change once when a
-  local start first records a census that says its parameter sets vary.
-- Behaviour change, shared playback only: a Dolby Vision HEVC copy served
-  stripped, on a node whose FFmpeg has `dovi_rpu`, now runs
-  `dovi_rpu=strip=1` as local playback of the same file does. Its v3
-  source key, Source rendition key and v1 index identity change. Nodes
-  without the filter, and every other copy, are unchanged. The plan's
-  step 4 lists the deploy cost: old Source heads and cached renditions of
-  those titles are not found, a Source rendition may now find a
-  local-built v1 index and serve indexed VOD, and a fleet whose nodes
-  disagree on `dovi_rpu` during a rolling FFmpeg upgrade does not adopt
-  heads across the two kinds of node for those titles.
+- It registers one foreground custody keyed by the local playback, with
+  the keys a rolling local session registers. The census reads through an
+  Input lent that custody and the primary's Input takes it over: one row,
+  written once, as a rolling start's.
+- Decision (review): it presses exactly as a rolling session does. The
+  rolling source observation is now one function that maintenance and the
+  range's read bank both call; a paused or buffering viewer still
+  reporting lifts pressure while held. The Source range keeps its rule.
+- Decision (Paul away): a local range takes no copy admission. No local
+  copy holds an encoder-pool permit today, and taking one could queue or
+  refuse a local copy start that never queues. The optional permit step 4
+  left on the local generation owner is removed.
+- It has no lease, loop or timer. The session's accepted control
+  exchanges, maintenance and retirement drive it (`observe_control`,
+  `refresh`, `settle`); settlement joins the child, the pipe tasks and the
+  Input before it removes the payload, manifests and session directory.
+  Dropped unsettled it retires; a panicking run task ends it.
+- Boot clears `copy-ranges/observations` and `copy-ranges/local-observations`
+  where it clears the transcode scratch that holds the payloads.
+- Decision (Paul away): the calls from `vod/session.rs` into the range are
+  left to step 6. A session cannot hold a range before it can attach one.
+- Fixed on Paul's call: a killed Source range's manifests under
+  `copy-ranges/observations` used to stay forever; boot now reaps them.
+- The trace comparison is written, not run. Both sides' observations come
+  from the shared function; the rolling flow's holds are replayed and the
+  range's committed media is set by hand (the fixture is shorter than the
+  low watermark); the plan lists what that leaves unmeasured.
+
+## Previous batch — a local owner for the copy engine (item 6, plan step 4, #1548)
+
+[Plan step 4](LOCAL-COPY-ENGINE-BUILD.md) is built on `step4`, with its
+review fixes (2 majors, 8 minors). Its tests are written, not yet run.
+
+- Range storage and generation ownership each have a typed local owner,
+  made only from a live local viewer with a named playback. Nothing
+  constructs one outside tests.
+- One copy pipeline derivation for the Source range, Source and local
+  renditions and the `vod_indexed` hint: the manager's injected
+  capability and the one stored probe. One file, recipe, node and stored
+  probe have one copy-index source key. Only a local copy start measures a
+  missing HEVC census.
+- Behaviour change, shared playback only: a stripped Dolby Vision HEVC
+  copy on a node whose FFmpeg has `dovi_rpu` is re-keyed. The plan's step
+  4 lists the deploy cost.
 - Decision (Paul away): the Source rendition path and the planning hint
-  were changed together with the range, which the plan did not name. The
-  rendition reads the copy index by the key the range publishes under, so
-  changing the range alone would have left shared playback unable to find
-  its own index.
-- Found: no binary reads a checkpoint manifest back, so the plan's
-  manifest compatibility is held by construction (identical Source bytes)
-  and pinned by the golden file rather than by a reader. The golden file
-  was derived by hand from `4b125e6`'s manifest declaration.
-- Found: a local copy rendition holds no admission permit today, so the
-  local owner's permit is optional. Step 5 decides whether a local range
-  takes copy admission.
-- Found: the Source range read a stored probe over 1 MiB as absent while
-  the Source rendition read it whole. Both now read it whole.
+  were changed with the range, which the plan did not name; the rendition
+  reads the index by the key the range publishes under.
+- Found: no binary reads a checkpoint manifest back; compatibility is
+  pinned by a golden file derived by hand from `4b125e6`.
 
-Open, post-deploy: on a node whose FFmpeg has `dovi_rpu`, play a Dolby
-Vision title stripped over a share before and after a local playback of
-it, and record that both resolve one v3 head and that the shared start
-plays. A node has the filter when its FFmpeg lists the `dovi_rpu`
-bitstream filter (FFmpeg 7.1 or later).
+Open, post-deploy: on a node whose FFmpeg has `dovi_rpu` (7.1 or later),
+play a Dolby Vision title stripped over a share before and after a local
+playback of it, and record that both resolve one v3 head.
 
 ## Previous batch — the copy index rides the content-analysis pass (item 6, plan step 3)
 
@@ -456,22 +453,21 @@ steps with an Execution log. Its step 1, durable demand, is built on
   have done so since item 2. The fix redefines that trigger and is one
   schema version on both backends; it is plan step 2.
 
-Plan step 3 is built on `step3` and plan step 4 on `step4`: see the two
+Plan steps 3, 4 and 5 are built on `step3`, `step4` and `step5`: see the
 batches above.
 
-Remaining for item 6, not started (plan step 2 and steps 5-10):
+Remaining for item 6, not started (plan step 2 and steps 6-10):
 
 - Local rolling copy and indexed-VOD copy still run their own producers
   (`copy_pipe_args` to the rolling segmenter, and plan-verified VOD
   generations). Neither runs the growing engine, so local playback commits
   no ranges and contributes no rows: a locally played title is indexed by a
   second read, not by the read that served it.
-- The growing engine is still run only by the Source worker. Range storage
-  and generation ownership have a local owner (plan step 4), which nothing
-  constructs yet: a local range still needs its Input admission, lifetime,
-  control state and reaping (plan step 5) and a local serving attachment
-  (build contract step 4: growing attachment and A1-N admission for local
-  sessions; plan step 6) before any local path can be moved onto it.
+- The growing engine is still run only by the Source worker. A local range
+  exists (plan steps 4 and 5) and nothing starts one: it still needs a
+  local serving attachment and the session's calls into it (build contract
+  step 4: growing attachment and A1-N admission for local sessions; plan
+  step 6) before any local path can be moved onto it.
 - `CopyObservationSet::observe` accepts a `Local` range, but nothing
   produces one. When the engine runs for local playback, the range's
   `CompletedCopyRange` carries `CopyObservationAuthority::Local` and the

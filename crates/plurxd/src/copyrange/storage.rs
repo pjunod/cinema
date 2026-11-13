@@ -254,12 +254,14 @@ pub(crate) struct CopyRangeFiles {
     av_init_sha256: String,
     origin: Option<i64>,
     rows: Vec<IndexRow>,
-    segments: Vec<StoredCopySegment>,
+    /// Visible to the range's owners' tests, which set a committed bank
+    /// that a 12-second fixture cannot produce.
+    pub(super) segments: Vec<StoredCopySegment>,
     row_inspections: Vec<StoredInspection>,
     inspection: Option<RangeInspection>,
     eof: bool,
     rendered: bool,
-    committed_segments: usize,
+    pub(super) committed_segments: usize,
     committed_eof: bool,
     current: Option<Arc<CopyRangeCheckpoint>>,
     old: Vec<OldManifest>,

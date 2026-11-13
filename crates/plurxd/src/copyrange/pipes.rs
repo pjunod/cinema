@@ -31,14 +31,15 @@ pub(crate) enum CopyGenerationOwner<'a> {
     /// permit and no Source grant, and nothing it produces may be served.
     Analysis { phase: &'a AnalysisPhysicalPhase },
     /// A local user's own named playback in one local VOD session. The
-    /// generation runs in that session's producer slot (the `slot` it is
-    /// spawned with) under the session rendition's own dispatch ledger, which
-    /// holds no Source assignment, gate or grant, and it retains the worker
-    /// claim of the session's admission when the session holds one (a local
-    /// copy rendition holds none today, as its plan-verified generation
-    /// holds none). The Input's own admission is the caller's, as it is for
-    /// Source. The viewer is carried as the owner's proof of who it is: only
-    /// a live local viewer makes one.
+    /// generation runs in the slot it is spawned with, under the session
+    /// rendition's own dispatch ledger, which holds no Source assignment,
+    /// gate or grant. It holds no admission permit: a local copy takes none
+    /// today, as a rolling session or as a plan-verified VOD rendition, and
+    /// charging one here would queue or refuse a start that never queues.
+    /// Its Input is opened by the caller under the playback's own foreground
+    /// source request, which is the one charge a local copy has. The viewer
+    /// is carried as the owner's proof of who it is: only a live local
+    /// viewer makes one.
     // Constructed by tests until a local VOD session attaches a range.
     #[cfg_attr(
         not(all(test, target_os = "linux")),
@@ -48,7 +49,6 @@ pub(crate) enum CopyGenerationOwner<'a> {
         owners: &'a SourceRenditionOwners,
         dispatch: SourceGenerationDispatch,
         viewer: &'a LocalPlaybackOwner,
-        permit: Option<crate::vodencode::EncodeWorkerPermit>,
     },
 }
 impl CopyGenerationOwner<'_> {
@@ -238,7 +238,7 @@ pub(crate) async fn spawn_source_generation(
     source_path: &Path,
     args: &[String],
     runtime_cache: &Path,
-    mut owner: CopyGenerationOwner<'_>,
+    owner: CopyGenerationOwner<'_>,
     slot: Arc<ProducerSlot>,
 ) -> Result<RunningCopyGeneration, String> {
     // Pair creation is fallible before any child exists. Retain and explicitly
@@ -266,7 +266,7 @@ pub(crate) async fn spawn_source_generation(
     }
     let descriptors = crate::producer_spawn::Descriptors::from_files(None, None, None, false)
         .with_copy_measurements(&canonical_write, &clock_write);
-    let (permit, work): (Option<Box<dyn Send>>, _) = match &mut owner {
+    let (permit, work): (Option<Box<dyn Send>>, _) = match &owner {
         CopyGenerationOwner::Source { owners, .. } => match owners.retained_initial_permit() {
             Some(permit) => (
                 Some(Box::new(permit)),
@@ -281,10 +281,8 @@ pub(crate) async fn spawn_source_generation(
             None,
             crate::process_control::ChildWork::background("Analysis observed copy"),
         ),
-        CopyGenerationOwner::Local { permit, .. } => (
-            permit
-                .take()
-                .map(|permit| Box::new(permit) as Box<dyn Send>),
+        CopyGenerationOwner::Local { .. } => (
+            None,
             crate::process_control::ChildWork::realtime("Local observed copy"),
         ),
     };

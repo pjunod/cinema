@@ -1,7 +1,7 @@
 //! One-input observed copy runtime shared by Source playback, Analysis gap
-//! fills and local playback, whose owner of a range and of a generation
-//! exists but which no local session uses yet. Whole-source attestation and
-//! publication remain Analysis work.
+//! fills and local playback, whose range (`local`) no local session
+//! attaches yet. Whole-source attestation and publication remain Analysis
+//! work.
 #[cfg(unix)]
 mod census;
 #[cfg(unix)]
@@ -30,6 +30,10 @@ pub(crate) use storage::{CopyRangeFiles, CopyRangeOwner, CopyRangePublisher};
 mod fill;
 #[cfg(unix)]
 pub(crate) use fill::{fill_copy_gap, CopyGapFill, CopyGapFillError};
+#[cfg(unix)]
+mod local;
+#[cfg(unix)]
+pub(crate) use local::reap_range_manifests;
 #[cfg(unix)]
 mod production;
 #[cfg(unix)]

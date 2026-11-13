@@ -3913,7 +3913,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # by the pass's own lead reader, stderr reader and this clock reader.
 # If the pass future is dropped the reader still ends with the child
 # (kill-on-drop closes the clock).
-expected_occurrences = 1145
+# 1145 -> 1146, local copy range review fixes (plan step 5): one test-only
+# `tokio::spawn` in copyrange/local_tests.rs, a task that takes the range
+# run task's end guard and panics; the test awaits its JoinHandle before it
+# asserts. No production task.
+expected_occurrences = 1146
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4168,7 +4172,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 98
+# 98 -> 99, local copy range review fixes (plan step 5): the same
+# `runtime.spawn` in copyrange/local.rs that removes an abandoned start's
+# range files (see process-capable-launch-method). A one-shot removal task,
+# not a producer; no process.
+expected_occurrences = 99
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5795,7 +5803,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # owner of the one existing spawn, holding its session rendition's dispatch
 # and admission until the registered reap, and no production path constructs
 # it yet.
-expected_occurrences = 2206
+# 2206 -> 2207 with a local range's input admission (item 6, plan step 5):
+# one `#[cfg(test)]`-only `tokio::time::timeout` in
+# `copyrange/local_tests.rs`, the single bound every wait of those tests
+# runs under (a range's start, its end, its settlement and a closed Input's
+# custody release). It settles nothing: when a range's end elapses the test
+# retires the range and awaits its settlement under the same bound.
+# `LocalCopyRange` adds no task, timer or process to the daemon: it has no
+# lease, loop or clock of its own, its child is the one existing copy spawn
+# under a Local owner, and no production path starts one yet. Boot reaping
+# of its manifests is one synchronous directory clear at startup.
+expected_occurrences = 2207
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7005,7 +7023,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # not a process.
 # PR1527: +1 (923 -> 924), the synchronous `.output()` of the test-only
 # bundle-installer --identity child above; it waits for and reaps the child.
-expected_occurrences = 924
+# 1145 -> 1146 / 98 -> 99 / 924 -> 925 belong to the local copy range's
+# review fixes (item 6, plan step 5). Here +1 is the `runtime.spawn` in
+# copyrange/local.rs that removes an abandoned start's range files: a start
+# future dropped after the files exist and before a production holds them.
+# It is one detached removal of the range's own payload and manifests; it
+# reads no source, holds no child and ends when the removal does. It
+# launches no process.
+expected_occurrences = 925
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
