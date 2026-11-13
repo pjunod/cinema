@@ -1787,7 +1787,7 @@ class MergeTargetScopeCase(RepositoryFixture):
                 subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=root, check=True)
                 (root / "src/app.rs").write_text("pub fn answer() {}\n")
                 fix = self.commit(root, "fix(app): restore answer")
-                self.write_coverage(coverage, "app.toml",
+                self.write_coverage(coverage, f"{fix[:8]}-app.toml",
                     f'commits = ["{fix[:8]}"]\npoints = ["app"]\nchecks = ["baseline"]\n'
                     'reason = "The baseline exercises the application."\n')
                 self.commit(root, "chore: record coverage")
