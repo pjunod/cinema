@@ -58,6 +58,7 @@ impl Group {
             jobs: vec![job],
         })
     }
+    #[cfg(test)]
     pub(super) fn add(&mut self, command: &mut Command, work: ChildWork) -> Result<(), String> {
         self.add_inner(command, work, None)
     }
