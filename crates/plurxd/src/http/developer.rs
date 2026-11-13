@@ -2405,6 +2405,12 @@ fn dolby_vision_refit_items(
         evidence: format!("{DV_REFIT_CLIENTS}. Serving the curves to a platform that ignores them changes nothing it shows."),
     }
     };
+    let timing = || DeveloperRequirement {
+        id: "refit_copy_timing",
+        title: "Audio-bearing copy qualification",
+        status: RequirementStatus::Unmet,
+        evidence: "Fitted copy requires a matching picture timeline. Some AAC layouts change that timing and are refused before publication. Audio-bearing copy acceptance remains pending.".into(),
+    };
     let helper = match helper {
         Ok(Some(identity)) => DeveloperRequirement {
             id: "refit_helper",
@@ -2476,25 +2482,25 @@ fn dolby_vision_refit_items(
             "dolby_vision_refit_web",
             "Dolby Vision F+ curves: web",
             enabled[0],
-            vec![clients()],
+            vec![clients(), timing()],
         ),
         item(
             "dolby_vision_refit_apple",
             "Dolby Vision F+ curves: Apple",
             enabled[1],
-            vec![helper, coverage, clients(), spool],
+            vec![helper, coverage, clients(), timing(), spool],
         ),
         item(
             "dolby_vision_refit_android",
             "Dolby Vision F+ curves: Android",
             enabled[2],
-            vec![clients()],
+            vec![clients(), timing()],
         ),
         item(
             "dolby_vision_refit_linux",
             "Dolby Vision F+ curves: Linux",
             enabled[3],
-            vec![clients()],
+            vec![clients(), timing()],
         ),
     ]
 }
