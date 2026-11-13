@@ -1983,11 +1983,6 @@ impl ReservedSourceVodRendition {
                     .encoding
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
-                    .rendition
-                    .recipe
-                    .video
-                    .dolby_vision_refit()
-                    .map(hex::encode),
                 degraded_processing: None,
                 processing_note: None,
                 session_id: session_id.into(),

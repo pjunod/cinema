@@ -1240,3 +1240,21 @@ async fn disabling_all_platforms_yields_active_catalogue_work_until_reenabled() 
         .await
         .expect("enabled without preempting probes"));
 }
+
+#[tokio::test]
+async fn a_queued_same_source_fit_publishes_under_its_claimed_probe_generation() {
+    let fx = fixture().await;
+    let file = title(&fx, "queued-generation", 7, true).await;
+    let old = source(&demand(&fx.store, file.id).await.expect("demand"), &helper());
+    fx.store.enqueue_job(enqueue_request(&old, now_ms())).await.expect("enqueue old generation");
+    let fresh = RefitSource { probe_revision: old.probe_revision + 7, ..old.clone() };
+    let (job, active) = attempt(&fx.store, &fresh).await;
+    let claimed = claimed_source(fresh, &job);
+    assert_eq!(claimed.probe_revision, old.probe_revision);
+    let run = run_fake(&fx.root, &fake(&fx.root, "queued-generation", &mixed(), "")).await;
+    let fence = active.fence();
+    let settlement = settle_run(&fence, &job, &claimed, run).await;
+    if let Some(settlement) = settlement { fence.settle(settlement).await.expect("settle"); }
+    active.finish().await;
+    assert_eq!(state(&fx.store, &job).await, JobState::Succeeded);
+}

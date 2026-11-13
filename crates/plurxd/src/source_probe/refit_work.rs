@@ -161,6 +161,13 @@ pub(super) fn rebind_of(demand: &RefitDemand, source: &RefitSource) -> Option<Re
     })
 }
 
+fn claimed_source(mut source: RefitSource, job: &plurx_core::store::background_jobs::BackgroundJob) -> RefitSource {
+    if let JobPayload::DvRefit { probe_revision, .. } = &job.payload {
+        source.probe_revision = *probe_revision;
+    }
+    source
+}
+
 async fn prune(state: &AppState) {
     let now = now_ms();
     let last = LAST_PRUNE_MS.load(std::sync::atomic::Ordering::Relaxed);
@@ -314,6 +321,10 @@ impl RefitTask {
                 JobKind::DvRefit,
             )
             .await?;
+            // Same-source probe generations share a job identity. Publish
+            // against the claimed payload; the normal rebind pass then moves
+            // the completed table to the latest title-scan generation.
+            let source = claimed_source(source, &job);
             let cancel = CancellationToken::new();
             let file_id = file.id;
             let work = execute(

@@ -1,5 +1,5 @@
 //! Disk F+ authoring from the title scanner's exact source packet clock.
-//! The sidecar binds each decode-order RPU to its source PTS and original
+//! The sidecar binds each source RPU to its source PTS and original
 //! bytes; a raw HEVC stream alone has no presentation clock.
 use dolby_vision::rpu::{dovi_rpu::DoviRpu, ConversionMode};
 use plurx_core::{
@@ -27,7 +27,9 @@ fn bounded_read(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|e| format!("reading RPU metadata: {e}"))
 }
 
-/// dovi_tool's RPU.bin is Annex B UNSPEC62 NALs, one per source picture.
+/// dovi_tool 2.3.3 exports presentation-ordered Annex B RPU payloads,
+/// omitting the two-byte HEVC UNSPEC62 header. Normalize that header for
+/// parsing and comparison with the scanner's full-NAL hashes.
 fn units(
     bytes: &[u8],
     mut visit: impl FnMut(&[u8], usize) -> Result<(), String>,
@@ -49,11 +51,14 @@ fn units(
         } else {
             end
         };
-        let nal = &bytes[start + 3..end];
-        if nal.len() < 3 || nal.len() > MAX_RPU_NAL_BYTES || nal[..2] != [0x7c, 0x01] {
-            return Err(format!("invalid RPU NAL at decode ordinal {ordinal}"));
+        let payload = &bytes[start + 3..end];
+        if payload.is_empty() || payload.len() + 2 > MAX_RPU_NAL_BYTES || payload[0] != 0x19 {
+            return Err(format!("invalid RPU payload at presentation ordinal {ordinal}"));
         }
-        visit(nal, ordinal)?;
+        let mut nal = Vec::with_capacity(payload.len() + 2);
+        nal.extend_from_slice(&[0x7c, 0x01]);
+        nal.extend_from_slice(payload);
+        visit(&nal, ordinal)?;
     }
     Ok(starts.len())
 }
@@ -87,7 +92,18 @@ fn timeline(path: &Path, table: &RefitCurveTable) -> Result<Vec<(i64, Hash)>, St
     if rows.len() != usize::try_from(table.title.frames).unwrap_or(usize::MAX) {
         return Err("RPU timeline frame count differs from fitted title".into());
     }
+    // The scanner follows packet/decode order; dovi_tool extract/inject uses
+    // presentation_number. A unique PTS is required to establish that order.
+    presentation_order(&mut rows)?;
     Ok(rows)
+}
+
+fn presentation_order(rows: &mut [(i64, Hash)]) -> Result<(), String> {
+    rows.sort_unstable_by_key(|(pts, _)| *pts);
+    if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err("RPU timeline has ambiguous duplicate presentation timestamps".into());
+    }
+    Ok(())
 }
 
 fn scene_for_pts(scenes: &[RefitCurveScene], pts: i64) -> Result<&RefitCurveScene, String> {
@@ -128,7 +144,7 @@ pub(super) fn author(
         actual.copy_from_slice(&Sha256::digest(nal));
         if &actual != source_hash {
             return Err(format!(
-                "source RPU hash differs at decode ordinal {ordinal}"
+                "source RPU hash differs at presentation ordinal {ordinal}"
             ));
         }
         let scene = scene_for_pts(&table.scenes, *pts)?;
@@ -146,7 +162,7 @@ pub(super) fn author(
             .write_hevc_unspec62_nalu()
             .map_err(|e| format!("writing RPU {ordinal}: {e}"))?;
         writer.write_all(&[0, 0, 0, 1]).map_err(|e| e.to_string())?;
-        writer.write_all(&written).map_err(|e| e.to_string())?;
+        writer.write_all(&written[2..]).map_err(|e| e.to_string())?;
         let mut hash: Hash = [0; 32];
         hash.copy_from_slice(&Sha256::digest(&written));
         expected.push(hash);
@@ -212,8 +228,17 @@ mod tests {
     }
 
     #[test]
+    fn extracted_rpus_use_unique_presentation_order_not_packet_order() {
+        let mut rows = [(100, [1;32]), (240, [2;32]), (180, [3;32]), (200, [4;32])];
+        presentation_order(&mut rows).expect("unique timestamps");
+        assert_eq!(rows.map(|(pts, hash)| (pts, hash[0])), [(100,1),(180,3),(200,4),(240,2)]);
+        let mut duplicate = [(100,[1;32]), (100,[2;32])];
+        assert!(presentation_order(&mut duplicate).is_err());
+    }
+
+    #[test]
     fn annex_b_units_never_guess_a_missing_frame() {
-        let valid = [0, 0, 0, 1, 0x7c, 1, 0x55, 0, 0, 0, 1, 0x7c, 1, 0x66];
+        let valid = [0, 0, 0, 1, 0x19, 0x55, 0, 0, 0, 1, 0x19, 0x66];
         let mut bodies = Vec::new();
         assert_eq!(
             units(&valid, |nal, _| {
@@ -222,7 +247,7 @@ mod tests {
             }),
             Ok(2)
         );
-        assert_eq!(bodies, [vec![0x7c, 1, 0x55], vec![0x7c, 1, 0x66]]);
-        assert!(units(&valid[..6], |_, _| Ok(())).is_err());
+        assert_eq!(bodies, [vec![0x7c, 1, 0x19, 0x55], vec![0x7c, 1, 0x19, 0x66]]);
+        assert!(units(&valid[..4], |_, _| Ok(())).is_err());
     }
 }
