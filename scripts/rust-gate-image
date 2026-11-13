@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Publish and pin the fast Rust gate's toolchain image (Dockerfile.rust-gate).
+
+    scripts/rust-gate-image input            # sha256 of Dockerfile.rust-gate (the image's identity)
+    scripts/rust-gate-image publish [--ref BRANCH]
+                                             # dispatch rust-gate-image.yml on BRANCH (default: the
+                                             # current branch, which must be pushed), wait, print digest
+    scripts/rust-gate-image publish --run N  # the digest of finished publish run N (both jobs green)
+    scripts/rust-gate-image pin sha256:<64 hex>
+                                             # point every lane at that digest
+    scripts/rust-gate-image check            # every lane pins the same well-formed digest
+
+Bumping the image is: edit Dockerfile.rust-gate, push the branch,
+`scripts/rust-gate-image publish`, then `scripts/rust-gate-image pin <digest>`
+and commit. `publish` needs the git-ignored `scripts/ci-failures.fleet.json`
+(forge_url, repo, token_file), shaped like the committed
+`scripts/ci-failures.fleet.example.json`. docs/ci/RUST-GATE-IMAGE.md is the
+reference.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+DOCKERFILE = ROOT / "Dockerfile.rust-gate"
+WORKFLOW = "rust-gate-image.yml"
+# Every workflow whose jobs run in the image. A lane missing from this list
+# keeps its old digest on a bump; `check` and tests/operations catch that.
+PINNED = (
+    ".github/workflows/main-fast-lane.yml",
+    ".github/workflows/effort-ci.yml",
+)
+REFERENCE = re.compile(r"(noirr/plurx-rust-gate@)(sha256:[0-9a-f]{64})")
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+PUBLISHED = re.compile(r"rust-gate-image digest: \S+/noirr/plurx-rust-gate@(sha256:[0-9a-f]{64})")
+CONFIG = ROOT / "scripts" / "ci-failures.fleet.json"
+
+
+def image_input() -> str:
+    return hashlib.sha256(DOCKERFILE.read_bytes()).hexdigest()
+
+
+def pins() -> dict[str, list[str]]:
+    return {path: REFERENCE.findall((ROOT / path).read_text(encoding="utf-8")) for path in PINNED}
+
+
+def check() -> list[str]:
+    problems = []
+    digests = set()
+    for path, found in pins().items():
+        if not found:
+            problems.append(f"{path} pins no noirr/plurx-rust-gate@sha256 image")
+        digests.update(digest for _, digest in found)
+    if len(digests) > 1:
+        problems.append("the lanes pin different rust-gate images: " + ", ".join(sorted(digests)))
+    return problems
+
+
+def pin(digest: str) -> list[str]:
+    if not DIGEST.fullmatch(digest):
+        raise SystemExit(f"rust-gate-image: not a sha256 manifest digest: {digest!r}")
+    changed = []
+    for path in PINNED:
+        file = ROOT / path
+        text = file.read_text(encoding="utf-8")
+        updated = REFERENCE.sub(lambda m: m.group(1) + digest, text)
+        if updated != text:
+            file.write_text(updated, encoding="utf-8")
+            changed.append(path)
+    return changed
+
+
+def api(config: dict, method: str, path: str, body: dict | None = None) -> bytes:
+    request = urllib.request.Request(
+        f"{config['forge_url'].rstrip('/')}/api/v1/repos/{config['repo']}/{path}",
+        data=None if body is None else json.dumps(body).encode(),
+        method=method,
+        headers={"Authorization": f"token {config['token']}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read()
+
+
+def forge_config() -> dict:
+    if not CONFIG.is_file():
+        raise SystemExit(f"rust-gate-image: create {CONFIG.relative_to(ROOT)} from the .example.json beside it")
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    token = os.environ.get("FORGEJO_TOKEN") or Path(os.path.expanduser(config["token_file"])).read_text().strip()
+    config["token"] = token
+    return config
+
+
+def published_digest(config: dict, run: dict) -> str:
+    """The digest a finished, fully green publish run printed."""
+    if run.get("status") != "success":
+        raise SystemExit(f"rust-gate-image: run {run.get('id')} ended {run.get('status')}; pin nothing from it")
+    jobs = json.loads(api(config, "GET", f"actions/runs/{run['id']}/jobs?page=1&limit=20"))
+    for job in jobs:
+        if job["name"] == "publish the rust-gate image":
+            log = api(config, "GET", f"actions/jobs/{job['id']}/logs").decode("utf-8", "replace")
+            found = set(PUBLISHED.findall(log))
+            if len(found) == 1:
+                return found.pop()
+    raise SystemExit(f"rust-gate-image: run {run['id']} printed no unique digest")
+
+
+def digest_of_run(run_id: int) -> str:
+    config = forge_config()
+    return published_digest(config, json.loads(api(config, "GET", f"actions/runs/{run_id}")))
+
+
+def publish(ref: str | None, wait_seconds: int) -> str:
+    config = forge_config()
+    if ref is None:
+        ref = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ROOT, check=True,
+                             capture_output=True, text=True).stdout.strip()
+    before = {run["id"] for run in json.loads(api(config, "GET", f"actions/runs?page=1&limit=20&workflow_id={WORKFLOW}")).get("workflow_runs", [])}
+    api(config, "POST", f"actions/workflows/{WORKFLOW}/dispatches", {"ref": ref})
+    print(f"dispatched {WORKFLOW} on {ref}; waiting (up to {wait_seconds}s)", file=sys.stderr)
+    deadline = time.monotonic() + wait_seconds
+    run = None
+    while time.monotonic() < deadline:
+        time.sleep(15)
+        runs = json.loads(api(config, "GET", f"actions/runs?page=1&limit=20&workflow_id={WORKFLOW}")).get("workflow_runs", [])
+        fresh = [r for r in runs if r["id"] not in before and r.get("workflow_id") == WORKFLOW]
+        if not fresh:
+            continue
+        run = fresh[0]
+        if run["status"] in ("success", "failure", "cancelled", "skipped"):
+            break
+    if run is None:
+        raise SystemExit(f"rust-gate-image: no publish run appeared within {wait_seconds}s")
+    if run["status"] not in ("success", "failure", "cancelled", "skipped"):
+        raise SystemExit(f"rust-gate-image: run {run['id']} still {run['status']}; "
+                         f"later: scripts/rust-gate-image publish --run {run['id']}")
+    return published_digest(config, run)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("input")
+    sub.add_parser("check")
+    p = sub.add_parser("pin")
+    p.add_argument("digest")
+    p = sub.add_parser("publish")
+    p.add_argument("--ref")
+    p.add_argument("--run", type=int, help="read the digest of an already finished publish run instead")
+    p.add_argument("--wait", type=int, default=3600)
+    args = parser.parse_args(argv)
+    if args.command == "input":
+        print(image_input())
+    elif args.command == "check":
+        problems = check()
+        for problem in problems:
+            print(f"rust-gate-image: {problem}", file=sys.stderr)
+        return 1 if problems else 0
+    elif args.command == "pin":
+        changed = pin(args.digest)
+        print("pinned in: " + (", ".join(changed) if changed else "nothing (already pinned)"))
+    else:
+        digest = digest_of_run(args.run) if args.run else publish(args.ref, args.wait)
+        print(digest)
+        print(f"next: scripts/rust-gate-image pin {digest}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
