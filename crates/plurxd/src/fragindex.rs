@@ -934,50 +934,54 @@ fn filtered_packet_hash(raw: &[u8], pts: i64, time_base: (u32, u32)) -> Result<[
         .map_err(|_| "F+ packet hash is not SHA256".into())
 }
 
-async fn held_filtered_packet_hash(
-    source: &std::fs::File,
+// Erase the bounded child-probe future here: its Send proof is checked at
+// this leaf rather than expanded through every source-publication worker.
+fn held_filtered_packet_hash<'a>(
+    source: &'a std::fs::File,
     stream: u32,
     pts: i64,
     time_base: (u32, u32),
     budget: Duration,
-    cancel: Option<&tokio_util::sync::CancellationToken>,
+    cancel: Option<&'a tokio_util::sync::CancellationToken>,
     retain_parameter_sets: bool,
-) -> Result<[u8; 32], String> {
-    let mut view = source;
-    view.seek(SeekFrom::Start(0))
-        .map_err(|error| error.to_string())?;
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    #[cfg(unix)]
-    {
-        command.args(filtered_packet_hash_args(
-            "/dev/fd/3",
-            stream,
-            retain_parameter_sets,
-        ));
-        crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
-    }
-    #[cfg(windows)]
-    {
-        let path = crate::ffmpeg::windows_source_path(source)?;
-        crate::ffmpeg::verify_windows_source_path(source, &path)?;
-        command.args(filtered_packet_hash_args(
-            &path.to_string_lossy(),
-            stream,
-            retain_parameter_sets,
-        ));
-    }
-    let result = crate::ffmpeg::bounded_command_output_cancellable(
-        command,
-        budget.min(Duration::from_secs(30)),
-        64 * 1024,
-        "F+ first packet identity",
-        cancel,
-        crate::process_control::ChildWork::realtime("F+ first packet identity"),
-    )
-    .await;
-    view.seek(SeekFrom::Start(0))
-        .map_err(|error| error.to_string())?;
-    filtered_packet_hash(&result?.stdout, pts, time_base)
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<[u8; 32], String>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut view = source;
+        view.seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
+        let mut command = tokio::process::Command::new(ffmpeg_bin());
+        #[cfg(unix)]
+        {
+            command.args(filtered_packet_hash_args(
+                "/dev/fd/3",
+                stream,
+                retain_parameter_sets,
+            ));
+            crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
+        }
+        #[cfg(windows)]
+        {
+            let path = crate::ffmpeg::windows_source_path(source)?;
+            crate::ffmpeg::verify_windows_source_path(source, &path)?;
+            command.args(filtered_packet_hash_args(
+                &path.to_string_lossy(),
+                stream,
+                retain_parameter_sets,
+            ));
+        }
+        let result = crate::ffmpeg::bounded_command_output_cancellable(
+            command,
+            budget.min(Duration::from_secs(30)),
+            64 * 1024,
+            "F+ first packet identity",
+            cancel,
+            crate::process_control::ChildWork::realtime("F+ first packet identity"),
+        )
+        .await;
+        view.seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
+        filtered_packet_hash(&result?.stdout, pts, time_base)
+    })
 }
 
 async fn index_stream_with_progress<R: AsyncRead + Unpin>(
