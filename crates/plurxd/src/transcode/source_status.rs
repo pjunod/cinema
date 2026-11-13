@@ -437,6 +437,7 @@ impl SourceGrowingBacking {
         });
         let complete = files.complete();
         Ok(crate::vodserve::VodSessionInfo {
+            dolby_vision_refit: None,
             dv_refit_digest: None,
             stream_format: None,
             active_encode_milli_realtime: None,

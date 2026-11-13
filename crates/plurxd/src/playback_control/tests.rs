@@ -984,6 +984,7 @@ fn vod_status_delivering(
     delivered_bps: Option<i64>,
 ) -> HlsSessionInfo {
     HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+        dolby_vision_refit: None,
         dv_refit_digest: None,
         stream_format: None,
         active_encode_milli_realtime: None,

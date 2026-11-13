@@ -2909,6 +2909,7 @@ pub(super) async fn session_info(
         "waiting"
     };
     SessionInfo {
+        dolby_vision_refit: None,
         vod_observation: None,
         dv_refit_digest: None,
         id: id.to_owned(),
@@ -3042,6 +3043,7 @@ pub(super) async fn session_info(
 pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
     let observation = info.observation.as_ref();
     SessionInfo {
+        dolby_vision_refit: info.dolby_vision_refit,
         vod_observation: info.observation.clone(),
         dv_refit_digest: info.dv_refit_digest,
         id: info.id,
@@ -3146,6 +3148,7 @@ mod activity_vod_tests {
     #[test]
     fn vod_activity_projects_real_control_without_rolling_measurements() {
         let info = crate::vodserve::VodDeliveryInfo {
+            dolby_vision_refit: None,
             observation: Some(crate::vodserve::VodActivityObservation {
                 processing: None,
                 display_target: None,

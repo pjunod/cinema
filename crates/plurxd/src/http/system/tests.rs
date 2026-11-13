@@ -1409,6 +1409,7 @@ async fn client_event_joins_and_persists_every_live_session_measurement() {
     beacon.session_id = Some("session-a".into());
     let event = client_playback_event(&beacon, 7);
     let info = crate::transcode::SessionInfo {
+        dolby_vision_refit: None,
         vod_observation: None,
         dv_refit_digest: None,
         id: "session-a".into(),

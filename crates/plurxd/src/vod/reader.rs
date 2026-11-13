@@ -12,6 +12,9 @@ pub(super) struct Recipe {
     pub(super) aac: bool,
     pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub(super) video: CopyVideoOptions,
+    /// Read with the exact pinned curve table when this recipe was resolved.
+    /// Status only: `rendition_key` and every media identity omit it.
+    pub(super) dv_refit_gain: Option<crate::dv_refit_serving::PinnedRefitGain>,
     /// Exact object version whose complete digest selected the cluster blob.
     /// None on the legacy node-local index path.
     pub(super) source_object_version: Option<String>,
@@ -25,6 +28,16 @@ pub(super) struct Recipe {
     pub(super) copy_index_init_contract: Option<String>,
     /// A frozen encoded strategy; None is the indexed compressed-copy path.
     pub(super) encoding: Option<Arc<crate::vodencode::Encoding>>,
+}
+
+impl Recipe {
+    /// Report only the gain belonging to this attached rendition's actual
+    /// digest. An incoming request may be superseded or share another recipe.
+    pub(super) fn fitted_refit_report(&self) -> Option<crate::transcode::RefitPlaybackReport> {
+        let digest = self.video.dolby_vision_refit()?;
+        let fact = self.dv_refit_gain?;
+        (fact.digest == digest).then(|| crate::transcode::RefitPlaybackReport::fitted(fact.gain))
+    }
 }
 
 /// One attached reader, in plan indexes.
