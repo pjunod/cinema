@@ -292,6 +292,7 @@ impl From<&mut Row<'_>> for FingerprintRow {
 impl HiqliteAuthStore {
     pub(super) async fn atomic_publication(
         &self,
+        method: &'static str,
         lease: &Lease,
         replacement: &Lease,
         mut statements: Vec<(String, hiqlite::Params)>,
@@ -314,7 +315,7 @@ impl HiqliteAuthStore {
             bind_atomic_authority(params, lease)?;
         }
         statements.insert(0, renewal);
-        let transaction = self.client().txn(statements).await;
+        let transaction = self.client().txn(method, statements).await;
         let results = match transaction {
             Ok(results) => results,
             Err(error)
@@ -335,6 +336,7 @@ impl HiqliteAuthStore {
 
     async fn identity_repair_mapping_applied(
         &self,
+        method: &'static str,
         plan: &IdentityRepairPlan,
     ) -> Result<bool, StoreError> {
         let Some(survivor) = plan.survivor_show_id else {
@@ -367,7 +369,7 @@ impl HiqliteAuthStore {
         .map_err(database_error)?;
         let count = self
             .client()
-            .query_consistent_map::<CountRow, _>(
+            .query_consistent_map::<CountRow, _>(method,
                 "SELECT COUNT(*) AS count FROM items survivor \
                   WHERE survivor.id=$1 AND survivor.library_id=$2 AND survivor.kind='show' \
                     AND NOT EXISTS (SELECT 1 FROM json_each($3) r JOIN items i ON i.id=r.value) \
@@ -435,6 +437,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let sql = format!("{ADD_DOWNLOADED_SUBTITLE} AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 AND fence=$8 AND revision=$9 AND expires_at_ms=$10)");
         let counts = self
             .atomic_publication(
+                "add_downloaded_subtitle_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -466,12 +469,16 @@ impl FencedPublicationStore for HiqliteAuthStore {
         if !plan.ready() {
             return Err(StoreError::Task("repair_blocked".to_owned()));
         }
-        if self.identity_repair_mapping_applied(plan).await? {
+        if self
+            .identity_repair_mapping_applied("apply_identity_repair_fenced", plan)
+            .await?
+        {
             let Some(survivor) = plan.survivor_show_id else {
                 return Err(StoreError::Task("repair_blocked".to_owned()));
             };
             let counts = self
                 .atomic_publication(
+                    "apply_identity_repair_fenced",
                     lease,
                     replacement,
                     vec![(
@@ -856,7 +863,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
 
         let mutation_count = statements.len();
         let result = self
-            .atomic_publication(lease, replacement, statements)
+            .atomic_publication(
+                "apply_identity_repair_fenced",
+                lease,
+                replacement,
+                statements,
+            )
             .await;
         match result {
             Ok(counts)
@@ -868,11 +880,19 @@ impl FencedPublicationStore for HiqliteAuthStore {
             {
                 Ok(IdentityRepairOutcome::Applied)
             }
-            Ok(_) if self.identity_repair_mapping_applied(plan).await? => {
+            Ok(_)
+                if self
+                    .identity_repair_mapping_applied("apply_identity_repair_fenced", plan)
+                    .await? =>
+            {
                 Ok(IdentityRepairOutcome::AlreadyApplied)
             }
             Ok(_) => Ok(IdentityRepairOutcome::Stale),
-            Err(_error) if self.identity_repair_mapping_applied(plan).await? => {
+            Err(_error)
+                if self
+                    .identity_repair_mapping_applied("apply_identity_repair_fenced", plan)
+                    .await? =>
+            {
                 Ok(IdentityRepairOutcome::AlreadyApplied)
             }
             Err(error) if error.to_string().contains("StmtIndex(1)") => {
@@ -891,6 +911,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         let now = self.now()?;
         self.atomic_publication(
+            "put_setting_fenced",
             lease,
             replacement,
             vec![(
@@ -927,6 +948,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let now = self.now()?;
         let results = self
             .atomic_publication(
+                "put_setting_if_absent_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -964,6 +986,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let now = self.now()?;
         let results = self
             .atomic_publication(
+                "put_setting_if_absent_if_artwork_repair_current_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -1006,6 +1029,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         let now = self.now()?;
         self.atomic_publication(
+            "mark_library_scanned_fenced",
             lease,
             replacement,
             vec![(
@@ -1044,13 +1068,13 @@ impl FencedPublicationStore for HiqliteAuthStore {
         };
         let now = self.now()?;
         // authority: current allocator installation selects the identity-fenced write path.
-        let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
+        let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("insert_item_fenced", "SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
         #[cfg(feature = "hiqlite-contract-tests")]
         let seam = self.insertion_seam.installed();
         for attempt in 0..4 {
             let id = if allocated {
                 // authority: select the next candidate against the committed monotonic watermark.
-                self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT high_water+1 AS value FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807",params!()).await.map_err(database_error)?.first().map(|r|r.value).ok_or_else(||StoreError::Database("item identity allocation unavailable".into()))?
+                self.client().query_consistent_map::<ItemIdentityValue,_>("insert_item_fenced", "SELECT high_water+1 AS value FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807",params!()).await.map_err(database_error)?.first().map(|r|r.value).ok_or_else(||StoreError::Database("item identity allocation unavailable".into()))?
             } else {
                 publication_row_id()
             };
@@ -1069,6 +1093,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
             let _ = attempt;
             let submission = self
                 .atomic_publication(
+                    "insert_item_fenced",
                     lease,
                     replacement,
                     vec![(
@@ -1161,6 +1186,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         };
         let now = self.now()?;
         self.atomic_publication(
+            "apply_metadata_fenced",
             lease,
             replacement,
             vec![(
@@ -1228,6 +1254,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let now = self.now()?;
         let results = self
             .atomic_publication(
+                "apply_series_tmdb_hint_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -1255,8 +1282,13 @@ impl FencedPublicationStore for HiqliteAuthStore {
         if results.first().copied() == Some(1) {
             return Ok(SeriesHintOutcome::Applied);
         }
-        self.current_series_hint_outcome(library_id, show_id, tmdb_id)
-            .await
+        self.current_series_hint_outcome(
+            "apply_series_tmdb_hint_fenced",
+            library_id,
+            show_id,
+            tmdb_id,
+        )
+        .await
     }
 
     async fn apply_metadata_if_artwork_repair_current_fenced(
@@ -1287,6 +1319,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let now = self.now()?;
         let results = self
             .atomic_publication(
+                "apply_metadata_if_artwork_repair_current_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -1356,6 +1389,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let source = patch.source.as_str();
         let now = self.now()?;
         self.atomic_publication(
+            "apply_book_metadata_fenced",
             lease,
             replacement,
             vec![(
@@ -1523,7 +1557,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
             )
         };
         let results = self
-            .atomic_publication(lease, replacement, vec![statement])
+            .atomic_publication(
+                "apply_book_metadata_if_current_fenced",
+                lease,
+                replacement,
+                vec![statement],
+            )
             .await?;
         Ok(results.first().copied() == Some(1))
     }
@@ -1536,6 +1575,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         let now = self.now()?;
         self.atomic_publication(
+            "set_nfo_seeded_fenced",
             lease,
             replacement,
             vec![(
@@ -1572,6 +1612,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let subtitles = serde_json::to_string(&probe.subtitle_streams).map_err(database_error)?;
         let now = self.now()?;
         self.atomic_publication(
+            "upsert_file_fenced",
             lease,
             replacement,
             vec![(
@@ -1647,7 +1688,11 @@ impl FencedPublicationStore for HiqliteAuthStore {
         )
         .await?;
         self.client()
-            .query_consistent_map::<IdRow, _>("SELECT id FROM files WHERE path = $1", params!(path))
+            .query_consistent_map::<IdRow, _>(
+                "upsert_file_fenced",
+                "SELECT id FROM files WHERE path = $1",
+                params!(path),
+            )
             .await?
             .into_iter()
             .next()
@@ -1669,6 +1714,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let configured_paths = crate::store::library_paths_json(configured_paths)?;
         let results = self
             .atomic_publication(
+                "ensure_library_root_fingerprint_fenced",
                 lease,
                 replacement,
                 vec![
@@ -1714,14 +1760,20 @@ impl FencedPublicationStore for HiqliteAuthStore {
         if results.first().copied() == Some(1) {
             return Ok(RootFingerprintStatus::Established);
         }
-        if !super::hiqlite_media::library_paths_are(self.client(), library_id, &configured_paths)
-            .await?
+        if !super::hiqlite_media::library_paths_are(
+            "ensure_library_root_fingerprint_fenced",
+            self.client(),
+            library_id,
+            &configured_paths,
+        )
+        .await?
         {
             return Ok(RootFingerprintStatus::ConfigurationChanged);
         }
         let expected = self
             .client()
             .query_consistent_map::<FingerprintRow, _>(
+                "ensure_library_root_fingerprint_fenced",
                 "SELECT fingerprint FROM library_roots WHERE library_id = $1",
                 params!(library_id),
             )
@@ -1764,9 +1816,15 @@ impl FencedPublicationStore for HiqliteAuthStore {
             Some(&authority),
         )?;
         let results = self
-            .atomic_publication(lease, replacement, statements)
+            .atomic_publication(
+                "remove_files_outside_library_roots_fenced",
+                lease,
+                replacement,
+                statements,
+            )
             .await?;
         super::hiqlite_media::root_removal_outcome(
+            "remove_files_outside_library_roots_fenced",
             self.client(),
             library_id,
             &configured_paths,
@@ -1916,12 +1974,13 @@ impl FencedPublicationStore for HiqliteAuthStore {
             ),
         ];
         let results = self
-            .atomic_publication(lease, replacement, statements)
+            .atomic_publication("reconcile_library_fenced", lease, replacement, statements)
             .await?;
         if results.first().copied() != Some(1) {
             let expected = self
                 .client()
                 .query_consistent_map::<FingerprintRow, _>(
+                    "reconcile_library_fenced",
                     "SELECT fingerprint FROM library_roots WHERE library_id = $1",
                     params!(library_id),
                 )
@@ -1937,6 +1996,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
             let requested = self
                 .client()
                 .query_consistent_map::<CountRow, _>(
+                    "reconcile_library_fenced",
                     "SELECT COUNT(*) AS count FROM files f JOIN items i ON i.id = f.item_id
                      WHERE i.library_id = $1
                        AND f.id IN (SELECT value FROM json_each($2))",
@@ -1980,6 +2040,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let revision = lease_i64("revision", lease.revision)?;
         let results = self
             .atomic_publication(
+                "claim_cache_entry_fenced",
                 lease,
                 replacement,
                 vec![
@@ -2043,6 +2104,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         replacement: &Lease,
     ) -> Result<(), StoreError> {
         self.atomic_publication(
+            "touch_cache_claim_fenced",
             lease,
             replacement,
             vec![(
@@ -2079,6 +2141,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
     ) -> Result<(), StoreError> {
         let now = self.now()?;
         self.atomic_publication(
+            "complete_cache_entry_fenced",
             lease,
             replacement,
             vec![(
@@ -2127,6 +2190,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let revision = lease_i64("revision", lease.revision)?;
         let results = self
             .atomic_publication(
+                "forget_cache_entry_fenced",
                 lease,
                 replacement,
                 vec![
@@ -2181,6 +2245,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         let results = self
             .atomic_publication(
+                "mark_dv_conversion_running_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -2222,6 +2287,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         }
         let results = self
             .atomic_publication(
+                "mark_dv_conversion_verified_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -2262,6 +2328,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let revision = lease_i64("revision", lease.revision)?;
         let results = self
             .atomic_publication(
+                "begin_dv_recovery_guard_fenced",
                 lease,
                 replacement,
                 vec![
@@ -2364,6 +2431,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         };
         let results = self
             .atomic_publication(
+                "mark_dv_conversion_committed_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -2406,6 +2474,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let revision = lease_i64("revision", lease.revision)?;
         let results = self
             .atomic_publication(
+                "mark_dv_conversion_committed_with_guard_fenced",
                 lease,
                 replacement,
                 vec![
@@ -2532,6 +2601,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         }
         let results = self
             .atomic_publication(
+                "advance_dv_recovery_guard_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -2580,6 +2650,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         let results = self
             .atomic_publication(
+                "delete_dv_recovery_guard_fenced",
                 lease,
                 replacement,
                 vec![(
@@ -2616,6 +2687,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let error = error.chars().take(4096).collect::<String>();
         let results = self
             .atomic_publication(
+                "mark_dv_conversion_failed_fenced",
                 lease,
                 replacement,
                 vec![(

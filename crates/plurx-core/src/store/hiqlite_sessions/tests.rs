@@ -377,3 +377,63 @@ fn direct_v9_upgrade_uses_the_frozen_v10_session_shape() {
     assert!(MEDIA_SESSION_TERMINAL_REASON_MIGRATION.contains("terminal_reason"));
     assert!(MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION.contains("publication_ready_at_ms"));
 }
+
+/// E1c review N6: `validation_assume_installed_session_layout` exists only
+/// under `cluster-read-cost-validation`, which another workspace crate turns
+/// on, so feature unification can compile it into a daemon. This pins that
+/// nothing outside the store-contract tests ever calls it: the definition is
+/// the only occurrence in any crate's `src/`.
+#[test]
+fn the_assumed_layout_hook_has_no_caller_outside_the_store_contract() {
+    fn walk(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).expect("read a source directory") {
+            let path = entry.expect("a source entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    const HOOK: &str = "validation_assume_installed_session_layout";
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crates directory");
+    let mut sources = Vec::new();
+    for entry in std::fs::read_dir(crates).expect("read crates") {
+        let src = entry.expect("a crate").path().join("src");
+        if src.is_dir() {
+            walk(&src, &mut sources);
+        }
+    }
+    let this = file!().replace('\\', "/");
+    let mut found = Vec::new();
+    for path in sources {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if rel.ends_with(this.rsplit("crates/").next().unwrap_or(&this)) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read a source file");
+        for _ in text.matches(HOOK) {
+            found.push(rel.clone());
+        }
+    }
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].ends_with("plurx-core/src/store/hiqlite_sessions.rs"),
+        "{found:?}"
+    );
+    assert!(SOURCE.contains(&format!("    pub fn {HOOK}(&self)")));
+    let definition = SOURCE
+        .split(&format!("pub fn {HOOK}"))
+        .next()
+        .expect("definition");
+    assert!(
+        definition
+            .trim_end()
+            .rsplit('\n')
+            .take(3)
+            .any(|line| line.contains("#[cfg(feature = \"cluster-read-cost-validation\")]")),
+        "the hook stays behind the validation feature"
+    );
+}

@@ -1813,7 +1813,17 @@ pattern = "DurableRouteResolution"
 # 102 -> 105 with playback-start E1a's route-read baseline: the status
 # resolution and the two site-labelled authoritative helpers return the same
 # enum. Counting only (`site="status"`); no new resolution, no producer.
-expected_occurrences = 105
+# 105 -> 113 with E1c (route view): status.rs's view-first first resolution
+# names the two active arms it admits (+2); the site-carrying forms of the
+# cached lookups (`route_resolution_at`, `media_route_resolution_at`,
+# `status_view_media_route_resolution_before`) return it (+3); the route
+# inventory pins status's match (+2) and the B1 case asserts a terminal
+# answer (+1), both test-only. No new producer.
+# 113 -> 125 with the E1c review: relay.rs's `durable_route` helper names the
+# variants it reads a row from and the confirmation arms name `Absent` (+6);
+# route_view_tests.rs's fence guard classifies verdicts by variant (+6,
+# test-only). No new producer.
+expected_occurrences = 125
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
@@ -1821,7 +1831,11 @@ pattern = "authoritative_route_resolution_before"
 # 9 -> 8 with E1a's route-read baseline: the media form now reaches the shared
 # body through `authoritative_route_resolution_at`, which carries the site
 # label. The same quorum read, counted; no call site changed authority.
-expected_occurrences = 8
+# 8 -> 9 with E1c: route_view_tests.rs's fence guard calls it once to prove
+# the verdict never asks the applied view. Test-only.
+# 9 -> 10 with the E1c review: route_view_tests.rs's source guard names it
+# among the fences it checks. Test-only.
+expected_occurrences = 10
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-facade"
@@ -2116,12 +2130,19 @@ expected_occurrences = 10
 [[module_symbols]]
 id = "m4-exact-release-proof-completion"
 pattern = "complete_release_(?:with_route|absent|settlement)"
-expected_occurrences = 29
+# 29 -> 30 with the E1c review: the fence guard runs a release through
+# `complete_release_absent` with a cached view answer present. Test-only.
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "m4-terminal-route-proof-cache"
 pattern = "cache_terminal_route"
-expected_occurrences = 4
+# 4 -> 5 with E1c: the B1 case in route_view_tests.rs publishes a release
+# tombstone through it. Test-only; the shipped callers are unchanged.
+# 5 -> 8 with the E1c review: route_view_tests.rs publishes tombstones
+# through it in the failed-replacement, image-replacement and storm cases.
+# Test-only; the shipped callers are unchanged.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-activation-publication-handoff-fence"
@@ -2235,7 +2256,11 @@ pattern = "publication_ready_at_ms"
 # sentinel, and three read-only checks refuse a route whose session or fence
 # moved. The engine never advances or clears the fence; the actor slot remains
 # the only authority that publishes.
-expected_occurrences = 167
+# 167 -> 168 with E1c: route_view_tests.rs's committed-row helper activates
+# with a publishable fence. Test-only.
+# 168 -> 169 with the E1c review: the HTTP route-view fixture activates with
+# a publishable fence. Test-only.
+expected_occurrences = 169
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2305,7 +2330,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # blocked activation before its existing Confirm settlement; no shipped write.
 # 58 -> 59 with the A1/B1 growing engine's route registration (#1495), which
 # writes the blocked sentinel the way every other actor registration does.
-expected_occurrences = 59
+# 59 -> 60 with E1c: route_view_tests.rs's committed-row helper activates
+# behind the blocked sentinel, as every activation must. Test-only.
+expected_occurrences = 60
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2490,7 +2517,9 @@ pattern = "terminal_reason"
 # the `attempt_limit` cause the recovery wrote. No route cause changes.
 # R1: +2 test-only reads asserting a release/stop maps to the existing
 # durable reasons (`deleted`, `admin_stop`). No new writer of a terminal cause.
-expected_occurrences = 56
+# 56 -> 57 with the E1c review: route_view_tests.rs's ended-row helper names
+# the durable reason. Test-only.
+expected_occurrences = 57
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -2605,7 +2634,11 @@ pattern = "cache_route_if_generation"
 # this row: the paused-time sweep test calls it once, on a coordinator it owns, to run
 # the generation-insert sweep over expired entries, and names it once in a comment.
 # Test-only; the shipped function still has its one production caller.
-expected_occurrences = 5
+# 5 -> 3 with E1c: the paused-time sweep test is gone with the sweeps
+# (ROUTE_CACHE_TTL deleted); the function keeps its one caller.
+# 3 -> 4 with the E1c review: the route inventory pins its lock site by
+# name. Test-only.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-predetermined-takeover-worker-id"
@@ -3904,7 +3937,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # spawn_blocking; state.rs run_targeted scopes a probe-only group to the nearest
 # existing folder on one awaited spawn_blocking. Each JoinHandle is awaited by
 # the request's own future, so cancellation and panics surface as task errors.
-expected_occurrences = 1148
+# #1566, +1 detached bounded store write: processed_upgrade_qualification.rs
+# `hold_viewer_demand` records a waiting viewer's live demand on its title scan
+# in one spawned task that makes a single store call and logs its outcome. It
+# holds no lock, resource or source, is throttled to one per viewer per 30 s by
+# the registry entry, and a lost write only delays that viewer's next renewal.
+# 1142 -> 1145 with the E1c review: three test-only `tokio::spawn`s in
+# route_view_tests.rs hold a lookup mid-read (cancel, publication race,
+# proof loss); each is joined or aborted by its test.
+# Merged main into E1c: 1142 base, +2 main, +3 E1c.
+# D3a: -1 (1147 -> 1146), the owner start's `tokio::spawn` becomes
+# `spawn_in_http_store_scope`, which carries the request's Store-operation
+# counts into the same awaited task (counted under process-capable-launch-method).
+# Merged main again: 1144 base, +4 main (#1546), +2 this branch.
+# Merged main into E1c: 1148 base, +1 main, +2 E1c.
+expected_occurrences = 1151
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5773,7 +5820,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # census fixture waits 20 ms on the test thread so its poisoned anchor's
 # ctime advances past the witness's, as the job-owner fixture already does.
 # No task, timer or process in production code.
-expected_occurrences = 2204
+# 2202 -> 2205 with E1c (route view): `raw_route_before` bounds its view read
+# and its quorum read (alternative arms) by the lookup's existing request
+# deadline, one `timeout_at` more than the single Store read had (+1); two
+# test-only 40-50 ms pacing sleeps in route_view_tests.rs drive real-time
+# lease cases (+2). No new task, timer or producer: the cache has no clock.
+# 2205 -> 2203 with the E1c review: the two wall-clock pacing sleeps in
+# route_view_tests.rs are gone; those cases run on a paused clock.
+# Merged main into E1c: 2202 base, +0 main, +1 E1c.
+# Merged main into E1c: 2202 base, +0 main, +1 E1c.
+# Merged main again: +1 main (#1546 test poll) = 2204.
+expected_occurrences = 2205
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6986,7 +7043,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # not a process.
 # PR1527: +1 (923 -> 924), the synchronous `.output()` of the test-only
 # bundle-installer --identity child above; it waits for and reaps the child.
-expected_occurrences = 924
+# D3a: +1 (924 -> 925), `spawn_in_http_store_scope(`, the owner start's one
+# spawn (the line above); it is the task `ims.rs::start` already awaited, not a
+# process, and joins before the handler returns.
+expected_occurrences = 925
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
