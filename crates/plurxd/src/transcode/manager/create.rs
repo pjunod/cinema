@@ -4622,6 +4622,7 @@ impl TranscodeManager {
         Ok(StartInfo {
             processed_dv_profile,
             processed_fel,
+            dv_refit_digest: start.dv_refit_digest,
             degraded_processing,
             processing_note,
             retained_output: response_facts

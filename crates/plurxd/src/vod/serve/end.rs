@@ -839,6 +839,7 @@ impl VodServe {
         let tone_map_peak = stream_format::tone_map_peak(&rendition);
         Some(VodPublication {
             result: Ok(VodSessionInfo {
+                dv_refit_digest: rendition.recipe.video.dolby_vision_refit().map(hex::encode),
                 stream_format: StreamFormat::for_rendition(&rendition),
                 active_encode_milli_realtime: active_production.map(|proof| proof.milli_realtime),
                 active_encode_age_ms: active_production.map(|proof| {

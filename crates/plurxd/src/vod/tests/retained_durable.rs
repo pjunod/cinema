@@ -175,6 +175,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
         encoded_frame_ticks: None,
         encoded_video_origin: None,
         identity: identity.clone(), convert_dolby_vision: false,
+        dv_refit: None,
         retain_hevc_parameter_sets: false, start_entry: 0, policy,
     }, &sink, "durable-trailer-negative").await;
     assert!(matches!(outcome, Outcome::Ran { .. }), "trailerless EOF is not normal completion: {outcome:?}");

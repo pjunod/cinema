@@ -64,6 +64,34 @@ pub struct ServedCurveTable {
 }
 
 impl ServedCurveTable {
+    /// Build from the store's already checked, quantised serving curves.
+    pub fn from_servable<'a>(
+        digest: impl Into<String>,
+        scenes: impl IntoIterator<Item = (i64, i64, &'a str, Option<&'a ServableCurves>)>,
+    ) -> Result<Self, ServeError> {
+        let mut time_base: Option<(&str, (u32, u32))> = None;
+        let mut starts = Vec::new();
+        let mut curves = Vec::new();
+        let mut end_pts = i64::MIN;
+        for (index, (first_pts, end, base, fitted)) in scenes.into_iter().enumerate() {
+            match time_base {
+                None => {
+                    let parsed = parse_time_base(base).ok_or_else(|| ServeError::TimeBase(base.into()))?;
+                    time_base = Some((base, parsed));
+                }
+                Some((known, _)) if known != base => return Err(ServeError::MixedTimeBase),
+                Some(_) => {}
+            }
+            if end <= first_pts || starts.last().is_some_and(|&last| first_pts <= last) {
+                return Err(ServeError::Order(index));
+            }
+            starts.push(first_pts);
+            end_pts = end;
+            curves.push(fitted.cloned());
+        }
+        let (_, time_base) = time_base.ok_or(ServeError::Empty)?;
+        Ok(Self { digest: digest.into(), time_base, starts, end_pts, curves })
+    }
     /// Builds the table from stored scenes, in presentation order:
     /// `(first_pts, end_pts, time_base, curves)`. Stored curves are checked
     /// with [`servable`] again here; one that fails refuses the whole table,
@@ -149,6 +177,37 @@ pub struct SourceClock {
 }
 
 impl SourceClock {
+    /// Bind a production fragment's first decode time to a candidate index
+    /// row. The source packet origin was verified when that fitted index was
+    /// built. This calculation uses the row's decode displacement, never a
+    /// floating-point seek estimate or a frame count.
+    pub fn for_index_landing(
+        index: &crate::segplan::FragmentIndex,
+        row: usize,
+        production_dts: u64,
+    ) -> Result<Self, ServeError> {
+        let origin = index.dv_refit_origin.ok_or(ServeError::Clock)?;
+        let first = index.rows.first().ok_or(ServeError::Clock)?;
+        let landed = index.rows.get(row).ok_or(ServeError::Clock)?;
+        let clock = Self {
+            track_timescale: index.timescale,
+            track_ticks: i128::from(production_dts),
+            source_pts: origin.first_dts,
+            source_time_base: (origin.time_base_num, origin.time_base_den),
+        };
+        let offset = i128::from(landed.dts) - i128::from(first.dts);
+        let denominator = i128::from(index.timescale) * i128::from(origin.time_base_num);
+        let numerator = offset.checked_mul(i128::from(origin.time_base_den))
+            .ok_or(ServeError::Overflow(offset))?;
+        if denominator == 0 || numerator % denominator != 0 {
+            return Err(ServeError::NonIntegral(offset));
+        }
+        let source_dts = i128::from(origin.first_dts).checked_add(numerator / denominator)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(ServeError::Overflow(offset))?;
+        Ok(Self { source_pts: source_dts, ..clock })
+    }
+
     /// The source pts of a sample presenting at `presentation` track ticks:
     /// `source_pts + (presentation − track_ticks) · den / (timescale · num)`,
     /// refused unless it is a whole source tick.

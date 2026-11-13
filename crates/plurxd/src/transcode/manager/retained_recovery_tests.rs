@@ -269,6 +269,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: Some(Box::new(TranscodeManager::candidate_context(&candidate))),

@@ -1494,6 +1494,9 @@ fn pipeline_digest_for_transform(
     // old fragment sizes and init metadata under a still-valid engine digest.
     if let (true, Some(transform)) = (video.converts_dolby_vision(), transform) {
         args.push(format!("{{plurx-output-transform:{transform}}}"));
+        if let Some(digest) = video.dolby_vision_refit() {
+            args.push(format!("{{plurx-dv-refit-digest:{}}}", hex::encode(digest)));
+        }
     }
     cluster_fragment_index_pipeline_digest(engine_sha256, &args)
         .expect("the engine probe always returns a SHA-256 digest")

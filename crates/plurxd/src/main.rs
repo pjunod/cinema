@@ -40,6 +40,7 @@ mod dv_disk;
 #[cfg(unix)]
 mod dv_segment;
 mod dvpipe;
+mod dv_refit_serving;
 mod ffmpeg;
 mod ffmpeg_support;
 mod fontenv;

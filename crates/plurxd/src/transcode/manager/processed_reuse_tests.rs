@@ -1659,6 +1659,7 @@ printf '%s\n' '{}'
         quality_catalog: None,
         candidate_context: Some(Box::new(context)),
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         vod_only: false,
         passive_vod: false,
         finite_bitrate_limit_bps: None,

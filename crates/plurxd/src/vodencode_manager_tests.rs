@@ -1559,6 +1559,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     let req = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -1577,6 +1578,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     let missing = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -1784,6 +1786,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
         let request = SessionRequest {
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -1927,6 +1930,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
     let request = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2026,6 +2030,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let req = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2075,6 +2080,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
             &SessionRequest {
                 dv_processing_destination: None,
                 sdr_master_codecs: None,
+                dv_refit_digest: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -2116,6 +2122,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
             &SessionRequest {
                 dv_processing_destination: None,
                 sdr_master_codecs: None,
+                dv_refit_digest: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -2226,6 +2233,7 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
     let req = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2321,6 +2329,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     let req = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2494,6 +2503,7 @@ async fn encoding_shipped_shape() {
     let req = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2581,6 +2591,7 @@ async fn an_encode_the_software_budget_can_never_admit_is_refused_at_create() {
     let req = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -2718,6 +2729,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     let mut request = SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: Some(Box::new(ContinuousMediaRequest {
             controlled: false,
             autonomous_companion: None,

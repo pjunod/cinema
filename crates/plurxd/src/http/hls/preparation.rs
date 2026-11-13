@@ -2650,6 +2650,7 @@ pub(super) async fn stage_prepared_successor_as(
     let staged_request = crate::transcode::SessionRequest {
         dv_processing_destination: candidate.dv_processing_destination,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),

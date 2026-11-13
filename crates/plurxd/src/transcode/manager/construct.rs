@@ -9,6 +9,13 @@ impl Drop for LibraryTurnWait<'_> {
 }
 
 impl TranscodeManager {
+    /// A predecessor's accepted typed control platform. First play has none.
+    pub(crate) async fn refit_platform_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::playback_control::ClientPlatform> {
+        self.vod.client_platform_for_session(session_id).await
+    }
     pub(crate) fn candidate_production_proof(&self, recipe: [u8; 32]) -> Option<u32> {
         self.candidate_production_proofs
             .get(recipe)

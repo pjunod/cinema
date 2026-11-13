@@ -697,7 +697,22 @@ pub struct FragmentIndex {
     /// the difference between a scan-time verdict and a `producer_failed` in
     /// the middle of someone's playback.
     pub parameter_sets_constant: bool,
+    /// Exact source packet origin of a fitted copy. Absent on every legacy
+    /// index, preserving its persisted shape and identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv_refit_origin: Option<DvRefitOrigin>,
     pub source: SourceIdentity,
+}
+
+/// The selected source video packet corresponding to the index's first
+/// sample, in the source stream time base. Its DTS anchors decode time; PTS
+/// checks the first composition offset before F+ bytes are published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DvRefitOrigin {
+    pub first_dts: i64,
+    pub first_pts: i64,
+    pub time_base_num: u32,
+    pub time_base_den: u32,
 }
 
 impl FragmentIndex {
@@ -716,6 +731,7 @@ impl FragmentIndex {
             // clean fragments were never compared has not been shown to vary.
             // The indexer sets this from what it actually walked.
             parameter_sets_constant: true,
+            dv_refit_origin: None,
             init_sha256: init_sha256.into(),
             source,
         }

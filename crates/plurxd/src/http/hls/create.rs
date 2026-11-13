@@ -697,6 +697,7 @@ impl CreateSession {
         crate::transcode::SessionRequest {
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -2564,6 +2565,15 @@ async fn resolve_plan_for_principal_with_local_evidence(
     };
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
+    if let Some(file) = source {
+        let platform = match request.previous_session_id.as_deref() {
+            Some(previous) => state.transcode.refit_platform_for_session(previous).await,
+            None => None,
+        };
+        crate::dv_refit_serving::pin_for_session(
+            state.store.as_ref(), file, &mut request, platform,
+        ).await.map_err(ApiError::Internal)?;
+    }
     // Observational retained-output override follows the original intent hash
     // and full route/audio reconciliation. Advisory JSON cannot construct it.
     let candidate_cost_proof = if candidate_auto_policy && incumbent_receipt.is_some() {

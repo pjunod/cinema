@@ -3704,11 +3704,15 @@ async fn fragment_index_video_identities(
     convert: bool,
 ) -> Result<Vec<plurx_core::transcode::CopyVideoOptions>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    Ok(crate::fragindex::video_identities(
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
+    Ok(crate::fragindex::video_identities_with_refit(
         file,
         probe_json.as_deref(),
         have_dovi,
         convert,
+        refit,
     ))
 }
 
@@ -3736,8 +3740,13 @@ pub(crate) async fn fragment_index_video_identity_options(
     convert: bool,
 ) -> Result<Vec<(plurx_core::transcode::CopyVideoOptions, String)>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
     Ok(
-        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert)
+        crate::fragindex::video_identities_with_refit(
+            file, probe_json.as_deref(), have_dovi, convert, refit,
+        )
             .into_iter()
             .map(|video| {
                 let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
@@ -9066,7 +9075,7 @@ impl JobManager {
             let Some(mut builds) = local_index_until_foreground(
                 &transcode,
                 &admission,
-                crate::fragindex::build_riding_shared(
+                crate::fragindex::build_riding_shared_with_store(
                     &file,
                     &missing
                         .iter()
@@ -9082,6 +9091,7 @@ impl JobManager {
                         .unwrap_or_else(|| index_file_budget(file.duration_ms, file.size, None)),
                     ride_along.as_ref(),
                     Some(reporter),
+                    Some(self.store.as_ref()),
                 ),
             )
             .await
@@ -9121,13 +9131,14 @@ impl JobManager {
                     let Some(build) = local_index_until_foreground(
                         &transcode,
                         &admission,
-                        crate::fragindex::build_riding(
+                        crate::fragindex::build_riding_with_store(
                             &file,
                             *video,
                             &runtime_cache,
                             index_file_budget(file.duration_ms, file.size, previous.as_ref()),
                             None,
                             Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                            Some(self.store.as_ref()),
                         ),
                     )
                     .await
@@ -11978,7 +11989,7 @@ impl JobManager {
             },
             async {
                 Ok::<_, String>(
-                    crate::fragindex::build_shared_from_attested_file_with_progress(
+                    crate::fragindex::build_shared_from_attested_file_with_progress_and_store(
                         &file,
                         &attested.handle,
                         &attested.observation.object_version,
@@ -11988,6 +11999,7 @@ impl JobManager {
                         report_progress,
                         ride_along.as_ref(),
                         &cancel,
+                        Some(self.store.as_ref()),
                     )
                     .await,
                 )
