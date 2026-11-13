@@ -2941,7 +2941,7 @@ async fn build_with_args_owned(
     #[cfg(not(unix))]
     let sibling_readers: Option<Vec<tokio::process::ChildStdout>> = stdout.is_some().then(Vec::new);
     let (Some(stdout), Some(sibling_readers)) = (stdout, sibling_readers) else {
-        if source_owned.is_some() {
+        if source_owned.is_some() || cancel.is_some() {
             let _ = child.start_kill();
             loop {
                 match child.wait().await {
