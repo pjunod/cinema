@@ -369,6 +369,13 @@ provenance and acknowledged partial-cleanup retry; both corrections were
 confirmed by the reviewer before execution. These definitions
 are not execution evidence.
 
+The durable-jobs and operation-progress mapping audit pins the reviewed
+startup/recovery files plus the new proof consumer and producer as explicit
+recovery dependencies outside those models. Existing Store transitions,
+physical-closure predicates, models, configurations and assertions are unchanged.
+These pins establish reviewed source correspondence, not formal verification
+of the administrator's journal or filesystem implementation.
+
 ## 2. The journal never impersonates an activation or completed join
 
 [Recovery replay](../../crates/plurxd/src/source_custody/recovery.rs) uses
