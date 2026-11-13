@@ -55,7 +55,7 @@
       },
       {
         "anchor": "    reprobe_files_with_publication(&PublicationStore::unfenced(store), files).await",
-        "sha256": "45572faa7133592faf096bbaabffb1f42962e2f895b390266a1339dd23077646",
+        "sha256": "53d80c85e600ee4d061103e00126a452484ede9c661b2893d308da89ffa2daaa",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/scan/mod.rs:485"
       },
@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "ce4fa16d5bd1a9aa3568b420974d49e7a0774c53dfd1c15dc4abd1c895b733fb",
+        "sha256": "422014b227217c345ab03ef86a824e6660a0b23176a62c7cfae3f6cee37b7806",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "ce4fa16d5bd1a9aa3568b420974d49e7a0774c53dfd1c15dc4abd1c895b733fb",
+        "sha256": "422014b227217c345ab03ef86a824e6660a0b23176a62c7cfae3f6cee37b7806",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },
@@ -277,109 +277,109 @@
       },
       {
         "anchor": "seam.acknowledgement(&observed).apply(results)",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "M2 Hiqlite acknowledgement hook application"
       },
       {
         "anchor": "fn acknowledgement(&self, attempt: &InsertionAttempt) -> Acknowledgement;",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "M2 Hiqlite acknowledgement hook contract"
       },
       {
         "anchor": "pub(crate) struct InsertionSeamSlot",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "M2 Hiqlite per-store seam slot"
       },
       {
         "anchor": "async fn insert_item_fenced(",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "proposal \u00a74.1 Hiqlite catalogue insertion"
       },
       {
         "anchor": "pub(super) fn atomic_renewal_statement(",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "proposal \u00a74.1 Hiqlite renewal SQL"
       },
       {
         "anchor": "        let renewal = atomic_renewal_statement(lease, replacement, unix_ms()?)?;",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:187"
       },
       {
         "anchor": "        let results = match transaction {",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:198"
       },
       {
         "anchor": "        || replacement.expires_at_unix_ms <= lease.expires_at_unix_ms",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:38"
       },
       {
         "anchor": "            AND expires_at_ms > $9",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:49"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:61"
       },
       {
         "anchor": "fn bind_atomic_authority(params: &mut hiqlite::Params, lease: &Lease) -> Result<(), StoreError> {",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:82"
       },
       {
         "anchor": "        };\n        let now = self.now()?;\n        // authority: current allocator installation selects the identity-fenced write path.",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:915"
       },
       {
         "anchor": "for attempt in 0..4 {",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:918"
       },
       {
         "anchor": "                 WHERE EXISTS (",
-        "sha256": "6d3a2be3a9601eec58a45f2be22a81b9f7980615c809a42c8e06d9f7a9a7c69a",
+        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:934"
       },
       {
         "anchor": "async fn fenced_call<",
-        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "sha256": "5b21d7d9674ded5d1788c95b9300942b3d8e7682ec00fdb35369c226fa9b3cef",
         "source": "crates/plurx-core/src/store/publication.rs",
         "table": "proposal \u00a74.1 publication facade call"
       },
       {
         "anchor": "pub async fn insert_item(&self, item: &NewItem) -> Result<i64, StoreError> {",
-        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "sha256": "5b21d7d9674ded5d1788c95b9300942b3d8e7682ec00fdb35369c226fa9b3cef",
         "source": "crates/plurx-core/src/store/publication.rs",
         "table": "proposal \u00a74.1 publication facade insertion"
       },
       {
         "anchor": "    async fn fenced_call<'call, T, F>(&'call self, operation: F) -> Result<T, StoreError>",
-        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "sha256": "5b21d7d9674ded5d1788c95b9300942b3d8e7682ec00fdb35369c226fa9b3cef",
         "source": "crates/plurx-core/src/store/publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/publication.rs:303"
       },
       {
         "anchor": "        let predecessor = state.as_ref().cloned().ok_or_else(|| self.invalidated())?;\n        let now = unix_ms()?;\n        if predecessor.expires_at_unix_ms <= now {",
-        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d",
+        "sha256": "5b21d7d9674ded5d1788c95b9300942b3d8e7682ec00fdb35369c226fa9b3cef",
         "source": "crates/plurx-core/src/store/publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/publication.rs:318"
       },
@@ -409,49 +409,49 @@
       },
       {
         "anchor": "async fn with_fenced_conn<T, F>",
-        "sha256": "ec987bd7633bd5293892776f1fc69190a3f6bd50a440b728758a6b944f78cd83",
+        "sha256": "a37654b6863ef0f1483e3026f6f4f7e6d3546a9f959ded877f14d573f5d60890",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "proposal \u00a74.1 SQLite fenced transaction"
       },
       {
         "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
-        "sha256": "ec987bd7633bd5293892776f1fc69190a3f6bd50a440b728758a6b944f78cd83",
+        "sha256": "a37654b6863ef0f1483e3026f6f4f7e6d3546a9f959ded877f14d573f5d60890",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
       },
       {
         "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
-        "sha256": "ec987bd7633bd5293892776f1fc69190a3f6bd50a440b728758a6b944f78cd83",
+        "sha256": "a37654b6863ef0f1483e3026f6f4f7e6d3546a9f959ded877f14d573f5d60890",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
       },
       {
         "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
-        "sha256": "ec987bd7633bd5293892776f1fc69190a3f6bd50a440b728758a6b944f78cd83",
+        "sha256": "a37654b6863ef0f1483e3026f6f4f7e6d3546a9f959ded877f14d573f5d60890",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "ec987bd7633bd5293892776f1fc69190a3f6bd50a440b728758a6b944f78cd83",
+        "sha256": "a37654b6863ef0f1483e3026f6f4f7e6d3546a9f959ded877f14d573f5d60890",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
       },
       {
         "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
-        "sha256": "ec987bd7633bd5293892776f1fc69190a3f6bd50a440b728758a6b944f78cd83",
+        "sha256": "a37654b6863ef0f1483e3026f6f4f7e6d3546a9f959ded877f14d573f5d60890",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
       },
       {
         "anchor": "async fn insert_item_fenced(",
-        "sha256": "d7b3828853d96048066be319d36f6203b51ac81646f7844e44f3e215beaaa823",
+        "sha256": "e45868c035767290e8128e3995926ba0b7ecbaf89d523b365acf313edab18e87",
         "source": "crates/plurx-core/src/store/sqlite/publication.rs",
         "table": "proposal \u00a74.1 SQLite catalogue insertion"
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "909db71db0556bdfab9095f5c973d74fd140897d43d290e3a2678c26b7aea91a",
+        "sha256": "70b828f9a3b06d978d04d966d55d130ea9b7c783f30d1a305e54af7902b699a7",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },
@@ -517,7 +517,7 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4",
+        "sha256": "18b52264d8deacd9feeb2e78c3806a7575c49527e503eecefa0264196b4f6814",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
@@ -535,37 +535,37 @@
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4",
+        "sha256": "18b52264d8deacd9feeb2e78c3806a7575c49527e503eecefa0264196b4f6814",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },
       {
         "anchor": "    async fn run_targeted(",
-        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
+        "sha256": "bba8eaf679e3e7ab457258a390d6d638675777cdad1e97e2a5650f0e0d2abd77",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
       },
       {
         "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
-        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
+        "sha256": "bba8eaf679e3e7ab457258a390d6d638675777cdad1e97e2a5650f0e0d2abd77",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
       },
       {
         "anchor": "    async fn run_scan(",
-        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
+        "sha256": "bba8eaf679e3e7ab457258a390d6d638675777cdad1e97e2a5650f0e0d2abd77",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
       },
       {
         "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
-        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
+        "sha256": "bba8eaf679e3e7ab457258a390d6d638675777cdad1e97e2a5650f0e0d2abd77",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
       },
       {
         "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
-        "sha256": "51e639a679234ebea9b543bcf4d57c5636190979e44567c4cbd479c9bb1386f7",
+        "sha256": "bba8eaf679e3e7ab457258a390d6d638675777cdad1e97e2a5650f0e0d2abd77",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
       },
