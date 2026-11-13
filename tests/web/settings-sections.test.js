@@ -1127,8 +1127,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.ok(developerCards.length >= 15, `Developer renders its cards (${developerCards.length})`);
   // 21 since D1 (2026-11-07): the processed DV upgrade waits on its measured
   // switches. 22 since E1a (2026-11-11): the applied view waits on its
-  // readers. The bound still catches a card that should have graduated.
-  assert.ok(developerCards.length <= 22, `Developer holds only what still waits (${developerCards.length})`);
+  // readers. 23 since D3b (2026-11-13): Create plan reports its deployment
+  // evidence. The bound still catches a card that should have graduated.
+  assert.ok(developerCards.length <= 23, `Developer holds only what still waits (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
