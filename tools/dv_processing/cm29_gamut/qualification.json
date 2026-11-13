@@ -1,129 +1,287 @@
 {
   "date": "2026-11-13",
   "owner": "Codex",
-  "state": "Locally qualified; adversarial review found no actionable issues; fast lane recorded in PR",
-  "measurement_base": "c37058e23f628968dfae37def89ca208fed8e209",
+  "state": "CPU and affected GPU cases qualified; adversarial review and final CI recorded in PR",
+  "baseline_commit": "e503f8bf3fca504f0facf6b26ff4306b25070cd9",
+  "prior_qualification_sha256": "918cd0b9db17d688de16748bfac0ba92c5c042b48b3a30b5ed1279537e57ed54",
   "source_sha256": {
     "dm_closed_form.h": "969d53c3dd17c17a5f6bdcb9d8bfac168ed5ff95602f749480c5be2973e0c1f8",
     "dv_dm.h": "aac57670c23e4de43d22879009b7880696459a4051629663c4d8ba7a13189de8",
-    "dm_cm29_gamut_tables.h": "e3425d434e7e3729e0446acac78324153cb60d0d6cce1681e85271083c2ac443"
+    "dm_cm29_gamut_tables.h": "98ddefa6cb6a173eed963ca640d9ab85f91c94572cad36772993d19bc53187fd"
   },
-  "cpu_control_sha256": "aa1bb9dc43ff9a3de767cdc55cfc3ccab90b6e7c859534a3dd7e776c40171d1f",
+  "cpu_control_sha256": "6f2df647f1126a1ed64747b1942a377e319f838540b782ec51c8e1f185e31510",
+  "root_cause": {
+    "missing_vertex": [
+      16,
+      -5,
+      -10
+    ],
+    "analytic_green_native_code": 0.047903195075475226,
+    "observed_rgb_codes": [
+      0,
+      4784,
+      20525
+    ],
+    "prior_probe_limit": "Neutral/dark physical RGB probes did not observe the corner; analytic clipping supplied a substantially wrong green value.",
+    "fix": "Generic saturation-expanded synthetic calibration fills unsupported 600-nit vertices; runtime interpolation is unchanged.",
+    "prior_vertices_preserved": 31545,
+    "added_vertices": 9181,
+    "total_600_vertices": 40726
+  },
   "corpus": [
+    {
+      "frame": "dumbmoney-31386",
+      "active_pixels": 6167040,
+      "worse": 11,
+      "equal": 6167028,
+      "better": 1,
+      "old_over_0.05": 0,
+      "new_over_0.05": 0,
+      "old_max_de": 0.013679453385839528,
+      "new_max_de": 0.013679453385839528,
+      "worst_worsening_de": 0.001788586735596628,
+      "max_change_codes": 0.16991928219795227,
+      "bars_changed": 0,
+      "bars_max_change_codes": 0.0,
+      "old_mean_de": 0.0021858723136385714,
+      "new_mean_de": 0.002185873448784365,
+      "worse_artifact_sha256": "4afc2c0b887b5fa6836412d8d01cd29a717f93718d61e9edbb84d28570c964b7"
+    },
     {
       "frame": "godfather2-w28",
       "active_pixels": 7971840,
-      "worse": 3411019,
-      "equal": 0,
-      "better": 4560821,
-      "old_over_0.05": 153917,
+      "worse": 0,
+      "equal": 7971840,
+      "better": 0,
+      "old_over_0.05": 0,
       "new_over_0.05": 0,
-      "old_max_de": 1.3820122432372832,
+      "old_max_de": 0.00855911535831544,
       "new_max_de": 0.00855911535831544,
-      "worst_worsening_de": 0.0076663548635910244,
-      "max_change_codes": 123.49030315876007,
-      "bars_changed": 322560,
-      "bars_max_change_codes": 401.08762979507446,
-      "old_mean_de": 0.005032950645546794,
+      "worst_worsening_de": 0.0,
+      "max_change_codes": 0.0,
+      "bars_changed": 0,
+      "bars_max_change_codes": 0.0,
+      "old_mean_de": 0.0024051883913212865,
       "new_mean_de": 0.0024051883913212865,
-      "worse_artifact_sha256": "5d41c25758557139ab58f83318bc508640aceb9b43e7e47de88052b3b53f063d"
+      "worse_artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca"
     },
     {
       "frame": "godfather2-w43",
       "active_pixels": 7971840,
-      "worse": 1947417,
-      "equal": 0,
-      "better": 6024423,
+      "worse": 0,
+      "equal": 7971840,
+      "better": 0,
       "old_over_0.05": 0,
       "new_over_0.05": 0,
-      "old_max_de": 0.011142905624688764,
+      "old_max_de": 0.005620932986754436,
       "new_max_de": 0.005620932986754436,
-      "worst_worsening_de": 0.004503934604911899,
-      "max_change_codes": 0.7719608768820763,
-      "bars_changed": 322560,
-      "bars_max_change_codes": 275.6063902191818,
-      "old_mean_de": 0.0025913225974857935,
+      "worst_worsening_de": 0.0,
+      "max_change_codes": 0.0,
+      "bars_changed": 0,
+      "bars_max_change_codes": 0.0,
+      "old_mean_de": 0.0016397253716451381,
       "new_mean_de": 0.0016397253716451381,
-      "worse_artifact_sha256": "8aae02b4913ca8b210523e11adc3406436cead66b0f5244ea0153d6165fc3995"
+      "worse_artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca"
     },
     {
       "frame": "smile-w33",
       "active_pixels": 7372800,
-      "worse": 2934815,
-      "equal": 7,
-      "better": 4437978,
-      "old_over_0.05": 965,
-      "new_over_0.05": 2,
-      "old_max_de": 0.5962990339114559,
-      "new_max_de": 0.39540530712053507,
-      "worst_worsening_de": 0.007610783908485724,
-      "max_change_codes": 61.7920258641243,
-      "bars_changed": 921600,
-      "bars_max_change_codes": 479.68457501381636,
-      "old_mean_de": 0.004421694588437042,
-      "new_mean_de": 0.003894313352605113,
-      "worse_artifact_sha256": "bb52b77719b4107015ab5f943e652d63bd9faa6bfe3002de1fe3b2b52325aa63"
-    },
-    {
-      "frame": "dumbmoney-31386",
-      "active_pixels": 6167040,
-      "worse": 723200,
-      "equal": 0,
-      "better": 5443840,
-      "old_over_0.05": 21,
+      "worse": 634,
+      "equal": 7370777,
+      "better": 1389,
+      "old_over_0.05": 2,
       "new_over_0.05": 0,
-      "old_max_de": 0.3331688878147713,
-      "new_max_de": 0.013679453385839528,
-      "worst_worsening_de": 0.009436849665807857,
-      "max_change_codes": 42.7139526940141,
-      "bars_changed": 2127360,
-      "bars_max_change_codes": 13.507972592487931,
-      "old_mean_de": 0.003448590710584495,
-      "new_mean_de": 0.0021858723136385714,
-      "worse_artifact_sha256": "ec44424a47d8176f8a24429e653c47ef9c497beb87f1c77fec1a6e7e1bcd2fac"
-    },
-    {
-      "frame": "soundofmusic-w7",
-      "active_pixels": 6704640,
-      "worse": 3559714,
-      "equal": 0,
-      "better": 3144926,
-      "old_over_0.05": 5,
-      "new_over_0.05": 0,
-      "old_max_de": 0.3268137401187477,
-      "new_max_de": 0.007097957275534586,
-      "worst_worsening_de": 0.005625043199210631,
-      "max_change_codes": 25.558447893708944,
-      "bars_changed": 1589760,
-      "bars_max_change_codes": 160.31786620616913,
-      "old_mean_de": 0.002988932306645173,
-      "new_mean_de": 0.003039768653509018,
-      "worse_artifact_sha256": "13294fc8c0832ca94f6d3561d23ff132676dfa4cf8c37bdbe898cc8694419de9"
+      "old_max_de": 0.39540530712053507,
+      "new_max_de": 0.009525018154541607,
+      "worst_worsening_de": 0.0034821156265144567,
+      "max_change_codes": 83.78143642097712,
+      "bars_changed": 0,
+      "bars_max_change_codes": 0.0,
+      "old_mean_de": 0.003894313352605113,
+      "new_mean_de": 0.003894169874945486,
+      "worse_artifact_sha256": "f6783c123916e36db17e98ff270927232d23c175b8860f6691d8d810d48092c8"
     },
     {
       "frame": "soundofmusic-w32",
       "active_pixels": 6704640,
-      "worse": 3240647,
-      "equal": 0,
-      "better": 3463993,
-      "old_over_0.05": 2,
+      "worse": 0,
+      "equal": 6704640,
+      "better": 0,
+      "old_over_0.05": 0,
       "new_over_0.05": 0,
-      "old_max_de": 0.07705312305475599,
+      "old_max_de": 0.005619361016226717,
       "new_max_de": 0.005619361016226717,
-      "worst_worsening_de": 0.004901927547725351,
-      "max_change_codes": 7.981567662209272,
-      "bars_changed": 1589760,
-      "bars_max_change_codes": 459.40876135602593,
-      "old_mean_de": 0.0026722591314993142,
+      "worst_worsening_de": 0.0,
+      "max_change_codes": 0.0,
+      "bars_changed": 0,
+      "bars_max_change_codes": 0.0,
+      "old_mean_de": 0.0026399368244714606,
       "new_mean_de": 0.0026399368244714606,
-      "worse_artifact_sha256": "bbf13db94946dd863303acc3b2a708d217e5c584454d29093750eed5c098a082"
+      "worse_artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca"
+    },
+    {
+      "frame": "soundofmusic-w7",
+      "active_pixels": 6704640,
+      "worse": 0,
+      "equal": 6704640,
+      "better": 0,
+      "old_over_0.05": 0,
+      "new_over_0.05": 0,
+      "old_max_de": 0.007097957275534586,
+      "new_max_de": 0.007097957275534586,
+      "worst_worsening_de": 0.0,
+      "max_change_codes": 0.0,
+      "bars_changed": 0,
+      "bars_max_change_codes": 0.0,
+      "old_mean_de": 0.003039768653509018,
+      "new_mean_de": 0.003039768653509018,
+      "worse_artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca"
     }
   ],
+  "aggregate": {
+    "scored_frames": 6,
+    "active_pixels": 42892800,
+    "old_over_0.05": 2,
+    "new_over_0.05": 0,
+    "worse_coordinates": 645,
+    "old_mean_de_weighted": 0.0026232407617885027,
+    "new_mean_de_weighted": 0.0026232162627677024,
+    "old_max_de": 0.39540530712053507,
+    "new_max_de": 0.013679453385839528,
+    "worst_worsening_de": 0.0034821156265144567
+  },
+  "resolved_smile_pixels": [
+    {
+      "x": 424,
+      "y": 1989,
+      "de_old": 0.24606000737515904,
+      "de_new": 0.0033872535653877937,
+      "old_rgb": [
+        0.12496692687273026,
+        0.07962348312139511,
+        0.3152945935726166
+      ],
+      "new_rgb": [
+        0.12483390420675278,
+        0.08073969185352325,
+        0.3148403763771057
+      ],
+      "reference_rgb": [
+        0.12483039498329163,
+        0.08073360472917557,
+        0.3148346543312073
+      ]
+    },
+    {
+      "x": 424,
+      "y": 1990,
+      "de_old": 0.39540530712053507,
+      "de_new": 0.0009521234328263136,
+      "old_rgb": [
+        0.13072487711906433,
+        0.08113537728786469,
+        0.32606127858161926
+      ],
+      "new_rgb": [
+        0.1304178088903427,
+        0.08241380006074905,
+        0.32526999711990356
+      ],
+      "reference_rgb": [
+        0.1304170936346054,
+        0.08240774273872375,
+        0.3252696394920349
+      ]
+    }
+  ],
+  "outside_active": {
+    "dumbmoney-31386": {
+      "changed_outside_pixels": 0,
+      "strict_raw_error_worsening": 0,
+      "artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca",
+      "interpretation": "Reference pads outside L5; retained for complete coordinate accounting, not picture-fidelity acceptance."
+    },
+    "godfather2-w28": {
+      "changed_outside_pixels": 0,
+      "strict_raw_error_worsening": 0,
+      "artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca",
+      "interpretation": "Reference pads outside L5; retained for complete coordinate accounting, not picture-fidelity acceptance."
+    },
+    "godfather2-w43": {
+      "changed_outside_pixels": 0,
+      "strict_raw_error_worsening": 0,
+      "artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca",
+      "interpretation": "Reference pads outside L5; retained for complete coordinate accounting, not picture-fidelity acceptance."
+    },
+    "smile-w33": {
+      "changed_outside_pixels": 0,
+      "strict_raw_error_worsening": 0,
+      "artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca",
+      "interpretation": "Reference pads outside L5; retained for complete coordinate accounting, not picture-fidelity acceptance."
+    },
+    "soundofmusic-w32": {
+      "changed_outside_pixels": 0,
+      "strict_raw_error_worsening": 0,
+      "artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca",
+      "interpretation": "Reference pads outside L5; retained for complete coordinate accounting, not picture-fidelity acceptance."
+    },
+    "soundofmusic-w7": {
+      "changed_outside_pixels": 0,
+      "strict_raw_error_worsening": 0,
+      "artifact_sha256": "ac260608b29b641a7036edd03c7ac310b020e12ac1f25111b98fa1aac8e61fca",
+      "interpretation": "Reference pads outside L5; retained for complete coordinate accounting, not picture-fidelity acceptance."
+    }
+  },
+  "gpu_parity": {
+    "input_count": 103,
+    "changed_manifest_inputs": [
+      "src/dv_processing/dm_cm29_gamut_tables.h"
+    ],
+    "table_arrays": {
+      "600": {
+        "before_sha256": "e3cabacc14b7b7873e5afdafcdc2fb340d11bec3dafbde85c8349be95f435769",
+        "after_sha256": "61a88a4ff16f14ac6623a3420d606cc2a17b19fcf9391b77f36272df419db3e6",
+        "unchanged": false
+      },
+      "1000": {
+        "before_sha256": "502b586520ce935dbe07dae859c42e0208ff563f06f48039fc516901df3e3081",
+        "after_sha256": "502b586520ce935dbe07dae859c42e0208ff563f06f48039fc516901df3e3081",
+        "unchanged": true
+      },
+      "2000": {
+        "before_sha256": "dee96f295cc5a109f27a66af0745990fcccd04cb21da762265de63130ce5edc0",
+        "after_sha256": "dee96f295cc5a109f27a66af0745990fcccd04cb21da762265de63130ce5edc0",
+        "unchanged": true
+      }
+    },
+    "retained_prior_parity_cases": 72,
+    "rerun_affected_existing_cases": 2,
+    "new_exact_context_crop": {
+      "max_gpu_cpu_de": 0.0012610942957462265,
+      "max_gpu_cpu_pq": 2.3543834686279297e-06,
+      "centers": [
+        {
+          "x": 424,
+          "y": 1989,
+          "gpu_de_reference": 0.003566769090002346,
+          "gpu_de_cpu": 0.00018111780727009388
+        },
+        {
+          "x": 424,
+          "y": 1990,
+          "gpu_de_reference": 0.001010147589008969,
+          "gpu_de_cpu": 7.442474270951297e-05
+        }
+      ],
+      "environment": "lavapipe / libplacebo.so.360",
+      "all_rgba_finite": true
+    }
+  },
   "limits": [
-    "Only L5 active picture has a comparable licensed reference; outside content is pointwise mapped.",
-    "Every worsening coordinate is retained privately; the strict comparator uses no epsilon.",
-    "Two Smile pixels remain above 0.05 dE.",
-    "No physical-display or broader-title acceptance is claimed."
+    "Strict comparisons retain every worsening coordinate; 645 active-picture coordinates worsen, with maximum increase 0.0034822 dE.",
+    "No outside-L5 pixel changed in the six frames; outside-padding comparison artifacts are also retained.",
+    "This is six-frame and lavapipe/libplacebo 360 qualification, not broad-title or physical-display acceptance.",
+    "Measured values are effective observations; neutral/dark values retain priority over saturation-family overlap."
   ],
   "ms_weight_spatial": {
     "tiles": 112,
@@ -168,40 +326,55 @@
     ],
     "linear_blue_before_pq_nits": 3.994856356825949e-08
   },
-  "integration_base": "882d4b691",
-  "remaining_smile_errors": [
-    {
-      "x": 424,
-      "y": 1989,
-      "de_old": 0.3334015171920589,
-      "de_new": 0.24606000737515904
+  "docker_cpu_controls": {
+    "control_source_sha256": "b06a57a96f247bfa31749659c0498b406f735ae866392e8deca28dda3d8402af",
+    "wrapper_source_sha256": "626f50367a093ac27533512f5b37da1bfbf4485c4a918457803f66bab984ddd9",
+    "cases": 9,
+    "analytic_and_measured_l5_and_chroma_coverage": true,
+    "unchanged_chroma_tolerance": 1e-06,
+    "analytic_lattice_fnv1a": "03994d4550df62ee",
+    "measured_lattice_fnv1a": "9c89edecf8b2f9e9",
+    "macos_libplacebo_7_387": {
+      "all_nine_passed": true,
+      "log_sha256": "335ed3abfa12ff29e79f5b80ce2ca7f5aba4f7aed8a830b4f084365d195eb9d6"
     },
-    {
-      "x": 424,
-      "y": 1990,
-      "de_old": 0.5962990339114559,
-      "de_new": 0.39540530712053507
-    }
-  ],
-  "rust_identity_function_check": {
-    "toolchain": "rustc 1.97.1",
-    "result": "exact extracted function compiles and matches Python packager identity",
-    "scope": "Portable function compile/run; not a Linux daemon integration-test execution."
-  },
-  "gpu_parity": {
-    "cases": 74,
-    "initial_passes_retained": 35,
-    "failed_cases_retried_and_passed": 39,
-    "environment": "lavapipe / libplacebo.so.360, not physical-display qualification",
-    "initial_log_sha256": "e8eaf5472e6abde0f9605e6b2280e0213b4ea31fac69f6f26a755aca559aa953",
-    "retry_log_sha256": "de75510e12188d72129fc370dbf959b29936d5ae4a82740a3dbcfac1c75966b7",
-    "final_binary_sha256": "71634ca89e680246f1be6d92a1c4cf9c44e57fc35553606b22355665e498ecf4",
-    "measured_shader_literal_sha256": "ec9e367926235b9570413afc84c306a5e5a625160e1d5139553864857832f783",
-    "retention": "Measured lattice shader literal identical in both binaries; other 102 source inputs identical. Analytic fallback cases rerun on final binary."
-  },
-  "adversarial_review": {
-    "reviewer": "GPT-6.1 Sol",
-    "result": "No actionable findings in runtime, generation, source identity and precision changes",
-    "tests_run_by_reviewer": false
+    "linux_cached_compiler_libplacebo_sdk_7_360": {
+      "all_nine_passed": true,
+      "image_sha256": "1c87411e470f01819ad878418d4857469c5f15d20020121df242ddd7a759ed0b",
+      "log_sha256": "335ed3abfa12ff29e79f5b80ce2ca7f5aba4f7aed8a830b4f084365d195eb9d6",
+      "source_manifest_sha256": "ee6ec9e1fdaf62ad2e399a89ec6c963a3c3d8b16db65c65afe7a701b40770bc5"
+    },
+    "chroma_plane_mutations": [
+      {
+        "model": "analytic",
+        "raw_chroma_weight": 1000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "analytic raw 1000 chroma speck: 0.630306482f,0.509516954f,0.328891009f pinned 0.673840880"
+      },
+      {
+        "model": "analytic",
+        "raw_chroma_weight": 3000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "analytic raw 3000 chroma speck: 0.681254566f,0.636733413f,0.469366312f pinned 0.674729228"
+      },
+      {
+        "model": "measured",
+        "raw_chroma_weight": 1000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "measured raw 1000 chroma speck: 0.630320251f,0.509533286f,0.328904748f pinned 0.673847616"
+      },
+      {
+        "model": "measured",
+        "raw_chroma_weight": 3000,
+        "exit": -6,
+        "expected_failure": true,
+        "diagnostic": "measured raw 3000 chroma speck: 0.681497693f,0.637223363f,0.492536277f pinned 0.674735844"
+      }
+    ],
+    "receipt_boundary": "Measured table header included; source-bound wrapper rejects a changed table even when the C control and other headers are unchanged.",
+    "full_application_docker_build_claimed": false
   }
 }

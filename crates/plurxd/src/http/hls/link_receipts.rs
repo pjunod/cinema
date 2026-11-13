@@ -1991,6 +1991,7 @@ mod tests {
                 caps: caps.clone(),
                 candidate: incumbent.clone(),
                 binding: crate::media_pool::PlanningBinding::from_snapshot(&planning),
+                catalog_query: None,
             }),
             presentation_target: None,
             decoder_caps: Some(

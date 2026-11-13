@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "4b6904464697e4738ee831492494b1ca800876c55ab894026dcc6d1259964869"
+        "sha256": "813b7cc873da78c3f62de7bd6c4d572211c565fa51cd68be2796267ae9080174"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "4b6904464697e4738ee831492494b1ca800876c55ab894026dcc6d1259964869"
+        "sha256": "813b7cc873da78c3f62de7bd6c4d572211c565fa51cd68be2796267ae9080174"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "2b2c1b83d4e1686e47b57c55e0728b278929a3ba8f830538ca3f0f56ffd0f63b"
+        "sha256": "88c58e951378aaef0e7dc4798ab90e14ed76c41d7e94187516d101c31962ecf6"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -345,13 +345,13 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "8203698cae8cc4e63b8116e900dc0570de4f65c388412c8ced81aeb3402174d2"
+        "sha256": "c20cd4961bbef84d7d67b889bfbf0912f30c2b613864baf84c8d5d1a674b42fb"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
         "source": "crates/plurxd/src/source_custody/recovery.rs",
         "anchor": "pub(super) fn configure_backend(",
-        "sha256": "8d1d5c725e5d107fef4d612f807181c8e81e4506afb3a45e58220698b601269b"
+        "sha256": "b24c8deb7d80a9e73ac1b341ffa7b30010573be0d2446bcd05079a776aba58c1"
       },
       {
         "table": "recovery dependency outside model: prepared host-reboot challenge",

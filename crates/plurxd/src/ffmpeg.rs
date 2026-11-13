@@ -113,43 +113,7 @@ pub(crate) fn inherit_raw_file_descriptors_with_cwd(
     descriptors: &[(std::os::fd::RawFd, i32)],
     cwd_target: Option<i32>,
 ) {
-    // No capability crosses exec when the broker replaced every descriptor.
-    if descriptors.is_empty() {
-        assert!(cwd_target.is_none());
-        return;
-    }
-    plurx_core::process::source_lifetime::tag_descriptor_handoff(command);
-    if let Err(error) = plurx_core::process::source_lifetime::unmediated_descriptor() {
-        let code = error.raw_os_error().unwrap_or(libc::EIO);
-        // SAFETY: the child performs only an allocation-free errno rejection.
-        unsafe {
-            command.pre_exec(move || Err(std::io::Error::from_raw_os_error(code)));
-        }
-    }
-
-    assert!(
-        descriptors.len() <= 7
-            && descriptors
-                .iter()
-                .all(|(_, target)| (3..=9).contains(target))
-    );
-    assert!(cwd_target.is_none_or(|target| descriptors.iter().any(|(_, fd)| *fd == target)));
-    let mut inherited = output_pipe::InheritedFds::<7>::default();
-    for &(source, target) in descriptors {
-        inherited.push(source, target);
-    }
-    unsafe {
-        command.pre_exec(move || {
-            inherited.inherit()?;
-            #[cfg(target_os = "macos")]
-            if let Some(target) = cwd_target {
-                if libc::fchdir(target) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
+    crate::producer_spawn::Descriptors::install_legacy(command, descriptors, cwd_target);
 }
 
 /// Drain diagnostics alongside the media pipe without letting a noisy
@@ -3618,8 +3582,26 @@ pub(crate) async fn bounded_command_capture_cancellable(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command, work)
-        .map_err(|error| error.to_string())?;
+    // A legacy tagged hook may install additional original descriptors; an
+    // empty plan must never hide it. Untagged bounded helpers own only stdio.
+    let manifest = if plurx_core::process::source_lifetime::has_descriptor_handoff(command.as_std())
+    {
+        None
+    } else {
+        Some(
+            crate::producer_spawn::Descriptors::default()
+                .prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED)
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    let (mut child, _child_job) = match &manifest {
+        Some(manifest) => crate::producer_spawn::with_manifest(manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(command, work)
+        }),
+        None => crate::process_control::spawn_job_owned(&mut command, work),
+    }
+    .map_err(|error| error.to_string())?;
+    drop((command, manifest));
     let stdout = child
         .stdout
         .take()

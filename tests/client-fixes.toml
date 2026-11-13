@@ -8600,3 +8600,21 @@ source = "clients/apple/Sources/Offload.swift"
 source_anchor = 'static func isGone(_ answer: OffloadAnswer) -> Bool { answer.state == "on_disk" }'
 test = "clients/apple/Tests/OffloadTests.swift"
 test_anchor = "func testATitleThatCameBackOrIsNoLongerOffloadedEndsTheStatusLoop()"
+
+# PR #1577: a replacement owns its first control sequence independently.
+[[fixes]]
+id = "linux-player.session-control-sequence-ownership"
+commits = ["0560936ff32e559161848a1b5d172a39a95e2025"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "if binding != self.control_binding:"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_seek_outside_the_range_recreates_the_session"
+
+[[fixes]]
+id = "linux-player.quality-rollback-control-sequence"
+commits = []
+supplements = "linux-player.session-control-sequence-ownership"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = '"origin_ms", "control_binding", "sequence")}'
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls"

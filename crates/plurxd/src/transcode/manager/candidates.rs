@@ -1784,31 +1784,14 @@ impl TranscodeManager {
             ));
         }
         tokio::time::timeout_at(deadline, async {
-            let retained_copy = match request.kind {
-                SessionKind::Copy {
-                    aac,
-                    preserve_dolby_vision,
-                    convert_dolby_vision,
-                    ..
-                } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
-                SessionKind::Transcode { .. } => None,
-            };
-            let mut query = crate::media_pool::QualityCatalogRequest {
-                file_id: request.file_id,
-                source_size,
-                source_mtime,
-                caps: catalog.caps.clone(),
-                audio_index: request.audio_index,
-                audio_offset_ms: request.audio_offset_ms,
-                audio_claim: request.audio_claim.clone(),
-                audio_delivery: request.audio_delivery.clone(),
-                subtitle_burn: request.subtitle_burn,
-                presentation: request.presentation,
-                copy_contract: retained_copy,
-            };
-            query
-                .validate()
-                .map_err(|error| CandidateRestoreError::Incompatible(format!("{error:?}")))?;
+            let mut query = catalog
+                .validated_catalog_query(request, source_size, source_mtime)
+                .ok_or_else(|| {
+                    CandidateRestoreError::Incompatible(
+                        "candidate catalog provenance changed".into(),
+                    )
+                })?;
+            let retained_copy = query.copy_contract;
             if let Some(decoder) = decoder {
                 query.caps.video = decoder.device_caps().video;
                 query
@@ -1840,7 +1823,7 @@ impl TranscodeManager {
                     "candidate source changed".to_owned(),
                 ));
             }
-            let canonical_caps = query.caps;
+            let canonical_caps = query.caps.clone();
             let selected = &catalog.candidate;
             if selected.id != id || !selected.identity_matches() {
                 return Err(CandidateRestoreError::Incompatible(
@@ -1910,6 +1893,7 @@ impl TranscodeManager {
                 }
             }
             let mut context = Self::candidate_context(candidate);
+            context.catalog_query = Some(query);
             context.canonical_caps = Some(canonical_caps);
             context.planning_binding =
                 Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
@@ -3732,6 +3716,7 @@ mod snapshot_catalog_regression {
                 generation: 1,
                 source_digest: "source".into(),
             },
+            catalog_query: None,
         };
         let restored =
             serde_json::from_slice(&serde_json::to_vec(&catalog).expect("durable descriptor"))
@@ -4891,6 +4876,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
                 caps: caps.clone(),
                 candidate: off.clone(),
                 binding: crate::media_pool::PlanningBinding::from_snapshot(&off_snapshot),
+                catalog_query: None,
             }),
             candidate_id: Some(off.id),
             presentation_target: None,
@@ -5010,6 +4996,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             caps,
             candidate: on.clone(),
             binding: crate::media_pool::PlanningBinding::from_snapshot(&current),
+            catalog_query: None,
         });
         envelope.request.candidate_context = None;
         manager

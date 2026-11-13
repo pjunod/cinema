@@ -1290,6 +1290,7 @@ async fn admit_native_processed_window_control(
         caps,
         candidate: candidate.clone(),
         binding: crate::media_pool::PlanningBinding::from_snapshot(&planning),
+        catalog_query: None,
     };
     let mut context = manager
         .restore_catalog_context(

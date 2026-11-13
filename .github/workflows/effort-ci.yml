@@ -115,6 +115,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PLURX_HISTORY_CONTEXT: effort-task
+          PLURX_HISTORY_MERGE_TARGET: ${{ inputs.compile_only && 'origin/main' || '' }}
         run: make history-check
       - name: Check validation catalog and contract unit tests
         run: |

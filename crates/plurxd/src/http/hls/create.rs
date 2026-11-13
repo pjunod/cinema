@@ -2251,6 +2251,15 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 .iter()
                 .map(|entry| entry.candidate.clone())
                 .collect();
+            // Unpinned selection must choose a route this request can execute.
+            // Copy may become Encode, but a Transcode carrier cannot acquire
+            // Copy flags by selecting a Remux row. Explicit identities retain
+            // their existing compatibility refusal below.
+            if requested.is_none() && body.copy != Some(true) {
+                catalog.retain(|candidate| {
+                    candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                });
+            }
             if body.candidate_auto_policy() {
                 catalog = super::candidate_recovery::auto_catalog(
                     state,
@@ -4226,6 +4235,7 @@ async fn create_with_purpose_attempt(
         retained_output_receiver: Some(1),
         candidate_catalog: request.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
+                catalog_query: context.catalog_query.clone(),
                 caps: context.canonical_caps.clone()?,
                 candidate: context.selected_candidate.clone(),
                 binding: context.planning_binding.clone()?,
@@ -4617,6 +4627,7 @@ async fn create_with_purpose_attempt(
         link_source_binding = ordinary_link_source_binding.take();
         remote_request.candidate_catalog = request.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
+                catalog_query: context.catalog_query.clone(),
                 caps: context.canonical_caps.clone()?,
                 candidate: context.selected_candidate.clone(),
                 binding: context.planning_binding.clone()?,

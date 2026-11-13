@@ -2674,6 +2674,7 @@ pub(super) async fn stage_prepared_successor_as(
                 caps: context.canonical_caps.clone()?,
                 candidate: context.selected_candidate.clone(),
                 binding: context.planning_binding.clone()?,
+                catalog_query: context.catalog_query.clone(),
             })
         }),
         candidate_id: candidate

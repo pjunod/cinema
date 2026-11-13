@@ -1678,8 +1678,6 @@ async fn probe_bound_with(
     loss: &CancellationToken,
     timeout: Duration,
 ) -> Result<ProbeResult, String> {
-    use std::os::unix::process::CommandExt;
-
     require_held_unchanged(media, role).await?;
     // Keep clear of stdio and the low descriptors Command may use for its
     // exec-error/reporting pipes.
@@ -1705,29 +1703,21 @@ async fn probe_bound_with(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // SAFETY: the closure calls only async-signal-safe fd operations between
-    // fork and exec. dup2 either creates descriptor 198 without CLOEXEC or the
-    // fcntl branch clears CLOEXEC when the held file already occupies it.
-    unsafe {
-        command.as_std_mut().pre_exec(move || {
-            if source_fd == CHILD_MEDIA_FD {
-                let flags = libc::fcntl(CHILD_MEDIA_FD, libc::F_GETFD);
-                if flags < 0
-                    || libc::fcntl(CHILD_MEDIA_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-            } else if libc::dup2(source_fd, CHILD_MEDIA_FD) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::background("Dolby Vision conversion source probe"),
-    )
-    .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
+    let descriptors =
+        crate::producer_spawn::Descriptors::from_mappings(&[(source_fd, CHILD_MEDIA_FD)], None);
+    let manifest = descriptors
+        .prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED)
+        .map_err(|error| format!("preparing ffprobe descriptors for {role}: {error}"))?;
+    let (mut child, _child_job) =
+        crate::producer_spawn::with_manifest(&manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(
+                command,
+                crate::process_control::ChildWork::background(
+                    "Dolby Vision conversion source probe",
+                ),
+            )
+        })
+        .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
     let stdout = child
         .stdout
         .take()
@@ -5903,7 +5893,14 @@ async fn run_tool_with_timeout(
 ) -> Result<String, String> {
     let mut command = tokio::process::Command::new(program);
     command.args(args);
-    run_tool_command_with_timeout(program, command, loss, timeout).await
+    run_tool_command_with_timeout(
+        program,
+        command,
+        loss,
+        timeout,
+        crate::producer_spawn::Descriptors::default(),
+    )
+    .await
 }
 
 #[cfg(unix)]
@@ -5915,8 +5912,6 @@ async fn run_tool_with_bound_media(
     role: &str,
     loss: &CancellationToken,
 ) -> Result<String, String> {
-    use std::os::unix::process::CommandExt;
-
     require_held_unchanged(media, role).await?;
     let duplicated = unsafe {
         libc::fcntl(
@@ -5956,20 +5951,10 @@ async fn run_tool_with_bound_media(
 
     let mut command = tokio::process::Command::new(program);
     command.args(&child_args);
-    // SAFETY: fcntl is async-signal-safe. The duplicated descriptor is the
-    // sole descriptor whose close-on-exec bit this command clears, so the
-    // child receives the manifest-bound source without widening inheritance.
-    unsafe {
-        command.as_std_mut().pre_exec(move || {
-            let flags = libc::fcntl(inherited_fd, libc::F_GETFD);
-            if flags < 0 || libc::fcntl(inherited_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let result = run_tool_command_with_timeout(program, command, loss, TOOL_RUN_TIMEOUT).await;
+    let descriptors =
+        crate::producer_spawn::Descriptors::from_mappings(&[(inherited_fd, inherited_fd)], None);
+    let result =
+        run_tool_command_with_timeout(program, command, loss, TOOL_RUN_TIMEOUT, descriptors).await;
     // Even a failed or cancelled tool is not allowed to hide a concurrent
     // mutation of the exact source inode it consumed.
     let unchanged = require_held_unchanged(media, role).await;
@@ -6004,7 +5989,14 @@ async fn run_tool_with_bound_media(
         path.into_os_string();
     let mut command = tokio::process::Command::new(program);
     command.args(child_args);
-    let result = run_tool_command_with_timeout(program, command, loss, TOOL_RUN_TIMEOUT).await;
+    let result = run_tool_command_with_timeout(
+        program,
+        command,
+        loss,
+        TOOL_RUN_TIMEOUT,
+        crate::producer_spawn::Descriptors::default(),
+    )
+    .await;
     require_held_unchanged(media, role).await?;
     result
 }
@@ -6028,17 +6020,24 @@ async fn run_tool_command_with_timeout(
     mut command: tokio::process::Command,
     loss: &CancellationToken,
     timeout: Duration,
+    descriptors: crate::producer_spawn::Descriptors,
 ) -> Result<String, String> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::background("Dolby Vision conversion"),
-    )
-    .map_err(|error| format!("starting {program}: {error}"))?;
+    let manifest = descriptors
+        .prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED)
+        .map_err(|error| format!("preparing {program} descriptors: {error}"))?;
+    let (mut child, _child_job) =
+        crate::producer_spawn::with_manifest(&manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(
+                command,
+                crate::process_control::ChildWork::background("Dolby Vision conversion"),
+            )
+        })
+        .map_err(|error| format!("starting {program}: {error}"))?;
     let stdout = child
         .stdout
         .take()

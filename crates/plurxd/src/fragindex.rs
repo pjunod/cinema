@@ -3352,26 +3352,22 @@ async fn build_with_args_owned(
     }
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
-    {
+    let descriptors = {
         use std::os::fd::AsRawFd;
-        let mut inherited =
-            crate::ffmpeg::output_pipe::InheritedFds::<{ MAX_PASS_OUTPUTS + 1 }>::default();
+        let mut mappings = Vec::new();
         if let Some(source_fd) = source_fd {
-            inherited.push(source_fd, 3);
+            mappings.push((source_fd, 3));
         }
         for (at, (_, writer)) in sibling_pipes.iter().enumerate() {
-            inherited.push(writer.as_raw_fd(), 4 + at as SourceFd);
+            mappings.push((writer.as_raw_fd(), 4 + at as SourceFd));
         }
-        if !inherited.is_empty() {
-            // SAFETY: `inherit` makes only async-signal-safe calls (`fcntl`,
-            // `dup2`, `close`) over a fixed-size array; it allocates nothing.
-            unsafe {
-                command.pre_exec(move || inherited.inherit());
-            }
-        }
-    }
+        crate::producer_spawn::Descriptors::from_mappings(&mappings, None)
+    };
     #[cfg(not(unix))]
-    let _ = source_fd;
+    let descriptors = {
+        let _ = source_fd;
+        crate::producer_spawn::Descriptors::default()
+    };
     command
         .args(&args)
         .stdin(Stdio::null())
@@ -3449,30 +3445,45 @@ async fn build_with_args_owned(
     if source_pause_guard.is_some() {
         command.process_group(0);
     }
-    let (mut child, _child_job) = match crate::process_control::spawn_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::background("fragment index"),
-    ) {
-        Ok(owned) => owned,
-        Err(error) => {
-            let transient = matches!(
-                error.kind(),
-                std::io::ErrorKind::Interrupted
-                    | std::io::ErrorKind::TimedOut
-                    | std::io::ErrorKind::WouldBlock
-                    | std::io::ErrorKind::OutOfMemory
-            );
-            return all(IndexOutcome::Failed(Box::new(
-                IndexFailure::new(
-                    IndexFailureCode::IndexProcessFailed,
-                    format!("spawning the job-owned index pipe: {error}"),
-                    0,
-                )
-                .transient(transient),
-            )));
-        }
-    };
+    let manifest =
+        match descriptors.prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return all(IndexOutcome::Unsupported(format!(
+                    "preparing index descriptors: {error}"
+                )))
+            }
+        };
+    let (mut child, _child_job) =
+        match crate::producer_spawn::with_manifest(&manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(
+                command,
+                crate::process_control::ChildWork::background("fragment index"),
+            )
+        }) {
+            Ok(owned) => owned,
+            Err(error) => {
+                let transient = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::OutOfMemory
+                );
+                return all(IndexOutcome::Failed(Box::new(
+                    IndexFailure::new(
+                        IndexFailureCode::IndexProcessFailed,
+                        format!("spawning the job-owned index pipe: {error}"),
+                        0,
+                    )
+                    .transient(transient),
+                )));
+            }
+        };
     let source_pause_pid = source_pause_guard.as_ref().and_then(|_| child.id());
+    // Prepared plans and pre_exec closures pin the writers too. Retire all
+    // parent plan copies as soon as fork has installed the child's copies.
+    drop((command, manifest));
     // The child holds its own copies now. Ours must close, or a sibling's
     // reader would wait forever for the EOF our copy keeps from it.
     #[cfg(unix)]

@@ -26,15 +26,12 @@ pub(crate) const QUALITY_CANDIDATES_V2_PATH: &str = "/internal/v2/media/quality-
 pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 9 adds the resolved audio claim/delivery to `SessionRequest`,
-/// `QualityCatalogRequest` and `RemoteStartResponse`, all strict
-/// (`deny_unknown_fields`) envelopes; protocol 8 preserved canonical capability
-/// and planning bindings at dispatch, in addition to pre-filter HEVC proof and
-/// source-fenced copy VOD. Exact-version placement excludes strict older
-/// workers, so a one-node-at-a-time rollout places locally across the version
-/// line instead of failing mid-start. Old ingress and sessions must be drained
-/// on rollout.
-pub(crate) const PROTOCOL_VERSION: i64 = 10;
+/// Protocol 11 adds the server-selected F+ curve digest to strict SessionRequest.
+/// Protocol 10 retains the original descriptive catalog query in the strict
+/// CandidateCatalogContext. Protocol 9 added resolved audio facts. Exact-version
+/// placement excludes older workers, so rolling upgrades retain an eligible
+/// owner in each cohort and drain old ingress/sessions before the last old node.
+pub(crate) const PROTOCOL_VERSION: i64 = 11;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -2051,7 +2048,7 @@ fn spawn_library_root_probe(
     // to a regular file fails instead of being mistaken for an empty readable
     // directory by `find -H`.
     let directory = root.join(".");
-    let mut command = tokio::process::Command::new("find");
+    let mut command = tokio::process::Command::new("/usr/bin/find");
     command
         .arg("-H")
         .arg(directory)
@@ -2060,10 +2057,16 @@ fn spawn_library_root_probe(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    crate::process_control::spawn_job_owned(
+    let manifest = plurx_core::process::source_lifetime::prepare_stdio(
         &mut command,
-        crate::process_control::ChildWork::background("library root reachability probe"),
-    )
+        plurx_core::process::source_lifetime::StdioFacts::NULL,
+    )?;
+    let work = crate::process_control::ChildWork::background("library root reachability probe");
+    plurx_core::process::source_lifetime::metadata_only_spawn(|| {
+        plurx_core::process::source_lifetime::with_descriptors(manifest, || {
+            crate::process_control::spawn_job_owned(&mut command, work)
+        })
+    })
 }
 
 async fn fetch_offer(

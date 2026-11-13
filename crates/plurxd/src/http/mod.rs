@@ -634,6 +634,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
         | "/api/v1/developer/dv-refit/spool"
+        | "/api/v1/developer/source-recovery"
         | "/api/v1/developer/macos-video-processing/reprobe"
         | "/api/v1/system/video-processing/reprobe"
         | "/api/v1/scan"
@@ -1676,6 +1677,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/developer/dv-refit/spool",
             get(developer::refit_spool).delete(developer::clear_refit_spool),
+        )
+        .route(
+            "/developer/source-recovery",
+            get(developer::source_recovery),
         )
         .route(
             "/developer/macos-video-processing/reprobe",

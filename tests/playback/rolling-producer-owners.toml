@@ -2103,7 +2103,12 @@ pattern = "media_session_route_for_playback"
 # neither publish nor mutate the pointer and grant no recovery authority.
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 28
+# 28 -> 29: `a_processed_successor_commits_with_its_original_copy_catalog_provenance`
+# reads the current route after the accepted commit and checks its incarnation,
+# active state, and usable control response. This is a test-only observation of
+# the Store-published successor; it does not make a read-then-act decision or
+# change the Store CAS as the sole pointer authority.
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -3989,7 +3994,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merged main again: 1144 base, +4 main (#1546), +2 this branch.
 # Merged main into E1c: 1148 base, +1 main, +2 E1c.
 # Offload integration: main 1151 plus the fake_curator test task above.
-expected_occurrences = 1162
+# Reader B0/B1: +1 bounded source-recovery diagnostic spawn_blocking. One
+# try-acquired owned semaphore permit remains in the closure through completion
+# even after request cancellation; contention returns unavailable, never queues.
+# F+ integration retains both reviewed source additions.
+expected_occurrences = 1163
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5892,7 +5901,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # pending candidate's cancellation token while the incumbent retains its
 # admitted root; and five test-only timeout/sleep calls that bound or pace
 # the successor scheduling fixture. No new task, producer, or process.
-expected_occurrences = 2219
+# Control failure diagnostics (2026-11-13), 2211 -> 2212: the test-only
+# `control_release_failure_diagnostics` helper in http/hls/tests/route_view.rs
+# adds one two-second completion timeout around its locally joined control
+# exchange and release-admission futures. The fixture retains both futures,
+# the process-free worker fixture and the route-read gate; the release future
+# closes that gate after deterministic admission. Expiry fails the test and
+# drops the joined observation futures; it proves no terminal mutation, child
+# reap or resource settlement. No production timer, task or process is added.
+# F+ integration retains both reviewed source additions.
+expected_occurrences = 2220
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6400,7 +6418,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # #1546, +1 test-only (341 -> 342): http/tests.rs makes one real Matroska
 # fixture with ffmpeg via testfixtures::run, which waits for and reaps the child
 # before the test continues. No production producer.
-expected_occurrences = 351
+# Reader B0/B1: +6 net test-only command constructors. Four process fixtures
+# exercise inherited/explicit loader isolation, refusal and failed startup;
+# one policy fixture constructs but never launches commands; one descriptor
+# fixture exercises fd198/cwd/file-stdio. The real no-source true helper replaces
+# one former reader test command (net zero there). Actual spawned children use
+# the production launcher and are joined before their fixture returns.
+# Probe setup compatibility: +1 test-only command constructor. A finite
+# loop verifies relative/custom/non-profile commands keep their resolution
+# and cwd, while a known absolute no-input candidate receives the owned cwd.
+# This fixture launches no child.
+# F+ integration retains both reviewed source additions.
+expected_occurrences = 358
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7116,7 +7145,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # status of an axum response built in the test. It launches no process.
 # Offload integration: main 925 plus the fake_curator in-process task.
 # D3b/main integration: 925 base + 1 D3b + 1 main = 927; keep both additions.
-expected_occurrences = 930
+# Control refusal diagnostics: +2 HTTP Response::status() assertions, one
+# in the process-free release-interleaving fixture and one in the privacy
+# observer fixture. Both inspect returned values; neither launches a process.
+# F+ integration retains both reviewed source additions.
+expected_occurrences = 932
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7427,7 +7460,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # stops waiting when generation retirement is cancelled, kills the child once,
 # and keeps waiting under the same retained admission. There is still exactly
 # one reaper per child; the added wait/start_kill sites are its select arms.
-expected_occurrences = 389
+# Reader B0/B1: +1 explicit wait for the verified native true fixture. The
+# fixture retains ChildJob through the positive physical join. The output-pipe
+# collision fixture now calls status instead of output (net zero lifecycle).
+expected_occurrences = 390
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7666,7 +7702,10 @@ pattern = "kill_on_drop\\s*\\("
 # 126 -> 127 with the A1/B1 batch (#1495): prodrun's natural-exit test builds
 # one real `/bin/sh` child with kill_on_drop and attaches it to a ChildJob.
 # Test-only; no shipped launch path changes.
-expected_occurrences = 127
+# Reader B0/B1: -1 former reader-fixture kill_on_drop configuration. Its
+# isolated real no-source true helper uses the production ChildJob and awaits
+# actual exit; no production kill-on-drop guarantee is removed.
+expected_occurrences = 126
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

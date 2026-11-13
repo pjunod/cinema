@@ -45,6 +45,7 @@ fn prepared_bootstrap_purpose_refuses_voluntary_upward_foreign_and_missing_decod
             generation: 1,
             source_digest: "0".repeat(64),
         },
+        catalog_query: None,
     });
     assert!(
         prepared_manual_auto_bootstrap(&manual, &automatic),
@@ -155,6 +156,7 @@ fn cached_recovery_purpose_requires_downward_auto_identity_grade_and_decoder() {
             generation: 1,
             source_digest: "0".repeat(64),
         },
+        catalog_query: None,
     });
     let mut incumbent = automatic.clone();
     incumbent.request.kind = SessionKind::Transcode { height: 1080 };

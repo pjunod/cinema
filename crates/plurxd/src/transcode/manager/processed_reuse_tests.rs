@@ -1692,6 +1692,7 @@ printf '%s\n' '{}'
             caps,
             candidate,
             binding,
+            catalog_query: None,
         }),
         presentation_target: None,
         decoder_caps: None,

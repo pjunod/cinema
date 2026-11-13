@@ -49,6 +49,7 @@ impl TranscodeManager {
                 .planning_binding
                 .clone()
                 .ok_or("queued candidate binding missing")?,
+            catalog_query: context.catalog_query.clone(),
         };
         if context.owner_node_id.as_deref() != Some(node)
             || self.cache_location().map(|(_, owner)| owner) != Some(node)

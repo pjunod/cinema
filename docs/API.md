@@ -510,6 +510,7 @@ of never storing it.
 | POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
 | GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
+| GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes. Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | GET | `/api/v1/developer/dv-refit/spool` | admin | Lists this node's F+ statistics spool (`entries`: `key`, `complete`, `bytes`, `modified_ms`; total `bytes`). Node-local; never replicated |
 | DELETE | `/api/v1/developer/dv-refit/spool` | admin | Deletes this node's F+ statistics spool and returns `removed`; stored curve tables are unaffected, and a later fit of a title decodes it again |

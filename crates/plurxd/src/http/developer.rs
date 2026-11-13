@@ -3943,9 +3943,63 @@ async fn display_target_hdr10(
     }
 }
 
+/// Node-local observations only. No enable or recovery path reads this route.
+static SOURCE_RECOVERY_SCAN: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+
+fn unavailable_source_recovery(node_name: &str, launches: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "error": "unavailable",
+        "poisoned": null,
+        "node_name": node_name,
+        "launches": launches,
+    })
+}
+
+pub async fn source_recovery(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let node_name = state
+        .node_hostname
+        .as_deref()
+        .unwrap_or(&state.node_id)
+        .to_owned();
+    let launches = serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot());
+    let permit = match SOURCE_RECOVERY_SCAN.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Json(unavailable_source_recovery(&node_name, launches));
+        }
+    };
+    let store = std::sync::Arc::clone(&state.store);
+    let mut reading = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::source_custody::recovery_status(&store)
+    })
+    .await
+    {
+        Ok(reading) => reading,
+        Err(_) => return Json(unavailable_source_recovery(&node_name, launches)),
+    };
+    reading["node_name"] = serde_json::json!(node_name);
+    reading["launches"] = launches;
+    Json(reading)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_source_recovery_preserves_local_diagnostics_without_a_poison_count() {
+        let launches = serde_json::json!({"total": 3});
+        let response = unavailable_source_recovery("media1", launches.clone());
+        assert_eq!(response["error"], "unavailable");
+        assert!(response["poisoned"].is_null());
+        assert_eq!(response["node_name"], "media1");
+        assert_eq!(response["launches"], launches);
+    }
 
     /// Review 2 of C1 (S9): the row counts readers the way the claim does --
     /// a whole-source (`source_io`) reader contends with every domain, and a
