@@ -1347,6 +1347,20 @@ impl AppliedView {
         file_id: i64,
         keys: &[&str],
     ) -> Result<Option<(super::PlaybackPlanningSnapshot, ViewSource)>, StoreError> {
+        self.planning_matching(file_id, keys, |_| true).await
+    }
+
+    /// [`Self::planning`] for a reader that holds a revision to match (a
+    /// remote owner and the binding it was sent): a view answer `accept`
+    /// refuses (it is handed `None` for a source the view does not hold) is
+    /// not counted as a view read; Authority answers once, counted under
+    /// [`ViewFallback::BindingMismatch`]. One plan, one count.
+    pub async fn planning_matching(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+        accept: impl Fn(Option<&super::PlaybackPlanningSnapshot>) -> bool,
+    ) -> Result<Option<(super::PlaybackPlanningSnapshot, ViewSource)>, StoreError> {
         let table = AppliedTable::Files;
         let local = match &self.mode {
             Mode::Standalone => {
@@ -1354,8 +1368,15 @@ impl AppliedView {
                     .authority
                     .playback_planning_snapshot(file_id, keys)
                     .await?;
-                self.counters.view(table);
-                return Ok(snapshot.map(|snapshot| (snapshot, ViewSource::View)));
+                // SQLite: the store is the only copy, so a refused answer is
+                // already Authority's; it is counted once, as that.
+                if accept(snapshot.as_ref()) {
+                    self.counters.view(table);
+                    return Ok(snapshot.map(|snapshot| (snapshot, ViewSource::View)));
+                }
+                self.counters
+                    .authority(table, ViewFallback::BindingMismatch);
+                return Ok(snapshot.map(|snapshot| (snapshot, ViewSource::Authority)));
             }
             Mode::RemoteAuthority => Err(ViewFallback::NoProof),
             #[cfg(feature = "hiqlite-store")]
@@ -1379,12 +1400,24 @@ impl AppliedView {
             }
         };
         match local {
-            Ok(snapshot) => {
+            Ok(snapshot) if accept(snapshot.as_ref()) => {
                 self.counters.view(table);
                 Ok(snapshot.map(|snapshot| (snapshot, ViewSource::View)))
             }
+            Ok(_) => {
+                self.planning_from_authority(file_id, keys, ViewFallback::BindingMismatch)
+                    .await
+            }
             Err(reason) => self.planning_from_authority(file_id, keys, reason).await,
         }
+    }
+
+    /// Whether this process holds a fact about `table` its replica may not
+    /// (a floor was raised: a write here, or [`Self::note_fact`]). Advisory:
+    /// whether the floor is still unmet is [`Self::floor_met`]'s question.
+    #[must_use]
+    pub fn floor_noted(&self, table: AppliedTable) -> bool {
+        self.floors.get(table).is_some()
     }
 
     /// The planning snapshot from Authority, counted under `reason`: for an
@@ -1655,6 +1688,7 @@ mod tests {
             "delete from libraries where id = $1",
             "INSERT OR REPLACE INTO items (id, title) VALUES ($1, $2)",
             "REPLACE INTO items VALUES ($1)",
+            "UPDATE OR REPLACE items SET id = $1 WHERE id = $2",
         ] {
             assert!(writes_files(sql), "{sql}");
             assert!(WrittenTables::of(sql).files, "{sql}");

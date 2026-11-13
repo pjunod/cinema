@@ -200,15 +200,29 @@ pub(crate) async fn start(
     // at the binding the ingress planned at, Authority once on a mismatch,
     // and Authority for a legacy route that carries no binding. Read first so
     // placement answers from it; its refusals keep their order below.
-    let plan = super::hls::start_plan::owner_plan(
-        &state.applied,
-        request.request.file_id,
-        request
-            .candidate_catalog
-            .as_ref()
-            .map(|catalog| &catalog.binding),
+    // Bounded as the restore stage it replaced (review S4): the owner's
+    // snapshot read ran under `deadline.min(create_stage_deadline(2 s))`.
+    let plan = tokio::time::timeout_at(
+        start_deadline.min(crate::media_pool::create_stage_deadline(
+            std::time::Duration::from_secs(2),
+        )),
+        super::hls::start_plan::owner_plan(
+            &state.applied,
+            request.request.file_id,
+            request
+                .candidate_catalog
+                .as_ref()
+                .map(|catalog| &catalog.binding),
+        ),
     )
-    .await;
+    .await
+    .unwrap_or_else(|_| {
+        Err(super::hls::start_plan::OwnerPlanError::Store(
+            plurx_core::error::StoreError::Task(
+                "the owner's planning read exceeded its stage deadline".to_owned(),
+            ),
+        ))
+    });
     if !state
         .media_pool
         .remote_placement_ready(&state, plan.as_ref().ok().and_then(Option::as_ref))

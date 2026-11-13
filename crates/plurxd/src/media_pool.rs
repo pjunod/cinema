@@ -368,6 +368,18 @@ pub(crate) struct CreateStartupBudget {
     /// this create began, unclamped. `deadline` bounds this create's answer;
     /// this bounds the work an owner does for it.
     viewer_end: tokio::time::Instant,
+    /// The create's plan (D3b): whether it was read from this node's view,
+    /// whether a catalog then refuted it by quorum (`StaleSource`) before the
+    /// claim, and whether the create has re-planned from Authority.
+    plan: std::sync::Arc<CreatePlanFlags>,
+}
+
+/// [`CreateStartupBudget::plan`].
+#[derive(Default)]
+struct CreatePlanFlags {
+    from_view: std::sync::atomic::AtomicBool,
+    refuted: std::sync::atomic::AtomicBool,
+    replanned: std::sync::atomic::AtomicBool,
 }
 
 /// Keeps the viewer's end a finite instant whatever a client sends; the
@@ -422,6 +434,7 @@ impl CreateStartupBudget {
             source_link: Default::default(),
             phases: Default::default(),
             owner: Default::default(),
+            plan: Default::default(),
         }
     }
     /// The bound this create's own work runs to: the viewer's allowance until
@@ -671,16 +684,61 @@ pub(crate) fn remember_create_source_link(
     });
 }
 
-pub(crate) fn capture_create_planning_binding(
-    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
-) {
+/// Remember the create's plan: the binding its catalog requests carry, and
+/// whether it was read from this node's view (D3b). A no-op outside a create.
+pub(crate) fn capture_create_plan(plan: &crate::http::hls::start_plan::StartPlan) {
+    use std::sync::atomic::Ordering;
     let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
         *budget
             .binding
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(PlanningBinding::from_snapshot(snapshot));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plan.binding.clone());
+        budget.plan.from_view.store(
+            plan.source == plurx_core::store::ViewSource::View,
+            Ordering::Relaxed,
+        );
     });
+}
+
+/// A catalog answered for this create: `StaleSource` from any node means a
+/// quorum read holds another revision than the plan (D3b, review B1). Only
+/// noted before the claim, while a re-plan costs nothing durable.
+pub(crate) fn note_create_catalog(result: &QualityCatalogResult) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        if budget.owner.get().is_none() && result.causes.contains(&CatalogCause::StaleSource) {
+            budget
+                .plan
+                .refuted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+/// Whether this create should plan again from Authority, once: its plan
+/// came from the view, a catalog refuted it by quorum, no claim is held yet,
+/// and it has not re-planned. Taking it marks the create re-planned.
+pub(crate) fn take_create_replan() -> bool {
+    use std::sync::atomic::Ordering;
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget.owner.get().is_none()
+                && budget.plan.from_view.load(Ordering::Relaxed)
+                && budget.plan.refuted.swap(false, Ordering::Relaxed)
+                && !budget.plan.replanned.swap(true, Ordering::Relaxed)
+        })
+        .unwrap_or(false)
+}
+
+/// Whether this create re-planned and must read its plan from Authority.
+pub(crate) fn create_replanned() -> bool {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget
+                .plan
+                .replanned
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .unwrap_or(false)
 }
 
 tokio::task_local! { static CREATE_STARTUP_BUDGET: CreateStartupBudget; }
@@ -1434,6 +1492,16 @@ impl MediaPool {
     }
 
     pub(crate) async fn quality_catalog(
+        &self,
+        state: &AppState,
+        request: QualityCatalogRequest,
+    ) -> QualityCatalogResult {
+        let result = self.quality_catalog_answer(state, request).await;
+        note_create_catalog(&result);
+        result
+    }
+
+    async fn quality_catalog_answer(
         &self,
         state: &AppState,
         request: QualityCatalogRequest,

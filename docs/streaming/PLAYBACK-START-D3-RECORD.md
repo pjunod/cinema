@@ -163,4 +163,15 @@ Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured 
 - **Caps-v2 + intent −11:** as Auto encode.
 - **Writes:** unchanged in every shape (6/8/8/9/9).
 
+**What the pin does not see** (review N4). None of the five shapes builds a quality catalog (the fixture runs with the media pool and display-aware Auto off), so the catalog's own quorum snapshot (`local_quality_catalog`, `mp.rs`) and the B1 re-plan it can trigger are outside these numbers; D3d owes their pin. The rolling shape reads 20 **or 23**: the pre-existing tolerance for `ahead_limits`' three refreshed `get_setting` reads still applies.
+
 **What stays, and why.** `get_file_probe_json` 1/0/0 in every shape is `hevc_census::probe_json_for_copy` inside `vod/serve/create.rs::prepare_recipe` (the VOD rendition's copy probe): `vod/` is A1's (§3.6, review S6), so it is the one planning-input read left, and A1 can take it from the plan. The copy-index reads and `instance_id`: [D3b record](PLAYBACK-START-D3B-RECORD.md) §1. `timeline_annotation_set`, the claim, activation, Confirm, publication and layout reads and the fences are out of scope (§10). The §9-1 target holds: for each shape authority = pinned − (the planning, settings, probe and file re-reads the plan answers) and +1 local; writes unchanged.
+
+## 11. D3b counterfactual runs
+
+Each run on a scratch commit, then discarded; results from the build host.
+
+- **The files floor never raised** (`WrittenTables::of` with `files: false`): `store_contract::applied_view::applied_planning_view_reads_the_replica_behind_the_settings_and_files_floors` fails at the direct `files` write (`left: (View, 200)`, the view answered the new row). On the D3b head it passes.
+- **No re-plan** (`replan_once_after_stale` returning the first attempt's answer): `start_plan_tests::a_stale_view_plan_replans_once_from_authority_before_the_claim` fails with the first attempt's `quality_catalog_unavailable`.
+- **The refusal arm without its floor close** (`remote_plan_refused` with `close_after_refusal` removed): `start_plan_tests::a_setting_saved_before_the_owner_starts_refuses_rather_than_mixing` fails at "the refusal closes the view".
+- **The create-path pin** against the D3a + D3t code: that build measured 29/1/6, 36/1/8, 30/1/8, 28/1/9, 32/1/9 (§2), so the D3b pin fails there by construction.

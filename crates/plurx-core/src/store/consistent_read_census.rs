@@ -531,6 +531,15 @@ const STORE_TRAIT_SOURCES: &[&str] = &[
 /// admitted — it takes the label and forwards it. The rule also admits
 /// `local_<method>` for a `Store` method (the bounded-replica twin of that
 /// method), so those are not listed.
+/// Labels emitted by a fallback rather than at a call site: `(label, source,
+/// the spelling that emits it)`. The liveness test counts them as used while
+/// the spelling is in the source.
+const FALLBACK_LABELS: &[(&str, &str, &str)] = &[(
+    "queue_sql",
+    include_str!("background_jobs.rs"),
+    "QUEUE_METHOD.try_with(|method| *method).unwrap_or(\"queue_sql\")",
+)];
+
 const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     // Startup, schema migration and compatibility probes: run at bootstrap or
     // on a membership change, outside a request's accounting.
@@ -589,8 +598,10 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     // the formally pinned background-jobs code. Its statements carry the
     // Store method a caller names through `background_jobs::queue_method`
     // (D3b: the create path's custody, analysis-interest and copy-index
-    // calls), else the default `queue_sql` that `queue_label` returns, which
-    // no call site spells. Transactions keep the bridge's own name.
+    // calls), else the default `queue_sql`, which `queue_label` returns and
+    // no call site spells (`FALLBACK_LABELS` keeps the entry live).
+    // Transactions keep the bridge's own name.
+    ("queue_sql", "the queue bridge's default statement label"),
     ("queue_transaction", "the queue bridge's transaction path"),
     // The live-TV resource ledger's own two operations behind its private
     // `Backend` trait, which is not a `Store`.
@@ -895,8 +906,12 @@ fn the_label_allow_list_has_only_live_entries() {
             !methods.contains(*entry),
             "{entry} is a Store method and needs no entry"
         );
+        let compact = |text: &str| -> String { text.split_whitespace().collect() };
+        let fallback = FALLBACK_LABELS.iter().any(|(label, source, spelling)| {
+            label == entry && compact(source).contains(&compact(spelling))
+        });
         assert!(
-            used.contains(*entry),
+            used.contains(*entry) || fallback,
             "{entry} is allow-listed but no call labels it; remove the entry"
         );
     }

@@ -9,7 +9,7 @@
 //! `plan: Option<&StartPlan>`: `Some` answers from the plan, `None` reads the
 //! Store exactly as before D3b. Whether a call may use plan values is a
 //! property of the call, not of the function: only the ingress create
-//! (`create_with_purpose_inner`) and the remote owner's start
+//! (`create_with_purpose_attempt`) and the remote owner's start
 //! (`internal_media_sessions::start`) ever pass `Some`, and a source test
 //! pins that.
 //!
@@ -22,6 +22,14 @@
 //! source). The refusal closes the ingress's view ([`close_after_refusal`]):
 //! the ingress may be the stale side, so its next plan is a quorum read.
 //! No wire change: the binding was already on the start request.
+//!
+//! **A stale ingress view** (review B1) is caught earlier, by the catalog's
+//! own quorum read, before the create holds its claim: the create closes its
+//! view and plans once more, from Authority, in the same request
+//! ([`replan_once_after_stale`]). A remote owner that will receive no binding
+//! (a legacy route) plans from Authority, so the ingress confirms its view
+//! plan at Authority before handing it such a start
+//! ([`confirm_unbound_remote`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -81,14 +89,51 @@ impl StartPlan {
 }
 
 /// The ingress create's plan: one read through the applied view (§4.2).
+/// A create that re-planned after a stale view ([`replan_once_after_stale`])
+/// reads from Authority.
 pub(crate) async fn ingress_plan(
     applied: &AppliedView,
     file_id: i64,
 ) -> Result<Option<StartPlan>, StoreError> {
-    Ok(applied
-        .planning(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
-        .await?
-        .map(|(snapshot, source)| StartPlan::new(snapshot, source)))
+    let keys = &crate::transcode::QUALITY_PLANNING_KEYS;
+    let plan = if crate::media_pool::create_replanned() {
+        applied
+            .planning_from_authority(file_id, keys, ViewFallback::Floor)
+            .await?
+    } else {
+        applied.planning(file_id, keys).await?
+    };
+    Ok(plan.map(|(snapshot, source)| StartPlan::new(snapshot, source)))
+}
+
+/// Run a create attempt, and once more if its view plan was refuted by a
+/// catalog's quorum read before the claim (review B1): the view closes, the
+/// second attempt plans from Authority (`ingress_plan`), and its answer is
+/// the create's. One re-plan per request, never a loop.
+pub(crate) async fn replan_once_after_stale<T, F, Fut>(
+    applied: &AppliedView,
+    mut attempt: F,
+) -> Result<T, crate::http::error::ApiError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, crate::http::error::ApiError>>,
+{
+    match attempt().await {
+        Err(_) if crate::media_pool::take_create_replan() => {
+            close_planning_view(applied);
+            STALE_REPLANS.fetch_add(1, Ordering::Relaxed);
+            attempt().await
+        }
+        result => result,
+    }
+}
+
+/// Views closed and re-planned because a catalog refuted this node's plan.
+static STALE_REPLANS: AtomicU64 = AtomicU64::new(0);
+
+/// [`replan_once_after_stale`]'s count since start, for Settings → Developer.
+pub(crate) fn stale_replans() -> u64 {
+    STALE_REPLANS.load(Ordering::Relaxed)
 }
 
 /// Why a remote owner refused to plan at the ingress's binding.
@@ -122,17 +167,12 @@ pub(crate) async fn owner_plan(
             .await?
             .map(|(snapshot, source)| StartPlan::new(snapshot, source)));
     };
-    if let Some((snapshot, source)) = applied.planning(file_id, keys).await? {
-        let plan = StartPlan::new(snapshot, source);
-        if plan.binding == *expected {
-            return Ok(Some(plan));
-        }
-        if source == ViewSource::Authority {
-            return Err(OwnerPlanError::Changed);
-        }
-    }
+    // One plan, one count: a view answer at another binding is not counted
+    // as a view read; Authority answers it (`binding_mismatch`).
     match applied
-        .planning_from_authority(file_id, keys, ViewFallback::BindingMismatch)
+        .planning_matching(file_id, keys, |snapshot| {
+            snapshot.is_some_and(|snapshot| PlanningBinding::from_snapshot(snapshot) == *expected)
+        })
         .await?
     {
         Some((snapshot, source)) => {
@@ -156,9 +196,76 @@ static REFUSAL_CLOSES: AtomicU64 = AtomicU64::new(0);
 /// contain what the owner saw. No retry, no loop: the create answers the
 /// typed `quality_catalog_unavailable` and the viewer's retry re-plans.
 pub(crate) fn close_after_refusal(applied: &AppliedView) {
+    close_planning_view(applied);
+    REFUSAL_CLOSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A quorum fact refutes this node's planning view: close both its floors.
+fn close_planning_view(applied: &AppliedView) {
     applied.note_fact(AppliedTable::Settings);
     applied.note_fact(AppliedTable::Files);
-    REFUSAL_CLOSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The ingress's answer when `candidate` refused the start as planned at
+/// another revision (`RemoteStartFailure::PlanChanged`): the view closes and
+/// the create answers the typed retryable `quality_catalog_unavailable`,
+/// offering the refuted plan to no further candidate (review S1).
+pub(crate) fn remote_plan_refused(
+    applied: &AppliedView,
+    candidate: &str,
+) -> crate::http::error::ApiError {
+    close_after_refusal(applied);
+    crate::http::error::ApiError::typed(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "quality_catalog_unavailable",
+        format!("media worker {candidate} holds another revision of this source or its settings"),
+    )
+}
+
+/// Whether a remote start failure ends placement: a refused plan is refuted
+/// for every candidate, this node included (review S1).
+pub(crate) fn ends_placement(failure: &crate::media_sessions::RemoteStartFailure) -> bool {
+    matches!(
+        failure,
+        crate::media_sessions::RemoteStartFailure::PlanChanged
+    )
+}
+
+/// Before a start that will carry no binding goes to a remote owner (a
+/// legacy route; the owner plans from Authority, `unbound`), the ingress
+/// plans from Authority too (review S2): a view plan is confirmed by one
+/// authority read at the same binding, or the view closes and the create
+/// answers `quality_catalog_unavailable` (the viewer's retry plans from
+/// Authority). An Authority plan needs nothing.
+pub(crate) async fn confirm_unbound_remote(
+    applied: &AppliedView,
+    plan: &StartPlan,
+) -> Result<(), crate::http::error::ApiError> {
+    if plan.source != ViewSource::View {
+        return Ok(());
+    }
+    let confirmed = applied
+        .planning_from_authority(
+            plan.snapshot.file.id,
+            &crate::transcode::QUALITY_PLANNING_KEYS,
+            ViewFallback::Unbound,
+        )
+        .await
+        .map_err(|error| {
+            crate::http::error::ApiError::ServiceUnavailable(format!(
+                "confirming the plan for a remote start: {error}"
+            ))
+        })?
+        .is_some_and(|(snapshot, _)| PlanningBinding::from_snapshot(&snapshot) == plan.binding);
+    if confirmed {
+        return Ok(());
+    }
+    close_planning_view(applied);
+    Err(crate::http::error::ApiError::typed(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "quality_catalog_unavailable",
+        "this node planned another revision of this source or its settings than Authority holds",
+    ))
 }
 
 /// [`close_after_refusal`]'s count since start, for Settings → Developer.

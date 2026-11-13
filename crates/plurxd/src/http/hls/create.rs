@@ -197,7 +197,7 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CreateSession {
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
@@ -2821,6 +2821,7 @@ pub(crate) async fn create_for_library_channel(
 }
 
 // The service caller chooses policy; the public create body cannot request it.
+#[derive(Clone)]
 enum ServiceCreatePurpose {
     Native,
     LibraryChannel(crate::http::library_channels::LibraryChannelPlaybackPurpose),
@@ -3251,7 +3252,36 @@ pub(crate) const OWNED_CREATE_REPOST_GRACE: std::time::Duration =
 /// the per-user start caps free as this user's other starts activate or end.
 pub(crate) const MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS: u64 = 2;
 
+/// One create, re-planned at most once (D3b, review B1): when the catalog's
+/// quorum read refutes a plan this node's view answered, before the claim,
+/// the view closes and the create runs again from an Authority plan
+/// (`start_plan::replan_once_after_stale`). Nothing durable exists yet but
+/// the recorded ask, whose repeat is idempotent.
 async fn create_with_purpose_inner(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    purpose: ServiceCreatePurpose,
+) -> Result<Json<StartResponse>, ApiError> {
+    let applied = state.applied.clone();
+    super::start_plan::replan_once_after_stale(&applied, || {
+        Box::pin(create_with_purpose_attempt(
+            user.clone(),
+            state.clone(),
+            id,
+            headers.clone(),
+            remote,
+            req.clone(),
+            purpose.clone(),
+        ))
+    })
+    .await
+}
+
+async fn create_with_purpose_attempt(
     user: plurx_core::domain::User,
     state: AppState,
     id: i64,
@@ -3362,8 +3392,8 @@ async fn create_with_purpose_inner(
         .map_err(|error| session_store_error("reading playback planning inputs", error))?
         .map(Arc::new);
     let planning_snapshot = start_plan.as_deref().map(|plan| &*plan.snapshot);
-    if let Some(snapshot) = planning_snapshot {
-        crate::media_pool::capture_create_planning_binding(snapshot);
+    if let Some(plan) = start_plan.as_deref() {
+        crate::media_pool::capture_create_plan(plan);
     }
     crate::media_pool::mark_create_phase("lookup");
     let source = planning_snapshot.map(|snapshot| snapshot.file.clone());
@@ -4250,6 +4280,11 @@ async fn create_with_purpose_inner(
 
     let mut started = None;
     let mut last_error = None;
+    // A refused plan is refuted for every candidate (review S1); a start
+    // with no binding is confirmed at Authority once before a remote owner
+    // takes it (review S2).
+    let mut placement_ended = false;
+    let mut unbound_confirmed = false;
     for candidate in owner_candidates {
         if tokio::time::Instant::now() >= placement_deadline {
             last_error = Some(create_still_starting(
@@ -4365,6 +4400,17 @@ async fn create_with_purpose_inner(
                 }
             }
         } else {
+            if remote_request.candidate_catalog.is_none() && !unbound_confirmed {
+                if let Some(plan) = start_plan.as_deref() {
+                    if let Err(error) =
+                        super::start_plan::confirm_unbound_remote(&state.applied, plan).await
+                    {
+                        last_error = Some(error);
+                        break;
+                    }
+                }
+                unbound_confirmed = true;
+            }
             remote_request.retained_output_receiver = state
                 .media_pool
                 .retained_output_receiver(&candidate)
@@ -4385,6 +4431,9 @@ async fn create_with_purpose_inner(
                 },
             )
             .await;
+            if let Err(failure) = &remote_start {
+                placement_ended = super::start_plan::ends_placement(failure);
+            }
             match remote_start {
                 Ok(started) => {
                     let target_generation = started.info.activation_generation;
@@ -4440,22 +4489,13 @@ async fn create_with_purpose_inner(
                     )))
                 }
                 // The worker's plan at this create's binding differs from
-                // this node's (D3b, contract §4.3): this replica may be the
-                // stale side, so its view closes and the viewer's retry plans
-                // from Authority. The next candidate is offered the same
-                // plan, as before; the answer, if none takes it, is the typed
-                // retryable `quality_catalog_unavailable`.
-                Err(crate::media_sessions::RemoteStartFailure::PlanChanged) => {
-                    super::start_plan::close_after_refusal(&state.applied);
-                    Err(ApiError::typed(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "quality_catalog_unavailable",
-                        format!(
-                            "media worker {candidate} holds another revision of this source \
-                             or its settings"
-                        ),
-                    ))
-                }
+                // this node's even at Authority (D3b, contract §4.3): this
+                // replica may be the stale side, so its view closes, no
+                // further candidate is offered the refuted plan (placement
+                // ends below), and the viewer's retry plans from Authority.
+                Err(crate::media_sessions::RemoteStartFailure::PlanChanged) => Err(
+                    super::start_plan::remote_plan_refused(&state.applied, &candidate),
+                ),
             }
         };
         match result {
@@ -4481,6 +4521,9 @@ async fn create_with_purpose_inner(
                     owner_node_id = %candidate, "media worker start attempt failed"
                 );
                 last_error = Some(error);
+                if placement_ended {
+                    break;
+                }
             }
         }
     }

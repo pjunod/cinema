@@ -588,6 +588,7 @@ pub(crate) async fn readiness(
             create_plan(
                 &state.applied.observation(),
                 super::hls::start_plan::refusal_closes(),
+                super::hls::start_plan::stale_replans(),
             ),
             cluster_backup(
                 &state,
@@ -1233,6 +1234,7 @@ pub(crate) fn applied_view(
 pub(crate) fn create_plan(
     observation: &plurx_core::store::AppliedViewObservation,
     refusal_closes: u64,
+    stale_replans: u64,
 ) -> DeveloperEnableItem {
     use plurx_core::store::{AppliedTable, ViewSource};
     use RequirementStatus::{Met, Unknown};
@@ -1254,6 +1256,15 @@ pub(crate) fn create_plan(
         (
             Unknown,
             "No create has planned on this node since start.".to_owned(),
+        )
+    } else if observation.mode == "standalone" {
+        // SQLite: the store is the only copy, so every plan read it.
+        (
+            Met,
+            format!(
+                "Since start: {} plans read the store (standalone: it is the only copy).",
+                view + quorum
+            ),
         )
     } else {
         (
@@ -1285,9 +1296,17 @@ pub(crate) fn create_plan(
                 title: "Owner plans at a peer's binding",
                 status: Met,
                 evidence: format!(
-                    "Since start, as a remote owner: {} plans asked quorum because this replica answered another binding than the ingress planned at; {} legacy starts (no binding) planned from quorum.",
+                    "Since start: {} plans asked quorum because this replica answered another binding than a peer planned at; {} plans for a start with no binding (an owner's legacy route, or this ingress confirming one) read quorum.",
                     by_reason("binding_mismatch"),
                     by_reason("unbound")
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_replans",
+                title: "Re-plans after a catalog refuted the view",
+                status: Met,
+                evidence: format!(
+                    "Since start: {stale_replans}. Each is a create whose view plan a catalog's quorum read refuted before its claim; it closed this node's planning view and planned again from quorum in the same request."
                 ),
             },
             DeveloperRequirement {
@@ -4115,7 +4134,7 @@ mod tests {
         let store: std::sync::Arc<dyn plurx_core::store::Store> =
             std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
         let mut observation = plurx_core::store::AppliedView::authority(store).observation();
-        let item = super::create_plan(&observation, 0);
+        let item = super::create_plan(&observation, 0, 0);
         assert_eq!(item.id, "create_plan");
         assert!(
             item.enabled.is_none() && item.setting.is_none(),
@@ -4143,7 +4162,15 @@ mod tests {
             ("settings", "authority", "binding_mismatch", 9),
         ]);
         observation.last_planning_fallback = Some(plurx_core::store::ViewFallback::Floor);
-        let item = super::create_plan(&observation, 5);
+        // A SQLite node's plans all read the store.
+        let (status, evidence) = row(
+            &super::create_plan(&observation, 5, 1),
+            "create_plan_source",
+        );
+        assert_eq!(status, super::RequirementStatus::Met);
+        assert!(evidence.contains("10 plans read the store"), "{evidence}");
+        observation.mode = "replicated";
+        let item = super::create_plan(&observation, 5, 1);
         let (status, evidence) = row(&item, "create_plan_source");
         assert_eq!(status, super::RequirementStatus::Met);
         assert!(
@@ -4152,7 +4179,10 @@ mod tests {
         );
         let (_, evidence) = row(&item, "create_plan_owner");
         assert!(evidence.contains(": 2 plans asked quorum"), "{evidence}");
-        assert!(evidence.contains("; 4 legacy starts"), "{evidence}");
+        assert!(
+            evidence.contains("; 4 plans for a start with no binding"),
+            "{evidence}"
+        );
         assert!(row(&item, "create_plan_refusals")
             .1
             .starts_with("Since start: 5."));

@@ -359,7 +359,7 @@ impl TranscodeManager {
     /// Start a cluster-owned replacement while retaining its process-local
     /// serialization gate for the ingress activation verdict.
     /// `plan` is the ingress create's one planning read (D3b): `Some` only
-    /// from `create_with_purpose_inner`, pinned by a source test.
+    /// from `create_with_purpose_attempt`, pinned by a source test.
     pub async fn create_cluster_session(
         &self,
         req: &SessionRequest,

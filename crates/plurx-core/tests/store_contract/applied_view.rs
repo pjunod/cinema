@@ -1659,3 +1659,94 @@ async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_f
         Some(ViewFallback::BindingMismatch)
     );
 }
+
+/// D3b, contract §8 ("files floor"), review S3: the dv-title bind command
+/// (whose `dv_title_jobs_bind` trigger rewrites `files.probe_json`) and the
+/// admitted probe result (`apply_probe_job`'s `UPDATE files`) each close the
+/// planning view on the writing node until a later confirmation. A writer's
+/// statements arm the floor by what they may write, whether or not this call
+/// changes a row, so the probe result is driven with no admitted job.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_planning_view_closes_on_the_dv_title_and_probe_result_writers() {
+    use plurx_core::store::BackgroundJobStore;
+    use sha2::Digest;
+    let node = EmbeddedSingleton::start().await;
+    let (_, item, file) = planning_source(node.store.as_ref(), "writers").await;
+    // A Dolby Vision probe: its publication seeds a title-scan demand.
+    let dv = ProbeResult {
+        video_codec: Some("hevc".into()),
+        dolby_vision: plurx_core::domain::DolbyVisionFacts {
+            profile: Some(7),
+            rpu_present: Some(true),
+            ..Default::default()
+        },
+        raw_json: Some(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#.into()),
+        ..Default::default()
+    };
+    node.store
+        .upsert_file(item, "/writers/movie.mkv", 100, 42, &dv)
+        .await
+        .expect("DV probe");
+    let keys = ["playback.d3b"];
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+    let source = |view: &AppliedView| {
+        let view = view.clone();
+        async move {
+            view.planning(file, &keys)
+                .await
+                .expect("plan")
+                .map(|(_, source)| source)
+        }
+    };
+    assert_eq!(source(&view).await, Some(ViewSource::View));
+
+    // The dv-title bind: a command insert whose trigger writes `files`.
+    let scanner = hex::encode(sha2::Sha256::digest(b"d3b-scanner"));
+    let demand = node
+        .store
+        .dv_title_demands(&scanner, 0)
+        .await
+        .expect("demands")
+        .into_iter()
+        .find(|demand| demand.file_id == file)
+        .expect("the DV source demands a title scan");
+    node.store
+        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .await
+        .expect("bind the scanner");
+    assert_eq!(source(&view).await, Some(ViewSource::Authority));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(source(&view).await, Some(ViewSource::View));
+
+    // The probe result through the background-jobs bridge.
+    let applied = node
+        .store
+        .apply_probe_job(plurx_core::store::background_jobs_probe::ApplyProbeJob {
+            job_id: uuid::Uuid::new_v4().to_string(),
+            lease: plurx_core::cluster::coordination::Lease {
+                resource: "repair:probe".into(),
+                owner_node_id: "node-a".into(),
+                fence: 1,
+                revision: 1,
+                expires_at_unix_ms: 4_102_444_800_000,
+            },
+            now_ms: 1_000,
+        })
+        .await
+        .expect("apply");
+    assert!(!applied, "no admitted job, so no row changes");
+    assert_eq!(source(&view).await, Some(ViewSource::Authority));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(source(&view).await, Some(ViewSource::View));
+}

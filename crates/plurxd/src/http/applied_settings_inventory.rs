@@ -64,8 +64,9 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("http/stream.rs", "readrate_setting", 1, true),
     // D3b: the create's one planning read, for the ingress and a remote
     // owner (`planning`, and `planning_from_authority` twice for an owner).
-    ("http/hls/start_plan.rs", "ingress_plan", 1, true),
-    ("http/hls/start_plan.rs", "owner_plan", 3, true),
+    ("http/hls/start_plan.rs", "confirm_unbound_remote", 1, true),
+    ("http/hls/start_plan.rs", "ingress_plan", 2, true),
+    ("http/hls/start_plan.rs", "owner_plan", 2, true),
 ];
 
 /// The direct callers of each helper above, `(helper file, helper,
@@ -135,7 +136,7 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/network.rs",
         "stored_prior",
         "http/hls/create.rs",
-        "create_with_purpose_inner",
+        "create_with_purpose_attempt",
     ),
     (
         "http/network.rs",
@@ -194,9 +195,15 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "http/hls/start_plan.rs",
+        "confirm_unbound_remote",
+        "http/hls/create.rs",
+        "create_with_purpose_attempt",
+    ),
+    (
+        "http/hls/start_plan.rs",
         "ingress_plan",
         "http/hls/create.rs",
-        "create_with_purpose_inner",
+        "create_with_purpose_attempt",
     ),
     (
         "http/hls/start_plan.rs",
@@ -257,6 +264,7 @@ const STAYS: &[&str] = &[
 const VIEW_METHODS: &[&str] = &[
     "planning",
     "planning_from_authority",
+    "planning_matching",
     "setting",
     "setting_pair",
     "setting_values",
@@ -678,7 +686,7 @@ const PLANNED_HELPERS: &[&str] = &[
 /// Where a plan comes from: the ingress create and the remote owner's start,
 /// the two functions that read one (§4.2, pinned by `HELPER_CALLERS`).
 const PLAN_ORIGINS: &[(&str, &str)] = &[
-    ("http/hls/create.rs", "create_with_purpose_inner"),
+    ("http/hls/create.rs", "create_with_purpose_attempt"),
     ("http/internal_media_sessions.rs", "start"),
 ];
 
@@ -690,10 +698,10 @@ const PLAN_ORIGINS: &[(&str, &str)] = &[
 /// caller's own `plan` or, in a plan origin, hands it over.
 #[rustfmt::skip]
 const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
-    ("http/hls/create.rs", "create_with_purpose_inner", "cluster_playlist_is_typeless", "start_plan.as_deref()"),
-    ("http/hls/create.rs", "create_with_purpose_inner", "create_cluster_session", "worker_plan.as_deref()"),
-    ("http/hls/create.rs", "create_with_purpose_inner", "remote_placement_ready", "start_plan.as_deref()"),
-    ("http/hls/create.rs", "create_with_purpose_inner", "validate_hevc_copy_transport", "start_plan.as_deref()"),
+    ("http/hls/create.rs", "create_with_purpose_attempt", "cluster_playlist_is_typeless", "start_plan.as_deref()"),
+    ("http/hls/create.rs", "create_with_purpose_attempt", "create_cluster_session", "worker_plan.as_deref()"),
+    ("http/hls/create.rs", "create_with_purpose_attempt", "remote_placement_ready", "start_plan.as_deref()"),
+    ("http/hls/create.rs", "create_with_purpose_attempt", "validate_hevc_copy_transport", "start_plan.as_deref()"),
     ("http/hls/create.rs", "preview_for_compatibility", "validate_hevc_copy_transport", "None"),
     ("http/hls/preparation.rs", "plan_preparation_with_candidate", "validate_hevc_copy_transport", "None"),
     ("http/hls/processed_upgrade_qualification.rs", "resolve_current", "validate_candidate_planning_binding", "None"),
