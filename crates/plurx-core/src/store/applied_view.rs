@@ -39,8 +39,33 @@
 //! (`TimedClient` for the store, the membership manager's client for its own
 //! statements), so the node that saved a setting reads it back from Authority
 //! until its replica has applied the save.
+//!
+//! **The route view** (§4.4) answers one session-keyed route read
+//! ([`AppliedView::route`]) from the replica once the principal session
+//! layout is installed, and from Authority while the layout is legacy. It
+//! keeps no memo: the daemon's route cache keeps the answer with its stamp,
+//! and holds a fact it learned directly (a row it committed, a quorum read) as
+//! an entry of its own whose instant it takes from [`AppliedView::observe`].
+//! That fact is per key, so it does not close the view for the table; the
+//! cache asks [`AppliedView::floor_met`] when to retire it, and
+//! [`AppliedView::hold_floor`] closes the table only if it must drop such an
+//! entry before then.
+//!
+//! **The planning view** (playback-start D3b,
+//! `docs/streaming/PLAYBACK-START-D3-BUILD.md` §4.2) answers the create's
+//! one planning snapshot — the file row, its probe, the planning settings and
+//! `playback_input_generation`, in one statement — from the replica under
+//! rules 1–3, **unstamped**: nothing caches it, so it needs no table slot,
+//! only the image generation, the proof and two floors. The settings floor
+//! covers the settings and the generation (only settings triggers write it);
+//! the **files floor** is raised by every replicated statement that may write
+//! `files` — directly, through a trigger ([`FILES_TRIGGER_TABLES`]) or by a
+//! foreign-key cascade from a delete ([`FILES_CASCADE_TABLES`]) — the same
+//! way the settings floor is, at `TimedClient`. The item title it carries is
+//! attribution only and needs no floor.
 
 use super::{Store, StoreError};
+use crate::domain::MediaSessionRoute;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -55,15 +80,25 @@ use crate::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 /// registers exactly these (`production_hiqlite_defaults_with_read_pool`).
 pub const APPLIED_VIEW_TABLES: &[&str] = &["settings", "media_sessions"];
 
-/// One applied view, by the table it reads.
+/// One applied view, by the table it reads (and whose floor it keeps).
+///
+/// `Files` is the planning view (D3b): it reads `files` with `settings`,
+/// `items` and the planning generation in one unstamped statement, and owns
+/// the files floor. It has no slot in the applied mark: nothing caches its
+/// answer, so no table revision is needed to say when one goes stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppliedTable {
     Settings,
     MediaSessions,
+    Files,
 }
 
 impl AppliedTable {
-    pub const ALL: [Self; 2] = [Self::Settings, Self::MediaSessions];
+    pub const ALL: [Self; 3] = [Self::Settings, Self::MediaSessions, Self::Files];
+    /// The views whose answers are stamped by a table revision of the
+    /// applied mark: exactly the tables production registers
+    /// ([`APPLIED_VIEW_TABLES`]).
+    pub const STAMPED: [Self; 2] = [Self::Settings, Self::MediaSessions];
 
     /// The replicated table behind this view.
     #[must_use]
@@ -71,6 +106,7 @@ impl AppliedTable {
         match self {
             Self::Settings => "settings",
             Self::MediaSessions => "media_sessions",
+            Self::Files => "files",
         }
     }
 
@@ -80,6 +116,7 @@ impl AppliedTable {
         match self {
             Self::Settings => "settings",
             Self::MediaSessions => "route",
+            Self::Files => "planning",
         }
     }
 
@@ -87,9 +124,17 @@ impl AppliedTable {
         match self {
             Self::Settings => 0,
             Self::MediaSessions => 1,
+            Self::Files => 2,
         }
     }
+
+    const fn stamped(self) -> bool {
+        !matches!(self, Self::Files)
+    }
 }
+
+/// How many views (and floors) a process keeps.
+const VIEWS: usize = AppliedTable::ALL.len();
 
 /// Where an answer came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,10 +168,16 @@ pub enum ViewFallback {
     /// A snapshot found the memo stale while another reader was reloading
     /// it; it answers from Authority instead of waiting on that reload.
     ReloadInFlight,
+    /// The planning view answered with a binding other than the one a peer
+    /// planned at (D3b, §4.3): the owner asks Authority once.
+    BindingMismatch,
+    /// A legacy remote start carried no binding to check a view answer
+    /// against (D3b, §4.3): the owner plans from Authority.
+    Unbound,
 }
 
 impl ViewFallback {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::NoProof,
         Self::ImageReplacing,
         Self::Floor,
@@ -135,6 +186,8 @@ impl ViewFallback {
         Self::LocalError,
         Self::Unregistered,
         Self::ReloadInFlight,
+        Self::BindingMismatch,
+        Self::Unbound,
     ];
 
     /// The `reason` label of `plurx_applied_view_reads_total`.
@@ -149,6 +202,8 @@ impl ViewFallback {
             Self::LocalError => "local_error",
             Self::Unregistered => "unregistered",
             Self::ReloadInFlight => "reload_in_flight",
+            Self::BindingMismatch => "binding_mismatch",
+            Self::Unbound => "unbound",
         }
     }
 
@@ -162,6 +217,8 @@ impl ViewFallback {
             Self::LocalError => 6,
             Self::Unregistered => 7,
             Self::ReloadInFlight => 8,
+            Self::BindingMismatch => 9,
+            Self::Unbound => 10,
         }
     }
 
@@ -226,6 +283,15 @@ pub struct AppliedSettings {
     pub stamp: Option<ViewStamp>,
 }
 
+/// [`AppliedView::route`]: the route, where it came from, and — for a view
+/// answer on a replica — the stamp an entry made from it is checked against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedRoute {
+    pub route: Option<MediaSessionRoute>,
+    pub stamp: Option<ViewStamp>,
+    pub source: ViewSource,
+}
+
 /// Advisory facts for Settings → Developer and `/metrics`, loaded at read
 /// time. Carries no authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -237,9 +303,16 @@ pub struct AppliedViewObservation {
     pub generation: Option<u64>,
     pub applied_index: Option<u64>,
     pub failed_replacements: u64,
+    /// Whether the route view can answer locally: a replica whose session
+    /// table has the installed principal layout and a registered slot.
+    /// `None` without a replica (standalone, remote authority); `Some(false)`
+    /// while the layout is legacy, when every route read is a quorum read.
+    pub route_view_open: Option<bool>,
     /// `(view label, revision)` per registered view table.
     pub revisions: Vec<(&'static str, u64)>,
     pub last_fallback: Option<ViewFallback>,
+    /// The last reason the planning view (D3b) answered from Authority.
+    pub last_planning_fallback: Option<ViewFallback>,
     /// `(view, source, reason, count)` for every combination.
     pub reads: Vec<(&'static str, &'static str, &'static str, u64)>,
     /// `(view, count)`: memo or cache reloads a stamp mismatch caused.
@@ -261,6 +334,17 @@ impl AppliedViewObservation {
             .map(|(_, _, _, count)| *count)
             .sum()
     }
+
+    /// [`Self::total`] for one view (`settings` or `route`).
+    #[must_use]
+    pub fn view_total(&self, table: AppliedTable, source: ViewSource) -> u64 {
+        let (view, label) = (table.label(), source_label(source));
+        self.reads
+            .iter()
+            .filter(|(read_view, read_source, _, _)| *read_view == view && *read_source == label)
+            .map(|(_, _, _, count)| *count)
+            .sum()
+    }
 }
 
 const fn source_label(source: ViewSource) -> &'static str {
@@ -271,13 +355,16 @@ const fn source_label(source: ViewSource) -> &'static str {
 }
 
 /// `[view][outcome]`, outcome 0 = answered by the view, else a fallback code.
-const OUTCOMES: usize = 9;
+const OUTCOMES: usize = 11;
 
 #[derive(Default)]
 struct ViewCounters {
-    reads: [[AtomicU64; OUTCOMES]; 2],
-    reloads: [AtomicU64; 2],
+    reads: [[AtomicU64; OUTCOMES]; VIEWS],
+    reloads: [AtomicU64; VIEWS],
     last_fallback: AtomicU8,
+    /// The last reason the planning view answered from Authority, apart from
+    /// the shared `last_fallback` (the Developer "Create plan" row).
+    last_planning_fallback: AtomicU8,
 }
 
 impl ViewCounters {
@@ -288,6 +375,10 @@ impl ViewCounters {
     fn authority(&self, table: AppliedTable, reason: ViewFallback) {
         self.reads[table.index()][usize::from(reason.code())].fetch_add(1, Ordering::Relaxed);
         self.last_fallback.store(reason.code(), Ordering::Relaxed);
+        if table == AppliedTable::Files {
+            self.last_planning_fallback
+                .store(reason.code(), Ordering::Relaxed);
+        }
     }
 }
 
@@ -300,7 +391,7 @@ impl ViewCounters {
 pub(crate) struct TableFloors {
     base: Instant,
     /// Nanoseconds after `base`, plus one; zero means no floor.
-    at: [AtomicU64; 2],
+    at: [AtomicU64; VIEWS],
 }
 
 impl TableFloors {
@@ -347,9 +438,78 @@ pub(crate) fn writes_settings(sql: &str) -> bool {
         })
 }
 
-/// This process's settings floor, as the writers that raise it hold it: the
-/// store's `TimedClient` and the membership manager's client share one with
-/// the applied view built over that store (§4.3, read-your-write).
+/// Tables whose triggers write `files`, each with the SQL literal the
+/// trigger's `WHEN` requires of the firing statement (`None`: any write
+/// arms). A table may appear once per trigger discriminator. A census over
+/// every trigger definition keeps this list true (D3b, §4.2).
+pub(crate) const FILES_TRIGGER_TABLES: &[(&str, Option<&str>)] = &[
+    // `dv_title_jobs_publish` (dv_title_jobs.sql):
+    // `WHEN NEW.operation='publish_dv_title'`.
+    ("background_job_commands", Some("'publish_dv_title'")),
+    // `dv_title_jobs_bind` (dv_title_jobs.sql):
+    // `WHEN NEW.operation='bind_dv_title'`.
+    ("background_job_commands", Some("'bind_dv_title'")),
+];
+
+/// Tables whose deletes reach `files` through `ON DELETE` actions: `files`
+/// references `items`, and `items` references `libraries` (and itself) with
+/// `ON DELETE CASCADE`. A census over every `REFERENCES … ON DELETE` clause
+/// keeps this list true.
+pub(crate) const FILES_CASCADE_TABLES: &[&str] = &["items", "libraries"];
+
+/// Whether a replicated statement may write `files`: directly, by writing a
+/// table whose trigger does, or by deleting rows a cascade follows into it.
+pub(crate) fn writes_files(sql: &str) -> bool {
+    use super::replicated::{deletes_rows_of, writes_table};
+    writes_table(sql, AppliedTable::Files.table())
+        || FILES_TRIGGER_TABLES.iter().any(|(table, when)| {
+            writes_table(sql, table) && when.is_none_or(|literal| sql.contains(literal))
+        })
+        || FILES_CASCADE_TABLES
+            .iter()
+            .any(|table| deletes_rows_of(sql, table))
+}
+
+/// Which write floors one replicated write raises: the classification of
+/// its statements, taken before the write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WrittenTables {
+    settings: bool,
+    files: bool,
+}
+
+impl WrittenTables {
+    /// One statement's floors.
+    pub(crate) fn of(sql: &str) -> Self {
+        Self {
+            settings: writes_settings(sql),
+            files: writes_files(sql),
+        }
+    }
+
+    /// Every floor any of `statements` raises.
+    pub(crate) fn any<'a>(statements: impl IntoIterator<Item = &'a str>) -> Self {
+        statements
+            .into_iter()
+            .fold(Self::default(), |written, sql| {
+                let one = Self::of(sql);
+                Self {
+                    settings: written.settings || one.settings,
+                    files: written.files || one.files,
+                }
+            })
+    }
+
+    const fn is_empty(self) -> bool {
+        !self.settings && !self.files
+    }
+}
+
+/// This process's write floors (settings, and since D3b files), as the
+/// writers that raise them hold them: the store's `TimedClient` and the
+/// membership manager's client share one set with the applied view built
+/// over that store (§4.3, read-your-write). The name is E1b's; the handle
+/// carries every write floor.
 #[derive(Clone)]
 pub struct SettingsWriteFloor(Arc<TableFloors>);
 
@@ -372,28 +532,37 @@ impl SettingsWriteFloor {
     /// timed out here and committed later) is not covered; its caller was
     /// never told it succeeded, and read-your-write is owed for acknowledged
     /// writes.
-    pub(crate) fn arm<'a>(
-        &self,
-        statements: impl IntoIterator<Item = &'a str>,
-    ) -> SettingsWriteGuard {
-        self.guard(statements.into_iter().any(writes_settings))
+    pub(crate) fn arm<'a>(&self, statements: impl IntoIterator<Item = &'a str>) -> WriteFloorGuard {
+        self.guard(WrittenTables::any(statements))
     }
 
-    /// The guard for a write already classified: `wrote` is whether any of
-    /// its statements may write `settings` ([`writes_settings`]).
-    pub(crate) fn guard(&self, wrote: bool) -> SettingsWriteGuard {
-        SettingsWriteGuard(wrote.then(|| Arc::clone(&self.0)))
+    /// The guard for a write already classified ([`WrittenTables`]).
+    pub(crate) fn guard(&self, written: WrittenTables) -> WriteFloorGuard {
+        WriteFloorGuard {
+            floors: (!written.is_empty()).then(|| Arc::clone(&self.0)),
+            written,
+        }
     }
 }
 
-/// Raises the settings floor when dropped; see [`SettingsWriteFloor::arm`].
+/// Raises the floors of the tables a write may have changed when dropped;
+/// see [`SettingsWriteFloor::arm`].
 #[must_use = "the floor is raised when the guard drops: hold it across the write"]
-pub(crate) struct SettingsWriteGuard(Option<Arc<TableFloors>>);
+pub(crate) struct WriteFloorGuard {
+    floors: Option<Arc<TableFloors>>,
+    written: WrittenTables,
+}
 
-impl Drop for SettingsWriteGuard {
+impl Drop for WriteFloorGuard {
     fn drop(&mut self) {
-        if let Some(floors) = &self.0 {
-            floors.raise(AppliedTable::Settings, Instant::now());
+        if let Some(floors) = &self.floors {
+            let now = Instant::now();
+            if self.written.settings {
+                floors.raise(AppliedTable::Settings, now);
+            }
+            if self.written.files {
+                floors.raise(AppliedTable::Files, now);
+            }
         }
     }
 }
@@ -403,7 +572,7 @@ struct Replicated {
     store: Arc<HiqliteAuthStore>,
     metrics: PassiveRaftMetrics,
     mark: hiqlite::AppliedMarkHandle,
-    slots: [Option<hiqlite::AppliedSlot>; 2],
+    slots: [Option<hiqlite::AppliedSlot>; VIEWS],
     #[cfg(feature = "cluster-read-cost-validation")]
     revoke_after_next_local: std::sync::atomic::AtomicBool,
 }
@@ -455,6 +624,53 @@ impl Replicated {
         })
     }
 
+    /// Step 1 for an unstamped read (D3b): no slot and no revision — nothing
+    /// caches the answer — so only the image generation, the proof and every
+    /// floor the read depends on.
+    fn admit_unstamped(
+        &self,
+        floors: &[Option<Instant>],
+    ) -> Result<(ServingProof, u64), ViewFallback> {
+        let generation = self.mark.generation();
+        if generation & 1 != 0 {
+            return Err(ViewFallback::ImageReplacing);
+        }
+        let proof = self
+            .metrics
+            .eligible_serving_proof()
+            .ok_or(ViewFallback::NoProof)?;
+        if floors.iter().flatten().any(|at| !self.floor_met(*at)) {
+            return Err(ViewFallback::Floor);
+        }
+        Ok((proof, generation))
+    }
+
+    /// Steps 1-3 around one unstamped local statement.
+    async fn read_unstamped<T, F, Fut>(
+        &self,
+        floors: &[Option<Instant>],
+        local: F,
+    ) -> Result<T, ViewFallback>
+    where
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
+        let (proof, generation) = self.admit_unstamped(floors)?;
+        let result = local(Arc::clone(&self.store)).await;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        if self.revoke_after_next_local.swap(false, Ordering::Relaxed) {
+            self.metrics.validation_revoke_bounded_proof();
+        }
+        let value = result.map_err(|_| ViewFallback::LocalError)?;
+        if self.mark.generation() != generation {
+            return Err(ViewFallback::ImageReplacing);
+        }
+        if !self.metrics.serving_proof_remains_valid(&proof) {
+            return Err(ViewFallback::RevokedDuringRead);
+        }
+        Ok(value)
+    }
+
     /// Steps 1-3 around one local statement.
     async fn read<T, F, Fut>(
         &self,
@@ -482,6 +698,22 @@ impl Replicated {
         Ok((value, admission.stamp))
     }
 
+    /// Whether the route view can answer from this replica at all: the
+    /// route slot is registered and the principal session layout installed.
+    /// While it cannot, every route read is Authority's.
+    fn answers_routes(&self) -> bool {
+        self.slots[AppliedTable::MediaSessions.index()].is_some()
+            && self.store.media_session_layout_installed()
+    }
+
+    /// Whether the image and the stamp's table revision are what they were
+    /// when the stamp was taken; the proof and floor are not consulted.
+    fn same_image(&self, stamp: &ViewStamp) -> bool {
+        self.slot(stamp.table).is_ok_and(|slot| {
+            self.mark.generation() == stamp.generation && self.mark.revision(slot) == stamp.revision
+        })
+    }
+
     /// Step 4.
     fn check(&self, stamp: &ViewStamp, floor: Option<Instant>) -> StampCheck {
         let slot = match self.slot(stamp.table) {
@@ -506,8 +738,9 @@ impl Replicated {
 }
 
 /// The monotonic instant a fact became known to this process, taken by
-/// [`AppliedView::note_fact`] after the acknowledgement. There is no other
-/// constructor, so a caller cannot hand the floor an earlier instant.
+/// [`AppliedView::note_fact`] or [`AppliedView::observe`] after the
+/// acknowledgement. Those are its only constructors, so a caller cannot hand
+/// the floor an earlier instant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FactInstant(Instant);
 
@@ -645,8 +878,17 @@ impl AppliedView {
         metrics: PassiveRaftMetrics,
         mark: hiqlite::AppliedMarkHandle,
     ) -> Self {
-        let slots = AppliedTable::ALL.map(|table| mark.slot(table.table()));
-        if slots.iter().any(Option::is_none) {
+        let slots = AppliedTable::ALL.map(|table| {
+            if table.stamped() {
+                mark.slot(table.table())
+            } else {
+                None
+            }
+        });
+        if AppliedTable::STAMPED
+            .iter()
+            .any(|table| slots[table.index()].is_none())
+        {
             tracing::error!(
                 registered = ?mark.observation().tables,
                 "the applied mark does not register every applied-view table; those views \
@@ -730,6 +972,66 @@ impl AppliedView {
         let at = Instant::now();
         self.floors.raise(table, at);
         FactInstant(at)
+    }
+
+    /// The instant of a fact about **one row** that the caller keeps in an
+    /// entry of its own — the route cache's `Observed` entry (§4.4) — rather
+    /// than closing the view for the whole table: call it, like
+    /// [`Self::note_fact`], after the write was acknowledged or the quorum
+    /// read returned. The caller must not read that row through the view
+    /// until [`Self::floor_met`] says the replica contains the fact; if it
+    /// drops the entry before then, [`Self::hold_floor`] keeps the promise
+    /// for the table.
+    #[must_use]
+    pub fn observe(&self) -> FactInstant {
+        FactInstant(Instant::now())
+    }
+
+    /// Close the view for `table` until `fact` is applied here: for a caller
+    /// that drops the per-row entry holding `fact` ([`Self::observe`]) while
+    /// its floor is still unmet, so no later read of that row can come from a
+    /// replica older than the fact.
+    pub fn hold_floor(&self, table: AppliedTable, fact: FactInstant) {
+        self.floors.raise(table, fact.0);
+    }
+
+    /// Whether the image and the table revision a stamp was taken at are
+    /// still current — [`Self::check`] without the proof and floor, which
+    /// are the same for every entry of a table. `false` on SQLite and on a
+    /// remote-authority process, which hand out no stamps.
+    #[must_use]
+    pub fn same_image(&self, stamp: &ViewStamp) -> bool {
+        match &self.mode {
+            Mode::Standalone | Mode::RemoteAuthority => false,
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) => replicated.same_image(stamp),
+        }
+    }
+
+    /// Whether [`Self::route`] can answer from this node's replica: a
+    /// replicated process whose route slot is registered and whose session
+    /// table has the installed principal layout. A per-row fact may be
+    /// retired into the view only while this holds; otherwise retiring it
+    /// would only trade the fact for another Authority read. `false` on
+    /// SQLite (the store answers, unstamped) and on a remote-authority process.
+    #[must_use]
+    pub fn answers_routes(&self) -> bool {
+        match &self.mode {
+            Mode::Standalone | Mode::RemoteAuthority => false,
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) => replicated.answers_routes(),
+        }
+    }
+
+    /// One session-keyed route from Authority — a quorum read on a
+    /// replicated node, the store itself on SQLite — for a caller replacing
+    /// a per-row fact whose lease ended before the replica was proven to
+    /// contain it. Not counted as a view read.
+    pub async fn authority_route(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        self.authority.media_session_route(session_id).await
     }
 
     /// Whether the view may answer for a fact noted at `fact`: the image is
@@ -994,6 +1296,149 @@ impl AppliedView {
         }
     }
 
+    /// One session-keyed route (§4.4): [`super::MediaSessionStore::media_session_route`]
+    /// from the replica when the view may answer, else from Authority. The
+    /// local twin runs only once this process has seen the installed
+    /// principal session layout; while the layout is legacy (or not yet
+    /// read) the answer is Authority's, whose read re-checks it. On SQLite
+    /// the store answers, unstamped.
+    pub async fn route(&self, session_id: &str) -> Result<AppliedRoute, StoreError> {
+        let table = AppliedTable::MediaSessions;
+        let local = match &self.mode {
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) if !replicated.store.media_session_layout_installed() => {
+                Err(LocalFailure::Authority(ViewFallback::LegacyLayout))
+            }
+            _ => {
+                let owned = session_id.to_owned();
+                self.local(table, |reader| async move { reader.route(&owned).await })
+                    .await
+            }
+        };
+        match local {
+            Ok((route, stamp)) => {
+                self.counters.view(table);
+                Ok(AppliedRoute {
+                    route,
+                    stamp,
+                    source: ViewSource::View,
+                })
+            }
+            // SQLite: the store is the only copy; asking it again is a retry.
+            Err(LocalFailure::Store(error)) => Err(error),
+            Err(LocalFailure::Authority(reason)) => {
+                self.counters.authority(table, reason);
+                Ok(AppliedRoute {
+                    route: self.authority.media_session_route(session_id).await?,
+                    stamp: None,
+                    source: ViewSource::Authority,
+                })
+            }
+        }
+    }
+
+    /// The create's planning snapshot (D3b, §4.2): the file row, its probe,
+    /// `keys` and `playback_input_generation` from one statement, read on the
+    /// replica under rules 1–3 behind the settings and files floors, else
+    /// from Authority. Unstamped: the caller keeps it for one request and
+    /// binds it with its generation. On SQLite the store answers.
+    pub async fn planning(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+    ) -> Result<Option<(super::PlaybackPlanningSnapshot, ViewSource)>, StoreError> {
+        self.planning_matching(file_id, keys, |_| true).await
+    }
+
+    /// [`Self::planning`] for a reader that holds a revision to match (a
+    /// remote owner and the binding it was sent): a view answer `accept`
+    /// refuses (it is handed `None` for a source the view does not hold) is
+    /// not counted as a view read; Authority answers once, counted under
+    /// [`ViewFallback::BindingMismatch`]. One plan, one count.
+    pub async fn planning_matching(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+        accept: impl Fn(Option<&super::PlaybackPlanningSnapshot>) -> bool,
+    ) -> Result<Option<(super::PlaybackPlanningSnapshot, ViewSource)>, StoreError> {
+        let table = AppliedTable::Files;
+        let local = match &self.mode {
+            Mode::Standalone => {
+                let snapshot = self
+                    .authority
+                    .playback_planning_snapshot(file_id, keys)
+                    .await?;
+                // SQLite: the store is the only copy, so a refused answer is
+                // already Authority's; it is counted once, as that.
+                if accept(snapshot.as_ref()) {
+                    self.counters.view(table);
+                    return Ok(snapshot.map(|snapshot| (snapshot, ViewSource::View)));
+                }
+                self.counters
+                    .authority(table, ViewFallback::BindingMismatch);
+                return Ok(snapshot.map(|snapshot| (snapshot, ViewSource::Authority)));
+            }
+            Mode::RemoteAuthority => Err(ViewFallback::NoProof),
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) => {
+                // The same bound Authority enforces, so the two never differ
+                // in what they accept.
+                super::selected_planning_keys_json(keys)?;
+                let owned: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+                replicated
+                    .read_unstamped(
+                        &[
+                            self.floors.get(AppliedTable::Settings),
+                            self.floors.get(AppliedTable::Files),
+                        ],
+                        |store| async move {
+                            let keys: Vec<&str> = owned.iter().map(String::as_str).collect();
+                            store.local_playback_planning_snapshot(file_id, &keys).await
+                        },
+                    )
+                    .await
+            }
+        };
+        match local {
+            Ok(snapshot) if accept(snapshot.as_ref()) => {
+                self.counters.view(table);
+                Ok(snapshot.map(|snapshot| (snapshot, ViewSource::View)))
+            }
+            Ok(_) => {
+                self.planning_from_authority(file_id, keys, ViewFallback::BindingMismatch)
+                    .await
+            }
+            Err(reason) => self.planning_from_authority(file_id, keys, reason).await,
+        }
+    }
+
+    /// Whether this process holds a fact about `table` its replica may not
+    /// (a floor was raised: a write here, or [`Self::note_fact`]). Advisory:
+    /// whether the floor is still unmet is [`Self::floor_met`]'s question.
+    #[must_use]
+    pub fn floor_noted(&self, table: AppliedTable) -> bool {
+        self.floors.get(table).is_some()
+    }
+
+    /// The planning snapshot from Authority, counted under `reason`: for an
+    /// owner whose view answer did not match the binding it was sent
+    /// ([`ViewFallback::BindingMismatch`]) or that was sent none
+    /// ([`ViewFallback::Unbound`]), and for [`Self::planning`]'s own
+    /// fallbacks.
+    pub async fn planning_from_authority(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+        reason: ViewFallback,
+    ) -> Result<Option<(super::PlaybackPlanningSnapshot, ViewSource)>, StoreError> {
+        self.counters.authority(AppliedTable::Files, reason);
+        Ok(self
+            .authority
+            .playback_planning_snapshot(file_id, keys)
+            .await?
+            .map(|snapshot| (snapshot, ViewSource::Authority)))
+    }
+
     /// Advisory facts, loaded now.
     #[must_use]
     pub fn observation(&self) -> AppliedViewObservation {
@@ -1012,9 +1457,7 @@ impl AppliedView {
             },
             #[cfg(feature = "hiqlite-store")]
             replica: match &self.mode {
-                Mode::Replicated(replicated) => {
-                    Some((replicated.metrics.clone(), replicated.mark.clone()))
-                }
+                Mode::Replicated(replicated) => Some(Arc::clone(replicated)),
                 _ => None,
             },
             counters: Arc::clone(&self.counters),
@@ -1037,6 +1480,14 @@ impl LocalReader {
             Self::Replica(store) => store.local_get_settings(keys).await,
         }
     }
+
+    async fn route(&self, session_id: &str) -> Result<Option<MediaSessionRoute>, StoreError> {
+        match self {
+            Self::Standalone(store) => store.media_session_route(session_id).await,
+            #[cfg(feature = "hiqlite-store")]
+            Self::Replica(store) => store.local_media_session_route(session_id).await,
+        }
+    }
 }
 
 /// Store-free handle for `/metrics` and Settings → Developer.
@@ -1044,7 +1495,7 @@ impl LocalReader {
 pub struct AppliedViewMetrics {
     mode: &'static str,
     #[cfg(feature = "hiqlite-store")]
-    replica: Option<(PassiveRaftMetrics, hiqlite::AppliedMarkHandle)>,
+    replica: Option<Arc<Replicated>>,
     counters: Arc<ViewCounters>,
 }
 
@@ -1052,7 +1503,7 @@ impl AppliedViewMetrics {
     /// Advisory facts, loaded now; no timer keeps them.
     #[must_use]
     pub fn observation(&self) -> AppliedViewObservation {
-        let mut reads = Vec::with_capacity(2 * OUTCOMES);
+        let mut reads = Vec::with_capacity(VIEWS * OUTCOMES);
         for table in AppliedTable::ALL {
             let row = &self.counters.reads[table.index()];
             reads.push((table.label(), "view", "ok", row[0].load(Ordering::Relaxed)));
@@ -1079,20 +1530,25 @@ impl AppliedViewMetrics {
             generation: None,
             applied_index: None,
             failed_replacements: 0,
+            route_view_open: None,
             revisions: Vec::new(),
             last_fallback: ViewFallback::from_code(
                 self.counters.last_fallback.load(Ordering::Relaxed),
+            ),
+            last_planning_fallback: ViewFallback::from_code(
+                self.counters.last_planning_fallback.load(Ordering::Relaxed),
             ),
             reads,
             reloads,
         };
         #[cfg(feature = "hiqlite-store")]
-        if let Some((metrics, mark)) = &self.replica {
-            let mark = mark.observation();
-            observation.proof_present = metrics.eligible_serving_proof().is_some();
+        if let Some(replicated) = &self.replica {
+            let mark = replicated.mark.observation();
+            observation.proof_present = replicated.metrics.eligible_serving_proof().is_some();
             observation.generation = Some(mark.generation);
             observation.applied_index = Some(mark.applied_index);
             observation.failed_replacements = mark.failed_replacements;
+            observation.route_view_open = Some(replicated.answers_routes());
             observation.revisions = AppliedTable::ALL
                 .into_iter()
                 .filter_map(|table| {
@@ -1215,9 +1671,120 @@ mod tests {
         }
     }
 
-    /// Every replicated write method of the store's one client arms the
-    /// settings floor, holds the guard across the write and drops it after:
-    /// whatever its visibility, and however the write is spelled.
+    /// The files floor's classifier (D3b): direct writes, the two dv-title
+    /// command triggers and the deletes that cascade into `files` arm it;
+    /// reads, other commands, item updates and look-alike names do not.
+    #[test]
+    fn a_files_write_is_recognised_in_every_form_plurx_uses() {
+        for sql in [
+            "UPDATE files SET probe_json = $1 WHERE id = $2",
+            "INSERT INTO files (item_id, path) VALUES ($1, $2) ON CONFLICT(path) DO UPDATE SET size = 1",
+            "DELETE FROM files WHERE id IN (SELECT value FROM json_each($1))",
+            "WITH admitted AS (SELECT 1) UPDATE files SET scanned_at = 1 WHERE id = 1",
+            "INSERT INTO background_job_commands(id,operation,request_json,result_json) \
+             SELECT $1,'publish_dv_title',$2,$3",
+            "INSERT INTO background_job_commands(id,operation) SELECT $1,'bind_dv_title'",
+            "DELETE FROM items WHERE library_id = $1 AND id NOT IN (SELECT item_id FROM files)",
+            "delete from libraries where id = $1",
+            // Synthetic classifier input only: no SQL here is executed. Keep
+            // replacement verbs separate so the identity-write guard does not
+            // mistake these negative-policy fixtures for repository writes.
+            concat!("INSERT OR REPLACE", " INTO items (id, title) VALUES ($1, $2)"),
+            concat!("REPLACE", " INTO items VALUES ($1)"),
+            "UPDATE OR REPLACE items SET id = $1 WHERE id = $2",
+        ] {
+            assert!(writes_files(sql), "{sql}");
+            assert!(WrittenTables::of(sql).files, "{sql}");
+        }
+        for sql in [
+            "SELECT probe_json FROM files WHERE id = $1",
+            "INSERT INTO background_job_commands(id,operation) SELECT $1,'subtitle_managed_config'",
+            "UPDATE items SET title = $1 WHERE id = $2",
+            "INSERT INTO items (library_id, title) VALUES ($1, $2)",
+            "INSERT INTO items (library_id, title) VALUES ($1, $2) ON CONFLICT DO UPDATE SET title = 1",
+            "DELETE FROM items_fts WHERE rowid = $1",
+            "INSERT INTO files_history (id) VALUES ($1)",
+            "DELETE FROM watch_state WHERE item_id IN (SELECT id FROM items)",
+        ] {
+            assert!(!writes_files(sql), "{sql}");
+        }
+        let written = WrittenTables::any([
+            "UPDATE settings SET value = $1 WHERE key = $2",
+            "SELECT 1 FROM files",
+        ]);
+        assert_eq!(
+            written,
+            WrittenTables {
+                settings: true,
+                files: false
+            }
+        );
+        assert_eq!(
+            WrittenTables::any(["UPDATE settings SET value = 1", "DELETE FROM files"]),
+            WrittenTables {
+                settings: true,
+                files: true
+            }
+        );
+    }
+
+    /// The production statements behind the trigger and probe paths the
+    /// contract names (§8 "files floor") classify as `files` writes: the
+    /// dv-title bind and both publish commands fire `dv_title_jobs_*`
+    /// triggers, and the admitted probe result updates `files` directly.
+    /// `TimedClient` classifies every statement it runs with this function.
+    #[test]
+    fn the_dv_title_commands_and_the_probe_result_raise_the_files_floor() {
+        let commands: Vec<&str> =
+            sql_texts("store/dv_title_jobs.rs", include_str!("dv_title_jobs.rs"))
+                .into_iter()
+                .filter(|sql| {
+                    sql.contains("INSERT INTO background_job_commands")
+                        && (sql.contains("'publish_dv_title'") || sql.contains("'bind_dv_title'"))
+                })
+                .collect();
+        assert_eq!(commands.len(), 3, "bind, publish and analysis publish");
+        for sql in commands {
+            assert!(writes_files(sql), "{sql}");
+        }
+        let probe: Vec<&str> = sql_texts(
+            "store/background_jobs_probe.rs",
+            include_str!("background_jobs_probe.rs"),
+        )
+        .into_iter()
+        .filter(|sql| sql.contains("UPDATE files SET"))
+        .collect();
+        assert!(!probe.is_empty(), "the admitted probe result");
+        for sql in probe {
+            assert!(writes_files(sql), "{sql}");
+        }
+    }
+
+    /// A guard raises exactly the floors of the tables its write may change,
+    /// and only when it drops.
+    #[test]
+    fn a_write_guard_raises_only_its_own_floors() {
+        let floor = SettingsWriteFloor::detached();
+        let floors = floor.floors();
+        let guard = floor.guard(WrittenTables::of("DELETE FROM items WHERE id = $1"));
+        assert_eq!(
+            floors.get(AppliedTable::Files),
+            None,
+            "raised before the write ended"
+        );
+        drop(guard);
+        assert!(floors.get(AppliedTable::Files).is_some());
+        assert_eq!(floors.get(AppliedTable::Settings), None);
+        drop(floor.guard(WrittenTables::of("SELECT 1 FROM files")));
+        assert_eq!(floors.get(AppliedTable::Settings), None);
+        drop(floor.arm(["UPDATE settings SET value = 1 WHERE key = 'x'"]));
+        assert!(floors.get(AppliedTable::Settings).is_some());
+    }
+
+    /// Every replicated write method of the store's one client arms its
+    /// write floors (settings and files), holds the guard across the write
+    /// and drops it after: whatever its visibility, and however the write is
+    /// spelled.
     #[test]
     fn every_timed_client_write_arms_the_settings_floor() {
         let source = include_str!("hiqlite.rs");
@@ -1268,10 +1835,10 @@ mod tests {
             let Some(write) = write else { continue };
             writers.push(name.to_owned());
             let armed = compact
-                .find("letsettings=self.settings_write(")
+                .find("letfloors=self.write_floors(WrittenTables::")
                 .unwrap_or_else(|| panic!("TimedClient::{name} writes without arming the floor"));
             let dropped = compact
-                .rfind("drop(settings);")
+                .rfind("drop(floors);")
                 .unwrap_or_else(|| panic!("TimedClient::{name} never drops its guard"));
             assert!(
                 armed < write && write < dropped,
@@ -1515,6 +2082,267 @@ mod tests {
         }
     }
 
+    /// The trigger half of the files floor (D3b): [`FILES_TRIGGER_TABLES`]
+    /// names exactly the tables other than `files` whose triggers write
+    /// `files` — directly, by a cascading delete, or by writing a listed
+    /// table the way its trigger fires — and every such trigger's `WHEN`
+    /// carries one of its table's listed literals, which the SQL always
+    /// spells and never binds.
+    #[test]
+    fn files_trigger_tables_name_every_trigger_that_writes_files() {
+        use crate::store::replicated::{deletes_rows_of, writes_table};
+        let root = crate_src();
+        let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (path, text) in production_sources(&root, "") {
+            for sql in sql_texts(&path, &text) {
+                for (table, when, body) in triggers(sql) {
+                    let writes = writes_table(&body, "files")
+                        || FILES_CASCADE_TABLES
+                            .iter()
+                            .any(|cascade| deletes_rows_of(&body, cascade))
+                        || FILES_TRIGGER_TABLES.iter().any(|(listed, literal)| {
+                            writes_table(&body, listed)
+                                && literal.is_none_or(|literal| body.contains(literal))
+                        });
+                    if writes && table != "files" {
+                        found.entry(table).or_default().push(when);
+                    }
+                }
+            }
+        }
+        let mut listed: Vec<&str> = FILES_TRIGGER_TABLES
+            .iter()
+            .map(|(table, _)| *table)
+            .collect();
+        listed.sort_unstable();
+        listed.dedup();
+        let tables: Vec<&str> = found.keys().map(String::as_str).collect();
+        assert_eq!(tables, listed, "a trigger writes files: list its table");
+        for (table, whens) in &found {
+            let literals: Vec<Option<&str>> = FILES_TRIGGER_TABLES
+                .iter()
+                .filter(|(listed, _)| listed == table)
+                .map(|(_, literal)| *literal)
+                .collect();
+            for when in whens {
+                assert!(
+                    literals
+                        .iter()
+                        .any(|literal| literal.is_none_or(|literal| when.contains(literal))),
+                    "{table}: a files trigger fires on {when:?}, which no listed literal covers"
+                );
+            }
+        }
+        let bare: Vec<&str> = FILES_TRIGGER_TABLES
+            .iter()
+            .filter_map(|(_, literal)| literal.map(|literal| literal.trim_matches('\'')))
+            .collect();
+        for dir in [root.clone(), root.join("../../plurxd/src")] {
+            for (path, text) in production_sources(&dir, "") {
+                for literal in sql_texts(&path, &text) {
+                    assert!(
+                        !bare.contains(&literal),
+                        "{path} binds a files trigger discriminator as a value"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `(child, parent, clause)` for every `REFERENCES` in a `CREATE TABLE`
+    /// of `sql`: the referencing table, the referenced one, and the clause
+    /// text up to the end of that column or constraint, lowercased.
+    fn references(sql: &str) -> Vec<(String, String, String)> {
+        let idents = crate::store::replicated::sql_identifiers(sql);
+        let mut out = Vec::new();
+        for (index, (_, _, word)) in idents.iter().enumerate() {
+            if word != "create" {
+                continue;
+            }
+            let mut k = index + 1;
+            while idents
+                .get(k)
+                .is_some_and(|(_, _, w)| w == "temp" || w == "temporary")
+            {
+                k += 1;
+            }
+            if idents.get(k).map(|(_, _, w)| w.as_str()) != Some("table") {
+                continue;
+            }
+            k += 1;
+            if idents.get(k).map(|(_, _, w)| w.as_str()) == Some("if") {
+                k += 3;
+            }
+            // `main.files`: the table is the identifier after the qualifier.
+            while idents
+                .get(k)
+                .is_some_and(|(_, end, _)| sql[*end..].trim_start().starts_with('.'))
+            {
+                k += 1;
+            }
+            let Some((_, name_end, child)) = idents.get(k) else {
+                continue;
+            };
+            let Some(open) = sql[*name_end..].find('(').map(|at| name_end + at) else {
+                continue;
+            };
+            let mut depth = 0_i32;
+            let mut close = sql.len();
+            for (at, byte) in sql.bytes().enumerate().skip(open) {
+                match byte {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = at;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for (start, end, word) in &idents[k + 1..] {
+                if *start >= close {
+                    break;
+                }
+                if word != "references" {
+                    continue;
+                }
+                let Some((_, parent_end, parent)) =
+                    idents.iter().find(|(begin, _, _)| *begin > *end)
+                else {
+                    continue;
+                };
+                let mut depth = 0_i32;
+                let mut stop = close;
+                for (at, byte) in sql.bytes().enumerate().take(close).skip(*parent_end) {
+                    match byte {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        b',' if depth == 0 => {
+                            stop = at;
+                            break;
+                        }
+                        _ => {}
+                    }
+                    if depth < 0 {
+                        stop = at;
+                        break;
+                    }
+                }
+                let clause = sql[*parent_end..stop]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase();
+                out.push((child.clone(), parent.clone(), clause));
+            }
+        }
+        out
+    }
+
+    /// The cascade half of the files floor (D3b): [`FILES_CASCADE_TABLES`]
+    /// is exactly the set of tables a delete from which reaches `files`
+    /// through `ON DELETE` actions, followed transitively; and no
+    /// `ON UPDATE` action reaches `files`, so updates need no listing.
+    #[test]
+    fn files_cascade_tables_name_every_delete_that_reaches_files() {
+        let root = crate_src();
+        let mut edges = std::collections::BTreeSet::new();
+        for (path, text) in production_sources(&root, "") {
+            for sql in sql_texts(&path, &text) {
+                for edge in references(sql) {
+                    edges.insert(edge);
+                }
+            }
+        }
+        assert!(
+            edges.iter().any(|(child, parent, clause)| child == "files"
+                && parent == "items"
+                && clause.contains("on delete cascade")),
+            "the census must see files' own reference to items: {edges:?}"
+        );
+        let acts = |clause: &str| {
+            [
+                "on delete cascade",
+                "on delete set null",
+                "on delete set default",
+            ]
+            .iter()
+            .any(|action| clause.contains(action))
+        };
+        let mut reach: std::collections::BTreeSet<String> = edges
+            .iter()
+            .filter(|(child, _, clause)| child == "files" && acts(clause))
+            .map(|(_, parent, _)| parent.clone())
+            .collect();
+        loop {
+            let more: Vec<String> = edges
+                .iter()
+                .filter(|(child, parent, clause)| {
+                    reach.contains(child)
+                        && clause.contains("on delete cascade")
+                        && !reach.contains(parent)
+                })
+                .map(|(_, parent, _)| parent.clone())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            reach.extend(more);
+        }
+        let mut listed: Vec<&str> = FILES_CASCADE_TABLES.to_vec();
+        listed.sort_unstable();
+        assert_eq!(
+            reach.iter().map(String::as_str).collect::<Vec<_>>(),
+            listed,
+            "a delete cascades into files: list its table"
+        );
+        for (child, parent, clause) in &edges {
+            if child == "files" || reach.contains(child) {
+                assert!(
+                    !clause.contains("on update"),
+                    "{child} -> {parent}: an ON UPDATE action reaches files; classify updates"
+                );
+            }
+        }
+    }
+
+    /// Every production statement that may write `files` runs through the
+    /// store's floored client (D3b), or writes no replicated row.
+    #[test]
+    fn every_files_writer_is_floored_or_writes_no_replicated_row() {
+        let root = crate_src();
+        let daemon = root.join("../../plurxd/src");
+        let mut writers = std::collections::BTreeSet::new();
+        for (crate_name, dir) in [("plurx-core", &root), ("plurxd", &daemon)] {
+            for (path, text) in production_sources(dir, "") {
+                if sql_texts(&path, &text).into_iter().any(writes_files) {
+                    writers.insert(format!("{crate_name}/{path}"));
+                }
+            }
+        }
+        let unfloored: Vec<&String> = writers
+            .iter()
+            .filter(|path| {
+                !(path.starts_with("plurx-core/store/")
+                    // `DVR_PURGE_CATALOG`: SQL both stores run, the replicated
+                    // one through TimedClient.
+                    || *path == "plurx-core/dvr.rs"
+                    // rusqlite on a restore image, before any node serves it.
+                    || *path == "plurx-core/cluster/migration.rs"
+                    // Test fixtures in `#[cfg(test)]` items the source cut
+                    // keeps (it removes only a trailing `mod tests`).
+                    || *path == "plurxd/http/shared_source_assets.rs"
+                    || *path == "plurxd/http/shared_source_playback.rs")
+            })
+            .collect();
+        assert!(
+            unfloored.is_empty(),
+            "files writers outside a floored path: {unfloored:?}"
+        );
+    }
+
     /// The other half: every production statement that may write `settings`
     /// runs through a floored writer, or writes no replicated row. A new file
     /// holding one fails here until its writer is named.
@@ -1553,7 +2381,12 @@ mod tests {
         // provisioning at store construction, before the applied view
         // exists; anything else goes through TimedClient.
         for (path, text) in production_sources(&root, "store") {
-            if path.starts_with("store/sqlite/") || !path.ends_with(".rs") {
+            // The consistent-read census is a test-only source scanner:
+            // the client calls in it are the patterns it searches for.
+            if path.starts_with("store/sqlite/")
+                || !path.ends_with(".rs")
+                || path == "store/consistent_read_census.rs"
+            {
                 continue;
             }
             let mut at = 0;

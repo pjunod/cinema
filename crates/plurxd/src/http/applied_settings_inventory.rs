@@ -62,6 +62,11 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("http/preparation.rs", "status", 2, false),
     ("http/stream.rs", "decision_for_file", 2, true),
     ("http/stream.rs", "readrate_setting", 1, true),
+    // D3b: the create's one planning read, for the ingress and a remote
+    // owner (`planning`, and `planning_from_authority` twice for an owner).
+    ("http/hls/start_plan.rs", "confirm_unbound_remote", 1, true),
+    ("http/hls/start_plan.rs", "ingress_plan", 2, true),
+    ("http/hls/start_plan.rs", "owner_plan", 2, true),
 ];
 
 /// The direct callers of each helper above, `(helper file, helper,
@@ -131,7 +136,7 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/network.rs",
         "stored_prior",
         "http/hls/create.rs",
-        "create_with_purpose_inner",
+        "create_with_purpose_attempt",
     ),
     (
         "http/network.rs",
@@ -188,7 +193,43 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/internal_media.rs",
         "directory",
     ),
+    (
+        "http/hls/start_plan.rs",
+        "confirm_unbound_remote",
+        "http/hls/create.rs",
+        "create_with_purpose_attempt",
+    ),
+    (
+        "http/hls/start_plan.rs",
+        "ingress_plan",
+        "http/hls/create.rs",
+        "create_with_purpose_attempt",
+    ),
+    // D3d: a peers catalog request plans at the senders binding.
+    (
+        "http/hls/start_plan.rs",
+        "owner_plan",
+        "http/hls/start_plan.rs",
+        "peer_catalog_plan",
+    ),
+    (
+        "http/hls/start_plan.rs",
+        "owner_plan",
+        "http/internal_media_sessions.rs",
+        "start",
+    ),
 ];
+
+/// The one path from a stays file to a view read, by contract (D3b §4.3):
+/// a remote owner's start plans once at the ingress's binding, and every
+/// fence, ownership and admission read in that file stays a Store read.
+/// `(helper file, helper, caller file, caller)`.
+const STAYS_CHAINS: &[(&str, &str, &str, &str)] = &[(
+    "http/hls/start_plan.rs",
+    "owner_plan",
+    "http/internal_media_sessions.rs",
+    "start",
+)];
 
 /// How a helper is called: bare in its own file and `module::name(`
 /// elsewhere, or as a method on a field of this name.
@@ -228,6 +269,9 @@ const STAYS: &[&str] = &[
 ];
 
 const VIEW_METHODS: &[&str] = &[
+    "planning",
+    "planning_from_authority",
+    "planning_matching",
     "setting",
     "setting_pair",
     "setting_values",
@@ -252,10 +296,11 @@ fn is_test_path(rel: &str) -> bool {
         || stem.ends_with("_test")
         || stem.starts_with("test_")
         || rel == "http/applied_settings_inventory.rs"
+        || rel == "http/applied_route_inventory.rs"
 }
 
 /// Every production Rust file under `src/`, masked by [`production`].
-fn sources() -> Vec<(String, String)> {
+pub(super) fn sources() -> Vec<(String, String)> {
     fn walk(path: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(path).expect("read a source directory") {
             let path = entry.expect("a source entry").path();
@@ -297,7 +342,7 @@ fn blank(out: &mut [u8], from: usize, to: usize) {
 
 /// The source with comment and literal contents blanked, offsets kept, so
 /// nothing inside a string or a comment can look like code.
-fn mask(src: &str) -> String {
+pub(super) fn mask(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = bytes.to_vec();
     let mut i = 0;
@@ -372,49 +417,77 @@ fn mask(src: &str) -> String {
 }
 
 /// A masked source with every `#[cfg(test)]` item blanked.
-fn production(masked: &str) -> String {
+///
+/// An item ends at its `;`, its braced body, or — for a struct field or a
+/// struct-literal entry — at the `,` or closing `}` that ends it; separators
+/// inside parentheses, brackets or generic arguments (a signature's
+/// arguments, `HashMap<K, V>`) do not count.
+pub(super) fn production(masked: &str) -> String {
     let mut out = masked.as_bytes().to_vec();
     let mut at = 0;
     while let Some(offset) = masked[at..].find("#[cfg(test)]") {
         let start = at + offset;
         let item = start + "#[cfg(test)]".len();
-        let semi = masked[item..].find(';').map(|e| item + e);
-        let brace = masked[item..].find('{').map(|e| item + e);
-        let end = match (semi, brace) {
-            (Some(semi), Some(brace)) if semi < brace => semi + 1,
-            (_, Some(brace)) => {
-                let mut depth = 0_usize;
-                let mut end = masked.len();
-                for (index, byte) in masked.bytes().enumerate().skip(brace) {
-                    match byte {
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                end = index + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
+        let bytes = masked.as_bytes();
+        let mut nesting = 0_usize;
+        let mut angle = 0_usize;
+        let mut end = masked.len();
+        let mut index = item;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'(' | b'[' => nesting += 1,
+                b')' | b']' => nesting = nesting.saturating_sub(1),
+                // Generic arguments (`Result<(), E>`), not `->` or `=>`.
+                b'<' => angle += 1,
+                b'>' if index > 0 && !matches!(bytes[index - 1], b'-' | b'=') => {
+                    angle = angle.saturating_sub(1);
                 }
-                end
+                b';' if nesting == 0 => {
+                    end = index + 1;
+                    break;
+                }
+                b',' if nesting == 0 && angle == 0 => {
+                    end = index + 1;
+                    break;
+                }
+                // The enclosing struct or literal closes: the field ended.
+                b'}' if nesting == 0 => {
+                    end = index;
+                    break;
+                }
+                b'{' if nesting == 0 => {
+                    let mut depth = 0_usize;
+                    for (close, byte) in masked.bytes().enumerate().skip(index) {
+                        match byte {
+                            b'{' => depth += 1,
+                            b'}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = close + 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    break;
+                }
+                _ => {}
             }
-            (Some(semi), None) => semi + 1,
-            (None, None) => masked.len(),
-        };
+            index += 1;
+        }
         blank(&mut out, start, end);
         at = end.max(item);
     }
     String::from_utf8(out).expect("blanking keeps ASCII")
 }
 
-fn is_ident(byte: u8) -> bool {
+pub(super) fn is_ident(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 /// The identifier ending just before `pos` (whitespace skipped).
-fn ident_before(text: &str, pos: usize) -> &str {
+pub(super) fn ident_before(text: &str, pos: usize) -> &str {
     let bytes = text.as_bytes();
     let mut end = pos;
     while end > 0 && bytes[end - 1].is_ascii_whitespace() {
@@ -428,7 +501,7 @@ fn ident_before(text: &str, pos: usize) -> &str {
 }
 
 /// The function a position sits in: the last `fn name` before it.
-fn enclosing(text: &str, pos: usize) -> String {
+pub(super) fn enclosing(text: &str, pos: usize) -> String {
     let bytes = text.as_bytes();
     let mut search = pos;
     while let Some(found) = text[..search].rfind("fn ") {
@@ -450,7 +523,7 @@ fn enclosing(text: &str, pos: usize) -> String {
 
 /// `(position, method)` of every `.method(` call in `text`, with the
 /// receiver identifier.
-fn method_calls<'a>(text: &'a str, names: &[&'a str]) -> Vec<(usize, &'a str, &'a str)> {
+pub(super) fn method_calls<'a>(text: &'a str, names: &[&'a str]) -> Vec<(usize, &'a str, &'a str)> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     for (dot, _) in text.match_indices('.') {
@@ -583,11 +656,219 @@ fn every_settings_view_read_and_its_callers_are_pinned_by_function() {
             "{path}::{function} reads the view in a stays file"
         );
     }
-    for (_, helper, path, caller) in &found_callers {
+    for (file, helper, path, caller) in &found_callers {
+        let pinned = STAYS_CHAINS.iter().any(|(a, b, c, d)| {
+            (*a, *b, *c, *d)
+                == (
+                    file.as_str(),
+                    helper.as_str(),
+                    path.as_str(),
+                    caller.as_str(),
+                )
+        });
         assert!(
-            !in_stays(path),
+            !in_stays(path) || pinned,
             "{path}::{caller} reaches the view through {helper} from a stays file"
         );
+    }
+    // Every pinned exception is live, and the helper it names is not itself
+    // in a stays file.
+    for (file, helper, path, caller) in STAYS_CHAINS {
+        assert!(!in_stays(file), "{file}::{helper} sits in a stays file");
+        assert!(
+            found_callers.contains(&(
+                (*file).to_owned(),
+                (*helper).to_owned(),
+                (*path).to_owned(),
+                (*caller).to_owned()
+            )),
+            "stale stays chain {path}::{caller} -> {helper}"
+        );
+    }
+}
+
+/// The helpers that take the create's plan (D3b, contract §4.2): each takes
+/// `plan: Option<&StartPlan>` as its last argument, and `None` reads the
+/// Store exactly as before.
+const PLANNED_HELPERS: &[&str] = &[
+    "cluster_playlist_is_typeless",
+    "create_cluster_session",
+    "create_cluster_session_for_receiver",
+    "create_cluster_session_with_priority",
+    "create_session_inner",
+    "prepare_vod_encoding_noting",
+    "prepare_vod_encoding_with_source",
+    "prepare_vod_encoding_with_source_scoped",
+    "refuse_unadmittable_encoding",
+    "remote_placement_ready",
+    "resolve_held_movie_plan_with_fonts",
+    "resolve_movie_plan_with_processing_exclusion",
+    "resolve_vod_movie_plan_with_fonts",
+    "restore_candidate_context_with_deadline",
+    "restore_catalog_context_planned",
+    "rolling_start_inputs",
+    "software_budget_planned",
+    "start_copy_with_audio_offset",
+    "start_live_recovery_session",
+    "start_with_audio_offset",
+    "try_vod_session",
+    "validate_candidate_planning_binding",
+    "validate_hevc_copy_transport",
+    "vod_preparation_snapshot_planned",
+    "vod_settings_planned",
+];
+
+/// Where a plan comes from: the ingress create and the remote owner's start,
+/// the two functions that read one (§4.2, pinned by `HELPER_CALLERS`).
+const PLAN_ORIGINS: &[(&str, &str)] = &[
+    ("http/hls/create.rs", "create_with_purpose_attempt"),
+    ("http/internal_media_sessions.rs", "start"),
+];
+
+/// The caller chains of §6.1, by call: `(file, caller, helper, plan
+/// argument)` for every production call of a planned helper. `None` is a
+/// caller that is not a create (takeover, resurrection, a prepared
+/// successor, a processed upgrade, a Source preparation, the Live TV
+/// worker choice, a compatibility wrapper); anything else forwards the
+/// caller's own `plan` or, in a plan origin, hands it over.
+#[rustfmt::skip]
+const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
+    ("http/hls/create.rs", "create_with_purpose_attempt", "cluster_playlist_is_typeless", "start_plan.as_deref()"),
+    ("http/hls/create.rs", "create_with_purpose_attempt", "create_cluster_session", "worker_plan.as_deref()"),
+    ("http/hls/create.rs", "create_with_purpose_attempt", "remote_placement_ready", "start_plan.as_deref()"),
+    ("http/hls/create.rs", "create_with_purpose_attempt", "validate_hevc_copy_transport", "start_plan.as_deref()"),
+    ("http/hls/create.rs", "preview_for_compatibility", "validate_hevc_copy_transport", "None"),
+    ("http/hls/preparation.rs", "plan_preparation_with_candidate", "validate_hevc_copy_transport", "None"),
+    ("http/hls/processed_upgrade_qualification.rs", "resolve_current", "validate_candidate_planning_binding", "None"),
+    ("http/internal_media_sessions.rs", "start", "create_cluster_session_for_receiver", "plan.as_ref()"),
+    ("http/internal_media_sessions.rs", "start", "remote_placement_ready", "plan.as_ref().ok().and_then(Option::as_ref)"),
+    ("http/internal_media_sessions.rs", "start", "restore_candidate_context_with_deadline", "plan.as_ref()"),
+    ("media_pool.rs", "live_tv_worker", "remote_placement_ready", "None"),
+    ("media_sessions.rs", "attempt_takeover", "restore_candidate_context_with_deadline", "None"),
+    ("transcode/manager/candidates.rs", "restore_candidate_context_with_deadline", "restore_catalog_context_planned", "plan"),
+    ("transcode/manager/candidates.rs", "restore_catalog_context", "restore_catalog_context_planned", "None"),
+    ("transcode/manager/create.rs", "create_cluster_prepared_session", "create_cluster_session_with_priority", "None"),
+    ("transcode/manager/create.rs", "create_cluster_session", "create_cluster_session_with_priority", "plan"),
+    ("transcode/manager/create.rs", "create_cluster_session_for_receiver", "create_cluster_session_with_priority", "plan"),
+    ("transcode/manager/create.rs", "create_cluster_session_with_priority", "create_session_inner", "plan"),
+    ("transcode/manager/create.rs", "create_cluster_takeover_session_under_guard", "create_session_inner", "None"),
+    ("transcode/manager/create.rs", "create_session_inner", "start_live_recovery_session", "plan"),
+    ("transcode/manager/create.rs", "create_session_inner", "try_vod_session", "plan"),
+    ("transcode/manager/create.rs", "create_session_inner", "validate_candidate_planning_binding", "plan"),
+    ("transcode/manager/create.rs", "create_session_inner", "vod_settings_planned", "plan"),
+    ("transcode/manager/create.rs", "prepare_processed_upgrade", "prepare_vod_encoding_with_source", "None"),
+    ("transcode/manager/create.rs", "prepare_processed_upgrade", "validate_candidate_planning_binding", "None"),
+    ("transcode/manager/create.rs", "prepare_source_vod_encoding", "prepare_vod_encoding_with_source", "None"),
+    ("transcode/manager/create.rs", "prepare_source_vod_encoding", "refuse_unadmittable_encoding", "None"),
+    ("transcode/manager/create.rs", "prepare_vod_encoding_noting", "prepare_vod_encoding_with_source", "plan"),
+    ("transcode/manager/create.rs", "prepare_vod_encoding_noting", "refuse_unadmittable_encoding", "plan"),
+    ("transcode/manager/create.rs", "prepare_vod_encoding_with_preference", "prepare_vod_encoding_noting", "None"),
+    ("transcode/manager/create.rs", "prepare_vod_encoding_with_source", "prepare_vod_encoding_with_source_scoped", "plan"),
+    ("transcode/manager/create.rs", "prepare_vod_encoding_with_source_scoped", "resolve_vod_movie_plan_with_fonts", "plan"),
+    ("transcode/manager/create.rs", "prepare_vod_encoding_with_source_scoped", "software_budget_planned", "plan"),
+    ("transcode/manager/create.rs", "prepare_vod_encoding_with_source_scoped", "vod_preparation_snapshot_planned", "plan"),
+    ("transcode/manager/create.rs", "refuse_unadmittable_encoding", "software_budget_planned", "plan"),
+    ("transcode/manager/create.rs", "resurrect_vod_from_recipe_before", "restore_candidate_context_with_deadline", "None"),
+    ("transcode/manager/create.rs", "start_live_recovery_session", "start_copy_with_audio_offset", "plan"),
+    ("transcode/manager/create.rs", "start_live_recovery_session", "start_with_audio_offset", "plan"),
+    ("transcode/manager/create.rs", "try_vod_session", "prepare_vod_encoding_noting", "plan"),
+    ("transcode/manager/create.rs", "vod_settings", "vod_settings_planned", "None"),
+    ("transcode/manager/plan.rs", "resolve_held_movie_plan", "resolve_held_movie_plan_with_fonts", "None"),
+    ("transcode/manager/plan.rs", "resolve_held_movie_plan_with_fonts", "resolve_movie_plan_with_processing_exclusion", "plan"),
+    ("transcode/manager/plan.rs", "resolve_movie_processing_retry", "resolve_movie_plan_with_processing_exclusion", "None"),
+    ("transcode/manager/plan.rs", "resolve_restricted_movie_plan", "resolve_movie_plan_with_processing_exclusion", "None"),
+    ("transcode/manager/plan.rs", "resolve_vod_movie_plan", "resolve_vod_movie_plan_with_fonts", "None"),
+    ("transcode/manager/plan.rs", "resolve_vod_movie_plan_with_fonts", "resolve_held_movie_plan_with_fonts", "plan"),
+    ("transcode/manager/start.rs", "start_copy_with_audio_offset", "rolling_start_inputs", "plan"),
+    ("transcode/manager/start.rs", "start_with_audio_offset", "rolling_start_inputs", "plan"),
+];
+
+/// The last top-level argument of the call whose `(` is at `open`, with its
+/// whitespace collapsed.
+fn last_argument(text: &str, open: usize) -> String {
+    let bytes = text.as_bytes();
+    let mut depth = 0_i32;
+    let mut start = open + 1;
+    let mut last = String::new();
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let arg = text[start..index].trim();
+                    if !arg.is_empty() {
+                        last = arg.to_owned();
+                    }
+                    break;
+                }
+            }
+            b',' if depth == 1 => {
+                let arg = text[start..index].trim();
+                if !arg.is_empty() {
+                    last = arg.to_owned();
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    last.split_whitespace().collect::<Vec<_>>().join("")
+}
+
+#[test]
+fn every_plan_argument_is_pinned_by_call() {
+    let mut found = BTreeSet::new();
+    for (path, text) in sources() {
+        let bytes = text.as_bytes();
+        for helper in PLANNED_HELPERS {
+            for (pos, _) in text.match_indices(helper) {
+                let end = pos + helper.len();
+                if (pos > 0 && is_ident(bytes[pos - 1]))
+                    || bytes.get(end).is_some_and(|byte| is_ident(*byte))
+                {
+                    continue;
+                }
+                let rest = &text[end..];
+                if !rest.trim_start().starts_with('(') {
+                    continue;
+                }
+                if text[..pos].trim_end().ends_with("fn") {
+                    continue;
+                }
+                let open = end + (rest.len() - rest.trim_start().len());
+                found.insert((
+                    path.clone(),
+                    enclosing(&text, pos),
+                    (*helper).to_owned(),
+                    last_argument(&text, open),
+                ));
+            }
+        }
+    }
+    let pinned: BTreeSet<(String, String, String, String)> = PLAN_CALLS
+        .iter()
+        .map(|(a, b, c, d)| ((*a).into(), (*b).into(), (*c).into(), (*d).into()))
+        .collect();
+    let render: String = found
+        .iter()
+        .map(|(a, b, c, d)| format!("    (\"{a}\", \"{b}\", \"{c}\", \"{d}\"),\n"))
+        .collect();
+    assert!(
+        found == pinned,
+        "the plan's caller chains moved (contract §6.1); found:\nPLAN_CALLS\n{render}"
+    );
+    for (path, caller, helper, argument) in &found {
+        let origin = PLAN_ORIGINS
+            .iter()
+            .any(|(file, function)| file == path && function == caller);
+        assert!(
+            argument == "None" || argument.starts_with("plan") || origin,
+            "{path}::{caller} hands {helper} a plan it did not receive: {argument}"
+        );
+        if argument != "None" && !argument.starts_with("plan") {
+            assert!(origin, "{path}::{caller}: {argument}");
+        }
     }
 }
 
@@ -712,12 +993,19 @@ fn the_census_masks_literals_and_skips_test_items() {
                   #[cfg(test)]\nmod tests {\n    fn t() { state.applied.setting(k); { } }\n}\n\
                   #[cfg(test)]\nfn helper() { state.applied.setting(k); }\n\
                   fn c() { store.settings_snapshot(); x.settings(); view.switch(k, true); }\n\
-                  fn d() { state\n    .applied\n    .switch(k, true); }\n";
+                  fn d() { state\n    .applied\n    .switch(k, true); }\n\
+                  struct S {\n    #[cfg(test)]\n    injected: Arc<Mutex<Vec<u8>>>,\n    kept: u8,\n}\n\
+                  #[cfg(test)]\nfn g(a: u8, b: u8) -> Result<(), HashMap<u8, u8>> { state.applied.setting(k); }\n\
+                  impl S {\n    fn e() { state.applied.setting(k); }\n}\n\
+                  fn f() { S {\n        #[cfg(test)]\n        injected: Default::default()\n    }; state.applied.setting(k); }\n";
     let text = production(&mask(source));
     let reads = view_reads(&[("x.rs".to_owned(), text)]);
     let expected: BTreeMap<(String, String), usize> = [
         (("x.rs".to_owned(), "a".to_owned()), 2),
         (("x.rs".to_owned(), "d".to_owned()), 1),
+        // A `#[cfg(test)]` struct field or literal entry blanks only itself.
+        (("x.rs".to_owned(), "e".to_owned()), 1),
+        (("x.rs".to_owned(), "f".to_owned()), 1),
     ]
     .into_iter()
     .collect();

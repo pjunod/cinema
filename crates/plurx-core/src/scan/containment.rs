@@ -54,6 +54,31 @@ pub fn configured_roots(libraries: &[Library]) -> Vec<String> {
         .collect()
 }
 
+/// `path`, or — when it does not exist — its nearest ancestor that does,
+/// never above the configured root it lies under. Only absence (`ENOENT`,
+/// `ENOTDIR`) climbs; any other error stops here, so classification reports
+/// it. Blocking.
+pub fn nearest_existing(libraries: &[Library], path: &Path) -> PathBuf {
+    let mut at = lexical(path);
+    let Some((_, root)) = lexical_root(libraries, &at) else {
+        return at;
+    };
+    while at != root {
+        match std::fs::symlink_metadata(&at) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                at.pop();
+            }
+            _ => break,
+        }
+    }
+    at
+}
+
 /// The library and configured root that lexically contain `path`; the
 /// longest root wins, so `/media/kids` beats `/media`.
 pub fn lexical_root<'a>(libraries: &'a [Library], path: &Path) -> Option<(&'a Library, PathBuf)> {

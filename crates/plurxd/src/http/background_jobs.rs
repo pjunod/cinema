@@ -151,8 +151,15 @@ pub async fn list(
             })
             .await?;
         if let Some(request) = pending.first() {
-            if let Some(sidecar) = state.store.scan_request_v2(&request.request_id).await? {
-                row["waiting_on"] = json!(sidecar.waiting_on);
+            // Advisory: a sidecar this node cannot read (a row written by a
+            // newer or older build) leaves the listing without `waiting_on`
+            // instead of failing it.
+            match state.store.scan_request_v2(&request.request_id).await {
+                Ok(Some(sidecar)) => row["waiting_on"] = json!(sidecar.waiting_on),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, request = %request.request_id, "reading scan request sidecar for the job listing");
+                }
             }
         }
     }
@@ -402,25 +409,60 @@ pub async fn storage_domains(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let (mappings, libraries) =
-        tokio::try_join!(state.store.storage_domains(), state.store.list_libraries())?;
-    Ok(Json(json!({"mappings": mappings, "libraries": libraries,
-        "slots_per_domain": 2, "provider_slots": 2})))
+    let (domains, libraries) = tokio::try_join!(
+        state.store.storage_domain_state(crate::state::clock_ms()),
+        state.store.list_libraries()
+    )?;
+    Ok(Json(
+        json!({"mappings": domains.applied, "libraries": libraries,
+        "slots_per_domain": 2, "provider_slots": 2, "pending": domains.pending,
+        "waiting_on": domains.waiting_on, "waiting_total": domains.waiting_total}),
+    ))
 }
 
 pub async fn replace_storage_domains(
-    _admin: AdminUser,
+    AdminUser(admin): AdminUser,
     State(state): State<AppState>,
     Json(mappings): Json<Vec<plurx_core::store::background_jobs_resources::StorageDomainMapping>>,
 ) -> Result<Json<Value>, ApiError> {
     plurx_core::store::background_jobs_resources::validate(&mappings)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    if !state
-        .store
-        .replace_storage_domains(mappings, crate::state::clock_ms())
-        .await?
+    let now = crate::state::clock_ms();
+    if serde_json::to_vec(
+        &json!({"mappings": &mappings, "saved_by": Some(admin.id), "now_ms": now}),
+    )
+    .map_err(|error| ApiError::BadRequest(error.to_string()))?
+    .len()
+        > 64 * 1024
     {
-        return Err(ApiError::Conflict("Storage identities cannot change while background work owns live reservations, or when a root no longer exists. Retry after the active jobs finish and reload the library roots.".into()));
+        return Err(ApiError::BadRequest(
+            "storage domain configuration exceeds 64 KiB".into(),
+        ));
     }
-    Ok(Json(json!({"saved": true})))
+    let revision = state
+        .store
+        .save_storage_domains(mappings, Some(admin.id), now)
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "A library root changed since this page loaded. Load library roots again.".into(),
+            )
+        })?;
+    if state.jobs.may_run_cluster_jobs().await {
+        // The desired revision is durable already. Applying is independent of
+        // accepting the save; the existing upkeep loop retries failed applies.
+        if let Err(error) = state.store.apply_pending_storage_domains(now).await {
+            tracing::warn!(%error, revision, "saved storage domains await application");
+        }
+    }
+    let domains = state.store.storage_domain_state(now).await?;
+    let applied = domains
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.revision == revision && pending.state == "applied");
+    Ok(Json(
+        json!({"saved": true, "revision": revision, "applied": applied,
+        "pending": domains.pending, "waiting_on": domains.waiting_on,
+        "waiting_total": domains.waiting_total}),
+    ))
 }

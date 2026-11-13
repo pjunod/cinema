@@ -160,8 +160,8 @@ for tgt in ("600 0 1 4000", "1000 0.005 1 4000", "1000 0 0 4000", "100 0.005 2 4
     ok &= run('cm29_dark_colour_' + tgt.split()[0] + '_f' + tgt.split()[1] + '_p' + tgt.split()[2], cm29 + 'target ' + tgt + '\n', dark, W, H, tgt.split()[2] == '0')
 # CM v2.9 detail at the top clip (cm29_top_clip): fields from below to above the intensity where the
 # tone curve reaches its top value (L1 max 3728 = PQ 0.910), with gray and coloured specks darker and
-# brighter than the field on a 16x8 grid. The detail input is held at the clip point, so the shader's
-# uniform and both detail planes (cm29: live chroma weight) run against the CPU reference there.
+# brighter than the field on a 16x8 grid. Detail there comes from the unclamped mapped intensity and
+# only the finished value is held to the peak, on both detail planes (cm29: live chroma weight).
 def cm29_top_clip():
     img = np.zeros((H, W, 3)); rng = np.random.default_rng(29)
     fields = np.linspace(0.84, 1.0, 8)
@@ -180,7 +180,7 @@ clip = cm29_top_clip()
 for fam, meta in (('cm29', cm29), ('cm29b', cm29b)):
     for tgt in ("600 0 1 4000", "1000 0.005 1 4000", "4000 0 1 4000"):
         ok &= run(fam + '_top_clip_' + tgt.split()[0] + '_p' + tgt.split()[2], meta + 'target ' + tgt + '\n', clip, W, H)
-# Chroma-weighted hold (xtop - 0.5*cw*C) at large L2 chroma weights (raw 1000: cw -0.51, raw 3000: +0.46,
+# The chroma-weighted plane at large L2 chroma weights (raw 1000: cw -0.51, raw 3000: +0.46,
 # on the 600-nit target's exact L2): fields above the clip with chroma-rich specks on the 16x8 grid.
 def cm29_top_clip_chroma():
     img = np.zeros((H, W, 3)); rng = np.random.default_rng(2929)
@@ -197,6 +197,29 @@ for raw in (1000, 3000):
     assert meta != cm29
     ok &= run('cm29_top_clip_chroma%d_600_p1' % raw, meta + 'target 600 0 1 4000\n', clipc, W, H)
 # a black frame (L1 0,0,0) maps instead of refusing
+# CM v2.9 L2 selection and the unclamped curve (the licensed values are pinned in
+# test_dm_active_area.c): gray and tinted ramps over the whole PQ range, so pixels run under the L1
+# crush and over the L1 clip, with specks for the detail planes. An L2 at 100 nits only (interpolated
+# towards neutral at the mastering peak, darkening: gradation above the clip), a high L1 minimum
+# with a lifting exact L2 over a non-zero black (the curve runs under the target black), an L2 at
+# the 1000-nit mastering peak bracketing 600, and an exact L2 above the mastering peak.
+def cm29_l2_ramp():
+    img = np.zeros((H, W, 3)); rng = np.random.default_rng(2902)
+    ramp = np.linspace(0, 1, W)
+    for b, tint in enumerate(((0, 0, 0), (0.03, -0.02, 0.0), (-0.04, 0.0, 0.05), (0.0, 0.04, -0.06))):
+        img[b * H // 4:(b + 1) * H // 4] = np.clip(ramp[:, None] + np.array(tint), 0, 1)
+    ys, xs = np.meshgrid(np.arange(4, H - 4, 8), np.arange(8, W - 8, 16), indexing='ij')
+    img[ys.ravel(), xs.ravel()] = np.clip(img[ys.ravel(), xs.ravel()] + rng.uniform(-0.1, 0.05, (ys.size, 1)), 0, 1)
+    return img
+l2ramp = cm29_l2_ramp()
+for name, meta, tgt in (
+        ('interp', 'l1 2 2048 3697\nl6 50 4000\nl2 2081 1500 2010 1300 2048 2048 2048\n', '600 0 1 4000'),
+        ('interp_cw', 'l1 2 2048 3697\nl6 50 4000\nl2 2081 1500 2010 1300 2500 1900 512\n', '1000 0.005 1 4000'),
+        ('crush', 'l1 205 1229 2457\nl6 50 4000\nl2 2851 2200 2060 2300 2048 2048 2048\n', '600 0.005 1 4000'),
+        ('crush_untrimmed', 'l1 205 1229 2457\nl6 50 4000\n', '600 0.005 1 4000'),
+        ('atpeak', 'l1 2 2048 3697\nl6 50 1000\nl2 3079 1400 2000 1400 2048 2048 2048\n', '600 0 1 1000'),
+        ('above', 'l1 2 2048 3697\nl6 50 1000\nl2 3388 2150 2052 1900 2048 2048 2048\n', '2000 0 1 1000')):
+    ok &= run('cm29_l2_' + name, meta + 'target ' + tgt + '\n', l2ramp, W, H)
 black = 'l1 0 0 0\nl6 50 4000\n'
 ok &= run('cm29_black_1000_p1', black + 'target 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)
 ok &= run('cm4_black_1000_p1', black + 'l254\ntarget 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)

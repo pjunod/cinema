@@ -33,7 +33,8 @@ GITHUB_ONLY_WORKFLOWS = frozenset({
     ".github/workflows/desktop-qualification.yml",
 })
 GITHUB_HOSTED_RUNNERS = frozenset(
-    {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "macos-15-intel", "windows-2022"}
+    # No Intel macOS runner: macOS releases are Apple Silicon only.
+    {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2022"}
 )
 
 
@@ -1904,13 +1905,18 @@ assert.equal(context.ACT_TIMER, null);
         for compiler_job in (
             fast_rust,
             metadata_jobs["cluster_wal"],
-            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
         ):
             compiler_header = compiler_job.split("    steps:", 1)[0]
             self.assertRegex(
                 compiler_header,
                 r'(?m)^      CARGO_BUILD_JOBS: "1"$',
             )
+        # The effort and main-fast Rust compiles size Cargo from their
+        # verified container instead (docs/ci/RUST-GATE-IMAGE.md).
+        for path in (".github/workflows/effort-ci.yml", ".github/workflows/main-fast-lane.yml"):
+            sized = workflow_job_blocks(path)["rust_compile"]
+            self.assertNotIn("CARGO_BUILD_JOBS:", sized)
+            self.assertIn('run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"', sized)
         self.assertIn("run: make effort-rust-check", fast_rust)
         self.assertNotIn("cargo test", fast_rust)
         fast_finalize = fast_rust.split(
@@ -2562,14 +2568,17 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("desktop-macos-test", effort)
         self.assertNotIn("swift test", effort)
 
-    def test_native_macos_tray_checks_build_both_architectures_and_run_swift_tests(self):
+    def test_native_macos_tray_checks_build_arm64_only_and_run_swift_tests(self):
         makefile = read("Makefile")
         build = makefile.split("\ndesktop-macos-build:", 1)[1].split("\ndesktop-macos-test:", 1)[0]
         test = makefile.split("\ndesktop-macos-test:", 1)[1].split("\ndesktop-macos-check:", 1)[0]
-        self.assertIn("for arch in arm64 x86_64", build)
+        self.assertNotIn("x86_64", build)
         self.assertIn("clients/server-tray/macos/build --configuration release", build)
-        self.assertIn('--arch "$$arch"', build)
-        self.assertIn('--scratch "$(CURDIR)/target/desktop-macos/scratch/$$arch"', build)
+        self.assertIn("--arch arm64", build)
+        tray_build = read("clients/server-tray/macos/build")
+        self.assertIn('[[ "$arch" == arm64 ]] || die "--arch must be arm64 (Intel Macs are not supported)"', tray_build)
+        self.assertNotIn("x86_64", tray_build)
+        self.assertIn('--scratch "$(CURDIR)/target/desktop-macos/scratch/arm64"', build)
         self.assertNotIn("swift test", build)
         self.assertIn("swift test --package-path clients/server-tray/macos", test)
         self.assertNotIn("--arch", test, "tests execute only on the actual runner architecture")
@@ -2605,8 +2614,8 @@ assert.equal(context.ACT_TIMER, null);
         # Whole-job budget includes checkout/toolchain/cache setup plus the
         # unchanged all-target compile and vendored denied-warning Clippy.
         full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        self.assertRegex(effort_jobs["rust_compile"], r"(?m)^    timeout-minutes: 60$")
         for lane, rust_job, minutes in (
-            ("effort", effort_jobs["rust_compile"], 60),
             ("full compiler", full_jobs["rust_compile"], 60),
         ):
             with self.subTest(lane=lane):
@@ -2630,10 +2639,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
         self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
-        self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
+        self.assertNotIn("CARGO_BUILD_JOBS", effort_rust_header.split("    runs-on:", 1)[1])
         self.assertEqual(
             re.findall(r"(?m)^[ \t]*CARGO_BUILD_JOBS: [^\n]+$", effort_jobs["rust_compile"]),
-            ['      CARGO_BUILD_JOBS: "1"'],
+            [],
         )
         self.assertIn(
             "if: always() && steps.cargo-cache.outputs.local == 'true'",
@@ -2668,21 +2677,19 @@ assert.equal(context.ACT_TIMER, null);
             list(effort_rust_steps),
             [
                 "Verify effective nonvoter resource bounds",
-                "Install Rust gate prerequisites",
                 "Check out the candidate",
-                "Install the pinned Rust toolchain",
+                "Require the gate image built from this tree",
+                "Size Cargo parallelism from the container's limits",
                 "Restore the effort Rust cache",
                 "Compile every Rust target without executing tests",
                 "Enforce persistent Cargo bounds",
                 "Restore persistent runner workspace ownership",
             ],
         )
-        rust_toolchain = effort_rust_steps["Install the pinned Rust toolchain"]
-        self.assertEqual(
-            workflow_step_scalar(rust_toolchain, "uses"),
-            "https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5",
-        )
-        self.assertIn("          components: rustfmt, clippy", rust_toolchain)
+        # The toolchain is baked into the pinned image; the job proves it.
+        image_check = effort_rust_steps["Require the gate image built from this tree"]
+        self.assertIn("rustc --version | grep -F 'rustc 1.97.1 '", image_check)
+        self.assertIn("rustup-init -y --no-modify-path --profile minimal \\\n        --default-toolchain 1.97.1 --component rustfmt,clippy", read("Dockerfile.rust-gate"))
         self.assertEqual(
             workflow_step_literal(
                 effort_rust_steps["Compile every Rust target without executing tests"],
@@ -2690,41 +2697,39 @@ assert.equal(context.ACT_TIMER, null);
             ),
             ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
-        # The deadline itself is pinned above with the larger-memory queue.
-        self.assertIn('CARGO_BUILD_JOBS: "1"', effort_jobs["rust_compile"])
         self.assertEqual(
             list(fast_rust_steps),
             [
                 "Verify effective nonvoter resource bounds",
-                "Install Rust gate prerequisites",
                 "Check out the candidate",
-                "Install the pinned Rust toolchain",
+                "Require the gate image built from this tree",
+                "Size Cargo parallelism from the container's limits",
                 "Install the pinned FFmpeg",
                 "Restore the main fast Rust cache",
-                "Compile every Rust target without executing tests",
-                "Lint the workspace",
+                "Run the Rust gate",
                 "Enforce persistent Cargo bounds",
                 "Restore persistent runner workspace ownership",
             ],
         )
-        self.assertIn("      image: ubuntu:24.04", fast_jobs["rust_compile"])
-        prerequisites = workflow_step_literal(
-            fast_rust_steps["Install Rust gate prerequisites"], "run"
+        self.assertRegex(
+            fast_jobs["rust_compile"],
+            r"(?m)^      image: \$\{\{ vars\.FLEET_REGISTRY \|\| 'fleet-registry\.unset\.invalid' \}\}"
+            r"/noirr/plurx-rust-gate@sha256:[0-9a-f]{64}$",
         )
-        self.assertTrue(any("python3" in line for line in prerequisites))
-        self.assertTrue(any("xz-utils" in line for line in prerequisites))
+        # What the job used to apt-install and download is in the image.
+        image = read("Dockerfile.rust-gate")
+        self.assertIn("python3", image)
+        self.assertIn("xz-utils", image)
+        self.assertIn("node --version | grep -Fx 'v22.23.4'", image)
         self.assertIn("node --version | grep -Fx 'v22.23.4'", fast_jobs["rust_compile"])
         self.assertEqual(
-            workflow_step_literal(fast_rust_steps["Lint the workspace"], "run"),
-            ["make lint"],
+            workflow_step_scalar(fast_rust_steps["Run the Rust gate"], "run"),
+            "make fast-rust-gate",
         )
-        self.assertEqual(
-            workflow_step_literal(
-                fast_rust_steps["Compile every Rust target without executing tests"],
-                "run",
-            ),
-            ["make effort-rust-check", "make hiqlite-vendor-clippy"],
-        )
+        gate = makefile.split("\nfast-rust-gate:", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("$(CARGO) clippy --workspace --locked --all-targets -- -D warnings", gate)
+        self.assertIn("$(MAKE) hiqlite-vendor-clippy", gate)
+        self.assertNotIn("check --workspace", gate)
         # Full-suite execution belongs to manual CI. Exact step/command lists
         # keep a renamed unit step or an appended broad test command from
         # silently returning to the blocking PR lane.
@@ -2773,7 +2778,9 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("subprocess.run(command, check=True)", node_phase)
         self.assertIn('record(identity, "success")', node_phase)
-        self.assertIn("cancel-in-progress: false", fast_lane)
+        # A superseded run is cancelled; Node successes of finished runs stay
+        # adoptable and a cancelled run's are simply run again.
+        self.assertIn("cancel-in-progress: true", fast_lane)
         self.assertEqual(
             make_dry_run_commands("hiqlite-vendor-clippy"),
             [
@@ -4293,9 +4300,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
         self.assertIn("cancel-in-progress: false", effort_workflow)
         self.assertNotIn("cancel-in-progress: true", effort_workflow)
+        # A push supersedes the PR's in-flight fast-lane run: its gate would
+        # refuse the moved head, and receipts adopt only finished runs'
+        # journals (docs/ci/CI-THROUGHPUT.md).
         main_workflow = read(".github/workflows/main-fast-lane.yml")
-        self.assertIn("cancel-in-progress: false", main_workflow)
-        self.assertNotIn("cancel-in-progress: true", main_workflow)
+        self.assertIn("cancel-in-progress: true", main_workflow)
+        self.assertNotIn("cancel-in-progress: false", main_workflow)
         main_preflight = workflow_job_blocks(".github/workflows/main-fast-lane.yml")["preflight"]
         self.assertIn("validation.main_unit_receipts prepare", main_preflight)
         self.assertIn("validation.main_unit_receipts run --suite-dir tests/validation --suite-dir tests/operations", main_preflight)
@@ -4819,7 +4829,14 @@ assert.equal(context.ACT_TIMER, null);
             "amd64": ("x64", "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce"),
             "arm64": ("arm64", "6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b"),
         }
-        for workflow in ("ci", "effort-ci", "main-fast-lane"):
+        for workflow in ("effort-ci", "main-fast-lane"):
+            job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
+            self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-compile-amd64",)])
+            self.assertNotIn("Install Rust gate prerequisites", workflow_step_blocks(job))
+        image = read("Dockerfile.rust-gate")
+        self.assertIn(f"node-v22.23.4-linux-x64.tar.xz", image)
+        self.assertIn(checksums["amd64"][1], image)
+        for workflow in ("ci",):
             job = workflow_job_blocks(f".github/workflows/{workflow}.yml")["rust_compile"]
             self.assertEqual(self_hosted_label_sets(job), [("ci-nonvoter-compile-amd64",)])
             bootstrap = workflow_step_blocks(job)["Install Rust gate prerequisites"]
@@ -5132,7 +5149,7 @@ assert.equal(context.ACT_TIMER, null);
         for asset in (
             "plurxd_${VERSION}-1_amd64.deb", "plurxd_${VERSION}-1_arm64.deb",
             "plurxd-${VERSION}-1.x86_64.rpm", "plurxd-${VERSION}-1.aarch64.rpm",
-            "plurxd-${VERSION}-macos-universal.tar.gz",
+            "plurxd-${VERSION}-macos-arm64.tar.gz",
             "plurxd-${VERSION}-windows-x86_64.zip",
         ):
             self.assertIn(asset, workflow)
@@ -5211,15 +5228,20 @@ assert.equal(context.ACT_TIMER, null);
         )
 
     def test_desktop_libraries_are_build_dependencies_not_server_runtime(self):
+        self.assertIn("libgtk-4-dev libdbus-1-dev", read("Dockerfile.rust-gate"))
         for path in (".github/workflows/ci.yml", ".github/workflows/effort-ci.yml",
                      ".github/workflows/main-fast-lane.yml"):
             with self.subTest(workflow=path):
                 job = workflow_job_blocks(path)["rust_compile"]
-                self.assertIn("      image: ubuntu:24.04", job)
                 steps = workflow_step_blocks(job)
-                setup = steps["Install Rust gate prerequisites"]
-                self.assertIn("libgtk-4-dev libdbus-1-dev", setup)
-                self.assertLess(job.index(setup), job.index("make effort-rust-check"))
+                if path == ".github/workflows/ci.yml":
+                    self.assertIn("      image: ubuntu:24.04", job)
+                    setup = steps["Install Rust gate prerequisites"]
+                    self.assertIn("libgtk-4-dev libdbus-1-dev", setup)
+                    self.assertLess(job.index(setup), job.index("make effort-rust-check"))
+                else:
+                    self.assertIn("/noirr/plurx-rust-gate@sha256:", job)
+                    self.assertIn("Require the gate image built from this tree", steps)
                 restore = steps["Restore persistent runner workspace ownership"]
                 self.assertIn("if: always()", restore)
                 self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', restore)
@@ -5318,9 +5340,10 @@ assert.equal(context.ACT_TIMER, null);
         fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
             "rust_compile"
         ]
-        self.assertIn("      image: ubuntu:24.04", fast)
+        self.assertIn("/noirr/plurx-rust-gate@sha256:", fast)
+        self.assertIn("FROM ubuntu:24.04@sha256:", read("Dockerfile.rust-gate"))
         self.assertIn('major: "6"', fast)
-        self.assertIn("make effort-rust-check", fast)
+        self.assertIn("make fast-rust-gate", fast)
         self.assertNotIn("make unit", fast)
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
         self.assertRegex(coverage, r"COVERAGE_IMAGE: ubuntu@sha256:[0-9a-f]{64}")

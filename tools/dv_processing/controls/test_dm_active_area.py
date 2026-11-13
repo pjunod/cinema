@@ -68,14 +68,14 @@ class ActiveAreaCControl(unittest.TestCase):
     def test_l5_cm29_crop_domain_excludes_adversarial_bars(self):
         self.run_case("test_l5_cm29_crop_domain_excludes_adversarial_bars")
 
-    def test_cm29_detail_holds_at_the_top_clip(self):
-        self.run_case("test_cm29_detail_holds_at_the_top_clip")
+    def test_cm29_detail_runs_on_the_unclamped_mapping(self):
+        self.run_case("test_cm29_detail_runs_on_the_unclamped_mapping")
 
-    def test_cm29_top_clip_state(self):
-        self.run_case("test_cm29_top_clip_state")
+    def test_cm29_detail_chroma_weight(self):
+        self.run_case("test_cm29_detail_chroma_weight")
 
-    def test_cm29_detail_hold_chroma_weight(self):
-        self.run_case("test_cm29_detail_hold_chroma_weight")
+    def test_cm29_l2_selection_matches_licensed(self):
+        self.run_case("test_cm29_l2_selection_matches_licensed")
 
 
 if __name__ == "__main__":

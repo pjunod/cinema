@@ -4637,8 +4637,9 @@ without duplicating the same computation or multiplying NAS reads by node count.
 Settings → Libraries → Shared storage budgets assigns the same domain name to
 mount paths on the same NAS. Independent storage may use different names. A
 multi-root library conservatively reserves all of its domains, even for a
-file-specific job. Save mapping changes while background jobs are idle; an
-active reservation cannot change identity. Ordinary library path edits that
+file-specific job. Saves persist at once;
+[pending status](server/STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) explains
+application. Ordinary library path edits that
 change required domains stop renewal and publication until a later attempt
 acquires the new slots. Enable switches remain independent of these mappings
 and their advisory observations.
@@ -6091,14 +6092,14 @@ session playing untouched. A create that names a processed candidate (a reopen
 of a processed session), and a viewer who picks the processed rung on an
 ordinary session, get the ordinary rung it enhances, and are upgraded after
 that session's first frame. An ordinary prepared successor this node owns is
-upgraded the same way once committed (the commit is the client's proof of the
-successor's frame). A start the ingress placed on another node is not
-upgraded: the owner does not hold the create's catalog scope (see the plan's
-open gaps).
+upgraded the same way once committed (the commit proves the successor's
+frame). A start the ingress placed on another node is not upgraded: its owner
+lacks the create's catalog scope.
 
 `plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
 upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
-`admission_refused`, `not_applicable`, `cancelled`).
+`admission_refused`, `not_applicable`, `qualification_pending`, `displaced`,
+`cancelled`).
 `plurx_playback_preparation_seams_total{platform,processed,outcome}` counts the
 prepared switches the clients reported at their seam (`committed`, `refused`,
 `switched_without_a_frame`) and

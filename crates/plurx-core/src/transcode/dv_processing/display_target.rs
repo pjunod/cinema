@@ -322,10 +322,12 @@ impl DvDisplayTarget {
 /// The display-management selection the helper (`dv_dm.h`) makes for this RPU at `nits`, for a
 /// title mastered at `title_peak` nits: CM v4 when the RPU carries CM v4.0 metadata (L254) or L8
 /// trims, otherwise CM v2.9. With trims, CM v4 uses every L8 whose target display is a preset or
-/// is described by an L10. CM v2.9 uses the L2 authored for the bucket peak; otherwise each trim
-/// field is interpolated linearly in target PQ between the bracketing L2 targets, with neutral
-/// trims at PQ 0 and at the mastering peak (measured against the reference renderer). At or above
-/// the mastering peak both families map untrimmed.
+/// is described by an L10, and maps untrimmed at or above the mastering peak. CM v2.9 uses the L2
+/// authored for the bucket peak; otherwise each trim field is interpolated linearly in target PQ
+/// between the nearest L2 targets below and above (wherever they sit against the mastering peak),
+/// with a neutral trim at the mastering display's minimum (L6) for a missing lower side and at
+/// the mastering peak for a missing upper side. With no L2 above, a bucket at or above the
+/// mastering peak maps untrimmed (measured against the reference renderer).
 fn dv_display_management(
     raw: &[u8],
     nits: u32,
@@ -407,21 +409,36 @@ fn dv_display_management(
             (hi, hi_ms) = (q, ms);
         }
     }
-    // An L2 target between this display and the mastering peak; without one (and without a lower
-    // target) every trim has faded out.
-    let (upper, lower) = (hi <= 1.0 && hi < smast, lo >= 0.0);
-    let (curve, weight) = if tmax >= smast {
-        ("cm29-l1-only", 0.0)
-    } else if let Some(ms) = exact {
+    // The mastering display's minimum, as the helper reads it: this RPU's L6, else 0.005 nits.
+    let smin_nits = dm
+        .level_blocks_iter(6)
+        .find_map(|block| match block {
+            ExtMetadataBlock::Level6(x) => {
+                Some(f64::from(x.min_display_mastering_luminance) / 10000.0)
+            }
+            _ => None,
+        })
+        .unwrap_or(0.005);
+    let (upper, lower) = (hi <= 1.0, lo >= 0.0);
+    let (curve, weight) = if let Some(ms) = exact {
         ("cm29-l2-exact", ms)
-    } else if lower || upper {
+    } else if upper || (lower && tmax < smast) {
         if !upper {
             (hi, hi_ms) = (smast, 0.0);
         }
         if !lower {
-            (lo, lo_ms) = (0.0, 0.0);
+            lo = if smin_nits > 0.0 {
+                pq_code_f64(smin_nits)
+            } else {
+                0.0
+            };
+            lo_ms = 0.0;
         }
-        let w: f64 = ((hi - tmax) / (hi - lo)).clamp(0.0, 1.0);
+        let w: f64 = if hi > lo {
+            ((hi - tmax) / (hi - lo)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         ("cm29-l2-interpolated", w * lo_ms + (1.0 - w) * hi_ms)
     } else {
         ("cm29-l1-only", 0.0)
@@ -634,7 +651,7 @@ mod tests {
             );
         };
         // CM v2.9: exact 12-bit match, else linear in target PQ between the bracketing L2
-        // targets, with neutral ones at PQ 0 and at the mastering peak (4000 here); raw
+        // targets, with neutral ones at the mastering minimum and peak (4000 here); raw
         // ms_weight -1 is 0. The interpolated weights are pinned in test_dv_dm.c too.
         let cm29 = build(false, vec![l2(2081, -1), l2(3079, 1800)]);
         let weight = (1800.0 - 2048.0) / 2048.0;
@@ -655,7 +672,8 @@ mod tests {
         near(600, -0.09346839266980962);
         near(1600, -0.07994135942825827);
         near(2000, -0.060392435898949166);
-        // below the lowest target: PQ(600) / PQ(3079) of that trim
+        // below the lowest target: (PQ(600) - PQ(min)) / (PQ(3079) - PQ(min)) of that trim, min the
+        // fixture's L6 mastering minimum
         let held = target(600)
             .display_management_with(&build(false, vec![l2(3079, 1800)]), true, true)
             .expect("selection");
@@ -663,10 +681,10 @@ mod tests {
             (held.cm4, held.curve, held.trim_targets),
             (false, "cm29-l2-interpolated", 1)
         );
-        assert!((held.detail_weight - -0.1121395094623157).abs() < 1e-12);
-        // A title mastered at 1000 nits: the trims fade to neutral at its peak, not at 4000. The
-        // 3079 trim is above PQ(1000) and does not count as a target below the peak; a CM v4 trim
-        // at the mastering peak has faded out. Pinned in test_dv_dm.c too.
+        assert!((held.detail_weight - -0.11211961090243337).abs() < 1e-12);
+        // A title mastered at 1000 nits: a trim without an L2 above it fades to neutral at that
+        // peak, not at 4000. An L2 at the mastering peak brackets lower buckets and is applied at
+        // its own; a CM v4 trim at the mastering peak has faded out. Pinned in test_dv_dm.c too.
         let mastered = |nits| {
             let mut stats = stats();
             stats.mastering_luminance = TitleConstant::Consistent(MasteringLuminance {
@@ -687,13 +705,15 @@ mod tests {
         let (cm4, curve, trims, w) = at_1000(&build(false, vec![l2(2081, 1800)]), 600);
         assert_eq!((cm4, curve, trims), (false, "cm29-l2-interpolated", 1));
         assert!((w - -0.02760024702986694).abs() < 1e-12, "{w}");
-        assert_eq!(
-            at_1000(&build(false, vec![l2(3079, 1800)]), 600),
-            (false, "cm29-l1-only", 0, 0.0)
-        );
-        // an L2 authored for the mastering peak itself is not applied at it
+        let (cm4, curve, trims, w) = at_1000(&build(false, vec![l2(3079, 1800)]), 600);
+        assert_eq!((cm4, curve, trims), (false, "cm29-l2-interpolated", 1));
+        assert!((w - -0.11211961090243337).abs() < 1e-12, "{w}");
         assert_eq!(
             at_1000(&build(false, vec![l2(3079, 1800)]), 1000),
+            (false, "cm29-l2-exact", 1, weight)
+        );
+        assert_eq!(
+            at_1000(&build(false, vec![l2(3079, 1800)]), 2000),
             (false, "cm29-l1-only", 0, 0.0)
         );
         assert_eq!(

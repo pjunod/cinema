@@ -239,6 +239,63 @@ sudo rm /run/plurx-physical-stop/source-census-v1/<uuid>.json
 
 The container needs the existing read-only bind of `/run/plurx-physical-stop`.
 
+A witness from an earlier boot of the same machine is censused too. Legacy
+reboot recovery needs the host identity binds, and a host without them writes
+its v1 record with no identity, which a reboot can never verify. The helper
+then reads the machine's own journal (`journalctl --list-boots`). It requires
+the witness's boot to be listed there and to have ended before the current
+boot began, so no process of that kernel survives. It records that boot as
+`prior_boot` in the proof. The daemon accepts a witness from another kernel
+only when the proof names exactly that boot. The census itself must still have
+run on the daemon's current kernel, and every other check is unchanged. A
+cloned data directory on another machine cannot claim boots from this
+machine's journal. The daemon cannot read the host journal: it trusts the root
+helper's `prior_boot`, as it already trusts the helper's open counts. The
+helper needs persistent journald (`/var/log/journal`); without it, earlier
+boots are not listed and it refuses. A later boot can mount the same export
+under another device number, so the owner's source binds by the file
+server's inode on the superblock the daemon sees now. With the owner's job row
+gone the daemon has no path to check that inode against, and refuses.
+
+### 1.4 A daemon restart proves its old namespace's readers gone
+
+A plurxd restart during any read left that owner's witness poisoned by some
+earlier unmediated launch. Its expired custody then held the shared storage
+fence, and every source-reading job in the cluster, live work included, was
+refused until the next host reboot. On 2026-11-12 one daemon restart fenced
+the cluster this way within a minute.
+
+Each witness now records its daemon's PID namespace and whether the daemon was
+that namespace's init (PID 1). Replay releases a poisoned witness only when
+all of these hold:
+
+- the witness's daemon was the init of its PID namespace;
+- the replaying daemon is the init of a different PID namespace;
+- the anchor lock is free.
+
+When a namespace's init exits, the kernel kills every process left in the
+namespace, and the init's exit completes only once they have all been reaped.
+A process cannot leave its PID namespace, so every child the old daemon ever
+launched, mediated or not, died with it. Only the old daemon held the anchor
+lock, and close-on-exec keeps that descriptor from its children. The container
+runtime starts the replacement daemon in a new namespace only after the old
+init has exited.
+
+The proof depends on that runtime ordering. The anchor lock is released when
+the old init's descriptors close, slightly before the kernel finishes killing
+the rest of its namespace, and a reader blocked on a hung hard NFS mount can
+take minutes to die. `docker restart` and Compose recreation report the old
+container stopped only after its whole namespace is reaped, so the new daemon
+cannot exist sooner. Never run two daemons on one data directory at once (a
+second container, or a rolling update sharing the volume): that breaks the
+ordering the proof relies on.
+
+A same-namespace replay, a daemon that is not an init, and evidence written
+before this field existed prove nothing and keep their reboot or census path.
+An older daemon refuses the new evidence field and so skips the record, the
+safe direction during a rolling upgrade. Each release logs `source custody
+recovered after its daemon's PID namespace was torn down`.
+
 ## 2. The journal never impersonates an activation or completed join
 
 [Recovery replay](../../crates/plurxd/src/source_custody/recovery.rs) uses
@@ -408,6 +465,11 @@ binaries ignore the separate namespace and cannot confuse its active records
 with old activation-abort or joined receipts. Drain/join/release active owners
 before downgrade. If that is impossible, preserve the recovery-capable binary
 and all journals; reverting binaries alone does not recover abandoned work.
+
+A daemon older than §1.4 cannot parse a witness that records its namespace:
+it logs `invalid reader evidence retained` and skips that record, which then
+needs a host reboot or the §1.3 census. Downgrade only after those owners have
+settled.
 
 Do not delete an unresolved record to downgrade. A missing identity source is
 a recovery limitation, not permission to manufacture proof. New same-kernel v2 witnesses cover native macOS/Linux and containers. Legacy

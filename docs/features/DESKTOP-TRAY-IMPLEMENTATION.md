@@ -41,7 +41,7 @@ upgrades use the existing qualified deployment commands.
 Closing the control window or choosing **Quit tray app** leaves the server
 running. Stopping the server leaves the icon available for Start.
 
-**Initial scope:** macOS 13+ on Apple Silicon and Intel; Linux systemd hosts
+**Initial scope:** macOS 13+ on Apple Silicon; Linux systemd hosts
 supported by the existing Debian/Ubuntu and Fedora/RHEL package contracts,
 on x86_64 and aarch64, using X11 or Wayland. Non-systemd Linux can use the web
 app and its own supervisor; automatic management is unavailable with an
@@ -350,7 +350,7 @@ write authority. Final filenames and asset-set validation change together.
 
 | Platform | Release artifacts |
 |---|---|
-| macOS | Existing universal archive name retained; add `Plurx Server.app`, controller/worker, installer and complete matching FFmpeg/FFprobe, WASM parser, subtitle engine, licenses and provenance. Preserve daemon JIT entitlements and each architecture's acceptance. |
+| macOS | `plurxd-X.Y.Z-macos-arm64.tar.gz` (Apple Silicon only); add `Plurx Server.app`, controller/worker, installer and complete matching FFmpeg/FFprobe, WASM parser, subtitle engine, licenses and provenance. Preserve daemon JIT entitlements and the arm64 acceptance. |
 | Linux amd64 / arm64 | Existing `plurxd` server `.deb`/`.rpm` gains the non-GUI controller/worker/helper/guard/recovery; matching `plurx-desktop` packages own GUI assets only. Server-only headless upgrades remain possible. |
 | All | Existing `SHA256SUMS`, plus signed `plurx-update-v1.json` and detached signature. Existing Windows artifacts remain unaffected and outside tray work. |
 

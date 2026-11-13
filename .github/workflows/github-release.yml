@@ -10,7 +10,7 @@ run-name: github release ${{ inputs.release_tag || (github.event_name == 'push' 
 #
 #   plurxd_X.Y.Z-1_{amd64,arm64}.deb        Debian 12+, Ubuntu 24.04+
 #   plurxd-X.Y.Z-1.{x86_64,aarch64}.rpm     Fedora, RHEL 9+ with RPM Fusion
-#   plurxd-X.Y.Z-macos-universal.tar.gz     Apple Silicon and Intel
+#   plurxd-X.Y.Z-macos-arm64.tar.gz        Apple Silicon (no Intel Macs)
 #   plurxd-X.Y.Z-windows-x86_64.zip         Windows 10 1809+ / Server 2019+
 #   plurx-desktop_X.Y.Z-1_{amd64,arm64}.deb optional local Linux GUI
 #   plurx-desktop-X.Y.Z-1.{x86_64,aarch64}.rpm
@@ -487,21 +487,17 @@ jobs:
     needs: [resolve, macos_source_parser]
     if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: ${{ matrix.runner }}
-    # A slice takes about an hour on these runners (63 min arm64, 72 min
-    # x86_64 on 2026-10-10).
+    # The build takes about an hour on this runner (63 min on 2026-10-10).
+    # macOS releases are Apple Silicon only; there is no Intel slice.
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        # Each slice builds natively on its own hardware, in parallel, and
-        # runs there; the archive job joins them.
+        # Built natively and run on Apple Silicon; the archive job packages it.
         include:
           - arch: arm64
             runner: macos-15
             target: aarch64-apple-darwin
-          - arch: x86_64
-            runner: macos-15-intel
-            target: x86_64-apple-darwin
     env:
       PLURX_BUILD_REF: ${{ needs.resolve.outputs.build_ref }}
       PLURX_BUILD_SHA: ${{ needs.resolve.outputs.commit }}
@@ -563,7 +559,7 @@ jobs:
           retention-days: 7
 
   macos:
-    name: macOS universal archive
+    name: macOS arm64 archive
     needs: [resolve, macos_build]
     if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: macos-15
@@ -583,39 +579,26 @@ jobs:
           pattern: macos-slice-*
           path: slice
           merge-multiple: true
-      - name: Assemble and check the universal archive
+      - name: Assemble and check the arm64 archive
         run: |
           set -euo pipefail
-          name="plurxd-$VERSION-macos-universal"
-          mkdir -p "$RUNNER_TEMP/universal/bin" dist
+          name="plurxd-$VERSION-macos-arm64"
+          mkdir -p "$RUNNER_TEMP/arm64/bin" dist
           for tool in plurxd plurx-control plurx-install-helper plurx-update-worker plurx-service-launch plurx-recovery; do
-            lipo -create -output "$RUNNER_TEMP/universal/bin/$tool" "slice/$tool-arm64" "slice/$tool-x86_64"
-            test "$(lipo -archs "$RUNNER_TEMP/universal/bin/$tool")" = "x86_64 arm64"
+            cp "slice/$tool-arm64" "$RUNNER_TEMP/arm64/bin/$tool"
+            chmod 0755 "$RUNNER_TEMP/arm64/bin/$tool"
+            test "$(lipo -archs "$RUNNER_TEMP/arm64/bin/$tool")" = arm64
           done
           cp -R slice/plurxd-arm64.dSYM "$RUNNER_TEMP/plurxd.dSYM"
-          lipo -create slice/plurxd-arm64.dSYM/Contents/Resources/DWARF/plurxd \
-            slice/plurxd-x86_64.dSYM/Contents/Resources/DWARF/plurxd \
-            -output "$RUNNER_TEMP/plurxd.dSYM/Contents/Resources/DWARF/plurxd"
-          for arch in arm64 x86_64; do
-            mkdir -p "slice/media-$arch" "slice/subtitle-engine-$arch" "slice/desktop-$arch"
-            tar -C "slice/media-$arch" -xzf "slice/media-$arch.tar.gz"
-            tar -C "slice/subtitle-engine-$arch" -xzf "slice/subtitle-engine-$arch.tar.gz"
-            tar -C "slice/desktop-$arch" -xzf "slice/desktop-$arch.tar.gz"
-          done
-          python3 scripts/package-macos --combine-ffmpeg "$PWD/slice/media-arm64" "$PWD/slice/media-x86_64" \
-            --output "$RUNNER_TEMP/universal-media"
-          python3 scripts/build-subtitle-engine --output "$RUNNER_TEMP/universal-engine" \
-            --combine "$PWD/slice/subtitle-engine-arm64" "$PWD/slice/subtitle-engine-x86_64"
+          mkdir -p slice/media-arm64 slice/subtitle-engine-arm64 slice/desktop-arm64
+          tar -C slice/media-arm64 -xzf slice/media-arm64.tar.gz
+          tar -C slice/subtitle-engine-arm64 -xzf slice/subtitle-engine-arm64.tar.gz
+          tar -C slice/desktop-arm64 -xzf slice/desktop-arm64.tar.gz
           cp -R 'slice/desktop-arm64/Plurx Server.app' "$RUNNER_TEMP/Plurx Server.app"
-          app_executable=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$RUNNER_TEMP/Plurx Server.app/Contents/Info.plist")
-          lipo -create "slice/desktop-arm64/Plurx Server.app/Contents/MacOS/$app_executable" \
-            "slice/desktop-x86_64/Plurx Server.app/Contents/MacOS/$app_executable" \
-            -output "$RUNNER_TEMP/Plurx Server.app/Contents/MacOS/$app_executable"
-          codesign --force --deep --sign - --options runtime "$RUNNER_TEMP/Plurx Server.app"
-          python3 scripts/package-macos --daemon "$RUNNER_TEMP/universal/bin/plurxd" \
-            --ffmpeg-package "$RUNNER_TEMP/universal-media" --subtitle-engine-package "$RUNNER_TEMP/universal-engine" \
+          python3 scripts/package-macos --daemon "$RUNNER_TEMP/arm64/bin/plurxd" \
+            --ffmpeg-package "$PWD/slice/media-arm64" --subtitle-engine-package "$PWD/slice/subtitle-engine-arm64" \
             --debug-symbols "$RUNNER_TEMP/plurxd.dSYM" --desktop-app "$RUNNER_TEMP/Plurx Server.app" \
-            --control-dir "$RUNNER_TEMP/universal/bin" --version "$VERSION" \
+            --control-dir "$RUNNER_TEMP/arm64/bin" --version "$VERSION" \
             --source-commit "${{ needs.resolve.outputs.commit }}" --output "$PWD/dist/$name"
           test "$("dist/$name/runtime/plurxd" --version)" = "$EXPECT_VERSION"
           python3 scripts/package-macos --archive "$PWD/dist/$name" --output "$PWD/dist/$name.tar.gz"
@@ -624,7 +607,7 @@ jobs:
       - name: Validate complete archive without modifying host startup policy
         run: |
           set -euo pipefail
-          name="plurxd-$VERSION-macos-universal"
+          name="plurxd-$VERSION-macos-arm64"
           mkdir -p "$RUNNER_TEMP/archive-check"
           tar -C "$RUNNER_TEMP/archive-check" -xzf "dist/$name.tar.gz"
           package="$RUNNER_TEMP/archive-check/$name"
@@ -708,8 +691,8 @@ jobs:
           unset CERTIFICATE_BASE64 CERTIFICATE_PASSWORD NOTARY_PRIVATE_KEY keychain_password
           mkdir dist
           python3 trusted/scripts/sign-macos-release \
-            --archive "$PWD/candidate/plurxd-$VERSION-macos-universal.tar.gz" \
-            --output "$PWD/dist/plurxd-$VERSION-macos-universal.tar.gz" \
+            --archive "$PWD/candidate/plurxd-$VERSION-macos-arm64.tar.gz" \
+            --output "$PWD/dist/plurxd-$VERSION-macos-arm64.tar.gz" \
             --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
             --identity "$SIGNING_IDENTITY" --team-id "$TEAM_ID" \
             --key "$credentials/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
@@ -841,7 +824,7 @@ jobs:
             "plurx-desktop_${VERSION}-1_amd64.deb" "plurx-desktop_${VERSION}-1_arm64.deb" \
             "plurx-desktop-${VERSION}-1.x86_64.rpm" "plurx-desktop-${VERSION}-1.aarch64.rpm" \
             "plurx-tray-${VERSION}-linux-amd64.tar.gz" "plurx-tray-${VERSION}-linux-arm64.tar.gz" \
-            "plurxd-${VERSION}-macos-universal.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
+            "plurxd-${VERSION}-macos-arm64.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
             | LC_ALL=C sort)
           test "$(ls assets | LC_ALL=C sort)" = "$expected"
           umask 077
@@ -986,7 +969,7 @@ jobs:
             "plurx-desktop_${VERSION}-1_amd64.deb" "plurx-desktop_${VERSION}-1_arm64.deb" \
             "plurx-desktop-${VERSION}-1.x86_64.rpm" "plurx-desktop-${VERSION}-1.aarch64.rpm" \
             "plurx-tray-${VERSION}-linux-amd64.tar.gz" "plurx-tray-${VERSION}-linux-arm64.tar.gz" \
-            "plurxd-${VERSION}-macos-universal.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
+            "plurxd-${VERSION}-macos-arm64.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
             | LC_ALL=C sort)
           if [ "$PUBLISH_UPDATES" = true ]; then
             expected=$(printf '%s\n' "$expected" "plurx-update-v1.json" "plurx-update-v1.json.sig" | LC_ALL=C sort)
@@ -1044,7 +1027,7 @@ jobs:
           |---|---|---|
           | Debian 12+, Ubuntu 24.04+ | \`${deb}_amd64.deb\`, \`${deb}_arm64.deb\` | \`sudo apt install ./${deb}_amd64.deb\` |
           | Fedora, RHEL 9+ | \`${rpm}.x86_64.rpm\`, \`${rpm}.aarch64.rpm\` | \`sudo dnf install ./${rpm}.x86_64.rpm\` |
-          | macOS | \`plurxd-${VERSION}-macos-universal.tar.gz\` | unpack, then \`./install\` in the folder |
+          | macOS | \`plurxd-${VERSION}-macos-arm64.tar.gz\` | unpack, then \`./install\` in the folder |
           | Windows x64 | \`plurxd-${VERSION}-windows-x86_64.zip\` | see \`README.md\` in the archive |
 
           The Linux packages install the \`plurxd\` systemd service and start it; open

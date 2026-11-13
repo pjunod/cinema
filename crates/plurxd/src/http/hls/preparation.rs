@@ -268,6 +268,22 @@ pub(super) const PROCESSED_UPGRADE_ASK: &str = "processed-upgrade";
 /// registers under. Cancellation therefore reaches every phase through the
 /// phase's own exit path, and the upgrade's future is never dropped while
 /// staging holds a half-registered successor.
+/// Whether the playback's one pending-candidate slot is held: by a viewer's
+/// own change in flight or by a registered successor. A processed upgrade
+/// waits rather than being spent against a held slot.
+pub(super) fn preparation_slot_held(playback_id: &str) -> bool {
+    active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .any(|active| active.preparation.playback_id == playback_id)
+        || pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(playback_id)
+            .is_some_and(|entry| !entry.cancelled.is_cancelled())
+}
+
 pub(super) fn begin_processed_upgrade(
     playback_id: &str,
     run: &tokio_util::sync::CancellationToken,
@@ -1869,7 +1885,7 @@ async fn plan_preparation_with_candidate(
     let plan_height = plan.height;
     let selected_candidate = plan.selected_candidate;
     let mut resolved = plan.request;
-    validate_hevc_copy_transport(state, source, caps, &resolved).await?;
+    validate_hevc_copy_transport(state, source, caps, &resolved, None).await?;
     // The same guard ordinary create runs, on the same function. This path
     // reaches `resolve_plan` directly and therefore skipped it entirely: a
     // successor prepared for an HDR delivery could be staged as a burn that

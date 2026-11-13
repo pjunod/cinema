@@ -15,7 +15,9 @@
 use super::*;
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::cluster::migration::status::PassiveRaftMetrics;
-use plurx_core::store::{AppliedTable, AppliedView, ViewFallback, ViewSource};
+use plurx_core::store::{
+    AppliedTable, AppliedView, PlaybackPlanningSnapshot, ViewFallback, ViewSource,
+};
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{SettingsStore, StampCheck};
 
@@ -927,4 +929,824 @@ async fn applied_view_follower_save_never_reads_its_stale_replica() {
     let read = view.settings(&[KEY]).await.expect("view read");
     assert_eq!(read.source, ViewSource::View);
     assert_eq!(read.values.get(KEY).map(String::as_str), Some("new"));
+}
+
+// Playback-start E1c: the route view (§4.4).
+
+#[cfg(feature = "cluster-read-cost-validation")]
+fn route_activation(user_id: i64, session: &str, incarnation: &str) -> MediaSessionActivation {
+    MediaSessionActivation {
+        expected_desired_revision: None,
+        recovery_epoch: format!("epoch-{session}"),
+        incarnation_id: incarnation.to_owned(),
+        session_id: session.to_owned(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        playback_id: format!("playback-{session}"),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "a".repeat(64),
+        owner_node_id: "route-owner".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: "{}".to_owned(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: 1_000,
+        lease_expires_at_ms: 900_000,
+    }
+}
+
+/// Apply the frozen principal session rebuild to the replicated tables (rows
+/// survive it) and record the layout as installed, so the route view's local
+/// twin runs. Production installs it with the coordinated Source installer.
+#[cfg(feature = "cluster-read-cost-validation")]
+async fn install_principal_layout(client: &Client, store: &HiqliteAuthStore) {
+    let statements: Vec<(String, hiqlite::Params)> =
+        plurx_core::store::media_session_principal_rebuild_schema()
+            .split("-- next statement\n")
+            .map(|sql| {
+                (
+                    sql.trim().trim_end_matches(';').to_owned(),
+                    hiqlite::params!(),
+                )
+            })
+            .collect();
+    for result in client
+        .txn(statements)
+        .await
+        .expect("apply the principal rebuild")
+    {
+        result.expect("rebuild statement");
+    }
+    store.validation_assume_installed_session_layout();
+}
+
+/// End a session's row as a release does (`state`, `terminal_reason`).
+#[cfg(feature = "cluster-read-cost-validation")]
+async fn release(client: &Client, session: &str) {
+    let sql = format!(
+        "UPDATE media_sessions SET state = 'ended', terminal_reason = 'deleted' \
+         WHERE session_id = '{session}'"
+    );
+    for result in client
+        .txn([(sql, hiqlite::params!())])
+        .await
+        .expect("release")
+    {
+        assert_eq!(result.expect("release statement"), 1, "one row ended");
+    }
+}
+
+/// On SQLite the route view is the store: every read is a store read, and no
+/// answer carries a stamp a cache could keep.
+#[tokio::test]
+async fn applied_route_view_on_sqlite_is_the_store() {
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let view = AppliedView::authority(Arc::clone(&store));
+    let absent = view
+        .route("00000000-0000-4000-8000-0000000e1c01")
+        .await
+        .expect("standalone route");
+    assert_eq!(absent.source, ViewSource::View);
+    assert!(absent.route.is_none());
+    assert!(absent.stamp.is_none(), "SQLite hands out no stamp");
+    let observation = view.observation();
+    assert_eq!(
+        observation.view_total(AppliedTable::MediaSessions, ViewSource::View),
+        1
+    );
+    assert_eq!(
+        observation.view_total(AppliedTable::Settings, ViewSource::View),
+        0
+    );
+    // Every per-row fact is met on the only copy.
+    assert!(view.floor_met(view.observe()));
+
+    let remote = AppliedView::remote_authority(Arc::clone(&store));
+    let read = remote
+        .route("00000000-0000-4000-8000-0000000e1c01")
+        .await
+        .expect("remote route");
+    assert_eq!(read.source, ViewSource::Authority);
+    assert!(!remote.floor_met(remote.observe()));
+}
+
+/// A release applied here moves the route slot: the entry made from the
+/// earlier view answer is stale the moment it applies, with no clock, and the
+/// next read re-reads the replica locally and sees the terminal row. A write
+/// to another session moves the same slot (per-table invalidation, §12-7).
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_route_view_moves_with_a_release_applied_here() {
+    const SESSION: &str = "00000000-0000-4000-8000-0000000e1c11";
+    const OTHER: &str = "00000000-0000-4000-8000-0000000e1c12";
+    let node = EmbeddedSingleton::start().await;
+    let user = node
+        .store
+        .create_user("e1c-route", "hash", false)
+        .await
+        .expect("user")
+        .id;
+    for (session, incarnation) in [
+        (SESSION, "00000000-0000-4000-8000-0000000e1c21"),
+        (OTHER, "00000000-0000-4000-8000-0000000e1c22"),
+    ] {
+        node.store
+            .activate_media_session(&route_activation(user, session, incarnation))
+            .await
+            .expect("activate")
+            .expect("activation wins");
+    }
+    install_principal_layout(&node.client, &node.store).await;
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+
+    node.store.validation_reset_operation_counts();
+    let read = view.route(SESSION).await.expect("view route");
+    assert_eq!(
+        read.source,
+        ViewSource::View,
+        "{:?}",
+        view.observation().last_fallback
+    );
+    assert_eq!(
+        read.route,
+        node.store
+            .media_session_route(SESSION)
+            .await
+            .expect("Authority")
+    );
+    node.store.validation_reset_operation_counts();
+    let read = view.route(SESSION).await.expect("view route");
+    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        0,
+        "a proven route view never asks the leader"
+    );
+    assert_eq!(
+        read.route.as_ref().map(|route| route.state.as_str()),
+        Some("active")
+    );
+    let stamp = read.stamp.expect("a view answer is stamped");
+    assert_eq!(view.check(&stamp), StampCheck::Current);
+    assert!(view.same_image(&stamp));
+
+    release(&node.client, SESSION).await;
+    assert_eq!(
+        view.check(&stamp),
+        StampCheck::Stale,
+        "the release moved the route slot; no clock advanced"
+    );
+    assert!(!view.same_image(&stamp));
+    node.store.validation_reset_operation_counts();
+    let read = view.route(SESSION).await.expect("re-read");
+    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(
+        read.route.as_ref().map(|route| route.state.as_str()),
+        Some("ended")
+    );
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        0
+    );
+
+    let stamp = read.stamp.expect("stamped");
+    release(&node.client, OTHER).await;
+    assert_eq!(
+        view.check(&stamp),
+        StampCheck::Stale,
+        "per-table: another session's row moves the slot too"
+    );
+}
+
+/// The legacy session layout — the one a store has until the coordinated
+/// Source installation rebuilds `media_sessions`, which this singleton never
+/// runs: the route view answers every read from Authority and says why, and
+/// an Authority read that re-verifies the layout does not open it. Once the
+/// principal layout is installed, the same view answers locally.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_route_view_answers_authority_in_the_legacy_layout() {
+    const SESSION: &str = "00000000-0000-4000-8000-0000000e1c31";
+    let node = EmbeddedSingleton::start().await;
+    let user = node
+        .store
+        .create_user("e1c-legacy", "hash", false)
+        .await
+        .expect("user")
+        .id;
+    node.store
+        .activate_media_session(&route_activation(
+            user,
+            SESSION,
+            "00000000-0000-4000-8000-0000000e1c32",
+        ))
+        .await
+        .expect("activate")
+        .expect("activation wins");
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+
+    for _ in 0..3 {
+        node.store.validation_reset_operation_counts();
+        let read = view.route(SESSION).await.expect("legacy route");
+        assert_eq!(read.source, ViewSource::Authority);
+        assert!(read.stamp.is_none());
+        assert_eq!(
+            read.route.as_ref().map(|route| route.session_id.as_str()),
+            Some(SESSION)
+        );
+        assert_eq!(
+            view.observation().last_fallback,
+            Some(ViewFallback::LegacyLayout)
+        );
+        assert!(
+            node.store
+                .validation_operation_counts()
+                .consistent_query_calls
+                >= 1,
+            "the legacy layout is answered by a quorum read"
+        );
+    }
+
+    install_principal_layout(&node.client, &node.store).await;
+    metrics.validation_confirm_now(node.applied_index());
+    node.store.validation_reset_operation_counts();
+    let read = view.route(SESSION).await.expect("installed route");
+    assert_eq!(
+        read.source,
+        ViewSource::View,
+        "{:?}",
+        view.observation().last_fallback
+    );
+    assert_eq!(
+        read.route.as_ref().map(|route| route.session_id.as_str()),
+        Some(SESSION)
+    );
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        0
+    );
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+impl LaggingLearner {
+    /// The learner's own replica, read directly.
+    async fn replica_route_state(&self, session: &str) -> Option<String> {
+        self.client
+            .query_map::<RouteState, _>(
+                "SELECT state FROM media_sessions WHERE session_id = $1",
+                hiqlite::params!(session.to_owned()),
+            )
+            .await
+            .expect("local read of the learner's replica")
+            .into_iter()
+            .next()
+            .map(|row| row.state)
+    }
+
+    /// Until the learner has applied the principal rebuild with `session`.
+    async fn await_principal_layout(&self, session: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let rebuilt = self
+                .client
+                .query_map::<RouteState, _>(
+                    "SELECT state FROM media_sessions WHERE session_id = $1 \
+                     AND owner_key IS NOT NULL",
+                    hiqlite::params!(session.to_owned()),
+                )
+                .await
+                .is_ok_and(|rows| !rows.is_empty());
+            if rebuilt {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the learner applies the principal rebuild within 30 s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn await_route_state(&self, session: &str, state: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while self.replica_route_state(session).await.as_deref() != Some(state) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the learner applies {session}={state} within 30 s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+struct RouteState {
+    state: String,
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+impl From<&mut hiqlite::Row<'_>> for RouteState {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self {
+            state: row.get("state"),
+        }
+    }
+}
+
+/// The review's B1 shape for routes, at the store layer: a learner whose own
+/// apply of a release is held has an acknowledged terminal row its replica
+/// does not hold, under a valid proof. The raw route view still answers the
+/// pre-release row — which is why the daemon's cache keeps the release as an
+/// `Observed` entry and never lets a view read replace it — and the per-row
+/// floor taken after the acknowledgement ([`AppliedView::observe`]) stays
+/// unmet until the release applies here, without closing the table. Dropping
+/// that entry early closes the table instead ([`AppliedView::hold_floor`]).
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_route_view_never_meets_the_floor_of_a_release_its_replica_holds_back() {
+    const SESSION: &str = "00000000-0000-4000-8000-0000000e1c41";
+    const RELEASE: &str = "UPDATE media_sessions SET state = 'ended', \
+                           terminal_reason = 'deleted' \
+                           WHERE session_id = '00000000-0000-4000-8000-0000000e1c41'";
+    let _case = HIQLITE_CASE.lock().await;
+    let node = LaggingLearner::start().await;
+    let user = node
+        .store
+        .create_user("e1c-learner", "hash", false)
+        .await
+        .expect("user")
+        .id;
+    node.store
+        .activate_media_session(&route_activation(
+            user,
+            SESSION,
+            "00000000-0000-4000-8000-0000000e1c42",
+        ))
+        .await
+        .expect("activate")
+        .expect("activation wins");
+    install_principal_layout(&node.client, &node.store).await;
+    node.await_principal_layout(SESSION).await;
+    let mark = node.mark();
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(mark.applied_index());
+    let authority: Arc<dyn Store> = node.store.clone();
+    let view = AppliedView::validation_replicated(
+        authority,
+        Arc::clone(&node.store),
+        metrics.clone(),
+        &node.client,
+    );
+    metrics.validation_confirm_now(mark.applied_index());
+    let read = view.route(SESSION).await.expect("view route");
+    assert_eq!(
+        read.source,
+        ViewSource::View,
+        "{:?}",
+        view.observation().last_fallback
+    );
+    let stamp = read.stamp.expect("stamped");
+
+    let (entered, release) = node
+        .client
+        .validation_hold_transaction_before_commit(
+            RELEASE.to_owned(),
+            std::time::Instant::now() + Duration::from_secs(45),
+        )
+        .await
+        .expect("hold the learner's apply of the release");
+    node.client
+        .txn([(RELEASE, hiqlite::params!())])
+        .await
+        .expect("the voters commit the release")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("the release applies on the voters");
+    // The fact this process now holds, taken after the acknowledgement.
+    let fact = view.observe();
+    tokio::time::timeout(Duration::from_secs(30), entered)
+        .await
+        .expect("the learner's writer reaches the held release")
+        .expect("hold entered");
+    assert_eq!(
+        node.replica_route_state(SESSION).await.as_deref(),
+        Some("active"),
+        "the learner's replica is behind its own acknowledged release"
+    );
+    // A confirmation after the release, at an index this replica has not
+    // applied: the proof is valid and the replica is stale.
+    metrics.validation_confirm_now(mark.applied_index() + 1);
+    assert!(!view.floor_met(fact), "the release is not applied here");
+    assert_eq!(
+        view.check(&stamp),
+        StampCheck::Current,
+        "nothing applied here moved the slot"
+    );
+    let raw = view.route(SESSION).await.expect("raw view route");
+    assert_eq!(
+        (
+            raw.source,
+            raw.route.as_ref().map(|route| route.state.as_str())
+        ),
+        (ViewSource::View, Some("active")),
+        "the raw view answers the pre-release row: only the cache's Observed entry stops it"
+    );
+
+    // An entry dropped before its floor is met closes the table.
+    view.hold_floor(AppliedTable::MediaSessions, fact);
+    let held = view.route(SESSION).await.expect("held route");
+    assert_eq!(held.source, ViewSource::Authority);
+    assert_eq!(
+        held.route.as_ref().map(|route| route.state.as_str()),
+        Some("ended")
+    );
+    assert_eq!(view.observation().last_fallback, Some(ViewFallback::Floor));
+
+    release.send(()).expect("release the learner's writer");
+    node.await_route_state(SESSION, "ended").await;
+    metrics.validation_confirm_now(mark.applied_index());
+    assert!(
+        view.floor_met(fact),
+        "applied and confirmed: the entry retires"
+    );
+    assert_eq!(view.check(&stamp), StampCheck::Stale);
+    let read = view.route(SESSION).await.expect("view route");
+    assert_eq!(read.source, ViewSource::View);
+    assert_eq!(
+        read.route.as_ref().map(|route| route.state.as_str()),
+        Some("ended")
+    );
+}
+
+/// A library, an item and one probed file, through the Store as production
+/// writes them.
+async fn planning_source(store: &dyn Store, path: &str) -> (i64, i64, i64) {
+    let library = store
+        .create_library(&NewLibrary {
+            name: format!("planning {path}"),
+            kind: LibraryKind::Movies,
+            paths: vec![std::path::PathBuf::from(format!("/{path}"))],
+            anime: false,
+        })
+        .await
+        .expect("planning library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "planned".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("planning item");
+    let probe = ProbeResult {
+        video_codec: Some("hevc".into()),
+        raw_json: Some(r#"{"revision":1}"#.into()),
+        ..Default::default()
+    };
+    let file = store
+        .upsert_file(item, &format!("/{path}/movie.mkv"), 100, 42, &probe)
+        .await
+        .expect("planning file");
+    (library.id, item, file)
+}
+
+fn same_plan(left: &PlaybackPlanningSnapshot, right: &PlaybackPlanningSnapshot) -> bool {
+    format!("{left:?}") == format!("{right:?}")
+}
+
+/// D3b, contract §4.2: the planning view on SQLite is the store itself, and a
+/// process without a replica answers every plan from Authority.
+#[tokio::test]
+async fn applied_planning_view_on_sqlite_is_the_store() {
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let (_, _, file) = planning_source(store.as_ref(), "sqlite").await;
+    store
+        .put_setting("playback.d3b", "on")
+        .await
+        .expect("setting");
+    let keys = ["playback.d3b", "transcode.absent"];
+    let expected = store
+        .playback_planning_snapshot(file, &keys)
+        .await
+        .expect("store")
+        .expect("source");
+    let view = AppliedView::authority(Arc::clone(&store));
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::View);
+    assert!(same_plan(&plan, &expected));
+    assert!(view
+        .planning(file + 1_000, &keys)
+        .await
+        .expect("plan")
+        .is_none());
+    assert_eq!(
+        view.observation()
+            .view_total(AppliedTable::Files, ViewSource::View),
+        2
+    );
+
+    let remote = AppliedView::remote_authority(Arc::clone(&store));
+    let (plan, source) = remote
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::Authority);
+    assert!(same_plan(&plan, &expected));
+    assert_eq!(
+        remote.observation().last_planning_fallback,
+        Some(ViewFallback::NoProof)
+    );
+}
+
+/// D3b, contract §4.2 and §8 ("files floor"): with a proof the plan is one
+/// local statement equal to Authority's; a proof revoked while it runs, a
+/// settings save, a direct `files` write and a cascading delete each answer
+/// from Authority on the writing node until a later confirmation is applied.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_floors() {
+    let node = EmbeddedSingleton::start().await;
+    let (library, item, file) = planning_source(node.store.as_ref(), "replica").await;
+    node.store
+        .put_setting("playback.d3b", "before")
+        .await
+        .expect("seed setting");
+    let keys = ["playback.d3b", "transcode.absent"];
+    let expected = node
+        .store
+        .playback_planning_snapshot(file, &keys)
+        .await
+        .expect("Authority")
+        .expect("source");
+
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    // The source and the setting were written by this process: both floors
+    // are raised until a confirmation started after them is applied here.
+    node.store.validation_reset_operation_counts();
+    let (_, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::Authority);
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    node.store.validation_reset_operation_counts();
+    for _ in 0..4 {
+        let (plan, source) = view
+            .planning(file, &keys)
+            .await
+            .expect("plan")
+            .expect("source");
+        assert_eq!(source, ViewSource::View);
+        assert!(same_plan(&plan, &expected));
+    }
+    let counts = node.store.validation_operation_counts();
+    assert_eq!(
+        counts.consistent_query_calls, 0,
+        "a proven plan never asks the leader"
+    );
+    assert_eq!(counts.non_consistent_query_calls, 4);
+    assert!(view
+        .planning(file + 1_000, &keys)
+        .await
+        .expect("plan")
+        .is_none());
+
+    // Revocation while the statement runs: discarded, Authority once.
+    view.validation_revoke_after_next_local();
+    node.store.validation_reset_operation_counts();
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::Authority);
+    assert!(same_plan(&plan, &expected));
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1
+    );
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::RevokedDuringRead)
+    );
+    // A fresh proof, then each writer kind in turn.
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+    let reopened = |view: &AppliedView| {
+        let view = view.clone();
+        async move {
+            view.planning(file, &keys)
+                .await
+                .expect("plan")
+                .map(|(_, source)| source)
+        }
+    };
+    assert_eq!(reopened(&view).await, Some(ViewSource::View));
+
+    // A planning setting: the settings floor.
+    node.store
+        .put_setting("playback.d3b", "after")
+        .await
+        .expect("save");
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(
+        (source, plan.settings["playback.d3b"].as_str()),
+        (ViewSource::Authority, "after")
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(reopened(&view).await, Some(ViewSource::View));
+
+    // A direct `files` write: the files floor, with no settings change.
+    let probe = ProbeResult {
+        video_codec: Some("hevc".into()),
+        raw_json: Some(r#"{"revision":2}"#.into()),
+        ..Default::default()
+    };
+    node.store
+        .upsert_file(item, "/replica/movie.mkv", 200, 43, &probe)
+        .await
+        .expect("rescan");
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!((source, plan.file.size), (ViewSource::Authority, 200));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    // The settings view is not closed by a `files` write.
+    assert_eq!(
+        view.settings(&["playback.d3b"])
+            .await
+            .expect("settings")
+            .source,
+        ViewSource::View
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(reopened(&view).await, Some(ViewSource::View));
+
+    // A delete that reaches `files` only by cascade (libraries -> items ->
+    // files): the files floor again, and the plan sees the source gone.
+    assert!(node
+        .store
+        .delete_library(library)
+        .await
+        .expect("delete library"));
+    node.store.validation_reset_operation_counts();
+    assert!(view.planning(file, &keys).await.expect("plan").is_none());
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1
+    );
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    node.store.validation_reset_operation_counts();
+    assert!(view.planning(file, &keys).await.expect("plan").is_none());
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        0
+    );
+
+    // An owner's authority plan is counted under its own reason.
+    assert!(view
+        .planning_from_authority(file, &keys, ViewFallback::BindingMismatch)
+        .await
+        .expect("plan")
+        .is_none());
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::BindingMismatch)
+    );
+}
+
+/// D3b, contract §8 ("files floor"), review S3: the dv-title bind command
+/// (whose `dv_title_jobs_bind` trigger rewrites `files.probe_json`) and the
+/// admitted probe result (`apply_probe_job`'s `UPDATE files`) each close the
+/// planning view on the writing node until a later confirmation. A writer's
+/// statements arm the floor by what they may write, whether or not this call
+/// changes a row, so the probe result is driven with no admitted job.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_planning_view_closes_on_the_dv_title_and_probe_result_writers() {
+    use plurx_core::store::BackgroundJobStore;
+    use sha2::Digest;
+    let node = EmbeddedSingleton::start().await;
+    let (_, item, file) = planning_source(node.store.as_ref(), "writers").await;
+    // A Dolby Vision probe: its publication seeds a title-scan demand.
+    let dv = ProbeResult {
+        video_codec: Some("hevc".into()),
+        dolby_vision: plurx_core::domain::DolbyVisionFacts {
+            profile: Some(7),
+            rpu_present: Some(true),
+            ..Default::default()
+        },
+        raw_json: Some(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#.into()),
+        ..Default::default()
+    };
+    node.store
+        .upsert_file(item, "/writers/movie.mkv", 100, 42, &dv)
+        .await
+        .expect("DV probe");
+    let keys = ["playback.d3b"];
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+    let source = |view: &AppliedView| {
+        let view = view.clone();
+        async move {
+            view.planning(file, &keys)
+                .await
+                .expect("plan")
+                .map(|(_, source)| source)
+        }
+    };
+    assert_eq!(source(&view).await, Some(ViewSource::View));
+
+    // The dv-title bind: a command insert whose trigger writes `files`.
+    let scanner = hex::encode(sha2::Sha256::digest(b"d3b-scanner"));
+    let demand = node
+        .store
+        .dv_title_demands(&scanner, 0)
+        .await
+        .expect("demands")
+        .into_iter()
+        .find(|demand| demand.file_id == file)
+        .expect("the DV source demands a title scan");
+    node.store
+        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .await
+        .expect("bind the scanner");
+    assert_eq!(source(&view).await, Some(ViewSource::Authority));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(source(&view).await, Some(ViewSource::View));
+
+    // The probe result through the background-jobs bridge.
+    let applied = node
+        .store
+        .apply_probe_job(plurx_core::store::background_jobs_probe::ApplyProbeJob {
+            job_id: uuid::Uuid::new_v4().to_string(),
+            lease: plurx_core::cluster::coordination::Lease {
+                resource: "repair:probe".into(),
+                owner_node_id: "node-a".into(),
+                fence: 1,
+                revision: 1,
+                expires_at_unix_ms: 4_102_444_800_000,
+            },
+            now_ms: 1_000,
+        })
+        .await
+        .expect("apply");
+    assert!(!applied, "no admitted job, so no row changes");
+    assert_eq!(source(&view).await, Some(ViewSource::Authority));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(source(&view).await, Some(ViewSource::View));
 }

@@ -121,6 +121,9 @@ mod create;
 pub use create::*;
 // split: end hls-create
 
+#[path = "hls/start_plan.rs"]
+pub(crate) mod start_plan;
+
 // split: begin hls-relay
 #[path = "hls/relay.rs"]
 mod relay;

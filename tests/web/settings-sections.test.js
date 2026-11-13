@@ -2523,6 +2523,176 @@ test("HTTPS unavailable card retries independently of replicated settings",async
   assert.equal(retry.data.https,value);
 });
 
+test("storage domains save reports in effect",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""};
+  const roots={dataset:{loaded:"true",edited:"true"},querySelectorAll:()=>[
+    {dataset:{library:"2",root:"/movies"},value:"nas-a"},
+  ]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const messages=[];
+  const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
+    async()=>({saved:true,revision:7,applied:true}),{getElementById:id=>elements[id]},message=>messages.push(message),esc,
+  );
+  await save({disabled:false});
+  assert.equal(status.textContent,"Saved and in effect (revision 7).");
+  assert.deepEqual(messages,["Storage domains saved and in effect"]);
+  assert.equal(roots.dataset.edited,"false");
+});
+
+test("storage domains save reports pending readers and library jobs",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""};
+  const roots={dataset:{loaded:"true",edited:"true",libraries:JSON.stringify([{id:2,name:"Movies"}])},querySelectorAll:()=>[]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const messages=[];
+  const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
+    async()=>({saved:true,revision:8,applied:false,pending:{revision:8,state:"pending"},waiting_on:[
+      {holder_kind:"foreground",work_id:"reader-123456",node_id:"media1",resource_key:"source_io:nas-a",reason:"old_domain_reader"},
+      {holder_kind:"foreground",work_id:"reader-2",node_id:"media2",resource_key:"source_io:nas-a",reason:"old_domain_reader",stuck:true},
+      {holder_kind:"job",work_id:"job-123456",node_id:"lab3",library_id:2,reason:"library_job"},
+    ],waiting_total:3}),
+    {getElementById:id=>elements[id]},message=>messages.push(message),esc,
+  );
+  await save({disabled:false});
+  assert.match(status.innerHTML,/Waiting on 2 readers on nas-a to finish before it takes effect\./);
+  assert.match(status.innerHTML,/Waiting on 1 library job in Movies to finish before it takes effect\./);
+  assert.match(status.innerHTML,/1 of the readers belongs to a process that is no longer running/);
+  assert.match(status.innerHTML,/Playback and jobs keep their current budgets until then\./);
+  assert.match(status.innerHTML,/Playback reader-/);
+  assert.equal(error.textContent,"");
+  assert.deepEqual(messages,["Storage domains saved — takes effect when current work finishes"]);
+});
+
+test("storage domains load marks pending roots",async()=>{
+  const roots={dataset:{},innerHTML:""},status={textContent:"",innerHTML:""},error={textContent:""};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const load=new Function("api","document","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("loadStorageDomains")}\nreturn loadStorageDomains;`)(
+    async()=>({libraries:[{id:2,name:"Movies",paths:["/movies"]}],mappings:[],pending:{revision:9,state:"pending",mappings:[{library_id:2,root_path:"/movies",domain_id:"nas-b"}]},waiting_on:[],waiting_total:0}),
+    {getElementById:id=>elements[id]},esc,
+  );
+  await load({disabled:false});
+  assert.match(roots.innerHTML,/value="nas-b"/);
+  assert.match(roots.innerHTML,/<span class="pill">pending · now Shared default<\/span>/);
+  assert.match(status.innerHTML,/Saved \(revision 9\)\./);
+  assert.match(roots.innerHTML,/oninput=/);
+});
+
+test("storage domains duplicate paused holder rows count once",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""};
+  const roots={dataset:{loaded:"true",edited:"true"},querySelectorAll:()=>[]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
+    async()=>({saved:true,revision:13,applied:false,pending:{revision:13,state:"pending"},waiting_on:[
+      {holder_kind:"pause",work_id:"job-paused-123",fence:4,node_id:"lab2",resource_key:"source_io:nas-a",reason:"old_domain_reader"},
+      {holder_kind:"pause",work_id:"job-paused-123",fence:4,node_id:"lab2",resource_key:"source_io:nas-a",reason:"old_domain_reader"},
+    ],waiting_total:1}),
+    {getElementById:id=>elements[id]},()=>{},esc,
+  );
+  await save({disabled:false});
+  assert.match(status.innerHTML,/Waiting on 1 reader on nas-a to finish/);
+  assert.equal((status.innerHTML.match(/Paused job/g)||[]).length,1,"duplicate diagnostics render one holder row");
+  assert.doesNotMatch(status.innerHTML,/Waiting on 2 readers|Waiting on 2 holders/);
+});
+
+test("storage domains initial load has no synthetic saved revision",async()=>{
+  const roots={dataset:{},innerHTML:""},status={textContent:"",innerHTML:""},error={textContent:""};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const load=new Function("api","document","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("loadStorageDomains")}\nreturn loadStorageDomains;`)(
+    async()=>({libraries:[],mappings:[],pending:null,waiting_on:[],waiting_total:0}),
+    {getElementById:id=>elements[id]},esc,
+  );
+  await load({disabled:false});
+  assert.equal(status.textContent,"Current storage domains are in effect.");
+  assert.doesNotMatch(status.textContent,/revision 0/);
+});
+
+test("storage domains superseded asks to save again",async()=>{
+  const roots={dataset:{},innerHTML:""},status={textContent:"",innerHTML:""},error={textContent:""};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  let calls=0;
+  const load=new Function("api","document","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("loadStorageDomains")}\nreturn loadStorageDomains;`)(
+    async()=>{calls++;return {libraries:[{id:2,name:"Movies",paths:["/movies"]}],mappings:[{library_id:2,root_path:"/movies",domain_id:"nas-a"}],pending:{revision:10,state:"superseded",mappings:[{library_id:2,root_path:"/movies",domain_id:"nas-b"}]},waiting_on:[],waiting_total:0};},
+    {getElementById:id=>elements[id]},esc,
+  );
+  await load({disabled:false});
+  assert.match(status.textContent,/Revision 10 was not applied: storage domains were changed from a node running an older version/);
+  assert.match(status.textContent,/Check the roots below and save again\./);
+  assert.match(roots.innerHTML,/value="nas-a"/,"superseded desired values are not staged as if they were saved");
+  roots.dataset.edited="true";
+  await load({disabled:false});
+  assert.equal(calls,1,"reload does not overwrite unsaved root edits");
+  assert.match(error.textContent,/unsaved edits/);
+});
+
+test("storage domains concurrent save reports the newer revision",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""},roots={dataset:{loaded:"true",edited:"true"},querySelectorAll:()=>[]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status},messages=[];
+  const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
+    async()=>({saved:true,revision:11,applied:false,pending:{revision:12,state:"pending"},waiting_on:[],waiting_total:0}),
+    {getElementById:id=>elements[id]},message=>messages.push(message),esc,
+  );
+  await save({disabled:false});
+  assert.match(status.textContent,/Your save \(revision 11\) was superseded by a newer save \(revision 12\)/);
+  assert.doesNotMatch(status.textContent,/changed from a node running an older version/);
+  assert.deepEqual(messages,[]);
+});
+
+test("storage domains stale root rejection allows explicit reload",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""};
+  const roots={dataset:{loaded:"true",edited:"true",libraries:JSON.stringify([{id:2,name:"Movies"}])},innerHTML:"",querySelectorAll:()=>[
+    {dataset:{library:"2",root:"/removed"},value:"nas-a"},
+  ]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};let gets=0;
+  const api=async(path,opts)=>{if(opts&&opts.method==="PUT")throw Object.assign(new Error("Library root is stale"),{status:400});gets++;return {libraries:[{id:2,name:"Movies",paths:["/current"]}],mappings:[],pending:null};};
+  const fns=new Function("api","document","toast","esc","confirm",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\n${shippedSource("loadStorageDomains")}\nreturn {saveStorageDomains,loadStorageDomains};`)(api,{getElementById:id=>elements[id]},()=>{},esc,()=>true);
+  await fns.saveStorageDomains({disabled:false});
+  assert.equal(roots.dataset.reloadRequired,"true");
+  assert.match(error.textContent,/Library root is stale/);
+  await fns.loadStorageDomains({disabled:false});
+  assert.equal(gets,1);
+  assert.match(roots.innerHTML,/data-root="\/current"/);
+  assert.equal(roots.dataset.edited,"false");
+});
+
+test("storage domains load discards a response after newer edits",async()=>{
+  let resolveFetch,calls=0;
+  const response=new Promise(resolve=>{resolveFetch=resolve;});
+  const roots={dataset:{loaded:"true",edited:"false",editGeneration:"4"},innerHTML:"<input value=\"kept\">"};
+  const status={textContent:"",innerHTML:""},error={textContent:""},elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const load=new Function("api","document","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("loadStorageDomains")}\nreturn loadStorageDomains;`)(
+    ()=>{calls++;return response;},{getElementById:id=>elements[id]},esc,
+  );
+  const button={disabled:false},request=load(button);
+  roots.dataset.editGeneration="5";roots.dataset.edited="true";roots.innerHTML="<input value=\"newer edit\">";
+  resolveFetch({libraries:[{id:2,name:"Movies",paths:["/movies"]}],mappings:[],pending:null});
+  await request;
+  assert.equal(roots.innerHTML,"<input value=\"newer edit\">","a late GET must not replace the user's current editor");
+  assert.equal(roots.dataset.edited,"true");
+  assert.equal(button.disabled,false);
+  assert.match(status.textContent,/Roots changed while this response was pending/);
+  await load(button);
+  assert.equal(calls,1,"a later reload is blocked while the newer edits remain unsaved");
+  assert.equal(roots.innerHTML,"<input value=\"newer edit\">");
+});
+
+test("storage domains save keeps edits made while the submitted snapshot is pending",async()=>{
+  let resolveSave,gets=0;
+  const response=new Promise(resolve=>{resolveSave=resolve;});
+  const input={dataset:{library:"2",root:"/movies"},value:"nas-a"};
+  const roots={dataset:{loaded:"true",edited:"true",editGeneration:"8",libraries:JSON.stringify([{id:2,name:"Movies"}])},innerHTML:"<input value=\"nas-a\">",querySelectorAll:()=>[input]};
+  const status={textContent:"",innerHTML:""},error={textContent:""},elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const api=(path,options)=>{if(options&&options.method==="PUT")return response;gets++;return Promise.resolve({libraries:[],mappings:[],pending:null});};
+  const fns=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\n${shippedSource("loadStorageDomains")}\nreturn {saveStorageDomains,loadStorageDomains};`)(api,{getElementById:id=>elements[id]},()=>{},esc);
+  const button={disabled:false},request=fns.saveStorageDomains(button);
+  input.value="nas-b";roots.dataset.editGeneration="9";roots.dataset.edited="true";roots.innerHTML="<input value=\"nas-b\">";
+  resolveSave({saved:true,revision:14,applied:true});
+  await request;
+  assert.equal(roots.dataset.edited,"true","the submitted response must not clear newer edits");
+  assert.match(status.innerHTML,/response is for the submitted values\. Newer edits remain unsaved/);
+  await fns.loadStorageDomains({disabled:false});
+  assert.equal(gets,0,"a later load cannot erase the edits made during save");
+  assert.equal(roots.innerHTML,"<input value=\"nas-b\">");
+});
+
 test("display targeting remains editable with unavailable or unmet advice",()=>{
   const panels=developerPanels();
   for(const readiness of [{unavailable:"offline"},{items:[{id:"dolby_vision_display_target",requirements:[{id:"dv_target_helper",status:"unmet",evidence:"helper absent"}]}]}]){

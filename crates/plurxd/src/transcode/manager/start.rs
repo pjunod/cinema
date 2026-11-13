@@ -41,6 +41,7 @@ impl TranscodeManager {
         &self,
         file_id: i64,
         candidate_context: Option<&super::CandidateExecutionContext>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<RollingStartInputs, String> {
         // The same guard the catalog restore path keeps: a processed candidate
         // exists only as the prepared VOD graph it was qualified with, and the
@@ -51,8 +52,10 @@ impl TranscodeManager {
                 "processed candidate requires fresh admitted owner qualification",
             ));
         }
+        // The create's plan (D3b) is the same statement with the same keys.
         if let Some(snapshot) = candidate_context
             .and_then(|context| context.planning_snapshot.as_ref())
+            .or_else(|| plan.map(|plan| &plan.snapshot))
             .filter(|snapshot| snapshot.file.id == file_id)
         {
             return Ok(RollingStartInputs {
@@ -193,6 +196,7 @@ impl TranscodeManager {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -230,6 +234,7 @@ impl TranscodeManager {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -655,6 +660,7 @@ impl TranscodeManager {
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
         source_telemetry: bool,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
@@ -669,7 +675,7 @@ impl TranscodeManager {
         // The file, its probe and every setting this start reads, in one
         // statement (D4). Nothing below reads settings from the Store.
         let inputs = self
-            .rolling_start_inputs(file_id, candidate_context)
+            .rolling_start_inputs(file_id, candidate_context, plan)
             .await?;
         let preference = inputs.encoder_preference();
         let content_aware = inputs.content_aware_encoding();
@@ -1801,6 +1807,7 @@ impl TranscodeManager {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -1823,14 +1830,16 @@ impl TranscodeManager {
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
         source_telemetry: bool,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<StartInfo, String> {
-        // One Store read for the file, its probe and its settings (D4).
+        // One Store read for the file, its probe and its settings (D4), or
+        // the create's plan (D3b).
         let RollingStartInputs {
             mut file,
             probe_json: stored_probe,
             settings,
             item_title,
-        } = self.rolling_start_inputs(file_id, None).await?;
+        } = self.rolling_start_inputs(file_id, None, plan).await?;
         let retained_budget = Self::rolling_retained_budget_from(&settings);
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.

@@ -3478,25 +3478,22 @@ fn stale_inventory_route_is_not_settled_after_its_lease_runway_is_spent() {
     assert!(settling.is_empty());
 }
 
-/// C-07 M5 (PLEX-FACADE-PAGING §5.4). The three ways a cached route
-/// lookup is answered are three separate series, and every map-lock and
-/// sweep site the lookups pass through is recorded exactly once per pass.
+/// C-07 M5 (PLEX-FACADE-PAGING §5.4), as E1c counts it. A view read, a
+/// cached view answer and a Store read are separate series, and every
+/// map-lock site the lookups pass through is recorded exactly once per pass.
+/// No scan runs below capacity (§4.4-3).
 #[tokio::test]
 async fn a_cache_hit_and_a_store_read_are_counted_separately() {
-    use plurx_core::cluster::membership::MembershipManager;
-    use plurx_core::store::SqliteStore;
-
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    let (coordinator, _replica, _store) = super::route_view_tests::coordinator_over_replica(true);
     let metrics = coordinator.route_cache_metrics();
     let session_id = "00000000-0000-4000-8000-0000000000d1";
     let other_id = "00000000-0000-4000-8000-0000000000d2";
 
     assert!(coordinator.route(session_id).await.expect("miss").is_none());
     assert_eq!(
-        metrics.lookups(RouteLookup::Store),
+        metrics.lookups(RouteLookup::View),
         1,
-        "a cold lookup reads the Store"
+        "a cold lookup reads the view"
     );
     assert_eq!(
         metrics.lookups(RouteLookup::CacheHit),
@@ -3512,29 +3509,32 @@ async fn a_cache_hit_and_a_store_read_are_counted_separately() {
         "each cached answer is one hit"
     );
     assert_eq!(
-        metrics.lookups(RouteLookup::Store),
+        metrics.lookups(RouteLookup::View),
         1,
-        "a cached answer must not also count as a Store read"
+        "a cached answer must not also count as a read"
     );
     assert!(coordinator.route(other_id).await.expect("miss").is_none());
-    assert_eq!(metrics.lookups(RouteLookup::Store), 2);
+    assert_eq!(metrics.lookups(RouteLookup::View), 2);
+    assert_eq!(metrics.lookups(RouteLookup::Store), 0);
     assert_eq!(metrics.lookups(RouteLookup::SingleFlightHit), 0);
 
     let exposition = metrics.prometheus();
     for line in [
         "plurx_media_session_route_lookups_total{result=\"cache_hit\"} 3\n",
         "plurx_media_session_route_lookups_total{result=\"single_flight_hit\"} 0\n",
-        "plurx_media_session_route_lookups_total{result=\"store\"} 2\n",
+        "plurx_media_session_route_lookups_total{result=\"observed\"} 0\n",
+        "plurx_media_session_route_lookups_total{result=\"view\"} 2\n",
+        "plurx_media_session_route_lookups_total{result=\"store\"} 0\n",
         // Two misses take the lookup lock twice each (before and after
         // the single-flight shard), three hits once each.
         "plurx_media_session_route_lock_seconds_count{site=\"lookup\"} 7\n",
-        // Each Store answer is published once.
+        // Each read's answer is published once.
         "plurx_media_session_route_lock_seconds_count{site=\"queried_insert\"} 2\n",
         "plurx_media_session_route_lock_seconds_count{site=\"insert\"} 0\n",
         "plurx_media_session_route_lock_seconds_count{site=\"generation_insert\"} 0\n",
-        // Two sweeps, over an empty map and then over the first answer.
-        "plurx_media_session_route_prune_entries_count 2\n",
-        "plurx_media_session_route_prune_entries_sum 1\n",
+        // Below capacity no eviction scan runs.
+        "plurx_media_session_route_prune_entries_count 0\n",
+        "plurx_media_session_route_prune_entries_sum 0\n",
         "plurx_media_session_route_cache_entries 2\n",
     ] {
         assert!(
@@ -3548,8 +3548,7 @@ async fn a_cache_hit_and_a_store_read_are_counted_separately() {
     let exposition = metrics.prometheus();
     for line in [
         "plurx_media_session_route_lock_seconds_count{site=\"insert\"} 1\n",
-        "plurx_media_session_route_prune_entries_count 3\n",
-        "plurx_media_session_route_prune_entries_sum 3\n",
+        "plurx_media_session_route_prune_entries_count 0\n",
         "plurx_media_session_route_cache_entries 3\n",
     ] {
         assert!(
@@ -3557,147 +3556,6 @@ async fn a_cache_hit_and_a_store_read_are_counted_separately() {
             "missing {line:?} in\n{exposition}"
         );
     }
-}
-
-/// C-07 M5 (PLEX-FACADE-PAGING §3.5 item 2). The prune histogram counts
-/// the entries each sweep WALKS, which is the O(n) cost under the map
-/// lock, not the entries it leaves (the gauge already says that). Time is
-/// paused so entries expire on demand, and each of the three sweep sites
-/// runs over expired entries: counting after `retain` would record 0
-/// there. It also covers the gauge update when a lookup removes an
-/// expired entry. No Store call is made, so paused time cannot fire a
-/// lookup deadline.
-#[tokio::test(start_paused = true)]
-async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge() {
-    use plurx_core::cluster::membership::MembershipManager;
-    use plurx_core::store::SqliteStore;
-
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
-    let metrics = coordinator.route_cache_metrics();
-    let value = |name: &str| -> u64 {
-        let exposition = metrics.prometheus();
-        let prefix = format!("{name} ");
-        exposition
-            .lines()
-            .find_map(|line| line.strip_prefix(prefix.as_str()))
-            .unwrap_or_else(|| panic!("{name} missing in\n{exposition}"))
-            .parse()
-            .expect("integer sample")
-    };
-    let sum = "plurx_media_session_route_prune_entries_sum";
-    let entries = "plurx_media_session_route_cache_entries";
-    let generation = |session_id: &str| {
-        coordinator.route_generations[route_hash(session_id) % coordinator.route_generations.len()]
-            .load(std::sync::atomic::Ordering::Acquire)
-    };
-    let id = |n: u8| format!("00000000-0000-4000-8000-0000000000f{n}");
-
-    coordinator.cache_route(media_route(&id(1))).await;
-    coordinator.cache_route(media_route(&id(2))).await;
-    assert_eq!(value(entries), 2);
-    tokio::time::advance(ROUTE_CACHE_TTL).await;
-
-    // A lookup that finds its entry expired removes it and lowers the gauge.
-    assert!(coordinator.cached_route(&id(1)).await.is_none());
-    assert_eq!(value(entries), 1, "an expired lookup must lower the gauge");
-
-    // `cache_route_result` sweeps one expired entry and keeps none of it.
-    let before = value(sum);
-    coordinator.cache_route(media_route(&id(3))).await;
-    assert_eq!(
-        value(sum) - before,
-        1,
-        "insert sweep walked one expired entry"
-    );
-    assert_eq!(value(entries), 1);
-
-    // `cache_queried_route_result` sweeps two expired entries.
-    coordinator.cache_route(media_route(&id(4))).await;
-    assert_eq!(value(entries), 2);
-    tokio::time::advance(ROUTE_CACHE_TTL).await;
-    let before = value(sum);
-    assert!(coordinator
-        .cache_queried_route_result(&id(5), None, generation(&id(5)))
-        .await
-        .is_none());
-    assert_eq!(
-        value(sum) - before,
-        2,
-        "queried-insert sweep walked two expired entries"
-    );
-    assert_eq!(value(entries), 1);
-
-    // `cache_route_if_generation` sweeps two expired entries.
-    coordinator.cache_route(media_route(&id(6))).await;
-    assert_eq!(value(entries), 2);
-    tokio::time::advance(ROUTE_CACHE_TTL).await;
-    let before = value(sum);
-    assert!(
-        coordinator
-            .cache_route_if_generation(media_route(&id(7)), generation(&id(7)))
-            .await
-    );
-    assert_eq!(
-        value(sum) - before,
-        2,
-        "generation-insert sweep walked two expired entries"
-    );
-    assert_eq!(value(entries), 1);
-}
-
-/// C-07 M5 (PLEX-FACADE-PAGING §2.4, §5.4). The measurement's reading of
-/// "store reads per session" depends on this: while one Store read for a
-/// capability is outstanding, every other lookup of that capability
-/// waits on its `route_queries` shard and is then answered by the cache
-/// the first read filled. The gate holds the first read open until every
-/// lookup has run as far as it can, so this does not pass by timing.
-#[tokio::test]
-async fn concurrent_lookups_of_one_session_produce_one_store_read() {
-    use plurx_core::cluster::membership::MembershipManager;
-    use plurx_core::store::SqliteStore;
-
-    const LOOKUPS: u64 = 8;
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
-    let metrics = coordinator.route_cache_metrics();
-    let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    *coordinator
-        .route_store_gate
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
-    let session_id = "00000000-0000-4000-8000-0000000000d4";
-    let lookups = (0..LOOKUPS)
-        .map(|_| {
-            let coordinator = Arc::clone(&coordinator);
-            tokio::spawn(async move { coordinator.route(session_id).await })
-        })
-        .collect::<Vec<_>>();
-    // A current-thread runtime: yielding lets every spawned lookup run
-    // until it parks, either at the gate or behind its query shard.
-    for _ in 0..256 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        metrics.lookups(RouteLookup::Store),
-        1,
-        "while one Store read is outstanding, the other lookups of the same capability must wait behind its single-flight shard instead of reading the Store"
-    );
-    gate.close();
-    for lookup in lookups {
-        assert!(lookup
-            .await
-            .expect("lookup task")
-            .expect("lookup")
-            .is_none());
-    }
-    assert_eq!(metrics.lookups(RouteLookup::Store), 1);
-    assert_eq!(
-        metrics.lookups(RouteLookup::SingleFlightHit),
-        LOOKUPS - 1,
-        "every waiter is answered by the cache the one read filled"
-    );
-    assert_eq!(metrics.lookups(RouteLookup::CacheHit), 0);
 }
 
 /// The route-cache exposition has a fixed series count whatever traffic
@@ -3723,9 +3581,9 @@ fn route_cache_exposition_is_bounded_and_its_labels_match_their_bounds() {
     metrics.cache_entries(17);
     let exposition = metrics.prometheus();
     let series = |text: &str| text.lines().filter(|line| !line.starts_with('#')).count();
-    // 3 lookup results; 4 sites x (5 bounds + Inf + sum + count); 7 prune
+    // 5 lookup results; 4 sites x (5 bounds + Inf + sum + count); 7 prune
     // bounds + Inf + sum + count; 1 gauge.
-    assert_eq!(series(&empty), 3 + 4 * 8 + 10 + 1);
+    assert_eq!(series(&empty), 5 + 4 * 8 + 10 + 1);
     assert_eq!(series(&exposition), series(&empty));
     for line in [
         "plurx_media_session_route_lock_seconds_bucket{site=\"insert\",le=\"0.00001\"} 0\n",
@@ -3749,11 +3607,9 @@ fn route_cache_exposition_is_bounded_and_its_labels_match_their_bounds() {
 
 #[tokio::test]
 async fn route_misses_are_single_flight_and_activation_supersedes_them() {
-    use plurx_core::cluster::membership::MembershipManager;
-    use plurx_core::store::SqliteStore;
-
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-    let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+    // No serving proof: every fact the cache holds is `Observed` and lives
+    // out its lease, so the cache's own ordering is what answers (E1c).
+    let (coordinator, _replica, _store) = super::route_view_tests::coordinator_over_replica(false);
     let session_id = "00000000-0000-4000-8000-0000000000c1";
     assert!(coordinator
         .route(session_id)
@@ -3780,7 +3636,12 @@ async fn route_misses_are_single_flight_and_activation_supersedes_them() {
     coordinator.routes.lock().await.remove(session_id);
     assert!(
         coordinator
-            .cache_queried_route_result(session_id, None, stale_miss_generation)
+            .cache_queried_route_result(
+                session_id,
+                None,
+                coordinator.observed_now(),
+                stale_miss_generation,
+            )
             .await
             .is_none(),
         "a stale in-flight miss must remain suppressed after cache eviction"
@@ -3809,7 +3670,12 @@ async fn route_misses_are_single_flight_and_activation_supersedes_them() {
     coordinator.routes.lock().await.remove(session_id);
     assert!(
         coordinator
-            .cache_queried_route_result(session_id, Some(stale_active), stale_active_generation,)
+            .cache_queried_route_result(
+                session_id,
+                Some(stale_active),
+                coordinator.observed_now(),
+                stale_active_generation,
+            )
             .await
             .is_none(),
         "an active read begun before fencing must stay suppressed after eviction"
@@ -4403,6 +4269,48 @@ async fn a_dropped_remote_start_reply_takes_the_session_the_worker_already_holds
 /// ingress as its code, so the viewer is not told to wait for a start that no
 /// retry can make; every other 503 — an older worker's bodiless one, a fence,
 /// a waitable refusal — stays the waitable answer.
+/// D3b, review S3: an owner whose plan differs at Authority answers the 409 a
+/// changed source always had, with a body naming the planning refusal; the
+/// ingress reads exactly that body as `PlanChanged`. A bare 409 (an older
+/// worker, a reused request id) and any other code stay a transport failure.
+#[tokio::test]
+async fn an_owner_plan_refusal_crosses_to_the_ingress_as_plan_changed() {
+    use axum::response::IntoResponse;
+    let worker =
+        crate::http::internal_media_sessions::RemoteStartError::PlanChanged.into_response();
+    assert_eq!(worker.status(), reqwest::StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(worker.into_body(), 4096)
+        .await
+        .expect("worker body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("a JSON body"),
+        serde_json::json!({"code": "catalog_input_unavailable"})
+    );
+    assert!(remote_start_plan_changed(&body));
+    for other in [
+        &b""[..],
+        br#"{"code":"transcode_capacity_pending"}"#,
+        br#"{"error":"catalog_input_unavailable"}"#,
+        b"catalog_input_unavailable",
+    ] {
+        assert!(
+            !remote_start_plan_changed(other),
+            "{}",
+            String::from_utf8_lossy(other)
+        );
+    }
+    assert!(crate::http::hls::start_plan::ends_placement(
+        &RemoteStartFailure::PlanChanged
+    ));
+    for failure in [
+        RemoteStartFailure::Unavailable,
+        RemoteStartFailure::Terminal(crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE),
+        RemoteStartFailure::Transport(PeerTransportError::InvalidResponse),
+    ] {
+        assert!(!crate::http::hls::start_plan::ends_placement(&failure));
+    }
+}
+
 #[tokio::test]
 async fn a_worker_terminal_capacity_refusal_crosses_to_the_ingress_by_code() {
     use axum::response::IntoResponse;

@@ -12,7 +12,9 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
 | [LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md) | Item 6 remainder: build plan. | open |
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
-| [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
+| [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) | D3 contract; records: [PLAYBACK-START-D3-RECORD.md](PLAYBACK-START-D3-RECORD.md), [PLAYBACK-START-D3CDE-RECORD.md](PLAYBACK-START-D3CDE-RECORD.md). | open |
+| [PLAYBACK-START-D3B-RECORD.md](PLAYBACK-START-D3B-RECORD.md) | D3b build record. | open |
+| [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
@@ -97,7 +99,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [HDR-CONTENT-LIGHT-INDEX.md](HDR-CONTENT-LIGHT-INDEX.md) | Why changing HDR light-level metadata forced rolling startup, indexed-copy metadata repair. | open |
 | [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Phase origins, incident replay, index/resource observations, transport limits, A-M0 startup lab with its decision rule. | open |
 | [PLAYBACK-STARTUP-LATENCY-BUILD.md](PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol handoff: clone, CI/CD rulings, milestones, one reviewed PR, fast lane, merge, cleanup. | open |
-| [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Reviewed runtime build contract for the measured 14.2-second start, index availability, qualified publication policy and cross-client acceptance. | open |
+| [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Runtime contract: measured 14.2 s start, index availability, publication policy, client acceptance. | open |
 | [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md) | Reviewed rev 6 handoff: 8 s encoded rolling target, fewer create-path quorum reads and operator tone-map census before changes. | open |
 | [PLAYBACK-STARTUP-PATH-FINDINGS.md](PLAYBACK-STARTUP-PATH-FINDINGS.md) | Play-to-first-frame waits across routes: fixed 40 ms consistent-read ACK stall and web scrim, plus ranked remaining waits and owners. | open |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW.md](PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |

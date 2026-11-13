@@ -402,10 +402,17 @@ pub fn select_cohort<'a>(
             ))
         }
     };
-    // Source-built macOS runtimes adopt the same signed universal release cohort.
-    // A thin installation never makes a thin release archive eligible.
+    // Every macOS native install (release, source-built, or a record left by an
+    // earlier universal release) adopts the signed arm64 release cohort. Intel
+    // Macs are not supported, so an x86_64 host is refused rather than handed
+    // binaries it cannot run.
     let architecture = if installed.method == InstallMethod::MacosNative {
-        Architecture::Universal
+        if cfg!(target_os = "macos")
+            && crate::installation::native_architecture() != Some(Architecture::Arm64)
+        {
+            return Err(untrusted("macOS releases are Apple Silicon only"));
+        }
+        Architecture::Arm64
     } else {
         installed.architecture.clone()
     };

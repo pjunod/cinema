@@ -76,6 +76,47 @@ fn an_upgrade_is_scheduled_only_by_its_own_sessions_first_frame() {
 }
 
 #[test]
+fn a_recovered_session_without_ttff_is_upgraded_by_its_own_rendering_exchange() {
+    // 2026-11-12: Safari's Twilight play stalled, reconnected and resumed.
+    // Neither the recovery nor the resume sends `ttff`, so the successor's
+    // waiting upgrade was never taken and the play stayed on DYN.
+    let (_, session, incarnation) = waiting(61);
+    // Another viewer, or an exchange from another generation, proves nothing
+    // about this incarnation's picture.
+    assert!(take_on_rendering(62, &session, &incarnation).is_none());
+    assert!(take_on_rendering(61, &session, &uuid::Uuid::new_v4().to_string()).is_none());
+    assert!(is_waiting(&session));
+    let (intent, run) =
+        take_on_rendering(61, &session, &incarnation).expect("its own rendering exchange");
+    assert_eq!(intent.incarnation_id, incarnation);
+    assert!(is_running(&session));
+    // Every later exchange, or a late ttff, schedules nothing more.
+    assert!(take_on_rendering(61, &session, &incarnation).is_none());
+    assert!(take_on_first_frame(61, &session).is_none());
+    drop(run);
+    assert!(!is_running(&session) && !is_waiting(&session));
+}
+
+#[test]
+fn only_an_accepted_active_rendering_exchange_of_its_own_generation_starts_an_upgrade() {
+    let source = include_str!("control.rs");
+    let gate = source
+        .split_once("super::processed_upgrade::note_rendering(state, route);")
+        .expect("the control exchange offers the waiting upgrade")
+        .0;
+    let gate = &gate[gate.len().saturating_sub(700)..];
+    for clause in [
+        "ControlDisposition::Accepted",
+        "!durable_receipt_response",
+        "request.generation == route.incarnation_id",
+        "PlaybackDemand::Active",
+        "RenderState::Rendering",
+    ] {
+        assert!(gate.contains(clause), "{clause} missing from {gate}");
+    }
+}
+
+#[test]
 fn a_session_released_before_its_first_frame_schedules_nothing() {
     let (_, session, _) = waiting(21);
     cancel_for_session(&session);
@@ -257,4 +298,59 @@ fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() 
         recovery_admission(Evidence::Admissible, AdmissionStage::AfterTrial),
         Ok(Admission::Proven)
     );
+}
+
+#[test]
+fn a_processed_successor_begins_at_its_verified_window_unless_the_viewer_passed_it() {
+    use super::successor_start_ms;
+    // The trial verified the window at 18 s while the viewer reached 15 s:
+    // the successor begins at the produced window, not behind it.
+    assert_eq!(successor_start_ms(15_000, 18_000), Some(18_000));
+    // A fast trial must wait before staging rather than clamp backward
+    // into unprepared media. At the lead boundary it uses the exact entry.
+    assert_eq!(successor_start_ms(11_000, 18_000), None);
+    assert_eq!(successor_start_ms(14_000, 18_000), Some(18_000));
+    assert_eq!(successor_start_ms(1_000, 8_000), None);
+    assert_eq!(successor_start_ms(4_000, 8_000), Some(8_000));
+    // A viewer already past the window is never sent back to it.
+    assert_eq!(successor_start_ms(21_000, 18_000), Some(21_000));
+}
+
+#[test]
+fn a_trial_that_did_not_prove_production_is_never_staged() {
+    let mut candidate = processed_candidate_fixture();
+    candidate.planned_codec = Some("hevc".into());
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+    candidate.sustainable = false;
+    assert!(super::trial_proved_production(&candidate).is_err());
+    candidate.complete_cache = true;
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+}
+
+#[test]
+fn an_upgrade_displaced_by_another_preparation_waits_for_the_free_slot() {
+    // 2026-11-12: every Twilight play's in-session preparation took the
+    // playback's slot, which cancelled the processed upgrade for good.
+    let (playback, session, incarnation) = waiting(71);
+    let holder = tokio_util::sync::CancellationToken::new();
+    let held = super::super::preparation::begin_processed_upgrade(&playback, &holder)
+        .expect("another preparation holds the slot");
+    // While the slot is held, a rendering exchange leaves the upgrade waiting.
+    assert!(take_on_rendering(71, &session, &incarnation).is_none());
+    assert!(is_waiting(&session));
+    drop(held);
+    let (intent, run) = take_on_rendering(71, &session, &incarnation).expect("slot is free");
+    // Losing the slot is not the session ending: the upgrade waits again.
+    assert!(run.displaced("cancelled") && run.displaced(SLOT_HELD));
+    assert!(!run.displaced("declined"));
+    run.wait_again(intent);
+    drop(run);
+    assert!(is_waiting(&session));
+    // A released session's run is cancelled, never displaced.
+    let (intent, run) = take_on_rendering(71, &session, &incarnation).expect("retaken");
+    cancel_for_session(&session);
+    assert!(!run.displaced("cancelled"));
+    run.wait_again(intent);
+    drop(run);
+    assert!(!is_waiting(&session) && !is_running(&session));
 }

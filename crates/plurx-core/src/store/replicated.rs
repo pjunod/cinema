@@ -1229,6 +1229,40 @@ pub(crate) fn writes_table(sql: &str, table: &str) -> bool {
     false
 }
 
+/// Whether `sql` may delete rows of `table`: a `DELETE FROM` naming it, a
+/// `REPLACE INTO` / `INSERT OR REPLACE INTO`, or an `UPDATE OR REPLACE` (a
+/// replace deletes the row it conflicts with). The same scan and over-approximation as [`writes_table`];
+/// the files floor uses it for the tables whose deletes cascade into `files`.
+pub(crate) fn deletes_rows_of(sql: &str, table: &str) -> bool {
+    let bytes = sql.as_bytes();
+    if !bytes
+        .windows(table.len().max(1))
+        .any(|window| window.eq_ignore_ascii_case(table.as_bytes()))
+    {
+        return false;
+    }
+    let mut previous: [&str; 3] = [""; 3];
+    let identifiers = sql_identifiers(sql);
+    for (_, end, identifier) in &identifiers {
+        if sql[*end..].trim_start().starts_with('.') {
+            continue;
+        }
+        if identifier == table {
+            let [p1, p2, p3] = previous;
+            // `UPDATE OR REPLACE t` deletes the rows a changed key collides with.
+            if (p1 == "from" && p2 == "delete")
+                || (p1 == "into" && p2 == "replace")
+                || (p1 == "replace" && p2 == "or" && p3 == "update")
+            {
+                return true;
+            }
+        }
+        previous.rotate_right(1);
+        previous[0] = identifier.as_str();
+    }
+    false
+}
+
 fn skip_quoted(bytes: &[u8], mut index: usize, quote: u8) -> usize {
     while index < bytes.len() {
         if bytes[index] == quote {

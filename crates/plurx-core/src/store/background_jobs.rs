@@ -616,7 +616,7 @@ WHERE id = json_extract($1, '$.job_id')
           WHERE interest.job_id = background_jobs.id
             AND interest.state IN ('pending','awaiting_hydration')
             AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-            AND (interest.consumer_kind = 'playback_fragment'
+            AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
               OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
                   SELECT 1 FROM background_job_waiters viewer
                   WHERE viewer.job_id = interest.consumer_ref
@@ -648,7 +648,7 @@ WHERE id = json_extract($1, '$.job_id')
                 WHERE interest.job_id = held.job_id
                   AND interest.state IN ('pending','awaiting_hydration')
                   AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-                  AND (interest.consumer_kind = 'playback_fragment'
+                  AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
                     OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
                         SELECT 1 FROM background_job_waiters viewer
                         WHERE viewer.job_id = interest.consumer_ref
@@ -2494,6 +2494,15 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
     ) -> Result<bool, StoreError>;
+    /// Hold `viewer`'s bounded live demand on `file_id`'s title scan; see
+    /// `dv_title_jobs::attach_viewer`. False when no scan is queued or running.
+    async fn attach_dv_title_viewer(
+        &self,
+        file_id: i64,
+        viewer: &str,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
@@ -2616,11 +2625,20 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn storage_domains(
         &self,
     ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError>;
-    async fn replace_storage_domains(
+    async fn save_storage_domains(
         &self,
         mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        saved_by: Option<i64>,
         now_ms: i64,
-    ) -> Result<bool, StoreError>;
+    ) -> Result<Option<i64>, StoreError>;
+    async fn apply_pending_storage_domains(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainApply, StoreError>;
+    async fn storage_domain_state(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainState, StoreError>;
     async fn advertise_library_turn(
         &self,
         job_id: &str,
@@ -2956,6 +2974,30 @@ impl AnalysisSourceAdmission {
     }
 }
 
+tokio::task_local! {
+    /// The Store method a queue-bridge statement is issued for, when its
+    /// caller names one (D3b, review S5 of D3a): the bridge's
+    /// `TimedClient` operations carry it as their method label instead of
+    /// the generic `queue_sql`. Labels only; nothing reads it to decide.
+    static QUEUE_METHOD: &'static str;
+}
+
+/// Run `body` with its queue-bridge statements labelled `method`.
+pub(super) async fn queue_method<F: std::future::Future>(
+    method: &'static str,
+    body: F,
+) -> F::Output {
+    QUEUE_METHOD.scope(method, body).await
+}
+
+/// The label of a queue-bridge statement: the Store method that named one
+/// ([`queue_method`]), else the bridge's own `queue_sql`.
+pub(super) fn queue_label() -> &'static str {
+    QUEUE_METHOD
+        .try_with(|method| *method)
+        .unwrap_or("queue_sql")
+}
+
 /// Narrow internal SQL bridge: callers cannot submit SQL through Store.
 /// Authority reads use the replicated leader barrier; listing is advisory.
 #[async_trait]
@@ -3153,7 +3195,11 @@ impl<T: QueueSql> BackgroundJobStore for T {
         source_key: &str,
         node_id: &str,
     ) -> Result<Option<super::copy_index_v3::CopyIndexV3Variant>, StoreError> {
-        super::copy_index_v3::read_variant(self, source_key, node_id).await
+        queue_method(
+            "copy_index_v3_variant",
+            super::copy_index_v3::read_variant(self, source_key, node_id),
+        )
+        .await
     }
     async fn copy_index_v3_healthy_heads(
         &self,
@@ -3279,8 +3325,11 @@ impl<T: QueueSql> BackgroundJobStore for T {
         file_id: i64,
         object_version: &str,
     ) -> Result<Option<super::copy_index_v3::CopyIndexSourceAttestation>, StoreError> {
-        super::copy_index_v3::source_attestation(self, origin_node_id, file_id, object_version)
-            .await
+        queue_method(
+            "copy_index_source_attestation",
+            super::copy_index_v3::source_attestation(self, origin_node_id, file_id, object_version),
+        )
+        .await
     }
     async fn establish_analysis_coordination(
         &self,
@@ -3514,6 +3563,15 @@ LIMIT 1
     ) -> Result<bool, StoreError> {
         super::dv_title_jobs::request_fel_variant(self, file_id, request).await
     }
+    async fn attach_dv_title_viewer(
+        &self,
+        file_id: i64,
+        viewer: &str,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::attach_viewer(self, file_id, viewer, deadline_ms, now_ms).await
+    }
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
@@ -3691,12 +3749,25 @@ LIMIT 1
     ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError> {
         super::background_jobs_resources::list(self).await
     }
-    async fn replace_storage_domains(
+    async fn save_storage_domains(
         &self,
         mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        saved_by: Option<i64>,
         now_ms: i64,
-    ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::replace(self, mappings, now_ms).await
+    ) -> Result<Option<i64>, StoreError> {
+        super::storage_domain_pending_api::save(self, mappings, saved_by, now_ms).await
+    }
+    async fn apply_pending_storage_domains(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainApply, StoreError> {
+        super::storage_domain_pending_api::apply(self, now_ms).await
+    }
+    async fn storage_domain_state(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainState, StoreError> {
+        super::storage_domain_pending_api::state(self, now_ms).await
     }
     async fn advertise_library_turn(
         &self,
@@ -4964,11 +5035,14 @@ LIMIT 1
         now_ms: i64,
         lease_expires_at_ms: i64,
     ) -> Result<Option<super::background_jobs_resources::ForegroundSourceToken>, StoreError> {
-        super::background_jobs_resources::register_foreground(
-            self,
-            owner,
-            now_ms,
-            lease_expires_at_ms,
+        queue_method(
+            "register_foreground_source",
+            super::background_jobs_resources::register_foreground(
+                self,
+                owner,
+                now_ms,
+                lease_expires_at_ms,
+            ),
         )
         .await
     }
@@ -5019,8 +5093,15 @@ LIMIT 1
         token: super::background_jobs_resources::ForegroundSourceToken,
         activation_id: String,
     ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::activate_foreground_custody(self, token, activation_id)
-            .await
+        queue_method(
+            "activate_foreground_source_custody",
+            super::background_jobs_resources::activate_foreground_custody(
+                self,
+                token,
+                activation_id,
+            ),
+        )
+        .await
     }
     async fn abort_foreground_source_activation(
         &self,
@@ -5122,7 +5203,11 @@ LIMIT 1
         now_ms: i64,
     ) -> Result<Option<super::background_jobs_resources::PlaybackAnalysisSuspension>, StoreError>
     {
-        super::background_jobs_resources::suspend_analysis_interest(self, receipt, now_ms).await
+        queue_method(
+            "suspend_playback_analysis_interest",
+            super::background_jobs_resources::suspend_analysis_interest(self, receipt, now_ms),
+        )
+        .await
     }
     async fn restore_playback_analysis_interest(
         &self,
