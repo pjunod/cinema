@@ -7,13 +7,16 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
 | File | Answers | |
 |---|---|---|
+| [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Runtime evidence and control503 attribution. | open |
+| [CM29 gamut](CM29-MEASURED-GAMUT.md) | Measured vertices and qualification. | built |
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |
 | [PLAYBACK-START-A1-B1-BUILD.md](PLAYBACK-START-A1-B1-BUILD.md) | A1/B1 build contract. | open |
 | [LOCAL-COPY-ENGINE-BUILD.md](LOCAL-COPY-ENGINE-BUILD.md) | Item 6 remainder: build plan. | open |
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
-| [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) | D3 contract; records: [PLAYBACK-START-D3-RECORD.md](PLAYBACK-START-D3-RECORD.md). | open |
-| [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
+| [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) | D3 contract; records: [PLAYBACK-START-D3-RECORD.md](PLAYBACK-START-D3-RECORD.md), [PLAYBACK-START-D3CDE-RECORD.md](PLAYBACK-START-D3CDE-RECORD.md). | open |
+| [PLAYBACK-START-D3B-RECORD.md](PLAYBACK-START-D3B-RECORD.md) | D3b build record. | open |
+| [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
@@ -63,7 +66,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [Merged-source compiler evidence](evidence/macos-video-20261008/merged-c10-compile-evidence.tar.gz) | Exact current-main integration checks on Mac and Linux, with the bounded hook continuation retained; no unit or runtime qualification claim. | open |
 | [Merged Mac release and API evidence](evidence/macos-video-20261008/final-c10-release-api-evidence.tar.gz) | Exact merged release/symbols and focused subtitle/caption API delivery; interrupted timing results remain unqualified. | open |
 | [Complete subtitle performance evidence](evidence/macos-video-20261008/final-c10-subtitle-performance-evidence.tar.gz) | Eight uninterrupted CPU/GPU complete-graph comparisons with frame/timestamp validation, exact timing/child-CPU medians and measurement limits. | open |
-| [Intel strict-P5 evidence](evidence/macos-video-20261008/intel-strict-p5-evidence.tar.gz) | Intel raw strict graphs (VA-API and QSV encode), foreign-Media-SDK and 64×64 QSV-proof findings, fixed-daemon normal-API windows on Intel and AMD, build record; no NVIDIA or deployment claim. | open |
+| [Intel strict-P5 evidence](evidence/macos-video-20261008/intel-strict-p5-evidence.tar.gz) | Intel strict-P5 and 64×64 QSV findings; NVIDIA/deployment remain unqualified. | open |
 | [QSV shipping dependency evidence](evidence/macos-video-20261008/qsv-shipping-dependency-evidence.tar.gz) | Exact installer and both shipping-stage builds preserve audited providers while removing the competing Debian Media SDK; paired Intel hardware acceptance is retained below. | done |
 | [Intel QSV shipping qualification](evidence/macos-video-20261008/intel-qsv-shipping-qualification-evidence.tar.gz) | Corrected shipping image passes all 32 raw controls and forced-QSV ordinary-API delivery; exact historical-daemon control, runtime identities and cleanup retained. | done |
 | [MACOS-VIDEO-PROCESSING-REVIEW.md](MACOS-VIDEO-PROCESSING-REVIEW.md) | Original proposal review and active continuation implementation review: independent coverage, concrete findings, owner repairs and re-review disposition. | open |
@@ -103,13 +106,13 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-STARTUP-PATH-FINDINGS.md](PLAYBACK-STARTUP-PATH-FINDINGS.md) | Play-to-first-frame waits across routes: fixed 40 ms consistent-read ACK stall and web scrim, plus ranked remaining waits and owners. | open |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW.md](PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |
 | [Playback startup build status](PLAYBACK-STARTUP-LATENCY-STATUS.html) | Live Sol build status: phase, PR, evidence, review, lane, decisions. | open |
-| [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, refused destination poisons the incumbent's control snapshot. | open |
+| [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why seeks refuse playback and reap the incumbent: retained reservations and poisoned control snapshots. | open |
 | [WEB-SEEK-LATENCY-RCA-AND-FIX.md](WEB-SEEK-LATENCY-RCA-AND-FIX.md) | October 2 VOD loader deadlock, false seek-presentation evidence and native rolling reopen latency: controlled causal evidence, proposed repair and adversarial review. | open |
 | [Web seek incident evidence](../evidence/web-seek-rca-2026-10-02.json) · [mechanism replay](../evidence/web-seek-mechanism-replay.cjs) | Sanitized live seek traces, same-session loader intervention and executable incident-source mechanisms. | done |
 | [SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md](SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md) | The build order for that repair: one scratch ledger, writer barrier, exact release grace, growing reservations, ownership boundaries and the evidence each unit owes. | open |
 | [Seek scratch reservations status](SEEK-SCRATCH-RESERVATIONS-STATUS.html) | Live ledger for the effort: unit state, base and compiler, evidence, review, fast lane and deployment. | open |
 | [Seek scratch reservations receipt](../evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Exact base and compiler, accounting/release/mechanism proofs, which regression covers which acceptance row, what already failed before the change, what is still owed. | open |
-| [FFmpeg HLS write boundary receipt](../evidence/ffmpeg-hls-write-boundary-receipt-2026-09-24.md) | The last whole-ceiling reservation removed: FFmpeg's HLS muxer uploads through a loopback endpoint that grants every piece before it lands, legacy copy hole, inverted grant wait, proofs. | open |
+| [FFmpeg HLS write boundary receipt](../evidence/ffmpeg-hls-write-boundary-receipt-2026-09-24.md) | The loopback muxer's per-piece reservation, hole repair and proofs. | open |
 | [FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md](FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md) | Historical design proposal for the owned FFmpeg write boundary; use the receipt above for the implemented mechanism and proof. | done |
 | [MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) | Why one valid MKV was denied immutable VOD, why its rolling fallback violated AVFoundation's playlist-update deadline, packet-duration plus sliding-HLS repair contracts. | open |
 | [MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md) | The build contract for the reviewed MKV-duration and sliding-HLS repair: startup admission, packet evidence, publication scheduling, object grace, acceptance. | open |

@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · reboot-free macOS/Linux witnesses qualified; legacy fleet acceptance pending · **Updated:** 2026-11-11
+**Status:** open · reboot-free macOS/Linux witnesses qualified; legacy fleet acceptance pending · **Updated:** 2026-11-13
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
@@ -141,140 +141,60 @@ legacy join. At enrollment the owner writes the opened source's
 `dev ino` beside its witness (`.source`). A later dead-owner census must
 count exactly that inode.
 
-### 1.3 A dead owner's poisoned witness uses a host source-open census
+### 1.3 Census recovery needs proof that the exact old kernel ended
 
-Any unmediated child launch poisons every armed anchor (`!` nonce, new
-ctime): the anchor lock can no longer stand for every holder of the source.
-The live owner still settles normally through its explicit join. If the owner
-process dies first, its custody has no live owner and no replayable witness,
-and its expired row holds the shared storage fence. The first such record was
-a cancelled SDR `transcode_prepare` on a learner (custody `4170fe8e…`,
-activated 2026-11-09T19:51:33.759Z); its anchor was poisoned 176 ms after
-activation, so by a launch at job start. It blocked AMD title measurement
-for another title in the same storage domain.
+**Owner:** Codex · **PR:** #1561 · corrective implementation, qualification pending.
 
-Model `source_open_census_v1` proves closure from the source capability
-instead of from the reader's executable history. The
-[host helper](../../scripts/source-custody-source-census) runs as root on the
-owner host. Twice, at least three seconds apart, it reads the kernel's
-`i_readcount`/`i_writecount` for the exact source inode, through `O_PATH`
-handles on every superblock that reaches the file (any mount namespace). It
-also records locks on the anchor inode, NFS silly-renamed `.nfs*` entries
-beside the source, and tasks outside its own ancestry naming the source in
-argv. The kernel counts include inherited, mmapped and SCM_RIGHTS in-flight
-descriptors. Any nonzero or unstable value refuses. `--publish` writes
-`/run/plurx-physical-stop/source-census-v1/<custody>.json`, root-owned and
-read-only to the worker.
+A zero-open count describes one inode at one instant. Two zero counts do not
+prove that an unknown surviving child cannot reopen a path or read another
+object. A child can also transfer a descriptor outside its process tree.
+An activation-time `stat(path)` cannot identify the descriptor actually opened:
+the pathname can change from A to B and back to A between observations.
+The earlier census proposal confused these observations with confinement.
 
-The daemon (Linux, every scheduler tick) trusts only the counts. It requires:
+The census consumer now requires the witness's exact kernel to have ended on
+this machine, for both job custody and playback custody. The root helper reads
+`journalctl --list-boots --output=json`, requires the current and witness boot
+UUIDs in this machine's journal, and requires them to differ. It records the
+exact witness kernel as `prior_boot`. The daemon accepts it only through the
+pinned root-owned proof directory, on the current kernel, within the bounded
+proof age. A same-kernel proof refuses even with zero counts and a complete
+process/storage snapshot. This helper neither kills processes nor reboots a host.
+Persistent journald is required; unavailable or missing history refuses.
 
-- the poisoned v2 witness for that custody, from this kernel instance and node;
-- the exact job owner token, with a lease that ended before the first pass
-  **and before this daemon process started**. A token whose claim predates
-  the process was issued to an earlier process, and the data-directory
-  daemon lock this process holds excludes that process still running;
-- the witness's anchor inode, with the ctime the census saw, unlocked by any
-  other open file description (the daemon takes its own non-blocking lock and
-  holds it through settlement);
-- the job payload's exact source: Store file row, payload size/mtime, and the
-  daemon's own `stat` of that path matching inode, size and mtime on a
-  superblock the census counted;
-- a census at most fifteen minutes old.
+Ordinary reader namespace replay in §1.4 retains its existing independent
+runtime contract. A legacy poisoned native owner without sufficient physical
+evidence stays charged. A census cannot create missing confinement retroactively.
 
-When the owner recorded its opened source (`.source`), the census and the
-daemon both require that exact inode. A path re-copied with identical size and
-mtime therefore refuses. Superblocks are found by the file's NFS handle
-(`open_by_handle_at`), not by mount-source strings. Records without a
-`.source` (the 2026-11-09 one predates it) fall back to the Store's size/mtime
-plus the daemon's own stat.
+The daemon still verifies the immutable witness's exact owner and node, the
+Store's exact custody and renewed expired lease, and the unchanged unlocked
+anchor held through typed settlement and release acknowledgement. The helper
+supports `background-<custody id>.json` and `foreground-<owner id>.json`; the
+proof's owner shape carries exactly one family. A missing job row, removed or
+rescanned file, changed inode or obsolete `.source` sidecar cannot invalidate
+whole-kernel closure, and none can authorize release without that closure.
 
-It then uses the ordinary typed settlement and clears only its own witness.
+Production `SourceInput` stamps the held `SourceFence` object version into its
+owner generation. The fallback generation from file-row fields is a different
+identity. Recovery settles the exact persisted token; it reconstructs neither
+identity from a current pathname. The activation-time foreground path stat and
+its misleading source sidecar have been removed.
 
-**When the owner's job row is gone.** Retention can delete a settled job while
-its custody is still charged. That row is the custody's only exact source
-binding, so the census alone cannot release it. The helper, running in the
-host's PID namespace, records an `owner_teardown` view in each pass:
-
-- the PID namespace of the `plurxd run` that is PID 1 of its namespace;
-- processes in that namespace that started at or before the owner's lease
-  expiry;
-- any other `plurxd run` on the host;
-- the following, counted only for processes outside that namespace:
-  - anything held (a descriptor, cwd, root, executable or mapping) on media
-    storage. Media storage means every network or FUSE superblock in any mount
-    namespace on the host, the census's superblock, and any `--library-root`
-    on local disk.
-  - FFmpeg tools or plurx helpers. An idle survivor between opens holds
-    nothing, so it is caught here instead.
-  - processes that cannot be read. These are never skipped.
-
-The helper reads zombie leaders through their live tasks. It names every
-holder on stderr so a refusal can be acted on.
-
-The daemon accepts the view only when all of these hold:
-
-- it is PID 1 of that namespace;
-- both passes were taken after this daemon started;
-- every count is zero in both passes;
-- the scanned set covers every network or FUSE superblock in its own mount
-  table and the superblock of every library root it serves;
-- the owner's recorded source inode, if any, is the census inode.
-
-The owner died before this daemon started, so its survivors are outside this
-namespace. None of them is reading any media file, whichever file the owner
-read. A hung network mount can stall the helper's scan; interrupting it
-publishes nothing.
-The operator removes the proof file after release. The model never repairs a
-nonce, rewrites a witness or treats lease expiry as stop evidence. A future
-unmediated launch still poisons live witnesses; reducing those launches
-(brokered producer handoff, declared raw retirement) is the root-cause work.
+The two census passes remain bounded additional observations: zero inode open
+counts across the reached superblocks, anchor locks, NFS silly-renames and argv
+references, at least two seconds apart. They do not authorize future access.
+The host path supplies these observations; it does not identify the old owner.
 
 ```bash
-# On the owner host, as root. Check first; publishes nothing.
-sudo scripts/source-custody-source-census --custody <uuid> --source <host path>
-sudo scripts/source-custody-source-census --custody <uuid> --source <host path> --publish
-# After the daemon logs the release:
-sudo rm /run/plurx-physical-stop/source-census-v1/<uuid>.json
-```
-
-The container needs the existing read-only bind of `/run/plurx-physical-stop`.
-
-**A dead playback owner.** Playback launches an unmediated FFmpeg on the
-source, so every foreground witness is poisoned too. When the daemon
-restarts while a stream reads, its `foreground_source_owners` row keeps
-custody (not quiescent), which blocks every background read and analysis
-claim that shares its storage domain. The same helper takes the playback
-owner's id, as Activity lists it; the witness is
-`foreground-<owner id>.json`. The proof's `owner` then carries the exact
-registration (`lifetime_id`, `session_incarnation`, `producer_attempt`,
-`node_id`, `boot_id`, `fence`) and no teardown view. The daemon requires:
-
-- the poisoned v2 foreground witness for that owner, from this kernel and node;
-- an owner `boot_id` other than this process's own. Every daemon process
-  mints one and stamps it on each owner it registers, so another one means
-  an earlier process registered it, and the data-directory lock excludes
-  that process. This holds after a restart of any length; the wall clock
-  plays no part;
-- the Store row's renewed lease (heartbeats advance its fence and lease past
-  the witness's activation copy) ended before the census's first pass;
-- the inode the path named when the owner was armed (`<witness>.source`),
-  matching the census and the daemon's own `stat`, plus the registration's
-  file binding (size, mtime, path generation) unchanged in the Store;
-- the unchanged, unlocked anchor, as for a job.
-
-It then marks the exact owner settled, releases its row and clears only its
-witness. An owner armed before its inode was recorded, or whose title was
-rescanned, replaced or removed since, refuses with no teardown fallback; a
-host reboot is its proof, and the ordinary reboot replay releases it. This is
-the stopgap for owners already stuck: the root-cause work keeps playback
-witnesses unpoisoned, so a restart settles through the ordinary v2 replay
-with no host step.
-
-```bash
-# On the owner host, as root, with the owner id from Activity.
+# On the owner host, as root, after the exact old boot has ended.
 sudo scripts/source-custody-source-census --custody <owner id> --source <host path>
 sudo scripts/source-custody-source-census --custody <owner id> --source <host path> --publish
 ```
+
+The worker reads but cannot write or remove host proofs. Remove the proof after
+its exact custody is released. Unknown journals, a foreign boot, a live lease,
+changed or locked anchor and Store failures retain custody for a safe retry.
+
 ### 1.4 A daemon restart proves its old namespace's readers gone
 
 A plurxd restart during any read left that owner's witness poisoned by some
@@ -309,7 +229,8 @@ second container, or a rolling update sharing the volume): that breaks the
 ordering the proof relies on.
 
 A same-namespace replay, a daemon that is not an init, and evidence written
-before this field existed prove nothing and keep their reboot or census path.
+before this field existed prove nothing and retain their verified reboot or
+exact ended-kernel recovery requirement.
 An older daemon refuses the new evidence field and so skips the record, the
 safe direction during a rolling upgrade. Each release logs `source custody
 recovered after its daemon's PID namespace was torn down`.
@@ -495,6 +416,14 @@ reader migration and unaudited raw-descriptor containment remain M1 work;
 neither receives an invented successful join or retrospective witness.
 
 ## 5. Validation and review ledger
+
+**#1561 corrective batch, 2026-11-13:** Codex owns the candidate requiring
+exact ended-kernel evidence for both custody families. It removes the
+unproven single-inode path and contradictory generation reconstruction,
+retains exact-token/lease/anchor/release checks, and removes obsolete scans.
+Final adversarial review, native Linux compile and focused fast-lane evidence
+are pending. Existing namespace replay and its deployment contract are unchanged.
+
 
 | Date | Evidence | Scope / remaining work |
 |---|---|---|

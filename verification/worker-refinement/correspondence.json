@@ -65,7 +65,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "fd76e7a5d0faf0714cffc9c79fe8979164c2b0224eca8fde520a5022480850ab"
+        "sha256": "e91ae98d21db6e4f21c517cf08c07afde2bcc7fad6597ffdb1bb2acf905c9304"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -115,7 +115,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -184,7 +184,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "process_library_requests",
         "anchor": "    async fn process_library_requests(",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -201,7 +201,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -252,7 +252,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "fd76e7a5d0faf0714cffc9c79fe8979164c2b0224eca8fde520a5022480850ab"
+        "sha256": "e91ae98d21db6e4f21c517cf08c07afde2bcc7fad6597ffdb1bb2acf905c9304"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -271,7 +271,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -288,7 +288,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -305,7 +305,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "fd76e7a5d0faf0714cffc9c79fe8979164c2b0224eca8fde520a5022480850ab"
+        "sha256": "e91ae98d21db6e4f21c517cf08c07afde2bcc7fad6597ffdb1bb2acf905c9304"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -321,7 +321,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -338,7 +338,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -435,7 +435,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "process_library_requests",
         "anchor": "                let scan = self",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -452,7 +452,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "process_library_requests",
         "anchor": "    async fn process_library_requests(",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -469,7 +469,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "process_library_requests",
         "anchor": "    async fn process_library_requests(",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -486,7 +486,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -859,7 +859,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -946,7 +946,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -980,7 +980,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "769b4e4ef6b90bc6e9f6386d7a156cfd10c5f94247c85ffe8543dc9e1f10edb4"
+        "sha256": "1d7a1ff5766bd225bdc19878b95461adce8b0d7b8d178c64aabbc525150c85e5"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1096,7 +1096,7 @@
         "file": "crates/plurx-core/src/store/publication.rs",
         "symbol": "PublicationStore::token",
         "anchor": "    async fn token(&self) -> Result<tokio::sync::OwnedRwLockReadGuard<Option<Lease>>, StoreError> {",
-        "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d"
+        "sha256": "5b21d7d9674ded5d1788c95b9300942b3d8e7682ec00fdb35369c226fa9b3cef"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1277,7 +1277,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_completion_after_release_and_rebind_is_rejected",
         "anchor": "async fn formal_publication_library_completion_after_release_and_rebind_is_rejected()",
-        "sha256": "fd76e7a5d0faf0714cffc9c79fe8979164c2b0224eca8fde520a5022480850ab"
+        "sha256": "e91ae98d21db6e4f21c517cf08c07afde2bcc7fad6597ffdb1bb2acf905c9304"
       },
       "held_across_await": [],
       "completed_by": "store trigger",

@@ -231,6 +231,13 @@ pub struct Item {
     /// Identity of this exact edition. Standalone EPUBs use the package's
     /// unique identifier; paired imports use Curator's medium-specific key.
     pub book_edition_id: Option<String>,
+    /// Unix seconds when Curator offloaded this title: its files were deleted
+    /// to free disk but the item (and its watch history) is kept, shown
+    /// greyed out until Get it back brings files again. `None` = on disk (or
+    /// never had files). Set only when the item is left with no files and
+    /// cleared by the store whenever a file attaches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offloaded_at: Option<i64>,
     /// `epub` or `curator`. The source is durable so a later scheduled scan
     /// cannot replace explicit paired metadata with weaker package hints.
     pub book_metadata_source: Option<String>,
@@ -1326,6 +1333,24 @@ pub struct DesiredOwnership {
     pub updated_at_ms: i64,
 }
 
+/// A viewer's ask, recorded by the claim that starts the session built for it
+/// (D3c) instead of by a write of its own before the claim.
+///
+/// The claim upserts it in its own transaction under a predicate that ties the
+/// upsert to *this attempt's* claim row (this incarnation, still `starting`,
+/// unexpired), so a refused, joined or overloaded claim records nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesiredSelectionWrite<'a> {
+    pub digest: &'a str,
+    pub canonical_form: &'a str,
+    /// When the viewer's request arrived, not when its claim was made: the
+    /// claim follows the plan and the catalog fan-out, so two creates for one
+    /// playback can reach their claims in the opposite order to their
+    /// arrival. The upsert never replaces an ask stamped later than this one
+    /// (D3 review S2); equal stamps replace.
+    pub arrived_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionPreparation {
     /// Independent cancellation is checked inside resource admission, so a
@@ -1901,6 +1926,64 @@ pub struct RecentItem {
 // ---------------------------------------------------------------------------
 // Browse queries
 // ---------------------------------------------------------------------------
+
+/// How much of a container Curator offloaded: `offloaded` of its `leaves`
+/// (movies and episodes) have no file. Only containers with some offloaded
+/// leaves are ever reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeafOffload {
+    pub offloaded: i64,
+    pub leaves: i64,
+}
+
+/// Which titles a library grid lists with respect to offload: what plays
+/// now, what Curator offloaded (greyed out, Get it back), or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ItemPresence {
+    /// Playable now: not offloaded, and a show is hidden only when it has
+    /// offloaded episodes and none on disk (an empty show stays).
+    #[default]
+    OnDisk,
+    /// Offloaded, or a show with at least one offloaded episode.
+    Offloaded,
+    Everything,
+}
+
+impl ItemPresence {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "disk" => Some(Self::OnDisk),
+            "offloaded" => Some(Self::Offloaded),
+            "everything" => Some(Self::Everything),
+            _ => None,
+        }
+    }
+
+    /// A `WHERE` term over `items` (no placeholders, so it cannot disturb a
+    /// statement's binding sequence); the grid's count and page both embed it.
+    pub const fn sql(self) -> &'static str {
+        match self {
+            Self::OnDisk => {
+                "(items.offloaded_at IS NULL AND (items.kind <> 'show' \
+                 OR NOT EXISTS ( \
+                   SELECT 1 FROM items s JOIN items e ON e.parent_id = s.id \
+                   WHERE s.parent_id = items.id AND e.kind = 'episode' \
+                     AND e.offloaded_at IS NOT NULL) \
+                 OR EXISTS ( \
+                   SELECT 1 FROM items s JOIN items e ON e.parent_id = s.id \
+                   WHERE s.parent_id = items.id AND e.kind = 'episode' \
+                     AND e.offloaded_at IS NULL)))"
+            }
+            Self::Offloaded => {
+                "(items.offloaded_at IS NOT NULL OR (items.kind = 'show' AND EXISTS ( \
+                 SELECT 1 FROM items s JOIN items e ON e.parent_id = s.id \
+                 WHERE s.parent_id = items.id AND e.kind = 'episode' \
+                   AND e.offloaded_at IS NOT NULL)))"
+            }
+            Self::Everything => "1",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemSort {

@@ -564,7 +564,7 @@ pub(in crate::http) async fn viewer_film_time_ms(
 /// of the ordinary catalog, on this node, at the height the trial renders.
 /// Its recipe digest and bitrate are what recovery and link evidence are kept
 /// under, so admission can refuse it before the trial spends the GPU.
-fn projected_processed_candidate(
+pub(in crate::http) fn projected_processed_candidate(
     state: &AppState,
     intent: &UpgradeIntent,
     source: &plurx_core::domain::MediaFile,
@@ -584,6 +584,65 @@ fn projected_processed_candidate(
                 && i64::from(entry.candidate.target_height) == height
         })
         .map(|entry| entry.candidate.clone())
+}
+
+/// How far ahead of the viewer a processed upgrade's successor may begin.
+/// The incumbent keeps playing until it reaches the successor's start, and
+/// both pipelines run meanwhile: the Apple client plans its rendezvous within
+/// its overlap's commit lead (`PreparedCommitRendezvous.planLoaded`, at most
+/// 8 s and less as priming spends the overlap), and Android within its 12 s
+/// overlap bound. Four seconds at staging leaves both room after priming.
+const SUCCESSOR_MAX_HEAD_START_MS: i64 = 4_000;
+
+/// A future prepared entry is met at its actual start. If it is still too
+/// far ahead, schedule staging later, before the client's overlap starts;
+/// clamping backward would put the producer on unprepared media again.
+/// A viewer already past the entry is never sent backward.
+pub(in crate::http) fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> Option<i64> {
+    (verified_ms <= viewer_ms.saturating_add(SUCCESSOR_MAX_HEAD_START_MS))
+        .then_some(verified_ms.max(viewer_ms))
+}
+
+pub(super) async fn await_successor_start(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    pending: &super::preparation::PendingCandidateGuard,
+    prepared_window: Option<&std::ops::Range<i64>>,
+    duration_ms: Option<i64>,
+) -> Result<(i64, bool), &'static str> {
+    let cancelled = pending.cancellation_token();
+    let mut waited = false;
+    loop {
+        if cancelled.is_cancelled() {
+            return Err("cancelled");
+        }
+        if state
+            .transcode
+            .session_preparation_gate(&intent.session_id)
+            .await
+            .is_none()
+        {
+            return Err("not_applicable");
+        }
+        let viewer = bounded_film_ms(viewer_film_time_ms(state, intent, run).await, duration_ms);
+        let Some(window) = prepared_window else {
+            // A reused producer owns its live coverage; there is no new
+            // private trial window to wait for or to claim as cached media.
+            return Ok((viewer, waited));
+        };
+        if let Some(start) = successor_start_ms(viewer, window.start) {
+            return Ok((start, waited));
+        }
+        waited = true;
+        // This schedules a handoff, not a recovery timer. A paused incumbent
+        // retains the admitted root until it resumes, is superseded, or its
+        // session ends; the existing cancellation/instance bounds still own it.
+        tokio::select! {
+            () = cancelled.cancelled() => return Err("cancelled"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        }
+    }
 }
 
 /// [`run_upgrade`] with its trial supplied: production passes
@@ -664,9 +723,10 @@ where
         return "not_applicable";
     };
     // Admission before the GPU (review 3 S6): when this node has already
-    // described the processed recipe for this query, the evidence kept under
-    // its digest and bitrate decides now, and a refused recipe costs no
-    // trial. A read that misses its deadline is not a refusal: the trial runs
+    // described the processed recipe for this query, the recovery and link
+    // evidence kept under its digest and bitrate decides now, and a refused
+    // recipe costs no trial; its production is proven by the trial itself.
+    // A read that misses its deadline is not a refusal: the trial runs
     // unproven and the check after it is the admission. Without a description
     // there is no evidence about the recipe yet (recovery and link memory are
     // kept under its digest, which only exists once it has been rendered), and
@@ -705,20 +765,20 @@ where
         recovery_epoch: route.recovery_epoch.clone(),
     };
     // The trial verifies its first window where the viewer will be when it
-    // ends: at most its own budget past where the viewer is now, so the
-    // verified window is never behind the successor's start, and the
-    // successor's producer takes it when it reaches that segment.
+    // ends: at most its own budget past where the viewer is now. The
+    // successor begins at that window (see `successor_start_ms` below), so
+    // its producer starts from media the trial already produced.
     let trial_budget_ms =
         i64::try_from(crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET.as_millis())
             .unwrap_or(i64::MAX);
-    let mut trial_request = intent.request.clone();
-    trial_request.start_seconds = bounded_film_ms(
+    let verified_ms = bounded_film_ms(
         viewer_film_time_ms(state, intent, run)
             .await
             .saturating_add(trial_budget_ms),
         source.duration_ms,
-    ) as f64
-        / 1_000.0;
+    );
+    let mut trial_request = intent.request.clone();
+    trial_request.start_seconds = verified_ms as f64 / 1_000.0;
     let superseded = pending.cancellation_token();
     let trial = tokio::select! {
         () = superseded.cancelled() => return "cancelled",
@@ -766,10 +826,24 @@ where
         request: mut processed,
         candidate,
         root,
+        prepared_window,
     } = trial;
+    let (film_time_ms, waited) = match await_successor_start(
+        state,
+        intent,
+        run,
+        &pending,
+        prepared_window.as_ref(),
+        source.duration_ms,
+    )
+    .await
+    {
+        Ok(position) => position,
+        Err(outcome) => return outcome,
+    };
     // The recipe the trial actually froze is admitted unless it is exactly
     // the one admitted before the trial: same digest, same bitrate.
-    if post_trial_admission_needed(proven_before, projected.as_ref(), &candidate) {
+    if waited || post_trial_admission_needed(proven_before, projected.as_ref(), &candidate) {
         if let Err(reason) = admit_processed_candidate(
             state,
             intent,
@@ -786,14 +860,24 @@ where
             return "admission_refused";
         }
     }
-    // Where the successor begins: where the viewer is now, as an ordinary
-    // prepared successor begins at its ask's accepted position (B1). The
-    // ordinary request a dispatch falls back to begins there too, or a
-    // degraded successor would restart the film at the create's start.
-    let film_time_ms = bounded_film_ms(
+    if let Err(reason) = trial_proved_production(&candidate) {
+        tracing::warn!(target: "plurxd::http::hls", session = %session, %reason,
+            "processed upgrade not admitted; the ordinary session keeps playing");
+        run.skipped(reason);
+        return "admission_refused";
+    }
+    // Admission may await Store reads. Keep its elapsed time out of the
+    // successor's start without losing the future prepared-entry floor.
+    let film_time_ms = film_time_ms.max(bounded_film_ms(
         viewer_film_time_ms(state, intent, run).await,
         source.duration_ms,
-    );
+    ));
+    // The actual prepared entry, not the requested trial timestamp, decides
+    // the start. If playback has already passed that entry, current media must
+    // be produced instead; never replay old film to consume a stale window.
+    let prepared_window_reused = prepared_window
+        .as_ref()
+        .is_some_and(|window| window.contains(&film_time_ms));
     if let Some(ordinary) = processed
         .candidate_context
         .as_mut()
@@ -855,6 +939,7 @@ where
     .await;
     if staged {
         tracing::info!(target: "plurxd::http::hls", session = %session,
+            film_time_ms, prepared_window_reused,
             "processed upgrade staged as a prepared successor");
         "staged"
     } else {
@@ -1003,10 +1088,27 @@ async fn admit_processed_candidate(
         )
         .await;
     }
-    if super::create::processed_candidate_is_admitted(&admitted, candidate) {
+    // Production is not part of this: before the trial the recipe is not
+    // producing, so a description of it from an earlier trial has no current
+    // proof, and the trial is what proves it (checked on the frozen recipe
+    // after the trial, whatever this admission found).
+    if super::create::processed_candidate_kept(&admitted, candidate).is_some() {
         Ok(admission)
     } else {
         Err("Auto's link evidence for this playback does not admit the processed candidate's bitrate".into())
+    }
+}
+
+/// The recipe the trial froze is only staged when the trial proved it
+/// sustains production: [`QualityCandidate::playable`] on the trial's own
+/// candidate, which carries the trial's production proof.
+fn trial_proved_production(
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> Result<(), &'static str> {
+    if candidate.playable() {
+        Ok(())
+    } else {
+        Err("the processed trial did not prove the recipe sustains realtime production")
     }
 }
 

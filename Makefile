@@ -96,6 +96,14 @@ fmt-check: ## Verify formatting without changing files
 effort-rust-check: fmt-check spike-lock-check ## Compile every Rust target without running the test suite
 	$(CARGO) check --workspace --locked --all-targets
 
+# The fast lane's Rust gate. One all-target Clippy pass type-checks everything
+# `cargo check --all-targets` does (clippy-driver is rustc plus lints), so the
+# separate check pass the lane used to run first compiled the workspace twice.
+.PHONY: fast-rust-gate
+fast-rust-gate: fmt-check spike-lock-check ## The main fast lane's Rust gate: all-target Clippy (-D warnings) and the vendored hiqlite Clippy
+	$(CARGO) clippy --workspace --locked --all-targets -- -D warnings
+	$(MAKE) hiqlite-vendor-clippy
+
 .PHONY: bans-check license-check lint
 bans-check: ## Reject forbidden duplicate crypto versions and native TLS stacks
 	cargo deny check bans
@@ -157,6 +165,10 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 .PHONY: paperwork
 paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
 	@python3 scripts/paperwork
+
+.PHONY: paperwork-fix
+paperwork-fix: ## Apply the derivable paperwork fixes (counters, Markdown host names, index rows) to the working tree
+	@python3 scripts/paperwork-fix
 
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence
@@ -1569,6 +1581,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
 	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
+	@node --test tests/web/offload.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
 	@node --test tests/web/cinema-remote-receiver.test.js
@@ -1896,21 +1909,19 @@ hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks, and Ripw
 ## ---- native macOS server tray ------------------------------------------
 
 .PHONY: desktop-macos-build desktop-macos-test desktop-macos-check
-# Cross-architecture slices prove compilation; unit tests execute only on the
-# runner's actual architecture. Separate scratch roots allow parallel make.
-desktop-macos-build: ## Compile both macOS server tray architectures without executing tests
-	@set -e; for arch in arm64 x86_64; do \
-	  clients/server-tray/macos/build --configuration release \
-	    --version "$(VERSION)" --arch "$$arch" \
-	    --scratch "$(CURDIR)/target/desktop-macos/scratch/$$arch" \
-	    --output "$(CURDIR)/target/desktop-macos/$$arch/Plurx Server.app"; \
-	done
+# The tray is built for Apple Silicon only; unit tests execute on the runner's
+# own architecture. Separate scratch roots allow parallel make.
+desktop-macos-build: ## Compile the Apple Silicon macOS server tray without executing tests
+	clients/server-tray/macos/build --configuration release \
+	  --version "$(VERSION)" --arch arm64 \
+	  --scratch "$(CURDIR)/target/desktop-macos/scratch/arm64" \
+	  --output "$(CURDIR)/target/desktop-macos/arm64/Plurx Server.app"
 
 desktop-macos-test: ## Run native server tray Swift and AppKit unit contracts
 	swift test --package-path clients/server-tray/macos \
 	  --scratch-path "$(CURDIR)/target/desktop-macos/tests"
 
-desktop-macos-check: desktop-macos-build desktop-macos-test ## Build both slices and test on the native macOS architecture
+desktop-macos-check: desktop-macos-build desktop-macos-test ## Build the arm64 tray and test it
 
 ## ---- apple clients -----------------------------------------------------
 

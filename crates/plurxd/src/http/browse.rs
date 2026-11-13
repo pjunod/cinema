@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use plurx_core::domain::{Item, ItemKind, ItemSort, WatchState};
+use plurx_core::domain::{Item, ItemKind, ItemPresence, ItemSort, WatchState};
 use plurx_core::mediafacts::MediaFacts;
 use serde::{Deserialize, Serialize};
 
@@ -460,6 +460,11 @@ pub struct ListQuery {
     /// not an error — the client asked a well-formed question and the answer
     /// is "nothing".
     pub genre: Option<String>,
+    /// `disk` (default: what plays now), `offloaded`, or `everything`.
+    /// Offloaded titles keep their item and watch history but have no files;
+    /// a show with some seasons offloaded is listed under both `disk` and
+    /// `offloaded`. Search ignores this and always includes them.
+    pub presence: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -492,9 +497,22 @@ pub async fn list_items(
     // Trimmed and emptied-to-None so `?genre=` and `?genre=%20` mean the same
     // thing as omitting it, rather than "the genre whose name is one space".
     let genre = q.genre.as_deref().map(str::trim).filter(|g| !g.is_empty());
+    let presence = match q
+        .presence
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        None => ItemPresence::OnDisk,
+        Some(value) => ItemPresence::parse(value).ok_or_else(|| {
+            ApiError::BadRequest(
+                "`presence` must be `disk`, `offloaded` or `everything`".to_owned(),
+            )
+        })?,
+    };
     let page = state
         .catalogue
-        .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+        .list_top_items_filtered(library_id, sort, offset, limit, genre, presence)
         .await?;
     // Containers carry no watch row of their own, so a grid filtering by
     // "Watched"/"In progress" has nothing to filter a show on — the state
@@ -516,6 +534,16 @@ pub async fn list_items(
         .await?;
     let watch: HashMap<i64, WatchState> = summary.watch.into_iter().collect();
     let rollups = summary.rollups;
+    // Which containers are (partly) offloaded, only where the grid can show
+    // one: `disk` lists only shows with something to play.
+    let offloaded_leaves = if presence != ItemPresence::OnDisk && !container_ids.is_empty() {
+        state
+            .catalogue
+            .offloaded_leaf_counts(&container_ids)
+            .await?
+    } else {
+        HashMap::new()
+    };
     // Per-item resolution so the grid can badge/section it. Home videos carry
     // a badge for the same reason movies do — phone footage ranges from 480p
     // to 4K in the same folder.
@@ -564,12 +592,14 @@ pub async fn list_items(
             let res = heights.get(&item.id).copied();
             let count = counts.get(&item.id).copied();
             let media = facts.remove(&item.id);
+            let offloaded = offloaded_leaves.get(&item.id).copied();
             ItemDto::from(item)
                 .with_watch(w)
                 .with_resolution(res)
                 .with_media(media)
                 .with_child_count(count)
                 .with_rollup(rollup)
+                .with_offloaded_leaves(offloaded)
         })
         .collect();
     Ok(Json(ItemListResponse {
@@ -746,10 +776,25 @@ pub async fn item_detail(
     // from the same read (K-04 M3).
     let mut all_ids: Vec<i64> = children.iter().map(|child| child.id).collect();
     all_ids.push(item.id);
-    let rollup_ids: Vec<i64> = if is_rollup_container(item.kind) {
+    let mut rollup_ids: Vec<i64> = if is_rollup_container(item.kind) {
         vec![id]
     } else {
         Vec::new()
+    };
+    // A show page lists its seasons: each one's rollup says how much of it is
+    // offloaded, from the same watch read.
+    if item.kind == ItemKind::Show {
+        rollup_ids.extend(
+            children
+                .iter()
+                .filter(|child| child.kind == ItemKind::Season)
+                .map(|child| child.id),
+        );
+    }
+    let offloaded_leaves = if rollup_ids.is_empty() {
+        HashMap::new()
+    } else {
+        state.catalogue.offloaded_leaf_counts(&rollup_ids).await?
     };
     let summary = state
         .catalogue
@@ -779,11 +824,25 @@ pub async fn item_detail(
     };
     let item_dto = ItemDto::from(item)
         .with_watch(watch.get(&id).copied())
-        .with_rollup(rollup);
+        .with_rollup(rollup)
+        .with_offloaded_leaves(offloaded_leaves.get(&id).copied());
+    let season_rollups = summary.rollups;
+    let children = annotate_with_counts(children, &watch, &child_counts, &mut child_media)
+        .into_iter()
+        .map(|child| {
+            if child.kind == ItemKind::Season {
+                let rollup = season_rollups.get(&child.id).copied();
+                let offloaded = offloaded_leaves.get(&child.id).copied();
+                child.with_rollup(rollup).with_offloaded_leaves(offloaded)
+            } else {
+                child
+            }
+        })
+        .collect();
     Ok(Json(ItemDetail {
         item: item_dto,
         ancestors: ancestors.into_iter().map(Into::into).collect(),
-        children: annotate_with_counts(children, &watch, &child_counts, &mut child_media),
+        children,
         files: file_dtos,
         editions: editions.into_iter().map(Into::into).collect(),
         reading,
@@ -893,6 +952,30 @@ pub async fn home_previews(
         .collect();
 
     Ok(Json(HomePreviews { libraries }))
+}
+
+/// Mark the shows and seasons among `items` that Curator offloaded in full,
+/// for the lists that can contain one (search, the user's lists). The
+/// rollup count is left to the pages that already read a rollup.
+pub(crate) async fn flag_offloaded_containers(
+    state: &AppState,
+    items: &mut [ItemDto],
+) -> Result<(), ApiError> {
+    let ids: Vec<i64> = items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Show | ItemKind::Season))
+        .map(|item| item.id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let counts = state.catalogue.offloaded_leaf_counts(&ids).await?;
+    for item in items {
+        if let Some(count) = counts.get(&item.id) {
+            item.offloaded = item.offloaded || count.offloaded >= count.leaves;
+        }
+    }
+    Ok(())
 }
 
 /// GET /api/v1/hubs — the home screen rows.
@@ -1006,13 +1089,14 @@ pub async fn search(
     let hits = state.catalogue.search_items(&query, limit).await?;
     let items: Vec<Item> = hits.iter().map(|r| r.item.clone()).collect();
     let watch = watch_lookup(&state, user.id, &items, read_after).await?;
-    let results = hits
+    let mut results: Vec<ItemDto> = hits
         .into_iter()
         .map(|r| {
             let w = watch.get(&r.item.id).copied();
             recent_dto(r, w)
         })
         .collect();
+    flag_offloaded_containers(&state, &mut results).await?;
     Ok(Json(SearchResponse { results }))
 }
 

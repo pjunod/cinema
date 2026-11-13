@@ -98,6 +98,7 @@ class Playback:
         self.playback_id = f"plurx-player:{uuid.uuid4()}"
         self.client_instance_id = str(uuid.uuid4())
         self.sequence = 0
+        self.control_binding = None
         self.decision = None
         self.delivery = None
         self.mode = None
@@ -466,7 +467,7 @@ class Playback:
         paused = bool(self.mpv.get("pause", self.paused))
         saved = {key: getattr(self, key) for key in (
             "quality", "decision", "delivery", "mode", "method", "sidecar", "burn", "notice",
-            "audio", "subtitle", "playback_id", "session", "origin_ms")}
+            "audio", "subtitle", "playback_id", "session", "origin_ms", "control_binding", "sequence")}
         self.changing, self.chrome_error = True, None
         self.publish_chrome()
         self.progress("seek")
@@ -630,6 +631,11 @@ class Playback:
         else:
             render = "rendering"
         control = self.session["control"]
+        binding = (self.session["session_id"], control.get("generation"), control.get("control_epoch"))
+        if binding != self.control_binding:
+            # Each advertised incarnation/owner starts at sequence 1. A seek
+            # replaces the session while retaining this Playback/controller.
+            self.control_binding, self.sequence = binding, 0
         self.sequence += 1
         subtitle = {"mode": "burn", "track": self.burn} if self.burn is not None else {"mode": "off"}
         # Passive: no supported_actions, so the server only ever answers `none`.

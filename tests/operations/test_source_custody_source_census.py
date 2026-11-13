@@ -17,7 +17,7 @@ CUSTODY='22222222-2222-4222-8222-222222222222'
 JOB='33333333-3333-4333-8333-333333333333'
 BOOT='44444444-4444-4444-8444-444444444444'
 CLAIM='55555555-5555-4555-8555-555555555555'
-KERNEL='linux:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+KERNEL='linux:'+BOOT
 # The Rust consumer's ForegroundOwner fields, in full: the proof must carry
 # exactly these, since it refuses unknown and missing fields alike.
 FOREGROUND_OWNER={'custody_id','lifetime_id','session_incarnation','producer_attempt',
@@ -89,12 +89,11 @@ class WitnessOwner(unittest.TestCase):
         with self.assertRaisesRegex(helper.Refused,'no single poisoned witness'):
             helper.witness_owner(self.witnesses,CUSTODY)
 
-    def test_a_witness_from_another_kernel_boot_refuses(self):
-        stale=evidence(playback_record())
-        stale['kernel_instance']='linux:'+BOOT
-        (self.witnesses/f'foreground-{CUSTODY}.json').write_text(json.dumps(stale))
-        with self.assertRaisesRegex(helper.Refused,'another kernel boot'):
-            helper.witness_owner(self.witnesses,CUSTODY)
+    def test_a_witness_preserves_its_exact_earlier_kernel_for_journal_verification(self):
+        self.write('foreground',playback_record())
+        _,written,_,_=helper.witness_owner(self.witnesses,CUSTODY)
+        self.assertEqual(written['kernel_instance'],KERNEL)
+
 
 
 if __name__=='__main__':

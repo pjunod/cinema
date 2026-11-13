@@ -389,7 +389,6 @@ impl TranscodeManager {
     }
 
     pub(crate) fn with_source_identity(mut self, node_id: String, boot_id: uuid::Uuid) -> Self {
-        crate::source_custody::note_process_source_boot(boot_id);
         let identity = crate::source_custody::SourceIdentity { node_id, boot_id };
         self.vod.set_source_identity(identity.clone());
         if let Some(jobs) = &self.subtitle_jobs {

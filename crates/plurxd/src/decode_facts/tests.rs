@@ -341,16 +341,15 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
     }
 
     let source = include_str!("../decode_facts.rs");
-    for item in [
+    let descriptors =
+        include_str!("../../../plurx-core/src/process/source_lifetime/descriptors.rs");
+    let namespace = include_str!("pi_namespace.rs");
+    for (source, item) in [
         "command.pre_exec(move ||",
         "fn is_production(self)",
         "fn bootstrap_interrupts(self)",
         "fn export_socket_fd(self)",
         "fn start_probe_session(",
-        "fn duplicate_child_fd(",
-        "fn assign_child_fd(",
-        "fn install_child_fd(",
-        "fn install_probe_child_fds(",
         "fn consume_linux_bootstrap_interrupt(",
         "fn ensure_linux_probe_deadline(",
         "fn confirm_linux_probe_fork(",
@@ -361,7 +360,14 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
         "fn install(&self)",
         "fn install_listener(&self)",
         "fn execute_held_probe(&self)",
-    ] {
+    ]
+    .into_iter()
+    .map(|item| (source, item))
+    .chain([
+        (descriptors, "pub fn inherit(&self)"),
+        (descriptors, "pub fn inherit_target(&self"),
+        (namespace, "command.pre_exec(move ||"),
+    ]) {
         let body = item_body(source, item);
         for allocating in [
             "std::io::Error::new(",
@@ -3189,28 +3195,24 @@ fn crossed_source_and_executable_fds_are_duplicated_before_assignment() {
     let executable = std::fs::File::open(executable_path).expect("executable");
     let source_fd = source.as_raw_fd();
     let executable_fd = executable.as_raw_fd();
+    // Cross the actual open descriptor numbers so either sequential dup2
+    // destroys the other input unless the shared builder pins both first.
+    let descriptors = crate::producer_spawn::Descriptors::from_mappings(
+        &[(source_fd, executable_fd), (executable_fd, source_fd)],
+        None,
+    )
+    .prepare_inline(crate::producer_spawn::StdioFacts::NULL)
+    .expect("prepare crossed descriptors");
     let mut command = std::process::Command::new("/bin/sh");
-    command.args([
-        "-c",
-        "test \"$(cat <&3)\" = bound-source && test \"$(cat <&4)\" = held-probe",
-    ]);
+    command.arg("-c").arg(format!(
+        "test \"$(cat /dev/fd/{executable_fd})\" = bound-source && test \"$(cat /dev/fd/{source_fd})\" = held-probe"
+    ));
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     unsafe {
-        command.pre_exec(move || {
-            let source_cross = duplicate_child_fd(source_fd)?;
-            let executable_cross = match duplicate_child_fd(executable_fd) {
-                Ok(duplicate) => duplicate,
-                Err(error) => {
-                    libc::close(source_cross);
-                    return Err(error);
-                }
-            };
-            let crossed = assign_child_fd(executable_cross, 3)
-                .and_then(|()| assign_child_fd(source_cross, HELD_PROBE_FD));
-            libc::close(source_cross);
-            libc::close(executable_cross);
-            crossed?;
-            install_probe_child_fds(HELD_PROBE_FD, 3)
-        });
+        command.pre_exec(move || descriptors.inherit());
     }
     assert!(command.status().expect("run descriptor check").success());
     drop((source, executable));
@@ -3579,6 +3581,7 @@ async fn strict_native_group_hold_never_excludes_outstanding_daemon_read_time() 
 
 /// The strict supervisor refuses any single read() above one service quantum,
 /// and FFmpeg's file protocol otherwise reads a whole large packet at once.
+#[cfg(target_os = "linux")]
 #[test]
 fn strict_parser_reads_are_capped_to_one_service_quantum() {
     let input = strict_source_input();
@@ -3587,12 +3590,12 @@ fn strict_parser_reads_are_capped_to_one_service_quantum() {
         input[1]
             .to_str()
             .and_then(|value| value.parse::<usize>().ok()),
-        Some(source_reads::MAX_READ)
+        Some(1_048_576)
     );
     assert_eq!(input[2], "/dev/fd/3", "the cap precedes the held input");
     assert!(idet_filter(0).starts_with(&format!(
         "movie=/dev/fd/3:format_opts=blocksize={}:",
-        source_reads::MAX_READ
+        1_048_576
     )));
 }
 

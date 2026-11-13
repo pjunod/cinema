@@ -157,6 +157,7 @@ mod sqlite;
 mod telemetry;
 mod timeline_annotations;
 
+pub(crate) mod offload;
 mod publication;
 mod scan_identity_repair;
 mod schema_lineage;
@@ -290,6 +291,8 @@ pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 pub mod scan_request_v2;
+mod storage_domain_pending;
+pub(crate) mod storage_domain_pending_api;
 mod subtitle_managed_schema;
 pub mod subtitle_text_translation;
 mod subtitle_text_translation_schema;
@@ -1203,14 +1206,15 @@ use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
     DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
-    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
-    MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
-    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
-    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    ItemPresence, ItemSort, Library, MediaFile, MediaSessionActivation,
+    MediaSessionActivationOutcome, MediaSessionActivationSettlement,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, OfflineActivityPackage,
+    OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
+    OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease, PlaybackEvent,
+    PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -2509,6 +2513,23 @@ pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError
     serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
+/// How many settings keys one planning snapshot may carry. The create reads
+/// every planning input in that one statement (playback-start D3b), which
+/// outgrew the keyed read's 32; the bound is still a bound.
+pub const PLANNING_SNAPSHOT_KEYS_MAX: usize = 64;
+
+/// [`selected_settings_json`] for the planning snapshot's own bound.
+pub(crate) fn selected_planning_keys_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > PLANNING_SNAPSHOT_KEYS_MAX
+        || keys.iter().any(|key| key.is_empty() || key.len() > 256)
+    {
+        return Err(StoreError::Task(format!(
+            "a planning snapshot requires at most {PLANNING_SNAPSHOT_KEYS_MAX} nonempty bounded keys"
+        )));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
+}
+
 pub(crate) fn validate_generated_settings(
     generation_key: &str,
     expected_generation: i64,
@@ -3129,6 +3150,32 @@ pub trait MediaStore: Send + Sync + 'static {
         library_id: i64,
         directory: &str,
     ) -> Result<Vec<Item>, StoreError>;
+    /// The offloaded movie of this library carrying these external ids, for
+    /// placing files that come back after Get it back. Ids only, never a
+    /// title: a re-acquired title must not become a duplicate when its
+    /// release name differs from the library title (`Tar` / `Tár`).
+    async fn find_offloaded_movie(
+        &self,
+        library_id: i64,
+        tmdb_id: Option<i64>,
+        imdb_id: Option<&str>,
+    ) -> Result<Option<Item>, StoreError>;
+    /// The offloaded episode of the show with this TMDB id, by season and
+    /// episode number.
+    async fn find_offloaded_episode(
+        &self,
+        library_id: i64,
+        series_tmdb_id: i64,
+        season_number: i32,
+        episode_number: i32,
+    ) -> Result<Option<Item>, StoreError>;
+    /// How many offloaded leaves sit under each container, of how many in
+    /// all (the item itself counts when it is a leaf). A container with none
+    /// offloaded is absent.
+    async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError>;
     async fn find_book(
         &self,
         library_id: i64,
@@ -3216,6 +3263,28 @@ pub trait MediaStore: Send + Sync + 'static {
         offset: i64,
         limit: i64,
         genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            ItemPresence::Everything,
+        )
+        .await
+    }
+    /// [`list_top_items_in_genre`](Self::list_top_items_in_genre) narrowed by
+    /// whether the title is on disk or offloaded. One `WHERE` term shared by
+    /// the count and the page, like the genre.
+    async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: ItemPresence,
     ) -> Result<ItemPage, StoreError>;
     /// The unfiltered grid: every caller that had no opinion about genres
     /// before this existed and still has none. Provided rather than
@@ -3631,12 +3700,19 @@ pub trait MediaStore: Send + Sync + 'static {
     /// Atomically remove vanished files and their empty item hierarchy only
     /// when the scanner sees the expected roots and stays within its deletion
     /// budget. This is the M1c publication boundary; M4 adds its lease fence.
+    ///
+    /// `offload_keep` names movie/episode items an offload wants kept: any
+    /// of them left with no files by this very removal is marked offloaded
+    /// (`offloaded_at`) between the file delete and the leaf prune, in the
+    /// same transaction, so nothing can observe it fileless and unmarked.
     async fn reconcile_library(
         &self,
         library_id: i64,
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError>;
     /// Remove `file_ids` — files of the library that the caller found under
     /// none of `configured_paths`, which is what an operator removing a
@@ -5025,6 +5101,8 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
@@ -5175,7 +5253,50 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
-    ) -> Result<MediaSessionRequestClaim, StoreError>;
+    ) -> Result<MediaSessionRequestClaim, StoreError> {
+        Ok(self
+            .claim_media_session_request_recording(
+                principal,
+                request_id,
+                request_fingerprint,
+                playback_id,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+                None,
+            )
+            .await?
+            .0)
+    }
+
+    /// [`claim_media_session_request`](Self::claim_media_session_request) that
+    /// also records the viewer's ask (D3c). With `desired`, the claim that is
+    /// `Acquired` (a new row or a re-acquired one) upserts the selection in the
+    /// same transaction, under a predicate that matches only *this* claim
+    /// (this `incarnation_id`, `starting`, unexpired), and the answer carries
+    /// the recorded row. Every other answer (`InFlight`, `Resolved`,
+    /// `Conflict`, `Overloaded`) records nothing and carries `None`. The
+    /// upsert is [`record_desired_selection`](Self::record_desired_selection)'s
+    /// statement, so a repeated digest does not move the revision. Without
+    /// `desired` this is the plain claim.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_media_session_request_recording(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+        request_fingerprint: &str,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+        claim_expires_at_ms: i64,
+        desired: Option<&crate::domain::DesiredSelectionWrite<'_>>,
+    ) -> Result<
+        (
+            MediaSessionRequestClaim,
+            Option<crate::domain::DesiredOwnership>,
+        ),
+        StoreError,
+    >;
 
     /// The claim row of `request_id`, read only. A retry waiting on an owner
     /// that is still starting reads this between ticks instead of re-running
@@ -6855,6 +6976,27 @@ impl CatalogueReader {
         self.authority.get_item(id).await
     }
 
+    /// Offloaded leaves under each container, from the bounded replica when
+    /// it is proven fresh enough, like the item reads beside it.
+    pub async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let owned = ids.to_vec();
+            if let Some(result) = self
+                .bounded(
+                    move |store| async move { store.local_offloaded_leaf_counts(&owned).await },
+                )
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.offloaded_leaf_counts(ids).await
+    }
+
     pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
@@ -6874,6 +7016,26 @@ impl CatalogueReader {
         limit: i64,
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            crate::domain::ItemPresence::Everything,
+        )
+        .await
+    }
+
+    pub async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: crate::domain::ItemPresence,
+    ) -> Result<ItemPage, StoreError> {
         // Both the existing Authority implementation and this local variant
         // read the page and count in separate statements. The bounded permit
         // covers that whole operation but deliberately does not promise a
@@ -6890,6 +7052,7 @@ impl CatalogueReader {
                             offset,
                             limit,
                             genre.as_deref(),
+                            presence,
                         )
                         .await
                 })
@@ -6899,7 +7062,7 @@ impl CatalogueReader {
             }
         }
         self.authority
-            .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+            .list_top_items_filtered(library_id, sort, offset, limit, genre, presence)
             .await
     }
 

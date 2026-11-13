@@ -441,6 +441,7 @@ enum Command {
     /// does and print its identity; exit 1 when this binary would refuse it or
     /// none is installed. The image build runs this, so an image cannot ship a
     /// bundle its own daemon rejects.
+    #[cfg(target_os = "linux")]
     DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
@@ -693,9 +694,10 @@ async fn dispatch(
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
+        #[cfg(target_os = "linux")]
+        Command::DvHelperIdentity => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
-        | Command::DvHelperIdentity
         | Command::Advertise { .. }
         | Command::Cluster { .. }
         | Command::Restore { .. }
@@ -749,15 +751,21 @@ async fn dispatch(
             );
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         Command::DvHelperIdentity => {
-            match crate::vodencode::dv_runtime::installed_helper_identity().await {
-                Ok(identity) => println!("{identity}"),
-                Err(error) => {
-                    eprintln!("DV helper bundle refused: {error}");
-                    std::process::exit(1);
+            #[cfg(target_os = "linux")]
+            {
+                match crate::vodencode::dv_runtime::installed_helper_identity().await {
+                    Ok(identity) => println!("{identity}"),
+                    Err(error) => {
+                        eprintln!("DV helper bundle refused: {error}");
+                        std::process::exit(1);
+                    }
                 }
+                Ok(())
             }
-            Ok(())
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("DV helper bundles are supported only on Linux")
         }
         Command::Advertise { server } => advertise(&server).await,
         Command::ResetPassword { username, password } => {
@@ -1965,6 +1973,9 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let catalogue = selected.catalogue_reader();
         let applied = selected.applied_view();
         let dirs = create_dirs_for_config(&config)?;
+        if let Err(error) = crate::source_custody::configure_access_roots(&config, &dirs) {
+            tracing::warn!(%error, "source-access roots unavailable; launches remain unverified");
+        }
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
         // slow probe from waiting out its grace period while this process

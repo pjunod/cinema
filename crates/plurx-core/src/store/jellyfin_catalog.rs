@@ -206,6 +206,12 @@ scope AS (
  FROM items i JOIN libraries library ON library.id=i.library_id
  WHERE EXISTS(SELECT 1 FROM scope) AND library.kind IN ('movies','shows')
  AND i.kind IN ('movie','show','season','episode')
+ AND i.offloaded_at IS NULL
+ AND (i.kind IN ('movie','episode')
+   OR NOT EXISTS(SELECT 1 FROM items o WHERE o.kind='episode' AND o.offloaded_at IS NOT NULL
+        AND (o.parent_id=i.id OR o.parent_id IN (SELECT s.id FROM items s WHERE s.parent_id=i.id)))
+   OR EXISTS(SELECT 1 FROM items e WHERE e.kind='episode' AND e.offloaded_at IS NULL
+        AND (e.parent_id=i.id OR e.parent_id IN (SELECT s.id FROM items s WHERE s.parent_id=i.id))))
  AND (CASE json_extract($1,'$.mode')
    WHEN 'resume' THEN i.kind IN ('movie','episode') AND EXISTS(SELECT 1 FROM watch_state w WHERE w.user_id=(SELECT user_id FROM scope) AND w.item_id=i.id AND w.watched=0 AND w.position_ms>0)
    WHEN 'next_up' THEN i.id IN (SELECT id FROM next_up)
@@ -248,9 +254,9 @@ scope AS (
  'air_date',p.air_date,'runtime_ms',p.runtime_ms,'poster_path',p.poster_path,'backdrop_path',p.backdrop_path,
  'added_at',p.added_at,'updated_at',p.updated_at,'genres',json(p.genres),
  'position_ms',COALESCE(w.position_ms,0),'watched',COALESCE(w.watched,0),'watch_updated_at',COALESCE(w.updated_at,0),
- 'child_count',(SELECT COUNT(*) FROM items child WHERE child.parent_id=p.id AND child.library_id=p.library_id AND child.kind IN ('movie','show','season','episode')),
+ 'child_count',(SELECT COUNT(*) FROM items child WHERE child.parent_id=p.id AND child.library_id=p.library_id AND child.kind IN ('movie','show','season','episode') AND child.offloaded_at IS NULL),
  'recursive_count',(SELECT COUNT(*) FROM page_descendants d WHERE d.root=p.id AND d.id<>p.id),
- 'playable_count',(SELECT COUNT(*) FROM page_descendants d JOIN items leaf ON leaf.id=d.id WHERE d.root=p.id AND leaf.kind IN ('movie','episode')),
+ 'playable_count',(SELECT COUNT(*) FROM page_descendants d JOIN items leaf ON leaf.id=d.id WHERE d.root=p.id AND leaf.kind IN ('movie','episode') AND leaf.offloaded_at IS NULL),
  'watched_count',(SELECT COUNT(*) FROM page_descendants d JOIN items leaf ON leaf.id=d.id JOIN watch_state watch ON watch.item_id=leaf.id AND watch.user_id=(SELECT user_id FROM scope) AND watch.watched=1 WHERE d.root=p.id AND leaf.kind IN ('movie','episode')),
  'sources',json(COALESCE((SELECT json_group_array(json(source)) FROM (
    SELECT json_object('native_id',f.id,'wire_id',fm.wire_id,'size',f.size,'mtime',f.mtime,

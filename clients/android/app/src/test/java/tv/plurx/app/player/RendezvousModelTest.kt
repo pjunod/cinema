@@ -239,6 +239,28 @@ class RendezvousModelTest {
         assertEquals(10_000 + RENDEZVOUS_LEAD_MS, park.rendezvousFilmMs)
     }
 
+    /**
+     * A successor staged ahead of the viewer (a processed upgrade begins at the
+     * window its trial produced) is met where it begins, never before it: the
+     * successor holds nothing earlier. Once the viewer is past that start the
+     * ordinary lead applies again.
+     */
+    @Test
+    fun aSuccessorStagedAheadIsMetAtItsOwnStart() {
+        val hold = RendezvousHold(floorFilmMs = 18_000)
+        assertEquals(18_000L, hold.park(nowMs = 0, incumbentFilmMs = 10_000).rendezvousFilmMs)
+        val step = hold.fire(
+            nowMs = 9_000,
+            incumbentFilmMs = 18_000,
+            successorFilmMs = 18_000,
+            successorReady = true,
+            speed = 1.0,
+        )
+        assertTrue(step is RendezvousHold.Step.Commit, "got $step")
+        val late = RendezvousHold(floorFilmMs = 18_000)
+        assertEquals(20_000 + RENDEZVOUS_LEAD_MS, late.park(nowMs = 0, incumbentFilmMs = 20_000).rendezvousFilmMs)
+    }
+
     /** A hold that has not been parked yet asks to be parked. */
     @Test
     fun firingBeforeAParkParksInstead() {

@@ -10,6 +10,24 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Source-custody census recovery requires proof that the exact old kernel
+  ended before releasing either playback or job custody. Zero-open snapshots,
+  replaced paths and mismatched file-row/object-version generations cannot
+  authorize release; obsolete source binding and process scans are removed.
+
+- Playback-control refusal logs retain the protocol code, route-read failure
+  stage and sanitized source location, distinguishing release reconciliation
+  from storage errors without exposing session capabilities.
+
+- The host source census can release a dead owner's custody after the host
+  has rebooted. It proves from the machine's own journal that the witness's
+  kernel boot ended. A host without the identity binds had no other way to
+  release such custody.
+- CM v2.9 uses measured gamut vertices for P3 600-, 1000- and 2000-nit
+  targets at 0.005-nit black, correcting near-black chroma and highlight
+  desaturation without changing the tone curve. Unsupported vertices and
+  targets retain the analytic mapping.
+
 - A plurxd restart no longer fences every source-reading job in the cluster
   until a host reboot. A restart during a read left that owner's custody
   stranded. A new daemon now releases it when the old daemon's whole PID
@@ -268,6 +286,18 @@ bump may break compatibility and a **patch** bump never does.
   removed path is not `path_unreadable`; an unreadable chain or an empty mount
   point is, and removes nothing. The connection test advertises
   `"features": ["removed_paths"]`.
+- Offload: when Curator deletes a title's files to free disk, plurx keeps the
+  item, its metadata and its watch history, greyed out with an Offloaded badge.
+  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
+  connection test lists `offload`), an item is flagged `offloaded` only when no
+  file is left, and no prune ever deletes one. Library lists take
+  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
+  in the web, Apple and Android clients); search always includes them, flagged.
+  An administrator's **Get it back** asks Curator for the title again
+  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
+  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
+  kept item by the request's ids and clear the flag. Deploy every cinema node
+  before Curator sends offload. [Contract](docs/INTEGRATION.md).
 - `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
   say which media files left a folder (a Re-match). Such a request probes
   exactly its expected and removed paths, walks nothing else, never becomes a

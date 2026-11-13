@@ -731,6 +731,7 @@ const TABLES: &[TablePlan] = &[
             "book_work_id",
             "book_edition_id",
             "book_metadata_source",
+            "offloaded_at",
         ],
         order_by: "id",
         minimum_schema: 13,
@@ -1829,6 +1830,25 @@ const TABLES: &[TablePlan] = &[
         columns: &["library_id", "root_path", "domain_id"],
         order_by: "library_id, root_path",
         minimum_schema: super::background_jobs_resources::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_storage_domain_pending",
+        columns: &[
+            "singleton",
+            "revision",
+            "mappings_json",
+            "base_json",
+            "saved_at_ms",
+            "saved_by",
+            "state",
+            "settled_at_ms",
+            "settled_reason",
+        ],
+        order_by: "singleton",
+        minimum_schema: super::storage_domain_pending::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -3578,6 +3598,9 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                         "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
                     )
                     && schema_version < 21)
+                || (table.name == "items"
+                    && *column == "offloaded_at"
+                    && schema_version < super::offload::SQLITE_INTRODUCED_SCHEMA)
                 || (table.name == "offline_packages"
                     && *column == "audio_recipe"
                     && schema_version < super::sqlite::OFFLINE_AUDIO_RECIPE_SCHEMA)

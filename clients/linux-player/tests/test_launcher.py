@@ -189,6 +189,9 @@ class Seeking(LauncherCase):
         self.assertEqual(after[0]["body"]["position_ms"], 560_000, "the new origin is taken")
         later = [r for r in s.calls("POST", pattern=r"/control$") if r["at"] > 6]
         self.assertTrue(later and all(r["path"] == f"/api/v1/hls/{second}/control" for r in later))
+        self.assertEqual([r["body"]["sequence"] for r in later], list(range(1, len(later) + 1)))
+        self.assertTrue(all(r["body"]["generation"] == s.sessions[1]["control"]["generation"]
+                            for r in later))
         self.assertEqual(s.index("DELETE", rf"/hls/{second}$") > release_first, True)
 
     def test_seek_inside_the_range_stays_in_the_session(self):

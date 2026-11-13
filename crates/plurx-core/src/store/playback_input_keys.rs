@@ -49,7 +49,7 @@ pub const PLAYBACK_INPUT_EXTRA_KEYS: [&str; 6] = [
 /// A copy of the `plurxd` planning list (`QUALITY_PLANNING_KEYS`), so the
 /// store-contract test can write every key. A `plurxd` test pins it equal to
 /// that list; D3b widens both together.
-pub const PLAYBACK_PLANNING_KEYS: [&str; 25] = [
+pub const PLAYBACK_PLANNING_KEYS: [&str; 36] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::DV_HDR_PROCESSING,
@@ -75,6 +75,21 @@ pub const PLAYBACK_PLANNING_KEYS: [&str; 25] = [
     keys::HLS_SCRATCH_MAX_BYTES,
     keys::VOD_OUTPUT_PREPARATION,
     keys::VOD_ROLLING_RETENTION,
+    // D3b (§4.2): the settings the create chain read after the snapshot,
+    // so the one plan answers them. `vod_settings`' admission policy:
+    keys::VOD_PRESENTATION,
+    keys::VOD_WORKING_SET_BYTES,
+    keys::VOD_BLOCK_BUDGET_SECS,
+    keys::VOD_MATERIALIZE_BUDGET_SECS,
+    keys::VOD_BLOCKED_GET_CAP,
+    keys::VOD_INDEX_CLUSTER_CACHE,
+    keys::HEVC_UNVERIFIED_COPY,
+    keys::VOD_LIVE_RECOVERY,
+    // the recorded playlist shape (`cluster_playlist_is_typeless`):
+    keys::HLS_TYPELESS_SLIDING,
+    keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+    // and placement (`remote_placement_ready`).
+    keys::CLUSTER_MEDIA_POOL_ENABLED,
 ];
 
 /// Whether a write to `key` moves `playback_input_generation`: the original

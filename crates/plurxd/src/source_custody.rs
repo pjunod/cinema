@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
+mod diagnostics;
 mod recovery;
 
 pub(crate) fn configure_recovery_backend(
@@ -73,21 +74,78 @@ pub(crate) fn note_process_start() {
 
 /// Wall-clock start of this daemon process; `None` only before
 /// `note_process_start` (test binaries).
+#[cfg(target_os = "linux")]
 pub(crate) fn process_started_ms() -> Option<i64> {
     PROCESS_STARTED_MS.get().copied()
 }
 
-static PROCESS_SOURCE_BOOT: OnceLock<uuid::Uuid> = OnceLock::new();
-
-/// The boot id this process stamps on every foreground owner it registers.
-/// A host census uses it to prove a dead owner belonged to another process.
-pub(crate) fn note_process_source_boot(boot_id: uuid::Uuid) {
-    PROCESS_SOURCE_BOOT.get_or_init(|| boot_id);
+/// Configure the process-wide verifier once from startup's canonical managed
+/// roots. Unit AppStates do not mutate this registry or inherit test roots.
+pub(crate) fn configure_access_roots(
+    config: &plurx_core::config::Config,
+    dirs: &crate::state::Dirs,
+) -> Result<(), String> {
+    let owned = vec![
+        config.storage.data_dir.clone(),
+        dirs.artwork.clone(),
+        dirs.transcode.clone(),
+        dirs.cache.clone(),
+        dirs.subs.clone(),
+        dirs.runtime_cache.clone(),
+        dirs.renditions.clone(),
+    ];
+    let mut tools = Vec::new();
+    for directory in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+        if let Ok(path) = std::fs::canonicalize(directory) {
+            tools.push(path);
+        }
+    }
+    let search: Vec<_> = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .collect();
+    for program in [
+        crate::ffmpeg::ffmpeg_bin(),
+        crate::ffmpeg::ffprobe_bin(),
+        crate::ffmpeg::bound_ffprobe_bin(),
+        "dovi_tool".into(),
+        "mkvmerge".into(),
+        "nvidia-smi".into(),
+        "vainfo".into(),
+        "vulkaninfo".into(),
+    ] {
+        let path = Path::new(&program);
+        let found = if path.components().count() > 1 {
+            std::fs::canonicalize(path).ok()
+        } else {
+            search
+                .iter()
+                .map(|directory| directory.join(path))
+                .find(|candidate| candidate.is_file())
+                .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+        };
+        if let Some(parent) = found.as_deref().and_then(Path::parent) {
+            tools.push(parent.to_owned());
+        }
+    }
+    if let Ok(executable) = std::env::current_exe().and_then(std::fs::canonicalize) {
+        if let Some(parent) = executable.parent() {
+            tools.push(parent.to_owned());
+        }
+    }
+    // Daemon-created executable snapshots live in this managed runtime cache.
+    tools.push(dirs.runtime_cache.clone());
+    plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
+        .map_err(|error| error.to_string())
 }
 
-/// `None` when this process has never registered foreground sources.
-pub(crate) fn process_source_boot() -> Option<uuid::Uuid> {
-    PROCESS_SOURCE_BOOT.get().copied()
+/// Local observations only; source recovery never uses these diagnostics as proof.
+pub(crate) fn recovery_status(store: &Arc<dyn Store>) -> serde_json::Value {
+    recovery::status(store)
+}
+
+pub(crate) fn launch_prometheus() -> String {
+    diagnostics::prometheus()
 }
 
 /// Bind the exact inode an enrolled owner opened to its live witness, so a
@@ -836,6 +894,12 @@ impl SourceIdentity {
         incarnation: uuid::Uuid,
         policy: ForegroundSourcePolicy,
     ) -> SourceRequest {
+        use sha2::{Digest, Sha256};
+        let mut identity = Sha256::new();
+        identity.update(file.id.to_le_bytes());
+        identity.update(file.size.to_le_bytes());
+        identity.update(file.mtime.to_le_bytes());
+        identity.update(file.path.as_os_str().to_string_lossy().as_bytes());
         SourceRequest {
             file: file.clone(),
             store,
@@ -849,23 +913,11 @@ impl SourceIdentity {
                 file_id: file.id,
                 source_size: file.size,
                 source_mtime: file.mtime,
-                source_generation: source_generation(file),
+                source_generation: hex::encode(identity.finalize()),
                 policy,
             },
         }
     }
-}
-
-/// The exact source a foreground owner binds: file row identity, size,
-/// mtime and path. Registration and dead-owner recovery derive it here alone.
-pub(crate) fn source_generation(file: &MediaFile) -> String {
-    use sha2::{Digest, Sha256};
-    let mut identity = Sha256::new();
-    identity.update(file.id.to_le_bytes());
-    identity.update(file.size.to_le_bytes());
-    identity.update(file.mtime.to_le_bytes());
-    identity.update(file.path.as_os_str().to_string_lossy().as_bytes());
-    hex::encode(identity.finalize())
 }
 
 pub(crate) struct SourceCustody {
@@ -1020,13 +1072,6 @@ impl SourceRequest {
         // returning a guard that can open input; an uncertain activation never
         // authorizes a read. The existing owner resolves and retries settlement.
         activate_foreground_with_journal(&self.store, token.clone()).await?;
-        // The inode this path names as the owner is armed, before any input
-        // opens it. A later host census refuses a path that names another.
-        if let Err(error) = recovery::record_foreground_source(&self.store, &token, &self.file.path)
-        {
-            tracing::warn!(%error, owner_id = %token.owner.owner_id,
-                "playback source identity not recorded; only a host reboot can prove this reader stopped");
-        }
         source_pressure_changed().notify_waiters();
         let (commands, receiver) = mpsc::unbounded_channel();
         let reads = Arc::new(ReadActivity::default());

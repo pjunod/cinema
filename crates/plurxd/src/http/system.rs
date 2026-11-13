@@ -6663,7 +6663,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &crate::background_jobs::analysis_reconcile::prometheus() + &crate::state::analysis_completed_prometheus(&state.node_id) + &state.clock.prometheus() + &crate::source_custody::launch_prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();

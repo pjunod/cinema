@@ -2041,14 +2041,24 @@ async fn item_by_external_id_matches_the_or_statement() {
 async fn library_pages_read_top_level_items_from_the_title_index() {
     use rusqlite::types::Value;
     let store = SqliteStore::open_in_memory().expect("open");
-    for sort in [
+    // The default grid is the OnDisk one, so its plan is held to the same
+    // index as the unfiltered page.
+    let sorts = [
         ItemSort::Title,
         ItemSort::Added,
         ItemSort::Year,
         ItemSort::Resolution,
         ItemSort::Recorded,
-    ] {
-        let (count, page) = super::library_page_statements(crate::store::item_sort_order_by(sort));
+    ];
+    for (sort, presence) in sorts.into_iter().flat_map(|sort| {
+        [
+            crate::domain::ItemPresence::Everything,
+            crate::domain::ItemPresence::OnDisk,
+        ]
+        .map(move |presence| (sort, presence))
+    }) {
+        let (count, page) =
+            super::library_page_statements(crate::store::item_sort_order_by(sort), presence);
         for genre in [Value::Null, Value::Text("Drama".into())] {
             let count_plan = plan_of(
                 &store,
@@ -2059,7 +2069,7 @@ async fn library_pages_read_top_level_items_from_the_title_index() {
             assert_eq!(
                 count_plan.first().map(String::as_str),
                 Some("SEARCH items USING INDEX idx_items_top_level_title (library_id=?)"),
-                "{sort:?} count: {count_plan:?}"
+                "{sort:?}/{presence:?} count: {count_plan:?}"
             );
             let page_plan = plan_of(
                 &store,
@@ -2075,7 +2085,7 @@ async fn library_pages_read_top_level_items_from_the_title_index() {
             assert_eq!(
                 page_plan.first().map(String::as_str),
                 Some("SEARCH items USING INDEX idx_items_top_level_title (library_id=?)"),
-                "{sort:?} page: {page_plan:?}"
+                "{sort:?}/{presence:?} page: {page_plan:?}"
             );
             if sort == ItemSort::Title {
                 assert!(

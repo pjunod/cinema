@@ -5,9 +5,58 @@
 //! runtime environment, descriptor inheritance, piped stdio, kill-on-drop,
 //! and Windows Job Object attachment.
 
+#[cfg(unix)]
+use plurx_core::process::source_lifetime::InheritedFd;
+pub(crate) use plurx_core::process::source_lifetime::{DescriptorManifest, StdioFacts, StdioMode};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+
+#[derive(Clone, Copy)]
+pub(crate) enum ChildStdio<'a> {
+    Null,
+    Piped,
+    // The file-stdio boundary is exercised by the descriptor contract tests;
+    // current production launches use Null/Piped. Keep its audit in the builder.
+    #[cfg_attr(not(test), allow(dead_code))]
+    File(&'a std::fs::File),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ChildStdios<'a> {
+    pub(crate) stdin: ChildStdio<'a>,
+    pub(crate) stdout: ChildStdio<'a>,
+    pub(crate) stderr: ChildStdio<'a>,
+}
+impl ChildStdios<'_> {
+    pub(crate) const CAPTURED: Self = Self {
+        stdin: ChildStdio::Null,
+        stdout: ChildStdio::Piped,
+        stderr: ChildStdio::Piped,
+    };
+}
+
+/// Bind only after all command configuration, in the exact synchronous launch
+/// scope. A future must call this at its actual spawn, not while being created.
+pub(crate) fn with_manifest<T>(
+    manifest: &Arc<DescriptorManifest>,
+    command: &mut tokio::process::Command,
+    launch: impl FnOnce(&mut tokio::process::Command) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    manifest.bind(command.as_std())?;
+    plurx_core::process::source_lifetime::with_descriptors(Arc::clone(manifest), || launch(command))
+}
+
+#[cfg(test)]
+pub(crate) fn with_std_manifest<T>(
+    manifest: &Arc<DescriptorManifest>,
+    command: &mut std::process::Command,
+    launch: impl FnOnce(&mut std::process::Command) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    manifest.bind(command)?;
+    plurx_core::process::source_lifetime::with_descriptors(Arc::clone(manifest), || launch(command))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Progress {
@@ -22,6 +71,8 @@ pub(crate) struct Descriptors {
     inherited: Vec<(std::os::fd::RawFd, i32)>,
     #[cfg(unix)]
     output_is_cwd: bool,
+    #[cfg(unix)]
+    cwd_target: Option<i32>,
     #[cfg(windows)]
     handoffs: Vec<WindowsPathHandoff>,
 }
@@ -41,6 +92,7 @@ impl Descriptors {
         Self {
             inherited,
             output_is_cwd,
+            cwd_target: None,
         }
     }
 
@@ -75,12 +127,148 @@ impl Descriptors {
     }
 
     #[cfg(unix)]
-    fn configure(&self, command: &mut tokio::process::Command) {
-        crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(
-            command,
-            &self.inherited,
-            self.output_is_cwd.then_some(4),
-        );
+    pub(crate) fn from_mappings(
+        mappings: &[(std::os::fd::RawFd, i32)],
+        cwd_target: Option<i32>,
+    ) -> Self {
+        Self {
+            inherited: mappings.to_vec(),
+            output_is_cwd: false,
+            cwd_target,
+        }
+    }
+
+    /// Inline plans are for the decoder's custom exec hook: every descriptor
+    /// is pinned before fork; inherit is allocation-free and may run there.
+    #[cfg(unix)]
+    pub(crate) fn prepare_inline(
+        &self,
+        stdio: StdioFacts,
+    ) -> std::io::Result<Arc<DescriptorManifest>> {
+        let inherited = self
+            .inherited
+            .iter()
+            .map(|&(source, target)| InheritedFd::duplicate_raw(source, target))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        DescriptorManifest::new(inherited, stdio, self.effective_cwd()).map(Arc::new)
+    }
+
+    #[cfg(unix)]
+    fn effective_cwd(&self) -> Option<i32> {
+        if self.output_is_cwd && cfg!(target_os = "macos") {
+            return Some(4);
+        }
+        self.cwd_target
+    }
+
+    /// The only ordinary daemon descriptor-install hook. Security hooks with a
+    /// custom exec use prepare_inline and invoke the same prepared plan there.
+    pub(crate) fn install(manifest: &Arc<DescriptorManifest>, command: &mut std::process::Command) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let manifest = Arc::clone(manifest);
+            // SAFETY: the prepared plan performs only descriptor syscalls.
+            unsafe {
+                command.pre_exec(move || manifest.inherit());
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (manifest, command);
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        command: &mut tokio::process::Command,
+        stdio: ChildStdios<'_>,
+    ) -> std::io::Result<Arc<DescriptorManifest>> {
+        self.prepare_std(command.as_std_mut(), stdio)
+    }
+
+    pub(crate) fn prepare_std(
+        &self,
+        command: &mut std::process::Command,
+        stdio: ChildStdios<'_>,
+    ) -> std::io::Result<Arc<DescriptorManifest>> {
+        #[cfg(unix)]
+        let mut inherited = self
+            .inherited
+            .iter()
+            .map(|&(source, target)| InheritedFd::duplicate_raw(source, target))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        #[cfg(not(unix))]
+        let inherited = Vec::new();
+        let mut facts = StdioFacts::NULL;
+        for (target, setting) in [(0, stdio.stdin), (1, stdio.stdout), (2, stdio.stderr)] {
+            let (value, mode) = match setting {
+                ChildStdio::Null => (Stdio::null(), StdioMode::Null),
+                ChildStdio::Piped => (Stdio::piped(), StdioMode::Piped),
+                #[cfg(unix)]
+                ChildStdio::File(file) => {
+                    inherited.push(InheritedFd::duplicate(file, target)?);
+                    (Stdio::null(), StdioMode::Descriptor(target))
+                }
+                #[cfg(not(unix))]
+                ChildStdio::File(file) => (Stdio::from(file.try_clone()?), StdioMode::Inherited),
+            };
+            match target {
+                0 => {
+                    command.stdin(value);
+                    facts.stdin = mode;
+                }
+                1 => {
+                    command.stdout(value);
+                    facts.stdout = mode;
+                }
+                _ => {
+                    command.stderr(value);
+                    facts.stderr = mode;
+                }
+            }
+        }
+        #[cfg(unix)]
+        let cwd = self.effective_cwd();
+        #[cfg(not(unix))]
+        let cwd = None;
+        let manifest = Arc::new(DescriptorManifest::new(inherited, facts, cwd)?);
+        Self::install(&manifest, command);
+        Ok(manifest)
+    }
+
+    /// Compatibility for held-source callers: installing a descriptor does
+    /// not by itself verify their declaration or manufacture output identity.
+    #[cfg(unix)]
+    pub(crate) fn install_legacy(
+        command: &mut tokio::process::Command,
+        mappings: &[(std::os::fd::RawFd, i32)],
+        cwd_target: Option<i32>,
+    ) {
+        if mappings.is_empty() {
+            return;
+        }
+        plurx_core::process::source_lifetime::tag_descriptor_handoff(command);
+        let result = plurx_core::process::source_lifetime::unmediated_descriptor().and_then(|()| {
+            let plan = Self::from_mappings(mappings, cwd_target).prepare_inline(StdioFacts {
+                stdin: StdioMode::Inherited,
+                stdout: StdioMode::Inherited,
+                stderr: StdioMode::Inherited,
+            })?;
+            Self::install(&plan, command.as_std_mut());
+            Ok(())
+        });
+        if let Err(error) = result {
+            Self::reject(command.as_std_mut(), error);
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn reject(command: &mut std::process::Command, error: std::io::Error) {
+        use std::os::unix::process::CommandExt;
+        let code = error.raw_os_error().unwrap_or(libc::EIO);
+        // SAFETY: only a captured errno is returned in the child.
+        unsafe {
+            command.pre_exec(move || Err(std::io::Error::from_raw_os_error(code)));
+        }
     }
 
     #[cfg(windows)]
@@ -103,9 +291,6 @@ impl Descriptors {
             .push(WindowsPathHandoff::directory(role, directory)?);
         Ok(self)
     }
-
-    #[cfg(windows)]
-    fn configure(&self, _command: &mut tokio::process::Command) {}
 
     #[cfg(windows)]
     fn verify(&self) -> Result<(), String> {
@@ -249,16 +434,20 @@ pub(crate) fn spawn(
     for (key, value) in options.env {
         command.env(key, value);
     }
-    options.descriptors.configure(&mut command);
     options.descriptors.verify()?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, child_job) =
-        crate::process_control::spawn_job_owned(&mut command, options.work)
-            .map_err(|error| format!("spawning job-owned producer: {error}"))?;
+    let manifest = options
+        .descriptors
+        .prepare(&mut command, ChildStdios::CAPTURED)
+        .map_err(|error| format!("preparing producer descriptors: {error}"))?;
+    let (mut child, child_job) = with_manifest(&manifest, &mut command, |command| {
+        crate::process_control::spawn_job_owned(command, options.work)
+    })
+    .map_err(|error| format!("spawning job-owned producer: {error}"))?;
     let stdout = child.stdout.take().ok_or_else(|| {
         let _ = child.start_kill();
         "producer started without a stdout pipe".to_owned()
@@ -330,6 +519,21 @@ mod tests {
                 let no_color = std::env::var("AV_LOG_FORCE_NOCOLOR").expect("no color");
                 let caller = std::env::var("PLURX_CALLER_ENV").expect("caller env");
                 println!("environment={cache}|{no_color}|{caller}");
+            }
+            #[cfg(unix)]
+            Ok("custom-descriptors") => {
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut input)
+                    .expect("file stdin");
+                let mut held = String::new();
+                std::fs::File::open("/dev/fd/198")
+                    .expect("fd 198")
+                    .read_to_string(&mut held)
+                    .expect("held bytes");
+                let relative = std::fs::read_to_string("relative-marker").expect("descriptor cwd");
+                eprintln!("file-stdio-diagnostic");
+                println!("custom={input}|{held}|{relative}");
             }
             #[cfg(unix)]
             Ok("descriptors") => {
@@ -586,6 +790,66 @@ mod tests {
         .expect("spawn child");
         let (stdout, _) = output(spawned).await;
         assert!(stdout.contains("descriptors=source|output|subtitle;fd6=closed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn arbitrary_target_cwd_and_file_stdio_reach_the_exact_child() {
+        use std::os::fd::AsRawFd;
+        let directory = tempfile::tempdir().expect("child directory");
+        std::fs::write(directory.path().join("relative-marker"), "cwd-bound").expect("cwd marker");
+        let cwd = std::fs::File::open(directory.path()).expect("held cwd");
+        let mut source = tempfile::tempfile().expect("held source");
+        source.write_all(b"fd-198").expect("source bytes");
+        source.rewind().expect("rewind source");
+        let mut input = tempfile::tempfile().expect("input file");
+        input.write_all(b"file-stdin").expect("input bytes");
+        input.rewind().expect("rewind input");
+        let mut diagnostics = tempfile::tempfile().expect("diagnostics file");
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+        let mut args = child("custom-descriptors");
+        args.pop();
+        command
+            .args(args)
+            .env("PLURX_PRODUCER_CHILD_MODE", "custom-descriptors");
+        let descriptors =
+            Descriptors::from_mappings(&[(source.as_raw_fd(), 198), (cwd.as_raw_fd(), 4)], Some(4));
+        let manifest = descriptors
+            .prepare(
+                &mut command,
+                ChildStdios {
+                    stdin: ChildStdio::File(&input),
+                    stdout: ChildStdio::Piped,
+                    stderr: ChildStdio::File(&diagnostics),
+                },
+            )
+            .expect("pinned descriptors and stdio");
+        let (child, _job) = with_manifest(&manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(
+                command,
+                crate::process_control::ChildWork::background("descriptor builder test"),
+            )
+        })
+        .expect("job-owned child");
+        let output = child.wait_with_output().await.expect("joined child");
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("custom=file-stdin|fd-198|cwd-bound")
+        );
+        diagnostics.rewind().expect("rewind diagnostics");
+        let mut log = String::new();
+        diagnostics.read_to_string(&mut log).expect("file stderr");
+        assert!(log.contains("file-stdio-diagnostic"));
+        assert!(
+            Descriptors::from_mappings(
+                &[(source.as_raw_fd(), 198), (input.as_raw_fd(), 198)],
+                None
+            )
+            .prepare_inline(StdioFacts::CAPTURED)
+            .is_err(),
+            "two different capabilities cannot target the same child descriptor"
+        );
     }
 
     #[cfg(unix)]

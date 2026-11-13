@@ -11,6 +11,7 @@ use hiqlite::{Param, Row};
 
 use super::hiqlite::{database_error, HiqliteAuthStore};
 use super::hiqlite_media::{IDENTITY_REPAIR_FILE_COLS, IDENTITY_REPAIR_ITEM_COLS};
+use super::offload::MARK_KEPT_PREDICATE;
 use crate::cluster::coordination::{unix_ms, Lease};
 use crate::domain::{
     sort_title_for, ArtworkAttempt, BookMetadataPatch, Item, ItemKind, MetadataPatch, NewItem,
@@ -751,6 +752,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
                         lease.expires_at_unix_ms
                     );
                     statement_params[3] = Param::StmtOutputNamed(1, "id".into());
+                    // offload-exempt: identity repair retires one named duplicate
+                    // after moving its files to the survivor; not a leaf prune.
                     statements.push((
                         "DELETE FROM items WHERE id=$1 AND library_id=$2 AND kind=$3 AND $4=$5 \
                          AND NOT EXISTS (SELECT 1 FROM files WHERE item_id=$1) \
@@ -1839,6 +1842,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError> {
@@ -1846,6 +1851,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
             return Ok(refusal);
         }
         let ids = serde_json::to_string(gone_file_ids).map_err(database_error)?;
+        let keep_json = serde_json::to_string(offload_keep).map_err(database_error)?;
         let limit = i64::try_from(prune_limit).unwrap_or(i64::MAX);
         let statements = vec![
             (
@@ -1895,14 +1901,44 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "DELETE FROM items WHERE library_id = $1
+                // Same transaction as the delete above and the prune below.
+                // hiqlite wants placeholders to first appear in order, so the
+                // mark ($1) and the keep list ($2, in the shared predicate)
+                // come before the library.
+                format!(
+                    "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $1)
+                     WHERE {MARK_KEPT_PREDICATE}
+                       AND library_id = $3
+                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $3)
+                       AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $4
+                         AND owner_node_id = $5 AND fence = $6 AND revision = $7
+                         AND expires_at_ms = $8)"
+                ),
+                params!(
+                    offloaded_at,
+                    keep_json.as_str(),
+                    library_id,
+                    lease.resource.as_str(),
+                    lease.owner_node_id.as_str(),
+                    lease_i64("fence", lease.fence)?,
+                    lease_i64("revision", lease.revision)?,
+                    lease.expires_at_unix_ms
+                ),
+            ),
+            (
+                // The lease fence precedes the shared predicate so that the
+                // statement is one literal the placeholder census judges
+                // whole; the conjuncts are order-independent.
+                concat!(
+                    "DELETE FROM items WHERE library_id = $1
                  AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)
-                 AND kind IN ('movie','episode','video','photo','book','audiobook')
-                 AND id NOT IN (SELECT item_id FROM files)
                  AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $2
                    AND owner_node_id = $3 AND fence = $4 AND revision = $5
-                   AND expires_at_ms = $6)"
-                    .to_owned(),
+                   AND expires_at_ms = $6)
+                 AND ",
+                    crate::store::offload::fileless_prunable_leaf!()
+                )
+                .to_owned(),
                 reconcile_lease_params(library_id, lease)?,
             ),
             (

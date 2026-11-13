@@ -3519,15 +3519,35 @@ async fn a_node_without_a_vote_dispatches_no_scheduler_tick() {
         Pipeline::Cpu,
     ));
 
+    let revision = store
+        .save_storage_domains(vec![], None, clock_ms())
+        .await
+        .expect("save desired storage domains")
+        .expect("valid empty mappings");
     assert!(
         !jobs.schedule_tick(&transcode).await,
         "a node with no vote must not dispatch a scheduler tick"
     );
 
+    let pending = store
+        .storage_domain_state(clock_ms())
+        .await
+        .expect("pending state");
+    assert_eq!(pending.pending.as_ref().expect("saved").state, "pending");
     authority.promote();
     assert!(
         jobs.schedule_tick(&transcode).await,
         "and the same manager, never restarted, dispatches once it has a vote"
+    );
+    let domains = store
+        .storage_domain_state(clock_ms())
+        .await
+        .expect("applied state");
+    let applied = domains.pending.expect("saved revision");
+    assert_eq!(applied.revision, revision);
+    assert_eq!(
+        applied.state, "applied",
+        "only the promoted scheduler applies it"
     );
 }
 

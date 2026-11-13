@@ -418,7 +418,8 @@ fn id_filter(column: &str, only: Option<&[i64]>) -> Option<String> {
 /// lets SQLite read them from the partial `idx_items_top_level_title`
 /// (K-05 M5): a partial index serves only a query whose `WHERE` contains the
 /// index's own `WHERE` term.
-fn library_page_statements(order: &str) -> (String, String) {
+fn library_page_statements(order: &str, presence: crate::domain::ItemPresence) -> (String, String) {
+    let presence = presence.sql();
     const GENRE_COUNT: &str = "(?2 IS NULL OR EXISTS ( \
          SELECT 1 FROM json_each(items.genres) WHERE value = ?2 COLLATE NOCASE))";
     const GENRE_PAGE: &str = "(?4 IS NULL OR EXISTS ( \
@@ -433,11 +434,12 @@ fn library_page_statements(order: &str) -> (String, String) {
     (
         format!(
             "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
-             {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT}"
+             {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT} AND {presence}"
         ),
         format!(
             "SELECT {ITEM_COLS} FROM items
              WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_PAGE}
+               AND {presence}
              ORDER BY {order} LIMIT ?3 OFFSET ?2"
         ),
     )
@@ -501,6 +503,92 @@ impl MediaStore for SqliteStore {
                 ),
                 params![library_id, title, year],
             )?)
+        })
+        .await
+    }
+
+    async fn find_offloaded_movie(
+        &self,
+        library_id: i64,
+        tmdb_id: Option<i64>,
+        imdb_id: Option<&str>,
+    ) -> Result<Option<Item>, StoreError> {
+        let imdb_id = imdb_id.map(str::to_owned);
+        self.with_conn(move |conn| {
+            Ok(find_by(
+                conn,
+                &format!(
+                    "SELECT {ITEM_COLS} FROM items
+                     WHERE library_id = ?1 AND kind = 'movie' AND offloaded_at IS NOT NULL
+                       AND ((?2 IS NOT NULL AND tmdb_id = ?2) OR (?3 IS NOT NULL AND imdb_id = ?3))
+                     ORDER BY id LIMIT 1"
+                ),
+                params![library_id, tmdb_id, imdb_id],
+            )?)
+        })
+        .await
+    }
+
+    async fn find_offloaded_episode(
+        &self,
+        library_id: i64,
+        series_tmdb_id: i64,
+        season_number: i32,
+        episode_number: i32,
+    ) -> Result<Option<Item>, StoreError> {
+        self.with_conn(move |conn| {
+            Ok(find_by(
+                conn,
+                &format!(
+                    "SELECT {} FROM items e
+                     JOIN items s ON s.id = e.parent_id AND s.kind = 'season'
+                     JOIN items sh ON sh.id = s.parent_id AND sh.kind = 'show'
+                     WHERE e.library_id = ?1 AND e.kind = 'episode'
+                       AND e.offloaded_at IS NOT NULL
+                       AND sh.tmdb_id = ?2 AND s.season_number = ?3 AND e.episode_number = ?4
+                     ORDER BY e.id LIMIT 1",
+                    item_cols("e")
+                ),
+                params![library_id, series_tmdb_id, season_number, episode_number],
+            )?)
+        })
+        .await
+    }
+
+    async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let ids = serde_json::to_string(ids).map_err(|e| StoreError::Task(e.to_string()))?;
+        self.with_read(move |conn| {
+            // One expression from prepare to bind, so the placeholder census
+            // reads the statement's `?1` against its single bound value.
+            let rows = conn
+                .prepare(
+                    "WITH RECURSIVE tree(root, id) AS (
+                     SELECT id, id FROM items WHERE id IN (SELECT value FROM json_each(?1))
+                     UNION
+                     SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
+                 )
+                 SELECT t.root, SUM(i.offloaded_at IS NOT NULL), COUNT(*)
+                 FROM tree t JOIN items i ON i.id = t.id
+                 WHERE i.kind IN ('movie', 'episode')
+                 GROUP BY t.root HAVING SUM(i.offloaded_at IS NOT NULL) > 0",
+                )?
+                .query_map(params![ids], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        crate::domain::LeafOffload {
+                            offloaded: row.get::<_, i64>(1)?,
+                            leaves: row.get::<_, i64>(2)?,
+                        },
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows.into_iter().collect())
         })
         .await
     }
@@ -881,17 +969,18 @@ impl MediaStore for SqliteStore {
         .await
     }
 
-    async fn list_top_items_in_genre(
+    async fn list_top_items_filtered(
         &self,
         library_id: i64,
         sort: ItemSort,
         offset: i64,
         limit: i64,
         genre: Option<&str>,
+        presence: crate::domain::ItemPresence,
     ) -> Result<ItemPage, StoreError> {
         let genre = genre.map(str::to_owned);
         self.with_read_txn(move |conn| {
-            let (count_sql, page_sql) = library_page_statements(item_sort_order_by(sort));
+            let (count_sql, page_sql) = library_page_statements(item_sort_order_by(sort), presence);
             super::trace_statement("list_top_items_in_genre.count", &count_sql);
             let total: i64 =
                 conn.query_row(&count_sql, params![library_id, genre], |row| row.get(0))?;
@@ -1507,6 +1596,7 @@ impl MediaStore for SqliteStore {
                 "SELECT {i} FROM items i
                  JOIN libraries l ON l.id = i.library_id AND l.kind != 'home'
                  WHERE i.kind IN ('movie','show') AND (?2 = 1 OR i.metadata_at IS NULL)
+                   AND i.offloaded_at IS NULL
                    AND (?1 IS NULL OR i.library_id = ?1){narrow}
                  ORDER BY i.id",
                 i = item_cols("i")
@@ -1562,6 +1652,7 @@ impl MediaStore for SqliteStore {
                    )
                    AND (i.artwork_attempted_at IS NULL
                         OR i.artwork_attempted_at <= unixepoch() - ?2)
+                   AND i.offloaded_at IS NULL
                    AND (?1 IS NULL OR i.library_id = ?1)
                  ORDER BY i.artwork_attempted_at, i.id
                  LIMIT ?3",
@@ -1844,7 +1935,7 @@ impl MediaStore for SqliteStore {
         keys: &[&str],
     ) -> Result<Option<crate::store::PlaybackPlanningSnapshot>, StoreError> {
         self.note_settings_read(keys);
-        let keys = crate::store::selected_settings_json(keys)?;
+        let keys = crate::store::selected_planning_keys_json(keys)?;
         self.with_read(move |conn| {
             conn.query_row(&format!("SELECT {FILE_COLS}, probe_json AS planning_probe, \
                 (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
@@ -2557,12 +2648,15 @@ impl MediaStore for SqliteStore {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError> {
         if let Some(refusal) = crate::store::reconcile_payload_refusal(gone_file_ids, prune_limit) {
             return Ok(refusal);
         }
         let root_fingerprint = root_fingerprint.to_owned();
         let ids = gone_file_ids.to_vec();
+        let keep = offload_keep.to_vec();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let expected: Option<String> = tx
@@ -2603,11 +2697,13 @@ impl MediaStore for SqliteStore {
                     deleted_files += delete.execute(params![id, library_id])? as u64;
                 }
             }
+            crate::store::offload::mark_kept_fileless(&tx, library_id, &keep, offloaded_at)?;
             let mut pruned_items = 0_u64;
             pruned_items += tx.execute(
-                "DELETE FROM items WHERE library_id = ?1 \
-                 AND kind IN ('movie','episode','video','photo','book','audiobook') \
-                 AND id NOT IN (SELECT item_id FROM files)",
+                concat!(
+                    "DELETE FROM items WHERE library_id = ?1 AND ",
+                    crate::store::offload::fileless_prunable_leaf!()
+                ),
                 params![library_id],
             )? as u64;
             pruned_items += tx.execute(
@@ -2735,9 +2831,10 @@ pub(super) fn prune_empty_items_in(tx: &Connection, library_id: i64) -> Result<u
     let mut removed = 0u64;
     // Bottom-up: file-less leaves, then empty seasons, then empty shows.
     removed += tx.execute(
-        "DELETE FROM items
-         WHERE library_id = ?1 AND kind IN ('movie','episode','video','photo','book','audiobook')
-           AND id NOT IN (SELECT item_id FROM files)",
+        concat!(
+            "DELETE FROM items WHERE library_id = ?1 AND ",
+            crate::store::offload::fileless_prunable_leaf!()
+        ),
         params![library_id],
     )? as u64;
     removed += tx.execute(
