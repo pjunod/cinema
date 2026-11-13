@@ -239,6 +239,18 @@ sudo rm /run/plurx-physical-stop/source-census-v1/<uuid>.json
 
 The container needs the existing read-only bind of `/run/plurx-physical-stop`.
 
+A witness from an earlier boot of the same machine is censused too. Legacy
+reboot recovery needs the host identity binds, and a host without them writes
+its v1 record with no identity, which a reboot can never verify. The helper
+then reads the machine's own journal (`journalctl --list-boots`). It requires
+the witness's boot to be listed there and to have ended before the current
+boot began, so no process of that kernel survives. It records that boot as
+`prior_boot` in the proof. The daemon accepts a witness from another kernel
+only when the proof names exactly that boot. The census itself must still have
+run on the daemon's current kernel, and every other check is unchanged. A
+cloned data directory on another machine cannot claim boots from this
+machine's journal.
+
 ## 2. The journal never impersonates an activation or completed join
 
 [Recovery replay](../../crates/plurxd/src/source_custody/recovery.rs) uses

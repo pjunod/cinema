@@ -337,6 +337,25 @@ def census(source: Path, anchor: Path, daemon=None, lease_expires_ms=None, roots
     return st, observed
 
 
+def ended_boot(witness_kernel, current_boot):
+    """The witness's kernel boot, shown by this machine's own journal to have
+    ended before the current boot began: no process of it survives here. The
+    journal is the machine's own, so a cloned data directory on another host
+    cannot claim this machine's boots."""
+    require(witness_kernel.startswith("linux:"), "witness kernel is not a Linux boot")
+    witness = uuid.UUID(witness_kernel[len("linux:"):]).hex
+    listed = subprocess.run(["journalctl", "--list-boots", "--output=json", "--no-pager"],
+                            check=True, capture_output=True, text=True).stdout
+    boots = {boot["boot_id"]: boot for boot in json.loads(listed)}
+    old, current = boots.get(witness), boots.get(uuid.UUID(current_boot).hex)
+    require(old is not None and current is not None,
+            "this machine's journal does not list the witness's boot")
+    require(witness != uuid.UUID(current_boot).hex
+            and old["last_entry"] < current["first_entry"],
+            "the witness's boot had not ended before this boot began")
+    return {"kernel_instance": witness_kernel}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--custody", required=True)
@@ -356,7 +375,10 @@ def main():
     require(evidence.get("version") == 2 and evidence.get("reader_model") == "daemon_mediated_v1",
             "unsupported witness")
     boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    require(evidence["kernel_instance"] == f"linux:{boot}", "witness is from another kernel boot")
+    # A witness from an earlier boot of this machine: that kernel's processes
+    # are all gone, which the journal proves. The census still runs below.
+    prior_boot = None if evidence["kernel_instance"] == f"linux:{boot}" \
+        else ended_boot(evidence["kernel_instance"], boot)
     token = evidence["record"]["token"]
     require(token["custody_id"] == args.custody and token["owner"]["kind"] == "job",
             "witness owner is not this custody's job")
@@ -375,7 +397,9 @@ def main():
     if opened.exists():
         device, inode = map(int, opened.read_text().split())
         current = os.stat(args.source)
-        require((current.st_dev, current.st_ino) == (device, inode),
+        # A later boot can mount the same export under another device number;
+        # the file server's inode still names the file the owner opened.
+        require(current.st_ino == inode and (prior_boot is not None or current.st_dev == device),
                 "source path no longer names the inode the owner opened")
     # Teardown evidence is what the daemon needs when the owner's job row,
     # and with it the exact source binding, is gone.
@@ -390,7 +414,7 @@ def main():
     require((first_st.st_ino, first_st.st_size, first_st.st_mtime_ns)
             == (second_st.st_ino, second_st.st_size, second_st.st_mtime_ns), "source changed")
     proof = {
-        "version": 1, "model": MODEL, "kernel_instance": evidence["kernel_instance"],
+        "version": 1, "model": MODEL, "kernel_instance": f"linux:{boot}",
         "owner": {"custody_id": args.custody, "job_id": job["job_id"], "node_id": job["node_id"],
                   "boot_id": job["boot_id"], "claim_id": job["claim_id"], "fence": job["fence"]},
         "anchor": {"device": anchor_st.st_dev, "inode": anchor_st.st_ino,
@@ -399,6 +423,8 @@ def main():
                    "mtime": int(second_st.st_mtime)},
         "passes": [first, second],
     }
+    if prior_boot is not None:
+        proof["prior_boot"] = prior_boot
     quiet = all(sb["readers"] == 0 and sb["writers"] == 0 for p in proof["passes"] for sb in p["superblocks"]) \
         and all(p[k] == 0 for p in proof["passes"] for k in ("anchor_locks", "silly_renames", "path_references"))
     torn_down = all(all(p["owner_teardown"][k] == 0 for k in (

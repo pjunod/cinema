@@ -3,6 +3,8 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 const KERNEL: &str = "linux:source-census-test";
+/// The same machine's kernel after a reboot.
+const REBOOTED: &str = "linux:source-census-rebooted";
 /// A network superblock the daemon mounts besides the census's.
 const STORAGE: u64 = 66;
 
@@ -151,13 +153,24 @@ impl Dead {
         process_started_ms: i64,
         namespace_init: Option<u64>,
     ) -> Result<(), String> {
+        self.apply_on(KERNEL, proof, process_started_ms, namespace_init)
+            .await
+    }
+    /// Apply as a daemon running on `kernel`.
+    async fn apply_on(
+        &self,
+        kernel: &str,
+        proof: &Proof,
+        process_started_ms: i64,
+        namespace_init: Option<u64>,
+    ) -> Result<(), String> {
         apply(
             &self.store,
             &self.witnesses,
             &self.legacy,
             &self.job().node_id,
             &Context {
-                kernel: KERNEL,
+                kernel,
                 process_started_ms,
                 now_ms: self.lease + 5_000,
                 namespace_init,
@@ -444,4 +457,65 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
         .expect("a proved teardown releases");
     assert_eq!(dead.held(), 0);
     assert!(!dead.anchor.exists(), "the worker clears its own witness");
+}
+
+#[tokio::test]
+async fn a_census_after_a_reboot_releases_a_witness_from_the_ended_boot() {
+    // 2026-11-13: a daemon restart stranded a transcode prepare's custody and
+    // the host then rebooted. Its legacy record carried no host identity, and
+    // every same-kernel check refused the witness, so no path released it.
+    let dead = dead_owner().await;
+    let started = dead.lease + 500;
+    let refused = |result: Result<(), String>, reason: &str| {
+        let error = result.expect_err(reason);
+        assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
+    };
+    let after_reboot = |ended: Option<&str>| {
+        let mut proof = dead.proof(0);
+        proof.kernel_instance = REBOOTED.into();
+        proof.prior_boot = ended.map(|kernel| PriorBoot {
+            kernel_instance: kernel.into(),
+        });
+        proof
+    };
+    // A later kernel's census that does not name the witness's boot as ended.
+    refused(
+        dead.apply_on(REBOOTED, &after_reboot(None), started, None)
+            .await,
+        "exact dead-owner witness differ",
+    );
+    // Another boot ended; the witness's did not.
+    refused(
+        dead.apply_on(
+            REBOOTED,
+            &after_reboot(Some("linux:another-boot")),
+            started,
+            None,
+        )
+        .await,
+        "exact dead-owner witness differ",
+    );
+    // A census taken on another kernel than this daemon's.
+    refused(
+        dead.apply(&after_reboot(Some(KERNEL)), started).await,
+        "stale, partial or nonzero",
+    );
+    // The owner recorded its source on the earlier boot's device number; the
+    // same export mounted after the reboot carries another one.
+    let sidecar = dead
+        .witnesses
+        .join(format!("background-{}.source", dead.token.custody_id));
+    private(
+        &sidecar,
+        format!("{} {}", dead.source.dev() + 13, dead.source.ino()).as_bytes(),
+    );
+    // A different file (another inode) is still not the owner's source.
+    let mut elsewhere = after_reboot(Some(KERNEL));
+    elsewhere.source.inode += 1;
+    refused(dead.apply_on(REBOOTED, &elsewhere, started, None).await, "");
+    assert_eq!(dead.held(), 1, "every refusal keeps the custody");
+    dead.apply_on(REBOOTED, &after_reboot(Some(KERNEL)), started, None)
+        .await
+        .expect("the witness's boot ended, and the source is quiescent");
+    assert_eq!(dead.held(), 0);
 }
