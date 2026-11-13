@@ -1424,6 +1424,7 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn quiet_for_veto() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 }

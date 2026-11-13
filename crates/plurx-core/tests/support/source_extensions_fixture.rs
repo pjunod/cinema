@@ -564,6 +564,86 @@ fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
+/// Rewind an owned, empty v131 storage-domain extension to published v130.
+/// Desired configuration is user data, including an already settled revision,
+/// so no pending-table row may be discarded by a historical fixture.
+fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture storage domain pending ordinal");
+    if version <= 130 {
+        return;
+    }
+    assert_eq!(
+        version, 131,
+        "only the published v131 storage domain tail may be rewound"
+    );
+    let shape_sql = "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (
+        name IN ('background_storage_domain_pending','background_storage_domains_live',
+        'background_storage_domain_changed_roots','background_storage_domain_disturbed',
+        'background_storage_domain_holders','background_storage_domain_affected_jobs',
+        'background_storage_domains_apply','background_storage_domain_pending_schema')
+        OR tbl_name IN ('background_storage_domain_pending','background_storage_domain_pending_schema'))
+        ORDER BY type,name";
+    let objects = |catalogue: &rusqlite::Connection| -> Vec<(String, String, String)> {
+        catalogue
+            .prepare(shape_sql)
+            .expect("storage domain fixture inventory")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("storage domain fixture objects")
+            .collect::<Result<_, _>>()
+            .expect("complete storage domain fixture objects")
+    };
+    let witness = rusqlite::Connection::open_in_memory().expect("published storage domain witness");
+    witness.execute_batch("CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);")
+        .expect("storage domain trigger dependency");
+    witness
+        .execute_batch(include_str!("../../src/store/storage_domain_pending.sql"))
+        .expect("published v131 storage domain extension");
+    assert_eq!(
+        objects(connection),
+        objects(&witness),
+        "exact published storage domain tail required"
+    );
+    let marker: (i64, i64) = connection.query_row(
+        "SELECT count(*),count(*) FILTER (WHERE singleton=1 AND version=1) FROM background_storage_domain_pending_schema",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).expect("storage domain pending exact marker");
+    assert_eq!(
+        marker,
+        (1, 1),
+        "storage domain pending requires its exact singleton marker"
+    );
+    let accepted: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM background_storage_domain_pending",
+            [],
+            |row| row.get(0),
+        )
+        .expect("storage domain pending accepted data inventory");
+    assert_eq!(
+        accepted, 0,
+        "desired storage domain configuration must not be discarded"
+    );
+    // Validate the entire extension before removing anything. The savepoint
+    // also protects direct callers from a refused or failed DDL statement.
+    within_fixture_savepoint(connection, || {
+        connection
+            .execute_batch(
+                "DROP TRIGGER background_storage_domains_apply;
+             DROP VIEW background_storage_domain_affected_jobs;
+             DROP VIEW background_storage_domain_disturbed;
+             DROP VIEW background_storage_domain_changed_roots;
+             DROP VIEW background_storage_domain_holders;
+             DROP VIEW background_storage_domains_live;
+             DROP TABLE background_storage_domain_pending_schema;
+             DROP TABLE background_storage_domain_pending;
+             PRAGMA user_version=130;",
+            )
+            .expect("published storage domain pending rewind");
+    });
+}
+
 /// Rewind v130 (offload: `items.offloaded_at` and its two clearing triggers)
 /// to v129. No item may still be offloaded: an offload mark is accepted data
 /// the rewind would silently discard, so it refuses like every other tail.
@@ -640,10 +720,11 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
         .expect("published custody retention rewind");
 }
 
-/// Rewind an owned, empty v127/v128 coordination tail to published v126;
+/// Rewind an owned, empty v127-v131 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
+    rewind_empty_storage_domain_pending_to_v130(connection);
     rewind_offload_to_v129(connection);
     rewind_custody_retention_to_v128(connection);
     if let Some(plan) = coordination_tail_rewind_plan(connection) {

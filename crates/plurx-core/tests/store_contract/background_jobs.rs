@@ -1,4 +1,4 @@
-use super::{for_each_backend, seed_file};
+use super::{for_each_backend, seed_file, set_storage_domains};
 #[cfg(feature = "hiqlite-contract-tests")]
 use super::{
     open_contract_hiqlite_store, populated_current_import_fixture, ContractCluster, HIQLITE_CASE,
@@ -1726,7 +1726,7 @@ async fn background_library_publication_requires_both_live_owners() {
             };
             if scenario == "roots_changed" {
                 let library = store.get_library(library_id).await.expect("library").expect("library");
-                assert!(store.replace_storage_domains(vec![plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                assert!(set_storage_domains(store.as_ref(), vec![plurx_core::store::background_jobs_resources::StorageDomainMapping {
                     library_id, root_path: library.paths[0].to_string_lossy().into_owned(), domain_id: "old-nas".into(),
                 }], now).await.expect("map original storage"));
             }
@@ -2062,11 +2062,13 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
         }
         assert!(
             store
-                .replace_storage_domains(mappings.clone(), 1_000)
+                .save_storage_domains(mappings.clone(), None, 1_000)
                 .await
-                .expect("map"),
+                .expect("save mappings").is_some(),
             "{backend}"
         );
+        assert!(matches!(store.apply_pending_storage_domains(1_000).await.expect("apply mappings"),
+            plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { .. }), "{backend}");
         assert_eq!(
             store.storage_domains().await.expect("mappings"),
             mappings,
@@ -2121,13 +2123,26 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             }
             claims.push(claim);
         }
-        assert!(
-            !store
-                .replace_storage_domains(vec![], 1_001)
-                .await
-                .expect("busy remap"),
-            "{backend}"
-        );
+        let revision = store.save_storage_domains(vec![], None, 1_001).await
+            .expect("save while busy").expect("valid empty mapping");
+        assert!(matches!(store.apply_pending_storage_domains(1_001).await.expect("deferred apply"),
+            plurx_core::store::background_jobs_resources::StorageDomainApply::Waiting { revision: waiting_revision }
+                if waiting_revision == revision), "{backend}: save must persist while readers are live");
+        let pending = store.storage_domain_state(1_001).await.expect("pending state");
+        assert_eq!(pending.pending.as_ref().map(|p| p.revision), Some(revision), "{backend}");
+        assert!(!pending.applied.is_empty(), "{backend}: old mapping stays applied while waiting");
+        let running = store.background_job(&claims[0].job_id).await.expect("read running job").expect("running job");
+        let old_token = running.token.expect("running token");
+        let renewal = store.renew_jobs(RenewJobs { tokens: vec![old_token.clone()], now_ms: 1_002 })
+            .await.expect("renew under pending mapping");
+        let RenewOutcome::Renewed { token } = renewal.into_iter().next().expect("renewal result") else {
+            panic!("{backend}: running job must retain ownership while its root change waits");
+        };
+        assert!(matches!(store.resolve_claim(ResolveClaim {
+            job_id: token.job_id.clone(), node_id: token.node_id.clone(), boot_id: token.boot_id.clone(),
+            claim_id: token.claim_id.clone(), fence: Some(token.fence), dispatched_at_ms: 1_000, now_ms: 1_003,
+        }).await.expect("claim acknowledgement across pending mapping"), ClaimResolution::Running { .. }),
+            "{backend}: claim acknowledgement must retain ownership until apply");
         assert_eq!(
             store.storage_domains().await.expect("unchanged"),
             mappings,
@@ -2164,14 +2179,189 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             ),
             "{backend}"
         );
+        assert!(matches!(store.apply_pending_storage_domains(100_000).await.expect("expired owners no longer block remap"),
+            plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { .. }), "{backend}");
+        assert!(store.storage_domains().await.expect("cleared").is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn storage_domain_apply_waits_only_for_disturbed_named_readers_and_uses_latest_save() {
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy, StorageDomainApply, StorageDomainMapping,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, held_file_id) = seed_file(&store, "domain-held-reader").await;
+        let held_file = store.get_file(held_file_id).await.expect("file").expect("held file");
+        let held_library = store.get_item(held_file.item_id).await.expect("item").expect("item").library_id;
+        let (_, other_file_id) = seed_file(&store, "domain-other-reader").await;
+        let other_file = store.get_file(other_file_id).await.expect("file").expect("other file");
+        let other_library = store.get_item(other_file.item_id).await.expect("item").expect("item").library_id;
+        let held_root = store.get_library(held_library).await.expect("library").expect("held library").paths[0].display().to_string();
+        let other_root = store.get_library(other_library).await.expect("library").expect("other library").paths[0].display().to_string();
+        let mappings = vec![
+            StorageDomainMapping { library_id: held_library, root_path: held_root.clone(), domain_id: "nas-a".into() },
+            StorageDomainMapping { library_id: other_library, root_path: other_root.clone(), domain_id: "nas-b".into() },
+        ];
+        assert!(set_storage_domains(store.as_ref(), mappings.clone(), 1_000).await.expect("initial mappings"), "{backend}");
+        let token = store.register_foreground_source(ForegroundSourceOwner {
+            owner_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "storage-domain-reader".into(),
+            session_incarnation: uuid::Uuid::new_v4().to_string(), producer_attempt: "producer-1".into(),
+            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id: held_file_id,
+            source_size: held_file.size, source_mtime: held_file.mtime, source_generation: "domain-source".into(),
+            policy: ForegroundSourcePolicy::Rolling,
+        }, 1_001, 20_000).await.expect("foreground registration").expect("registered reader");
+
+        // Moving another root's domain does not disturb this holder and applies immediately.
+        let unrelated = vec![
+            mappings[0].clone(),
+            StorageDomainMapping { library_id: other_library, root_path: other_root.clone(), domain_id: "nas-c".into() },
+        ];
+        assert!(set_storage_domains(store.as_ref(), unrelated, 1_002).await.expect("unrelated move"), "{backend}");
+
+        // Moving the reader's own domain saves successfully but remains pending.
+        let desired = vec![
+            StorageDomainMapping { library_id: held_library, root_path: held_root.clone(), domain_id: "nas-d".into() },
+            StorageDomainMapping { library_id: other_library, root_path: other_root.clone(), domain_id: "nas-c".into() },
+        ];
+        let first = store.save_storage_domains(desired, None, 1_003).await.expect("save disturbed move").expect("valid roots");
+        assert!(matches!(store.apply_pending_storage_domains(1_003).await.expect("wait for reader"),
+            StorageDomainApply::Waiting { revision } if revision == first), "{backend}");
+        let state = store.storage_domain_state(1_003).await.expect("wait state");
+        assert_eq!(state.waiting_total, 1, "{backend}");
+        assert_eq!(state.waiting_on[0].reason, "old_domain_reader", "{backend}");
+        assert!(state.applied.iter().any(|mapping| mapping.domain_id == "nas-a"), "{backend}: old mapping remains effective");
+
+        // A later save supersedes the pending target; release allows that revision to apply.
+        let latest = vec![
+            StorageDomainMapping { library_id: held_library, root_path: held_root.clone(), domain_id: "nas-e".into() },
+            StorageDomainMapping { library_id: other_library, root_path: other_root.clone(), domain_id: "nas-c".into() },
+        ];
+        let second = store.save_storage_domains(latest.clone(), None, 1_004).await.expect("newer save").expect("valid roots");
+        assert_eq!(second, first + 1, "{backend}");
+        assert!(store.release_foreground_source(token, 1_005).await.expect("release reader"), "{backend}");
+        let (left, right) = tokio::join!(
+            store.apply_pending_storage_domains(1_005),
+            store.apply_pending_storage_domains(1_005),
+        );
+        let outcomes = [left.expect("first concurrent apply"), right.expect("second concurrent apply")];
+        assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, StorageDomainApply::Applied { revision } if *revision == second)).count(), 1, "{backend}");
+        assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, StorageDomainApply::NothingPending)).count(), 1, "{backend}");
+        assert_eq!(store.storage_domains().await.expect("final mappings"), latest, "{backend}");
+
+        // A stale root is an input error and must not replace the settled revision.
+        let stale = vec![StorageDomainMapping { library_id: held_library, root_path: "/removed-root".into(), domain_id: "nas-z".into() }];
+        assert_eq!(store.save_storage_domains(stale, None, 1_006).await.expect("stale root is nonfatal"), None, "{backend}");
+        assert_eq!(store.storage_domains().await.expect("settled mappings"), latest, "{backend}");
+    }).await;
+}
+
+#[tokio::test]
+async fn storage_domain_bare_to_named_applies_while_a_foreground_reader_holds_bare_key() {
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy, StorageDomainMapping,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "bare-domain-reader").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let item = store.get_item(file.item_id).await.expect("item").expect("item");
+        let library = store.get_library(item.library_id).await.expect("library").expect("library");
+        let root = library.paths[0].display().to_string();
+        let token = store.register_foreground_source(ForegroundSourceOwner {
+            owner_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "bare-reader".into(),
+            session_incarnation: uuid::Uuid::new_v4().to_string(), producer_attempt: "producer-1".into(),
+            node_id: "node-a".into(), boot_id: uuid::Uuid::new_v4().to_string(), file_id,
+            source_size: file.size, source_mtime: file.mtime, source_generation: "bare-source".into(),
+            policy: ForegroundSourcePolicy::Rolling,
+        }, 1_000, 20_000).await.expect("foreground registration").expect("reader");
+
+        let revision = store.save_storage_domains(vec![StorageDomainMapping {
+            library_id: library.id, root_path: root, domain_id: "nas-a".into(),
+        }], None, 1_001).await.expect("save mapping beside bare reader").expect("valid root");
+        assert!(matches!(store.apply_pending_storage_domains(1_001).await.expect("apply beside bare reader"),
+            plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { revision: applied } if applied == revision), "{backend}");
+        assert_eq!(store.storage_domain_state(1_001).await.expect("state").waiting_total, 0, "{backend}: bare source_io remains a universal conflict");
+        assert!(store.release_foreground_source(token, 1_002).await.expect("release reader"), "{backend}");
+    }).await;
+}
+
+#[tokio::test]
+async fn storage_domain_paused_job_and_its_holders_count_once() {
+    use plurx_core::store::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "paused-domain-job").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library_id = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("item")
+            .library_id;
+        let library = store
+            .get_library(library_id)
+            .await
+            .expect("library")
+            .expect("library");
+        let root_path = library.paths[0].display().to_string();
+        let initial = vec![StorageDomainMapping {
+            library_id,
+            root_path: root_path.clone(),
+            domain_id: "nas-a".into(),
+        }];
         assert!(
-            store
-                .replace_storage_domains(vec![], 100_000)
+            set_storage_domains(store.as_ref(), initial, 1_000)
                 .await
-                .expect("expired owners no longer block remap"),
+                .expect("initial mapping"),
             "{backend}"
         );
-        assert!(store.storage_domains().await.expect("cleared").is_empty());
+        let request = metadata_source_request(store.as_ref(), library_id, 1_001).await;
+        let ClaimOutcome::Claimed { job } =
+            store.claim_job(request).await.expect("claim affected job")
+        else {
+            panic!("{backend}: source job should claim");
+        };
+        let token = job.token.expect("job token");
+        assert!(
+            store
+                .pause_background_source(token, 1_002)
+                .await
+                .expect("pause job"),
+            "{backend}"
+        );
+        let revision = store
+            .save_storage_domains(
+                vec![StorageDomainMapping {
+                    library_id,
+                    root_path,
+                    domain_id: "nas-b".into(),
+                }],
+                None,
+                1_003,
+            )
+            .await
+            .expect("save beside paused job")
+            .expect("valid root");
+        assert!(
+            matches!(store.apply_pending_storage_domains(1_003).await.expect("wait for paused job"),
+            StorageDomainApply::Waiting { revision: waiting } if waiting == revision),
+            "{backend}"
+        );
+        let state = store
+            .storage_domain_state(1_003)
+            .await
+            .expect("waiting state");
+        assert_eq!(
+            state.waiting_total, 1,
+            "{backend}: job reservation, pause and job row share one work/fence"
+        );
+        assert!(
+            state
+                .waiting_on
+                .iter()
+                .any(|wait| wait.reason == "library_job"),
+            "{backend}"
+        );
     })
     .await;
 }
@@ -2202,8 +2392,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
             libraries.push(library_id);
             files.push(file_id);
         }
-        assert!(store
-            .replace_storage_domains(mappings, 1_000)
+        assert!(set_storage_domains(store.as_ref(), mappings, 1_000)
             .await
             .expect("map"));
         for (index, library_id) in libraries.into_iter().enumerate() {
@@ -4835,7 +5024,7 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
                 root_path: format!("/{prefix}"), domain_id: domain.into() });
             files.push(file_id);
         }
-        assert!(store.replace_storage_domains(mappings.clone(), 1_000).await.expect("map"));
+        assert!(set_storage_domains(store.as_ref(), mappings.clone(), 1_000).await.expect("map"));
         let mut payloads = vec![JobPayload::LibraryScan {
             library_id: mappings[0].library_id, generation: "batch-parent".into(),
         }];
