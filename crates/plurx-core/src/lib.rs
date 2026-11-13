@@ -1,3 +1,4 @@
+// Measurement-only edit (claude/ci-unit-fanout-measure): re-keys plurx-core and its dependents.
 //! plurx core: the storage boundary, configuration, and shared domain types.
 //!
 //! The single most load-bearing decision in this crate is the [`store::Store`]
