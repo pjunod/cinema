@@ -2322,12 +2322,20 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // shape that serves from the copy index (first play, reopen, rolling),
     // and first play reads one more `get_setting`; pinned on the E1c + D3a
     // build (2026-11-12) so later D3 lanes measure against what runs now.
+    // D3b reads the create's planning inputs once, as one plan from node B's
+    // applied view (`local_playback_planning_snapshot`, the one new local
+    // read), and hands it down every chain: the planning snapshot re-reads,
+    // the typeless, placement and VOD settings reads, the encode's HWACCEL,
+    // software-budget and two stored-probe reads, and the rolling fallback's
+    // file read are gone (29/36/30/28/32 -> 23/30/19/20/21; writes
+    // unchanged). `docs/streaming/PLAYBACK-START-D3-RECORD.md` §9 has each
+    // delta.
     let expected: [(&str, (u64, u64, u64)); 5] = [
-        ("first play, VOD index", (29, 1, 6)),
-        ("reopen, new position", (36, 1, 8)),
-        ("Auto encode, VOD", (30, 1, 8)),
-        ("index miss, rolling copy", (28, 1, 9)),
-        ("caps-v2 Auto, intent", (32, 1, 9)),
+        ("first play, VOD index", (23, 2, 6)),
+        ("reopen, new position", (30, 2, 8)),
+        ("Auto encode, VOD", (19, 2, 8)),
+        ("index miss, rolling copy", (20, 2, 9)),
+        ("caps-v2 Auto, intent", (21, 2, 9)),
     ];
     let observed = measured
         .iter()
@@ -2358,16 +2366,16 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         })
         .collect::<Vec<_>>();
     // Each shape's counts by the Store method that makes them, as
-    // (authority reads, local reads, writes). Measured on D3a's build
-    // (nothing moved); `docs/streaming/PLAYBACK-START-D3-RECORD.md` explains
-    // each row. Every later D3 lane changes these by exactly what it removes.
-    // `queue_sql` is the queue bridge's one non-forwarded label (D3b defers
-    // naming it). The writes it carries per shape: first play and reopen, none
-    // (its two reads are the copy-index consumer); Auto encode and caps-v2
-    // Auto, the foreground source custody `register` and `activate`; rolling
-    // copy, those two plus `suspend_playback_analysis_interest` (3). Swapping
-    // one queue write for another is invisible to this pin until D3b forwards
-    // the label.
+    // (authority reads, local reads, writes). Measured on D3b's build;
+    // `docs/streaming/PLAYBACK-START-D3-RECORD.md` explains each row. Every
+    // later D3 lane changes these by exactly what it removes.
+    // The queue bridge now carries the Store method its create-path callers
+    // name (D3b, D3a review S5): the copy-index consumer's two reads are
+    // `copy_index_v3_variant` and `copy_index_source_attestation`, and the
+    // writes `queue_sql` used to hide are `register_foreground_source`,
+    // `activate_foreground_source_custody` and, on the rolling fallback,
+    // `suspend_playback_analysis_interest`. Any other queue statement keeps
+    // the label `queue_sql`, and none is on this path.
     // Layout reads: `session_layout` is its own label. Its reads (the
     // `cluster_meta` marker and guard reads) are paid only by a store whose
     // cached session layout is still Legacy, as this fresh fixture is; a store
@@ -2381,16 +2389,16 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
-                ("get_setting", (2, 0, 0)),
-                ("get_settings", (2, 0, 0)),
+                ("get_setting", (1, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
                 ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
-                ("playback_planning_snapshot", (3, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("queue_sql", (2, 0, 0)),
                 ("session_layout", (8, 0, 0)),
                 // Two timed writes, one physical UPDATE: Confirm is double-timed
                 // (`source_layout_idempotent` times its retry loop and the inner
@@ -2408,17 +2416,16 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 ("claim_media_session_request", (1, 0, 1)),
                 ("complete_media_session_handoff", (1, 0, 1)),
                 ("complete_media_session_terminal_projection", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
                 ("fragment_index_source", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
-                ("get_setting", (1, 0, 0)),
-                ("get_settings", (2, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
                 ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_by_incarnation", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
-                ("playback_planning_snapshot", (3, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("queue_sql", (2, 0, 0)),
                 ("session_layout", (12, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
@@ -2427,18 +2434,17 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "Auto encode, VOD",
             &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
-                ("get_file_probe_json", (3, 0, 0)),
-                ("get_setting", (4, 0, 0)),
-                ("get_settings", (2, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
                 ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
-                ("playback_planning_snapshot", (3, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("queue_sql", (0, 0, 2)),
+                ("register_foreground_source", (0, 0, 1)),
                 ("session_layout", (8, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
@@ -2447,40 +2453,40 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "index miss, rolling copy",
             &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
                 ("fragment_index_source", (1, 0, 0)),
-                ("get_file", (1, 0, 0)),
                 ("get_file_probe_json", (1, 0, 0)),
-                ("get_setting", (1, 0, 0)),
-                ("get_settings", (2, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
                 ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
-                ("playback_planning_snapshot", (4, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("queue_sql", (2, 0, 3)),
+                ("register_foreground_source", (0, 0, 1)),
                 ("session_layout", (8, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
+                ("suspend_playback_analysis_interest", (0, 0, 1)),
             ],
         ),
         (
             "caps-v2 Auto, intent",
             &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
-                ("get_file_probe_json", (3, 0, 0)),
-                ("get_setting", (4, 0, 0)),
-                ("get_settings", (2, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
                 ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
                 ("maintain_media_sessions", (1, 0, 0)),
                 ("media_session_route_for_playback", (1, 0, 0)),
-                ("playback_planning_snapshot", (3, 0, 0)),
                 ("publish_media_session_activation", (2, 0, 1)),
-                ("queue_sql", (0, 0, 2)),
                 ("record_desired_selection", (1, 0, 1)),
+                ("register_foreground_source", (0, 0, 1)),
                 ("session_layout", (9, 0, 0)),
                 ("settle_media_session_activation", (1, 0, 2)),
                 ("timeline_annotation_set", (2, 0, 0)),
@@ -2524,6 +2530,8 @@ async fn create_path_store_operations_are_pinned_per_shape() {
                 .find(|(method, _)| method == "get_setting")
                 .expect("the refreshed bounds are get_setting reads");
             entry.1 .0 -= AHEAD_LIMITS_REFRESH_READS;
+            // Since D3b the rolling shape makes no other `get_setting` read.
+            observed.retain(|(_, counts)| *counts != (0, 0, 0));
         }
         let pinned = pinned
             .iter()
