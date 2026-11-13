@@ -31,7 +31,9 @@ pub const LIBRARY_WORK_GENERATION: &str = "library-work-v1";
 /// provider reservations and every older node's decoder accept the row; the
 /// managed resource view (v5, SQLite v126) drops its source-I/O requirement
 /// by this generation. An older node does not claim it, because its claimer
-/// runs only [`LIBRARY_WORK_GENERATION`].
+/// runs only [`LIBRARY_WORK_GENERATION`]. A probe-only request (removed paths)
+/// is admitted under `library:targeted-probe:{id}`, a job of its own in the
+/// same generation.
 pub const LIBRARY_TARGETED_GENERATION: &str = "library-targeted-v1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -154,6 +156,10 @@ pub(super) async fn enqueue_with<T: QueueSql>(
         }
     }
     let refresh = matches!(input.input, LibraryWorkInput::Full { refresh: true, .. });
+    // A probe-only request is its own job: it never shares a pass with a
+    // request that wants a walk, and a row an older node cannot decode only
+    // ever delays other probe-only requests, never a plain targeted scan.
+    let probe_only = seed.as_ref().is_some_and(|seed| seed.is_probe_only());
     let targeted = matches!(input.input, LibraryWorkInput::Targeted { .. });
     // Higher is claimed first. A targeted request is a file someone just
     // imported and may be about to watch: it outranks every pending full scan.
@@ -196,7 +202,9 @@ pub(super) async fn enqueue_with<T: QueueSql>(
         payload,
         dedupe_key: format!(
             "library:{}:{}",
-            if targeted {
+            if targeted && probe_only {
+                "targeted-probe"
+            } else if targeted {
                 "targeted"
             } else if refresh {
                 "metadata"
@@ -224,8 +232,7 @@ pub(super) async fn enqueue_with<T: QueueSql>(
     body["library_request"] =
         serde_json::from_str(&input_json).map_err(|error| StoreError::Task(error.to_string()))?;
     if let Some(seed) = seed {
-        body["scan_request_v2"] =
-            serde_json::to_value(&seed).map_err(|error| StoreError::Task(error.to_string()))?;
+        body["scan_request_v2"] = seed.admission_value()?;
     }
     let rows = store
         .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)

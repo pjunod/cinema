@@ -2504,6 +2504,32 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn library_file_paths_under(
+        &self,
+        library_id: i64,
+        folder: &std::path::Path,
+    ) -> Result<Vec<(i64, PathBuf)>, StoreError> {
+        let folder = folder.to_string_lossy().trim_end_matches('/').to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT f.id, f.path FROM files f
+                 JOIN items i ON i.id = f.item_id
+                 WHERE i.library_id = ?1
+                   AND (f.path = ?2 OR substr(f.path, 1, length(?2) + 1) = ?2 || '/')",
+            )?;
+            let rows = stmt
+                .query_map(params![library_id, folder], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        PathBuf::from(row.get::<_, String>(1)?),
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
