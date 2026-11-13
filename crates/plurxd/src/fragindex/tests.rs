@@ -1240,7 +1240,7 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
     }
 }
 
-fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
+pub(super) fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
     MediaFile {
         downloaded_subtitles: Vec::new(),
         id: 77,

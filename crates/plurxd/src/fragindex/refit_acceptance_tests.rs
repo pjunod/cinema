@@ -93,6 +93,51 @@ async fn copy_pipe(
     output(ffmpeg, &args).await
 }
 
+// Optional audio acceptance uses the production argv builder, independently
+// of the video-only pipe that establishes the canonical index.
+async fn served_copy_pipe(
+    ffmpeg: &str,
+    source: &str,
+    stream: u32,
+    seek: Option<f64>,
+    audio: Option<i64>,
+    digest: &str,
+) -> Vec<u8> {
+    let Some(audio) = audio else {
+        return copy_pipe(ffmpeg, source, stream, seek, false).await;
+    };
+    assert_eq!(
+        stream, 0,
+        "controlled audio fixture has first selected video"
+    );
+    let mut file = super::tests::hevc_file(Some("dolby_vision"), None);
+    file.path = source.into();
+    file.audio_streams = vec![plurx_core::domain::AudioStream {
+        index: audio,
+        codec: "pcm_s16le".into(),
+        channels: Some(2),
+        sample_rate: Some(48_000),
+        channel_layout: Some("stereo".into()),
+        ..Default::default()
+    }];
+    let digest = hex::decode(digest)
+        .expect("curve digest")
+        .try_into()
+        .expect("SHA256");
+    let args = transcode::copy_pipe_args_with_audio_delivery(
+        &file,
+        seek.unwrap_or(0.0),
+        Some(audio),
+        true,
+        transcode::Pacing::unpaced(),
+        transcode::CopyVideoOptions::new(false, false)
+            .with_dolby_vision_conversion(true)
+            .with_dolby_vision_refit(Some(digest)),
+        None,
+    );
+    output(ffmpeg, &args).await
+}
+
 // The production landing probe is private to vodserve. Use its independent
 // framecrc protocol over the exact input prefix used above, measuring both
 // the selected RAP and the unseeked origin rather than assuming the target.
@@ -178,7 +223,9 @@ fn split(feed: &[u8]) -> (Init, Vec<Fragment>) {
 
 fn rpus(fragment: &Fragment, init: &Init) -> Vec<(i128, Vec<u8>)> {
     let video = init.video().expect("video");
-    let track = fragment.track(video.id).expect("video fragment");
+    let Some(track) = fragment.track(video.id) else {
+        return Vec::new();
+    };
     let width = usize::from(video.nal_length_size);
     assert!((1..=4).contains(&width));
     let mut decode = i128::from(track.base_decode_time);
@@ -310,8 +357,9 @@ async fn publish(
 /// PLURX_FEL_REAL_VIDEO_INDEX, PLURX_FFMPEG, PLURX_FFPROBE,
 /// PLURX_FEL_CANDIDATE_SHA (full compiled source SHA), and
 /// PLURX_FEL_COPY_ACCEPTANCE_DIR (new durable output directory).
-/// Run explicitly with --ignored --exact. This is a video-only, offline copy
-/// pipeline acceptance; it does not qualify a deployed HTTP session or client.
+/// Optional PLURX_FEL_COPY_AUDIO_INDEX selects controlled stereo PCM for the
+/// production AAC argv. Run explicitly with --ignored --exact. This offline
+/// copy acceptance does not qualify a deployed HTTP session or client.
 #[tokio::test]
 #[ignore = "requires private Michael5400 media and the current helper/media tools"]
 async fn real_fitted_index_and_seek_publish_stored_curves() {
@@ -327,6 +375,9 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         .expect("video index");
     let ffmpeg = required("PLURX_FFMPEG");
     let ffprobe = required("PLURX_FFPROBE");
+    let audio_index = std::env::var("PLURX_FEL_COPY_AUDIO_INDEX")
+        .ok()
+        .map(|value| value.parse::<i64>().expect("audio stream ordinal"));
     let dir = PathBuf::from(required("PLURX_FEL_COPY_ACCEPTANCE_DIR"));
     assert!(
         dir.is_absolute() && !dir.exists(),
@@ -629,13 +680,29 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         &policy,
         &TrackDurations {
             video_ms: duration_ms,
-            audio_ms: 0,
-            audio_bits_per_second: 0,
+            audio_ms: if audio_index.is_some() {
+                duration_ms
+            } else {
+                0
+            },
+            audio_bits_per_second: if audio_index.is_some() { 256_000 } else { 0 },
         },
     );
     assert!(plan.len() >= 2, "fixture must offer a nonzero seek entry");
+    let served_feed =
+        served_copy_pipe(&ffmpeg, &source, stream, None, audio_index, table.digest()).await;
+    if audio_index.is_some() {
+        assert!(
+            split(&served_feed)
+                .0
+                .tracks
+                .iter()
+                .any(|track| track.kind == fmp4::TrackKind::Audio),
+            "AAC must actually be muxed"
+        );
+    }
     let served = publish(
-        &feed,
+        &served_feed,
         &index,
         &plan,
         policy,
@@ -650,6 +717,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
     };
     let mut full = BTreeMap::new();
     let mut readbacks = Vec::new();
+    let mut published_audio_samples = 0usize;
     for entry in &plan.entries {
         let bytes = std::fs::read(dir.join("whole").join(format!("seg{:05}.m4s", entry.index)))
             .expect("actual materialization");
@@ -658,6 +726,15 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         reader.push(&bytes);
         while let Some(unit) = reader.next_unit().expect("actual served boxes") {
             if let Unit::Fragment(fragment) = unit {
+                for track in served
+                    .tracks
+                    .iter()
+                    .filter(|track| track.kind == fmp4::TrackKind::Audio)
+                {
+                    published_audio_samples += fragment
+                        .track(track.id)
+                        .map_or(0, |track| track.sample_count());
+                }
                 for (pts, nal) in rpus(&fragment, &served) {
                     let pts = published_clock.source_pts(pts).expect("served source PTS");
                     if check_curve(&table, pts, &nal) {
@@ -677,6 +754,10 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         "publisher preserves every source picture"
     );
     assert!(!readbacks.is_empty());
+    assert!(
+        audio_index.is_none() || published_audio_samples > 0,
+        "publisher preserves actual audio samples"
+    );
     std::fs::write(
         dir.join("patch-readback.json"),
         serde_json::to_vec_pretty(&json!({"frames": [&readbacks[0]]})).expect("readback JSON"),
@@ -690,6 +771,11 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
     let target = &plan.entries[plan.entries.len() / 2];
     assert!(target.index > 0);
     let seek_seconds = target.start_ticks as f64 / f64::from(plan.timescale);
+    let seek_seconds = if audio_index.is_some() {
+        (seek_seconds * 1000.0).round() / 1000.0
+    } else {
+        seek_seconds
+    };
     let measured = measured_landing(
         &ffmpeg,
         &source,
@@ -699,7 +785,15 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         &dir,
     )
     .await;
-    let seek_feed = copy_pipe(&ffmpeg, &source, stream, Some(seek_seconds), false).await;
+    let seek_feed = served_copy_pipe(
+        &ffmpeg,
+        &source,
+        stream,
+        Some(seek_seconds),
+        audio_index,
+        table.digest(),
+    )
+    .await;
     let seek_init = publish(
         &seek_feed,
         &index,
@@ -715,6 +809,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         "seek keeps the attached init identity"
     );
     let mut seek_frames = 0;
+    let mut seek_audio_samples = 0usize;
     for entry in plan
         .entries
         .iter()
@@ -727,6 +822,15 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         reader.push(&bytes);
         while let Some(unit) = reader.next_unit().expect("seek served boxes") {
             if let Unit::Fragment(fragment) = unit {
+                for track in seek_init
+                    .tracks
+                    .iter()
+                    .filter(|track| track.kind == fmp4::TrackKind::Audio)
+                {
+                    seek_audio_samples += fragment
+                        .track(track.id)
+                        .map_or(0, |track| track.sample_count());
+                }
                 for (pts, nal) in rpus(&fragment, &seek_init) {
                     let pts = published_clock.source_pts(pts).expect("seek source PTS");
                     check_curve(&table, pts, &nal);
@@ -741,7 +845,12 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         }
     }
     assert!(seek_frames > 0);
-    let receipt = json!({"scope": "offline video-only production index/converter/VOD publisher; no deployed HTTP session",
+    assert!(
+        audio_index.is_none() || seek_audio_samples > 0,
+        "seek publisher preserves actual audio samples"
+    );
+    let receipt = json!({"scope": "offline canonical video-only index plus actual production converter/VOD publisher; no deployed HTTP session",
+        "aac_audio_index": audio_index, "published_audio_samples": published_audio_samples, "seek_audio_samples": seek_audio_samples,
         "source_sha256": hex::encode(Sha256::digest(std::fs::read(&source).expect("source hash"))),
         "candidate_sha": candidate, "helper_path": helper, "helper_sha256": key.helper_identity,
         "ffmpeg_path": ffmpeg, "ffprobe_path": ffprobe, "curve_digest": table.digest(), "source_origin": index.dv_refit_origin,
