@@ -1,3 +1,4 @@
+// Measurement-only edit (claude/ci-unit-fanout-measure): re-keys this crate alone.
 //! Independent support hosting. This process has no Cinema LAN/control authority.
 mod handoff;
 mod limits;
