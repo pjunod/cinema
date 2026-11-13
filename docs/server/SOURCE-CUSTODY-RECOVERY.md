@@ -138,8 +138,9 @@ Once every holder has retired, the ledger publishes the joined proof:
 A dropped, unjoined raw declaration vetoes live proof, as does a capability
 the ledger cannot track. Both log a warning; neither falls back to the
 legacy join. At enrollment the owner writes the opened source's
-`dev ino` beside its witness (`.source`). A later dead-owner census must
-count exactly that inode.
+`dev ino` beside its witness (`.source`) as an observation. It cannot confine
+an unknown reader; census recovery instead requires the exact ended-kernel
+proof described below.
 
 ### 1.3 Census recovery needs proof that the exact old kernel ended
 
