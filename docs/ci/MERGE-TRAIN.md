@@ -82,3 +82,9 @@ re-runs of only some jobs are train PRs too, with a `Train-Jobs:` line in the
 description; `validation/merge_train.py` turns that line into the scope
 outputs, and the promotion gate does not run on them. The train lands
 through pull requests and never pushes to `main`.
+
+One limit to know: a probe on `main` alone has an empty diff, so a job that
+decides from the diff what to check (the worker controller proof, the formal
+mapping, `web-types --base`) can pass there vacuously. Such a failure is then
+treated as caused by the train and bisected; the PR whose diff triggers the
+failing check is the one returned, as its own lane run would have failed too.
