@@ -50,6 +50,13 @@ The train service writes nothing to your PR while it is off.
    `WIP:` back on that PR with a comment linking the failing job's log, and
    lands the rest after they pass the whole lane again without it. A failure
    that does not reproduce evicts nobody; the train is rebuilt.
+   **Rust unit-stage exception:** its own verdict already checks failed tests
+   at the merge base. If the final `Rust unit verdict` fails, the train halts
+   for inspection. A main-alone content selector has no diff and may select
+   no tests; that empty result must never authorize an eviction or landing.
+   Automated unit-stage bisection waits until probes can carry and authenticate
+   the original exact failing test plan. Passing unit stages work normally;
+   there is no blanket unit-suite retry.
 6. **Conflicts:** a PR that does not merge onto `main` plus the PRs ahead of it
    gets `WIP:` back and a comment naming what it conflicts with.
 
