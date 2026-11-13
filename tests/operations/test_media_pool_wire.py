@@ -41,7 +41,11 @@ in-repo `Deserialize` derive (std, serde_json, a hand-written impl) is opaque.
 The base is the merge base of HEAD and `PLURX_VALIDATION_BASE` (set by
 `scripts/paperwork`), or `origin/main` when that comparison ref is absent.
 An advanced target tip must not turn target-only wire changes into PR changes.
-The rule functions are also exercised on fixed sources, so the check is proven even where no base resolves.
+Breaking PR wire changes must also advance the target's current protocol, from
+`PLURX_VALIDATION_MERGE_TARGET` (or `origin/main`), so two divergent wire changes
+cannot consume the same protocol number. Unchanged PR wire needs no bump.
+The rule functions are also exercised on fixed sources, so the check is proven
+even where no base resolves.
 """
 
 from __future__ import annotations
@@ -567,6 +571,7 @@ def wire_findings(
     base_protocol: int | None,
     head_protocol: int | None,
     notes: str,
+    target_protocol: int | None = None,
 ) -> list[str]:
     """Problems with HEAD's wire relative to the base; empty when compatible."""
     findings: list[str] = []
@@ -587,11 +592,15 @@ def wire_findings(
                 continue
             needs_bump.extend(_field_changes(f"{path}::{key}", now.strict, before.fields, now.fields, findings))
     if needs_bump:
-        bumped = base_protocol is not None and head_protocol is not None and head_protocol > base_protocol
+        floor = (max(base_protocol, target_protocol)
+                 if base_protocol is not None and target_protocol is not None else base_protocol)
+        bumped = floor is not None and head_protocol is not None and head_protocol > floor
         if not bumped:
             findings.append(
                 "media-pool wire changed without a PROTOCOL_VERSION bump "
-                f"(base {base_protocol}, head {head_protocol}): " + "; ".join(needs_bump)
+                f"(base {base_protocol}, head {head_protocol}"
+                + (f", target {target_protocol}" if target_protocol is not None else "")
+                + "): " + "; ".join(needs_bump)
             )
         elif not has_dated_note(notes, head_protocol):
             findings.append(
@@ -651,8 +660,12 @@ def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
 
 
+def target_ref() -> str:
+    return os.environ.get("PLURX_VALIDATION_MERGE_TARGET") or "origin/main"
+
+
 def resolve_base() -> str | None:
-    comparison = os.environ.get("PLURX_VALIDATION_BASE") or "origin/main"
+    comparison = os.environ.get("PLURX_VALIDATION_BASE") or target_ref()
     try:
         return _git("merge-base", "HEAD", comparison).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -716,7 +729,8 @@ class BaseResolutionTests(unittest.TestCase):
         root = mock.patch(__name__ + ".ROOT", self.repo)
         root.start()
         self.addCleanup(root.stop)
-        environment = mock.patch.dict(os.environ, {"PLURX_VALIDATION_BASE": self.target})
+        environment = mock.patch.dict(os.environ, {"PLURX_VALIDATION_BASE": self.target,
+                                                   "PLURX_VALIDATION_MERGE_TARGET": "origin/main"})
         environment.start()
         self.addCleanup(environment.stop)
 
@@ -729,11 +743,12 @@ class BaseResolutionTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"pub const PROTOCOL_VERSION: i64 = {version};\n" + body)
 
-    def findings(self):
+    def findings(self, notes=""):
         before, after = GitTree(resolve_base()), GitTree(None)
         return wire_findings(collect_wire(before, (PROTOCOL_FILE,)), collect_wire(after, (PROTOCOL_FILE,)),
                              protocol_version(before.read(PROTOCOL_FILE) or ""),
-                             protocol_version(after.read(PROTOCOL_FILE) or ""), "")
+                             protocol_version(after.read(PROTOCOL_FILE) or ""), notes,
+                             target_protocol=protocol_version(GitTree(target_ref()).read(PROTOCOL_FILE) or ""))
 
     def test_advanced_main_does_not_turn_untouched_wire_into_pr_changes(self):
         self.assertEqual(resolve_base(), self.shared)
@@ -743,6 +758,14 @@ class BaseResolutionTests(unittest.TestCase):
         self.write_wire(STRICT_SNAPSHOT.replace("    pub file_id: i64,", "    pub file_id: i64,\n    pub pr_only: bool,"), 9)
         findings = self.findings()
         self.assertTrue(any("PROTOCOL_VERSION bump" in finding and "pr_only" in finding for finding in findings), findings)
+
+    def test_breaking_pr_cannot_reuse_a_protocol_number_consumed_on_target(self):
+        changed = STRICT_SNAPSHOT.replace("    pub file_id: i64,", "    pub file_id: i64,\n    pub pr_only: bool,")
+        self.write_wire(changed, 10)
+        findings = self.findings("2026-11-13: protocol 10 adds the PR field; upgrade all nodes.")
+        self.assertTrue(any("PROTOCOL_VERSION bump" in finding and "target 10" in finding for finding in findings), findings)
+        self.write_wire(changed, 11)
+        self.assertEqual(self.findings("2026-11-13: protocol 11 adds the PR field; upgrade all nodes."), [])
 
     def test_ancestor_base_and_default_target_keep_the_same_patch_boundary(self):
         with mock.patch.dict(os.environ, {"PLURX_VALIDATION_BASE": self.shared}):
@@ -1027,6 +1050,7 @@ class TreeTests(unittest.TestCase):
             protocol_version(base_tree.read(PROTOCOL_FILE) or ""),
             protocol_version(head_tree.read(PROTOCOL_FILE) or ""),
             rollout_notes(OPERATIONS.read_text(encoding="utf-8")),
+            target_protocol=protocol_version(GitTree(target_ref()).read(PROTOCOL_FILE) or ""),
         )
         self.assertEqual(findings, [], "\n".join(findings))
 
