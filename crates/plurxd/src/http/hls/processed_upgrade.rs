@@ -603,7 +603,7 @@ pub(in crate::http) fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> O
         .then_some(verified_ms.max(viewer_ms))
 }
 
-pub(in crate::http) async fn await_successor_start(
+pub(super) async fn await_successor_start(
     state: &AppState,
     intent: &UpgradeIntent,
     run: &UpgradeRun,
