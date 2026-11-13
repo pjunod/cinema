@@ -247,7 +247,7 @@ review of PR #1565):
   control (`controls/test_refit_resume.py`) shows the resumed scenes equal an
   uninterrupted run's at every boundary of the real clip (resuming at frame
   286 of 311 takes 1.1 s against 13.1 s). The helper runs with `--threads 2`
-  and the job reserves exactly 3 CPU threads (measured on nuc3: 1 thread 39 s
+  and the job reserves exactly 3 CPU threads (measured on lab3: 1 thread 39 s
   at 1.0 core, 2 threads 21.9 s at 2.2 cores, 3 threads 16 s at 3.2 cores, 4
   threads no faster). It is admitted beside live sessions when that fits the
   software budget and no viewer waits, and yields only when a viewer or an
