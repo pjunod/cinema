@@ -96,6 +96,13 @@ const _: () = assert!(
 );
 const _: () = assert!(
     migration_is(
+        super::storage_domain_pending::SQLITE_INTRODUCED_SCHEMA,
+        super::storage_domain_pending::SCHEMA
+    ),
+    "storage_domain_pending::SQLITE_INTRODUCED_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(
         super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
         super::candidate_recovery::SCHEMA
     ),
@@ -1345,6 +1352,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::PUBLISH_MIGRATION,
     // v129: retention keeps a job that still owns charged source custody.
     super::custody_retention::SCHEMA,
+    // v130: storage-domain changes are saved at once and applied when safe.
+    super::storage_domain_pending::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

@@ -2179,6 +2179,7 @@ impl HiqliteAuthStore {
         store.install_dispatch_turns(None).await?;
         store.install_scan_request_v2_schema(None).await?;
         store.install_custody_retention_schema(None).await?;
+        store.install_storage_domain_pending_schema(None).await?;
         Ok(store)
     }
 
@@ -2382,7 +2383,8 @@ impl HiqliteAuthStore {
                     self.install_playback_handoffs_schema(admission).await?;
                     self.install_dispatch_turns(admission).await?;
                     self.install_scan_request_v2_schema(admission).await?;
-                    return self.install_custody_retention_schema(admission).await;
+                    self.install_custody_retention_schema(admission).await?;
+                    return self.install_storage_domain_pending_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4829,6 +4831,64 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "custody retention schema install did not settle".into(),
+        ))
+    }
+
+    async fn storage_domain_pending_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed trigger shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "storage_domain_pending_schema_version",
+                super::storage_domain_pending::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::storage_domain_pending::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "storage_domain_pending_schema_version",
+                    super::storage_domain_pending::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "storage domain pending schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    /// New binaries alone read this adjunct marker; older mapping commands remain valid.
+    async fn install_storage_domain_pending_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.storage_domain_pending_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::storage_domain_pending::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.storage_domain_pending_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "storage domain pending schema install did not settle".into(),
         ))
     }
 

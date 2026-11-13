@@ -1768,6 +1768,9 @@ mod tests {
             // v129: the shared queue helper drops every background_* object,
             // the replaced triggers and their marker among them.
             "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
+            // v130: the shared queue helper drops every background_* object,
+            // including the pending storage-domain table, views and marker.
+            "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
         ];
 
         assert!(
