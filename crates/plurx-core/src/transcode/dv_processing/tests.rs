@@ -833,7 +833,7 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
         max_l1_pq: Some(4095),
         mastering_luminance: TitleConstant::Unknown,
         mastering_primaries: TitleConstant::Unknown,
-    el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
+        el_kind: crate::scan::dv_title::TitleConstant::Unknown,
     };
     let mut master = plan(DvDestination::Hdr10);
     let master_export = DvExportPolicy::PqBilinearYuv420p10V1 { raster: (64, 64) };
@@ -891,7 +891,7 @@ fn resolved_source_floor_is_the_completed_plan_black_level_and_semantic_identity
             index: 0,
             custom_xy: None,
         }),
-    el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
+        el_kind: crate::scan::dv_title::TitleConstant::Unknown,
     };
     let DvDisplayTargetChoice::Target(proposal) =
         DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
@@ -1511,7 +1511,7 @@ fn completed_base_window_receipt_keeps_display_mapping_and_source_operations() {
                     max_l1_pq: Some(4095),
                     mastering_luminance: TitleConstant::Unknown,
                     mastering_primaries: TitleConstant::Unknown,
-                el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
+                    el_kind: crate::scan::dv_title::TitleConstant::Unknown,
                 }),
             )
             .expect("title")
@@ -2021,7 +2021,7 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
-        el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
+            el_kind: crate::scan::dv_title::TitleConstant::Unknown,
         }))
         .expect("SDR target")
     else {
