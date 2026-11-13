@@ -1,7 +1,7 @@
 # FEL RPU re-fit (F+) — build plan
 
 **Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565,
-mandatory fitted timing proof implemented, review complete, qualification pending; 7 remains a follow-up after served
+v4 bounded seek-preroll repair implemented and reviewed, qualification pending; 7 remains a follow-up after served
 F+ scores · **Updated:** 2026-11-13 · **Written:** 2026-11-12 ·
 **Owner:** Codex (continuing Claude) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
@@ -304,7 +304,7 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
   time (the fragment's `tfdt` and `trun` cts) against the stored scene table,
   which keys scenes by their first presentation time. It never uses a
   running count, because a seek starts mid-title.
-- A fitted output uses `dv-p7-to-p81-rpu-v3` and its curve digest in the
+- A fitted output uses `dv-p7-to-p81-rpu-v4` and its curve digest in the
   fragment-index identity. The v1 output stays alongside it for disabled
   platforms and titles without a fit. Live `copyseg` stays on v1 until it
   shares the indexed copy engine; no fitted scene is selected from a live
@@ -317,21 +317,30 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
   independently measured PTS/time base. Its composition offset then resolves
   the decode origin with exact integer arithmetic; a mismatch or nonintegral
   clock refuses the fitted index. PTS is never substituted for DTS.
-  A seek's measured clock bounds candidate index rows. The buffered fragments
-  are converted once per candidate with that row's exact rational clock and
-  compared against converted index byte counts. A unique match is required;
-  an unmeasured or inconsistent landing refuses the fitted generation.
+  A seek probe measures packet PTS relative to the first source packet.
+  Canonical first composition offsets place that presentation measurement
+  against index rows; inferred post-seek DTS never establishes the landing.
+  A unique coded-picture sequence and candidate-specific converted byte
+  counts are required.
 
-Fitted v3 indexes additionally persist a compact proof for every video row:
-ordered raw coded samples, sample count, durations and composition offsets.
-The local promotion JSON and both cluster index headers retain the source
-clock and proofs. Before conversion, landing checks every buffered row under
-one fixed decode-clock translation; every later fragment is checked under the
-same translation before any media publication. Missing proof, changed coded
-pictures, cadence drift or incomplete EOF coverage refuses the fitted output.
-Legacy/native indexes omit the optional proof metadata and retain their
-existing encoding. The fitted namespace advances from the unqualified v2 to
-v3 so an older fitted index cannot bypass the contract.
+Fitted v4 indexes persist a 72-byte proof per video row: separate ordered
+coded-picture and cadence SHA-256 values plus the signed first composition
+offset. Count, clock, every coded NAL payload, duration and composition offset
+remain bound. The local promotion JSON and both cluster headers retain the
+source clock and proofs. Older fitted namespaces cannot bypass this contract;
+v1/native indexes retain their existing encoding.
+
+Real acceptance found that the first four pictures after a Matroska seek had
+inferred DTS/CTO different from the complete-source index. The next RAP fully
+recovered. The bounded repair may discard at most two whole preroll fragments,
+only after proving their coded identities and only strictly before the requested
+entry. The bound is the existing three-fragment landing evidence window minus
+one fully proven row, not a universal demuxer recovery claim; longer damage
+refuses. It never rewrites timing, discards a target row, or converts discarded
+preroll. Every retained/served row still requires full cadence/CTO proof and
+one fixed DTS translation before conversion/publication; later rows and complete
+EOF coverage remain checked. Damage reaching the target, an unidentified
+prefix, excess preroll or an ambiguous landing refuses the generation.
 
 This proves that the producer agrees with the canonical video-only index;
 real clock qualification separately compares all source PTS and every
@@ -341,7 +350,12 @@ priming. Affected layouts must be refused before fitted media publication,
 even when distinct curves encode to the same byte count. AAC timing alignment
 and audio-bearing acceptance remain open; a video-only positive plus an AAC
 negative must not be reported as full AAC qualification. Developer readiness
-explains this limit without disabling the saved platform choices.
+explains this limit without disabling the saved platform choices. The current
+hvc1 muxer also removes in-band parameter sets after the conversion filter;
+F+ retaining outputs therefore explicitly refuse even with known DTS. This
+does not change v1 behavior or claim existing retaining-copy paths qualified.
+The boundary follows [FFmpeg's hvc1 muxer choice](https://github.com/FFmpeg/FFmpeg/blob/n8.0.1/libavformat/movenc.c#L6378-L6396)
+and its [parameter-set filtering](https://github.com/FFmpeg/FFmpeg/blob/n8.0.1/libavformat/hevc.c#L1124-L1134).
 
 Decisions (2026-11-12; timing proof strengthened 2026-11-13):
 - **Pinned per session.** The digest in the server-owned copy intent is fixed
@@ -349,11 +363,11 @@ Decisions (2026-11-12; timing proof strengthened 2026-11-13):
   If retention has removed the table, a new rendition generation may pin the
   current digest under a new identity before publishing. A refit published
   mid-generation cannot change that generation's bytes.
-- **v3 only for fitted titles.** A title without a fitted table keeps
+- **v4 only for fitted titles.** A title without a fitted table keeps
   `dv-p7-to-p81-rpu-v1`, so its indexes and caches stay valid. A fitted
-  title's identity is `dv-p7-to-p81-rpu-v3` plus the curve digest. Identity
+  title's identity is `dv-p7-to-p81-rpu-v4` plus the curve digest. Identity
   and bytes always agree: if curves cannot be applied, the conversion is
-  refused, never served as identity bytes under v3.
+  refused, never served as identity bytes under v4.
 - **Enable, not gate.** Per-platform settings
   `playback.dolby_vision_refit_{apple,web,android,linux}`, default off, are
   read against the accepted control snapshot's typed `ClientPlatform`.

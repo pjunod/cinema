@@ -1457,7 +1457,14 @@ pub(crate) fn converted_dolby_vision_record(
 /// token scoped to converting copies so ordinary stripped and preserved
 /// artifacts retain their existing identities.
 pub(crate) const DV_CONVERSION_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v1";
-pub(crate) const DV_REFIT_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v3";
+// The current hvc1 muxer drops in-band parameter sets after the conversion
+// filter. Do not claim a fitted retaining identity, even with known DTS.
+fn fitted_parameter_set_refusal(video: CopyVideoOptions) -> Option<&'static str> {
+    (video.dolby_vision_refit().is_some() && video.retains_hevc_parameter_sets())
+        .then_some("fitted copy cannot preserve the required in-band HEVC parameter sets with the current muxer")
+}
+
+pub(crate) const DV_REFIT_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v4";
 
 pub(crate) fn output_transform_identity(
     file: &MediaFile,
@@ -3004,6 +3011,10 @@ async fn build_attested_pass(
     let mut outputs = Vec::with_capacity(videos.len());
     let mut slots = Vec::with_capacity(videos.len());
     for (slot, video) in videos.iter().enumerate() {
+        if let Some(reason) = fitted_parameter_set_refusal(*video) {
+            builds[slot] = Some(IndexBuild::plain(IndexOutcome::Unsupported(reason.into())));
+            continue;
+        }
         match IndexOutput::new(file, *video) {
             Ok(mut output) => {
                 if let Some(digest) = video.dolby_vision_refit() {

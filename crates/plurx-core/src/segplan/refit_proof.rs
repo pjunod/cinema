@@ -8,26 +8,63 @@ use sha2::{Digest, Sha256};
 /// Ordered coded pictures and exact per-picture cadence before To81/F+.
 /// Base DTS is checked independently under one generation-wide translation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FittedFragmentProof([u8; 32]);
+pub struct FittedFragmentProof {
+    coded: [u8; 32],
+    cadence: [u8; 32],
+    first_cto: i64,
+}
 
 impl Serialize for FittedFragmentProof {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&hex::encode(self.0))
+        serializer.serialize_str(&hex::encode(self.as_bytes()))
     }
 }
 impl<'de> Deserialize<'de> for FittedFragmentProof {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
+        if text.len() != 144 {
+            return Err(serde::de::Error::custom(
+                "fitted v4 proof must contain 144 hex characters",
+            ));
+        }
         let bytes = hex::decode(text).map_err(serde::de::Error::custom)?;
-        Ok(Self(bytes.try_into().map_err(|_| {
-            serde::de::Error::custom("fitted proof must be SHA256")
-        })?))
+        if bytes.len() != 72 {
+            return Err(serde::de::Error::custom(
+                "fitted v4 proof must contain 72 bytes",
+            ));
+        }
+        let mut coded = [0; 32];
+        let mut cadence = [0; 32];
+        let mut first_cto = [0; 8];
+        coded.copy_from_slice(&bytes[..32]);
+        cadence.copy_from_slice(&bytes[32..64]);
+        first_cto.copy_from_slice(&bytes[64..72]);
+        Ok(Self {
+            coded,
+            cadence,
+            first_cto: i64::from_be_bytes(first_cto),
+        })
     }
 }
 
 impl FittedFragmentProof {
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
+    /// Full persisted identity, including the independently useful first CTO.
+    pub fn as_bytes(&self) -> [u8; 72] {
+        let mut bytes = [0; 72];
+        bytes[..32].copy_from_slice(&self.coded);
+        bytes[32..64].copy_from_slice(&self.cadence);
+        bytes[64..72].copy_from_slice(&self.first_cto.to_be_bytes());
+        bytes
+    }
+
+    /// Exact ordered coded pictures on the same track clock; this alone does
+    /// not establish sample cadence or permission to publish.
+    pub fn same_pictures(&self, other: &Self) -> bool {
+        self.coded == other.coded
+    }
+
+    pub fn first_cto(&self) -> i64 {
+        self.first_cto
     }
 
     pub fn observe(fragment: &Fragment, init: &Init) -> Result<Self, String> {
@@ -38,14 +75,21 @@ impl FittedFragmentProof {
         if video.timescale == 0 || track.sample_count() == 0 {
             return Err("fitted proof has no video cadence".into());
         }
-        let mut hash = Sha256::new();
-        hash.update(b"plurx/fitted-copy/ordered-coded-cadence/v3\0");
-        hash.update(video.timescale.to_be_bytes());
-        hash.update(
-            u64::try_from(track.sample_count())
-                .map_err(|_| "fitted sample count overflows")?
-                .to_be_bytes(),
-        );
+        let count =
+            u64::try_from(track.sample_count()).map_err(|_| "fitted sample count overflows")?;
+        let first_cto = track
+            .samples()
+            .next()
+            .ok_or("fitted proof has no first sample")?
+            .cto;
+        let mut coded = Sha256::new();
+        coded.update(b"plurx/fitted-copy/ordered-coded-pictures/v4\0");
+        coded.update(video.timescale.to_be_bytes());
+        coded.update(count.to_be_bytes());
+        let mut cadence = Sha256::new();
+        cadence.update(b"plurx/fitted-copy/ordered-cadence/v4\0");
+        cadence.update(video.timescale.to_be_bytes());
+        cadence.update(count.to_be_bytes());
         for run in &track.runs {
             let mut at = run.data_offset;
             for sample in &run.samples {
@@ -59,16 +103,20 @@ impl FittedFragmentProof {
                     .bytes
                     .get(at..end)
                     .ok_or("fitted sample extent is invalid")?;
-                hash.update(sample.duration.to_be_bytes());
-                hash.update(sample.cto.to_be_bytes());
-                hash.update(
+                cadence.update(sample.duration.to_be_bytes());
+                cadence.update(sample.cto.to_be_bytes());
+                coded.update(
                     fmp4::hevc_cbs_annex_b_sample_hash(bytes, video.nal_length_size)
                         .map_err(|error| error.to_string())?,
                 );
                 at = end;
             }
         }
-        Ok(Self(hash.finalize().into()))
+        Ok(Self {
+            coded: coded.finalize().into(),
+            cadence: cadence.finalize().into(),
+            first_cto,
+        })
     }
 }
 
@@ -132,7 +180,7 @@ mod tests {
             init.video().expect("video").timescale,
             vec![IndexRow::from_fragment(fragment, init).expect("row")],
             hex::encode(Sha256::digest(&init.bytes)),
-            SourceIdentity::new(1, 1, "fitted-v3"),
+            SourceIdentity::new(1, 1, "fitted-v4"),
         );
         index.dv_refit_proofs = Some(vec![
             FittedFragmentProof::observe(fragment, init).expect("proof")
@@ -215,6 +263,99 @@ mod tests {
         assert!(verify_fitted_fragment(&index, 2, &later, &init, 0).is_err());
         index.dv_refit_proofs.as_mut().expect("proofs").pop();
         assert!(verify_fitted_fragment(&index, 0, &fragment, &init, 0).is_err());
+    }
+
+    #[test]
+    fn coded_pictures_match_while_changed_cadence_requires_full_mismatch() {
+        let (init, fragment) = fixture();
+        let original = FittedFragmentProof::observe(&fragment, &init).expect("original proof");
+        let video = init.video().expect("video").id;
+        for composition in [false, true] {
+            let mut changed = fragment.clone();
+            let first = &mut changed
+                .tracks
+                .iter_mut()
+                .find(|track| track.track_id == video)
+                .expect("video track")
+                .runs[0]
+                .samples[0];
+            if composition {
+                first.cto -= 3;
+            } else {
+                first.duration += 1;
+            }
+            let observed =
+                FittedFragmentProof::observe(&changed, &init).expect("changed cadence proof");
+            assert!(
+                original.same_pictures(&observed),
+                "timing does not change coded picture identity"
+            );
+            assert_ne!(
+                original, observed,
+                "full equality must bind every duration and CTO"
+            );
+            assert_eq!(
+                observed.first_cto(),
+                original.first_cto() - if composition { 3 } else { 0 }
+            );
+        }
+        let mut other_clock = init.clone();
+        other_clock
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == video)
+            .expect("video init")
+            .timescale += 1;
+        assert!(
+            !original.same_pictures(
+                &FittedFragmentProof::observe(&fragment, &other_clock).expect("other clock")
+            ),
+            "coded pictures retain their track timescale binding"
+        );
+    }
+
+    #[test]
+    fn v4_proof_serialization_binds_signed_first_cto_and_rejects_old_widths() {
+        let (init, mut fragment) = fixture();
+        let video = init.video().expect("video").id;
+        fragment
+            .tracks
+            .iter_mut()
+            .find(|track| track.track_id == video)
+            .expect("video track")
+            .runs[0]
+            .samples[0]
+            .cto = -29;
+        let proof = FittedFragmentProof::observe(&fragment, &init).expect("negative CTO proof");
+        let bytes = proof.as_bytes();
+        assert_eq!(&bytes[64..72], &(-29i64).to_be_bytes());
+        let encoded = serde_json::to_value(proof).expect("compact proof");
+        assert_eq!(encoded.as_str().expect("hex proof").len(), 144);
+        assert_eq!(
+            serde_json::from_value::<FittedFragmentProof>(encoded).expect("v4 roundtrip"),
+            proof
+        );
+        let mut changed = bytes;
+        changed[71] ^= 1;
+        let changed: FittedFragmentProof =
+            serde_json::from_value(serde_json::json!(hex::encode(changed)))
+                .expect("different bound first CTO");
+        assert!(proof.same_pictures(&changed));
+        assert_ne!(proof.first_cto(), changed.first_cto());
+        assert_ne!(proof, changed);
+        assert_ne!(
+            proof.as_bytes(),
+            changed.as_bytes(),
+            "output identity sees the first CTO field too"
+        );
+        for old_or_truncated in [64, 142, 146] {
+            assert!(
+                serde_json::from_value::<FittedFragmentProof>(serde_json::json!(
+                    "a".repeat(old_or_truncated)
+                ))
+                .is_err()
+            );
+        }
     }
 
     fn with_rpu(init: &Init, fragment: &Fragment, rpu: &[u8]) -> Fragment {

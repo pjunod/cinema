@@ -524,7 +524,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         SourceIdentity::new(
             metadata.len(),
             1,
-            format!("dv-p7-to-p81-rpu-v3:{}", table.digest()),
+            format!("dv-p7-to-p81-rpu-v4:{}", table.digest()),
         ),
         None,
         DolbyVisionPass::Rewrite(Box::new(record)),
@@ -963,10 +963,10 @@ fn filtered_packet_hash_binds_its_first_pts_and_time_base() {
     assert!(filtered_packet_hash(raw.as_bytes(), 125, (1, 24000)).is_err());
 }
 
-/// Both header policies must identify their own first packet. A hash from
-/// the stripping output must never qualify the retained-header sample.
+/// hvc1 drops in-band parameter sets after CBS converts Annex B. The
+/// stripping policy matches; a claimed retaining policy must refuse.
 #[tokio::test]
-async fn missing_dts_probe_matches_each_outputs_parameter_set_retention() {
+async fn missing_dts_probe_refuses_retention_lost_by_the_mp4_muxer() {
     use plurx_core::testfixtures;
     testfixtures::require_ffmpeg();
     let ffmpeg = testfixtures::ffmpeg();
@@ -1031,9 +1031,15 @@ async fn missing_dts_probe_matches_each_outputs_parameter_set_retention() {
             time_base_den: base.1,
             first_sample_sha256: Some(hash),
         };
-        origin
-            .resolve(&init, &fragments[0])
-            .expect("same selected header policy matches");
+        let resolved = origin.resolve(&init, &fragments[0]);
+        if retain {
+            assert!(
+                resolved.is_err(),
+                "hvc1 discarded the claimed retained parameter sets"
+            );
+        } else {
+            resolved.expect("stripping policy matches every retained payload");
+        }
         cases.push((hash, init, fragments.remove(0), origin));
     }
     assert_ne!(
@@ -1115,4 +1121,24 @@ fn cbs_packet_identity_rejects_ambiguous_or_incomplete_framing() {
     ] {
         assert!(cbs_annex_b_sample_hash(&malformed, 4).is_err());
     }
+}
+
+#[test]
+fn fitted_output_refuses_unproved_parameter_set_retention_for_every_clock() {
+    let v1 = transcode::CopyVideoOptions::new(false, true)
+        .with_dolby_vision_conversion(true)
+        .with_parameter_set_retention(true);
+    assert!(
+        fitted_parameter_set_refusal(v1).is_none(),
+        "v1 behavior is unchanged"
+    );
+    assert!(
+        fitted_parameter_set_refusal(v1.with_dolby_vision_refit(Some([1; 32]))).is_some(),
+        "known DTS cannot bypass the fitted retention refusal"
+    );
+    assert!(fitted_parameter_set_refusal(
+        v1.with_parameter_set_retention(false)
+            .with_dolby_vision_refit(Some([1; 32]))
+    )
+    .is_none());
 }

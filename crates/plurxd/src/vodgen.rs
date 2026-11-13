@@ -51,6 +51,11 @@ use crate::renditiondir::{InitIdentity, InitRefused};
 /// small enough that a SIGSTOPped producer leaves the reader parked in one
 /// `read` rather than holding a large buffer.
 const READ_CHUNK: usize = 256 * 1024;
+// Demuxing after a seek can infer wrong DTS for its initial reordered
+// pictures. Stay within the existing three-fragment landing evidence window
+// and retain at least one fully proven row. This is a supported bound, not
+// a claim that every demuxer recovers within it; longer damage refuses.
+const FITTED_MAX_PREROLL_FRAGMENTS: usize = LANDING_WINDOW - 1;
 
 /// Mirror of [`crate::copyseg::MEMORY_WARN_BYTES`], with the landing buffer
 /// counted in: before the landing resolves nothing can be published, so the
@@ -394,6 +399,58 @@ struct GenerationRun<'a, S> {
     encoded_entry: u32,
     encoded_init: Option<Init>,
     audio_segmenter: Option<plurx_core::fmp4::PlannedAudioSegmenter>,
+}
+
+/// Select a fully proven suffix; the only omitted rows are identified preroll
+/// strictly before the requested target. There is no timestamp repair here.
+fn proved_fitted_preroll_start(
+    index: &FragmentIndex,
+    candidate: usize,
+    target: usize,
+    raw: &[(
+        usize,
+        plurx_core::segplan::refit_proof::FittedFragmentProof,
+        u64,
+    )],
+    allow_preroll: bool,
+) -> Option<(usize, usize, u64, i128)> {
+    let proofs = index
+        .dv_refit_proofs
+        .as_ref()
+        .filter(|proofs| proofs.len() == index.rows.len())?;
+    if candidate.checked_add(raw.len())? > index.rows.len()
+        || raw
+            .iter()
+            .enumerate()
+            .any(|(offset, (_, proof, _))| !proofs[candidate + offset].same_pictures(proof))
+    {
+        return None;
+    }
+    for skip in 0..raw.len().min(FITTED_MAX_PREROLL_FRAGMENTS + 1) {
+        let landed = candidate + skip;
+        if landed > target || (skip > 0 && !allow_preroll) {
+            break;
+        }
+        let translation = i128::from(index.rows[landed].dts) - i128::from(raw[skip].2);
+        // These proofs were observed once from the immutable raw fragments.
+        // Equality includes every coded payload, duration, CTO and first CTO.
+        if raw[skip..]
+            .iter()
+            .enumerate()
+            .all(|(offset, (_, proof, dts))| {
+                *proof == proofs[landed + offset]
+                    && i128::from(*dts) + translation == i128::from(index.rows[landed + offset].dts)
+            })
+        {
+            return Some((
+                landed,
+                if skip == 0 { 0 } else { raw[skip].0 },
+                raw[skip].2,
+                translation,
+            ));
+        }
+    }
+    None
 }
 
 impl<S: Sink> GenerationRun<'_, S> {
@@ -773,28 +830,6 @@ impl<S: Sink> GenerationRun<'_, S> {
                 }
             },
         };
-        let candidates: Vec<usize> = if let Some(time) = time {
-            let first = index
-                .rows
-                .partition_point(|row| row.dts < time.ticks.saturating_sub(time.frame_ticks));
-            let last = index
-                .rows
-                .partition_point(|row| row.dts <= time.ticks.saturating_add(time.frame_ticks));
-            (first..last.min(target.saturating_add(1)))
-                .filter(|&row| {
-                    let indexed = &index.rows[row];
-                    let off = indexed.dts.abs_diff(time.ticks);
-                    off < time.frame_ticks.max(1) && off.saturating_mul(2) < indexed.duration.max(1)
-                })
-                .collect()
-        } else {
-            vec![0]
-        };
-        if candidates.is_empty() {
-            return Err(landing_failed(
-                "the fitted landing clock names no index row".into(),
-            ));
-        }
         let init = self
             .served
             .as_ref()
@@ -802,48 +837,78 @@ impl<S: Sink> GenerationRun<'_, S> {
         let video = init
             .video()
             .ok_or_else(|| landing_failed("fitted conversion has no video track".into()))?;
-        let first_dts = self
-            .landing
-            .iter()
-            .find_map(|fragment| fragment.track(video.id).map(|track| track.base_decode_time))
+        if video.timescale != index.timescale {
+            return Err(landing_failed(
+                "fitted output changed its video timescale".into(),
+            ));
+        }
+        let proofs = index
+            .dv_refit_proofs
+            .as_ref()
+            .filter(|proofs| proofs.len() == index.rows.len())
             .ok_or_else(|| {
-                landing_failed("fitted conversion has no first video fragment".into())
+                landing_failed("fitted index lacks complete pre-conversion proofs".into())
             })?;
+        let mut raw = Vec::new();
+        for (slot, fragment) in self.landing.iter().enumerate() {
+            if let Some(track) = fragment.track(video.id) {
+                let proof =
+                    plurx_core::segplan::refit_proof::FittedFragmentProof::observe(fragment, init)
+                        .map_err(landing_failed)?;
+                raw.push((slot, proof, track.base_decode_time));
+            }
+        }
+        let first = raw.first().ok_or_else(|| {
+            landing_failed("fitted conversion has no first video fragment".into())
+        })?;
+        let first_presentation = index
+            .rows
+            .first()
+            .zip(proofs.first())
+            .map(|(row, proof)| i128::from(row.dts) + i128::from(proof.first_cto()))
+            .ok_or_else(|| landing_failed("fitted index has no presentation origin".into()))?;
+        // The probe measures source packet PTS. A seek can temporarily invent
+        // DTS, so compare it with the canonical RAP's PTS, not its DTS.
+        let candidates: Vec<_> = (0..=target.min(index.rows.len().saturating_sub(1)))
+            .filter(|&row| proofs[row].same_pictures(&first.1))
+            .filter(|&row| match time {
+                Some(time) => {
+                    let presentation = i128::from(index.rows[row].dts)
+                        + i128::from(proofs[row].first_cto())
+                        - first_presentation;
+                    let off = presentation.abs_diff(i128::from(time.ticks));
+                    off < u128::from(time.frame_ticks.max(1))
+                        && off * 2 < u128::from(index.rows[row].duration.max(1))
+                }
+                None => row == 0,
+            })
+            .collect();
         let table = self
             .generation
             .dv_refit
             .as_ref()
             .ok_or_else(|| landing_failed("fitted conversion lost its pinned table".into()))?;
         let mut match_found = None;
-        'candidate: for candidate in candidates {
+        for candidate in candidates {
+            let Some((landed, first_slot, first_dts, translation)) = proved_fitted_preroll_start(
+                index,
+                candidate,
+                target,
+                &raw,
+                self.generation.start_entry > 0,
+            ) else {
+                continue;
+            };
             let clock = plurx_core::transcode::dv_refit_serve::SourceClock::for_index_landing(
-                index, candidate, first_dts,
+                index, landed, first_dts,
             )
             .map_err(|error| landing_failed(format!("fitted landing clock: {error}")))?;
             let mut converter = crate::dvpipe::Converter::for_init(init)
                 .and_then(|ready| ready.with_refit(std::sync::Arc::clone(table), clock))
                 .map_err(|error| landing_failed(format!("fitted conversion: {error}")))?;
-            let mut converted = Vec::with_capacity(self.landing.len());
-            let mut observed = Vec::with_capacity(self.observed.len());
-            let translation = i128::from(index.rows[candidate].dts) - i128::from(first_dts);
-            let mut raw_row = candidate;
-            for original in &self.landing {
-                if original.track(video.id).is_some() {
-                    if plurx_core::segplan::refit_proof::verify_fitted_fragment(
-                        index,
-                        raw_row,
-                        original,
-                        init,
-                        translation,
-                    )
-                    .is_err()
-                    {
-                        continue 'candidate;
-                    }
-                    raw_row += 1;
-                }
-            }
-            for original in &self.landing {
+            let mut converted = Vec::with_capacity(self.landing.len() - first_slot);
+            let mut observed = Vec::with_capacity(raw.len());
+            for original in &self.landing[first_slot..] {
                 let mut fragment = original.clone();
                 converter
                     .convert(&mut fragment)
@@ -854,20 +919,18 @@ impl<S: Sink> GenerationRun<'_, S> {
                 converted.push(fragment);
             }
             let matches = !observed.is_empty()
-                && candidate + observed.len() <= index.rows.len()
-                && (observed.len() >= LANDING_WINDOW
-                    || candidate + observed.len() == index.rows.len())
+                && landed + observed.len() <= index.rows.len()
                 && observed
                     .iter()
                     .enumerate()
-                    .all(|(offset, &bytes)| index.rows[candidate + offset].video_bytes == bytes);
+                    .all(|(offset, &bytes)| index.rows[landed + offset].video_bytes == bytes);
             if matches {
                 if match_found.is_some() {
                     return Err(landing_failed(
                         "multiple fitted landing rows agree with the converted bytes".into(),
                     ));
                 }
-                match_found = Some((candidate, converted, observed, converter, translation));
+                match_found = Some((landed, converted, observed, converter, translation));
             }
         }
         let Some((landed, converted, observed, converter, translation)) = match_found else {
@@ -878,6 +941,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         };
         self.fitted_translation = Some(translation);
         self.fitted_next_row = Some(landed + observed.len());
+        self.landing_bytes = converted.iter().map(|fragment| fragment.bytes.len()).sum();
         self.landing = converted;
         self.observed = observed;
         self.converter = Some(converter);
@@ -1126,10 +1190,9 @@ impl<S: Sink> GenerationRun<'_, S> {
             ));
         }
         if self.segmenter.is_none() {
-            // Fewer fragments than a full landing window: `match_landing`
-            // accepts a short probe only at the index's own tail, where the
-            // stream genuinely ran out. Anywhere else this is a typed
-            // landing failure, not a guess.
+            // Legacy byte matching accepts a short window only at the index
+            // tail. Fitted coded proofs can settle a unique short window;
+            // their complete EOF coverage check below remains mandatory.
             if let Err(outcome) = self.engage(true).await {
                 return outcome;
             }
@@ -1843,6 +1906,108 @@ mod tests {
         assert_eq!(
             sink.taken().first().map(|(entry, _)| *entry),
             Some(start_entry)
+        );
+    }
+
+    fn preroll_proof(
+        coded: u8,
+        cadence: u8,
+    ) -> plurx_core::segplan::refit_proof::FittedFragmentProof {
+        let mut bytes = [0u8; 72];
+        bytes[..32].fill(coded);
+        bytes[32..64].fill(cadence);
+        serde_json::from_value(serde_json::json!(hex::encode(bytes))).expect("v4 proof")
+    }
+    fn preroll_index() -> FragmentIndex {
+        let mut index = FragmentIndex::new(
+            1000,
+            (0..4)
+                .map(|at| plurx_core::segplan::IndexRow {
+                    dts: at * 100,
+                    duration: 100,
+                    bytes: 1,
+                    video_bytes: 1,
+                    class: plurx_core::fmp4::CutClass::CleanIdr,
+                })
+                .collect(),
+            "a".repeat(64),
+            plurx_core::segplan::SourceIdentity::new(1, 1, "fitted-v4"),
+        );
+        index.dv_refit_proofs = Some((1..=4).map(|code| preroll_proof(code, 7)).collect());
+        index
+    }
+    #[test]
+    fn fitted_preroll_discards_only_identified_pre_target_clock_damage() {
+        let index = preroll_index();
+        let full = [(2, preroll_proof(1, 7), 10_000)];
+        assert_eq!(
+            proved_fitted_preroll_start(&index, 0, 0, &full, false),
+            Some((0, 0, 10_000, -10_000)),
+            "without a preroll discard, retain leading audio-only fragments"
+        );
+        let raw = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 7), 10_083),
+            (2, preroll_proof(3, 7), 10_183),
+        ];
+        assert_eq!(
+            proved_fitted_preroll_start(&index, 0, 1, &raw, true),
+            Some((1, 1, 10_083, -9_983))
+        );
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 0, &raw, true).is_none(),
+            "cannot discard target row"
+        );
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &raw, false).is_none(),
+            "whole playback cannot discard"
+        );
+        let mut wrong_picture = raw;
+        wrong_picture[0].1 = preroll_proof(9, 9);
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &wrong_picture, true).is_none(),
+            "skipped pictures also require identity"
+        );
+    }
+    #[test]
+    fn fitted_preroll_keeps_every_served_row_clock_and_prefix_bound() {
+        let index = preroll_index();
+        let raw = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 7), 10_083),
+            (2, preroll_proof(3, 9), 10_183),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &raw, true).is_none(),
+            "later served cadence cannot differ"
+        );
+        let target_damage = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 9), 10_083),
+            (2, preroll_proof(3, 7), 10_183),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &target_damage, true).is_none(),
+            "damage intersecting target cannot be discarded"
+        );
+        let drift = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 7), 10_083),
+            (2, preroll_proof(3, 7), 10_184),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 1, &drift, true).is_none(),
+            "fixed translation includes every served row"
+        );
+        let over_bound = [
+            (0, preroll_proof(1, 9), 10_000),
+            (1, preroll_proof(2, 9), 10_100),
+            (2, preroll_proof(3, 9), 10_200),
+            (3, preroll_proof(4, 7), 10_300),
+        ];
+        assert!(
+            proved_fitted_preroll_start(&index, 0, 3, &over_bound, true).is_none(),
+            "at most two preroll fragments"
         );
     }
 

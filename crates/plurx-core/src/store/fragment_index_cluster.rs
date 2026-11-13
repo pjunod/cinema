@@ -3140,7 +3140,7 @@ pub fn cluster_fragment_index_output_identity(
         if proofs.len() != index.rows.len() {
             return Err(v3_error("fitted proof row count mismatch"));
         }
-        digest.update(b"plurx/fitted-copy/ordered-coded-cadence/v3\0");
+        digest.update(b"plurx/fitted-copy/ordered-coded-cadence/v4\0");
         digest.update((proofs.len() as u64).to_be_bytes());
         for proof in proofs {
             digest.update(proof.as_bytes());
@@ -3781,9 +3781,11 @@ mod tests {
             time_base_num: 1,
             time_base_den: 1000,
         });
-        let proof = |digit| {
-            serde_json::from_value::<FittedFragmentProof>(serde_json::json!(digest(digit)))
-                .expect("typed SHA256 proof")
+        let proof = |digit: char| {
+            serde_json::from_value::<FittedFragmentProof>(serde_json::json!(digit
+                .to_string()
+                .repeat(144)))
+            .expect("typed v4 coded/cadence proof")
         };
         index.dv_refit_proofs = Some(vec![proof('e'), proof('f')]);
         let output = cluster_fragment_index_output_identity(&index, &source, &semantic)

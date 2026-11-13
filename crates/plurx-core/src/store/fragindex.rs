@@ -1264,7 +1264,7 @@ mod tests {
             time_base_den: 1000,
         });
         let proof = serde_json::from_value::<crate::segplan::refit_proof::FittedFragmentProof>(
-            serde_json::json!("a".repeat(64)),
+            serde_json::json!("a".repeat(144)),
         )
         .expect("proof");
         built.dv_refit_proofs = Some(vec![proof; built.rows.len()]);

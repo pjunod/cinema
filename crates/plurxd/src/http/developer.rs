@@ -2408,9 +2408,9 @@ fn dolby_vision_refit_items(
     let timing = || {
         DeveloperRequirement {
         id: "refit_copy_timing",
-        title: "Audio-bearing copy qualification",
+        title: "Fitted copy qualification",
         status: RequirementStatus::Unmet,
-        evidence: "Fitted copy requires a matching picture timeline. Some AAC layouts change that timing and are refused before publication. Audio-bearing copy acceptance remains pending.".into(),
+        evidence: "Fitted copy requires a matching picture timeline. Some AAC layouts change that timing and are refused before publication. Audio-bearing copy acceptance remains pending. Fitted copies requiring retained in-band parameter sets are unsupported by the current muxer.".into(),
     }
     };
     let helper = match helper {
