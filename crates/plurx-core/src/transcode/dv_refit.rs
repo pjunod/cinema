@@ -685,6 +685,103 @@ impl ServableCurves {
     pub fn curves(&self) -> &ComposerCurves {
         &self.0
     }
+
+    /// The coefficients exactly as [`apply_to_rpu`] writes them.
+    pub fn quantised(&self) -> QuantisedCurves {
+        let n = |v: f64| {
+            let (int, frac) = split(v, 23).expect("servable curves are writable");
+            int * (1i64 << 23) + frac as i64
+        };
+        QuantisedCurves {
+            luma: self.0.luma.map(|piece| piece.map(n)),
+            chroma: self.0.chroma.map(|component| component.map(n)),
+        }
+    }
+
+    /// Curves rebuilt from stored coefficients, checked again as they will be
+    /// written: writable, the luma curve rising without flattening, and both
+    /// curves within bounds of identity, measured on the composer's own
+    /// reshape (the fit-domain diagnostics need curves this store does not
+    /// keep; the two domains differ by under a code at these bounds).
+    pub fn from_quantised(q: &QuantisedCurves) -> Result<Self, Unservable> {
+        let limit = 64i64 << 23;
+        if q.luma
+            .iter()
+            .flatten()
+            .chain(q.chroma.iter().flatten())
+            .any(|&n| !(-limit..63i64 << 23).contains(&n))
+        {
+            return Err(Unservable::Unwritable);
+        }
+        let v = |n: i64| n as f64 / FIT_QUANT;
+        let composer = ComposerCurves {
+            luma: q.luma.map(|piece| piece.map(v)),
+            chroma: q.chroma.map(|component| component.map(v)),
+        };
+        luma_shape(&composer)?;
+        let identity = RefitCurves::identity().composer();
+        let mid = 512u16;
+        let luma = (0..CODES as u16)
+            .map(|c| {
+                (f64::from(composer.reshape([c, mid, mid])[0])
+                    - f64::from(identity.reshape([c, mid, mid])[0]))
+                .abs()
+            })
+            .fold(0.0, f64::max);
+        if luma > LUMA_DEPARTURE_LIMIT {
+            return Err(Unservable::LumaDeparture(luma));
+        }
+        let grid: Vec<u16> = (0..17)
+            .map(|i| (1023.0 * i as f64 / 16.0).round() as u16)
+            .collect();
+        let mut chroma = 0.0f64;
+        for &y in &grid {
+            for &u in &grid {
+                for &w in &grid {
+                    let (got, want) = (composer.reshape([y, u, w]), identity.reshape([y, u, w]));
+                    for ch in 1..3 {
+                        chroma = chroma.max((f64::from(got[ch]) - f64::from(want[ch])).abs());
+                    }
+                }
+            }
+        }
+        if chroma > CHROMA_DEPARTURE_LIMIT {
+            return Err(Unservable::ChromaDeparture(chroma));
+        }
+        Ok(Self(composer))
+    }
+}
+
+/// A scene's served composer coefficients as stored and digested: each the
+/// numerator over 2^23 that [`apply_to_rpu`] writes (the integer part and
+/// the 23-bit fraction [`split`] makes, joined). `n / 2^23` is exact in
+/// binary64, so curves rebuilt from these write the same RPU bits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuantisedCurves {
+    pub luma: [[i64; 3]; LUMA_PIECES],
+    pub chroma: [[i64; MMR_TERMS]; 2],
+}
+
+/// The luma curve as a decoder applies it rises everywhere and rises at
+/// least a quarter of identity's slope across every 32-code span.
+fn luma_shape(composer: &ComposerCurves) -> Result<(), Unservable> {
+    let mid = 512u16;
+    let luma: Vec<f64> = (0..CODES as u16)
+        .map(|c| f64::from(composer.reshape([c, mid, mid])[0]))
+        .collect();
+    if luma.windows(2).any(|w| w[1] < w[0]) {
+        return Err(Unservable::NotMonotone);
+    }
+    let min_rise = MIN_SPAN_RISE_SHARE * IDENTITY_SLOPE * 32.0;
+    if let Some(rise) = luma
+        .windows(33)
+        .map(|w| w[32] - w[0])
+        .find(|&r| r < min_rise)
+    {
+        return Err(Unservable::Flattens(rise));
+    }
+    Ok(())
 }
 
 /// Checks the shape of a fit as it will be written: coefficients writable
@@ -702,21 +799,7 @@ pub fn servable(curves: &RefitCurves) -> Result<ServableCurves, Unservable> {
     {
         return Err(Unservable::Unwritable);
     }
-    let mid = 512u16;
-    let luma: Vec<f64> = (0..CODES as u16)
-        .map(|c| f64::from(composer.reshape([c, mid, mid])[0]))
-        .collect();
-    if luma.windows(2).any(|w| w[1] < w[0]) {
-        return Err(Unservable::NotMonotone);
-    }
-    let min_rise = MIN_SPAN_RISE_SHARE * IDENTITY_SLOPE * 32.0;
-    if let Some(rise) = luma
-        .windows(33)
-        .map(|w| w[32] - w[0])
-        .find(|&r| r < min_rise)
-    {
-        return Err(Unservable::Flattens(rise));
-    }
+    luma_shape(&composer)?;
     let d = curves.diagnostics();
     if d.luma_max_abs_minus_identity > LUMA_DEPARTURE_LIMIT {
         return Err(Unservable::LumaDeparture(d.luma_max_abs_minus_identity));
@@ -1019,6 +1102,10 @@ pub struct RefitScene {
     pub first_pts: i64,
     pub end_pts: i64,
     pub time_base: String,
+    /// The lengths of the RPU's own scenes pooled into this one, in order.
+    /// They sum to `frames`; with them a resumed run's scenes and the
+    /// scenes before it rebuild the whole title's summary ([`summarise`]).
+    pub rpu_scene_frames: Vec<u64>,
     pub fit: RefitStats,
     pub held_out: RefitStats,
 }
@@ -1031,6 +1118,9 @@ impl RefitScene {
             || scene.end_pts <= scene.first_pts
             || !time_base_valid(&scene.time_base)
             || scene.fit.samples() < scene.frames as f64
+            || scene.rpu_scene_frames.is_empty()
+            || scene.rpu_scene_frames.contains(&0)
+            || scene.rpu_scene_frames.iter().sum::<u64>() != scene.frames
         {
             return Err(RefitError::Output("scene bounds"));
         }
@@ -1080,6 +1170,20 @@ impl RefitSummary {
 /// every pooled scene at least 24 frames unless it is the only one, and the
 /// summary's totals equal to the scenes' sums.
 pub fn check_refit_run(scenes: &[RefitScene], summary: &RefitSummary) -> Result<(), RefitError> {
+    if summarise(scenes)? != *summary {
+        return Err(RefitError::Output("summary disagrees with the scenes"));
+    }
+    Ok(())
+}
+
+/// The summary an uninterrupted run writes after `scenes`, from the scenes
+/// alone: their frames, samples and span, and the RPU scene lengths they
+/// carry for the median. Refused unless the scenes are contiguous, rise in
+/// presentation time, share one time base and are each at least 24 frames
+/// long (unless there is only one). A resumed run's scenes appended to the
+/// ones written before the interruption summarise to the uninterrupted
+/// run's summary.
+pub fn summarise(scenes: &[RefitScene]) -> Result<RefitSummary, RefitError> {
     let (first, last) = match (scenes.first(), scenes.last()) {
         (Some(f), Some(l)) => (f, l),
         _ => return Err(RefitError::Output("no scenes")),
@@ -1095,20 +1199,36 @@ pub fn check_refit_run(scenes: &[RefitScene], summary: &RefitSummary) -> Result<
             "a pooled scene is shorter than 24 frames",
         ));
     }
-    let frames: u64 = scenes.iter().map(|s| s.frames).sum();
-    let fit: f64 = scenes.iter().map(|s| s.fit.samples()).sum();
-    let held_out: f64 = scenes.iter().map(|s| s.held_out.samples()).sum();
-    if scenes.iter().any(|s| s.time_base != summary.time_base)
-        || summary.scenes != scenes.len() as u64
-        || summary.frames != frames
-        || summary.fit_samples as f64 != fit
-        || summary.held_out_samples as f64 != held_out
-        || summary.first_pts != first.first_pts
-        || summary.end_pts != last.end_pts
-    {
-        return Err(RefitError::Output("summary disagrees with the scenes"));
+    if scenes.iter().any(|s| s.time_base != first.time_base) {
+        return Err(RefitError::Output("scenes disagree on the time base"));
     }
-    Ok(())
+    let mut lengths: Vec<u64> = scenes
+        .iter()
+        .flat_map(|s| s.rpu_scene_frames.iter().copied())
+        .collect();
+    lengths.sort_unstable();
+    let n = lengths.len();
+    // The helper's median: the middle length, or the mean of the two middle
+    // ones. Both are exact in binary64 for any frame count.
+    let median_scene_frames = if n % 2 == 1 {
+        lengths[n / 2] as f64
+    } else {
+        (lengths[n / 2 - 1] as f64 + lengths[n / 2] as f64) / 2.0
+    };
+    let whole = |v: f64| v as u64;
+    Ok(RefitSummary {
+        kind: "refit_summary".into(),
+        frames: scenes.iter().map(|s| s.frames).sum(),
+        scenes: scenes.len() as u64,
+        rpu_scenes: n as u64,
+        median_scene_frames,
+        degenerate: median_scene_frames < MIN_SCENE_FRAMES as f64,
+        fit_samples: whole(scenes.iter().map(|s| s.fit.samples()).sum()),
+        held_out_samples: whole(scenes.iter().map(|s| s.held_out.samples()).sum()),
+        first_pts: first.first_pts,
+        end_pts: last.end_pts,
+        time_base: first.time_base.clone(),
+    })
 }
 
 #[cfg(test)]
