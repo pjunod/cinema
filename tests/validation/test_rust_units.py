@@ -208,7 +208,7 @@ class ReceiptAuthenticationTests(unittest.TestCase):
             "/actions/runs/41": {"id": 41, "commit_sha": run_commit or self.commit, "workflow_id": workflow},
             "/actions/runs/41/jobs": [
                 {"id": 501, "name": ru.JOB_VERDICT, "status": "success"},
-                {"id": 502, "name": ru.JOB_SHARD.format(index=1), "status": "success"}],
+                {"id": 502, "name": ru.JOB_SHARD.format(index=1) + " (1)", "status": "success"}],
             "/actions/artifacts/7/zip": buffer.getvalue(),
             "/actions/jobs/501/logs": (self.task("verdict") + publisher_log).encode(),
             "/actions/jobs/502/logs": (self.task(shard_job) + shard_log).encode(),

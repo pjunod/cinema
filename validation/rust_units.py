@@ -633,7 +633,9 @@ class Authenticator:
 
     def job(self, run, name, statuses, job_id):
         """The one job of that name, terminal, and run as the stage's own job id."""
-        found = [job for job in self.jobs(run) if job.get("name") == name]
+        # Forgejo appends the matrix values to a dispatched matrix job's name.
+        found = [job for job in self.jobs(run) if isinstance(job.get("name"), str)
+                 and re.fullmatch(re.escape(name) + r"(?: \([^()]*\))?", job["name"])]
         require(len(found) == 1, f"run {run} has {len(found)} jobs named {name!r}", NotAdopted)
         require(found[0].get("status") in statuses, f"{name!r} in run {run} is {found[0].get('status')}",
                 NotAdopted)
@@ -850,8 +852,9 @@ def run_shard(plan_path, archive, index, threads):
     if plan["serial_filters"] and index == 1:
         runs.append(("serial ignored", plan["serial_filters"],
                      ["--run-ignored", "only", "--test-threads", "1"]))
+    EXTRACT.mkdir(parents=True, exist_ok=True)
     for label, filters, extra in runs:
-        for stale in EXTRACT.rglob("junit.xml") if EXTRACT.exists() else ():
+        for stale in EXTRACT.rglob("junit.xml"):
             stale.unlink()
         command = nextest_command(archive, filters, extra)
         print(f"::group::nextest {label}: shard {index}/{count}")
@@ -862,7 +865,7 @@ def run_shard(plan_path, archive, index, threads):
         # 0: all passed; 100: tests failed; 4: no tests matched this partition.
         require(result.returncode in (0, 4, 100), f"nextest {label} could not run (exit {result.returncode})")
         if result.returncode != 4:
-            reports = sorted(EXTRACT.rglob("junit.xml")) if EXTRACT.exists() else []
+            reports = sorted(EXTRACT.rglob("junit.xml"))
             require(len(reports) == 1, f"nextest {label} wrote {len(reports)} JUnit reports")
             outcomes.update(junit_outcomes(reports[0]))
     planned = {t for crate in plan["crates"].values() for t in crate["remaining"] + crate["serial"]}
