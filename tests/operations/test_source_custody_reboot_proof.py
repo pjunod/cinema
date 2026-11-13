@@ -42,7 +42,8 @@ def witnesses():
 
 def entry(**fields):
     value = {'_BOOT_ID': OLD.replace('-', ''), '_MACHINE_ID': MACHINE,
-             '__REALTIME_TIMESTAMP': '5000000', '__CURSOR': 's=fixture', '__MONOTONIC_TIMESTAMP': '200'}
+             '__REALTIME_TIMESTAMP': '5000000', '__CURSOR': 's=fixture', '__MONOTONIC_TIMESTAMP': '200',
+             '__SEQNUM': '12', '__SEQNUM_ID': 'abcdef0123456789abcdef0123456789'}
     value.update(fields)
     return encoded(value)
 

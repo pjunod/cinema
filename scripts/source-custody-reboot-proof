@@ -307,7 +307,7 @@ def journal_entry(raw, machine, previous, at_ms):
     entry = strict_json(lines[0])
     required = {'_BOOT_ID', '_MACHINE_ID', '__REALTIME_TIMESTAMP'}
     require(isinstance(entry, dict) and required <= set(entry)
-            and set(entry) <= required | {'__CURSOR', '__MONOTONIC_TIMESTAMP'},
+            and set(entry) <= required | {'__CURSOR', '__MONOTONIC_TIMESTAMP', '__SEQNUM', '__SEQNUM_ID'},
             'unsupported prior boot journal entry shape')
     for key in set(entry) - required:
         require(isinstance(entry[key], str) and 0 < len(entry[key]) <= 1024, 'invalid journal metadata')
