@@ -30,7 +30,7 @@ def expected(version):
             for fmt, name in [("deb", f"{package}_{version}-1_{arch}.deb"), ("rpm", f"{package}-{version}-1.{rpm_arch}.rpm")]:
                 result.append(dict(name=name, platform="linux", architecture=arch, format=fmt,
                                    component=component, package_name=package, package_version=f"{version}-1"))
-    result.append(dict(name=f"plurxd-{version}-macos-universal.tar.gz", platform="macos", architecture="universal", format="tar_gz", component="native_runtime", package_name="plurx-native", package_version=version))
+    result.append(dict(name=f"plurxd-{version}-macos-arm64.tar.gz", platform="macos", architecture="arm64", format="tar_gz", component="native_runtime", package_name="plurx-native", package_version=version))
     return sorted(result, key=lambda x: x["name"])
 
 

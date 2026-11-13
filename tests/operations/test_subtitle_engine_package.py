@@ -52,10 +52,11 @@ def fixture_variant(directory, baseline):
     binary = directory / pin["filename"]
     binary.write_bytes(b"qualified static AVX2 executable fixture")
     binary.chmod(0o755)
-    facts["platform"] = "macos-x86_64"
+    # The x86_64 AVX2 variant exists only for x86_64 Linux: macOS is arm64 only.
+    facts["platform"] = "linux-x86_64"
     facts["cpu_variants"] = {"x86_64-avx2": dict(pin,
         binary_sha256=TOOL.digest(binary), binary_bytes=binary.stat().st_size,
-        runtime_dependencies=["/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)"])}
+        runtime_dependencies=["libstdc++.so.6 => /lib/libstdc++.so.6", "/lib64/ld-linux-x86-64.so.2"])}
     (directory / "subtitle-engine.json").write_text(json.dumps(facts))
     return facts
 
@@ -250,34 +251,35 @@ class SubtitleEnginePackageCase(unittest.TestCase):
                     self.assertNotIn(result.returncode, [0, 99], result.stderr)
                     self.assertNotIn("native signature qualification deliberately unavailable", result.stderr)
 
-    def test_portable_verifier_accepts_variant_metadata_without_faking_native_signature(self):
-        fixture_variant(self.package, self.facts)
+    def test_portable_verifier_accepts_the_arm64_package_without_faking_native_signature(self):
         result = subprocess.run(["/bin/bash", str(self.portable_verifier), str(self.package)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 99, result.stderr)
         self.assertIn("native signature qualification deliberately unavailable", result.stderr)
 
-    def test_universal_package_keeps_one_intel_variant_without_lipo_or_execution(self):
-        intel = self.root / "intel-engine"
-        intel_facts = fixture_variant(intel, fixture_bundle(intel))
-        dependencies = ["/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)"]
-        commands = []
-        def assemble(argv, **kwargs):
-            commands.append(argv)
-            if argv[:2] == ["/usr/bin/lipo", "-create"]:
-                output = Path(argv[argv.index("-output") + 1])
-                output.write_bytes(b"universal baseline fixture")
-                output.chmod(0o755)
-            return subprocess.CompletedProcess(argv, 0)
-        with mock.patch.object(TOOL.platform, "system", return_value="Darwin"), mock.patch.object(TOOL, "run", side_effect=assemble), mock.patch.object(TOOL, "loader_dependencies", return_value=dependencies):
-            for index, packages in enumerate([[self.package, intel], [intel, self.package]]):
-                output = self.root / ("universal-" + str(index))
-                facts = TOOL.combine(packages, output)
-                self.assertEqual(facts["platform"], "macos-universal")
-                self.assertEqual(facts["cpu_variants"], intel_facts["cpu_variants"])
-                self.assertEqual((output / "whisper-cli-avx2").read_bytes(), (intel / "whisper-cli-avx2").read_bytes())
-                self.assertEqual(TOOL.verify(output), facts)
-        self.assertEqual(sum(command[:2] == ["/usr/bin/lipo", "-create"] for command in commands), 2)
-        self.assertFalse(any("whisper-cli-avx2" in str(argument) for command in commands for argument in command))
+    def test_macos_installer_verifiers_refuse_intel_universal_and_cpu_variant_packages(self):
+        cases = [("Intel", dict(self.facts, platform="macos-x86_64"), "not macOS arm64"),
+                 ("universal", dict(self.facts, platform="macos-universal"), "not macOS arm64"),
+                 ("arm64 with a variant", dict(fixture_variant(self.package, self.facts), platform="macos-arm64"),
+                  "CPU variant requires x86_64")]
+        for label, facts, message in cases:
+            (self.package / "subtitle-engine.json").write_text(json.dumps(facts))
+            for verifier in self.installer_verifiers():
+                with self.subTest(label=label, verifier=verifier.name):
+                    result = subprocess.run(["/bin/bash", str(verifier), str(self.package)], capture_output=True, text=True)
+                    self.assertNotIn(result.returncode, [0, 99], result.stderr)
+                    self.assertIn(message, result.stderr)
+
+    def test_macos_packages_are_arm64_only(self):
+        for platform in ["macos-x86_64", "macos-universal"]:
+            with self.subTest(platform=platform):
+                (self.package / "subtitle-engine.json").write_text(json.dumps(dict(self.facts, platform=platform)))
+                with self.assertRaisesRegex(ValueError, "unqualified subtitle engine platform"):
+                    TOOL.verify(self.package)
+        with mock.patch.object(TOOL.platform, "system", return_value="Darwin"):
+            with self.assertRaisesRegex(ValueError, "Apple Silicon"):
+                TOOL.build(self.root / "intel-output", architecture="x86_64")
+        self.assertFalse((self.root / "intel-output").exists())
+        self.assertFalse(hasattr(TOOL, "combine"))
 
     def test_builder_emits_pinned_static_variant_only_for_x86_without_executing_it(self):
         dependencies = ["libstdc++.so.6 => /lib/libstdc++.so.6", "/lib64/ld-linux-x86-64.so.2"]
