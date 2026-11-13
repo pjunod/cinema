@@ -1,3 +1,11 @@
+# 2026-11-13 Linux reboot recovery ownership audit (Codex/root): the new
+# reboot_proof module is awaited by the existing exact-source recovery owner.
+# It adds no daemon task, timer, media opener or child launcher. Startup identity
+# validation is synchronous before serving. Freshness constants are proof
+# predicates, not scheduled work. The separate root-admin helper owns one
+# bounded journalctl child, drains bounded output, and kills/waits on failure;
+# it neither stops a reader nor releases custody. Store settlement, exact
+# acknowledgement and worker-journal cleanup retain their existing owner.
 # S5 source custody / VOD Source-copy yield audit (2026-11-09), authored
 # structural comparison of origin/main c8f8b5aa9 with 3e17df55f using the
 # unchanged rust_structural_source extractor over module_roots. This is static

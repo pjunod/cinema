@@ -1,6 +1,6 @@
 # Shared-library playback — implementation and merge status
 
-**Status:** built · **Updated:** 2026-11-09 · **Owner:** Codex/root
+**Status:** built; lab4 recovery correction prepared · **Updated:** 2026-11-13 · **Owner:** Codex/root
 
 PR #1472, `claude/shared-library-standalone-fixes`, carries the standalone
 repairs and relay budget, retry and abandonment work. Its live gate and
@@ -19,8 +19,12 @@ HDR and queued-analysis custody repairs from #1475–#1478.
 S5's Source-owned caption windows and the fixture Start503 landed in
 [#1490](SHARED-SUBTITLE-CUSTODY-AND-START-503.md). S1–S3, S8 and S9 remain A1 work. Native Apple/Android startup headers
 require a client release. RX-ring sizing is built in the host baseline
-(2026-11-12) and awaits the owner's apply; deployment and physical playback
-acceptance remain separate.
+(2026-11-12) and was applied on 2026-11-13 with the persistent rule included
+in every installed kernel boot image. Post-reboot and physical playback
+acceptance remain separate. The cluster-wide recovery-pending count is one
+lab4 preparation custody; [recovery ledger §1.5](../server/SOURCE-CUSTODY-RECOVERY.md#15-linux-startup-preserves-reboot-recovery-old-empty-identity-records-need-independent-proof)
+records its root cause, prevention and exact-owner repair. Source is prepared;
+review, tests and fleet recovery remain pending.
 
 ## Fixture correction
 

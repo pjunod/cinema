@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux replicated servers validate actual-host reboot identity before serving,
+  so a raw source reader can still be recovered after a later host reboot.
+  Historical empty-identity job custody has a root-admin journal proof path
+  through normal exact-owner settlement; lease expiry alone never releases it.
+
 - A plurxd restart no longer fences every source-reading job in the cluster
   until a host reboot. A restart during a read left that owner's custody
   stranded. A new daemon now releases it when the old daemon's whole PID

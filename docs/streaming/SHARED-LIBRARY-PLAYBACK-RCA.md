@@ -341,6 +341,24 @@ macOS and unbound containers, where empty is normal. Add a test that the
 activation writer refuses only when `prepare_at` returns `Ok(None)` *and*
 the identity is empty.
 
+### 5.1 A different lab4 owner lost both recovery paths after replacement and reboot
+
+On 2026-11-13, all four replicas retain the same `2b6f4c0e…` custody for
+`transcode_prepare` job `49dd5948…` (file 104, recent-demand preparation).
+The job is cancelled; custody remains active without settlement. Its anchor
+was invalidated by a raw launch at 02:30:05 UTC; Docker records daemon
+replacement at 02:30:23–24 UTC, and the host rebooted at 03:54:57 UTC.
+The v2 record's kernel UUID is now historical and it has no namespace field.
+The v1 machine/boot IDs are empty, and the deployment lacked both host binds.
+This is a separate owner from the resolved lab3 DV migration above.
+
+The [recovery ledger §1.5](../server/SOURCE-CUSTODY-RECOVERY.md#15-linux-startup-preserves-reboot-recovery-old-empty-identity-records-need-independent-proof)
+owns the corrective contract: validate the Linux reboot fallback before
+serving, and settle historical missing-identity witnesses only through an
+independent root-admin proof of a different local kernel boot. Owner:
+Codex/root. Source is prepared; review, qualification and fleet recovery remain
+pending. No manual row deletion or ownership-check bypass is authorized.
+
 ## 6. Every node warns about two removed Raft members, every minute
 
 **Symptom:** lab6 logs `hiqlite::split_brain_check: … sqlite node 3 not in

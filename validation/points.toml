@@ -859,6 +859,8 @@ paths = [
   "scripts/source-custody-recovery",
   "scripts/source-custody-reader-stop",
   "scripts/source-custody-source-census",
+  "scripts/source-custody-reboot-proof",
+  "tests/operations/test_source_custody_reboot_proof.py",
   "tests/operations/test_source_custody_reader_stop.py",
   "tests/operations/test_source_custody_recovery.py",
   "crates/plurxd/src/fragment_index_cluster/source_digest.rs",

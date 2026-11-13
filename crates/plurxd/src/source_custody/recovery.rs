@@ -10,9 +10,9 @@ use std::io::Read;
 
 #[cfg(target_os = "linux")]
 mod physical_stop;
+mod reader;
 #[cfg(target_os = "linux")]
 mod reboot_proof;
-mod reader;
 #[cfg(target_os = "linux")]
 mod source_census;
 pub(super) use reader::Witness;
@@ -155,7 +155,11 @@ struct Identity {
 pub(super) fn validate_startup(authoritative: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        validate_linux_startup(authoritative, Identity::current(), reader::kernel_instance())
+        validate_linux_startup(
+            authoritative,
+            Identity::current(),
+            reader::kernel_instance(),
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -177,7 +181,9 @@ fn validate_linux_startup(
         "Linux replicated source recovery requires read-only actual-host machine-id and boot-id binds at /run/plurx-host-machine-id and /run/plurx-host-boot-id",
     )?;
     if kernel.as_deref() != Some(format!("linux:{}", identity.boot_id).as_str()) {
-        return Err("source recovery host boot identity is not the actual procfs kernel identity".into());
+        return Err(
+            "source recovery host boot identity is not the actual procfs kernel identity".into(),
+        );
     }
     Ok(())
 }
@@ -571,9 +577,7 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
         source_census::replay(store, &context.dir.with_file_name("v2"), &context.dir, node).await,
     );
     #[cfg(target_os = "linux")]
-    let legacy_result = legacy_result.and(
-        reboot_proof::replay(store, &context.dir, node).await,
-    );
+    let legacy_result = legacy_result.and(reboot_proof::replay(store, &context.dir, node).await);
     reader_result.and(legacy_result)
 }
 

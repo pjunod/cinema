@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · reboot-free macOS/Linux witnesses qualified; legacy fleet acceptance pending · **Updated:** 2026-11-11
+**Status:** open · Linux reboot-proof correction prepared; exact-candidate qualification and fleet recovery pending · **Updated:** 2026-11-13
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
@@ -277,6 +277,89 @@ before this field existed prove nothing and keep their reboot or census path.
 An older daemon refuses the new evidence field and so skips the record, the
 safe direction during a rolling upgrade. Each release logs `source custody
 recovered after its daemon's PID namespace was torn down`.
+
+### 1.5 Linux startup preserves reboot recovery; old empty-identity records need independent proof
+
+**Owner:** Codex/root · **Branch:** `codex/source-custody-cross-boot` ·
+**State:** source prepared; final review, qualification and fleet recovery pending.
+This is an independent corrective PR to `main`; it does not change the active
+foreground-census or playback-start projects.
+
+A second stranded owner on lab4 explains the 2026-11-13 cluster-wide pending
+count of one. A speculative `transcode_prepare` job opened custody, a raw child
+launch invalidated its anchor, and its daemon was replaced before settlement.
+The host later rebooted. The v2 witness names the prior kernel and lacks the
+newer namespace identity; its v1 envelope has empty machine and boot IDs because
+the container had neither actual-host bind. Cancelling the job cannot prove
+physical closure. The [shared-playback RCA](../streaming/SHARED-LIBRARY-PLAYBACK-RCA.md)
+retains the incident finding. The exact child executable was not recorded.
+
+Linux replicated daemon startup now requires a valid explicit host identity,
+with its boot UUID backed by actual procfs, before starting source readers or
+listeners. The [Compose deployment](../../deploy/docker-compose.yml) supplies
+both read-only binds with missing-source creation disabled, and the
+[native unit](../../deploy/plurxd.service) requires both mounts. A raw launch
+may still invalidate v2, but every newly served Linux replicated owner also
+gets the existing valid v1 reboot fallback. Native macOS recovery and the
+non-authoritative SQLite bootstrap remain unchanged. This is an ownership
+configuration invariant, not an optional feature switch.
+
+Historical empty identities cannot be filled in after the fact. The
+[root-admin helper](../../scripts/source-custody-reboot-proof) instead publishes
+independent `host_journal_reboot_v1` evidence for one expired background Job.
+It requires an independently prepared root-owned host enrollment, verifies
+actual initial-host namespaces, filesystem root, machine/node identity and
+current boot, then finds the witness's different kernel UUID in this machine's
+root-protected persistent journal. The kernel reboot proves all its old tasks
+ended, including raw children. A worker cannot publish this evidence.
+
+The [consumer](../../crates/plurxd/src/source_custody/recovery/reboot_proof.rs)
+accepts only protected root-owned local proof files, an unprivileged worker,
+the same actual host/current boot/node, a proof younger than 15 minutes, the
+exact original v1/v2 bytes, matching armed activation and immutable owner, and
+expired original authority. It resolves that exact custody through Store,
+uses the existing typed settlement/release, and requires acknowledged exact
+absence before clearing worker evidence. Failed settlement retains evidence
+for retry; a replacement owner is never settled. The root proof remains
+read-only until its operator removes it. No database or old worker-record edits
+are part of this procedure.
+
+Recovery procedure, on the actual owning Linux host as root:
+
+1. Prepare a private root-owned enrollment JSON outside the worker's data
+   directory. Fields are `version: 1`, `node_id`, `data_dir`,
+   `machine_id_sha256` (SHA-256 of stripped `/etc/machine-id` bytes), `boot_id`,
+   `initial_pid_namespace_inode`, `initial_user_namespace_inode`, and
+   `host_root_device_inode: [device, inode]`. Obtain namespace and filesystem
+   identities independently through the actual host administration session.
+   The helper does not mint its own trusted enrollment.
+2. Install the reviewed helper root-owned, and run check-only first:
+
+   ```bash
+   source-custody-reboot-proof --host-enrollment /etc/plurx-custody-host.json \
+     --custody <exact-custody-uuid>
+   ```
+
+3. With a compatible merged daemon and the mandatory identity binds, expose
+   root-owned `/run/plurx-physical-stop` to it read-only. Re-run the helper with
+   `--publish`. It atomically creates the exact proof in
+   `/run/plurx-physical-stop/reboot-v1/`; it never overwrites a differing proof.
+4. Observe the daemon's recovery acknowledgement, exact custody absence and
+   the cluster-wide pending metric. Only then remove that published root proof
+   and the incident enrollment. If a proof expires before consumption, remove
+   only that exact root-owned proof and obtain a fresh check/publication.
+
+A same-boot witness, foreign journal machine or boot, missing history, unsafe
+proof namespace, changed owner/activation/bytes, or unavailable Store refuses
+recovery. Retain the original worker files and diagnose the refusal. Do not
+relax the proof or translate expiry into a physical join. The helper does not
+stop services, signal processes, reboot hosts, or access a database.
+
+Qualification is recorded on the PR and in the ledger below. Prepared Rust
+regressions exercise startup validation, poisoned-witness recovery, foreign and
+stale proof refusals, ownership replacement, release retry, and the normal v1
+fallback. Prepared Python tests exercise protected host/journal boundaries and
+check-only/publication behavior. These definitions are not execution evidence.
 
 ## 2. The journal never impersonates an activation or completed join
 

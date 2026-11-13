@@ -73,7 +73,12 @@ impl Proof {
             && canonical_uuid(&self.activation_id)
             && [&self.witness_sha256, &self.legacy_sha256]
                 .into_iter()
-                .all(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+                .all(|value| {
+                    value.len() == 64
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
             && self.at_ms > 0
             && self.at_ms <= now_ms.saturating_add(MAX_SKEW_MS)
             && self.at_ms >= now_ms.saturating_sub(MAX_AGE_MS)
@@ -94,7 +99,9 @@ fn read_proofs() -> io::Result<Vec<Proof>> {
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<io::Result<Vec<_>>>()?;
     if names.len() > MAX_PROOFS {
-        return Err(io::Error::other("host reboot proof inventory exceeds its bound"));
+        return Err(io::Error::other(
+            "host reboot proof inventory exceeds its bound",
+        ));
     }
     names.sort();
     let mut proofs = Vec::new();
@@ -127,14 +134,24 @@ pub(super) async fn replay(
         return Ok(());
     }
     let identity = Identity::current().ok_or("host reboot proof needs explicit host identity")?;
-    if reader::kernel_instance().as_deref() != Some(format!("linux:{}", identity.boot_id).as_str()) {
+    if reader::kernel_instance().as_deref() != Some(format!("linux:{}", identity.boot_id).as_str())
+    {
         return Err("host reboot proof needs the actual procfs host boot identity".into());
     }
     for proof in proofs {
         if proof.node_id != node {
             continue;
         }
-        if let Err(error) = apply(store, legacy, node, &identity, crate::state::clock_ms(), &proof).await {
+        if let Err(error) = apply(
+            store,
+            legacy,
+            node,
+            &identity,
+            crate::state::clock_ms(),
+            &proof,
+        )
+        .await
+        {
             tracing::warn!(%error, custody_id = %proof.custody_id, "host reboot proof retained for retry");
         }
     }
@@ -150,13 +167,22 @@ async fn apply(
     proof: &Proof,
 ) -> Result<(), String> {
     if !proof.verified(identity, node, now_ms) {
-        return Err("host reboot proof is stale or names another host, boot, node or activation".into());
+        return Err(
+            "host reboot proof is stale or names another host, boot, node or activation".into(),
+        );
     }
     let witnesses = legacy.with_file_name("v2");
     let name = format!("background-{}.json", proof.custody_id);
     let witness_path = witnesses.join(&name);
-    if !witness_path.try_exists().map_err(|error| error.to_string())? {
-        return if !legacy.join(&name).try_exists().map_err(|error| error.to_string())? {
+    if !witness_path
+        .try_exists()
+        .map_err(|error| error.to_string())?
+    {
+        return if !legacy
+            .join(&name)
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
             Ok(())
         } else {
             Err("host reboot proof has no matching reader witness".into())
@@ -192,19 +218,28 @@ async fn apply(
     if read_bytes(&armed_path)? != proof.activation_id.as_bytes() {
         return Err("host reboot proof activation marker differs".into());
     }
-    let present = store.resolve_background_source_custody(token.clone())
-        .await.map_err(|error| error.to_string())?.is_some();
+    let present = store
+        .resolve_background_source_custody(token.clone())
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some();
     let legacy_path = legacy.join(&name);
     // A prior acknowledged settlement may have removed v1 before a crash.
     // Only authoritative exact absence permits finishing that partial cleanup.
-    if legacy_path.try_exists().map_err(|error| error.to_string())? {
+    if legacy_path
+        .try_exists()
+        .map_err(|error| error.to_string())?
+    {
         let legacy_bytes = read_bytes(&legacy_path)?;
         if digest(&legacy_bytes) != proof.legacy_sha256 {
             return Err("host reboot proof legacy bytes changed".into());
         }
-        let envelope: Envelope = serde_json::from_slice(&legacy_bytes).map_err(|error| error.to_string())?;
-        if envelope.version != 1 || envelope.node_id != node
-            || !envelope.machine_id.is_empty() || !envelope.boot_id.is_empty()
+        let envelope: Envelope =
+            serde_json::from_slice(&legacy_bytes).map_err(|error| error.to_string())?;
+        if envelope.version != 1
+            || envelope.node_id != node
+            || !envelope.machine_id.is_empty()
+            || !envelope.boot_id.is_empty()
             || envelope.records.len() != 1
             || !envelope.records[0].same_owner(&witness.record)
         {
@@ -215,8 +250,11 @@ async fn apply(
     }
     if present {
         settle_records(store, std::slice::from_ref(&witness.record)).await?;
-        if store.resolve_background_source_custody(token.clone())
-            .await.map_err(|error| error.to_string())?.is_some()
+        if store
+            .resolve_background_source_custody(token.clone())
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
         {
             return Err("host reboot settlement awaits exact release acknowledgement".into());
         }
@@ -225,7 +263,9 @@ async fn apply(
     if digest(&read_bytes(&witness_path)?) != proof.witness_sha256 {
         return Err("host reboot witness changed during settlement".into());
     }
-    if legacy_path.try_exists().map_err(|error| error.to_string())?
+    if legacy_path
+        .try_exists()
+        .map_err(|error| error.to_string())?
         && digest(&read_bytes(&legacy_path)?) != proof.legacy_sha256
     {
         return Err("host reboot legacy evidence changed during settlement".into());
