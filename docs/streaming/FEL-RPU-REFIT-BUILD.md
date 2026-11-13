@@ -60,9 +60,26 @@ Its picture already contains the EL, so identity mapping is correct there.
 
 Curves change only at an RPU `scene_refresh_flag`. The colourist's scene
 cuts are where the DM metadata already changes, so a mapping change there
-can't flicker inside a shot. A scene with fewer than 24 frames pools with
-its predecessor: offline, one fit per 48-frame window cost nothing against
-per-frame fits, and short scenes give thin statistics.
+can't flicker inside a shot. Scenes shorter than 24 frames are pooled:
+offline, one fit per 48-frame window cost nothing against per-frame fits,
+and short scenes give thin statistics. The pooling is bounded:
+- a scene of 24 or more frames is a group of its own;
+- consecutive shorter scenes collect into a run, which becomes a group of
+  its own once it reaches 24 frames;
+- a run still short when a long scene follows joins the group before it, or,
+  at the very start, the group after it;
+- a run still short at the end joins the last group.
+
+Every group is at least 24 frames unless the whole title is shorter, and
+short scenes never chain into one long group. A title whose RPUs flag every
+frame (the summary's `degenerate`) gets 24-frame groups, not one scene.
+
+Scenes are keyed by presentation time, never by frame count. Each scene
+carries `first_pts` and `end_pts` (its last frame's pts plus duration) in the
+source's time base, and serving finds a sample's scene by its pts: scene *i*
+covers [first_ptsᵢ, first_ptsᵢ₊₁), and the last one runs to its `end_pts`.
+`end_pts` need not equal the next scene's `first_pts` exactly (container
+durations are rounded), so the next scene's start is the boundary.
 
 ### 3.2 Composition in the helper, on the CPU
 
@@ -79,6 +96,67 @@ per-frame fits, and short scenes give thin statistics.
 The mode needs no GPU, so any node can fit. The NLQ arithmetic is ported from
 `fel_renderer.h`'s shader, and the port is checked against the frozen tools
 (acceptance in §6).
+
+As built (milestone 2; `tools/dv_processing/refit_mode.h`, arithmetic in
+`refit_compose.h`):
+
+```sh
+segment_decode_render --refit-stats SOURCE VIDEO_INDEX [--frames FIRST LAST]
+segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
+```
+
+- **Output:** `--refit-stats` prints one `refit_scene` JSON line per pooled
+  scene (`first_frame`, `frames`, `first_pts` and `end_pts` in `time_base`
+  ticks, and `fit` and `held_out` in `RefitStats`' serde layout, whose
+  `xtx_upper` is XᵀX's upper triangle), then a `refit_summary` line
+  (`frames`, `scenes`, `rpu_scenes`, `median_scene_frames` of the RPU's own
+  scenes before pooling, `degenerate` when that median is under 24,
+  `fit_samples`, `held_out_samples`, `first_pts`, `end_pts`, `time_base`).
+  Diagnostics go to stderr; exit 0 only after a complete read; any refusal is
+  exit 1 and the output is void. plurx-core reads the lines as `RefitScene`
+  and `RefitSummary` (each checked, 512 KB per line at most) and
+  `check_refit_run` cross-checks a whole run.
+  `--dump-composed` writes the lattice samples as binary records (format in
+  `refit_mode.h`), which
+  `diagnostics/fel_quality/compare_composed.py` checks against the frozen
+  tools.
+- **Composition:** each frame's own mapping plus the LINEAR_DZ residual
+  sign(d)·((|d| − ½)·S + T)/2²³, rounded as floor(v·4096 + ½) and clipped,
+  the way the helper's GPU renderer (libplacebo v7.387.0) composes the
+  master: input code/2¹⁰ (UNORM16 of code ≪ 6 rescaled,
+  `src/shaders/colorspace.c:349-352`); pivots code/2¹⁰
+  (`utils/libav_internal.h:985`), so a piece is chosen by code ≥ pivot;
+  every component clamped to its own pivot range before any piece runs,
+  including where another component's MMR reads it (`colorspace.c:178`);
+  each mapped value clamped to [0, 1] before the residual
+  (`colorspace.c:326`) and the sum clamped again (`colorspace.c:147-150`).
+  FFmpeg parses the mapping but does not reshape. Our code already matched
+  this, so the frozen-tool checks are unchanged. The renderer evaluates in
+  binary32; the helper in binary64 with fused multiply-adds off. RPUs go
+  through the playback path's own admission (`map_fel_rpu`), FFmpeg's parse
+  must agree with libdovi's on every pivot and coefficient, and the
+  scene_refresh_flag comes from the frame's own DM data. Only a
+  half-resolution EL is admitted (the frozen pairing covers no other).
+- **Lattices:** stride 8 over the RPU's L5 active area (else the full
+  frame); fit at phase 0, held out at phase 4 in x and y. The diagnostic
+  `--area LEFT RIGHT TOP BOTTOM` replaces L5 to reproduce an offline region.
+  The offline Michael5400 and Beekeeper fixtures used regions that are not
+  their L5 areas (32 vs 42 rows; 272/275 vs 276/276), so their production
+  statistics differ from the fixtures' by design; with `--area` they are the
+  same samples.
+- **Decoding:** software only, four frame threads per layer (the window
+  path's reservation); at the end of the title both decoders are flushed and
+  drained one frame each in turn. The source is read whole, as `scan_title`
+  reads it, within four times its length plus 64 MiB, and at most 10⁶
+  frames.
+- **Media checks:** `diagnostics/fel_quality/compare_composed.py` (exact
+  against the frozen tools) and `controls/test_refit_title_edits.py`, which
+  edits a real title's RPUs with dovi_tool (an L5 change inside a scene, a
+  scene cut on a reordered frame, an invalid RPU mid-title) and checks scene
+  boundaries, lattice counts and the mid-title refusal.
+  The playback window path is unchanged: the modes are dispatched before its
+  arguments are parsed, and a window rendered before and after the change is
+  byte-identical.
 
 ### 3.3 The job
 
@@ -188,7 +266,7 @@ green fast lane.
        fixtures;
      - the composer domain within 1e-6;
      - a real P7 RPU round trip exact to 2⁻²³.
-2. **Helper `--refit-stats`:**
+2. **Helper `--refit-stats`:** built (branch `claude/fel-refit-helper`).
    - **Contents:** CPU composition, the lattice, and per-scene JSON.
    - **Acceptance:**
      - on the Michael5400 window, curves solved from the helper's stats

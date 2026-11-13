@@ -73,11 +73,11 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed against main 548927d6c: #1545 passes ARCHS=arm64 to the two
-    # `apple-build` simulator compiles and says what that no longer covers;
-    # every other recipe, flag and external input is the reviewed de5928d05
-    # bytes. The Apple simulator flags changed, so pin these exact bytes; no
-    # old-to-new receipt adoption is authorized.
+    # Reviewed against main cfe2c0107 (#1545): `apple-build` compiles the iOS
+    # and tvOS simulator builds with ARCHS=arm64 and says why in a comment.
+    # `apple-tv-navigation-test`, the desktop recipes, their flags and external
+    # inputs are unchanged. Pin these exact bytes; no old-to-new receipt
+    # adoption is authorized.
     'Makefile': '2bc2f5446114f87797e09a87c0555099a8b0355779f4477ce8405a22666c2a82',
     # Reviewed 0.8.0 build 298: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 297 bytes. 297 was set inside a merge commit (8164f7380),

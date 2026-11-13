@@ -78,7 +78,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_jellyfin_play.rs", 4),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
-    ("hiqlite_media.rs", 72),
+    // #1546: the probe-only scan's removal sweep reads the files under one folder.
+    ("hiqlite_media.rs", 73),
     // Handoff status, the redemption verdict, handoff-audience authentication
     // and the token scope each read committed authority; see the
     // `authority:` reasons at the sites.

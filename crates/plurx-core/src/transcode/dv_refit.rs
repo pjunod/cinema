@@ -70,7 +70,15 @@ const MMR_DEGREE: [i32; MMR_TERMS] = [
 ];
 
 /// Sufficient statistics of one scene's samples.
+///
+/// The serde layout is what `segment_decode_render --refit-stats` prints for
+/// each scene's `fit` and `held_out` (`tools/dv_processing/refit_compose.h`):
+/// `ysum`, `ycnt`, `xtx_upper` (XᵀX's upper triangle, row by row, 253
+/// values), `xty`, `ysq`, `csq`, `second_moments`. Deserialising checks every
+/// bound the samples imply ([`RefitStatsParts`]), so a malformed or
+/// inconsistent helper line is refused rather than solved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RefitStatsParts", into = "RefitStatsParts")]
 pub struct RefitStats {
     /// Per 10-bit luma code: sum of composed 12-bit luma, and sample count.
     ysum: Vec<f64>,
@@ -85,6 +93,119 @@ pub struct RefitStats {
     ysq: Vec<f64>,
     csq: Vec<f64>,
     second_moments: bool,
+}
+
+/// Values of XᵀX's upper triangle, diagonal included.
+const MMR_UPPER: usize = MMR_TERMS * (MMR_TERMS + 1) / 2;
+
+/// [`RefitStats`] as serialised.
+#[derive(Serialize, Deserialize)]
+struct RefitStatsParts {
+    ysum: Vec<f64>,
+    ycnt: Vec<f64>,
+    xtx_upper: Vec<f64>,
+    xty: Vec<f64>,
+    ysq: Vec<f64>,
+    csq: Vec<f64>,
+    second_moments: bool,
+}
+
+impl From<RefitStats> for RefitStatsParts {
+    fn from(s: RefitStats) -> Self {
+        let xtx_upper = (0..MMR_TERMS)
+            .flat_map(|i| (i..MMR_TERMS).map(move |j| (i, j)))
+            .map(|(i, j)| s.xtx[i * MMR_TERMS + j])
+            .collect();
+        Self {
+            ysum: s.ysum,
+            ycnt: s.ycnt,
+            xtx_upper,
+            xty: s.xty,
+            ysq: s.ysq,
+            csq: s.csq,
+            second_moments: s.second_moments,
+        }
+    }
+}
+
+/// Relative slack for sums the helper accumulated in another order.
+const SUM_SLACK: f64 = 1e-9;
+
+impl TryFrom<RefitStatsParts> for RefitStats {
+    type Error = RefitError;
+
+    /// Every bound the samples imply. A sample is a base code in [0, 1023]
+    /// and a composition in [0, 4095]; every MMR basis term lies in [0, 1]
+    /// and every chroma target in [0, 1]. So per luma code the sum lies in
+    /// [0, 4095·count] and the sum of squares is at least sum²/count (and
+    /// zero where the count is); every XᵀX and XᵀY entry and Σ target² lies
+    /// in [0, n]; and |XᵀY_i| ≤ √(XᵀX_ii · Σ target²). Moments flagged
+    /// absent must be zero.
+    fn try_from(p: RefitStatsParts) -> Result<Self, RefitError> {
+        if p.xtx_upper.len() != MMR_UPPER || p.ysq.len() != CODES || p.csq.len() != 2 {
+            return Err(RefitError::Shape);
+        }
+        let mut xtx = vec![0.0; MMR_TERMS * MMR_TERMS];
+        let mut at = 0;
+        for i in 0..MMR_TERMS {
+            for j in i..MMR_TERMS {
+                xtx[i * MMR_TERMS + j] = p.xtx_upper[at];
+                xtx[j * MMR_TERMS + i] = p.xtx_upper[at];
+                at += 1;
+            }
+        }
+        let mut stats = Self::from_parts(p.ysum, p.ycnt, xtx, p.xty)?;
+        let n = stats.samples();
+        let within =
+            |v: f64, high: f64| v.is_finite() && v >= 0.0 && v <= high + SUM_SLACK * high.max(1.0);
+        let moments_ok = p
+            .ysq
+            .iter()
+            .chain(&p.csq)
+            .all(|v| v.is_finite() && *v >= 0.0);
+        if !moments_ok
+            || stats.ycnt.iter().any(|c| c.fract() != 0.0)
+            || !stats.xtx.iter().chain(&stats.xty).all(|&v| within(v, n))
+        {
+            return Err(RefitError::Shape);
+        }
+        for code in 0..CODES {
+            let (count, sum) = (stats.ycnt[code], stats.ysum[code]);
+            if !within(sum, OUT_SCALE * count) || (count == 0.0 && sum != 0.0) {
+                return Err(RefitError::Shape);
+            }
+        }
+        if p.second_moments {
+            for code in 0..CODES {
+                let (count, sum, sq) = (stats.ycnt[code], stats.ysum[code], p.ysq[code]);
+                let floor = if count > 0.0 { sum * sum / count } else { 0.0 };
+                if (count == 0.0 && sq != 0.0)
+                    || sq < floor * (1.0 - SUM_SLACK)
+                    || !within(sq, OUT_SCALE * OUT_SCALE * count)
+                {
+                    return Err(RefitError::Shape);
+                }
+            }
+            for ch in 0..2 {
+                if !within(p.csq[ch], n) {
+                    return Err(RefitError::Shape);
+                }
+                for i in 0..MMR_TERMS {
+                    let bound = stats.xtx[i * MMR_TERMS + i] * p.csq[ch];
+                    let v = stats.xty[2 * i + ch];
+                    if v * v > bound * (1.0 + SUM_SLACK) + 1e-300 {
+                        return Err(RefitError::Shape);
+                    }
+                }
+            }
+        } else if p.ysq.iter().chain(&p.csq).any(|&v| v != 0.0) {
+            return Err(RefitError::Shape);
+        }
+        stats.ysq = p.ysq;
+        stats.csq = p.csq;
+        stats.second_moments = p.second_moments;
+        Ok(stats)
+    }
 }
 
 impl Default for RefitStats {
@@ -110,6 +231,8 @@ pub enum RefitError {
     NoMapping,
     #[error("the RPU's header or NLQ is outside what this writes (fixed-point coefficients, 10-bit base, 12-bit output, no NLQ)")]
     UnsupportedHeader,
+    #[error("malformed refit helper output: {0}")]
+    Output(&'static str),
 }
 
 fn mmr_basis(y: f64, u: f64, v: f64) -> [f64; MMR_TERMS] {
@@ -855,6 +978,136 @@ pub fn apply_to_rpu(rpu: &mut DoviRpu, curves: &ServableCurves) -> Result<(), Re
         curve.mmr = Some(mmr);
     }
     rpu.modified = true;
+    Ok(())
+}
+
+/// Longest helper line accepted. A scene line is about 50 KB.
+pub const MAX_REFIT_LINE_BYTES: usize = 512 * 1024;
+/// Pooled scenes are at least this long unless the whole range is shorter
+/// (FEL-RPU-REFIT-BUILD.md §3.1).
+pub const MIN_SCENE_FRAMES: u64 = 24;
+
+fn time_base_valid(text: &str) -> bool {
+    let Some((num, den)) = text.split_once('/') else {
+        return false;
+    };
+    matches!((num.parse::<u32>(), den.parse::<u32>()), (Ok(n), Ok(d)) if n > 0 && d > 0)
+}
+
+fn helper_line<T: serde::de::DeserializeOwned>(line: &str, kind: &str) -> Result<T, RefitError> {
+    if line.len() > MAX_REFIT_LINE_BYTES {
+        return Err(RefitError::Output("line longer than the cap"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|_| RefitError::Output("not JSON"))?;
+    if value.get("kind").and_then(|k| k.as_str()) != Some(kind) {
+        return Err(RefitError::Output("unexpected line kind"));
+    }
+    serde_json::from_value(value).map_err(|_| RefitError::Output("fields or statistics refused"))
+}
+
+/// One `refit_scene` line of `segment_decode_render --refit-stats`: frames
+/// `first_frame .. first_frame + frames` in presentation order, presenting
+/// over `[first_pts, end_pts)` in `time_base` ticks. Serving finds a frame's
+/// scene by its presentation time, never by a frame count.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefitScene {
+    kind: String,
+    pub first_frame: u64,
+    pub frames: u64,
+    pub first_pts: i64,
+    pub end_pts: i64,
+    pub time_base: String,
+    pub fit: RefitStats,
+    pub held_out: RefitStats,
+}
+
+impl RefitScene {
+    /// Parses and checks one line.
+    pub fn from_line(line: &str) -> Result<Self, RefitError> {
+        let scene: Self = helper_line(line, "refit_scene")?;
+        if scene.frames == 0
+            || scene.end_pts <= scene.first_pts
+            || !time_base_valid(&scene.time_base)
+            || scene.fit.samples() < scene.frames as f64
+        {
+            return Err(RefitError::Output("scene bounds"));
+        }
+        Ok(scene)
+    }
+}
+
+/// The `refit_summary` line that ends a complete `--refit-stats` run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefitSummary {
+    kind: String,
+    pub frames: u64,
+    pub scenes: u64,
+    pub rpu_scenes: u64,
+    /// Median length of the RPU's own scenes, before pooling.
+    pub median_scene_frames: f64,
+    /// The median is under 24 frames: scene_refresh_flag does not mark cuts.
+    pub degenerate: bool,
+    pub fit_samples: u64,
+    pub held_out_samples: u64,
+    pub first_pts: i64,
+    pub end_pts: i64,
+    pub time_base: String,
+}
+
+impl RefitSummary {
+    /// Parses and checks one line.
+    pub fn from_line(line: &str) -> Result<Self, RefitError> {
+        let s: Self = helper_line(line, "refit_summary")?;
+        if s.scenes == 0
+            || s.rpu_scenes < s.scenes
+            || s.frames < s.scenes
+            || !(s.median_scene_frames.is_finite() && s.median_scene_frames >= 1.0)
+            || s.degenerate != (s.median_scene_frames < MIN_SCENE_FRAMES as f64)
+            || s.end_pts <= s.first_pts
+            || !time_base_valid(&s.time_base)
+        {
+            return Err(RefitError::Output("summary bounds"));
+        }
+        Ok(s)
+    }
+}
+
+/// A complete run: its scenes, checked against each other and against the
+/// summary — contiguous frames, rising presentation times, one time base,
+/// every pooled scene at least 24 frames unless it is the only one, and the
+/// summary's totals equal to the scenes' sums.
+pub fn check_refit_run(scenes: &[RefitScene], summary: &RefitSummary) -> Result<(), RefitError> {
+    let (first, last) = match (scenes.first(), scenes.last()) {
+        (Some(f), Some(l)) => (f, l),
+        _ => return Err(RefitError::Output("no scenes")),
+    };
+    for pair in scenes.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if b.first_frame != a.first_frame + a.frames || b.first_pts <= a.first_pts {
+            return Err(RefitError::Output("scenes are not contiguous"));
+        }
+    }
+    if scenes.len() > 1 && scenes.iter().any(|s| s.frames < MIN_SCENE_FRAMES) {
+        return Err(RefitError::Output(
+            "a pooled scene is shorter than 24 frames",
+        ));
+    }
+    let frames: u64 = scenes.iter().map(|s| s.frames).sum();
+    let fit: f64 = scenes.iter().map(|s| s.fit.samples()).sum();
+    let held_out: f64 = scenes.iter().map(|s| s.held_out.samples()).sum();
+    if scenes.iter().any(|s| s.time_base != summary.time_base)
+        || summary.scenes != scenes.len() as u64
+        || summary.frames != frames
+        || summary.fit_samples as f64 != fit
+        || summary.held_out_samples as f64 != held_out
+        || summary.first_pts != first.first_pts
+        || summary.end_pts != last.end_pts
+    {
+        return Err(RefitError::Output("summary disagrees with the scenes"));
+    }
     Ok(())
 }
 
