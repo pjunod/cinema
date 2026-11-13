@@ -3299,6 +3299,7 @@ async fn create_with_purpose_inner(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_with_purpose_attempt(
     user: plurx_core::domain::User,
     state: AppState,
