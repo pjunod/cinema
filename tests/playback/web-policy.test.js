@@ -4149,6 +4149,7 @@ function attachedOutputTelemetry(player){
     ${shippedSource("statsHttpWait")}
     ${shippedSource("statsToneMapPeak")}
     ${shippedSourceIfPresent("statsStreamFormat")}
+    ${shippedSource("statsRefitCurves")}
     ${shippedSource("playbackStatsTelemetry")}
     return playbackStatsTelemetry();
   `)(player,policy);
@@ -4227,6 +4228,21 @@ test("range badges use the attached frozen output without asserting display outp
   assert.match(badge(p).full,/display output unverified/);
   p.sessionId="b";
   assert.equal(badge(p).arrow,null,"stale status cannot relabel a different attachment");
+});
+
+test("F+ playback info follows the attached generation and preserves identity reasons", () => {
+  const summarize=new PlaybackContextFunction(`${shippedSource("statsRefitCurves")}\nreturn statsRefitCurves;`)();
+  const p={sessionId:"active",health:{id:"active",dolby_vision_refit:{state:"fitted",gain:0.542}}};
+  assert.equal(summarize(p),"fitted, −54.2%");
+  p.health.dolby_vision_refit={state:"identity",reason:"platform choice is off"};
+  assert.equal(summarize(p),"identity (platform choice is off)");
+  p.health.id="retired";
+  assert.equal(summarize(p),null,"a previous attachment cannot claim fitted bytes");
+  p.health.id="active";
+  p.health.dolby_vision_refit={state:"fitted",gain:Infinity};
+  assert.equal(summarize(p),"fitted","unknown gain makes no numeric claim");
+  p.health.dolby_vision_refit={state:"future_state"};
+  assert.equal(summarize(p),null);
 });
 
 test("playback info labels tone-map peak provenance without calling policy source truth", () => {
