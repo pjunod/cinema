@@ -47,6 +47,50 @@ pub(super) struct Proof {
     anchor: Anchor,
     source: Source,
     passes: [Pass; 2],
+    /// The witness's kernel boot, when the census ran on a later boot of the
+    /// same machine and the host's own journal showed that boot had ended.
+    #[serde(default)]
+    prior_boot: Option<PriorBoot>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+struct PriorBoot {
+    kernel_instance: String,
+}
+
+impl Proof {
+    /// The witness was written on this kernel, or on an earlier boot of this
+    /// machine that the census showed had ended: then no process of that
+    /// kernel survives, and a lock or poisoned anchor from it proves nothing.
+    /// The inode the owner recorded opening is the one the census counted,
+    /// on a superblock it counted (and, when given, the one this daemon now
+    /// sees). Device numbers are assigned at mount time: on a later boot the
+    /// same network export can carry another one, so a census from a later
+    /// boot binds the inode, which the file server assigns, on the device the
+    /// census counted now.
+    fn opened_source_counted(&self, (device, inode): (u64, u64), seen: Option<(u64, u64)>) -> bool {
+        if inode != self.source.inode {
+            return false;
+        }
+        let device = match (&self.prior_boot, seen) {
+            (None, _) => device,
+            (Some(_), Some((seen_device, _))) => seen_device,
+            // No daemon-side path to check the inode against: an inode number
+            // alone can name another file on another filesystem.
+            (Some(_), None) => return false,
+        };
+        seen.is_none_or(|(seen_device, seen_inode)| seen_device == device && seen_inode == inode)
+            && self.census_devices().any(|counted| counted == device)
+    }
+
+    fn witness_kernel_settled(&self, witness_kernel: &str, current: &str) -> bool {
+        witness_kernel == current
+            || self
+                .prior_boot
+                .as_ref()
+                .is_some_and(|ended| ended.kernel_instance == witness_kernel)
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -536,7 +580,7 @@ pub(super) async fn apply(
     // A lease that ended before this process existed was issued to an
     // earlier process. The data-directory daemon lock this process holds
     // excludes that process still running.
-    if witness.kernel_instance != context.kernel
+    if !proof.witness_kernel_settled(&witness.kernel_instance, context.kernel)
         || witness.node_id != node
         || token.custody_id != proof.owner.custody_id
         || !proof.owner.matches(original)
@@ -602,11 +646,17 @@ pub(super) async fn apply(
             if !proof.owner_teardown_verified(context) {
                 return Err("census job unavailable for source binding".into());
             }
+            // A census from a later boot binds the source through the job's
+            // file row; without it, an inode number alone could name another
+            // file on another filesystem.
+            if proof.prior_boot.is_some() {
+                return Err("a census from a later boot needs the owner's job row".into());
+            }
             // The owner's own record of the inode it opened still binds.
-            if witness.source.is_some_and(|(device, inode)| {
-                inode != proof.source.inode
-                    || !proof.census_devices().any(|counted| counted == device)
-            }) {
+            if witness
+                .source
+                .is_some_and(|opened| !proof.opened_source_counted(opened, None))
+            {
                 return Err("census source is not the inode the owner opened".into());
             }
             settle_released(store, token, &witness).await?;
@@ -632,11 +682,8 @@ pub(super) async fn apply(
         // The daemon's own view of the same physical file: inode, size and
         // mtime, on a superblock the census actually counted.
         let seen = std::fs::metadata(&file.path).map_err(|e| e.to_string())?;
-        if witness.source.is_some_and(|(device, inode)| {
-            seen.dev() != device
-                || seen.ino() != inode
-                || inode != proof.source.inode
-                || !proof.census_devices().any(|counted| counted == device)
+        if witness.source.is_some_and(|opened| {
+            !proof.opened_source_counted(opened, Some((seen.dev(), seen.ino())))
         }) {
             return Err("census source is not the inode the owner opened".into());
         }

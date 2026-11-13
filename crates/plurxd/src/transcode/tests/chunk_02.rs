@@ -2944,7 +2944,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         assert!(
-            !manager.cluster_playlist_is_typeless().await,
+            !manager.cluster_playlist_is_typeless(None).await,
             "both switches unset"
         );
         for (typeless, takeover, expected) in [
@@ -2963,7 +2963,7 @@ quality_catalog: None,
                 .await
                 .expect("takeover");
             assert_eq!(
-                manager.cluster_playlist_is_typeless().await,
+                manager.cluster_playlist_is_typeless(None).await,
                 expected,
                 "typeless={typeless:?} takeover={takeover:?}"
             );

@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 24] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 25] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -193,6 +193,7 @@
             include_str!("../processed_upgrade_qualification.rs"),
         ),
         ("fence.rs", include_str!("../fence.rs")),
+        ("start_plan.rs", include_str!("../start_plan.rs")),
     ];
 
     mod source_inventory {

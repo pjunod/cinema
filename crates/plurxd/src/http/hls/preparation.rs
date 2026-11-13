@@ -1885,7 +1885,7 @@ async fn plan_preparation_with_candidate(
     let plan_height = plan.height;
     let selected_candidate = plan.selected_candidate;
     let mut resolved = plan.request;
-    validate_hevc_copy_transport(state, source, caps, &resolved).await?;
+    validate_hevc_copy_transport(state, source, caps, &resolved, None).await?;
     // The same guard ordinary create runs, on the same function. This path
     // reaches `resolve_plan` directly and therefore skipped it entirely: a
     // successor prepared for an HDR delivery could be staged as a burn that

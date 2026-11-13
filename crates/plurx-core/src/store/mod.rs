@@ -2528,6 +2528,23 @@ pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError
     serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
+/// How many settings keys one planning snapshot may carry. The create reads
+/// every planning input in that one statement (playback-start D3b), which
+/// outgrew the keyed read's 32; the bound is still a bound.
+pub const PLANNING_SNAPSHOT_KEYS_MAX: usize = 64;
+
+/// [`selected_settings_json`] for the planning snapshot's own bound.
+pub(crate) fn selected_planning_keys_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > PLANNING_SNAPSHOT_KEYS_MAX
+        || keys.iter().any(|key| key.is_empty() || key.len() > 256)
+    {
+        return Err(StoreError::Task(format!(
+            "a planning snapshot requires at most {PLANNING_SNAPSHOT_KEYS_MAX} nonempty bounded keys"
+        )));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
+}
+
 pub(crate) fn validate_generated_settings(
     generation_key: &str,
     expected_generation: i64,
@@ -5251,7 +5268,50 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
-    ) -> Result<MediaSessionRequestClaim, StoreError>;
+    ) -> Result<MediaSessionRequestClaim, StoreError> {
+        Ok(self
+            .claim_media_session_request_recording(
+                principal,
+                request_id,
+                request_fingerprint,
+                playback_id,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+                None,
+            )
+            .await?
+            .0)
+    }
+
+    /// [`claim_media_session_request`](Self::claim_media_session_request) that
+    /// also records the viewer's ask (D3c). With `desired`, the claim that is
+    /// `Acquired` (a new row or a re-acquired one) upserts the selection in the
+    /// same transaction, under a predicate that matches only *this* claim
+    /// (this `incarnation_id`, `starting`, unexpired), and the answer carries
+    /// the recorded row. Every other answer (`InFlight`, `Resolved`,
+    /// `Conflict`, `Overloaded`) records nothing and carries `None`. The
+    /// upsert is [`record_desired_selection`](Self::record_desired_selection)'s
+    /// statement, so a repeated digest does not move the revision. Without
+    /// `desired` this is the plain claim.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_media_session_request_recording(
+        &self,
+        principal: &crate::playback_principal::PlaybackPrincipal,
+        request_id: &str,
+        request_fingerprint: &str,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+        claim_expires_at_ms: i64,
+        desired: Option<&crate::domain::DesiredSelectionWrite<'_>>,
+    ) -> Result<
+        (
+            MediaSessionRequestClaim,
+            Option<crate::domain::DesiredOwnership>,
+        ),
+        StoreError,
+    >;
 
     /// The claim row of `request_id`, read only. A retry waiting on an owner
     /// that is still starting reads this between ticks instead of re-running

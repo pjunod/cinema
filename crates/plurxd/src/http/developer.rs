@@ -623,6 +623,12 @@ pub(crate) async fn readiness(
             )
             .await,
             applied_view(&state.applied.observation()),
+            create_plan(
+                &state.applied.observation(),
+                super::hls::start_plan::refusal_closes(),
+                super::hls::start_plan::stale_replans(),
+                super::hls::start_plan::peer_catalog_counts(),
+            ),
             cluster_backup(
                 &state,
                 settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
@@ -1260,6 +1266,109 @@ pub(crate) fn applied_view(
                 title: "Reads through the view",
                 status: reads_status,
                 evidence: reads_evidence,
+            },
+        ],
+    }
+}
+
+/// Playback-start D3b: the create's one planning read
+/// (`http/hls/start_plan.rs`). No switch; every row is a count this process
+/// loads now, and none changes how a create plans.
+pub(crate) fn create_plan(
+    observation: &plurx_core::store::AppliedViewObservation,
+    refusal_closes: u64,
+    stale_replans: u64,
+    peer_catalogs: (u64, u64),
+) -> DeveloperEnableItem {
+    use plurx_core::store::{AppliedTable, ViewSource};
+    use RequirementStatus::{Met, Unknown};
+    let view = observation.view_total(AppliedTable::Files, ViewSource::View);
+    let quorum = observation.view_total(AppliedTable::Files, ViewSource::Authority);
+    let by_reason = |reason: &str| {
+        observation
+            .reads
+            .iter()
+            .filter(|(read_view, source, read_reason, _)| {
+                *read_view == AppliedTable::Files.label()
+                    && *source == "authority"
+                    && *read_reason == reason
+            })
+            .map(|(_, _, _, count)| *count)
+            .sum::<u64>()
+    };
+    let (source_status, source_evidence) = if view + quorum == 0 {
+        (
+            Unknown,
+            "No create has planned on this node since start.".to_owned(),
+        )
+    } else if observation.mode == "standalone" {
+        // SQLite: the store is the only copy, so every plan read it.
+        (
+            Met,
+            format!(
+                "Since start: {} plans read the store (standalone: it is the only copy).",
+                view + quorum
+            ),
+        )
+    } else {
+        (
+            Met,
+            format!(
+                "Since start: {view} of {} plans ({}%) read this node's replica and {quorum} read quorum; last quorum reason {}.",
+                view + quorum,
+                view * 100 / (view + quorum),
+                observation
+                    .last_planning_fallback
+                    .map_or("none", |reason| reason.label())
+            ),
+        )
+    };
+    DeveloperEnableItem {
+        id: "create_plan",
+        title: "Create plan",
+        enabled: None,
+        setting: None,
+        requirements: vec![
+            DeveloperRequirement {
+                id: "create_plan_source",
+                title: "Plans from this replica",
+                status: source_status,
+                evidence: source_evidence,
+            },
+            DeveloperRequirement {
+                id: "create_plan_owner",
+                title: "Owner plans at a peer's binding",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} plans asked quorum because this replica answered another binding than a peer planned at; {} plans for a start with no binding (an owner's legacy route, or this ingress confirming one) read quorum.",
+                    by_reason("binding_mismatch"),
+                    by_reason("unbound")
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_peer_catalogs",
+                title: "Peer catalogs at a sender's binding",
+                status: Met,
+                evidence: format!(
+                    "Since start: {} peer catalog requests planned from this replica at the sender's binding, {} refused as stale (Authority held another binding, so the sender's plan was the stale one and its create re-plans). This node's own create answers its local catalog from its plan and reads nothing for it.",
+                    peer_catalogs.0, peer_catalogs.1
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_replans",
+                title: "Re-plans after a catalog refuted the view",
+                status: Met,
+                evidence: format!(
+                    "Since start: {stale_replans}. Each is a create whose view plan a catalog's quorum read refuted before its claim; it closed this node's planning view and planned again from quorum in the same request."
+                ),
+            },
+            DeveloperRequirement {
+                id: "create_plan_refusals",
+                title: "Views closed after an owner refusal",
+                status: Met,
+                evidence: format!(
+                    "Since start: {refusal_closes}. Each is an owner that held another revision of a source or its settings than this node planned at; this node's planning view then reads quorum until its replica is proven to hold what the owner saw."
+                ),
             },
         ],
     }
@@ -4221,6 +4330,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// D3b: the Create plan row reports the planning view's share, an
+    /// owner's authority plans by reason and the refusal closes, and has no
+    /// switch.
+    #[test]
+    fn create_plan_rows_name_the_share_the_owner_plans_and_the_refusals() {
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let mut observation = plurx_core::store::AppliedView::authority(store).observation();
+        let item = super::create_plan(&observation, 0, 0, (0, 0));
+        assert_eq!(item.id, "create_plan");
+        assert!(
+            item.enabled.is_none() && item.setting.is_none(),
+            "no switch"
+        );
+        let row = |item: &super::DeveloperEnableItem, id: &str| {
+            item.requirements
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| (row.status, row.evidence.clone()))
+                .expect("row")
+        };
+        assert_eq!(
+            row(&item, "create_plan_source"),
+            (
+                super::RequirementStatus::Unknown,
+                "No create has planned on this node since start.".to_owned()
+            )
+        );
+        observation.reads.extend([
+            ("planning", "view", "ok", 3),
+            ("planning", "authority", "floor", 1),
+            ("planning", "authority", "binding_mismatch", 2),
+            ("planning", "authority", "unbound", 4),
+            ("settings", "authority", "binding_mismatch", 9),
+        ]);
+        observation.last_planning_fallback = Some(plurx_core::store::ViewFallback::Floor);
+        // A SQLite node's plans all read the store.
+        let (status, evidence) = row(
+            &super::create_plan(&observation, 5, 1, (7, 2)),
+            "create_plan_source",
+        );
+        assert_eq!(status, super::RequirementStatus::Met);
+        assert!(evidence.contains("10 plans read the store"), "{evidence}");
+        observation.mode = "replicated";
+        let item = super::create_plan(&observation, 5, 1, (7, 2));
+        let (status, evidence) = row(&item, "create_plan_source");
+        assert_eq!(status, super::RequirementStatus::Met);
+        assert!(
+            evidence.contains("3 of 10 plans (30%) read this node's replica and 7 read quorum; last quorum reason floor"),
+            "{evidence}"
+        );
+        let (_, evidence) = row(&item, "create_plan_owner");
+        assert!(evidence.contains(": 2 plans asked quorum"), "{evidence}");
+        assert!(
+            evidence.contains("; 4 plans for a start with no binding"),
+            "{evidence}"
+        );
+        assert!(row(&item, "create_plan_refusals")
+            .1
+            .starts_with("Since start: 5."));
     }
 
     /// E1a: the Applied view row reports what the observation says, with a

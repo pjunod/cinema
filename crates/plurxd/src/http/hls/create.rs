@@ -196,7 +196,7 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CreateSession {
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
@@ -2187,6 +2187,20 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     serde_json::json!({"clause": error.clause, "observed": error.observed, "limit": error.limit}),
                 ));
             }
+            // A peer's quorum read refuted the plan this node's view answered
+            // (`StaleSource`): the local catalog, built from that same plan, is
+            // complete and would still pick a candidate, so the refutation
+            // itself ends the attempt, before any pick. `replan_once_after_stale`
+            // then closes the view and plans once from Authority (D3b review B1,
+            // D3 review B1). A plan read from Authority is not ended here.
+            if crate::media_pool::create_plan_refuted() {
+                return Err(ApiError::typed_detail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "quality_catalog_unavailable",
+                    "quality discovery is incomplete; retry with the existing startup owner",
+                    serde_json::json!({"complete": false, "causes": catalogue_result.causes}),
+                ));
+            }
             let authority_refused = catalogue_result.authority_refused;
             // A create never dispatches a processed candidate: it has no
             // qualified graph before the first frame. Nor does a prepared
@@ -2661,13 +2675,25 @@ pub(super) async fn validate_hevc_copy_transport(
     source: &MediaFile,
     caps: &plurx_core::playback::DeviceCaps,
     request: &crate::transcode::SessionRequest,
+    plan: Option<&super::start_plan::StartPlan>,
 ) -> Result<(), ApiError> {
     if !matches!(request.kind, crate::transcode::SessionKind::Copy { .. })
         || caps.progressive_hevc_sample_entries.is_none()
     {
         return Ok(());
     }
-    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?;
+    // The create's plan read this revision's probe with the file (D3b).
+    let probe_json = match plan.and_then(|plan| plan.probe_for(source)) {
+        Some(probe) => {
+            crate::hevc_census::probe_json_for_copy_from(
+                state.store.as_ref(),
+                source,
+                probe.map(str::to_owned),
+            )
+            .await?
+        }
+        None => crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?,
+    };
     validate_hevc_copy_transport_from_probe(source, caps, request, probe_json.as_deref())
 }
 
@@ -2823,6 +2849,7 @@ pub(crate) async fn create_for_library_channel(
 }
 
 // The service caller chooses policy; the public create body cannot request it.
+#[derive(Clone)]
 enum ServiceCreatePurpose {
     Native,
     LibraryChannel(crate::http::library_channels::LibraryChannelPlaybackPurpose),
@@ -2933,7 +2960,7 @@ pub(crate) async fn preview_for_compatibility(
         body,
     )
     .await?;
-    validate_hevc_copy_transport(state, file, &caps, &resolved.request).await?;
+    validate_hevc_copy_transport(state, file, &caps, &resolved.request, None).await?;
     if burn_would_discard_this_session_hdr(
         state,
         Some(file),
@@ -3253,6 +3280,11 @@ pub(crate) const OWNED_CREATE_REPOST_GRACE: std::time::Duration =
 /// the per-user start caps free as this user's other starts activate or end.
 pub(crate) const MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS: u64 = 2;
 
+/// One create, re-planned at most once (D3b, review B1): when the catalog's
+/// quorum read refutes a plan this node's view answered, before the claim,
+/// the view closes and the create runs again from an Authority plan
+/// (`start_plan::replan_once_after_stale`). Nothing durable exists yet but
+/// the recorded ask, whose repeat is idempotent.
 async fn create_with_purpose_inner(
     user: plurx_core::domain::User,
     state: AppState,
@@ -3260,6 +3292,36 @@ async fn create_with_purpose_inner(
     headers: HeaderMap,
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
+    purpose: ServiceCreatePurpose,
+) -> Result<Json<StartResponse>, ApiError> {
+    let applied = state.applied.clone();
+    // The ask's arrival order, taken once here: a re-planned attempt is the
+    // same request and keeps its place (D3 review S2).
+    let arrived_at_ms = unix_ms();
+    super::start_plan::replan_once_after_stale(&applied, || {
+        Box::pin(create_with_purpose_attempt(
+            user.clone(),
+            state.clone(),
+            id,
+            headers.clone(),
+            remote,
+            req.clone(),
+            arrived_at_ms,
+            purpose.clone(),
+        ))
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_with_purpose_attempt(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    arrived_at_ms: i64,
     purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
     let library_channel = match &purpose {
@@ -3295,18 +3357,22 @@ async fn create_with_purpose_inner(
             "the growing live HLS presentation has been removed; request VOD",
         ));
     }
-    // The ask is made durable before anything is built for it, and before this
-    // request can be answered.
+    // The ask is made durable by the claim, not before it (D3c).
     //
-    // Placed here, above every other decision, rather than beside the response:
-    // a create that goes on to fail is still a viewer who asked, and the row
-    // records the asking, not the outcome. The order that matters is the one
-    // §1 names — canonical desired ownership persisted *before* an
-    // intent-changing request is reported accepted — and answering first would
-    // tell a client its selection was taken while nothing anywhere had recorded
-    // it. A restart or an owner change in that window loses the ask entirely.
+    // The order that matters is still the one §1 names: canonical desired
+    // ownership is persisted *before* an intent-changing request is reported
+    // accepted. The claim is the first write this create makes, so it carries
+    // the ask in its own transaction, under a predicate that matches only this
+    // attempt's claim row (`claim_media_session_request_recording`). The ask
+    // lands exactly when the create becomes its request's owner, which is
+    // what "a viewer who asked" has always meant for a create that goes on:
+    // a create refused before the claim (invalid intent or capabilities, the
+    // HDR burn guard, the HEVC copy-transport refusal, `quality_catalog_unavailable`,
+    // an overloaded or joined claim) records no ask, where it used to record
+    // one on the way to its refusal. None of those answers was ever reported
+    // accepted, and each is retryable (D3 contract §12-6).
     //
-    // A failed write refuses the create for the same reason the control
+    // A failed claim refuses the create for the same reason the control
     // exchange refuses: a retry costs one request, and a phantom acceptance
     // costs a viewer their selection with nothing to point at.
     // `None` for a body that carried no ask: a playback with nothing recorded
@@ -3314,61 +3380,37 @@ async fn create_with_purpose_inner(
     // A parser-floor create must not reinterpret a future route as ordinary
     // Auto or persist acceptance of a candidate it cannot dispatch.
     let mut recorded_ask_revision: Option<i64> = None;
-    if let Some(intent) = req.intent.as_ref() {
-        intent
-            .validate()
-            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
-        let selection = intent.selection;
-        recorded_ask_revision = Some(
-            state
-                .store
-                .record_desired_selection(
-                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                        user_id: user.id,
-                    },
-                    &req.playback_id,
-                    &intent.digest(),
-                    &selection.canonical_form(),
-                    unix_ms(),
-                )
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        target: "plurxd::http::hls",
-                        playback = %req.playback_id,
-                        "recording the viewer's selection on create failed: {error}"
-                    );
-                    ApiError::ServiceUnavailable(
-                        "this selection could not be recorded; retry shortly".to_owned(),
-                    )
-                })?
-                .revision,
-        );
-        state
-            .hls_route_hooks
-            .get()
-            .after_create_ask_recorded()
-            .await;
-    }
+    let mut ask_superseded = false;
+    let desired_ask: Option<(String, String)> = match req.intent.as_ref() {
+        Some(intent) => {
+            intent
+                .validate()
+                .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+            Some((intent.digest(), intent.selection.canonical_form()))
+        }
+        None => None,
+    };
     let ingress_serving_authority = state.serving.authority();
     let ingress_serving_generation = ingress_serving_authority
         .admit()
         .ok_or_else(|| create_owner_transition("the ingress node has no serving authority"))?;
     // The source height answers three things now: Auto, the ladder in the
-    // response, and the snap's source-height escape. One Authority read: the
-    // file row, its probe and the planning settings in one statement.
-    let planning_snapshot = state
-        .store
-        .playback_planning_snapshot(id, &crate::transcode::QUALITY_PLANNING_KEYS)
+    // response, and the snap's source-height escape. The create's one plan
+    // (D3b): the file row, its probe and every planning setting in one
+    // statement, from this node's applied view behind its floors, else from
+    // Authority. Every chain below takes it instead of reading again.
+    let start_plan = super::start_plan::ingress_plan(&state.applied, id)
         .await
-        .map_err(|error| session_store_error("reading playback planning inputs", error))?;
-    if let Some(snapshot) = planning_snapshot.as_ref() {
-        crate::media_pool::capture_create_planning_binding(snapshot);
-    }
+        .map_err(|error| session_store_error("reading playback planning inputs", error))?
+        .map(Arc::new);
+    let planning_snapshot = start_plan.as_deref().map(|plan| &*plan.snapshot);
+    // Held for this attempt only: dropping it clears the budget's copy of the
+    // plan (D3 review N1).
+    let _captured_plan = start_plan
+        .as_deref()
+        .map(crate::media_pool::capture_create_plan);
     crate::media_pool::mark_create_phase("lookup");
-    let source = planning_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.file.clone());
+    let source = planning_snapshot.map(|snapshot| snapshot.file.clone());
     // The HDR subtitle-burn guard used to stand here, keyed on the source's
     // own `hdr` column. It now runs after `resolve_plan`, against the grade
     // this request actually resolves to — see
@@ -3443,7 +3485,7 @@ async fn create_with_purpose_inner(
             req.caps.as_ref(),
             req.overrides.as_ref(),
             file,
-            &match planning_snapshot.as_ref() {
+            &match planning_snapshot {
                 Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
                 None => super::super::stream::render_caps(&state).await,
             },
@@ -3464,7 +3506,7 @@ async fn create_with_purpose_inner(
     let source_height = source.as_ref().and_then(|f| f.height);
     // The HWACCEL preference is in the snapshot read above, in this task,
     // with nothing in between: decide from it rather than reading it again.
-    let ladder_ceiling = match planning_snapshot.as_ref() {
+    let ladder_ceiling = match planning_snapshot {
         Some(snapshot) => {
             state
                 .transcode
@@ -3503,7 +3545,7 @@ async fn create_with_purpose_inner(
     crate::media_pool::mark_create_phase("settings");
     let resolved = resolve_plan_with_continuous(
         PlanInputs {
-            snapshot: planning_snapshot.as_ref(),
+            snapshot: planning_snapshot,
             state: &state,
             user_id: user.id,
             file_id: id,
@@ -3554,7 +3596,7 @@ async fn create_with_purpose_inner(
         None
     };
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
-        validate_hevc_copy_transport(&state, source, caps, &request).await?;
+        validate_hevc_copy_transport(&state, source, caps, &request, start_plan.as_deref()).await?;
     }
     let height = resolved.height;
     if burn_would_discard_this_session_hdr(
@@ -3640,21 +3682,52 @@ async fn create_with_purpose_inner(
                 claim_principal.clone(),
                 request_claim_id.clone(),
                 incarnation_id.clone(),
-                state.store.claim_media_session_request(
-                    &claim_principal,
-                    &request_claim_id,
-                    &fingerprint,
-                    &request.playback_id,
-                    &incarnation_id,
-                    claim_now_ms,
-                    claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
-                ),
+                async {
+                    let desired_write = desired_ask.as_ref().map(|(digest, canonical_form)| {
+                        plurx_core::domain::DesiredSelectionWrite {
+                            digest,
+                            canonical_form,
+                            arrived_at_ms,
+                        }
+                    });
+                    let (claim, recorded) = state
+                        .store
+                        .claim_media_session_request_recording(
+                            &claim_principal,
+                            &request_claim_id,
+                            &fingerprint,
+                            &request.playback_id,
+                            &incarnation_id,
+                            claim_now_ms,
+                            claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
+                            desired_write.as_ref(),
+                        )
+                        .await?;
+                    if let Some(recorded) = recorded {
+                        // A newer arrival's ask stands: the upsert did not
+                        // replace it, so this create's ask is not the one
+                        // recorded (D3 review S2).
+                        ask_superseded = desired_ask
+                            .as_ref()
+                            .is_some_and(|(digest, _)| *digest != recorded.digest);
+                        recorded_ask_revision = Some(recorded.revision);
+                    }
+                    Ok(claim)
+                },
             )
             .await
             .map_err(|error| session_store_error("claiming the media-session request", error))?
             {
                 Ok((guard, acquired)) => {
                     incarnation_id = acquired;
+                    if ask_superseded {
+                        // Dropping the armed guard settles this claim as failed.
+                        return Err(ApiError::typed(
+                            StatusCode::CONFLICT,
+                            "selection_superseded",
+                            "a newer selection for this playback arrived first",
+                        ));
+                    }
                     // From here this create is the claim's owner, not the
                     // viewer's request: it runs to activation for as long as
                     // its viewer can still take the answer, inside the
@@ -3665,6 +3738,13 @@ async fn create_with_purpose_inner(
                             .unwrap_or(claim_window_ends),
                         OWNED_CREATE_REPOST_GRACE,
                     );
+                    if desired_ask.is_some() {
+                        state
+                            .hls_route_hooks
+                            .get()
+                            .after_create_ask_recorded()
+                            .await;
+                    }
                     break guard;
                 }
                 Err(claim) => claim,
@@ -4025,7 +4105,7 @@ async fn create_with_purpose_inner(
         .as_ref()
         .is_none_or(|owner| owner == &state.node_id)
     {
-        match planning_snapshot.as_ref().map(|snapshot| {
+        match planning_snapshot.map(|snapshot| {
             crate::transcode::TranscodeManager::processed_upgrade_gates(
                 &request,
                 snapshot,
@@ -4048,7 +4128,6 @@ async fn create_with_purpose_inner(
 
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
-            .as_ref()
             .and_then(|snapshot| {
                 snapshot
                     .settings
@@ -4068,7 +4147,6 @@ async fn create_with_purpose_inner(
 
     let quality_enabled = continuous.is_some()
         || planning_snapshot
-            .as_ref()
             .and_then(|snapshot| {
                 snapshot
                     .settings
@@ -4175,7 +4253,10 @@ async fn create_with_purpose_inner(
         // Recorded from the same decision the worker will make, so a later
         // takeover can tell whether this URL was ever serving a shape a
         // successor is allowed to continue.
-        typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
+        typeless_playlist: state
+            .transcode
+            .cluster_playlist_is_typeless(start_plan.as_deref())
+            .await,
         library_channel: library_channel.as_ref().map(|purpose| {
             serde_json::to_value(purpose).expect("bounded Library-channel purpose serializes")
         }),
@@ -4207,7 +4288,11 @@ async fn create_with_purpose_inner(
         .and_then(|context| context.owner_node_id.clone());
     let mut owner_candidates = if let Some(owner) = candidate_owner.or(pinned_owner) {
         vec![owner]
-    } else if !state.media_pool.remote_placement_ready(&state).await {
+    } else if !state
+        .media_pool
+        .remote_placement_ready(&state, start_plan.as_deref())
+        .await
+    {
         vec![state.node_id.clone()]
     } else {
         match MediaOfferRequest::new(
@@ -4247,6 +4332,11 @@ async fn create_with_purpose_inner(
 
     let mut started = None;
     let mut last_error = None;
+    // A refused plan is refuted for every candidate (review S1); a start
+    // with no binding is confirmed at Authority once before a remote owner
+    // takes it (review S2).
+    let mut placement_ended = false;
+    let mut unbound_confirmed = false;
     for candidate in owner_candidates {
         if tokio::time::Instant::now() >= placement_deadline {
             last_error = Some(create_still_starting(
@@ -4282,6 +4372,7 @@ async fn create_with_purpose_inner(
                 recovery_epoch: recovery_epoch.clone(),
             };
             let worker_serving_authority = ingress_serving_authority.clone();
+            let worker_plan = start_plan.clone();
             let mut start_task = crate::media_pool::spawn_create_worker(async move {
                 let started = transcode
                     .create_cluster_session(
@@ -4290,6 +4381,7 @@ async fn create_with_purpose_inner(
                         &user_name,
                         placement_deadline,
                         admitted_serving_generation,
+                        worker_plan.as_deref(),
                     )
                     .await?;
                 let crate::transcode::ClusterSessionStart {
@@ -4360,6 +4452,17 @@ async fn create_with_purpose_inner(
                 }
             }
         } else {
+            if remote_request.candidate_catalog.is_none() && !unbound_confirmed {
+                if let Some(plan) = start_plan.as_deref() {
+                    if let Err(error) =
+                        super::start_plan::confirm_unbound_remote(&state.applied, plan).await
+                    {
+                        last_error = Some(error);
+                        break;
+                    }
+                }
+                unbound_confirmed = true;
+            }
             remote_request.retained_output_receiver = state
                 .media_pool
                 .retained_output_receiver(&candidate)
@@ -4380,6 +4483,9 @@ async fn create_with_purpose_inner(
                 },
             )
             .await;
+            if let Err(failure) = &remote_start {
+                placement_ended = super::start_plan::ends_placement(failure);
+            }
             match remote_start {
                 Ok(started) => {
                     let target_generation = started.info.activation_generation;
@@ -4434,6 +4540,14 @@ async fn create_with_purpose_inner(
                         "media worker {candidate} could not start the session: {error:?}"
                     )))
                 }
+                // The worker's plan at this create's binding differs from
+                // this node's even at Authority (D3b, contract §4.3): this
+                // replica may be the stale side, so its view closes, no
+                // further candidate is offered the refuted plan (placement
+                // ends below), and the viewer's retry plans from Authority.
+                Err(crate::media_sessions::RemoteStartFailure::PlanChanged) => Err(
+                    super::start_plan::remote_plan_refused(&state.applied, &candidate),
+                ),
             }
         };
         match result {
@@ -4459,6 +4573,9 @@ async fn create_with_purpose_inner(
                     owner_node_id = %candidate, "media worker start attempt failed"
                 );
                 last_error = Some(error);
+                if placement_ended {
+                    break;
+                }
             }
         }
     }
@@ -4659,7 +4776,7 @@ async fn create_with_purpose_inner(
             source,
             &catalog_request,
             &accepted,
-            planning_snapshot.as_ref(),
+            planning_snapshot,
             link_receipts::advisory_deadline(),
         )
         .await
@@ -4677,7 +4794,7 @@ async fn create_with_purpose_inner(
         info.processed_dv_profile,
         info.processed_fel,
         effective_processing.as_ref(),
-        planning_snapshot.as_ref(),
+        planning_snapshot,
         processing_decline.as_deref(),
     );
     let response = StartResponse {

@@ -4272,6 +4272,48 @@ async fn a_dropped_remote_start_reply_takes_the_session_the_worker_already_holds
 /// ingress as its code, so the viewer is not told to wait for a start that no
 /// retry can make; every other 503 — an older worker's bodiless one, a fence,
 /// a waitable refusal — stays the waitable answer.
+/// D3b, review S3: an owner whose plan differs at Authority answers the 409 a
+/// changed source always had, with a body naming the planning refusal; the
+/// ingress reads exactly that body as `PlanChanged`. A bare 409 (an older
+/// worker, a reused request id) and any other code stay a transport failure.
+#[tokio::test]
+async fn an_owner_plan_refusal_crosses_to_the_ingress_as_plan_changed() {
+    use axum::response::IntoResponse;
+    let worker =
+        crate::http::internal_media_sessions::RemoteStartError::PlanChanged.into_response();
+    assert_eq!(worker.status(), reqwest::StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(worker.into_body(), 4096)
+        .await
+        .expect("worker body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("a JSON body"),
+        serde_json::json!({"code": "catalog_input_unavailable"})
+    );
+    assert!(remote_start_plan_changed(&body));
+    for other in [
+        &b""[..],
+        br#"{"code":"transcode_capacity_pending"}"#,
+        br#"{"error":"catalog_input_unavailable"}"#,
+        b"catalog_input_unavailable",
+    ] {
+        assert!(
+            !remote_start_plan_changed(other),
+            "{}",
+            String::from_utf8_lossy(other)
+        );
+    }
+    assert!(crate::http::hls::start_plan::ends_placement(
+        &RemoteStartFailure::PlanChanged
+    ));
+    for failure in [
+        RemoteStartFailure::Unavailable,
+        RemoteStartFailure::Terminal(crate::transcode::TRANSCODE_HEIGHT_UNAVAILABLE),
+        RemoteStartFailure::Transport(PeerTransportError::InvalidResponse),
+    ] {
+        assert!(!crate::http::hls::start_plan::ends_placement(&failure));
+    }
+}
+
 #[tokio::test]
 async fn a_worker_terminal_capacity_refusal_crosses_to_the_ingress_by_code() {
     use axum::response::IntoResponse;

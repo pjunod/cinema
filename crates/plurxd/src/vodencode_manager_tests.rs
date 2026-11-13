@@ -3518,7 +3518,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
     // The rolling engine never serves a processed candidate, whoever hands
     // it one: the same refusal the catalog restore path gives.
     let refused = manager
-        .rolling_start_inputs(file_id, Some(&processed_context))
+        .rolling_start_inputs(file_id, Some(&processed_context), None)
         .await
         .err()
         .expect("the rolling engine refuses a processed candidate context");
@@ -3701,6 +3701,7 @@ async fn create_local_vod(
         None,
         None,
         (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+        None,
     ))
     .await
     .map(|creation| creation.info)

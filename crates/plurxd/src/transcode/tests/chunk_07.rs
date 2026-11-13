@@ -2160,7 +2160,7 @@ async fn rolling_start_enforces_operator_ahead_and_scratch_limits_from_the_snaps
     let mut context = TranscodeManager::candidate_context(&candidate);
     context.planning_snapshot = Some(Arc::new(snapshot));
     let inputs = mgr
-        .rolling_start_inputs(file_id, Some(&context))
+        .rolling_start_inputs(file_id, Some(&context), None)
         .await
         .expect("inputs");
     let limits = mgr.ahead_limits_for_start(&inputs.settings);
@@ -2237,7 +2237,7 @@ async fn candidate_bound_start_honours_operator_cache_and_pacing_settings() {
     let mut context = TranscodeManager::candidate_context(&candidate);
     context.planning_snapshot = Some(Arc::new(snapshot));
     let inputs = mgr
-        .rolling_start_inputs(file_id, Some(&context))
+        .rolling_start_inputs(file_id, Some(&context), None)
         .await
         .expect("inputs");
     assert_eq!(

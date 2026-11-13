@@ -3563,7 +3563,7 @@ mod tests {
                     &state,
                     &query,
                     tokio::time::Instant::now() + Duration::from_millis(500),
-                    None,
+                    crate::media_pool::CatalogSource::Quorum(None),
                 )
                 .await
             })
