@@ -31,9 +31,9 @@ TAG = "v8.1.3-1"
 COMMIT = "253db2a7b0a8045c54ce68ce33d7f601229b1822"
 SOURCE_URL = f"https://codeload.github.com/jellyfin/jellyfin-ffmpeg/tar.gz/refs/tags/{TAG}"
 SOURCE_SHA256 = "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140"
+# macOS is Apple Silicon only; there is no Intel (mac64) archive.
 ARCHIVES = {
     "arm64": ("macarm64", "22445d7299742749ad2eeb9ce87963d50def0357e45b3e6c7b69987c8365dbf6"),
-    "x86_64": ("mac64", "cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb"),
 }
 REQUIRED = {
     "filters": ["scale_vt", "tonemap_videotoolbox", "tonemapx", "zscale", "tonemap",
@@ -449,7 +449,7 @@ def validate_font_tools(package, facts):
             header = stream.read(32)
         if len(header) != 32 or header[:4] != b"\xcf\xfa\xed\xfe" or int.from_bytes(header[12:16], "little") != 2:
             raise ValueError("Fontconfig tool is not a native Mach-O executable")
-        architecture = {0x0100000C: "arm64", 0x01000007: "x86_64"}.get(int.from_bytes(header[4:8], "little"))
+        architecture = {0x0100000C: "arm64"}.get(int.from_bytes(header[4:8], "little"))
         libraries = re.findall(r"^\s+(\S+) \(", run(["/usr/bin/otool", "-L", str(binary)]), re.MULTILINE)
         if architecture != platform.machine() or architecture != claimed.get("architecture"):
             raise ValueError("Fontconfig tool architecture differs")
@@ -520,7 +520,7 @@ def main():
     if args.historical_build_lineage is not None and args.prepared_build is None:
         parser.error("historical lineage requires a completed prepared build")
     if platform.system() != "Darwin" or platform.machine() not in ARCHIVES:
-        parser.error("native arm64 or x86_64 macOS is required")
+        parser.error("native Apple Silicon (arm64) macOS is required")
     output = args.output
     if not output.is_absolute() or output.exists():
         parser.error("output must be an absolute, new directory")
