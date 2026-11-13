@@ -15,11 +15,16 @@ failure counts are not new failures in that interval.
 
 ## E1/D3 fleet qualification — 2026-11-13
 
-Codex owns the resumed E1/D3 fleet reading and control503 investigation.
-#1568 landed as882d4b691; all four nodes report it at19:22 UTC. #1573
-landed the Developer renderer correction as746cb0500. [Measured results and
-attribution limits](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) separate completed source work from runtime
-acceptance. Earlier fleet snapshots below are historical.
+Codex owns the resumed E1/D3 reading and control503 investigation; Paul owns
+and confirmed full-fleet rollout. #1568 landed as `882d4b691`, #1573 corrected
+the Developer renderer, and #1582 landed diagnostics as `65493acc8` after green
+fast lane 7477 (API 7690), Main promotion, local Clippy and three regressions.
+All four nodes run `483d2bcf3` and are healthy at 23:03:46 UTC. Four natural
+control503s identify the pre-read pending-release fence; the original 18:44
+branch remains unproven. [Measured results and attribution limits](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md)
+retain the historical 882 interval, actual Developer cards, unexercised Create
+plan counts and separate status503s. Final post-rollout hour reading is pending
+00:03:00 UTC November 14. Earlier fleet snapshots below are historical.
 
 ## Merged batch — index timestamp repair and Source locate eligibility
 

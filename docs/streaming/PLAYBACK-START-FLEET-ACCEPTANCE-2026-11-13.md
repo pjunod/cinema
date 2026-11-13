@@ -6,7 +6,7 @@ Companion to [the continuation ledger](PLAYBACK-START-STATUS.md),
 [D3b record](PLAYBACK-START-D3B-RECORD.md). This records runtime observations;
 it does not turn source tests or elapsed idle time into fleet acceptance.
 
-## E1/D3 landed and reached all four nodes
+## Historical E1/D3 rollout and comparable canary interval
 
 #1568 landed as `882d4b691` after fast lane 7420 and Main promotion. Its
 16 regression fields are present in the landing commit. The 19:22 UTC fleet
@@ -65,12 +65,12 @@ the table above uses the actual request-correlated HTTP response.
 
 ## Diagnostics must preserve the refusal without changing the release fence
 
-The deployed control handler drops its route error and constructs responses
-without the existing ApiErrorCode extension. The HLS observer therefore records
+The historical `882d4b691` control handler dropped its route error and built
+responses without the existing ApiErrorCode extension. The observer recorded
 an untyped 503, despite a typed client body. This is the confirmed attribution
 failure; it is separate from the unproven historical refusal branch.
 
-The follow-up retains bounded route-failure stages, safe Store error classes,
+The landed #1582 follow-up retains bounded route-failure stages, safe Store error classes,
 protocol code and crate-relative callsite in the existing diagnostic record.
 Deterministic before-read and after-read release tests preserve the public503
 body and fail-closed ordering while asserting the diagnostic distinction.
@@ -79,18 +79,18 @@ No release status, retry policy, timer, watchdog or enable switch changes.
 ## Remaining runtime observations stay explicit
 
 #1573 landed the missing Create plan card and asynchronous Applied view badge
-as `746cb0500` after fast lane 7447 and Main promotion. The observed fleet still
-runs `882d4b691`. Developer at 19:22:14 UTC reports proof/image met, settings
+as `746cb0500` after fast lane 7447 and Main promotion. The historical fleet still
+ran `882d4b691`. Developer at 19:22:14 UTC reported proof/image met, settings
 223 view / 1 quorum, routes 367 view / 0 quorum, and last fallback floor; the old
-renderer still shows a stale badge and omits Create plan.
+renderer showed a stale badge and omitted Create plan.
 
-Final post-hour fleet results, diagnostic qualification and the exact deployment
-candidate are recorded here when measured. Create plan stale-replan/refusal-close
+The later diagnostic rollout and its pending post-rollout hour are recorded
+below. Create plan stale-replan/refusal-close
 atomics are not exposed by Prometheus; absent readings are not zero evidence.
 The learner's server-info 503 explicitly reports learner_route_ineligible;
 that policy refusal is not evidence of a cluster outage.
 
-## Final fleet endpoint — every process exceeds one hour
+## Historical 882 fleet endpoint — every process exceeds one hour
 
 The 20:00:14 UTC read reports the same `882d4b691` build everywhere. Compared
 with 19:22:38–39, all uptimes advance and counters have no reset. Parent
@@ -115,9 +115,9 @@ The observed endpoint interval is 2255 seconds, not a continuously sampled
 hour. Process uptime exceeds an hour, but idle learner/other-voter ingress
 cannot establish normal playback coverage. The historical 503 remains cumulative;
 no new 503 or control-unavailable result occurred in the comparable interval.
-These checks complete the requested post-hour fleet reading. They do not
+These checks complete the requested post-hour fleet reading. They did not
 qualify unexercised ingress paths, causal before/after improvement, the exact
-historical 503 branch, or the not-yet-deployed renderer/diagnostics.
+historical 503 branch, or the renderer/diagnostics that were not yet deployed.
 
 ### Site and method attribution in the comparable interval
 
@@ -169,7 +169,61 @@ interleaving cases; both passed in 0.96 s. The passed privacy case was retained.
 No source change or recompilation was used for the failed-only rerun.
 
 The timer inventory and doc-budget regressions passed after their targeted
-bookkeeping fixes; the other 14 paperwork checks were retained. Exact-head
-fast-lane qualification and deployment are recorded when they actually pass.
+bookkeeping fixes; the other 14 paperwork checks were retained. PR #1582 landed
+as `65493acc8` after exact-head fast lane 7477
+(API run 7690), including Main promotion, passed. Its three regression fields
+and the local Clippy/three-regression evidence are retained.
 The completed learner compiler and task-owned duplicate volumes are removed;
 shared cache seeds and all durable evidence remain preserved.
+
+## Diagnostic rollout — four healthy nodes, release stage now observed
+
+Paul owns and confirmed the full-fleet rollout. At 23:03:46 UTC all four nodes
+run `483d2bcf3`, including #1573 and #1582; both server and discovery containers
+are healthy. Every node reports quorum, known leader, replicated applied-view
+proof, stable image and zero failed replacements. The process starts below are
+container StartedAt, not ReadyAt; new-process counters are not subtracted from
+an older build.
+
+| Role | Server start UTC | Discovery start UTC |
+|---|---|---|
+| Learner | 22:16:53 | 22:17:29 |
+| Voter A | 23:01:56 | 23:02:32 |
+| Voter B | 23:01:49 | 23:02:15 |
+| Leader | 22:09:22 | 22:09:58 |
+
+The leader records four natural control 503s at 22:13:59, 22:20:27,
+22:35:29 and 22:53:53 UTC. All four explicitly report `control_unavailable`,
+`release_pending_before_read`, and `http/hls/control.rs:1765`, taking 19–30 ms.
+Serving readiness remains true and loss generation remains zero. Two sessions
+explicitly settle retirement as `client_released` after the refusal, followed
+by control 410. The other two already return ended/owner-lost 410s before their
+503; no new release initiation is retained. Successful DELETE ingress and its
+caller remain absent from these logs. This proves the new failures' pre-read
+release-fence stage; it does not retroactively prove the original 18:44 branch.
+The original concurrent-deletion timing and inspected fence-before-End source
+ordering remain strong evidence with that historical attribution limit.
+
+Two further 503s are status GETs for one rolling session at 22:41:50 and
+22:41:52 UTC: `response_state_changed`, 48/33 ms, ready true and unchanged loss
+generation zero. Its producer subsequently ends and requests return 410.
+No create/startup or segment 5xx appears in that bounded window; the producer's
+termination cause is not retained. These are separate from control Unavailable.
+
+At 22:13:01 UTC, the actual Settings → Developer UI on the new leader shows
+Applied view met, proof met and stable image, with settings 12 view / 0 quorum,
+routes 91 view / 0 quorum and last fallback none. Create plan is present and
+shows unknown: no create has planned on that node since start. Its zero counts
+are unexercised, not stale-plan/refusal-close runtime qualification. The receipt
+was captured during partial rollout; the later fleet observation establishes
+the full rollout, not new UI exercise. The separate unlanded combined guard at
+`6115865b3` is not deployed by this rollout.
+
+## Final post-rollout hour reading — pending 00:03:00 UTC, November 14
+
+No final-hour numbers are claimed yet. Record a fresh four-node endpoint after
+00:03:00 UTC, preserving process identity, uptime, quorum/proof/image state and
+counter reset boundaries. Compare only unchanged processes; report playback
+traffic and typed failures rather than treating idle ingress or elapsed uptime
+as acceptance. Both server and discovery containers exceed one hour by that threshold;
+StartedAt alone does not establish an uninterrupted hour of readiness.
