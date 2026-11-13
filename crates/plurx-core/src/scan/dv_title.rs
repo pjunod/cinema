@@ -280,12 +280,12 @@ mod tests {
         assert!(DvTitleStats::from_probe_json("{}").is_none());
         let mut doc = serde_json::json!({ PROBE_FIELD: good });
         assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()), Some(good));
-        doc[PROBE_FIELD].as_object_mut().unwrap().remove("el_kind");
+        doc[PROBE_FIELD].as_object_mut().expect("probe fixture object").remove("el_kind");
         assert_eq!(DvTitleStats::from_probe_json(&doc.to_string()), Some(good));
         doc[PROBE_FIELD]["el_kind"] = serde_json::json!({"state":"consistent","value":"fel"});
         assert_eq!(
             DvTitleStats::from_probe_json(&doc.to_string())
-                .unwrap()
+                .expect("valid FEL probe fixture")
                 .el_kind,
             TitleConstant::Consistent(TitleElKind::Fel)
         );
