@@ -1,6 +1,6 @@
 # Shared-library playback — implementation and merge status
 
-**Status:** built; lab4 recovery correction prepared · **Updated:** 2026-11-13 · **Owner:** Codex/root
+**Status:** built; Linux startup identity prevention prepared; lab4 custody recovery pending · **Updated:** 2026-11-13 · **Owner:** Codex/root
 
 PR #1472, `claude/shared-library-standalone-fixes`, carries the standalone
 repairs and relay budget, retry and abandonment work. Its live gate and
@@ -22,9 +22,11 @@ require a client release. RX-ring sizing is built in the host baseline
 (2026-11-12) and was applied on 2026-11-13 with the persistent rule included
 in every installed kernel boot image. Post-reboot and physical playback
 acceptance remain separate. The cluster-wide recovery-pending count is one
-lab4 preparation custody; [recovery ledger §1.5](../server/SOURCE-CUSTODY-RECOVERY.md#15-linux-startup-preserves-reboot-recovery-old-empty-identity-records-need-independent-proof)
-records its root cause, prevention and exact-owner repair. Source is prepared;
-review, tests and fleet recovery remain pending.
+lab4 preparation custody. The [RCA §5.1](SHARED-LIBRARY-PLAYBACK-RCA.md#51-missing-host-identity-let-a-replicated-linux-daemon-start-without-reboot-recovery)
+records the startup cause and prevention. PR #1570 adds the required actual-host
+identity check and mounts; existing exact-custody census recovery is owned by
+merged PR #1567 and remains pending fleet evidence and acceptance. No fleet
+recovery acceptance is claimed.
 
 ## Fixture correction
 

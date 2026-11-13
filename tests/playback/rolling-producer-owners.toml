@@ -1,11 +1,4 @@
-# 2026-11-13 Linux reboot recovery ownership audit (Codex/root): the new
-# reboot_proof module is awaited by the existing exact-source recovery owner.
-# It adds no daemon task, timer, media opener or child launcher. Startup identity
-# validation is synchronous before serving. Freshness constants are proof
-# predicates, not scheduled work. The separate root-admin helper owns one
-# bounded journalctl child, drains bounded output, and kills/waits on failure;
-# it neither stops a reader nor releases custody. Store settlement, exact
-# acknowledgement and worker-journal cleanup retain their existing owner.
+# Startup host-identity validation adds no task, timer, child or source opener.
 # S5 source custody / VOD Source-copy yield audit (2026-11-09), authored
 # structural comparison of origin/main c8f8b5aa9 with 3e17df55f using the
 # unchanged rust_structural_source extractor over module_roots. This is static
@@ -5839,14 +5832,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main again: +1 main (#1546 test poll) = 2204.
-# Reconcile main #1551 (694455592): +6, unrelated to reboot recovery.
-# processed_upgrade.rs::await_successor_start adds one awaited 250ms poll
-# under the existing PendingCandidateGuard/UpgradeRun cancellation owner;
-# it retains the admitted predecessor root and never proves source closure.
-# processed_upgrade_runs.rs adds five fixture time calls: two 20ms wait
-# assertions, one 1s cancellation bound, one 260ms control cadence sleep,
-# and one 2s prepared-entry bound. No new task or recovery owner is added.
-expected_occurrences = 2210
+# D3b review S4: +1, `tokio::time::timeout_at` around the remote owner's
+# `start_plan::owner_plan` in `internal_media_sessions::start`, bounded by
+# `start_deadline.min(create_stage_deadline(2 s))` -- the restore stage's own
+# bound, which the owner's planning read ran under before D3b. An awaited
+# request-path deadline: no task, no producer, no process; a timeout answers 503.
+# Merged main into D3b: 2203 base, +1 main, +1 D3b = 2205.
+# Reconcile main#1551: one awaited250ms successor-start poll retains the
+# PendingCandidateGuard/UpgradeRun cancellation owner; five test-only waits
+# in processed_upgrade_runs.rs are two20ms,1s,260ms,2s. No recovery owner.
+expected_occurrences = 2211
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7065,8 +7060,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # D3a: +1 (924 -> 925), `spawn_in_http_store_scope(`, the owner start's one
 # spawn (the line above); it is the task `ims.rs::start` already awaited, not a
 # process, and joins before the handler returns.
+# D3b review S3: +1 lexical `.status()` in `media_sessions/tests.rs`
+# (`an_owner_plan_refusal_crosses_to_the_ingress_as_plan_changed`), the
+# status of an axum response built in the test. It launches no process.
 # Offload integration: main 925 plus the fake_curator in-process task.
-expected_occurrences = 926
+# D3b/main integration: 925 base + 1 D3b + 1 main = 927; keep both additions.
+expected_occurrences = 927
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

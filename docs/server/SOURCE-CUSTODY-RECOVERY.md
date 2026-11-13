@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · Linux reboot-proof correction prepared; exact-candidate qualification and fleet recovery pending · **Updated:** 2026-11-13
+**Status:** open · Linux startup identity guard prepared; qualification, fleet rollout and exact-owner recovery pending · **Updated:** 2026-11-13
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
@@ -239,6 +239,24 @@ sudo rm /run/plurx-physical-stop/source-census-v1/<uuid>.json
 
 The container needs the existing read-only bind of `/run/plurx-physical-stop`.
 
+A witness from an earlier boot of the same machine is censused too. Legacy
+reboot recovery needs the host identity binds, and a host without them writes
+its v1 record with no identity, which a reboot can never verify. The helper
+then reads the machine's own journal (`journalctl --list-boots`). It requires
+the witness's boot to be listed there and to have ended before the current
+boot began, so no process of that kernel survives. It records that boot as
+`prior_boot` in the proof. The daemon accepts a witness from another kernel
+only when the proof names exactly that boot. The census itself must still have
+run on the daemon's current kernel, and every other check is unchanged. A
+cloned data directory on another machine cannot claim boots from this
+machine's journal. The daemon cannot read the host journal: it trusts the root
+helper's `prior_boot`, as it already trusts the helper's open counts. The
+helper needs persistent journald (`/var/log/journal`); without it, earlier
+boots are not listed and it refuses. A later boot can mount the same export
+under another device number, so the owner's source binds by the file
+server's inode on the superblock the daemon sees now. With the owner's job row
+gone the daemon has no path to check that inode against, and refuses.
+
 ### 1.4 A daemon restart proves its old namespace's readers gone
 
 A plurxd restart during any read left that owner's witness poisoned by some
@@ -278,103 +296,32 @@ An older daemon refuses the new evidence field and so skips the record, the
 safe direction during a rolling upgrade. Each release logs `source custody
 recovered after its daemon's PID namespace was torn down`.
 
-### 1.5 Linux startup preserves reboot recovery; old empty-identity records need independent proof
+### 1.5 Linux replicated startup requires actual-host identity
 
-**Owner:** Codex/root · **Branch:** `codex/source-custody-cross-boot` ·
-**PR:** #1570 · **State:** final review corrections, qualification and fleet recovery pending.
-This is an independent corrective PR to `main`; it does not change the active
-foreground-census or playback-start projects.
+**Owner:** Codex/root · **PR:** #1570 · **Scope:** startup prevention only;
+qualification and fleet rollout remain pending.
 
-A second stranded owner on lab4 explains the 2026-11-13 cluster-wide pending
-count of one. A speculative `transcode_prepare` job opened custody, a raw child
-launch invalidated its anchor, and its daemon was replaced before settlement.
-The host later rebooted. The v2 witness names the prior kernel and lacks the
-newer namespace identity; its v1 envelope has empty machine and boot IDs because
-the container had neither actual-host bind. Cancelling the job cannot prove
-physical closure. The [shared-playback RCA](../streaming/SHARED-LIBRARY-PLAYBACK-RCA.md)
-retains the incident finding. The exact child executable was not recorded.
+A replicated Linux daemon must read the actual host's machine ID and boot ID
+through read-only binds before it starts source readers or listeners. It
+refuses startup if either bind is missing or invalid, or if the bound boot ID
+does not match the current procfs kernel boot ID. This prevents a container
+from serving with image-local or empty host identity and creating custody that
+cannot use the existing reboot-recovery path. SQLite bootstrap and native
+macOS recovery are unchanged.
 
-Linux replicated daemon startup now requires a valid explicit host identity,
-with its boot UUID backed by actual procfs, before starting source readers or
-listeners. The [Compose deployment](../../deploy/docker-compose.yml) supplies
-both read-only binds with missing-source creation disabled, and the
-[native unit](../../deploy/plurxd.service) requires both mounts. A raw launch
-may still invalidate v2, but every newly served Linux replicated owner also
-gets the existing valid v1 reboot fallback. Native macOS recovery and the
-non-authoritative SQLite bootstrap remain unchanged. This is an ownership
-configuration invariant, not an optional feature switch.
+The [Compose deployment](../../deploy/docker-compose.yml) supplies
+`/etc/machine-id` and `/proc/sys/kernel/random/boot_id` at
+`/run/plurx-host-machine-id` and `/run/plurx-host-boot-id`, read-only, with
+missing-source creation disabled. The [native systemd unit](../../deploy/plurxd.service)
+requires the same mounts. These are required host configuration, not an
+optional feature switch.
 
-Historical empty identities cannot be filled in after the fact. The
-[root-admin helper](../../scripts/source-custody-reboot-proof) instead publishes
-independent `host_journal_reboot_v1` evidence for one expired background Job.
-It requires an independently prepared root-owned host enrollment, verifies
-actual initial-host namespaces, filesystem root, machine/node identity and
-current boot, then finds the witness's different kernel UUID in this machine's
-root-protected persistent journal. All three pinned worker inputs must have
-unchanged modification and kernel change times from before this host boot;
-current-worker bytes cannot be relabelled as historical reboot evidence. The kernel reboot proves all its old tasks
-ended, including raw children. A worker cannot publish this evidence.
-
-The [consumer](../../crates/plurxd/src/source_custody/recovery/reboot_proof.rs)
-accepts only protected root-owned local proof files, an unprivileged worker,
-the same actual host/current boot/node, a proof younger than 15 minutes before
-settlement, the
-exact original v1/v2 bytes, matching armed activation and immutable owner, and
-expired original authority. It resolves that exact custody through Store,
-uses the existing typed settlement/release, and requires acknowledged exact
-absence before clearing worker evidence. Failed settlement retains evidence
-for retry; a replacement owner is never settled. A delayed cleanup retry may
-finish after proof expiry only when Store already acknowledges that exact
-owner absent, without invoking settlement again. The root proof remains
-read-only until its operator removes it. No database or old worker-record edits
-are part of this procedure.
-
-Recovery procedure, on the actual owning Linux host as root:
-
-1. Prepare a private root-owned enrollment JSON outside the worker's data
-   directory. Fields are `version: 1`, `node_id`, `data_dir`,
-   `machine_id_sha256` (SHA-256 of stripped `/etc/machine-id` bytes), `boot_id`,
-   `initial_pid_namespace_inode`, `initial_user_namespace_inode`, and
-   `host_root_device_inode: [device, inode]`. Obtain namespace and filesystem
-   identities independently through the actual host administration session.
-   The helper does not mint its own trusted enrollment.
-2. Install the reviewed helper root-owned, and run check-only first:
-
-   ```bash
-   source-custody-reboot-proof --host-enrollment /etc/plurx-custody-host.json \
-     --custody <exact-custody-uuid>
-   ```
-
-3. With a compatible merged daemon and the mandatory identity binds, expose
-   root-owned `/run/plurx-physical-stop` to it read-only. Re-run the helper with
-   `--publish`. It atomically creates the exact proof in
-   `/run/plurx-physical-stop/reboot-v1/`; it never overwrites a differing proof.
-4. Observe the daemon's recovery acknowledgement, exact custody absence and
-   the cluster-wide pending metric. Only then remove that published root proof
-   and the incident enrollment. If a proof expires before consumption, remove
-   only that exact root-owned proof and obtain a fresh check/publication.
-
-A same-boot witness, foreign journal machine or boot, missing history, unsafe
-proof namespace, changed owner/activation/bytes, or unavailable Store refuses
-recovery. Retain the original worker files and diagnose the refusal. Do not
-relax the proof or translate expiry into a physical join. The helper does not
-stop services, signal processes, reboot hosts, or access a database.
-
-Qualification is recorded on the PR and in the ledger below. Prepared Rust
-regressions exercise startup validation, poisoned-witness recovery, foreign and
-stale proof refusals, ownership replacement, release retry, and the normal v1
-fallback. Prepared Python tests exercise protected host/journal boundaries and
-check-only/publication behavior. Final review required local-filesystem
-provenance and acknowledged partial-cleanup retry; both corrections were
-confirmed by the reviewer before execution. These definitions
-are not execution evidence.
-
-The durable-jobs and operation-progress mapping audit pins the reviewed
-startup/recovery files plus the new proof consumer and producer as explicit
-recovery dependencies outside those models. Existing Store transitions,
-physical-closure predicates, models, configurations and assertions are unchanged.
-These pins establish reviewed source correspondence, not formal verification
-of the administrator's journal or filesystem implementation.
+This guard prevents new Linux replicated owners from starting without valid
+host identity; it does not repair historical records. The lab4 incident and
+the [existing exact-custody census recovery in §1.3](#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census)
+remain separate: that recovery is implemented by merged PR #1567, and the
+fleet evidence and acceptance are still pending. See the
+[shared-playback RCA §5.1](../streaming/SHARED-LIBRARY-PLAYBACK-RCA.md#51-a-different-lab4-owner-lost-both-recovery-paths-after-replacement-and-reboot).
 
 ## 2. The journal never impersonates an activation or completed join
 

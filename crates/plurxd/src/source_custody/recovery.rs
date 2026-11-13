@@ -12,8 +12,6 @@ use std::io::Read;
 mod physical_stop;
 mod reader;
 #[cfg(target_os = "linux")]
-mod reboot_proof;
-#[cfg(target_os = "linux")]
 mod source_census;
 pub(super) use reader::Witness;
 
@@ -576,8 +574,6 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
     let legacy_result = legacy_result.and(
         source_census::replay(store, &context.dir.with_file_name("v2"), &context.dir, node).await,
     );
-    #[cfg(target_os = "linux")]
-    let legacy_result = legacy_result.and(reboot_proof::replay(store, &context.dir, node).await);
     reader_result.and(legacy_result)
 }
 
@@ -698,3 +694,6 @@ mod abort_tests;
 pub(super) fn fail_activation_clear_for_test() -> bool {
     abort_tests::fail_clear()
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod startup_tests;

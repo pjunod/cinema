@@ -1369,11 +1369,12 @@ impl TimedClient {
         self.facts.clone()
     }
 
-    /// Arm the settings floor for one write: `wrote` is whether any of its
-    /// statements may write `settings`, directly or through a trigger. See
-    /// [`super::applied_view::SettingsWriteFloor::arm`] for when it rises.
-    fn settings_write(&self, wrote: bool) -> super::applied_view::SettingsWriteGuard {
-        self.facts.guard(wrote)
+    /// Arm the write floors for one write: `written` is which of the floored
+    /// tables (`settings`, `files`) any of its statements may write, directly,
+    /// through a trigger or by a cascade. See
+    /// [`super::applied_view::SettingsWriteFloor::arm`] for when they rise.
+    fn write_floors(&self, written: WrittenTables) -> super::applied_view::WriteFloorGuard {
+        self.facts.guard(written)
     }
 
     fn inner(&self) -> &Client {
@@ -1515,7 +1516,7 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        let settings = self.settings_write(writes_settings(&sql));
+        let floors = self.write_floors(WrittenTables::of(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1526,7 +1527,7 @@ impl TimedClient {
             |_| true,
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1543,7 +1544,7 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        let settings = self.settings_write(writes_settings(&sql));
+        let floors = self.write_floors(WrittenTables::of(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1554,7 +1555,7 @@ impl TimedClient {
             |_| true,
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1569,7 +1570,7 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        let settings = self.settings_write(writes_settings(&sql));
+        let floors = self.write_floors(WrittenTables::of(&sql));
         // The arm is client-wide, but only the activation confirmation is
         // under contract here. Scoping it to that statement keeps an unrelated
         // idempotent write (settings upserts share this path) from stealing the
@@ -1596,7 +1597,7 @@ impl TimedClient {
             }
         })
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1642,7 +1643,7 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        let settings = self.settings_write(writes_settings(&sql));
+        let floors = self.write_floors(WrittenTables::of(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1653,7 +1654,7 @@ impl TimedClient {
             |rows| rows.iter().all(Result::is_ok),
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1671,7 +1672,7 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        let settings = self.settings_write(writes_settings(&sql));
+        let floors = self.write_floors(WrittenTables::of(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1682,7 +1683,7 @@ impl TimedClient {
             |ack| ack.result.iter().all(Result::is_ok),
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1698,7 +1699,7 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        let settings = self.settings_write(writes_settings(&sql));
+        let floors = self.write_floors(WrittenTables::of(&sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1709,7 +1710,7 @@ impl TimedClient {
             |_| true,
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1729,7 +1730,9 @@ impl TimedClient {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
-        let settings = self.settings_write(statements.iter().any(|(sql, _)| writes_settings(sql)));
+        let floors = self.write_floors(WrittenTables::any(
+            statements.iter().map(|(sql, _)| sql.as_ref()),
+        ));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1740,7 +1743,7 @@ impl TimedClient {
             |results| results.iter().all(Result::is_ok),
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1754,7 +1757,9 @@ impl TimedClient {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
-        let settings = self.settings_write(statements.iter().any(|(sql, _)| writes_settings(sql)));
+        let floors = self.write_floors(WrittenTables::any(
+            statements.iter().map(|(sql, _)| sql.as_ref()),
+        ));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1774,7 +1779,7 @@ impl TimedClient {
             },
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -1784,7 +1789,7 @@ impl TimedClient {
         sql: &'static str,
     ) -> Result<Vec<Result<usize, hiqlite::Error>>, StoreError> {
         validate_sql(sql)?;
-        let settings = self.settings_write(writes_settings(sql));
+        let floors = self.write_floors(WrittenTables::of(sql));
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         let result = time_store_operation(
@@ -1795,7 +1800,7 @@ impl TimedClient {
             |results| results.iter().all(Result::is_ok),
         )
         .await;
-        drop(settings);
+        drop(floors);
         result
     }
 
@@ -7554,11 +7559,9 @@ impl Clock for SystemClock {
     }
 }
 
-/// Whether a replicated statement may write `settings`, directly or through
-/// a trigger.
-fn writes_settings(sql: &str) -> bool {
-    super::applied_view::writes_settings(sql)
-}
+// Which write floors a replicated statement raises: `settings` and `files`,
+// written directly, through a trigger or by a cascade.
+use super::applied_view::WrittenTables;
 
 pub(super) fn validate_sql(sql: &str) -> Result<(), StoreError> {
     if sql.contains("__PLURX_") {

@@ -23,6 +23,8 @@ use queue_fixture::QueueFixture;
 mod applied_view;
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/claim_selection.rs"]
+mod claim_selection;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -877,6 +879,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "validation_playback_pointer_desired_revision",
     "validation_write_legacy_playback_pointer",
     "claim_media_session_request",
+    "claim_media_session_request_recording",
     "record_library_channel_session_recipe",
     "assign_media_session_request_owner",
     "activate_media_session",

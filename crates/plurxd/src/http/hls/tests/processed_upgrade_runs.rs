@@ -235,7 +235,7 @@ async fn a_late_qualification_resumes_once_with_fresh_authority_and_keeps_its_re
     assert_eq!(super::processed_upgrade::run_upgrade_with(&fixture.state,&intent,&run,
         |_,_| std::future::ready(Err(encoded))).await,"qualification_pending");
     drop(run);
-    assert!(fixture.state.transcode.validate_candidate_planning_binding(&intent.request,None).await.is_err(),
+    assert!(fixture.state.transcode.validate_candidate_planning_binding(&intent.request,None,None).await.is_err(),
         "reusing the old intent would fail normal binding validation");
     let recipe: RemoteStartRequest=serde_json::from_str(&route.recipe_json).expect("recipe");
     let delivered=crate::playback_control::EffectiveSelection::from_recipe(&recipe,1080,Some("dolby_vision".into()));
@@ -252,7 +252,7 @@ async fn a_late_qualification_resumes_once_with_fresh_authority_and_keeps_its_re
                 plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x75;32]),[0x75;32],1080);
             context.planning_binding=Some(crate::media_pool::PlanningBinding::from_snapshot(&current));
             fresh.candidate_context=Some(Box::new(context));
-            assert!(state.transcode.validate_candidate_planning_binding(&fresh,None).await.is_ok());
+            assert!(state.transcode.validate_candidate_planning_binding(&fresh,None,None).await.is_ok());
             Ok(Some(fresh))
         },
         move |intent,run,pending| {

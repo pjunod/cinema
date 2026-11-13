@@ -335,13 +335,14 @@ procedure:
 The daemon then settles the custody, clears its journal and frees the slot.
 This is the owner's step (deploys).
 
-**Prevention:** the right invariant is "an activation has a v2 witness *or*
-a valid v1 identity". Refusing an empty identity outright would break native
-macOS and unbound containers, where empty is normal. Add a test that the
-activation writer refuses only when `prepare_at` returns `Ok(None)` *and*
-the identity is empty.
+**Prevention:** keep recovery platform- and backend-specific. The lab3 owner
+still uses the exact host-admin stop proof above. For replicated Linux startup,
+PR #1570 requires actual-host machine and boot identity binds and checks the
+bound boot against the running kernel before the daemon serves. Native macOS
+recovery and non-authoritative SQLite startup remain unchanged; see the
+[startup contract in the recovery ledger §1.5](../server/SOURCE-CUSTODY-RECOVERY.md#15-linux-replicated-startup-requires-actual-host-identity).
 
-### 5.1 A different lab4 owner lost both recovery paths after replacement and reboot
+### 5.1 Missing host identity let a replicated Linux daemon start without reboot recovery
 
 On 2026-11-13, all four replicas retain the same `2b6f4c0e…` custody for
 `transcode_prepare` job `49dd5948…` (file 104, recent-demand preparation).
@@ -349,15 +350,19 @@ The job is cancelled; custody remains active without settlement. Its anchor
 was invalidated by a raw launch at 02:30:05 UTC; Docker records daemon
 replacement at 02:30:23–24 UTC, and the host rebooted at 03:54:57 UTC.
 The v2 record's kernel UUID is now historical and it has no namespace field.
-The v1 machine/boot IDs are empty, and the deployment lacked both host binds.
-This is a separate owner from the resolved lab3 DV migration above.
+The v1 machine/boot IDs are empty because the deployment lacked both actual-host
+identity binds. Cancelling the job, replacing the daemon, or observing a later
+host reboot did not itself settle that custody. This is a separate owner from
+the resolved lab3 DV migration above; the exact child executable was not
+recorded.
 
-The [recovery ledger §1.5](../server/SOURCE-CUSTODY-RECOVERY.md#15-linux-startup-preserves-reboot-recovery-old-empty-identity-records-need-independent-proof)
-owns the corrective contract: validate the Linux reboot fallback before
-serving, and settle historical missing-identity witnesses only through an
-independent root-admin proof of a different local kernel boot. Owner:
-Codex/root. Source is prepared; review, qualification and fleet recovery remain
-pending. No manual row deletion or ownership-check bypass is authorized.
+The missing prevention was a serving-boundary check: replicated Linux could
+start without machine and boot IDs tied to the actual host and current kernel.
+PR #1570 adds that fail-closed startup requirement and the mandatory read-only
+Compose/systemd mounts. It does not add an alternate historical recovery path.
+The existing [exact-custody census recovery in the ledger §1.3](../server/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census),
+implemented by merged PR #1567, still owns the old lab4 record; fleet evidence
+and acceptance remain pending. No recovery or deployment acceptance is claimed.
 
 ## 6. Every node warns about two removed Raft members, every minute
 

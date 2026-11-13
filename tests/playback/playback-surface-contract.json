@@ -388,6 +388,7 @@
       "media_session_handoff_pending",
       "media_session_superseded",
       "playback_target_superseded",
+      "selection_superseded",
       "sharing_playback_authority_unavailable",
       "sharing_playback_response_unavailable",
       "unsupported_build",
