@@ -2052,6 +2052,7 @@ impl HiqliteAuthStore {
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
         store.install_playback_handoffs_schema(None).await?;
+        store.install_delegation_schema(None).await?;
         Ok(store)
     }
 
@@ -2243,7 +2244,8 @@ impl HiqliteAuthStore {
                     self.install_shared_caption_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
                     self.install_dv_title_jobs_schema(admission).await?;
-                    return self.install_playback_handoffs_schema(admission).await;
+                    self.install_playback_handoffs_schema(admission).await?;
+                    return self.install_delegation_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4386,6 +4388,61 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "playback handoff schema install did not settle".into(),
+        ))
+    }
+
+    async fn delegation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed handoff shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::delegation::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::delegation::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    super::delegation::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "delegated login schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_delegation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.delegation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::delegation::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.delegation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "delegated login schema install did not settle".into(),
         ))
     }
 

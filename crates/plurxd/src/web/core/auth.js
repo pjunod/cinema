@@ -164,7 +164,7 @@ function renderSetup(){
       if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
       if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
-      refreshClientErrorReporterAuth(); await loadFeatures(); location.hash="#/"; render();
+      refreshClientErrorReporterAuth(); await loadFeatures(); location.hash=location.hash.startsWith("#/curator-consent?")?location.hash:"#/"; render();
     });
   markBootReady();
 }
@@ -186,7 +186,7 @@ function renderLogin(){
       if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
       if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
-      refreshClientErrorReporterAuth(); await loadFeatures(); location.hash="#/"; render();
+      refreshClientErrorReporterAuth(); await loadFeatures(); location.hash=location.hash.startsWith("#/curator-consent?")?location.hash:"#/"; render();
     },false);
   markBootReady();
 }

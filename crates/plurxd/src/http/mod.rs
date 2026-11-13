@@ -27,6 +27,7 @@ pub(crate) mod error;
 pub(crate) mod extract;
 pub(crate) mod file_grants;
 pub(crate) mod playback_handoffs;
+pub(crate) mod delegation;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 mod https_admin;
@@ -1549,6 +1550,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/server/node", get(system::server_node))
+        .nest("/delegation", delegation::router())
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))

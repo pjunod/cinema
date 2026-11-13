@@ -1333,6 +1333,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA,
     // v123: prepared artifact operations do not read original media.
     super::subtitle_managed_schema::PREPARED_MIGRATION,
+    // v124: optional scoped application login, separate from native sessions.
+    super::delegation::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1888,6 +1890,7 @@ impl SqliteStore {
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
+        super::delegation::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

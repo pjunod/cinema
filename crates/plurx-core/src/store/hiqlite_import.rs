@@ -594,6 +594,9 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    TablePlan {name: "delegation_clients",columns: &["id","name","secret_hash","redirect","generation","active"],order_by: "id",minimum_schema:124,import_filter:None,sealed_columns:&[],parent_first:false},
+    TablePlan {name: "delegation_codes",columns: &["code_hash","client_id","client_generation","user_id","subject","source_hash","challenge","redirect","expires_at","claim"],order_by: "code_hash",minimum_schema:124,import_filter:None,sealed_columns:&[],parent_first:false},
+    TablePlan {name: "delegation_grants",columns: &["grant_hash","code_hash","client_id","client_generation","user_id","subject","source_hash","expires_at"],order_by: "grant_hash",minimum_schema:124,import_filter:None,sealed_columns:&[],parent_first:false},
     // Playback handoff codes and the tokens they redeemed into; a handoff
     // token lives only in its own table, never in `tokens`.
     TablePlan {

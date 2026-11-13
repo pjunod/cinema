@@ -87,6 +87,8 @@ pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEM
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_playback_handoffs;
 pub mod playback_handoffs;
+pub mod delegation;
+pub use delegation::DelegationStore;
 pub use playback_handoffs::{
     NewPlaybackHandoff, PlaybackHandoff, PlaybackHandoffRedeemOutcome, PlaybackHandoffRedemption,
     PlaybackHandoffStore, PlaybackHandoffTokenScope, PLAYBACK_HANDOFF_CODE_TTL_SECS,
@@ -5831,6 +5833,7 @@ pub trait Store:
     + OfflinePackageStore
     + FileGrantStore
     + PlaybackHandoffStore
+    + DelegationStore
     + RemoteStore
     + InvitationStore
     + PlaybackTelemetryStore
@@ -5892,6 +5895,7 @@ impl<T> Store for T where
         + OfflinePackageStore
         + FileGrantStore
         + PlaybackHandoffStore
+    + DelegationStore
         + RemoteStore
         + InvitationStore
         + PlaybackTelemetryStore
