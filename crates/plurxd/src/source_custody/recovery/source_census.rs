@@ -76,8 +76,9 @@ impl Proof {
         let device = match (&self.prior_boot, seen) {
             (None, _) => device,
             (Some(_), Some((seen_device, _))) => seen_device,
-            // No daemon-side view: the inode on any superblock the census counted.
-            (Some(_), None) => return self.census_devices().next().is_some(),
+            // No daemon-side path to check the inode against: an inode number
+            // alone can name another file on another filesystem.
+            (Some(_), None) => return false,
         };
         seen.is_none_or(|(seen_device, seen_inode)| seen_device == device && seen_inode == inode)
             && self.census_devices().any(|counted| counted == device)
@@ -638,6 +639,12 @@ pub(super) async fn apply(
             // gone instead.
             if !proof.owner_teardown_verified(context) {
                 return Err("census job unavailable for source binding".into());
+            }
+            // A census from a later boot binds the source through the job's
+            // file row; without it, an inode number alone could name another
+            // file on another filesystem.
+            if proof.prior_boot.is_some() {
+                return Err("a census from a later boot needs the owner's job row".into());
             }
             // The owner's own record of the inode it opened still binds.
             if witness

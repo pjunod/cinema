@@ -342,17 +342,22 @@ def ended_boot(witness_kernel, current_boot):
     ended before the current boot began: no process of it survives here. The
     journal is the machine's own, so a cloned data directory on another host
     cannot claim this machine's boots."""
-    require(witness_kernel.startswith("linux:"), "witness kernel is not a Linux boot")
-    witness = uuid.UUID(witness_kernel[len("linux:"):]).hex
-    listed = subprocess.run(["journalctl", "--list-boots", "--output=json", "--no-pager"],
-                            check=True, capture_output=True, text=True).stdout
-    boots = {boot["boot_id"]: boot for boot in json.loads(listed)}
-    old, current = boots.get(witness), boots.get(uuid.UUID(current_boot).hex)
-    require(old is not None and current is not None,
-            "this machine's journal does not list the witness's boot")
-    require(witness != uuid.UUID(current_boot).hex
-            and old["last_entry"] < current["first_entry"],
-            "the witness's boot had not ended before this boot began")
+    try:
+        require(witness_kernel.startswith("linux:"), "witness kernel is not a Linux boot")
+        witness = uuid.UUID(witness_kernel[len("linux:"):]).hex
+        current = uuid.UUID(current_boot).hex
+    except ValueError:
+        require(False, "witness or current boot is not a boot UUID")
+    try:
+        listed = subprocess.run(["journalctl", "--list-boots", "--output=json", "--no-pager"],
+                                check=True, capture_output=True, text=True).stdout
+        boots = {boot["boot_id"] for boot in json.loads(listed)}
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+        require(False, "this machine's journal cannot list its boots (persistent journald needed)")
+    # Listed and not the current boot: that kernel has ended, whatever the
+    # clocks said at the time.
+    require(current in boots and witness in boots and witness != current,
+            "this machine's journal does not list the witness's boot as an earlier one")
     return {"kernel_instance": witness_kernel}
 
 

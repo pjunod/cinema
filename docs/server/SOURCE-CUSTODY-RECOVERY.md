@@ -249,7 +249,13 @@ boot began, so no process of that kernel survives. It records that boot as
 only when the proof names exactly that boot. The census itself must still have
 run on the daemon's current kernel, and every other check is unchanged. A
 cloned data directory on another machine cannot claim boots from this
-machine's journal.
+machine's journal. The daemon cannot read the host journal: it trusts the root
+helper's `prior_boot`, as it already trusts the helper's open counts. The
+helper needs persistent journald (`/var/log/journal`); without it, earlier
+boots are not listed and it refuses. A later boot can mount the same export
+under another device number, so the owner's source binds by the file
+server's inode on the superblock the daemon sees now. With the owner's job row
+gone the daemon has no path to check that inode against, and refuses.
 
 ## 2. The journal never impersonates an activation or completed join
 

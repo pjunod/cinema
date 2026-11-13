@@ -519,3 +519,33 @@ async fn a_census_after_a_reboot_releases_a_witness_from_the_ended_boot() {
         .expect("the witness's boot ended, and the source is quiescent");
     assert_eq!(dead.held(), 0);
 }
+
+#[tokio::test]
+async fn a_census_from_a_later_boot_needs_the_owners_job_row() {
+    const NAMESPACE: u64 = 4_026_532_885;
+    let dead = dead_owner().await;
+    dead.forget_job();
+    let mut proof = dead.proof(0);
+    proof.kernel_instance = REBOOTED.into();
+    proof.prior_boot = Some(PriorBoot {
+        kernel_instance: KERNEL.into(),
+    });
+    for pass in &mut proof.passes {
+        pass.owner_teardown = Some(Teardown {
+            pid_namespace: NAMESPACE,
+            daemon_is_namespace_init: true,
+            preexisting: 0,
+            other_daemons: 0,
+            foreign_storage_holders: 0,
+            foreign_media_tools: 0,
+            unreadable: 0,
+            storage_devices: vec![STORAGE, dead.source.dev()],
+        });
+    }
+    let error = dead
+        .apply_on(REBOOTED, &proof, dead.lease + 500, Some(NAMESPACE))
+        .await
+        .expect_err("no file row to bind the source");
+    assert!(error.contains("needs the owner's job row"), "{error}");
+    assert_eq!(dead.held(), 1);
+}
