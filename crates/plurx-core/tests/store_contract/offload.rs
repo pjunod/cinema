@@ -163,6 +163,34 @@ async fn an_offloaded_item_survives_prunes_is_found_by_ids_and_clears_when_a_fil
             "{backend}: an on-disk title still is"
         );
 
+        // Nor does the artwork retry sweep: an offloaded title with a provider
+        // match and no poster is not artwork work, while an on-disk one is.
+        store
+            .apply_metadata(
+                twin,
+                &MetadataPatch {
+                    tmdb_id: Some(900_001),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("tmdb");
+        let missing: Vec<i64> = store
+            .items_missing_artwork(Some(library.id), 0, 100)
+            .await
+            .expect("artwork work")
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(
+            !missing.contains(&kept),
+            "{backend}: offloaded is not artwork work"
+        );
+        assert!(
+            missing.contains(&twin),
+            "{backend}: an on-disk matched title with no poster still is"
+        );
+
         // Ids only, never a title.
         let found = store
             .find_offloaded_movie(library.id, Some(817758), None)
