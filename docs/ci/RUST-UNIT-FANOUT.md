@@ -77,7 +77,7 @@ adjustments follow from that, both in files that are key inputs:
 - Archived CLI integration tests use the runtime `CARGO_BIN_EXE_*` path
   nextest remaps, with Cargo's compiled path as a fallback for ordinary test
   runs. A baked builder path cannot launch a binary extracted on a shard.
-  This covers desktop-control, notification-broker and plurxd CLI fixtures.
+  This covers the archived desktop-control and notification-broker CLI fixtures.
 - Shard and merge-base containers provision `dbus-daemon`: the tray's private
   session test launches `dbus-run-session`, which development libraries alone
   do not provide. No host service or runner installation changes.

@@ -94,20 +94,17 @@ impl Daemon {
     fn spawn(config: &Path, log: PathBuf, hostname: &str) -> Self {
         let output = File::create(&log).expect("daemon log");
         let errors = output.try_clone().expect("clone daemon log");
-        let child = Command::new(
-            std::env::var_os("CARGO_BIN_EXE_plurxd")
-                .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
-        )
-        .args(["--config", config.to_str().expect("config path"), "run"])
-        .env("NO_COLOR", "1")
-        .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
-        .env("PLURX_NODE_HOSTNAME", hostname)
-        .env("PLURX_HWACCEL", "software")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(output))
-        .stderr(Stdio::from(errors))
-        .spawn()
-        .expect("spawn plurxd");
+        let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
+            .args(["--config", config.to_str().expect("config path"), "run"])
+            .env("NO_COLOR", "1")
+            .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
+            .env("PLURX_NODE_HOSTNAME", hostname)
+            .env("PLURX_HWACCEL", "software")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(errors))
+            .spawn()
+            .expect("spawn plurxd");
         Self { child, log }
     }
 

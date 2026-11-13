@@ -92,26 +92,23 @@ impl Daemon {
     fn spawn(config: &Path, log: PathBuf, hostname: &str) -> Self {
         let output = File::create(&log).expect("daemon log");
         let errors = output.try_clone().expect("clone daemon log");
-        let child = Command::new(
-            std::env::var_os("CARGO_BIN_EXE_plurxd")
-                .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
-        )
-        .args(["--config", config.to_str().expect("config path"), "run"])
-        // The index-completion wait reads structured fields from this
-        // file. ANSI styling splits `built=1` into control-coded pieces.
-        .env("NO_COLOR", "1")
-        .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
-        // Both daemons share one machine, so without this they would share
-        // one machine name — and on a container runner they would have
-        // none at all, because `short_hostname` rejects a Docker container
-        // id. Naming them apart makes the roster's names a test input
-        // rather than a property of whichever box CI landed on.
-        .env("PLURX_NODE_HOSTNAME", hostname)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(output))
-        .stderr(Stdio::from(errors))
-        .spawn()
-        .expect("spawn plurxd");
+        let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
+            .args(["--config", config.to_str().expect("config path"), "run"])
+            // The index-completion wait reads structured fields from this
+            // file. ANSI styling splits `built=1` into control-coded pieces.
+            .env("NO_COLOR", "1")
+            .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
+            // Both daemons share one machine, so without this they would share
+            // one machine name — and on a container runner they would have
+            // none at all, because `short_hostname` rejects a Docker container
+            // id. Naming them apart makes the roster's names a test input
+            // rather than a property of whichever box CI landed on.
+            .env("PLURX_NODE_HOSTNAME", hostname)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(errors))
+            .spawn()
+            .expect("spawn plurxd");
         Self { child, log }
     }
 
