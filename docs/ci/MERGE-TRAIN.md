@@ -31,9 +31,9 @@ The train service writes nothing to your PR while it is off.
    goes on — is drafted, never boarded, so you take `WIP:` off again.
 3. **Do not merge it yourself.** The train takes up to eight queued PRs in
    order, merges them onto `main` in a branch `train/<n>`, and opens a pull
-   request for that branch. The fast lane runs on that train PR only — with
-   the switch on, the lane's jobs after `paperwork` do not run on ordinary PRs,
-   because a per-PR run would test a tree that never lands.
+   request for that branch. With the switch on, the lane's heavy jobs run on
+   the train PR only. Ordinary ready PRs still run paperwork and lightweight
+   scope selection; their heavy checks wait for the tree the train will land.
 4. **Green:** the train PR's run succeeded and its `Main promotion gate` job
    passed (a run that skipped the gate is not green: the train halts). The bot
    merges each PR through its own PR, in order, pinned to the commit that was
