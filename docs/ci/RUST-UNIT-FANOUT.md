@@ -234,9 +234,20 @@ a baked CLI executable path and a missing `dbus-run-session`; the harness fixes
 above address those concrete causes. Those logs predate the corrected harness
 and are not passing evidence for it.
 
-One-leaf-crate timing, core-crate timing, and authenticated no-change reuse are
-still awaiting the final candidate's dispatched runs. No speedup or acceptance
-claim is made from the interrupted builder's run.
+Dispatched proofs on 2026-11-13 establish the following boundaries:
+
+| Proof | Result |
+|---|---|
+| Leaf-only change (run 7615) | Only `plurx-tray` selected; all 43 cases and the final verdict passed. |
+| New commit, unchanged leaf inputs (run 7623) | Authenticated prior passes; archive, shards and baseline all skipped. Zero test bodies rerun. |
+| Core change restored to the final lane tree (run 7618) | All six shards and coverage verdict passed. Failure-only merge-base check stopped at the 25 GiB disk guard; this is incomplete qualification, not a green gate. |
+| Full corrected harness seed (run 7610) | 8,102 passing cases authenticated in the subsequent PR selector; 30 cases remained unpassed. Baseline capacity prevented classification. |
+
+These are execution and reuse proofs, not a measured speedup claim. Concurrent
+main changes require fresh keys for affected crates; receipts remain reusable
+only where the recomputed key matches. The final combined PR's lane must pass
+before landing. Runner capacity and real train installation remain separate
+operational acceptance work.
 
 ## 9. Other languages — follow-up plan
 
