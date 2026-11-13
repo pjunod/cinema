@@ -67,8 +67,11 @@ exempt = [
 # Tests that locate the workspace at run time (`CARGO_MANIFEST_DIR` followed
 # by `.parent()`, `.ancestors()` or `.pop()`) can read anything, so the
 # scanner cannot see what they read. Each such site is declared here with the
-# paths it reads; tests/validation/test_rust_units.py fails when a site is
-# added, moved to another function or removed without updating this list.
+# paths it reads and the tests (nextest names, without the binary) that read
+# them. Those reads key only this crate, and when they are all that changed
+# only those tests are due. tests/validation/test_rust_units.py fails when a
+# site is added, moved to another function or removed without updating this
+# list; the archive job fails when a named test does not exist.
 [[dynamic]]
 crate = "plurx-core"
 file = "crates/plurx-core/src/process/census.rs"
@@ -79,6 +82,7 @@ reads = [
     "crates/plurx-pgs/src/**",
     "crates/plurx-compat-plex/src/**",
 ]
+tests = ["process::census::every_production_spawn_goes_through_the_launcher"]
 reason = "The process-launch census walks the src trees of DAEMON_CRATES."
 
 [[dynamic]]
@@ -86,6 +90,7 @@ crate = "plurx-core"
 file = "crates/plurx-core/src/process/census.rs"
 function = "clippy_refuses_every_spawning_method_outside_tests"
 reads = ["clippy.toml"]
+tests = ["process::census::clippy_refuses_every_spawning_method_outside_tests"]
 reason = "Reads the workspace clippy.toml (an input of every crate already)."
 
 [[dynamic]]
@@ -93,6 +98,7 @@ crate = "plurx-core"
 file = "crates/plurx-core/src/process/mod.rs"
 function = "output_job_owned_call_sites_are_the_audited_set"
 reads = ["crates/plurxd/src/**"]
+tests = ["process::tests::output_job_owned_call_sites_are_the_audited_set"]
 reason = "Audits the plurxd call sites of the output helper."
 
 [[dynamic]]
@@ -100,6 +106,7 @@ crate = "plurx-core"
 file = "crates/plurx-core/src/scan/probe.rs"
 function = "store_probe_writes_stay_in_the_application_namespace"
 reads = []
+tests = []
 reason = "Walks its own src/store; the `.pop()` is its work queue, not a path."
 
 [[dynamic]]
@@ -107,6 +114,7 @@ crate = "plurx-core"
 file = "crates/plurx-core/src/testfixtures.rs"
 function = "fixture_dir"
 reads = []
+tests = []
 reason = "Generated fixtures under target/fixtures; nothing tracked is read."
 
 [[dynamic]]
@@ -114,6 +122,7 @@ crate = "plurx-core"
 file = "crates/plurx-core/src/transcode/tests.rs"
 function = "shipped_ffmpeg_deinterlace_fixture_matrix"
 reads = ["tests/playback/**"]
+tests = ["transcode::tests::shipped_ffmpeg_deinterlace_fixture_matrix"]
 reason = "Runs tests/playback/interlace-fixtures.sh (not exempt, so already an input)."
 
 [[dynamic]]
@@ -121,6 +130,7 @@ crate = "plurxd"
 file = "crates/plurxd/src/store_result.rs"
 function = "production_store_results_never_use_bare_let_underscore"
 reads = ["crates/plurx-core/src/store/**"]
+tests = ["store_result::tests::production_store_results_never_use_bare_let_underscore"]
 reason = "Derives Store method names from the plurx-core Store traits."
 
 [[dynamic]]
@@ -128,6 +138,7 @@ crate = "plurxd"
 file = "crates/plurxd/src/transcode/tests/seam_census.rs"
 function = "seam_census_of_the_workspace"
 reads = ["crates/*/src/**"]
+tests = ["transcode::tests::seam_census::seam_census_of_the_workspace"]
 reason = "The seam census parses every crate's production sources."
 
 # `make unit` also runs these ignored tests, serially, through

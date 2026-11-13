@@ -301,11 +301,13 @@ class Config:
         require(data.get("version") == 1, "rust-unit-inputs.toml must have version = 1")
         dynamic = []
         for index, site in enumerate(data.get("dynamic", [])):
-            require(set(site) == {"crate", "file", "function", "reads", "reason"},
-                    f"dynamic[{index}] must have exactly crate, file, function, reads, reason")
+            require(set(site) == {"crate", "file", "function", "reads", "tests", "reason"},
+                    f"dynamic[{index}] must have exactly crate, file, function, reads, tests, reason")
             require(isinstance(site["reads"], list) and all(isinstance(r, str) for r in site["reads"])
+                    and isinstance(site["tests"], list) and all(isinstance(r, str) for r in site["tests"])
+                    and (site["tests"] or not site["reads"])
                     and isinstance(site["reason"], str) and site["reason"].strip(),
-                    f"dynamic[{index}] needs reads (a list) and a reason")
+                    f"dynamic[{index}] needs reads, the tests that perform them, and a reason")
             dynamic.append(site)
         serial = {}
         for index, entry in enumerate(data.get("serial_ignored", [])):
@@ -395,10 +397,6 @@ class Keys:
             crate = self.crates[name]
             paths = set(self.tree.under(crate.directory))
             references = literal_references(self.tree, crate)
-            for site in self.config.dynamic:
-                if site["crate"] == name:
-                    for pattern in site["reads"]:
-                        paths.update(p for p in self.tree.entries if matches(p, (pattern,)))
             for directory in crate.external:
                 references.add(directory)
             for target in references:
@@ -409,15 +407,35 @@ class Keys:
             self._own[name] = paths
         return self._own[name]
 
-    def inputs(self, name):
+    def dynamic_inputs(self, name):
+        """What the crate's own declared test-time workspace walks read.
+
+        These are reads made by named tests of this crate, so they belong to
+        this crate's key only (no other crate links its tests) and, when they
+        are all that changed, only those tests are due.
+        """
+        paths = set()
+        for site in self.config.dynamic:
+            if site["crate"] == name:
+                for pattern in site["reads"]:
+                    paths.update(p for p in self.tree.entries if matches(p, (pattern,)))
+        return paths
+
+    def dynamic_tests(self, name):
+        return sorted({test for site in self.config.dynamic if site["crate"] == name and site["reads"]
+                       for test in site["tests"]})
+
+    def inputs(self, name, dynamic=True):
         paths = set(self.shared)
         for member in closure(self.crates, name):
             paths |= self.own_inputs(member)
+        if dynamic:
+            paths |= self.dynamic_inputs(name)
         return paths
 
-    def key(self, name):
+    def key(self, name, dynamic=True):
         lines = [KEY_VERSION, f"crate {name}"]
-        for path in sorted(self.inputs(name)):
+        for path in sorted(self.inputs(name, dynamic)):
             mode, oid = self.tree.entries[path]
             lines.append(f"{mode} {oid} {path}")
         return digest_lines(lines)
@@ -465,7 +483,11 @@ def selection(head_rev, base_rev, repository=".", config=None):
         due = key != base_key
         reason = (changed_inputs(head, base, name) if base and due
                   else [f"merge-base workspace unreadable: {base_error}"] if due else [])
-        crates[name] = {"key": key, "base_key": base_key, "due": due, "reason": reason}
+        # When only declared test-time reads changed, only those tests are due.
+        only = None
+        if due and base_key is not None and head.key(name, False) == base.key(name, False):
+            only = head.dynamic_tests(name)
+        crates[name] = {"key": key, "base_key": base_key, "due": due, "only": only, "reason": reason}
     return {"schema": SCHEMA, "head": head_tree.commit, "base": base_tree.commit,
             "crates": crates}
 
@@ -794,10 +816,19 @@ def make_plan(selection_doc, pending, listing, config, run):
         missing = set(config.serial_ignored.get(crate, ())) - {t.split(" ", 1)[1] for t in serial}
         require(not missing, f"{crate}: declared serial ignored tests not found: {sorted(missing)}")
         everything = tests + serial
+        # A declaration naming a test that does not exist would silently
+        # narrow a run, so every declared reader must be in the listing.
+        declared = {test for site in config.dynamic if site["crate"] == crate for test in site["tests"]}
+        names = {name for binary_id, cases in suites.items() if crate_of(binary_id) == crate for name in cases}
+        require(declared <= names, f"{crate}: declared dynamic-read tests not found: {sorted(declared - names)}")
+        only = entry.get("only")
+        if only is not None:
+            tests = [t for t in tests if t.split(" ", 1)[1] in only]
+            serial = [t for t in serial if t.split(" ", 1)[1] in only]
         adopted = sorted(set(entry["passed"]) & set(everything))
         remaining = sorted(set(tests) - set(adopted))
         remaining_serial = sorted(set(serial) - set(adopted))
-        crates[crate] = {"key": entry["key"],
+        crates[crate] = {"key": entry["key"], "only": only,
                          "listing": {"count": len(everything), "sha256": digest_lines(sorted(everything))},
                          "adopted": adopted, "remaining": remaining, "serial": remaining_serial}
         partitioned += remaining
@@ -1016,7 +1047,8 @@ def command_adopt(args):
                                          "passed": len(found["passed"])}
             print(f"{crate}: every test already passed under key {entry['key'][:16]}; not run")
             continue
-        pending["crates"][crate] = {"key": entry["key"], "passed": sorted(found["passed"])}
+        pending["crates"][crate] = {"key": entry["key"], "passed": sorted(found["passed"]),
+                                    "only": entry.get("only")}
     write_json(args.output, pending)
     emit("build", "true" if pending["crates"] else "false")
     emit("crates", sorted(pending["crates"]))

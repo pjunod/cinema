@@ -163,13 +163,22 @@ class SelectionTests(unittest.TestCase):
         keys = ru.Keys(ru.Tree(head, self.repo.root), ru.Config.load(CONFIG))
         self.assertEqual(ru.dynamic_site_drift(keys), ([("leaf", "crates/leaf/src/walk.rs", "walk")], []))
         declared = CONFIG + ('\n[[dynamic]]\ncrate = "leaf"\nfile = "crates/leaf/src/walk.rs"\n'
-                             'function = "walk"\nreads = ["manual/**"]\nreason = "walks the manual"\n')
+                             'function = "walk"\nreads = ["manual/**"]\ntests = ["walk::reads_the_manual"]\n'
+                             'reason = "walks the manual"\n')
         self.repo.write("validation/rust-unit-inputs.toml", declared)
         self.base = self.repo.commit()
         keys = ru.Keys(ru.Tree(self.base, self.repo.root), ru.Config.load(declared))
         self.assertEqual(ru.dynamic_site_drift(keys), ([], []))
-        # Once declared, the read paths are inputs: the manual now re-key the reader.
+        # Once declared, the read paths are inputs: the manual now re-keys the
+        # reader, and since nothing else of it changed only its reading test is due.
         self.assertEqual(self.due_after({"manual/guide.md": "read by leaf\n"}), ["leaf"])
+        head = self.repo.git("rev-parse", "HEAD")
+        doc = ru.selection(head, self.base, repository=self.repo.root)
+        self.assertEqual(doc["crates"]["leaf"]["only"], ["walk::reads_the_manual"])
+        # A change to the reader's own sources makes the whole crate due again.
+        self.repo.write("crates/leaf/src/lib.rs", "pub const X: u8 = 1;\n")
+        doc = ru.selection(self.repo.commit(), self.base, repository=self.repo.root)
+        self.assertIsNone(doc["crates"]["leaf"]["only"])
 
 
 class ReceiptAuthenticationTests(unittest.TestCase):
@@ -325,6 +334,21 @@ class PlanTests(unittest.TestCase):
         plan = ru.make_plan(self.selection, pending, listing, self.config, run=5)
         self.assertNotIn("app child::body", plan["crates"]["app"]["remaining"])
         self.assertEqual(plan["crates"]["app"]["listing"]["count"], 4)
+
+    def test_a_reads_only_change_plans_just_the_declared_readers(self):
+        config = ru.Config.load(CONFIG + '\n[[dynamic]]\ncrate = "app"\nfile = "x.rs"\nfunction = "f"\n'
+                                'reads = ["manual/**"]\ntests = ["t::b"]\nreason = "r"\n')
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": [], "only": ["t::b"]}}}
+        plan = ru.make_plan(self.selection, pending, self.listing, config, run=5)
+        self.assertEqual(plan["crates"]["app"]["remaining"], ["app t::b"])
+        self.assertEqual(plan["crates"]["app"]["serial"], [])
+
+    def test_a_declared_reader_that_does_not_exist_fails_the_plan(self):
+        config = ru.Config.load(CONFIG + '\n[[dynamic]]\ncrate = "app"\nfile = "x.rs"\nfunction = "f"\n'
+                                'reads = ["manual/**"]\ntests = ["t::gone"]\nreason = "r"\n')
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": [], "only": ["t::gone"]}}}
+        with self.assertRaises(ru.UnitsError):
+            ru.make_plan(self.selection, pending, self.listing, config, run=5)
 
     def test_shard_count_follows_the_selection(self):
         self.assertEqual(ru.shard_count(1), 1)

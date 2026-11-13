@@ -120,15 +120,20 @@ in place) is:
    manifest's directory — this is how `plurxd` picks up `scripts/mkpgs`,
    `docs/CLIENTS.md` and the `tests/playback` fixtures although those trees are
    exempt;
-5. the declared `reads` of every `[[dynamic]]` site: a test that finds the
-   workspace at run time (`CARGO_MANIFEST_DIR` then `.parent()`/`.ancestors()`/
-   `.pop()`) can read anything, so each such site is declared with what it
-   reads. `tests/validation/test_rust_units.py` fails when a site appears,
-   moves function, or disappears without the declaration changing.
+5. the declared `reads` of the crate's own `[[dynamic]]` sites: a test that
+   finds the workspace at run time (`CARGO_MANIFEST_DIR` then `.parent()`/
+   `.ancestors()`/`.pop()`) can read anything, so each such site is declared
+   with what it reads and which tests read it. These key only the declaring
+   crate (no other crate links its tests), and when they are the only inputs
+   that changed, only those named tests are due — the rest of the crate's
+   inputs are unchanged. `tests/validation/test_rust_units.py` fails when a
+   site appears, moves function, or disappears without the declaration
+   changing; the archive job fails when a named test does not exist.
 
-Consequences worth knowing: a change under `crates/plurxd/src` also re-keys
-`plurx-core`, because two plurx-core census tests read plurxd's sources; a
-`plurxd/build.rs` change re-keys plurxd and nothing else; `git describe`
+Consequences worth knowing: a change under `crates/plurxd/src` also makes
+plurx-core's three census tests due (they read plurxd's sources), and any
+crate's `src` change makes plurxd's seam census test due, but not the rest of
+either crate; a `plurxd/build.rs` change re-keys plurxd and nothing else; `git describe`
 (embedded by plurxd's build script) is deliberately not an input — it is the
 commit's identity, not its content. Exempting a tree is a claim that no Rust
 test reads it except as items 4 and 5 find; keep that list to documentation,
@@ -227,7 +232,6 @@ Filled from dispatched runs on the branch; see the Execution log.
 | Apple unit (XCTest) | The Apple job compiles and runs the 32 TV navigation journeys with native receipts ([NATIVE-CI-RECEIPTS.md](NATIVE-CI-RECEIPTS.md)); `make apple-test` runs only in ci.yml. | Add `make apple-test` beside the journeys on the same runner, keyed by the native receipts' existing source closure. |
 | Rust doctests | Not run at PR time. | One `cargo test --doc` job per due crate on the archive host, keyed by the same crate key. |
 | Merge-base outcomes as receipts | Each lane run with failures rebuilds the merge-base and re-runs them, even when the same merge-base was checked before. | Publish the merge-base check's outcomes under the merge-base keys (`selection.json` has them) and consult them before compiling. |
-| Per-test keys for declared readers | A plurxd source change re-runs all of plurx-core (two census tests read plurxd). | Key `[[dynamic]]` readers by test, so only those tests re-run. |
 
 ## Execution log
 
