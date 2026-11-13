@@ -4,7 +4,7 @@
   "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
   "correspondence": {
     "path": "verification/worker-refinement/correspondence.json",
-    "sha256": "315091bfa8600e3e862baf4e2519af3fdc834ac6090665e6d3dff194a191dad5"
+    "sha256": "52d917d8b01cc0dc02a9f0d1004b4fa186cb196224a3edada83f07a14d3b2cad"
   },
   "configs": {
     "progress.cfg": {
