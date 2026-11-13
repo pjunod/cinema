@@ -1759,7 +1759,8 @@ async fn control_inner_observed(
                 None,
             );
         }
-        Err(_) => {
+        Err(error) => {
+            super::fence::note_control_route_failure(&error);
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
             return control_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2246,6 +2247,7 @@ async fn staged_successor_action(
     Ok(Some(prepared))
 }
 
+#[track_caller]
 pub(crate) fn control_error(
     status: StatusCode,
     code: &'static str,
@@ -2255,7 +2257,8 @@ pub(crate) fn control_error(
     retry_after_ms: Option<u32>,
     invalid_field: Option<&'static str>,
 ) -> Response {
-    (
+    super::fence::note_control_error_origin(std::panic::Location::caller());
+    let mut response = (
         status,
         [(header::CACHE_CONTROL, "no-store")],
         Json(crate::playback_control::ControlErrorBody {
@@ -2268,7 +2271,11 @@ pub(crate) fn control_error(
             invalid_field: invalid_field.map(str::to_owned),
         }),
     )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(crate::http::error::ApiErrorCode(code));
+    response
 }
 
 /// Whether this route can authorize control at all, and the answer if not.
