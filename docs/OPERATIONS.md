@@ -9,7 +9,7 @@
   - Live reference; maintained with behavior changes. No overall status line.
 - **Read further only for:**
   - install and run (Docker, service, bare metal): `## Running it`
-  - upgrading a cluster one node at a time: `## Rolling upgrades`
+  - upgrading a cluster one node at a time: [Rolling upgrades](#rolling-upgrades)
   - settings, ports and listeners: `## Configuration surface`; `## Ports`
   - what a pill, scan state, storage number or the stats overlay means: `## Reading the activity pill`; `## Reading library scan status`; `## Reading playback (and the stats overlay)`
   - runbooks: sharing addresses, Curator, channels, Jellyfin, Live TV: `## Sharing Cinema addresses — set up before creating invitations`; `## Pairing another application (Curator) — the runbook`; `## Library channels — the runbook`; `## Jellyfin client compatibility`; `## Live TV (HDHomeRun) — the runbook`
@@ -3341,42 +3341,28 @@ with a newly issued token. Never copy the removed directory back into service.
 
 ## Rolling upgrades
 
-Media placement between nodes compares three facts **independently**, and
-Settings → Cluster shows all three on every node card: the **build** the node
-reports, its **media protocol** (`PROTOCOL_VERSION` in
-`crates/plurxd/src/media_pool.rs`; placement requires an exact match), and
-whether the node you are looking from would place on it now (**eligible
-owner** — a fresh, exact-protocol advertisement with an available egress and
-an encoder; the card names the reason when it is not). A node on another
-protocol never appears in placement at all, so during a protocol-changing
-upgrade the fleet is two placement cohorts: old nodes place among old nodes,
-new among new.
+Settings → Cluster reports each node's build, media protocol
+(`PROTOCOL_VERSION` in `crates/plurxd/src/media_pool.rs`), and eligible-owner
+status. Placement requires a fresh, exact-protocol advertisement, available
+egress and an encoder; the card explains refusals. Different protocols form
+separate placement cohorts. Build skew alone does not prevent placement.
 
-The rule for a rolling upgrade:
+1. Upgrade one node at a time. Confirm ready, the new build/protocol and
+   eligible-owner status before proceeding.
+2. Keep an eligible owner in each protocol cohort while its ingress serves
+   requests. Without one, old ingress can only start locally.
+3. Drain old ingress and finish or move its sessions before upgrading the
+   last old node: new-protocol workers cannot accept old placement.
 
-1. Upgrade one serving cohort at a time — one node, then confirm on the
-   Cluster card that it reads ready, its new build and protocol, and
-   *eligible owner* before the next.
-2. Keep at least one eligible owner in each cohort. While any old-build
-   ingress still takes requests, at least one old-protocol worker must stay
-   eligible, or that ingress can only start locally.
-3. Drain old ingress before upgrading the last old node: its sessions finish
-   or move first, because no new-protocol worker will accept its placement.
+Strict media-pool envelope changes require a protocol bump and dated note
+here (`make paperwork` checks this). Newest first:
 
-A build skew with the same protocol is ordinary and needs none of this; the
-card flags it so it is noticed, not because placement refuses it.
-
-Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
-(run by `make paperwork`) refuses a change to a strict media-pool envelope
-without a `PROTOCOL_VERSION` bump and a dated line here naming it:
-
-- 2026-11-13: protocol 10 — retain original catalog-query provenance in
-  `CandidateCatalogContext`, so prepared commit checks use full capability and
-  Copy-origin facts after Encode normalization. The query is descriptive and
-  source/track/capability validated; it grants no execution authority. Keep an
-  eligible owner in each protocol cohort and drain old ingress and sessions
-  before the last old node. Old processed rows without provenance cannot
-  commit from a guessed query; keep or reopen ordinary playback instead.
+- 2026-11-13: protocol 10 — retain validated source, track and full-capability
+  catalog-query provenance in `CandidateCatalogContext` so processed commits
+  preserve Copy discovery after Encode normalization. This descriptive query
+  grants no execution authority. Follow the cohort/drain sequence above.
+  Old processed rows without provenance cannot commit; retain or reopen
+  ordinary playback instead.
 - 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
   `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
 
