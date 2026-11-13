@@ -866,6 +866,12 @@ where
         run.skipped(reason);
         return "admission_refused";
     }
+    // Admission may await Store reads. Keep its elapsed time out of the
+    // successor's start without losing the future prepared-entry floor.
+    let film_time_ms = film_time_ms.max(bounded_film_ms(
+        viewer_film_time_ms(state, intent, run).await,
+        source.duration_ms,
+    ));
     // The actual prepared entry, not the requested trial timestamp, decides
     // the start. If playback has already passed that entry, current media must
     // be produced instead; never replay old film to consume a stale window.

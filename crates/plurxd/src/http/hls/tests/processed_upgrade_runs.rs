@@ -451,3 +451,36 @@ async fn a_scheduled_processed_handoff_is_cancelled_with_its_predecessor() {
     assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), &mut scheduling)
         .await.expect("cancellation wakes the scheduler"), Err("cancelled"));
 }
+
+#[tokio::test]
+async fn a_scheduled_processed_handoff_meets_the_actual_prepared_entry() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-scheduled-entry");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (intent, run, mut request) =
+        upgrade_after_playing_to(&fixture, &session_id, &route, 600_000).await;
+    let pending = super::preparation::begin_processed_upgrade(&playback, run.cancelled())
+        .expect("the upgrade holds the preparation slot");
+    let window = 620_000..622_000;
+    let scheduling = super::processed_upgrade::await_successor_start(
+        &fixture.state, &intent, &run, &pending, Some(&window), None,
+    );
+    tokio::pin!(scheduling);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut scheduling)
+        .await.is_err());
+    // Honour the real control exchange cadence, then let the ordinary
+    // incumbent approach the prepared entry before opening client overlap.
+    tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    request.sequence = 2;
+    request.position_ms = 616_000;
+    request.buffered_from_ms = Some(614_000);
+    request.buffered_through_ms = 640_000;
+    let (status, body) = control_body(control_local_inner(
+        &fixture.state, &route, request, unix_ms().saturating_add(4_000),
+    ).await).await;
+    assert_eq!(status, StatusCode::OK, "the incumbent keeps playing: {body}");
+    let (position, waited) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut scheduling)
+        .await.expect("the incumbent reached the handoff lead").expect("the session is current");
+    assert_eq!(position, window.start, "staging uses produced media, not an earlier clamp");
+    assert!(waited);
+}
