@@ -80,9 +80,11 @@ fn source() -> RefitSource {
 }
 
 fn token() -> crate::store::background_jobs::JobToken {
-    serde_json::from_value(serde_json::json!({"job_id":uuid::Uuid::new_v4().to_string(),
+    serde_json::from_value(
+        serde_json::json!({"job_id":uuid::Uuid::new_v4().to_string(),
         "node_id":"n","boot_id":uuid::Uuid::new_v4().to_string(),
-        "claim_id":uuid::Uuid::new_v4().to_string(),"fence":1,"revision":1,"lease_expires_ms":1}))
+        "claim_id":uuid::Uuid::new_v4().to_string(),"fence":1,"revision":1,"lease_expires_ms":1}),
+    )
     .expect("token")
 }
 
@@ -120,7 +122,10 @@ fn the_recorded_helper_run_parses_and_fits() {
     );
     let again = fit(parse(RECORDED.as_bytes()).expect("again"));
     assert_eq!(again.curve_digest, title.curve_digest, "stable across runs");
-    assert_eq!(title.curve_digest, RECORDED_DIGEST, "the served curves moved");
+    assert_eq!(
+        title.curve_digest, RECORDED_DIGEST,
+        "the served curves moved"
+    );
 }
 
 /// Decision K: two real helper runs over Michael5400's source window give
@@ -138,7 +143,10 @@ fn two_real_helper_runs_give_the_same_digest() {
     };
     let (a, b) = (digest("PLURX_REFIT_RUN_A"), digest("PLURX_REFIT_RUN_B"));
     assert_eq!(a, b, "two runs disagree");
-    assert_eq!(a, RECORDED_DIGEST, "the runs disagree with the recorded run");
+    assert_eq!(
+        a, RECORDED_DIGEST,
+        "the runs disagree with the recorded run"
+    );
 }
 
 #[test]
@@ -246,7 +254,11 @@ fn the_digest_is_stable_and_names_the_curves() {
     // The digest is over the stored integers: rows whose coefficients
     // change by one numerator fail the publication's own check.
     let mut publish = publication(&first);
-    publish.scenes[0].coefficients.as_mut().expect("served").luma[0][0] += 1;
+    publish.scenes[0]
+        .coefficients
+        .as_mut()
+        .expect("served")
+        .luma[0][0] += 1;
     assert!(publish.check().is_err());
 }
 
@@ -322,7 +334,10 @@ fn a_resumed_run_joins_to_the_uninterrupted_one() {
         partial.push_str(&lines[torn][..lines[torn].len() / 2]);
         let kept = complete_scenes(partial.as_bytes());
         assert_eq!(kept.len(), torn);
-        assert!(kept.iter().zip(&lines).all(|((line, _), want)| line == want));
+        assert!(kept
+            .iter()
+            .zip(&lines)
+            .all(|((line, _), want)| line == want));
         let scenes: Vec<RefitScene> = kept.iter().map(|(_, s)| s.clone()).collect();
         let (keep, at) = resume_point(&scenes).expect("resumable");
         assert_eq!(keep, torn - 1);
@@ -331,12 +346,18 @@ fn a_resumed_run_joins_to_the_uninterrupted_one() {
         assert_eq!(resumed_scenes[0].first_frame, at.first_frame);
         let mut resumed = lines[keep..lines.len() - 1].join("\n");
         resumed.push('\n');
-        resumed.push_str(&serde_json::to_string(&summarise(resumed_scenes).expect("tail")).expect("json"));
-        let joined = parse_resumed(scenes[..keep].to_vec(), at, resumed.as_bytes()).expect("joined");
+        resumed.push_str(
+            &serde_json::to_string(&summarise(resumed_scenes).expect("tail")).expect("json"),
+        );
+        let joined =
+            parse_resumed(scenes[..keep].to_vec(), at, resumed.as_bytes()).expect("joined");
         assert_eq!(joined, whole, "resumed at scene {keep}");
         assert_eq!(fit(joined).curve_digest, RECORDED_DIGEST);
         // The spool text of the joined run parses as the whole run.
-        let scene_lines: Vec<String> = lines[..lines.len() - 1].iter().map(|l| (*l).to_owned()).collect();
+        let scene_lines: Vec<String> = lines[..lines.len() - 1]
+            .iter()
+            .map(|l| (*l).to_owned())
+            .collect();
         let spool = spool_text(&scene_lines, &whole.summary).expect("spool");
         assert_eq!(parse(spool.as_bytes()).expect("spool parses"), whole);
         // A resumed run that starts anywhere else is refused.
@@ -347,7 +368,10 @@ fn a_resumed_run_joins_to_the_uninterrupted_one() {
         assert!(parse_resumed(scenes[..keep].to_vec(), wrong, resumed.as_bytes()).is_err());
     }
     assert!(complete_scenes(b"").is_empty());
-    assert!(resume_point(&whole.scenes[..1]).is_none(), "nothing to keep: start over");
+    assert!(
+        resume_point(&whole.scenes[..1]).is_none(),
+        "nothing to keep: start over"
+    );
     // A summary or a foreign line ends the kept prefix.
     assert_eq!(complete_scenes(RECORDED.as_bytes()).len(), 5);
 }

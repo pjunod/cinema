@@ -90,7 +90,9 @@ pub mod decimal {
 
         pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
             Option::<String>::deserialize(d)?
-                .map(|text| super::parse(&text).ok_or_else(|| D::Error::custom("not a finite decimal")))
+                .map(|text| {
+                    super::parse(&text).ok_or_else(|| D::Error::custom("not a finite decimal"))
+                })
                 .transpose()
         }
     }
@@ -195,9 +197,10 @@ impl RefitSceneRow {
             && self.reason.is_some() == self.fitted_error.is_none()
             && self.fitted_error.is_some() == self.gain.is_some()
             && self.identity_error.is_finite()
-            && self.coefficients.as_ref().is_none_or(|q| {
-                ServableCurves::from_quantised(q).is_ok()
-            })
+            && self
+                .coefficients
+                .as_ref()
+                .is_none_or(|q| ServableCurves::from_quantised(q).is_ok())
     }
 }
 
@@ -247,16 +250,17 @@ impl PublishRefitJob {
         if self.scenes.first().is_some_and(|s| s.first_frame != 0) {
             return Err("F+ scenes do not start at the title's first frame".into());
         }
-        let recomputed = crate::transcode::dv_refit_title::curve_digest(self.scenes.iter().map(
-            |s| crate::transcode::dv_refit_title::DigestScene {
-                first_frame: s.first_frame as u64,
-                frames: s.frames as u64,
-                first_pts: s.first_pts,
-                end_pts: s.end_pts,
-                time_base: &s.time_base,
-                coefficients: s.coefficients.as_ref(),
-            },
-        ));
+        let recomputed =
+            crate::transcode::dv_refit_title::curve_digest(self.scenes.iter().map(|s| {
+                crate::transcode::dv_refit_title::DigestScene {
+                    first_frame: s.first_frame as u64,
+                    frames: s.frames as u64,
+                    first_pts: s.first_pts,
+                    end_pts: s.end_pts,
+                    time_base: &s.time_base,
+                    coefficients: s.coefficients.as_ref(),
+                }
+            }));
         if recomputed != title.curve_digest {
             return Err("the F+ curve digest does not name these rows".into());
         }

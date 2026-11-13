@@ -210,7 +210,8 @@ impl Spool {
         {
             let file = std::fs::File::create(&temp)?;
             if gzip {
-                let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+                let mut encoder =
+                    flate2::write::GzEncoder::new(file, flate2::Compression::default());
                 encoder.write_all(bytes)?;
                 encoder.finish()?.sync_all()?;
             } else {
@@ -294,7 +295,11 @@ impl Spool {
             let recovered = dv_refit_title::continue_scenes(prefix.last().map(|(_, s)| s), &bytes);
             if !recovered.is_empty() {
                 prefix.extend(recovered);
-                let mut text = prefix.into_iter().map(|(line, _)| line).collect::<Vec<_>>().join("\n");
+                let mut text = prefix
+                    .into_iter()
+                    .map(|(line, _)| line)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 text.push('\n');
                 spool.write_atomically(".partial", text.as_bytes(), false)?;
             }
@@ -338,7 +343,10 @@ fn spool_name(name: &str) -> Option<(&str, bool)> {
     } else if let Some(key) = name
         .strip_suffix(".partial")
         .or_else(|| name.strip_suffix(".run"))
-        .or_else(|| name.strip_suffix(".tmp").map(|n| n.trim_end_matches(".jsonl.gz").trim_end_matches(".partial")))
+        .or_else(|| {
+            name.strip_suffix(".tmp")
+                .map(|n| n.trim_end_matches(".jsonl.gz").trim_end_matches(".partial"))
+        })
     {
         (key, false)
     } else {
@@ -624,7 +632,10 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
 
-    fn output(status: i32, stderr: &str) -> Result<plurx_core::process::bounded::Output, std::io::Error> {
+    fn output(
+        status: i32,
+        stderr: &str,
+    ) -> Result<plurx_core::process::bounded::Output, std::io::Error> {
         Ok(plurx_core::process::bounded::Output {
             status: std::process::ExitStatus::from_raw(status),
             stdout: Vec::new(),
@@ -639,11 +650,17 @@ mod tests {
     fn the_exit_status_classifies_a_run() {
         assert_eq!(classify(&output(0, "noise\nmore noise\n")), Exit::Success);
         assert_eq!(
-            classify(&output(3 << 8, "Segment refused: full-resolution enhancement layer\n")),
+            classify(&output(
+                3 << 8,
+                "Segment refused: full-resolution enhancement layer\n"
+            )),
             Exit::Refused("full-resolution enhancement layer".into())
         );
         assert_eq!(
-            classify(&output(3 << 8, "a decoder warning\nSegment refused: not FEL\n\n")),
+            classify(&output(
+                3 << 8,
+                "a decoder warning\nSegment refused: not FEL\n\n"
+            )),
             Exit::Refused("not FEL".into()),
             "the last line, however many there are"
         );
@@ -652,7 +669,9 @@ mod tests {
             Exit::Failed(reason) if reason.contains("cannot allocate")
         ));
         assert!(matches!(classify(&output(1 << 8, "")), Exit::Failed(_)));
-        assert!(matches!(classify(&output(9, "")), Exit::Failed(reason) if reason.contains("signal 9")));
+        assert!(
+            matches!(classify(&output(9, "")), Exit::Failed(reason) if reason.contains("signal 9"))
+        );
         assert!(matches!(
             classify(&Err(std::io::Error::other("spawn"))),
             Exit::Failed(_)
@@ -674,7 +693,10 @@ mod tests {
         std::fs::write(root.join("unrelated.txt"), b"keep").expect("other");
         let entries = list(&root);
         assert_eq!(
-            entries.iter().map(|e| (e.complete, e.bytes)).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|e| (e.complete, e.bytes))
+                .collect::<Vec<_>>(),
             [(true, 1), (false, 2)]
         );
         assert_eq!(clear(&root).expect("clear"), 2);

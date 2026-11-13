@@ -372,7 +372,13 @@ impl ToolSet {
     /// (`dv_refit::FIT_VERSION`).
     #[cfg(unix)]
     pub(crate) fn refit_helper_identity(&self) -> String {
-        hash(format!("plurx-dv-refit-identity-v1\0{REFIT_MODE_VERSION}\0{}", self.decoder_abi).as_bytes())
+        hash(
+            format!(
+                "plurx-dv-refit-identity-v1\0{REFIT_MODE_VERSION}\0{}",
+                self.decoder_abi
+            )
+            .as_bytes(),
+        )
     }
     /// The decoder ABI, as the Developer card reports it.
     pub(crate) fn decoder_abi(&self) -> &str {
@@ -3396,11 +3402,16 @@ mod title_scanner_identity_tests {
         assert_eq!(one.refit_helper_identity(), two.refit_helper_identity());
         let mut newer_abi = ToolSet::lifecycle_fixture(backend(b"renderer one"));
         newer_abi.decoder_abi = "avcodec=62,avformat=62,avutil=60".into();
-        assert_ne!(one.refit_helper_identity(), newer_abi.refit_helper_identity());
+        assert_ne!(
+            one.refit_helper_identity(),
+            newer_abi.refit_helper_identity()
+        );
         use sha2::{Digest, Sha256};
         let mut sources = Sha256::new();
         sources.update(include_bytes!("../../../tools/dv_processing/refit_mode.h"));
-        sources.update(include_bytes!("../../../tools/dv_processing/refit_compose.h"));
+        sources.update(include_bytes!(
+            "../../../tools/dv_processing/refit_compose.h"
+        ));
         assert_eq!(
             hex::encode(sources.finalize()),
             REFIT_MODE_SOURCES,

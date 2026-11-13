@@ -2603,9 +2603,7 @@ pub trait BackgroundJobStore: Send + Sync {
     /// outcomes of sources the catalogue no longer has.
     async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError>;
     /// Profile 7 FEL titles and their current F+ tables, by verdict.
-    async fn dv_refit_progress(
-        &self,
-    ) -> Result<super::dv_refit_jobs::RefitProgress, StoreError>;
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError>;
     async fn probe_can_preempt_title(
         &self,
         probe_id: &str,
@@ -3686,9 +3684,7 @@ LIMIT 1
     async fn prune_dv_refit(&self, now_ms: i64) -> Result<(), StoreError> {
         super::dv_refit_jobs::prune(self, now_ms).await
     }
-    async fn dv_refit_progress(
-        &self,
-    ) -> Result<super::dv_refit_jobs::RefitProgress, StoreError> {
+    async fn dv_refit_progress(&self) -> Result<super::dv_refit_jobs::RefitProgress, StoreError> {
         super::dv_refit_jobs::progress(self).await
     }
     async fn probe_can_preempt_title(

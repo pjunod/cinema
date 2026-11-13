@@ -328,7 +328,11 @@ async fn refit_demand_selects_current_profile7_fel_titles() {
             .expect("FEL title demanded");
         assert!(found.probe_revision > 0, "{backend}");
         assert_eq!(
-            (found.stored_video_index, found.terminal.len(), found.queued.is_none()),
+            (
+                found.stored_video_index,
+                found.terminal.len(),
+                found.queued.is_none()
+            ),
             (None, 0, true),
             "{backend}"
         );
@@ -395,7 +399,10 @@ async fn refit_publication_supersedes_and_keeps_old_tables_for_seven_days() {
             .expect("job");
         assert_eq!(waiter_ref.state, JobState::Succeeded, "{backend}");
         let table = current(&store, file.id).await.expect("table");
-        assert_eq!(table.title, first.0, "{backend}: exact title, gain included");
+        assert_eq!(
+            table.title, first.0,
+            "{backend}: exact title, gain included"
+        );
         assert_eq!(table.superseded_at_ms, None);
         let shape: Vec<(i64, i64, i64, bool)> = table
             .scenes
@@ -434,7 +441,10 @@ async fn refit_publication_supersedes_and_keeps_old_tables_for_seven_days() {
         ));
         let table = current(&store, file.id).await.expect("table");
         assert_eq!(table.title, second.0, "{backend}");
-        assert!(table.scenes[0].curves.is_none(), "{backend}: identity serves no curves");
+        assert!(
+            table.scenes[0].curves.is_none(),
+            "{backend}: identity serves no curves"
+        );
         let old = by_digest(&store, file.id, &first.0.curve_digest)
             .await
             .expect("the superseded table stays addressable");
@@ -456,7 +466,9 @@ async fn refit_publication_supersedes_and_keeps_old_tables_for_seven_days() {
             .await
             .expect("prune");
         assert!(
-            by_digest(&store, file.id, &first.0.curve_digest).await.is_some(),
+            by_digest(&store, file.id, &first.0.curve_digest)
+                .await
+                .is_some(),
             "{backend}: still inside the window"
         );
         store
@@ -464,7 +476,9 @@ async fn refit_publication_supersedes_and_keeps_old_tables_for_seven_days() {
             .await
             .expect("prune");
         assert!(
-            by_digest(&store, file.id, &first.0.curve_digest).await.is_none(),
+            by_digest(&store, file.id, &first.0.curve_digest)
+                .await
+                .is_none(),
             "{backend}: dropped after seven days"
         );
         assert_eq!(
@@ -555,7 +569,11 @@ async fn a_newer_generation_rebinds_the_stored_table() {
             .await
             .expect("rebind");
         assert_eq!(
-            current(&store, file.id).await.expect("table").title.probe_revision,
+            current(&store, file.id)
+                .await
+                .expect("table")
+                .title
+                .probe_revision,
             found.probe_revision,
             "{backend}"
         );
@@ -633,7 +651,12 @@ async fn a_cancelled_identity_stays_terminal_until_retried() {
             .await
             .expect("cancel");
         assert_eq!(
-            store.background_job(&job_id).await.expect("job").expect("job").state,
+            store
+                .background_job(&job_id)
+                .await
+                .expect("job")
+                .expect("job")
+                .state,
             JobState::Cancelled
         );
         assert!(
@@ -641,7 +664,10 @@ async fn a_cancelled_identity_stays_terminal_until_retried() {
             "{backend}: a cancel is terminal for its identity"
         );
         // Another helper is another identity.
-        assert!(demand(&store, file.id, &"e".repeat(64)).await.is_some(), "{backend}");
+        assert!(
+            demand(&store, file.id, &"e".repeat(64)).await.is_some(),
+            "{backend}"
+        );
         let retried = store
             .retry_background_job(&job_id, &uuid::Uuid::new_v4().to_string(), 1, now())
             .await
@@ -699,7 +725,11 @@ async fn a_refit_refusal_is_a_recorded_title_without_scenes() {
             JobPublishOutcome::Published { .. }
         ));
         let table = current(&store, file.id).await.expect("table");
-        assert_eq!((table.title, table.scenes.len()), (refused.0, 0), "{backend}");
+        assert_eq!(
+            (table.title, table.scenes.len()),
+            (refused.0, 0),
+            "{backend}"
+        );
         let progress = store.dv_refit_progress().await.expect("progress");
         assert!(progress.refused >= 1, "{backend}: {progress:?}");
         // An invalid publication is refused before it reaches the store.

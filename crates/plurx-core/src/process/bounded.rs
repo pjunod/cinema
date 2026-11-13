@@ -589,7 +589,6 @@ mod tests {
 
     const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
 
-
     #[tokio::test]
     async fn file_output_drains_excess_and_retains_only_the_bound() {
         let dir = tempfile::tempdir().expect("scratch");

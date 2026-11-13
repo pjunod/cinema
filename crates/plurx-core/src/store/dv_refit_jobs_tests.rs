@@ -87,9 +87,10 @@ fn catalogue() -> rusqlite::Connection {
 }
 
 fn job(conn: &rusqlite::Connection, id: &str, identity: &str, state: &str, size: i64) {
-    let payload = serde_json::json!({"file_id":1,"source_size":size,"source_mtime":1,"video_index":0,
+    let payload =
+        serde_json::json!({"file_id":1,"source_size":size,"source_mtime":1,"video_index":0,
         "probe_revision":1,"helper_identity":"a".repeat(64),"fit_version":"v"})
-    .to_string();
+        .to_string();
     let owned = matches!(state, "running" | "cancelling");
     conn.execute(
         "INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,revision,
@@ -111,8 +112,11 @@ fn count(conn: &rusqlite::Connection, sql: &str) -> i64 {
 fn a_terminal_outcome_outlives_its_job_and_a_retry_lifts_it() {
     let conn = catalogue();
     job(&conn, "job-a", "dv-refit:a", "queued", 10);
-    conn.execute("UPDATE background_jobs SET state='cancelled',last_error_code=NULL WHERE id='job-a'", [])
-        .expect("user cancel");
+    conn.execute(
+        "UPDATE background_jobs SET state='cancelled',last_error_code=NULL WHERE id='job-a'",
+        [],
+    )
+    .expect("user cancel");
     let outcome = |identity: &str| -> Option<String> {
         conn.query_row(
             "SELECT state FROM background_dv_refit_outcomes WHERE identity=?1",
@@ -124,7 +128,11 @@ fn a_terminal_outcome_outlives_its_job_and_a_retry_lifts_it() {
     assert_eq!(outcome("dv-refit:a").as_deref(), Some("cancelled"));
     conn.execute("DELETE FROM background_jobs WHERE id='job-a'", [])
         .expect("retention prunes the job row");
-    assert_eq!(outcome("dv-refit:a").as_deref(), Some("cancelled"), "outlives the row");
+    assert_eq!(
+        outcome("dv-refit:a").as_deref(),
+        Some("cancelled"),
+        "outlives the row"
+    );
     job(&conn, "job-b", "dv-refit:b", "running", 10);
     conn.execute("UPDATE background_jobs SET state='failed',last_error_code='refit_failed',owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL WHERE id='job-b'", [])
         .expect("attempts exhausted");
@@ -138,8 +146,16 @@ fn a_terminal_outcome_outlives_its_job_and_a_retry_lifts_it() {
         .expect("identity recorded");
     assert_eq!(row, (0, 1, "refit_failed".into()));
     job(&conn, "job-a2", "dv-refit:a", "queued", 10);
-    assert_eq!(outcome("dv-refit:a"), None, "a retry of the identity lifts it");
-    assert_eq!(outcome("dv-refit:b").as_deref(), Some("failed"), "only that identity");
+    assert_eq!(
+        outcome("dv-refit:a"),
+        None,
+        "a retry of the identity lifts it"
+    );
+    assert_eq!(
+        outcome("dv-refit:b").as_deref(),
+        Some("failed"),
+        "only that identity"
+    );
     // A yield or a retry back to queued is not terminal.
     job(&conn, "job-c", "dv-refit:c", "running", 10);
     conn.execute("UPDATE background_jobs SET state='queued',owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL WHERE id='job-c'", [])
@@ -162,9 +178,15 @@ fn a_changed_source_supersedes_its_jobs_and_keeps_nothing() {
     .expect("table");
     conn.execute("UPDATE files SET path='/b.mkv' WHERE id=1", [])
         .expect("rename");
-    assert_eq!(count(&conn, "SELECT count(*) FROM background_dv_refit_titles"), 1);
     assert_eq!(
-        count(&conn, "SELECT count(*) FROM background_jobs WHERE state IN ('queued','running')"),
+        count(&conn, "SELECT count(*) FROM background_dv_refit_titles"),
+        1
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM background_jobs WHERE state IN ('queued','running')"
+        ),
         2
     );
     conn.execute("UPDATE files SET size=11 WHERE id=1", [])
@@ -183,20 +205,36 @@ fn a_changed_source_supersedes_its_jobs_and_keeps_nothing() {
             ("cancelling".to_owned(), "source_changed".to_owned())
         ]
     );
-    assert_eq!(count(&conn, "SELECT count(*) FROM background_dv_refit_titles"), 0);
-    assert_eq!(count(&conn, "SELECT count(*) FROM background_dv_refit_outcomes"), 0);
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM background_dv_refit_titles"),
+        0
+    );
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM background_dv_refit_outcomes"),
+        0
+    );
     // The running attempt settling later records only an identity of the
     // old source, which prune drops.
     conn.execute("UPDATE background_jobs SET state='cancelled',owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL WHERE id='job-r'", [])
         .expect("settled");
-    assert_eq!(count(&conn, "SELECT count(*) FROM background_dv_refit_outcomes"), 1);
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM background_dv_refit_outcomes"),
+        1
+    );
     conn.execute(
         "INSERT INTO background_job_commands(id,operation,request_json,result_json)
          VALUES('p','prune_dv_refit','{\"now_ms\":5}','{}')",
         [],
     )
     .expect("prune");
-    assert_eq!(count(&conn, "SELECT count(*) FROM background_dv_refit_outcomes"), 0);
-    assert_eq!(count(&conn, "SELECT count(*) FROM background_job_commands"), 0);
-    conn.execute("DELETE FROM files WHERE id=1", []).expect("file deleted");
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM background_dv_refit_outcomes"),
+        0
+    );
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM background_job_commands"),
+        0
+    );
+    conn.execute("DELETE FROM files WHERE id=1", [])
+        .expect("file deleted");
 }
