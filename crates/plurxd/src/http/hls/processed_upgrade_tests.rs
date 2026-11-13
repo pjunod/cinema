@@ -305,12 +305,15 @@ fn a_processed_successor_begins_at_its_verified_window_unless_the_viewer_passed_
     use super::successor_start_ms;
     // The trial verified the window at 18 s while the viewer reached 15 s:
     // the successor begins at the produced window, not behind it.
-    assert_eq!(successor_start_ms(15_000, 18_000), 18_000);
-    // A fast trial leaves the window far ahead: the head start is bounded so
-    // the clients' rendezvous can still meet it within their overlap.
-    assert_eq!(successor_start_ms(11_000, 18_000), 15_000);
+    assert_eq!(successor_start_ms(15_000, 18_000), Some(18_000));
+    // A fast trial must wait before staging rather than clamp backward
+    // into unprepared media. At the lead boundary it uses the exact entry.
+    assert_eq!(successor_start_ms(11_000, 18_000), None);
+    assert_eq!(successor_start_ms(14_000, 18_000), Some(18_000));
+    assert_eq!(successor_start_ms(1_000, 8_000), None);
+    assert_eq!(successor_start_ms(4_000, 8_000), Some(8_000));
     // A viewer already past the window is never sent back to it.
-    assert_eq!(successor_start_ms(21_000, 18_000), 21_000);
+    assert_eq!(successor_start_ms(21_000, 18_000), Some(21_000));
 }
 
 #[test]

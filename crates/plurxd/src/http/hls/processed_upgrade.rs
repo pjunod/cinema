@@ -594,13 +594,55 @@ fn projected_processed_candidate(
 /// overlap bound. Four seconds at staging leaves both room after priming.
 const SUCCESSOR_MAX_HEAD_START_MS: i64 = 4_000;
 
-/// Where a processed upgrade's successor begins: the trial's verified window,
-/// already produced, but never more than [`SUCCESSOR_MAX_HEAD_START_MS`]
-/// ahead of the viewer, and never behind the viewer.
-pub(in crate::http) fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> i64 {
-    verified_ms
-        .min(viewer_ms.saturating_add(SUCCESSOR_MAX_HEAD_START_MS))
-        .max(viewer_ms)
+/// A future prepared entry is met at its actual start. If it is still too
+/// far ahead, schedule staging later, before the client's overlap starts;
+/// clamping backward would put the producer on unprepared media again.
+/// A viewer already past the entry is never sent backward.
+pub(in crate::http) fn successor_start_ms(viewer_ms: i64, verified_ms: i64) -> Option<i64> {
+    (verified_ms <= viewer_ms.saturating_add(SUCCESSOR_MAX_HEAD_START_MS))
+        .then_some(verified_ms.max(viewer_ms))
+}
+
+async fn await_successor_start(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    pending: &super::preparation::PendingCandidateGuard,
+    prepared_window: Option<&std::ops::Range<i64>>,
+    duration_ms: Option<i64>,
+) -> Result<(i64, bool), &'static str> {
+    let cancelled = pending.cancellation_token();
+    let mut waited = false;
+    loop {
+        if cancelled.is_cancelled() {
+            return Err("cancelled");
+        }
+        if state
+            .transcode
+            .session_preparation_gate(&intent.session_id)
+            .await
+            .is_none()
+        {
+            return Err("not_applicable");
+        }
+        let viewer = bounded_film_ms(viewer_film_time_ms(state, intent, run).await, duration_ms);
+        let Some(window) = prepared_window else {
+            // A reused producer owns its live coverage; there is no new
+            // private trial window to wait for or to claim as cached media.
+            return Ok((viewer, waited));
+        };
+        if let Some(start) = successor_start_ms(viewer, window.start) {
+            return Ok((start, waited));
+        }
+        waited = true;
+        // This schedules a handoff, not a recovery timer. A paused incumbent
+        // retains the admitted root until it resumes, is superseded, or its
+        // session ends; the existing cancellation/instance bounds still own it.
+        tokio::select! {
+            () = cancelled.cancelled() => return Err("cancelled"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        }
+    }
 }
 
 /// [`run_upgrade`] with its trial supplied: production passes
@@ -783,10 +825,24 @@ where
         request: mut processed,
         candidate,
         root,
+        prepared_window,
     } = trial;
+    let (film_time_ms, waited) = match await_successor_start(
+        state,
+        intent,
+        run,
+        &pending,
+        prepared_window.as_ref(),
+        source.duration_ms,
+    )
+    .await
+    {
+        Ok(position) => position,
+        Err(outcome) => return outcome,
+    };
     // The recipe the trial actually froze is admitted unless it is exactly
     // the one admitted before the trial: same digest, same bitrate.
-    if post_trial_admission_needed(proven_before, projected.as_ref(), &candidate) {
+    if waited || post_trial_admission_needed(proven_before, projected.as_ref(), &candidate) {
         if let Err(reason) = admit_processed_candidate(
             state,
             intent,
@@ -803,25 +859,12 @@ where
             return "admission_refused";
         }
     }
-    // Where the successor begins: at the window the trial verified, which
-    // is already produced, within the head start the clients' rendezvous
-    // can absorb, and never behind the viewer. A successor
-    // begun where the viewer is now leaves its producer to render, from the
-    // viewer's position, everything before that window, while the viewer
-    // and the client's rendezvous lead and runway move away from it; unless
-    // the render runs well above realtime it does not catch up within the
-    // client's overlap bound (Avatar on the Google TV: runway_unproven after
-    // 12 s). The clients hold the incumbent until it reaches the
-    // successor's own start, so beginning ahead of the viewer skips no film.
-    // The ordinary request a dispatch falls back to begins there too, or a
-    // degraded successor would restart the film at the create's start.
-    let film_time_ms = successor_start_ms(
-        bounded_film_ms(
-            viewer_film_time_ms(state, intent, run).await,
-            source.duration_ms,
-        ),
-        verified_ms,
-    );
+    // The actual prepared entry, not the requested trial timestamp, decides
+    // the start. If playback has already passed that entry, current media must
+    // be produced instead; never replay old film to consume a stale window.
+    let prepared_window_reused = prepared_window
+        .as_ref()
+        .is_some_and(|window| window.contains(&film_time_ms));
     if let Some(ordinary) = processed
         .candidate_context
         .as_mut()
@@ -883,6 +926,7 @@ where
     .await;
     if staged {
         tracing::info!(target: "plurxd::http::hls", session = %session,
+            film_time_ms, prepared_window_reused,
             "processed upgrade staged as a prepared successor");
         "staged"
     } else {
