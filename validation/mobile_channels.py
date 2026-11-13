@@ -19,6 +19,83 @@ from validation.mobile_versions import (
 )
 
 
+# The signing controller's release guard (noirr_mobile_release_guard, kind
+# "plurx") refuses a platform whose client paths changed after its last
+# build-number update. Mirror its layout here so the workflow skips such a
+# platform with a warning instead of starting a build the guard will refuse.
+# Keep this table in step with the controller's LAYOUTS["plurx"].
+_README = r"(^|/)README(?:\.[^/]*)?$"
+GUARD_LAYOUT = {
+    "apple": ("clients/apple/project.yml", "CURRENT_PROJECT_VERSION", "clients/apple",
+              (r"(^|/)Tests?/", _README)),
+    "android": ("clients/android/app/build.gradle.kts", "versionCode", "clients/android",
+                (r"(^|/)src/(?:test|androidTest)/", _README)),
+}
+
+
+def _guard_group(platform: str) -> str:
+    return "android" if platform == "android" else "apple"
+
+
+def unbumped_changes(root: Path, head: str, platform: str) -> list[str]:
+    """Client paths changed on main since this platform's build number landed.
+
+    The bump is found along main's first-parent history and merge commits are
+    diffed against their first parent, so a pull request whose bump commit is
+    older than its later source commits still counts as bumped when it merges:
+    the merge is the moment both reached main together. An empty list means
+    the platform is releasable at ``head``.
+    """
+    metadata, pattern, client, ignored = GUARD_LAYOUT[_guard_group(platform)]
+    bump = git(root, "log", "-1", "--first-parent", "--diff-merges=first-parent", "--no-patch",
+               "--format=%H", "-G", pattern, head, "--", metadata)
+    if not bump:
+        return [metadata]
+    changed = git(root, "diff", "--no-renames", "--name-only", "-z", bump, head, "--", client)
+    return [path for path in changed.rstrip("\0").split("\0")
+            if path and not any(re.search(rule, path) for rule in ignored)]
+
+
+def releasable_platforms(root: Path, head: str, platforms: list[str]) -> list[str]:
+    """Drop platforms the controller guard would refuse, saying why on stderr."""
+    ready = []
+    reasons: dict[str, list[str]] = {}
+    for platform in platforms:
+        group = _guard_group(platform)
+        if group not in reasons:
+            reasons[group] = unbumped_changes(root, head, platform)
+        if reasons[group]:
+            continue
+        ready.append(platform)
+    for group, paths in reasons.items():
+        if paths:
+            shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+            print(f"mobile channels: skipping Cinema {group}: changed after its last build-number "
+                  f"update ({shown}); the next build-number bump on main publishes it.",
+                  file=sys.stderr, flush=True)
+    return ready
+
+
+def pinned_source(source: Path, state: Path, commit: str) -> Path:
+    """A bare repository whose ``main`` stays at ``commit`` for the whole build.
+
+    The controller fetches ``origin/main`` before building and again before
+    publishing, and refuses when the two differ. Pointed at the live checkout
+    that comparison fails whenever anything merges during a build, which on
+    this repository is most builds. Its remote is itself, so both fetches see
+    the commit this job chose; objects come from the source checkout.
+    """
+    pin = state / "pinned-source.git"
+    if not (pin / "HEAD").is_file():
+        subprocess.run(["git", "init", "--bare", "--quiet", str(pin)], check=True)
+    common = Path(git(source, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    (pin / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (pin / "objects" / "info" / "alternates").write_text(f"{common / 'objects'}\n")
+    subprocess.run(["git", "-C", str(pin), "config", "remote.origin.url", str(pin)], check=True)
+    subprocess.run(["git", "-C", str(pin), "update-ref", "refs/heads/main", commit], check=True)
+    return pin
+
+
 def platforms_for_paths(paths: tuple[str, ...]) -> list[str]:
     platforms = []
     if any(p in APPLE_RELEASE_FILES or p.startswith(APPLE_RELEASE_PATHS) for p in paths):
@@ -50,6 +127,12 @@ def changed_platforms(root: Path, base: str, head: str, *, initial_push: bool = 
     return platforms_for_paths(tuple(paths.rstrip("\0").split("\0")))
 
 
+def scope_platforms(root: Path, base: str, head: str) -> list[str]:
+    """Platforms whose release inputs changed in the push and that can publish."""
+    platforms = changed_platforms(root, base, head, initial_push=os.environ.get("GITHUB_EVENT_NAME") == "push")
+    return releasable_platforms(root, head, platforms)
+
+
 def release(base: str, head: str) -> None:
     source = Path(os.environ.get("PLURX_MOBILE_SOURCE_REPO", "~/code/plurx")).expanduser().resolve()
     ansible = Path(os.environ.get("PLURX_ANSIBLE_DIR", "~/code/ansible/media")).expanduser().resolve()
@@ -76,7 +159,12 @@ def release(base: str, head: str) -> None:
         if not platforms:
             print("No mobile release inputs changed.")
             return
+        platforms = releasable_platforms(source, current, platforms)
+        if not platforms:
+            print("No changed mobile platform has a new build number yet.")
+            return
         print(f"Publishing Cinema {current}: {', '.join(platforms)}", flush=True)
+        pin = pinned_source(source, state, current)
         variables = {
             "mobile_release_channels_apps": ["cinema"],
             "mobile_release_channels_platforms": platforms,
@@ -85,7 +173,7 @@ def release(base: str, head: str) -> None:
             "mobile_release_channels_receipts": str(state),
             "mobile_release_expected_commits": {"cinema": current},
             "mobile_release_repositories": {
-                "cinema": {"source_path": str(source), "metadata_kind": "plurx"},
+                "cinema": {"source_path": str(pin), "metadata_kind": "plurx"},
             },
         }
         command = ["ansible-playbook", "-i", str(inventory), str(ansible / "mobile-channels.yml")]
@@ -105,7 +193,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     try:
         if args.mode == "scope":
-            platforms = changed_platforms(root, args.base, args.head, initial_push=os.environ.get("GITHUB_EVENT_NAME") == "push")
+            platforms = scope_platforms(root, args.base, args.head)
             print(f"publish={'true' if platforms else 'false'}")
             print("platforms=" + ",".join(platforms))
         else:

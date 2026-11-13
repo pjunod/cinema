@@ -29,6 +29,11 @@ Docs, native test changes and server changes alone do not allocate a signing
 runner. Contributors still bump the affected build counter in their pull
 request; this job preserves those numbers rather than committing a new bump.
 
+A platform publishes only if no client path changed after the `main`
+commit that landed its counter (first-parent, so an early bump in a merged PR
+counts). Otherwise the log says `skipping Cinema <platform>` and the next bump
+publishes it. The controller guard must use the same first-parent rule.
+
 The job calls `media/mobile-channels.yml` in the private Ansible repository,
 selecting `cinema` only. This channel playbook is separate from the physical
 device playbook below. It builds signed archives/AABs, validates them, and
@@ -146,11 +151,6 @@ The edit was discarded without uploading an artifact or committing a release.
 This proves store access separately from the presence of a local key file.
 Missing credentials and rejected uploads fail the job.
 
-Credential checks do not prove an end-to-end store submission. Collect the
-first real mobile update's workflow result and store processing result as
-that acceptance evidence; do not bump versions or publish unchanged apps
-solely to exercise controller setup.
-
 **Queued runs and recovery.** Workflow concurrency queues this repository's
 releases without cancelling an upload. A controller file lock also refuses
 overlapping publishers using this entry point; other apps and manual channel
@@ -159,8 +159,9 @@ latest `origin/main` containing its triggering commit, and includes subsequent
 mobile changes in its selection. The selected revision is passed to the
 private publisher and checked before any build starts. Rewritten history and
 non-ancestor recovery baselines are refused. The private playbook checks main
-again before uploading; if main advances during the
-build, rerun after merges settle. Successful upload receipts let retries skip
+again before uploading, against `pinned-source.git` in the state directory,
+whose `main` stays at the selected revision; later merges publish in their own
+run. Successful upload receipts let retries skip
 version/build/platform/track combinations already submitted. The receipt is
 not a live store query: after a crash between store acceptance and receipt
 writing, inspect the store before retrying.
