@@ -3284,7 +3284,7 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
     let revision = |demands: Vec<plurx_core::store::dv_title_jobs::TitleDemand>| {
         demands.into_iter().find(|d| d.file_id == id).map(|d| d.probe_revision).expect("demand")
     };
-    let unbound = revision(store.dv_title_demands(&scanner, 0, crate::source_probe::now_ms()).await.expect("demand"));
+    let unbound = revision(store.dv_title_demands(&scanner, 0, crate::media_sessions::unix_ms()).await.expect("demand"));
     let bound = store
         .bind_dv_title_demand(unbound, &scanner)
         .await
@@ -3298,7 +3298,7 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
             .expect_err("measured first")
     };
     assert_eq!(measure().await, TranscodeManager::fel_being_measured());
-    let requested = revision(store.dv_title_demands(&scanner, 0, crate::source_probe::now_ms()).await.expect("demand"));
+    let requested = revision(store.dv_title_demands(&scanner, 0, crate::media_sessions::unix_ms()).await.expect("demand"));
     assert!(requested > bound, "{bound} -> {requested}");
     let rebound = store
         .bind_dv_title_demand(requested, &scanner)
@@ -3307,7 +3307,7 @@ async fn fel_reconstruction_is_served_only_on_an_admitting_verdict_and_otherwise
         .expect("bound");
     assert_eq!(measure().await, TranscodeManager::fel_being_measured());
     assert_eq!(
-        revision(store.dv_title_demands(&scanner, 0, crate::source_probe::now_ms()).await.expect("demand")),
+        revision(store.dv_title_demands(&scanner, 0, crate::media_sessions::unix_ms()).await.expect("demand")),
         rebound,
         "throttled"
     );
