@@ -15,7 +15,9 @@
 use super::*;
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::cluster::migration::status::PassiveRaftMetrics;
-use plurx_core::store::{AppliedTable, AppliedView, ViewFallback, ViewSource};
+use plurx_core::store::{
+    AppliedTable, AppliedView, PlaybackPlanningSnapshot, ViewFallback, ViewSource,
+};
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{SettingsStore, StampCheck};
 
@@ -1384,4 +1386,367 @@ async fn applied_route_view_never_meets_the_floor_of_a_release_its_replica_holds
         read.route.as_ref().map(|route| route.state.as_str()),
         Some("ended")
     );
+}
+
+/// A library, an item and one probed file, through the Store as production
+/// writes them.
+async fn planning_source(store: &dyn Store, path: &str) -> (i64, i64, i64) {
+    let library = store
+        .create_library(&NewLibrary {
+            name: format!("planning {path}"),
+            kind: LibraryKind::Movies,
+            paths: vec![std::path::PathBuf::from(format!("/{path}"))],
+            anime: false,
+        })
+        .await
+        .expect("planning library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "planned".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("planning item");
+    let probe = ProbeResult {
+        video_codec: Some("hevc".into()),
+        raw_json: Some(r#"{"revision":1}"#.into()),
+        ..Default::default()
+    };
+    let file = store
+        .upsert_file(item, &format!("/{path}/movie.mkv"), 100, 42, &probe)
+        .await
+        .expect("planning file");
+    (library.id, item, file)
+}
+
+fn same_plan(left: &PlaybackPlanningSnapshot, right: &PlaybackPlanningSnapshot) -> bool {
+    format!("{left:?}") == format!("{right:?}")
+}
+
+/// D3b, contract §4.2: the planning view on SQLite is the store itself, and a
+/// process without a replica answers every plan from Authority.
+#[tokio::test]
+async fn applied_planning_view_on_sqlite_is_the_store() {
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let (_, _, file) = planning_source(store.as_ref(), "sqlite").await;
+    store
+        .put_setting("playback.d3b", "on")
+        .await
+        .expect("setting");
+    let keys = ["playback.d3b", "transcode.absent"];
+    let expected = store
+        .playback_planning_snapshot(file, &keys)
+        .await
+        .expect("store")
+        .expect("source");
+    let view = AppliedView::authority(Arc::clone(&store));
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::View);
+    assert!(same_plan(&plan, &expected));
+    assert!(view
+        .planning(file + 1_000, &keys)
+        .await
+        .expect("plan")
+        .is_none());
+    assert_eq!(
+        view.observation()
+            .view_total(AppliedTable::Files, ViewSource::View),
+        2
+    );
+
+    let remote = AppliedView::remote_authority(Arc::clone(&store));
+    let (plan, source) = remote
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::Authority);
+    assert!(same_plan(&plan, &expected));
+    assert_eq!(
+        remote.observation().last_planning_fallback,
+        Some(ViewFallback::NoProof)
+    );
+}
+
+/// D3b, contract §4.2 and §8 ("files floor"): with a proof the plan is one
+/// local statement equal to Authority's; a proof revoked while it runs, a
+/// settings save, a direct `files` write and a cascading delete each answer
+/// from Authority on the writing node until a later confirmation is applied.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_planning_view_reads_the_replica_behind_the_settings_and_files_floors() {
+    let node = EmbeddedSingleton::start().await;
+    let (library, item, file) = planning_source(node.store.as_ref(), "replica").await;
+    node.store
+        .put_setting("playback.d3b", "before")
+        .await
+        .expect("seed setting");
+    let keys = ["playback.d3b", "transcode.absent"];
+    let expected = node
+        .store
+        .playback_planning_snapshot(file, &keys)
+        .await
+        .expect("Authority")
+        .expect("source");
+
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    // The source and the setting were written by this process: both floors
+    // are raised until a confirmation started after them is applied here.
+    node.store.validation_reset_operation_counts();
+    let (_, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::Authority);
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    node.store.validation_reset_operation_counts();
+    for _ in 0..4 {
+        let (plan, source) = view
+            .planning(file, &keys)
+            .await
+            .expect("plan")
+            .expect("source");
+        assert_eq!(source, ViewSource::View);
+        assert!(same_plan(&plan, &expected));
+    }
+    let counts = node.store.validation_operation_counts();
+    assert_eq!(
+        counts.consistent_query_calls, 0,
+        "a proven plan never asks the leader"
+    );
+    assert_eq!(counts.non_consistent_query_calls, 4);
+    assert!(view
+        .planning(file + 1_000, &keys)
+        .await
+        .expect("plan")
+        .is_none());
+
+    // Revocation while the statement runs: discarded, Authority once.
+    view.validation_revoke_after_next_local();
+    node.store.validation_reset_operation_counts();
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(source, ViewSource::Authority);
+    assert!(same_plan(&plan, &expected));
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1
+    );
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::RevokedDuringRead)
+    );
+    // A fresh proof, then each writer kind in turn.
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+    let reopened = |view: &AppliedView| {
+        let view = view.clone();
+        async move {
+            view.planning(file, &keys)
+                .await
+                .expect("plan")
+                .map(|(_, source)| source)
+        }
+    };
+    assert_eq!(reopened(&view).await, Some(ViewSource::View));
+
+    // A planning setting: the settings floor.
+    node.store
+        .put_setting("playback.d3b", "after")
+        .await
+        .expect("save");
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!(
+        (source, plan.settings["playback.d3b"].as_str()),
+        (ViewSource::Authority, "after")
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(reopened(&view).await, Some(ViewSource::View));
+
+    // A direct `files` write: the files floor, with no settings change.
+    let probe = ProbeResult {
+        video_codec: Some("hevc".into()),
+        raw_json: Some(r#"{"revision":2}"#.into()),
+        ..Default::default()
+    };
+    node.store
+        .upsert_file(item, "/replica/movie.mkv", 200, 43, &probe)
+        .await
+        .expect("rescan");
+    let (plan, source) = view
+        .planning(file, &keys)
+        .await
+        .expect("plan")
+        .expect("source");
+    assert_eq!((source, plan.file.size), (ViewSource::Authority, 200));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    // The settings view is not closed by a `files` write.
+    assert_eq!(
+        view.settings(&["playback.d3b"])
+            .await
+            .expect("settings")
+            .source,
+        ViewSource::View
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(reopened(&view).await, Some(ViewSource::View));
+
+    // A delete that reaches `files` only by cascade (libraries -> items ->
+    // files): the files floor again, and the plan sees the source gone.
+    assert!(node
+        .store
+        .delete_library(library)
+        .await
+        .expect("delete library"));
+    node.store.validation_reset_operation_counts();
+    assert!(view.planning(file, &keys).await.expect("plan").is_none());
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        1
+    );
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    node.store.validation_reset_operation_counts();
+    assert!(view.planning(file, &keys).await.expect("plan").is_none());
+    assert_eq!(
+        node.store
+            .validation_operation_counts()
+            .consistent_query_calls,
+        0
+    );
+
+    // An owner's authority plan is counted under its own reason.
+    assert!(view
+        .planning_from_authority(file, &keys, ViewFallback::BindingMismatch)
+        .await
+        .expect("plan")
+        .is_none());
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::BindingMismatch)
+    );
+}
+
+/// D3b, contract §8 ("files floor"), review S3: the dv-title bind command
+/// (whose `dv_title_jobs_bind` trigger rewrites `files.probe_json`) and the
+/// admitted probe result (`apply_probe_job`'s `UPDATE files`) each close the
+/// planning view on the writing node until a later confirmation. A writer's
+/// statements arm the floor by what they may write, whether or not this call
+/// changes a row, so the probe result is driven with no admitted job.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn applied_planning_view_closes_on_the_dv_title_and_probe_result_writers() {
+    use plurx_core::store::BackgroundJobStore;
+    use sha2::Digest;
+    let node = EmbeddedSingleton::start().await;
+    let (_, item, file) = planning_source(node.store.as_ref(), "writers").await;
+    // A Dolby Vision probe: its publication seeds a title-scan demand.
+    let dv = ProbeResult {
+        video_codec: Some("hevc".into()),
+        dolby_vision: plurx_core::domain::DolbyVisionFacts {
+            profile: Some(7),
+            rpu_present: Some(true),
+            ..Default::default()
+        },
+        raw_json: Some(r#"{"streams":[{"index":0,"codec_type":"video"}]}"#.into()),
+        ..Default::default()
+    };
+    node.store
+        .upsert_file(item, "/writers/movie.mkv", 100, 42, &dv)
+        .await
+        .expect("DV probe");
+    let keys = ["playback.d3b"];
+    let metrics = PassiveRaftMetrics::validation_bounded_ready_applied(node.applied_index());
+    let view = node.view(metrics.clone());
+    metrics.validation_confirm_now(node.applied_index());
+    let source = |view: &AppliedView| {
+        let view = view.clone();
+        async move {
+            view.planning(file, &keys)
+                .await
+                .expect("plan")
+                .map(|(_, source)| source)
+        }
+    };
+    assert_eq!(source(&view).await, Some(ViewSource::View));
+
+    // The dv-title bind: a command insert whose trigger writes `files`.
+    let scanner = hex::encode(sha2::Sha256::digest(b"d3b-scanner"));
+    let demand = node
+        .store
+        .dv_title_demands(&scanner, 0)
+        .await
+        .expect("demands")
+        .into_iter()
+        .find(|demand| demand.file_id == file)
+        .expect("the DV source demands a title scan");
+    node.store
+        .bind_dv_title_demand(demand.probe_revision, &scanner)
+        .await
+        .expect("bind the scanner");
+    assert_eq!(source(&view).await, Some(ViewSource::Authority));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(source(&view).await, Some(ViewSource::View));
+
+    // The probe result through the background-jobs bridge.
+    let applied = node
+        .store
+        .apply_probe_job(plurx_core::store::background_jobs_probe::ApplyProbeJob {
+            job_id: uuid::Uuid::new_v4().to_string(),
+            lease: plurx_core::cluster::coordination::Lease {
+                resource: "repair:probe".into(),
+                owner_node_id: "node-a".into(),
+                fence: 1,
+                revision: 1,
+                expires_at_unix_ms: 4_102_444_800_000,
+            },
+            now_ms: 1_000,
+        })
+        .await
+        .expect("apply");
+    assert!(!applied, "no admitted job, so no row changes");
+    assert_eq!(source(&view).await, Some(ViewSource::Authority));
+    assert_eq!(
+        view.observation().last_planning_fallback,
+        Some(ViewFallback::Floor)
+    );
+    metrics.validation_confirm_now(node.applied_index());
+    assert_eq!(source(&view).await, Some(ViewSource::View));
 }

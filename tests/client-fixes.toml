@@ -8487,6 +8487,15 @@ source_anchor = "role == PlayerRole.Finite && television"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
 test_anchor = "fun onlyTheFinitePlayerTunnelsSoASuccessorNeverTakesTheIncumbentsAvSync()"
 
+# PR #1551: the rendezvous never precedes a prepared successor's own start (a processed upgrade stages ahead of the viewer).
+[[fixes]]
+id = "android.rendezvous-floor-at-successor-origin"
+commits = ["e4cc25697a13d35b9d3d161262c75859b78155a0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "val target = maxOf(incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead, floorFilmMs)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun aSuccessorStagedAheadIsMetAtItsOwnStart()"
+
 # PR #1489: the Android decoder envelope claims only what Media3's selector admits.
 [[fixes]]
 id = "android.decoder-envelope-media3-admits"
@@ -8539,6 +8548,15 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "@Published private(set) var playbackEnhancement: PlaybackEnhancement?"
 test = "tests/operations/test_playback_surface_fence.py"
 test_anchor = "def test_the_player_controllers_published_surface_inventory_is_pinned(self):"
+
+# PR #1552: macOS is Apple Silicon only; the tray build refuses any other arch.
+[[fixes]]
+id = "macos.tray-build-arm64-only"
+commits = ["a16d342b4a8d965407f3e8c5064721ecf1b0ed08"]
+source = "clients/server-tray/macos/build"
+source_anchor = '[[ "$arch" == arm64 ]] || die "--arch must be arm64 (Intel Macs are not supported)"'
+test = "tests/operations/test_contracts.py"
+test_anchor = "def test_native_macos_tray_checks_build_arm64_only_and_run_swift_tests(self):"
 
 [[fixes]]
 id = "apple.offload-status-loop-ends-when-the-title-is-back"

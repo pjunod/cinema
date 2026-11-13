@@ -98,6 +98,7 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 /// protocol otherwise issues one direct read per large packet (a 2160p remux
 /// keyframe exceeds 1 MiB), so cap its block size at exactly one quantum.
 const STRICT_BLOCKSIZE: &str = "1048576";
+#[cfg(target_os = "linux")]
 const _: () = assert!(source_reads::MAX_READ == 1_048_576);
 
 /// The strict parser's source input: one-quantum reads, then the held fd.

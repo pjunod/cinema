@@ -5831,7 +5831,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main again: +1 main (#1546 test poll) = 2204.
-expected_occurrences = 2204
+# D3b review S4: +1, `tokio::time::timeout_at` around the remote owner's
+# `start_plan::owner_plan` in `internal_media_sessions::start`, bounded by
+# `start_deadline.min(create_stage_deadline(2 s))` -- the restore stage's own
+# bound, which the owner's planning read ran under before D3b. An awaited
+# request-path deadline: no task, no producer, no process; a timeout answers 503.
+# Merged main into D3b: 2203 base, +1 main, +1 D3b = 2205.
+expected_occurrences = 2205
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7050,8 +7056,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # D3a: +1 (924 -> 925), `spawn_in_http_store_scope(`, the owner start's one
 # spawn (the line above); it is the task `ims.rs::start` already awaited, not a
 # process, and joins before the handler returns.
+# D3b review S3: +1 lexical `.status()` in `media_sessions/tests.rs`
+# (`an_owner_plan_refusal_crosses_to_the_ingress_as_plan_changed`), the
+# status of an axum response built in the test. It launches no process.
 # Offload integration: main 925 plus the fake_curator in-process task.
-expected_occurrences = 926
+# D3b/main integration: 925 base + 1 D3b + 1 main = 927; keep both additions.
+expected_occurrences = 927
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

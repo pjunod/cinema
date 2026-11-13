@@ -625,6 +625,9 @@ pub(crate) struct ProcessedUpgradeTrial {
     pub(crate) request: SessionRequest,
     pub(crate) candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) root: crate::vodserve::PreparedRootAdmission,
+    /// Exact frame-grid entry held by a fresh trial. A reused live parent
+    /// has no new private window; its existing coverage is checked on attach.
+    pub(crate) prepared_window: Option<std::ops::Range<i64>>,
 }
 
 pub(crate) struct HeldProcessedUpgradeRoot {

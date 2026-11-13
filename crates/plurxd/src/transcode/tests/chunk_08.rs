@@ -101,6 +101,7 @@ quality_catalog: None,
                 None,
                 None,
                 (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+                None,
             )
             .await
             .expect("create");
@@ -115,6 +116,7 @@ quality_catalog: None,
                 None,
                 None,
                 (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+                None,
             )
             .await
             .expect("replay");

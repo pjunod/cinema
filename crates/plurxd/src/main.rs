@@ -441,6 +441,7 @@ enum Command {
     /// does and print its identity; exit 1 when this binary would refuse it or
     /// none is installed. The image build runs this, so an image cannot ship a
     /// bundle its own daemon rejects.
+    #[cfg(target_os = "linux")]
     DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
@@ -693,9 +694,10 @@ async fn dispatch(
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
+        #[cfg(target_os = "linux")]
+        Command::DvHelperIdentity => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
-        | Command::DvHelperIdentity
         | Command::Advertise { .. }
         | Command::Cluster { .. }
         | Command::Restore { .. }
@@ -749,6 +751,7 @@ async fn dispatch(
             );
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         Command::DvHelperIdentity => {
             match crate::vodencode::dv_runtime::installed_helper_identity().await {
                 Ok(identity) => println!("{identity}"),
