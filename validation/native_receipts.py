@@ -78,14 +78,13 @@ BUILD_SPECS = {
     # Pin the exact merged Makefile bytes; no old-to-new receipt adoption is
     # authorized.
     'Makefile': 'ebd54967df15db5019f47220642f6543a3ae381d17b330da07e789e273db1c0b',
-    # Reviewed 0.8.0 build 299 (offload client sources): only
-    # CURRENT_PROJECT_VERSION differs from the reviewed build 298 bytes
-    # (`make apple-build-bump`; no resources or scripts added). Build 298 had
-    # differed from build 297 the same way; 297 was set inside a merge commit
-    # (8164f7380), which the release guard does not read as a build-number
-    # update. Pin this exact spec; earlier-build case receipts do not
-    # transfer, and added resources or scripts still change its digest.
-    'clients/apple/project.yml': '83c6bd08bb59a8e6f28dbd036c4a36320aec52c90b2648e50dc95e501f486b2e',
+    # Reviewed 0.8.0 build 300 (mobile build-counter update): only
+    # CURRENT_PROJECT_VERSION differs from reviewed build 299 bytes; no
+    # resources, scripts, or flags changed. Pin this exact spec; build-299
+    # case receipts do not transfer, and later resource or script changes
+    # still change its digest. Earlier build-counter steps remain documented
+    # in project history.
+    'clients/apple/project.yml': 'e7d701cd716173e28559d4f4104f0c38046ba48ecbb992878c5fe3747f94bce7',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     # PR #1552: the tray build accepts --arch arm64 only (Intel Macs dropped).
