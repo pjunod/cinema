@@ -1780,6 +1780,25 @@ class MergeTargetScopeCase(RepositoryFixture):
         self.assertTrue(any("missing source path clients/app.swift" in error for error in scoped.errors))
         self.assertFalse(any("missing source path clients/app.swift" in error for error in scoped.inherited))
 
+    def test_removing_catalog_references_is_the_prs_own_error(self):
+        for kind in ("point", "check"):
+            with self.subTest(kind=kind):
+                root, catalog, coverage = self.repository()
+                subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=root, check=True)
+                (root / "src/app.rs").write_text("pub fn answer() {}\n")
+                fix = self.commit(root, "fix(app): restore answer")
+                self.write_coverage(coverage, f"{fix[:8]}-app.toml",
+                    f'commits = ["{fix[:8]}"]\npoints = ["app"]\nchecks = ["baseline"]\n'
+                    'reason = "The baseline exercises the application."\n')
+                self.commit(root, "chore: record coverage")
+                subprocess.run(["git", "checkout", "-q", "-b", "pr"], cwd=root, check=True)
+                changed = CATALOG.replace('id = "app"', 'id = "replacement"') if kind == "point" else CATALOG.replace('"baseline"', '"replacement"')
+                catalog.path.write_text(changed)
+                self.commit(root, "chore: change catalog")
+                report = audit_history(root, load_catalog(catalog.path), coverage, merge_target="main")
+                self.assertTrue(any("unknown " + kind in error for error in report.errors), report)
+                self.assertFalse(any("unknown " + kind in error for error in report.inherited), report)
+
     def test_an_unknown_merge_target_is_an_error_not_a_pass(self):
         root, catalog, coverage, _, ledger, _, _ = self.main_with_a_gap()
         with self.assertRaises(HistoryError):

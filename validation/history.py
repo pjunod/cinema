@@ -1047,7 +1047,10 @@ def audit_history(
         )
 
     for entry in entries:
-        with errors.about(named_by(entry.commits), (f"{coverage_file}/{entry.origin}",)):
+        entry_commits = named_by(entry.commits)
+        entry_path = f"{coverage_file}/{entry.origin}"
+        catalog_paths = (entry_path, _relative(root, catalog.path))
+        with errors.about(entry_commits, (entry_path,)):
             where = entry.origin
             # The freeze, phase B. A fragment is evidence for the pre-boundary
             # range and nothing else: neither a new fragment nor a commit added to
@@ -1073,10 +1076,10 @@ def audit_history(
                 errors.append(f"{where} has no checks")
             for point in entry.points:
                 if point not in catalog.point_map:
-                    errors.append(f"{where} references unknown point {point}")
+                    errors.add(f"{where} references unknown point {point}", entry_commits, catalog_paths)
             for check in entry.checks:
                 if check not in catalog.check_map:
-                    errors.append(f"{where} references unknown check {check}")
+                    errors.add(f"{where} references unknown check {check}", entry_commits, catalog_paths)
 
             for prefix in entry.commits:
                 matches_sha = tuple(sha for sha in by_sha if sha.startswith(prefix))
@@ -1096,9 +1099,10 @@ def audit_history(
                     and issue.point_ids
                     and not set(issue.point_ids).intersection(entry.points)
                 ):
-                    errors.append(
+                    errors.add(
                         f"{where} commit {prefix} maps to {', '.join(issue.point_ids)}; "
-                        f"entry claims {', '.join(entry.points) or 'no point'}"
+                        f"entry claims {', '.join(entry.points) or 'no point'}",
+                        entry_commits, catalog_paths,
                     )
 
             allowed_checks = set(catalog.always_checks)
@@ -1107,8 +1111,9 @@ def audit_history(
                     allowed_checks.update(catalog.point_map[point].checks)
             for check in entry.checks:
                 if check in catalog.check_map and check not in allowed_checks:
-                    errors.append(
-                        f"{where} check {check} is not evidence for its listed point(s)"
+                    errors.add(
+                        f"{where} check {check} is not evidence for its listed point(s)",
+                        entry_commits, catalog_paths,
                     )
 
     anchor_ids: set[str] = set()

@@ -307,7 +307,7 @@ def push(args: argparse.Namespace) -> int:
         return 1
     command, environment = push_command(args.head_ref, args.head_sha, token)
     # The runner masks the secret, not its encoded form.
-    print("::add-mask::" + basic_auth(token))
+    print("::add-mask::" + basic_auth(token), flush=True)
     result = subprocess.run(command, cwd=ROOT, env=environment)
     if result.returncode != 0:
         print(f"paperwork-fix: the push was refused; {args.head_ref} moved since {args.head_sha} "
