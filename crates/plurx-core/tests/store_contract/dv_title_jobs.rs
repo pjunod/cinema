@@ -1679,6 +1679,7 @@ async fn title_live_paging_reaches_after_full_page_and_direct_own_interest() {
         let scanner = "a".repeat(64);
         let initial = seed_playback(&store, "title-many-live").await;
         let mut last = initial.id;
+        let mut setup_after = 0;
         for n in 0..129 {
             let id = if n == 0 {
                 initial.id
@@ -1696,7 +1697,29 @@ async fn title_live_paging_reaches_after_full_page_and_direct_own_interest() {
                     .await
                     .expect("distinct source")
             };
-            let demand = bound(&store, id, &scanner).await;
+            // Fixture discovery obeys the same ordinary page bound as the
+            // scheduler. Starting every lookup at zero would hide source 129
+            // before this test ever reaches the live paging assertion.
+            let current = store
+                .dv_title_demands(&scanner, setup_after, 1_000)
+                .await
+                .expect("next fixture demand page")
+                .into_iter()
+                .find(|demand| demand.file_id == id)
+                .expect("new source follows the setup cursor");
+            store
+                .bind_dv_title_demand(current.probe_revision, &scanner)
+                .await
+                .expect("bind fixture scanner")
+                .expect("current fixture generation");
+            let demand = store
+                .dv_title_demands(&scanner, setup_after, 1_000)
+                .await
+                .expect("bound fixture demand page")
+                .into_iter()
+                .find(|demand| demand.file_id == id)
+                .expect("bound source follows the setup cursor");
+            setup_after = demand.probe_revision;
             playback_title(&store, &demand, &scanner, Some(60_000)).await;
             last = id;
         }
