@@ -2392,7 +2392,8 @@ impl HiqliteAuthStore {
                     self.install_scan_request_v2_schema(admission).await?;
                     self.install_custody_retention_schema(admission).await?;
                     self.install_offloaded_schema(admission).await?;
-                    self.install_storage_domain_pending_schema(admission).await?;
+                    self.install_storage_domain_pending_schema(admission)
+                        .await?;
                     return self.install_dv_refit_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
