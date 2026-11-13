@@ -1364,6 +1364,8 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        // The prepared command hook owns a duplicate writer until dropped.
+        drop(command);
         drop(write);
         let mut bytes = Vec::new();
         read.read_to_end(&mut bytes).expect("settled NUT output");
