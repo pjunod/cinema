@@ -278,16 +278,21 @@ int main(int argc, char **argv) {
   f = prep(&c29, 100, DM_BT709);
   assert(!strcmp(f.trim, "l2-exact") && f.weight == 0);      // raw ms_weight -1 is the default 0
   rpu hi; base(&hi, 80, 1528, 3728); add_l2(&hi, 3079, 2010, 2180, 2075, 2050, 2179, 1800);
-  f = prep(&hi, 600, DM_P3D65);    // below the lowest L2 target: faded towards neutral at PQ 0
+  f = prep(&hi, 600, DM_P3D65);    // below the lowest L2 target: faded towards neutral at the mastering minimum (L6, 0.005 nits)
   assert(f.algo == 29 && f.trim_targets == 1 && !strcmp(f.trim, "l2-interpolated") &&
-         fabs(f.weight - -0.1121395094623157) < 1e-12);
-  f = prep(&hi, 4000, DM_P3D65);   // at the mastering peak the trims have faded out
+         fabs(f.weight - -0.11195629184019208) < 1e-12);
+  f = prep(&hi, 4000, DM_P3D65);   // no L2 above and at the mastering peak: the trims have faded out
   assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0);
-  // a title mastered at 1000 nits (display_target.rs pins the same): the 100-nit trim fades to
-  // neutral at 1000; the 3079 trim lies above PQ(1000), so at 600 nothing is left to interpolate
+  // a title mastered at 1000 nits (display_target.rs pins the same selections): the 3079 trim sits at the
+  // mastering peak and still brackets a 600-nit target, exactly as on a 4000-nit master, and is
+  // applied at its own peak (cm_offline uses an L2 at or above the mastering peak like any other);
+  // above it nothing is left
   f = prep_m(&hi, 600, DM_P3D65, 1000);
-  assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0 && f.trim_targets == 0);
-  f = prep_m(&hi, 1000, DM_P3D65, 1000);   // an L2 authored for the mastering peak is not applied at it
+  assert(f.algo == 29 && !strcmp(f.trim, "l2-interpolated") && f.trim_targets == 1 &&
+         fabs(f.weight - -0.11195629184019208) < 1e-12);
+  f = prep_m(&hi, 1000, DM_P3D65, 1000);
+  assert(f.algo == 29 && !strcmp(f.trim, "l2-exact") && f.trim_targets == 1 && fabs(f.weight - (1800 - 2048) / 2048.0) < 1e-12);
+  f = prep_m(&hi, 2000, DM_P3D65, 1000);
   assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0 && f.trim_targets == 0);
   {
     rpu low; base(&low, 80, 1528, 3728); add_l2(&low, 2081, 2010, 2180, 2075, 2050, 2179, 1800);

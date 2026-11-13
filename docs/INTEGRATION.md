@@ -195,6 +195,8 @@ what separates a key from a login token, whichever header carries it.
 | `path` | yes, unless `probe_paths` | Absolute directory or file under a configured library root |
 | `request_key` | no | Curator's idempotency key, attempt number last. The same key from the same API key returns the same `request_id` and result, so a lost response never becomes a second scan. A new attempt suffix is a new request |
 | `expected_files` | no | `[{"path","bytes","mtime_ns"}]`, each path absolute. Every in-scope file is probed whatever plurx's size+mtime cache says, and reported in `files`; outside paths and paths below a symlink are skipped without probing their targets |
+| `removed_paths` | no | Paths gone under `path`; probe-only (§1.10) |
+| `probe_only` | no | Default `false`; walk nothing (§1.10) |
 | `wait_ms` | no | Hold the response up to this long for the result. Default `0` (answer at once) |
 | `hint` | no | `movie` · `episode` · `season` · `book`. Advisory: the library's kind decides how a file is parsed; the hint only picks which item an id applies to |
 | `ids` | no | `{"tmdb","imdb"}` for the item itself |
@@ -205,7 +207,7 @@ what separates a key from a login token, whichever header carries it.
 | `probe_paths` | no | Connection test (§1.6); takes no `path` |
 
 Unknown fields are ignored, so an older plurx simply does not see
-`request_key`, `wait_ms`, `expected_files` or `probe_paths` (§1.8).
+`request_key`, `wait_ms`, `expected_files`, `removed_paths`, `probe_only` or `probe_paths` (§1.8).
 
 An episode's own id does not identify its series, and plurx never falls back
 from item-level `ids.tmdb` to the show. The series id is applied after
@@ -226,6 +228,7 @@ fails if one drifts:
 | `probe_paths` entries | 1 to 64 | `MAX_PROBE_PATHS` |
 | `request_key` length | 256 bytes, no control characters | `MAX_REQUEST_KEY_BYTES` |
 | `expected_files` entries | 64, together at most 16 KiB of JSON; each path at most 4096 bytes, `bytes` and `mtime_ns` non-negative | `MAX_EXPECTED_FILES` |
+| `removed_paths` entries | 64, each at most 4096 bytes; at most 16 KiB of JSON together with `expected_files` | `MAX_REMOVED_PATHS` |
 | `waiting_on` length | 1024 bytes | `MAX_WAITING_ON_BYTES` |
 | pending requests per library | 256 | `ENQUEUE_SQL` (the library `queue_full` bound) |
 
@@ -237,7 +240,7 @@ fails if one drifts:
 | `202` | `{"status":"queued","request_id","correlation_id"}` | Durably queued, not dropped; poll it (§1.4). `correlation_id` is omitted when there is none |
 | `400` | `{"code":"path_required","message"}` | Neither `path` nor `probe_paths` |
 | `400` | `{"code":"probe_paths_with_path","message"}` | Both — a connection test and a scan are different requests |
-| `400` | `{"error"}` | A relative `path` or `expected_files[].path`, a non-positive `series.tmdb`, invalid `book` fields, a `request_key` or `expected_files` over the limits above, or `probe_paths` outside 1–64 |
+| `400` | `{"error"}` | A relative path, a non-positive `series.tmdb`, invalid `book` fields, a `request_key`, `expected_files` or `removed_paths` over the limits above, or `probe_paths` outside 1–64 |
 | `401` | `{"error":"authentication required"}` | No key, a revoked or unknown key, or a login token on this key-only route |
 | `403` | `{"error":"admin privileges required"}` | A real key without `scan:trigger` (the text is the shared forbidden message, not a statement about admins) |
 | `422` | `{"code":"path_outside_roots","error":"path is not under any library root","path","roots":[…]}` | Under no library root — **permanent**. `roots` is there because "wrong path" is only actionable if you can see the right ones |
@@ -255,6 +258,8 @@ fails if one drifts:
  {"state":"skipped","path":"/media/tv/Show/Season 02/sample.mkv","reason":"…"},
  {"state":"missing","path":"/media/tv/Show/Season 02/Show.S02E02.mkv"}]
 ```
+
+Removed paths add entries after these (§1.10).
 
 `placed` carries the size and nanosecond mtime from plurx's own fresh `stat`,
 not the caller's claim. `items` lists every file the scan placed,
@@ -352,8 +357,9 @@ in a rolling upgrade decode it and leave it alone.
 ### 1.6 Connection test
 
 `{"probe_paths":["/media/tv","/media/movies"]}` with no `path` answers
-`200 {"roots","visible","missing","outside_roots"}`: which of Curator's library
-roots plurx can see. Only a configured root, or a path under one, is ever
+`200 {"features","roots","visible","missing","outside_roots"}`: which of
+Curator's library roots plurx can see; `features` is `["removed_paths"]`
+(§1.10). Only a configured root, or a path under one, is ever
 `stat`ed. A symlink beneath a root is found with `lstat`, listed under
 `outside_roots` and never followed. Nothing is scanned or queued. It needs
 `scan:trigger`, and it counts as a received notification, never as a scan.
@@ -380,6 +386,7 @@ every library at startup' is on (it is off by default)."*
 |---|---|---|
 | v2 | older | `wait_ms`, `request_key`, `expected_files` and `probe_paths` are ignored; `202` is handled; the status poll gets `403`, so the delivery shows `queued (cinema does not report results)`; the Test falls back to the legacy probe; the old single `422` stays permanent |
 | older | v2 | Nothing changes: an old Curator sends none of the new fields and gets the same `200`/`202` it always did, now with the typed `422`/`503` bodies |
+| `moved` | no `features` | No `removed_paths`; the old entry stays until the next scan |
 
 ### 1.9 Where you see it, and how to prove it
 
@@ -404,6 +411,18 @@ curl -sS -H "Authorization: Bearer $PLXKEY" "$PLURX/api/v1/scan/requests/<reques
 
 Read the answer against §1.2: a `422 path_outside_roots` proves the key, the
 scope and the route all work, and `files` says whether each file is usable.
+
+### 1.10 Removed paths
+
+`removed_paths` or `probe_only: true` makes the request probe-only: it probes
+only the expected and removed paths, walks nothing and admits no full scan.
+Each removed path comes back in `files` as `gone`, `unknown`, `present`,
+`retained` (`code`, `retryable`) or `skipped`; `gone` and `unknown` both
+satisfy it, and an unreadable chain is `503 path_unreadable`, not absence.
+Send it only when the connection test's `features` lists `removed_paths`, after
+upgrading every cinema node. Detail:
+[PIPELINE-CONTRACT-REMOVED-PATHS.md](features/PIPELINE-CONTRACT-REMOVED-PATHS.md),
+[API.md](API.md) §6.3.
 
 ---
 

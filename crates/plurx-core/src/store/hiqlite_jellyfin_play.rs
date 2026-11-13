@@ -29,6 +29,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         let expiry = jp::terminal_expiry(now_ms)?;
         self.client()
             .execute_returning_map::<_, jp::RawPlay>(
+                "end_jellyfin_login_plays",
                 jp::END_LOGIN,
                 params!(
                     expiry,
@@ -48,37 +49,40 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         let (payload, expiry) = jp::encode(&play)?;
         let results = self
             .client()
-            .txn(vec![
-                (jp::CLEANUP, params!(play.created_at_ms)),
-                (jp::RETIRE_ORPHANED_ACTIVE, params!(play.created_at_ms)),
-                (
-                    jp::TRIM_LOGIN_TOMBSTONES,
-                    params!(
-                        play.scope.user_id,
-                        play.scope.token_digest.clone(),
-                        play.scope.device_digest.clone(),
-                        play.scope.client_family.as_str()
+            .txn(
+                "create_jellyfin_play",
+                vec![
+                    (jp::CLEANUP, params!(play.created_at_ms)),
+                    (jp::RETIRE_ORPHANED_ACTIVE, params!(play.created_at_ms)),
+                    (
+                        jp::TRIM_LOGIN_TOMBSTONES,
+                        params!(
+                            play.scope.user_id,
+                            play.scope.token_digest.clone(),
+                            play.scope.device_digest.clone(),
+                            play.scope.client_family.as_str()
+                        ),
                     ),
-                ),
-                (
-                    jp::CREATE,
-                    params!(
-                        play.play_id,
-                        play.scope.user_id,
-                        play.scope.token_digest,
-                        play.scope.device_digest,
-                        play.scope.client_family.as_str(),
-                        play.playback_id,
-                        play.item_id,
-                        play.file_id,
-                        payload,
-                        expiry,
-                        play.item_wire_id,
-                        play.file_wire_id,
-                        play.media_grant_id
+                    (
+                        jp::CREATE,
+                        params!(
+                            play.play_id,
+                            play.scope.user_id,
+                            play.scope.token_digest,
+                            play.scope.device_digest,
+                            play.scope.client_family.as_str(),
+                            play.playback_id,
+                            play.item_id,
+                            play.file_id,
+                            payload,
+                            expiry,
+                            play.item_wire_id,
+                            play.file_wire_id,
+                            play.media_grant_id
+                        ),
                     ),
-                ),
-            ])
+                ],
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -94,6 +98,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         self.client()
             // authority: activation and late stop require the current exact play tombstone.
             .query_consistent_map::<jp::RawPlay, _>(
+                "jellyfin_play",
                 jp::READ,
                 params!(
                     play_id,
@@ -118,7 +123,11 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         }
         self.client()
             // authority: an anonymous scoped media link must observe Stop, supersession and login replacement exactly.
-            .query_consistent_map::<jp::RawPlay, _>(jp::READ_BY_DIRECT_GRANT, params!(grant_id))
+            .query_consistent_map::<jp::RawPlay, _>(
+                "jellyfin_play_for_direct_grant",
+                jp::READ_BY_DIRECT_GRANT,
+                params!(grant_id),
+            )
             .await?
             .into_iter()
             .next()
@@ -135,6 +144,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         self.client()
             // authority: a direct request without a play id must resolve the play Stop, supersession and renegotiation last committed.
             .query_consistent_map::<jp::RawPlay, _>(
+                "jellyfin_current_direct_play",
                 jp::READ_CURRENT_DIRECT,
                 params!(
                     scope.user_id,
@@ -160,6 +170,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         self.client()
             // authority: releasing a predecessor's exact resources must see the supersession its own activation committed.
             .query_consistent_map::<jp::RawPlay, _>(
+                "jellyfin_plays_superseded_by",
                 jp::READ_SUPERSEDED_BY,
                 params!(
                     scope.user_id,
@@ -187,34 +198,37 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         let nonce = uuid::Uuid::new_v4().to_string();
         let changed = self
             .client()
-            .txn(vec![
-                (
-                    sql,
-                    params!(
-                        reference,
-                        i64::MAX,
-                        play_id,
-                        scope.user_id,
-                        &scope.token_digest,
-                        &scope.device_digest,
-                        scope.client_family.as_str(),
-                        now_ms,
-                        nonce.as_str()
+            .txn(
+                "activate_jellyfin_play",
+                vec![
+                    (
+                        sql,
+                        params!(
+                            reference,
+                            i64::MAX,
+                            play_id,
+                            scope.user_id,
+                            &scope.token_digest,
+                            &scope.device_digest,
+                            scope.client_family.as_str(),
+                            now_ms,
+                            nonce.as_str()
+                        ),
                     ),
-                ),
-                (
-                    jp::SUPERSEDE_AFTER_BINDING_ACTIVATION,
-                    params!(
-                        play_id,
-                        scope.user_id,
-                        &scope.token_digest,
-                        &scope.device_digest,
-                        scope.client_family.as_str(),
-                        expiry,
-                        nonce.as_str()
+                    (
+                        jp::SUPERSEDE_AFTER_BINDING_ACTIVATION,
+                        params!(
+                            play_id,
+                            scope.user_id,
+                            &scope.token_digest,
+                            &scope.device_digest,
+                            scope.client_family.as_str(),
+                            expiry,
+                            nonce.as_str()
+                        ),
                     ),
-                ),
-            ])
+                ],
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -232,6 +246,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "end_jellyfin_play",
                 jp::END,
                 params!(
                     expiry,
@@ -256,6 +271,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "withdraw_pending_jellyfin_play",
                 jp::WITHDRAW_PENDING,
                 params!(
                     expiry,
