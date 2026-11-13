@@ -123,7 +123,7 @@ Built on `claude/ps-d3b` from `claude/ps-e1c-d3a-d3t` (PR #1554): the create rea
 
 ## 10. The "after": operations per shape, by Store method (D3b)
 
-Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured on the D3b build (pasted from `create-path store operations by method`, identical on both gate runs).
+Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured on the D3b build, intent column as of D3c (pasted from `create-path store operations by method`, identical on both gate runs).
 
 | Store method | first play | reopen | Auto encode | rolling copy | caps-v2 + intent |
 |---|---:|---:|---:|---:|---:|
@@ -135,9 +135,9 @@ Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured 
 | `copy_index_v3_variant` | 1/0/0 | 1/0/0 | · | 1/0/0 | · |
 | `copy_index_source_attestation` | 1/0/0 | 1/0/0 | · | 1/0/0 | · |
 | `timeline_annotation_set` | 2/0/0 | 2/0/0 | 2/0/0 | · | 2/0/0 |
-| `record_desired_selection` | · | · | · | · | 1/0/1 |
+| `record_desired_selection` | · | · | · | · | · |
 | `maintain_media_sessions` | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 |
-| `claim_media_session_request` | 1/0/1 | 1/0/1 | 1/0/1 | 1/0/1 | 1/0/1 |
+| `claim_media_session_request` | 1/0/1 | 1/0/1 | 1/0/1 | 1/0/1 | 2/0/1 |
 | `assign_media_session_request_owner` | 0/0/1 | 0/0/1 | 0/0/1 | 0/0/1 | 0/0/1 |
 | `media_session_route_for_playback` | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 |
 | `media_session_route_by_incarnation` | · | 1/0/0 | · | · | · |
@@ -150,7 +150,7 @@ Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured 
 | `settle_media_session_activation` | 1/0/2 | 1/0/2 | 1/0/2 | 1/0/2 | 1/0/2 |
 | `publish_media_session_activation` | 2/0/1 | 2/0/1 | 2/0/1 | 2/0/1 | 2/0/1 |
 | `session_layout` (layout reads) | 8/0/0 | 12/0/0 | 8/0/0 | 8/0/0 | 9/0/0 |
-| **total** | **23/2/6** | **30/2/8** | **19/2/8** | **20/2/9** | **21/2/9** |
+| **total** | **23/2/6** | **30/2/8** | **19/2/8** | **20/2/9** | **21/2/8** |
 
 **Each delta and its cause** (against §2's 29/1/6, 36/1/8, 30/1/8, 28/1/9, 32/1/9; site names from a backtrace of every planning-input read on the D3a build).
 
@@ -161,7 +161,7 @@ Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured 
 - **Auto encode −11:** snapshots −3, `get_settings` −2, `get_setting` −4 (placement; `encoder_and_grade_for`'s HWACCEL; `software_budget` for the frozen thread count and for `refuse_unadmittable_encoding`), `get_file_probe_json` −2 (the encoded preparation's stored probe; the decoder plan's `resolve_movie_plan_with_processing_exclusion`). `queue_sql` 0/0/2 becomes `register_foreground_source` + `activate_foreground_source_custody`.
 - **Rolling copy −8:** snapshots −4 (the three above and `rolling_start_inputs`), `get_settings` −2, `get_setting` −1 (placement), `get_file` −1 (the fallback's source row for the analysis-interest receipt). `queue_sql` 2/0/3 becomes the two copy-index reads and the custody and `suspend_playback_analysis_interest` writes.
 - **Caps-v2 + intent −11:** as Auto encode.
-- **Writes:** unchanged in every shape (6/8/8/9/9).
+- **Writes:** unchanged in every shape (6/8/8/9/9) by D3b; D3c then folds the intent shape's separate ask write into the claim, so the intent column reads 21/2/8 ([D3CDE record](PLAYBACK-START-D3CDE-RECORD.md) §1).
 
 **What the pin does not see** (review N4). None of the five shapes builds a quality catalog (the fixture runs with the media pool and display-aware Auto off), so the catalog's own quorum snapshot (`local_quality_catalog`, `mp.rs`) and the B1 re-plan it can trigger are outside these numbers; D3d owes their pin. The rolling shape reads 20 **or 23**: the pre-existing tolerance for `ahead_limits`' three refreshed `get_setting` reads still applies.
 
