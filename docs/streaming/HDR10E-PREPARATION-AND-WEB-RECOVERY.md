@@ -312,5 +312,5 @@ could not start on the test kernel, so it supplies no race-check evidence.
 
 The rejected observer patch's tests do not establish incident closure. The
 64-second publication result establishes server preparation headroom under its
-recorded conditions. No deployment or live browser acceptance is recorded yet;
+recorded conditions. Merged as #1374 and deployed 2026-11-07 to media1, lab4 and lab6 (builds `4ddbf1229` and `edf6d08fa`, both contain it); no live browser acceptance is recorded yet;
 final compiler/CLI gates and a matching Safari JavaScript capture remain separate.

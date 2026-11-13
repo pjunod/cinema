@@ -202,7 +202,7 @@ enum Caps {
             // audiobook enter the video HLS copy path and fail before its
             // first frame-equivalent audio sample on physical devices.
             containers: ["mp4", "mov", "m4v", "m4a", "m4b", "mp3", "aac", "flac", "wav"],
-            transports: ["progressive", "hls"],
+            transports: ["progressive", "hls", SharedPlaybackTimeline.capability],
             // AVPlayer's progressive HEVC path is conservatively admitted
             // only for the hvc1 sample entry. HLS remains available for a
             // server-normalized copy whose progressive output uses another

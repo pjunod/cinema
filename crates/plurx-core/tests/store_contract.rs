@@ -14,13 +14,102 @@ mod subtitle_jobs_fixture;
 use subtitle_jobs_fixture::SubtitleFixture;
 
 use plurx_core::store::background_jobs::{
-    AnalysisViewerInterest, ArtifactViewerInterest, CancelWaiter, EnqueueOutcome, WaiterQuery,
+    AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore, CancelWaiter,
+    EnqueueOutcome, WaiterQuery,
 };
+use plurx_core::store::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
 use plurx_core::store::RootRemovalOutcome;
 use queue_fixture::QueueFixture;
 
+/// Install a mapping for fixture setup using the deferred save/apply API.
+/// Tests that exercise waiting behavior call the two Store methods directly.
+async fn set_storage_domains(
+    store: &dyn Store,
+    mappings: Vec<StorageDomainMapping>,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    let Some(_revision) = store.save_storage_domains(mappings, None, now_ms).await? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        store.apply_pending_storage_domains(now_ms).await?,
+        StorageDomainApply::Applied { .. }
+    ))
+}
+
+#[tokio::test]
+async fn storage_domain_pending_is_superseded_by_legacy_sqlite_replace() {
+    use plurx_core::store::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
+
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("legacy-storage-replace.sqlite");
+    let store = plurx_core::store::SqliteStore::open(&path).expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Legacy storage replacement".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/legacy-storage-root".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let mapping = |domain_id: &str| StorageDomainMapping {
+        library_id: library.id,
+        root_path: "/legacy-storage-root".into(),
+        domain_id: domain_id.into(),
+    };
+    store
+        .save_storage_domains(vec![mapping("before")], None, 1_000)
+        .await
+        .expect("save baseline")
+        .expect("valid root");
+    assert!(matches!(
+        store
+            .apply_pending_storage_domains(1_000)
+            .await
+            .expect("apply baseline"),
+        StorageDomainApply::Applied { .. }
+    ));
+    let pending_revision = store
+        .save_storage_domains(vec![mapping("new-node")], None, 1_001)
+        .await
+        .expect("save pending")
+        .expect("valid root");
+    drop(store);
+
+    // Simulate an older node that still submits the legacy atomic replacement.
+    let connection = rusqlite::Connection::open(&path).expect("open shared SQLite file");
+    connection
+        .execute(
+            "INSERT INTO background_job_commands(id,operation,request_json,result_json) VALUES(?1,'storage_domains',?2,'true')",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                serde_json::json!({"mappings":[mapping("legacy-node")]}).to_string(),
+            ],
+        )
+        .expect("legacy node replacement");
+    drop(connection);
+
+    let reopened = plurx_core::store::SqliteStore::open(&path).expect("reopen store");
+    assert!(matches!(
+        reopened.apply_pending_storage_domains(1_002).await.expect("supersede stale pending revision"),
+        StorageDomainApply::Superseded { revision } if revision == pending_revision
+    ));
+    assert_eq!(
+        reopened
+            .storage_domains()
+            .await
+            .expect("legacy applied mapping"),
+        vec![mapping("legacy-node")]
+    );
+}
+
+#[path = "store_contract/applied_view.rs"]
+mod applied_view;
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/claim_selection.rs"]
+mod claim_selection;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -35,10 +124,16 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/library_schedule.rs"]
+mod library_schedule;
+#[path = "store_contract/offload.rs"]
+mod offload;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
 mod remote;
+#[path = "store_contract/scan_request_v2.rs"]
+mod scan_request_v2;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
@@ -352,6 +447,9 @@ const USER_METHODS: &[&str] = &[
 ];
 const LIBRARY_METHODS: &[&str] = &[
     "create_library",
+    // Contract v2 §6: a library created with an explicit scan interval;
+    // store_contract/library_schedule.rs runs it on every backend.
+    "create_library_with_scan_interval",
     "update_library",
     "delete_library",
     "set_library_schedule",
@@ -594,12 +692,15 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "analysis_completions_executed_by",
+    "analysis_source_admission",
     // Both-backend title publication/cancellation/reprobe and priority
     // contracts in store_contract/dv_title_jobs.rs exercise these five.
     // The source-fenced FEL verdict/requalification contract exercises these
     // three methods on every backend in store_contract/dv_title_jobs.rs.
     "put_dv_fel_verdict",
     "request_dv_fel_requalification",
+    "request_dv_fel_variant",
     "dv_fel_verdict_counts",
     "dv_fel_stale_titles",
     "dv_title_readiness",
@@ -608,6 +709,15 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_dv_title_job",
     "publish_dv_title_from_analysis",
     "probe_can_preempt_title",
+    // Contract v2 targeted-scan sidecar: admission with its sidecar, reads by
+    // request and by creating key, and the later report/waiting writes. All
+    // six run on every backend in store_contract/scan_request_v2.rs.
+    "enqueue_library_work_v2",
+    "scan_request_v2",
+    "scan_request_by_key",
+    "set_scan_request_waiting_on",
+    "set_library_job_waiting_on",
+    "set_scan_request_files",
     // Progressive translation's actual source-bind/publication/Stop/read-lease
     // contract below exercises these on every backend, including three voters.
     "maintain_translation_cache",
@@ -669,7 +779,11 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_artwork_demand",
     "publish_artwork_job",
     "storage_domains",
-    "replace_storage_domains",
+    // Desired/applied lifecycle covered by the storage-domain contracts in
+    // background_jobs.rs, including blocked saves, safe apply, and state reads.
+    "save_storage_domains",
+    "apply_pending_storage_domains",
+    "storage_domain_state",
     "enqueue_library_work",
     "library_work_requests",
     "complete_library_work",
@@ -702,6 +816,36 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "maintain_jobs",
     "publish_transcode_job",
     "publish_fragment_job",
+    "advertise_library_turn",
+    "recent_job_completions",
+    "register_foreground_source",
+    "project_foreground_source",
+    "release_foreground_source",
+    "foreground_source_pressure",
+    "list_foreground_source_owners",
+    "resolve_foreground_source",
+    "activate_foreground_source_custody",
+    "abort_foreground_source_activation",
+    "mark_foreground_source_settled",
+    "reap_settled_source_custody",
+    "settled_foreground_source_custody",
+    "activate_background_source_custody",
+    "abort_background_source_activation",
+    "mark_background_source_settled",
+    "settled_background_source_custody",
+    "resolve_background_source_custody",
+    "register_background_source_custody",
+    "claim_background_source_service",
+    "release_background_source_custody",
+    "close_read_attestation_source_lease",
+    "suspend_playback_analysis_interest",
+    "restore_playback_analysis_interest",
+    "background_source_may_continue",
+    "pause_background_source",
+    "resume_background_source",
+    "source_checkpoint_artifacts",
+    "checkpoint_analysis_source",
+    "checkpoint_job",
 ];
 const PRETRANSCODE_METHODS: &[&str] = &["pretranscode_job", "pretranscode_staging_jobs"];
 const OFFLINE_METHODS: &[&str] = &[
@@ -810,6 +954,7 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "media_session_request_progress",
     // `first_preparation_output_seal_is_exact_and_idempotent_on_every_backend`.
     "seal_prepared_output",
     // Same scenario: the complete seal is confirmed by a read, not a replay.
@@ -823,6 +968,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "validation_playback_pointer_desired_revision",
     "validation_write_legacy_playback_pointer",
     "claim_media_session_request",
+    "claim_media_session_request_recording",
     "record_library_channel_session_recipe",
     "assign_media_session_request_owner",
     "activate_media_session",
@@ -902,7 +1048,10 @@ const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "delete_dv_recovery_guard_fenced",
     "mark_dv_conversion_failed_fenced",
 ];
-const METRICS_METHODS: &[&str] = &["prometheus_store_snapshot"];
+const METRICS_METHODS: &[&str] = &[
+    "prometheus_store_snapshot",
+    "prometheus_store_snapshot_with",
+];
 
 struct StoreFixture {
     name: &'static str,
@@ -961,6 +1110,38 @@ enum StrandedFieldOrder {
 }
 
 impl StrandedFieldOrder {
+    /// Delete one settings row by key: the Store trait has no setting delete,
+    /// and the planning triggers must be shown to fire on one.
+    async fn delete_setting(&self, key: &str) {
+        match self {
+            Self::Sqlite(path) => {
+                let connection = rusqlite::Connection::open(path).expect("open raw SQLite handle");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("raw SQLite busy timeout");
+                assert_eq!(
+                    connection
+                        .execute(
+                            "DELETE FROM settings WHERE key = ?1",
+                            rusqlite::params![key]
+                        )
+                        .expect("delete SQLite setting"),
+                    1
+                );
+            }
+            #[cfg(feature = "hiqlite-contract-tests")]
+            Self::Hiqlite(client) => {
+                assert_eq!(
+                    client
+                        .execute("DELETE FROM settings WHERE key = $1", hiqlite::params!(key))
+                        .await
+                        .expect("delete replicated setting"),
+                    1
+                );
+            }
+        }
+    }
+
     async fn strand(&self, file_id: i64) {
         match self {
             Self::Sqlite(path) => {
@@ -9231,6 +9412,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "fenced-root",
                 &[baseline_file],
                 1,
+                &[],
+                0,
                 &first,
                 &stale_replacement,
             ),
@@ -9521,6 +9704,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     "fenced-root",
                     &[],
                     0,
+                    &[],
+                    0,
                     &successor_current,
                     &replacement,
                 )
@@ -9769,24 +9954,24 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: create secondary library: {error}"));
-        assert!(store
-            .replace_storage_domains(
-                vec![
-                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
-                        library_id: library.id,
-                        root_path: "/contract/pretranscode".into(),
-                        domain_id: "pretranscode-primary".into(),
-                    },
-                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
-                        library_id: secondary.id,
-                        root_path: "/contract/pretranscode-secondary".into(),
-                        domain_id: "pretranscode-secondary".into(),
-                    },
-                ],
-                100,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: map source domains: {error}")));
+        assert!(set_storage_domains(
+            store.as_ref(),
+            vec![
+                plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                    library_id: library.id,
+                    root_path: "/contract/pretranscode".into(),
+                    domain_id: "pretranscode-primary".into(),
+                },
+                plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                    library_id: secondary.id,
+                    root_path: "/contract/pretranscode-secondary".into(),
+                    domain_id: "pretranscode-secondary".into(),
+                },
+            ],
+            100,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: map source domains: {error}")));
         let mut files = Vec::new();
         for ordinal in 1..=5 {
             let (source_library, root) = if matches!(ordinal, 2 | 3) {
@@ -12789,6 +12974,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         Vec<String>,
         Vec<String>,
         Vec<String>,
+        Vec<String>,
     ) {
         async fn rows(client: &Client, sql: &str) -> Vec<String> {
             client
@@ -12800,6 +12986,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
                 .collect()
         }
         (replicated_schema_marker(client).await,
+         rows(client, "SELECT json_array(resource_key,epoch_id,allocated_bytes) AS payload FROM background_source_service_epochs ORDER BY resource_key,epoch_id").await,
          rows(client, "SELECT json_object('name',name,'type',type,'sql',sql) AS payload FROM sqlite_master ORDER BY name,type,sql").await,
          rows(client, "SELECT json_array(node_id,model_id,profile_id,receipt_json) AS payload FROM subtitle_translation_capabilities ORDER BY node_id,model_id,profile_id").await,
          rows(client, "SELECT json_array(node_id,model_id,receipt_json) AS payload FROM subtitle_model_receipts ORDER BY node_id,model_id").await,
@@ -12810,6 +12997,7 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
          rows(client, "SELECT json_array(job_id,fence,demand_id,continuity_id) AS payload FROM subtitle_translation_range_continuities ORDER BY job_id,fence,demand_id").await)
     }
     for scenario in [
+        "source-service-epoch",
         "translation-job",
         "translation-data",
         "translation-shape",
@@ -12827,10 +13015,11 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
         "text-cue",
     ] {
         let (inject, restore) = match scenario {
+            "source-service-epoch" => ("INSERT INTO background_source_service_epochs VALUES('retained-fixture',1,64)".to_owned(), "DELETE FROM background_source_service_epochs WHERE resource_key='retained-fixture'".to_owned()),
             "translation-job" => ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node')".to_owned(), "DELETE FROM background_jobs WHERE id='fixture-orphan-translation'".to_owned()),
             "translation-data" => ("INSERT INTO subtitle_translation_capabilities VALUES('fixture-node','fixture-model',printf('%064d',0),'{}')".to_owned(), "DELETE FROM subtitle_translation_capabilities WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
             "managed-data" => ("INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')".to_owned(), "DELETE FROM subtitle_model_receipts WHERE node_id='fixture-node' AND model_id='fixture-model'".to_owned()),
-            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,3)".to_owned()),
+            "managed-marker" => ("DELETE FROM subtitle_managed_schema".to_owned(), "INSERT INTO subtitle_managed_schema VALUES(1,5)".to_owned()),
             "translation-marker" => ("DELETE FROM subtitle_translation_schema".to_owned(), "INSERT INTO subtitle_translation_schema VALUES(1,1)".to_owned()),
             "text-marker" => ("DELETE FROM subtitle_text_translation_schema".to_owned(), "INSERT INTO subtitle_text_translation_schema VALUES(1,1)".to_owned()),
             "caption-marker" => ("DELETE FROM shared_caption_schema".to_owned(), "INSERT INTO shared_caption_schema VALUES(1,1)".to_owned()),
@@ -12894,6 +13083,80 @@ async fn replicated_historical_rewind_refuses_owned_extension_data_and_partial_s
     }
 }
 
+/// Review #1405 (4): a replicated cluster at managed v4 (the v125 release)
+/// upgrades to v5 on bootstrap — the exact v5 view and marker, with its
+/// managed receipts kept — and a later bootstrap is a no-op.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_managed_v4_upgrades_to_v5_and_a_restart_is_a_no_op() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("managed upgrade client");
+    let telemetry = cluster._root.path().join("managed-v5-upgrade.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("bootstrap current"),
+    );
+    // Return exactly the managed view and marker to published v4.
+    let statements = include_str!("../src/store/subtitle_managed_resources_v4.sql")
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|sql| !sql.is_empty())
+        .map(|sql| (sql.to_owned(), hiqlite::params!()))
+        .collect::<Vec<_>>();
+    for result in client.txn(statements).await.expect("rewind to managed v4") {
+        result.expect("published v4 statement");
+    }
+    for result in client
+        .txn([(
+            "INSERT INTO subtitle_model_receipts VALUES('fixture-node','fixture-model','{}')",
+            hiqlite::params!(),
+        )])
+        .await
+        .expect("retained managed receipt")
+    {
+        result.expect("receipt insert");
+    }
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 4).await;
+    assert_eq!(
+        replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+        queue_fixture::managed_fixture_shape(4),
+        "exact published managed v4"
+    );
+    for round in ["upgrade", "restart"] {
+        drop(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+                .await
+                .unwrap_or_else(|error| panic!("{round} bootstrap: {error}")),
+        );
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
+        assert_eq!(
+            replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
+            queue_fixture::managed_fixture_shape(5),
+            "{round}: exact managed v5 view, marker and guards"
+        );
+        let receipts: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT count(*) AS value FROM subtitle_model_receipts",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("managed receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].value, 1, "{round}: managed receipts kept");
+    }
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exactly() {
@@ -12922,6 +13185,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
         .await
         .expect("unrelated retained row");
     let queries = [
+        queue_fixture::source_extensions_fixture::SOURCE_TAIL_SHAPE,
         queue_fixture::CURRENT_TAIL_FIXTURE_SHAPE_SQL,
         queue_fixture::TRANSLATION_FIXTURE_SHAPE_SQL,
         queue_fixture::MANAGED_FIXTURE_SHAPE_SQL,
@@ -12962,7 +13226,7 @@ async fn replicated_current_empty_subtitle_extensions_rewind_and_bootstrap_exact
             "bootstrap exact published shape"
         );
     }
-    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 3).await;
+    require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
     require_replicated_fixture_marker(&client, "subtitle_translation_schema", 1).await;
     for marker in queue_fixture::CURRENT_TAIL_FIXTURE_MARKERS {
         require_replicated_fixture_marker(&client, marker, 1).await;
@@ -13012,6 +13276,86 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
         .collect()
 }
 
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_tail_drops(
+    client: &Client,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        validated_source_tail_drops, SOURCE_TAIL_SHAPE,
+    };
+    let source_shape: Vec<_> = client
+        .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
+        .await
+        .expect("replicated source and dispatch inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    let mut source_counts = Vec::new();
+    for (_, name, _) in source_shape.iter().filter(|(kind, _, _)| kind == "table") {
+        let query = format!(
+            r#"SELECT count(*) AS value FROM "{}""#,
+            name.replace('"', r#""""#)
+        );
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(query, hiqlite::params!())
+            .await
+            .expect("replicated source data inventory");
+        assert_eq!(rows.len(), 1);
+        source_counts.push((name.clone(), rows[0].value));
+    }
+    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
+    validated_source_tail_drops(&source_shape, &source_counts, true, remove)
+}
+
+/// The v125 scan request sidecar, validated like the source tail: exact
+/// published DDL, its one marker and no request facts. Ordinary open
+/// reinstalls it whole.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_scan_request_drops(client: &Client) -> Vec<String> {
+    use queue_fixture::source_extensions_fixture::{
+        validated_scan_request_drops, SCAN_REQUEST_FIXTURE_SHAPE_SQL,
+    };
+    let shape: Vec<_> = client
+        .query_consistent(
+            SCAN_REQUEST_FIXTURE_SHAPE_SQL.to_owned(),
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated scan request sidecar inventory")
+        .iter_mut()
+        .map(|row| {
+            (
+                row.get::<String>("type"),
+                row.get::<String>("name"),
+                row.get::<String>("sql"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        queue_fixture::source_extensions_fixture::scan_request_fixture_shape(),
+        "exact published scan request sidecar required before inventory"
+    );
+    let marker =
+        require_replicated_fixture_marker(client, "background_scan_request_v2_schema", 1).await;
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM background_scan_request_v2",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated scan request data inventory");
+    assert_eq!(rows.len(), 1);
+    validated_scan_request_drops(&shape, (marker, marker), rows[0].value)
+}
+
 /// A historical queue fixture cannot retain half of the independent managed
 /// extension after removing its background objects. Rewind only an empty,
 /// unactivated current extension, then let ordinary open reinstall it.
@@ -13029,6 +13373,8 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
             .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
             .collect()
     }
+    let scan_request_drops = replicated_scan_request_drops(client).await;
+    let source_drops = replicated_source_tail_drops(client, |_| true).await;
     let handoff_shape = extension_shape(client, queue_fixture::HANDOFF_FIXTURE_SHAPE_SQL).await;
     assert_eq!(
         handoff_shape,
@@ -13083,7 +13429,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
-    require_replicated_fixture_marker(client, "subtitle_managed_schema", 3).await;
+    require_replicated_fixture_marker(client, "subtitle_managed_schema", 5).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
@@ -13119,7 +13465,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     let annotations_drops =
         queue_fixture::validated_empty_annotations_rewind(&annotations_shape, &annotations_counts);
     let rows: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=3) AS value",
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=5) AS value",
         hiqlite::params!(),
     ).await.expect("current managed fixture marker");
     assert_eq!(rows.len(), 1);
@@ -13151,7 +13497,7 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     );
     let managed_shape = extension_shape(client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await;
     let managed_drops =
-        queue_fixture::validated_empty_managed_rewind(&managed_shape, 3, managed_data_count);
+        queue_fixture::validated_empty_managed_rewind(&managed_shape, 5, managed_data_count);
     // The historical queue teardown also removes translation triggers that
     // reference background_jobs. Remove the entire exact empty extension,
     // never leave its marker/tables advertising a partial current shape.
@@ -13191,8 +13537,10 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
     assert_eq!(jobs.len(), 1);
     let translation_drops =
         queue_fixture::validated_empty_translation_rewind(&shape, &counts, jobs[0].value);
-    let mut statements: Vec<_> = tail_drops
+    let mut statements: Vec<_> = scan_request_drops
         .into_iter()
+        .chain(source_drops)
+        .chain(tail_drops)
         .chain(handoff_drops)
         .chain(title_drops)
         .chain(annotations_drops)
@@ -13756,13 +14104,14 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ),
         (
             "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
-             WHERE singleton = 1 AND version = 3",
+             WHERE singleton = 1 AND version = 5",
             1,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
              AND name = 'background_job_required_resources' \
-             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%'",
+             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%' \
+             AND sql LIKE '%library-targeted-v1%'",
             1,
         ),
     ];
@@ -13782,11 +14131,11 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
         }
-        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 3).await;
+        require_replicated_fixture_marker(&client, "subtitle_managed_schema", 5).await;
         assert_eq!(
             replicated_fixture_shape(&client, queue_fixture::MANAGED_FIXTURE_SHAPE_SQL).await,
-            queue_fixture::managed_fixture_shape(3),
-            "{round}: exact current managed v3 view, marker and guards",
+            queue_fixture::managed_fixture_shape(5),
+            "{round}: exact current managed v5 view, marker and guards",
         );
         let views: Vec<SchemaText> = client
             .query_consistent_map(
@@ -17260,7 +17609,7 @@ mod managed_bootstrap_regressions {
             ),
             (
                 "DELETE FROM subtitle_managed_schema",
-                "INSERT INTO subtitle_managed_schema VALUES(1,3)".into(),
+                "INSERT INTO subtitle_managed_schema VALUES(1,5)".into(),
                 "marker missing",
             ),
         ]
@@ -18082,13 +18431,28 @@ impl ContractCluster {
     }
 
     async fn try_start() -> Result<Self, ContractStartError> {
+        Self::try_start_sized(3, 0)
+            .await
+            .map(|(cluster, _)| cluster)
+    }
+
+    /// `voters` child voters, and the specs of every node: the voters first,
+    /// then `spares` further nodes whose ports were reserved in the same
+    /// allocation, for a caller that starts them itself (an in-process
+    /// learner with a local client and a mark).
+    async fn try_start_sized(
+        voters: u64,
+        spares: u64,
+    ) -> Result<(Self, Vec<ContractNodeSpec>), ContractStartError> {
         let root = tempfile::tempdir().expect("three-voter contract root");
-        // Select the complete six-port set while all probe listeners coexist,
+        // Select the complete port set while all probe listeners coexist,
         // so one call cannot contain duplicate port numbers. The listeners
         // must be released before Hiqlite can bind; try_start reports that
         // remaining cross-process race and start() reallocates the whole set.
-        let mut ports = contract_free_ports(6).into_iter();
-        let specs = (1..=3)
+        let mut ports =
+            contract_free_ports(2 * usize::try_from(voters + spares).expect("node count"))
+                .into_iter();
+        let mut specs = (1..=voters + spares)
             .map(|id| ContractNodeSpec {
                 id,
                 raft: format!(
@@ -18101,10 +18465,12 @@ impl ContractCluster {
                 ),
             })
             .collect::<Vec<_>>();
+        let all_specs = specs.clone();
+        specs.truncate(usize::try_from(voters).expect("voter count"));
         let executable = std::env::current_exe().expect("contract test executable");
         let mut starting = Vec::new();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
-        for node_id in 1..=3 {
+        for node_id in 1..=voters {
             let launch = ContractNodeLaunch {
                 node_id,
                 learner_only: false,
@@ -18193,11 +18559,14 @@ impl ContractCluster {
                     .expect("ready contract voter output"),
             });
         }
-        Ok(Self {
-            addresses: specs.into_iter().map(|node| node.api).collect(),
-            _root: root,
-            _nodes: nodes,
-        })
+        Ok((
+            Self {
+                addresses: specs.into_iter().map(|node| node.api).collect(),
+                _root: root,
+                _nodes: nodes,
+            },
+            all_specs,
+        ))
     }
 }
 
@@ -18710,6 +19079,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
             "DROP TRIGGER IF EXISTS playback_settings_insert;
              DROP TRIGGER IF EXISTS playback_settings_update;
              DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_insert;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_update;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_delete;
+             DROP TABLE IF EXISTS playback_input_keys_schema;
              DROP TABLE IF EXISTS playback_input_generation;
              ",
         )
@@ -18933,22 +19306,8 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 74 with the current durable tables, including the Library channel
-    // entities, media classifications, channel subject jobs and decisions,
-    // the three DVR tables, the scoped book file grants (SQLite v68), the
-    // replicated candidate-recovery memory (SQLite v96), and the three
-    // continuous-quality tables that travel with media sessions. A
-    // v14 source has no rows for newer tables — each one's `minimum_schema` is
-    // later — but every table is still reported, because the digest inventory
-    // is over what the import *plans*, not over what the source happened to
-    // hold. The subtitle-source ledgers are node-held facts about local files
-    // and are deliberately not imported, so they are not counted here.
-    // 77: main's replicated candidate recovery, plus Jellyfin compatibility's
-    // wire identities, compatibility logins and bounded negotiations
-    // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
-    // v102–v103).
-    // Plus the item ratings and per-person lists (SQLite v113).
-    // Plus the playback handoff codes and tokens (SQLite v115).
+    // The report covers the entire current import plan, including later families
+    // with no rows in v14. SQLite v122 added seven durable source-arbitration tables.
     let mut imported_tables = report
         .tables
         .iter()
@@ -18961,6 +19320,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "analysis_attempts",
             "analysis_lifecycle_counters",
             "analysis_requests",
+            "analysis_source_checkpoints",
             "api_keys",
             "background_artifact_repairs",
             "background_artwork_locations",
@@ -18976,6 +19336,12 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_library_requests",
             "background_predictions",
             "background_provider_budgets",
+            "background_scan_request_v2",
+            "background_source_custody",
+            "background_source_pauses",
+            "background_source_service_epochs",
+            "background_source_service_grants",
+            "background_storage_domain_pending",
             "background_storage_domains",
             "background_transcode_artifacts",
             "cache_consumer_pins",
@@ -18994,6 +19360,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "dvr_rules",
             "file_grants",
             "files",
+            "foreground_source_owners",
             "items",
             "jellyfin_entity_ids",
             "jellyfin_login_tokens",
@@ -19022,6 +19389,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "media_sessions",
             "offline_package_leases",
             "offline_packages",
+            "playback_analysis_suspensions",
             "playback_handoffs",
             "playback_handoffs_tokens",
             "pretranscode_jobs",
@@ -20865,6 +21233,43 @@ async fn sqlite_import_verification_refusals_have_teeth() {
         .contains("table settings failed SQLite-to-Hiqlite parity"));
 }
 
+// Interface inventory, not execution evidence: these methods already exist on
+// main but were omitted from the previous name list. Their tests/receipts must
+// establish behavior independently; listing a method never proves a test ran.
+const RECENT_SOURCE_METHODS: &[&str] = &[
+    "analysis_coordination",
+    "analysis_source_phase_current",
+    "attach_dv_title_viewer",
+    "begin_analysis_source_phase",
+    "claim_analysis_coordination",
+    "claim_analysis_source_phase_service",
+    "copy_index_source_attestation",
+    "copy_index_v3_head",
+    "copy_index_v3_healthy_heads",
+    "copy_index_v3_last_blob_holder",
+    "copy_index_v3_locations",
+    "copy_index_v3_quarantine_code",
+    "copy_index_v3_variant",
+    "ensure_copy_index_v3_head",
+    "establish_analysis_coordination",
+    "find_offloaded_episode",
+    "find_offloaded_movie",
+    "finish_analysis_source_phase",
+    "forget_copy_index_v3_blob_holder",
+    "forget_copy_index_v3_location",
+    "library_file_paths_under",
+    "list_top_items_filtered",
+    "offloaded_leaf_counts",
+    "predecessor_analysis_coordination_with_prefix",
+    "publish_copy_index_v3",
+    "put_copy_index_v3_location",
+    "quarantine_copy_index_v3_head",
+    "record_copy_index_source_attestation",
+    "retire_analysis_coordination_claim",
+    "retire_queued_analysis_coordination",
+    "retire_stranded_analysis_coordination",
+];
+
 #[test]
 fn contract_inventory_matches_every_store_method() {
     let store_source = include_str!("../src/store/mod.rs")
@@ -20917,6 +21322,7 @@ fn contract_inventory_matches_every_store_method() {
         MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
         METRICS_METHODS,
+        RECENT_SOURCE_METHODS,
     ]
     .into_iter()
     .flatten()
@@ -21001,7 +21407,7 @@ fn contract_inventory_matches_every_store_method() {
     // Shared queue replaces legacy execution and adds 20 net Store methods.
     // E0 adds the catalogue/queue dual-owner binding.
     // Three library admission/query/completion operations preserve each caller.
-    // +2: replicated root-domain observation and atomic replacement.
+    // +4: replicated root-domain observation plus pending save, apply, and state.
     // E1 adds a bounded named-settings snapshot for playback preferences.
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
@@ -21061,7 +21467,20 @@ fn contract_inventory_matches_every_store_method() {
     // +5: source-revision title demand/readiness, binding, fenced publication
     // and same-node probe priority, explicitly listed in BACKGROUND_JOB_METHODS.
     // +3: source-fenced FEL verdict write, requalification and verdict counts.
-    assert_eq!(declared.len(), 517, "review the Store method count");
+    // 27 foreground/background source custody, service, and checkpoint methods,
+    // plus library turn readiness and recent job completions.
+    // The recovery sweep checks current authority and settlement in the writer.
+    // +6: the contract v2 scan request sidecar methods in
+    // BACKGROUND_JOB_METHODS (pipeline v2 T1).
+    // +1: `create_library_with_scan_interval` in LIBRARY_METHODS (T5).
+    // +4: main's analysis_completions_executed_by, analysis_source_admission,
+    // media_session_request_progress and prometheus_store_snapshot_with, which
+    // main declared (551) without naming them here; named above.
+    // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
+    // exercised by the source-fenced DV title-job contracts.
+    // Current main declares 591 distinct methods; save/apply/state replace
+    // one storage-domain method, adding two names without hiding existing APIs.
+    assert_eq!(declared.len(), 593, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -21307,6 +21726,86 @@ async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
                 .expect("unknown source")
                 .is_none(),
             "{backend}"
+        );
+    })
+    .await;
+}
+
+/// D3t: the planning binding covers every planning key, on both stores. A
+/// write (insert, update, delete) to every key the planning snapshot reads and
+/// to every key of the extension moves the generation, as does a
+/// representative of each glob family; a job key does not. Before the
+/// extension `cache.max_gb`, `vod.output_preparation`, `vod.rolling_retention`,
+/// the two cluster switches and `subtitles.stored_sources` moved nothing.
+#[tokio::test]
+async fn every_planning_key_write_moves_the_playback_input_generation() {
+    for_each_strandable_backend(|store, backend, raw| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "binding".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/binding".into()],
+                anime: false,
+            })
+            .await
+            .expect("binding library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "binding".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("binding item");
+        let file = store
+            .upsert_file(item, "/binding/movie.mkv", 100, 42, &ProbeResult::default())
+            .await
+            .expect("binding file");
+        let generation = || async {
+            store
+                .playback_planning_snapshot(file, &[])
+                .await
+                .expect("binding snapshot")
+                .expect("known source")
+                .generation
+        };
+        // Every key the planning snapshot reads, every extension key, and a
+        // representative of each glob family (a `plurxd` test pins the first
+        // list equal to `QUALITY_PLANNING_KEYS`).
+        let mut bound = plurx_core::store::playback_input_keys::PLAYBACK_PLANNING_KEYS.to_vec();
+        bound.extend(plurx_core::store::playback_input_keys::PLAYBACK_INPUT_EXTRA_KEYS);
+        bound.extend(["playback.binding_fixture", "transcode.binding_fixture"]);
+        bound.sort_unstable();
+        bound.dedup();
+        for key in bound {
+            let before = generation().await;
+            store.put_setting(key, "one").await.expect("insert");
+            let inserted = generation().await;
+            assert!(inserted > before, "{backend}: insert {key}");
+            store.put_setting(key, "two").await.expect("update");
+            let updated = generation().await;
+            assert!(updated > inserted, "{backend}: update {key}");
+            raw.delete_setting(key).await;
+            assert!(generation().await > updated, "{backend}: delete {key}");
+        }
+        let before = generation().await;
+        store
+            .put_setting("jobs.binding_fixture", "one")
+            .await
+            .expect("job insert");
+        store
+            .put_setting("jobs.binding_fixture", "two")
+            .await
+            .expect("job update");
+        raw.delete_setting("jobs.binding_fixture").await;
+        assert_eq!(
+            generation().await,
+            before,
+            "{backend}: job keys do not move planning"
         );
     })
     .await;
@@ -24726,7 +25225,9 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     11,
                     1011,
                     true,
-                    false
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("busy claim")
@@ -24774,7 +25275,9 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     13,
                     1013,
                     true,
-                    false
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("wrong engine")
@@ -24789,6 +25292,8 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                 1014,
                 true,
                 false,
+                false,
+                &[],
             )
             .await
             .expect("viewer claim")
@@ -24815,7 +25320,9 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     120013,
                     121013,
                     true,
-                    false
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("expired viewer claim")
@@ -24830,12 +25337,856 @@ async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintena
                     120014,
                     121014,
                     false,
-                    false
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("idle maintenance claim")
                 .is_some(),
             "{backend}: idle maintenance still runs"
+        );
+    })
+    .await;
+}
+
+/// C1: an idle node takes another node's fragment-index request for its own
+/// engine -- after its own rows, never for a different engine, never for a
+/// target membership removed -- and the work keeps the requester's target:
+/// the executor builds, delivery hydrates the requester, and settlement
+/// counts the target-verified completion against the executor.
+#[tokio::test]
+async fn an_idle_node_claims_another_nodes_fragment_request_for_its_engine() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "cross-node-analysis").await;
+        let request = |id: &str, target: &str, engine: &str, created: i64| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: engine.into(),
+            video_identity: String::new(),
+            requested_generation: format!("{id}-generation"),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: target.into(),
+            not_before_ms: created,
+            created_at_ms: created,
+        };
+        for row in [
+            request("serving-row", "serving-node", "shared-engine", 10),
+            request("own-row", "idle-node", "shared-engine", 20),
+            request("gone-row", "gone-node", "shared-engine", 5),
+            request("other-engine-row", "serving-node", "other-engine", 6),
+        ] {
+            store
+                .enqueue_analysis_request(&row)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {}: {error}", row.request_id));
+        }
+        store
+            .put_setting("internal.cluster_job_owner_removed.gone-node", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: mark removed: {error}"));
+        let claim = |node: &'static str, engine: &'static str, at: i64, cross_node: bool| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .claim_analysis_request_for_capacity(
+                        node,
+                        Some(engine),
+                        at,
+                        at + 1_000,
+                        false,
+                        false,
+                        cross_node,
+                        &[],
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: claim at {at}: {error}"))
+            }
+        };
+
+        // Its own row first, though the other node's is older.
+        let own = claim("idle-node", "shared-engine", 30, true)
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the idle node's own row"));
+        assert_eq!(own.request_id, "own-row", "{backend}: own rows first");
+        assert!(store
+            .fail_analysis_request(
+                &own.request_id,
+                "idle-node",
+                own.fence,
+                "admin_cancelled",
+                31
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle own row: {error}")));
+
+        // After its lease (the reservation outlives the failure), a node
+        // that is not idle takes nothing it was not asked to do...
+        assert!(
+            claim("idle-node", "shared-engine", 2_000, false)
+                .await
+                .is_none(),
+            "{backend}: a serving node claims only its own rows"
+        );
+        // ...an idle one takes nothing for another engine...
+        assert!(
+            claim("idle-node", "unknown-engine", 2_001, true)
+                .await
+                .is_none(),
+            "{backend}: never another engine's request"
+        );
+        // ...and the other live node's row for its own engine.
+        let taken = claim("idle-node", "shared-engine", 2_002, true)
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the serving node's row"));
+        assert_eq!(
+            taken.request_id, "serving-row",
+            "{backend}: not the removed target's"
+        );
+        assert_eq!(taken.owner_node_id, "idle-node", "{backend}");
+        assert_eq!(
+            taken.target_node_id, "serving-node",
+            "{backend}: the requester keeps it"
+        );
+
+        // Submission accepts an executor that is not the target.
+        let source_sha256 = "c1".repeat(32);
+        let pipeline_sha256 = "d1".repeat(32);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("cross-node cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            target_node_id: "serving-node".into(),
+            not_before_ms: 2_003,
+            created_at_ms: 2_003,
+        };
+        assert!(
+            store
+                .submit_fragment_index_analysis(&taken, &job, 2_003)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: submit: {error}")),
+            "{backend}: the executor submits the requester's job"
+        );
+        assert!(
+            claim("idle-node", "shared-engine", 2_004, true)
+                .await
+                .is_none(),
+            "{backend}: nothing left that this engine may do"
+        );
+
+        // The executor builds it; delivery hydrates the requester.
+        let built = store
+            .fixture_claim_cluster_fragment_index("idle-node", &[], 2_010, 3_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: build claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the executor may build the job"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            blob_sha256: "e1".repeat(32),
+            bytes: 4_096,
+            built_by_node_id: "idle-node".into(),
+            built_at_ms: 2_020,
+        };
+        let location = |node: &str, at: i64| ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: node.into(),
+            bytes: 4_096,
+            verified_at_ms: at,
+            last_seen_at_ms: at,
+        };
+        assert!(store
+            .fixture_complete_cluster_fragment_index(
+                &built,
+                &artifact,
+                &location("idle-node", 2_020),
+                2_020
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish: {error}")));
+        store
+            .settle_analysis_requests(2_025)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: early settle: {error}"));
+        assert_ne!(
+            store
+                .analysis_request("serving-row")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "ready",
+            "{backend}: not ready until the target holds it"
+        );
+        let hydrating = store
+            .fixture_claim_cluster_fragment_index("serving-node", &[], 2_030, 3_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: hydration claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: delivery to the requester"));
+        assert_eq!(hydrating.target_node_id, "serving-node", "{backend}");
+        assert!(store
+            .fixture_complete_cluster_fragment_index_by_hydration(
+                &hydrating,
+                &artifact,
+                &location("serving-node", 2_040),
+                2_040,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: hydrate: {error}")));
+        store
+            .settle_analysis_requests(2_050)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle: {error}"));
+        assert_eq!(
+            store
+                .analysis_request("serving-row")
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "ready",
+            "{backend}: target-verified"
+        );
+        for (node, completed) in [("idle-node", 1), ("serving-node", 0)] {
+            assert_eq!(
+                store
+                    .analysis_completions_executed_by(node, 0)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: completions: {error}")),
+                completed,
+                "{backend}: {node} executed {completed}"
+            );
+        }
+        assert_eq!(
+            store
+                .analysis_completions_executed_by("idle-node", 2_051)
+                .await
+                .expect("since"),
+            0,
+            "{backend}: only completions settled since the given time"
+        );
+    })
+    .await;
+}
+
+/// Review 2 of C1 (S1, B1): a foreign row a viewer is waiting on outranks
+/// this node's own background rows, and a foreign row naming a copy-video
+/// identity this executor cannot emit is never claimed by it -- it stays
+/// queued for its own target, which still claims it.
+#[tokio::test]
+async fn a_waited_foreign_row_comes_first_and_an_unemittable_identity_stays_queued() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, own_file) = seed_file(&store, "ranked-own").await;
+        let (_, waited_file) = seed_file(&store, "ranked-waited").await;
+        let (_, excluded_file) = seed_file(&store, "ranked-excluded").await;
+        let request = |id: &str, file_id: i64, target: &str, identity: &str, created: i64| {
+            NewAnalysisRequest {
+                request_id: id.into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "ranked-engine".into(),
+                video_identity: identity.into(),
+                requested_generation: format!("{id}-generation"),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: target.into(),
+                not_before_ms: created,
+                created_at_ms: created,
+            }
+        };
+        let mut waited = None;
+        for row in [
+            request("own-background", own_file, "idle-node", "own-identity", 10),
+            request(
+                "foreign-waited",
+                waited_file,
+                "serving-node",
+                "waited-identity",
+                20,
+            ),
+            request(
+                "foreign-excluded",
+                excluded_file,
+                "serving-node",
+                "no-dovi-here",
+                5,
+            ),
+        ] {
+            let enqueued = store
+                .enqueue_analysis_request(&row)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {}: {error}", row.request_id));
+            if enqueued.request_id == "foreign-waited" {
+                waited = Some(enqueued);
+            }
+        }
+        let waited = waited.expect("the waited row");
+        assert!(
+            store
+                .join_analysis_viewer(AnalysisViewerInterest {
+                    analysis_request_id: waited.request_id.clone(),
+                    requested_generation: waited.requested_generation.clone(),
+                    pipeline_version: waited.pipeline_version.clone(),
+                    video_identity: waited.video_identity.clone(),
+                    target_node_id: waited.target_node_id.clone(),
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id,
+                    },
+                    playback_id: "ranked-viewer".into(),
+                    now_ms: 25,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join viewer: {error}")),
+            "{backend}"
+        );
+        let excluded = vec!["no-dovi-here".to_owned()];
+        let claim = |node: &'static str, at: i64, cross_node: bool, excluded: Vec<String>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .claim_analysis_request_for_capacity(
+                        node,
+                        Some("ranked-engine"),
+                        at,
+                        at + 1_000,
+                        false,
+                        false,
+                        cross_node,
+                        &excluded,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: claim at {at}: {error}"))
+            }
+        };
+        let settle = |claimed: plurx_core::store::AnalysisRequest, node: &'static str, at: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                assert!(store
+                    .fail_analysis_request(
+                        &claimed.request_id,
+                        node,
+                        claimed.fence,
+                        "admin_cancelled",
+                        at
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: settle: {error}")));
+            }
+        };
+
+        // The viewer's row first, though it is another node's and younger
+        // than this node's own background row.
+        let first = claim("idle-node", 30, true, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: a claimable row"));
+        assert_eq!(
+            first.request_id, "foreign-waited",
+            "{backend}: a waiting viewer outranks own background work"
+        );
+        settle(first, "idle-node", 31).await;
+        // Then its own row (after the first claim's reservation lapses).
+        let second = claim("idle-node", 2_000, true, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: its own row"));
+        assert_eq!(second.request_id, "own-background", "{backend}");
+        settle(second, "idle-node", 2_001).await;
+        // The oldest foreign row names an identity this executor cannot
+        // emit: not this node's to take, however often it asks.
+        for at in [4_000, 4_001] {
+            assert!(
+                claim("idle-node", at, true, excluded.clone())
+                    .await
+                    .is_none(),
+                "{backend}: an excluded identity is not re-claimed at {at}"
+            );
+        }
+        let row = store
+            .analysis_request("foreign-excluded")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(
+            (row.state.as_str(), row.fence, row.attempts),
+            ("queued", 0, 0),
+            "{backend}: untouched"
+        );
+        // Its target is not excluded from its own row.
+        let own = claim("serving-node", 4_002, false, excluded.clone())
+            .await
+            .unwrap_or_else(|| panic!("{backend}: the target claims its own row"));
+        assert_eq!(own.request_id, "foreign-excluded", "{backend}");
+
+        let too_many = (0..=plurx_core::store::MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES)
+            .map(|n| format!("identity-{n}"))
+            .collect::<Vec<_>>();
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "idle-node",
+                    Some("ranked-engine"),
+                    6_000,
+                    7_000,
+                    false,
+                    false,
+                    true,
+                    &too_many,
+                )
+                .await
+                .is_err(),
+            "{backend}: the exclusion list is bounded"
+        );
+    })
+    .await;
+}
+
+/// Review 2 of G1 (S2): what "index now" says about a file comes from that
+/// file's own requests -- an active one when there is any, else the newest --
+/// however deep the queue is.
+#[tokio::test]
+async fn fragment_index_requests_for_files_answers_per_file() {
+    for_each_backend(|store, backend| async move {
+        let (_, active_file) = seed_file(&store, "lookup-active").await;
+        let (_, failed_file) = seed_file(&store, "lookup-failed").await;
+        let (_, empty_file) = seed_file(&store, "lookup-empty").await;
+        let request = |id: &str, file_id: i64, generation: &str, created: i64| NewAnalysisRequest {
+            request_id: id.into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "lookup-engine".into(),
+            video_identity: String::new(),
+            requested_generation: generation.into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: "lookup-node".into(),
+            not_before_ms: created,
+            created_at_ms: created,
+        };
+        store
+            .enqueue_analysis_request(&request("failed-old", failed_file, "lookup-g1", 10))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let claimed = store
+            .claim_analysis_request("lookup-node", 11, 1_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: claimable"));
+        assert!(store
+            .fail_analysis_request(
+                &claimed.request_id,
+                "lookup-node",
+                claimed.fence,
+                "attempt_limit",
+                12
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail: {error}")));
+        store
+            .enqueue_analysis_request(&request("active", active_file, "lookup-g2", 20))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let rows = store
+            .fragment_index_requests_for_files(&[active_file, failed_file, empty_file])
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: lookup: {error}"));
+        let by_file = rows
+            .iter()
+            .map(|row| (row.file_id, (row.request_id.as_str(), row.state.as_str())))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            by_file.get(&active_file),
+            Some(&("active", "queued")),
+            "{backend}"
+        );
+        assert_eq!(
+            by_file.get(&failed_file),
+            Some(&("failed-old", "failed")),
+            "{backend}"
+        );
+        assert!(
+            !by_file.contains_key(&empty_file),
+            "{backend}: no request, no row"
+        );
+        assert!(store
+            .fragment_index_requests_for_files(&[])
+            .await
+            .expect("empty")
+            .is_empty());
+        assert!(store.fragment_index_requests_for_files(&[0]).await.is_err());
+    })
+    .await;
+}
+
+/// C1: the claim's source-capacity rule, asked again of the claimed request,
+/// leaves out what the request itself holds, and yields to a foreground
+/// stream that arrived after the claim; the yield goes back uncharged.
+#[tokio::test]
+async fn analysis_source_admission_carries_the_claim_decision_through_the_read() {
+    use plurx_core::store::background_jobs::AnalysisSourceAdmission;
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-admission").await;
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "admission-row".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "admission-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "admission-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "node-a".into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let claimed = store
+            .claim_analysis_request_for_capacity(
+                "node-a",
+                Some("admission-engine"),
+                10,
+                60_010,
+                false,
+                false,
+                false,
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an idle domain admits the claim"));
+        let admission = |fence: i64, at: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .analysis_source_admission("admission-row", "node-a", fence, at)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: admission at {at}: {error}"))
+            }
+        };
+        assert_eq!(
+            admission(claimed.fence, 11).await,
+            AnalysisSourceAdmission::Admit,
+            "{backend}: its own reservation is not a competing reader"
+        );
+        assert_eq!(
+            admission(claimed.fence + 1, 11).await,
+            AnalysisSourceAdmission::NotOwned,
+            "{backend}: another fence is not this claim"
+        );
+        let foreground = store
+            .register_foreground_source(
+                ForegroundSourceOwner {
+                    owner_id: uuid::Uuid::new_v4().to_string(),
+                    lifetime_id: "admission-gesture".into(),
+                    session_incarnation: uuid::Uuid::new_v4().to_string(),
+                    producer_attempt: "producer-1".into(),
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    source_generation: "admission-source".into(),
+                    policy: ForegroundSourcePolicy::Rolling,
+                },
+                12,
+                20_012,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: foreground: {error}"));
+        assert!(foreground.is_some(), "{backend}: playback takes the source");
+        assert_eq!(
+            admission(claimed.fence, 13).await,
+            AnalysisSourceAdmission::Yield("foreground_source"),
+            "{backend}: a foreground permission after the claim stops the read"
+        );
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 14, 15, false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: yield: {error}")));
+        let row = store
+            .analysis_request("admission-row")
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.state, "queued", "{backend}");
+        assert_eq!(row.attempts, 0, "{backend}: the yield is uncharged");
+        assert_eq!(row.last_error_code, "foreground_preempted", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim() {
+    use plurx_core::store::analysis_coordination::AnalysisCoordinationSource;
+    use plurx_core::store::background_jobs_resources::{
+        ForegroundSourceOwner, ForegroundSourcePolicy, StorageDomainApply, StorageDomainMapping,
+    };
+
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-domain-phase").await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file")
+            .expect("analysis file");
+        let library_id = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("analysis item")
+            .library_id;
+        let library = store
+            .get_library(library_id)
+            .await
+            .expect("library")
+            .expect("analysis library");
+        let root_path = library.paths[0].display().to_string();
+        let source = AnalysisCoordinationSource {
+            file_id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            origin_node_id: "analysis-node".into(),
+            object_version: "object-version-1".into(),
+            video_identity: "0123456789abcdef".into(),
+            contract_version: 1,
+            requested_generation: "analysis-domain-generation".into(),
+        };
+        let request_id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: request_id.clone(),
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                component: "fragment_index".into(),
+                pipeline_version: source.pipeline_marker(),
+                video_identity: source.video_marker(),
+                requested_generation: source.requested_generation.clone(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: source.origin_node_id.clone(),
+                not_before_ms: 1_000,
+                created_at_ms: 1_000,
+            })
+            .await
+            .expect("enqueue coordinator request");
+        assert!(
+            store
+                .establish_analysis_coordination(&request_id, source.clone(), 1_000)
+                .await
+                .expect("establish coordinator")
+                .is_some(),
+            "{backend}"
+        );
+        let claim = store
+            .claim_analysis_coordination(
+                &request_id,
+                source.clone(),
+                &source.origin_node_id,
+                0,
+                1_001,
+                20_000,
+            )
+            .await
+            .expect("claim coordinator")
+            .expect("claimed coordinator");
+
+        // The metadata claim owns no physical read and therefore does not block applying its new domain.
+        let revision = store
+            .save_storage_domains(
+                vec![StorageDomainMapping {
+                    library_id,
+                    root_path: root_path.clone(),
+                    domain_id: "analysis-nas".into(),
+                }],
+                None,
+                1_002,
+            )
+            .await
+            .expect("save root mapping")
+            .expect("valid root");
+        assert!(
+            matches!(store.apply_pending_storage_domains(1_002).await.expect("apply root mapping"),
+            StorageDomainApply::Applied { revision: applied } if applied == revision),
+            "{backend}"
+        );
+
+        // Two live foreground readers make the new named domain unavailable for a physical phase.
+        let mut blockers = Vec::new();
+        let mut final_mappings = vec![StorageDomainMapping {
+            library_id,
+            root_path,
+            domain_id: "analysis-nas".into(),
+        }];
+        for index in 0..2 {
+            let (_, blocked_file_id) =
+                seed_file(&store, &format!("analysis-domain-blocker-{index}")).await;
+            let blocked_file = store
+                .get_file(blocked_file_id)
+                .await
+                .expect("blocker file")
+                .expect("blocker");
+            let blocked_library_id = store
+                .get_item(blocked_file.item_id)
+                .await
+                .expect("blocker item")
+                .expect("item")
+                .library_id;
+            let blocked_library = store
+                .get_library(blocked_library_id)
+                .await
+                .expect("blocker library")
+                .expect("library");
+            final_mappings.push(StorageDomainMapping {
+                library_id: blocked_library_id,
+                root_path: blocked_library.paths[0].display().to_string(),
+                domain_id: "analysis-nas".into(),
+            });
+            blockers.push((blocked_file_id, blocked_file));
+        }
+        store
+            .save_storage_domains(final_mappings, None, 1_003)
+            .await
+            .expect("save shared domain")
+            .expect("valid roots");
+        assert!(
+            matches!(
+                store
+                    .apply_pending_storage_domains(1_003)
+                    .await
+                    .expect("apply shared domain"),
+                StorageDomainApply::Applied { .. }
+            ),
+            "{backend}"
+        );
+        let mut foreground = Vec::new();
+        for (blocked_file_id, blocked_file) in blockers {
+            let token = store
+                .register_foreground_source(
+                    ForegroundSourceOwner {
+                        owner_id: uuid::Uuid::new_v4().to_string(),
+                        lifetime_id: "analysis-domain-blocker".into(),
+                        session_incarnation: uuid::Uuid::new_v4().to_string(),
+                        producer_attempt: "producer-1".into(),
+                        node_id: "playback-node".into(),
+                        boot_id: uuid::Uuid::new_v4().to_string(),
+                        file_id: blocked_file_id,
+                        source_size: blocked_file.size,
+                        source_mtime: blocked_file.mtime,
+                        source_generation: "analysis-blocker-source".into(),
+                        policy: ForegroundSourcePolicy::Rolling,
+                    },
+                    1_004,
+                    20_000,
+                )
+                .await
+                .expect("register blocker")
+                .expect("blocker owner");
+            foreground.push(token);
+        }
+
+        let blocked = store
+            .begin_analysis_source_phase(
+                claim.clone(),
+                source.clone(),
+                0,
+                uuid::Uuid::new_v4().to_string(),
+                1_005,
+            )
+            .await
+            .expect("capacity refusal is retryable");
+        assert!(
+            blocked.is_none(),
+            "{backend}: foreground capacity must refuse the physical phase"
+        );
+        let request = store
+            .analysis_request(&request_id)
+            .await
+            .expect("read request")
+            .expect("request remains");
+        assert_eq!(
+            request.state, "running",
+            "{backend}: capacity refusal must not lose the analysis claim"
+        );
+        assert_eq!(request.owner_node_id, claim.node_id, "{backend}");
+        assert_eq!(request.fence, claim.fence, "{backend}");
+        let role = store
+            .analysis_coordination(&request_id)
+            .await
+            .expect("read coordinator")
+            .expect("role");
+        assert_eq!(
+            role.phase_sequence, 0,
+            "{backend}: refused phase does not advance sequence"
+        );
+        assert!(
+            role.active_custody_id.is_none(),
+            "{backend}: refusal creates no custody"
+        );
+
+        for token in foreground {
+            assert!(
+                store
+                    .release_foreground_source(token, 1_006)
+                    .await
+                    .expect("release blocker"),
+                "{backend}"
+            );
+        }
+        let phase = store
+            .begin_analysis_source_phase(
+                claim.clone(),
+                source.clone(),
+                0,
+                uuid::Uuid::new_v4().to_string(),
+                1_007,
+            )
+            .await
+            .expect("retry physical phase")
+            .expect("retry succeeds");
+        assert_eq!(
+            phase.claim, claim,
+            "{backend}: retry uses the same coordinator claim"
+        );
+        let holders = store
+            .source_io_holders(1_007)
+            .await
+            .expect("new domain holder");
+        assert!(
+            holders.iter().any(|holder| holder.kind == "analysis_source"
+                && holder.work_id == request_id
+                && holder.resource_key == "source_io:analysis-nas"),
+            "{backend}: physical phase reserves the applied named domain"
         );
     })
     .await;
@@ -24883,6 +26234,8 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
                 1011,
                 false,
                 true,
+                false,
+                &[],
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
@@ -24952,7 +26305,16 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
             .unwrap_or_else(|error| panic!("{backend}: untargeted: {error}"));
         assert!(
             store
-                .claim_analysis_request_for_capacity("lonely-node", None, 2_000, 3_000, false, true)
+                .claim_analysis_request_for_capacity(
+                    "lonely-node",
+                    None,
+                    2_000,
+                    3_000,
+                    false,
+                    true,
+                    false,
+                    &[]
+                )
                 .await
                 .expect("targeted-only claim")
                 .is_none(),
@@ -24966,7 +26328,9 @@ async fn removing_a_node_retires_only_its_active_analysis_requests() {
                     2_001,
                     3_001,
                     false,
-                    false
+                    false,
+                    false,
+                    &[]
                 )
                 .await
                 .expect("claim")
@@ -25591,8 +26955,12 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry metrics worker: {error}")));
+        // `now` is Unix seconds and the retry wait ends at 14 ms, so only a
+        // sample taken at second 0 is still inside it. Before the units fix
+        // the depth gauge compared milliseconds to seconds and filed every
+        // queued row as `retry_wait`.
         let retrying = store
-            .prometheus_store_snapshot("analysis-node", 13)
+            .prometheus_store_snapshot("analysis-node", 0)
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry metrics: {error}"));
         assert_eq!(
@@ -25916,6 +27284,325 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
     .await;
 }
 
+/// The pre-worker half of the queue health and the depth gauge read the same
+/// rows: due requests split into eligible and incompatible by the live engine
+/// set, delayed ones are `waiting`, and the gauge files them as `queued` and
+/// `retry_wait` with real ages. On 2026-11-07 the fleet held 3,878 due
+/// requests under retired digests and read `idle`, and the gauge filed every
+/// queued row as `retry_wait` with age 0 (milliseconds compared to seconds).
+#[tokio::test]
+async fn pre_worker_requests_are_split_by_live_engine_and_counted_once() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let live = "a".repeat(64);
+        let retired = "b".repeat(64);
+        let live_set = plurx_core::store::LiveAnalysisEngines {
+            engines: [("split-node".to_owned(), live.clone())].into(),
+            members: None,
+        };
+        let mut seeded = Vec::new();
+        for (name, engine, not_before_ms) in [
+            ("due-live", &live, NOW_MS - 60_000),
+            ("due-retired", &retired, NOW_MS - 60_000),
+            ("waiting-live", &live, NOW_MS + 60_000),
+        ] {
+            let (_, file_id) = seed_file(&store, &format!("split-{name}")).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("split-{name}"),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: engine.clone(),
+                video_identity: String::new(),
+                requested_generation: format!("split-{name}-generation"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: "split-node".to_owned(),
+                not_before_ms,
+                created_at_ms: NOW_MS - 120_000,
+            };
+            // Through the runnable-work cap with a known live set, so both
+            // backends execute that statement and not only its source text.
+            store
+                .enqueue_analysis_request_with(&request, Some(&live_set))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}"));
+            seeded.push(request);
+        }
+
+        let split = store
+            .prometheus_store_snapshot_with("split-node", NOW_SECS, Some(&live_set))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: split snapshot: {error}"))
+            .analysis;
+        assert_eq!(
+            split.health.eligible, 1,
+            "{backend}: one due request runs on a live engine"
+        );
+        assert_eq!(
+            split.health.claimable, 1,
+            "{backend}: claimable is eligible"
+        );
+        assert_eq!(
+            split.health.incompatible, 1,
+            "{backend}: one due request is stranded"
+        );
+        assert_eq!(
+            split.health.waiting, 1,
+            "{backend}: one request is inside its wait"
+        );
+        assert_eq!(
+            split.health.oldest_queued_at_ms,
+            NOW_MS - 120_000,
+            "{backend}"
+        );
+        let queued = split.queue_depth
+            [analysis_queue_slot("fragment_index", "queued", "normal", "background")];
+        let retry_wait = split.queue_depth
+            [analysis_queue_slot("fragment_index", "retry_wait", "normal", "background")];
+        assert_eq!(
+            queued,
+            split.health.eligible + split.health.incompatible,
+            "{backend}: the gauge's due rows are the health's due rows"
+        );
+        assert_eq!(
+            retry_wait, split.health.waiting,
+            "{backend}: the same delayed rows"
+        );
+        assert_eq!(
+            split.queue_oldest_age_seconds
+                [analysis_queue_slot("fragment_index", "queued", "normal", "background")],
+            120,
+            "{backend}: ages are seconds of real time"
+        );
+        assert_eq!(
+            plurx_core::store::analysis_queue_verdict(split.health, 0, 0, 0),
+            plurx_core::store::AnalysisQueueVerdict::Degraded,
+            "{backend}: a backlog is not idle"
+        );
+
+        // An unknown live set strands nothing: every due request is eligible.
+        let unknown = store
+            .prometheus_store_snapshot("split-node", NOW_SECS)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unknown snapshot: {error}"))
+            .analysis
+            .health;
+        assert_eq!(
+            (unknown.eligible, unknown.incompatible),
+            (2, 0),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+/// One stranded rule for the health, the enqueue caps and the reconciler
+/// (review S7/S8). Due pre-worker requests split into `eligible` and
+/// `incompatible` exactly as `LiveAnalysisEngines::is_stranded` calls them —
+/// a row another live worker can claim (the claim's cross-node arm) is not
+/// stranded whatever its own target runs — and a removed target's row is
+/// stranded in the Store and never reconciled. Both enqueues run their
+/// live-set cap on both backends, and two reconcilers racing on one row
+/// commit exactly one successor.
+#[tokio::test]
+async fn one_stranded_rule_splits_the_health_and_refuses_racing_reconcilers() {
+    for_each_backend(|store, backend| async move {
+        const NOW_MS: i64 = 1_700_000_000_000;
+        const NOW_SECS: i64 = NOW_MS / 1_000;
+        let (live, busy, retired) = ("a".repeat(64), "c".repeat(64), "b".repeat(64));
+        let inventory = plurx_core::store::LiveAnalysisEngines {
+            engines: [
+                ("rule-live".to_owned(), live.clone()),
+                ("rule-busy".to_owned(), busy.clone()),
+            ]
+            .into(),
+            members: Some(
+                ["rule-live", "rule-busy", "rule-silent"]
+                    .map(str::to_owned)
+                    .into(),
+            ),
+        };
+        let mut rows = Vec::new();
+        for (name, engine, target) in [
+            ("runnable", &live, "rule-live"),
+            ("cross-node", &live, "rule-busy"),
+            ("engine-changed", &retired, "rule-live"),
+            ("absent", &retired, "rule-gone"),
+            ("silent", &retired, "rule-silent"),
+        ] {
+            let (_, file_id) = seed_file(&store, &format!("rule-{name}")).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("rule-{name}"),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: engine.clone(),
+                video_identity: String::new(),
+                requested_generation: format!("rule-{name}-generation"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: target.to_owned(),
+                not_before_ms: NOW_MS - 60_000,
+                created_at_ms: NOW_MS - 120_000,
+            };
+            rows.push(
+                store
+                    .enqueue_analysis_request_with(&request, Some(&inventory))
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: enqueue {name}: {error}")),
+            );
+        }
+        let stranded = rows.iter().filter(|row| inventory.is_stranded(row)).count() as i64;
+        assert_eq!(stranded, 3, "{backend}: engine-changed, absent and silent");
+        let remedies = rows
+            .iter()
+            .map(|row| inventory.remedy(row))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remedies,
+            vec![
+                None,
+                None,
+                Some(plurx_core::store::StrandedRemedy::TargetEngine(
+                    live.clone()
+                )),
+                Some(plurx_core::store::StrandedRemedy::TargetAbsent),
+                Some(plurx_core::store::StrandedRemedy::TargetSilent),
+            ],
+            "{backend}"
+        );
+        let health = |at| {
+            let store = Arc::clone(&store);
+            let inventory = inventory.clone();
+            async move {
+                store
+                    .prometheus_store_snapshot_with("rule-live", at, Some(&inventory))
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: snapshot: {error}"))
+                    .analysis
+                    .health
+            }
+        };
+        let split = health(NOW_SECS).await;
+        assert_eq!(
+            (split.eligible, split.incompatible),
+            (5 - stranded, stranded),
+            "{backend}: the metric's incompatible is the reconciler's stranded"
+        );
+
+        // A subtitle source runs the same live-set cap.
+        let (_, subtitle_file) = seed_file(&store, "rule-subtitle").await;
+        let subtitle = store
+            .enqueue_or_promote_subtitle_source_with(
+                &subtitle_source_stamp(subtitle_file),
+                "normal",
+                NOW_MS,
+                Some(&inventory),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: subtitle enqueue: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: inside the repair budget"));
+        assert_eq!(subtitle.state, "queued", "{backend}");
+
+        // Two voters re-home the absent target's row, each onto itself, at
+        // once: exactly one successor commits.
+        let absent = rows[3].clone();
+        let replacement = |voter: &str| NewAnalysisRequest {
+            request_id: format!("rule-absent-{voter}"),
+            file_id: absent.file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: live.clone(),
+            video_identity: String::new(),
+            requested_generation: format!("rule-absent-{voter}-generation"),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: voter.to_owned(),
+            not_before_ms: 0,
+            created_at_ms: 0,
+        };
+        let (left, right) = (replacement("rule-live"), replacement("rule-busy"));
+        let (a, b) = tokio::join!(
+            store.reconcile_analysis_request(&absent, &left, NOW_MS),
+            store.reconcile_analysis_request(&absent, &right, NOW_MS),
+        );
+        let (a, b) = (
+            a.unwrap_or_else(|error| panic!("{backend}: reconcile a: {error}")),
+            b.unwrap_or_else(|error| panic!("{backend}: reconcile b: {error}")),
+        );
+        assert!(
+            a ^ b,
+            "{backend}: exactly one reconciler commits ({a}, {b})"
+        );
+        let read = |id: String| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .analysis_request(&id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {id}: {error}"))
+            }
+        };
+        assert_eq!(
+            read(absent.request_id.clone()).await.map(|row| row.state),
+            Some("cancelled".to_owned()),
+            "{backend}: the predecessor is retired once"
+        );
+        let successors = [left.request_id.clone(), right.request_id.clone()];
+        let mut live_successors = 0;
+        for id in successors {
+            if read(id).await.is_some_and(|row| row.state == "queued") {
+                live_successors += 1;
+            }
+        }
+        assert_eq!(live_successors, 1, "{backend}: one successor, not two");
+
+        // A removed target's row is stranded in the Store, and never
+        // reconciled: removal retires it.
+        store
+            .put_setting("internal.cluster_job_owner_removed.rule-live", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: removal fence: {error}"));
+        let fenced = health(NOW_SECS).await;
+        assert_eq!(
+            fenced.incompatible,
+            // engine-changed and silent as before; runnable now targets a
+            // removed node; absent is cancelled; the winner of the race
+            // targets rule-live (removed) or rule-busy (a live digest).
+            2 + 1 + i64::from(a),
+            "{backend}: a removed target's row is not claimable"
+        );
+        let engine_changed = rows[2].clone();
+        assert!(
+            !store
+                .reconcile_analysis_request(
+                    &engine_changed,
+                    &NewAnalysisRequest {
+                        request_id: "rule-engine-changed-successor".to_owned(),
+                        file_id: engine_changed.file_id,
+                        target_node_id: "rule-live".to_owned(),
+                        pipeline_version: live.clone(),
+                        requested_generation: "rule-engine-changed-successor".to_owned(),
+                        ..replacement("rule-live")
+                    },
+                    NOW_MS,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reconcile fenced: {error}")),
+            "{backend}: a removed target's row is never reconciled"
+        );
+    })
+    .await;
+}
+
 /// The four figures the verdict divides by, read off a queue driven through
 /// the states they describe.
 ///
@@ -25978,6 +27665,17 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
         assert_eq!(
             too_early.claimable, 0,
             "{backend}: a job inside its retry wait is not work the queue is refusing"
+        );
+        // ...but it is work: a queue whose whole backlog is backing off is
+        // not idle (review S9 — job-level waits were missing from `waiting`).
+        assert_eq!(
+            too_early.waiting, 1,
+            "{backend}: a job inside its retry wait is waiting"
+        );
+        assert_ne!(
+            plurx_core::store::analysis_queue_verdict(too_early, 0, 0, 0),
+            plurx_core::store::AnalysisQueueVerdict::Idle,
+            "{backend}: a backing-off backlog does not read idle"
         );
 
         let claim = store
@@ -31271,7 +32969,7 @@ async fn media_contract_runs_through_dyn_store() {
         );
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "stale-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "stale-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("reject root"),
             ReconcileOutcome::RefusedRoot { .. }
@@ -31283,7 +32981,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert_eq!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 0)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 0, &[], 0)
                 .await
                 .expect("reject bound"),
             ReconcileOutcome::RefusedPrune {
@@ -31298,7 +32996,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("bounded reconcile"),
             ReconcileOutcome::Applied {
@@ -31821,7 +33519,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
         );
         assert_eq!(
             store
-                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1)
+                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1, &[], 0)
                 .await
                 .expect("reconcile verified conversion"),
             ReconcileOutcome::Applied {

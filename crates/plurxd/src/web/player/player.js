@@ -36,9 +36,11 @@
  * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
  * @property {number|null} deliveredDvProfile
  * @property {any} [effectiveProcessing] the accepted current-generation DV processing report behind HDR10-E, or null
+ * @property {any} [processingSkip] the current-generation optional-upgrade refusal shown as the FEL/RPU skip reason, or null
  * @property {{active:string[],details:{badge:string,active:boolean,text:string}[],requires_effective_processing:boolean}|null} [enhancement] this session's server-computed DV enhancement (FEL / RPU / DYN), or null
  * @property {boolean} [copyHls]           the HLS session copies the video stream
  * @property {boolean} [vod]               the session answered with a VOD (fixed) playlist
+ * @property {boolean} [rangePresentation] the session presents a bounded range of a growing title, so its playlist end is not the title end
  * @property {string|null} [encoder]       the session's encoder, once one reports
  *
  * Position and duration

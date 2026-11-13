@@ -121,6 +121,9 @@ mod create;
 pub use create::*;
 // split: end hls-create
 
+#[path = "hls/start_plan.rs"]
+pub(crate) mod start_plan;
+
 // split: begin hls-relay
 #[path = "hls/relay.rs"]
 mod relay;
@@ -148,6 +151,9 @@ pub(crate) use quality_control::*;
 mod preparation;
 pub(in crate::http) use preparation::*;
 // split: end hls-preparation
+
+#[path = "hls/processed_upgrade.rs"]
+pub(crate) mod processed_upgrade;
 
 // split: begin hls-status
 #[path = "hls/status.rs"]
@@ -195,7 +201,7 @@ use subtitle_names::*;
 mod playlist_text;
 use playlist_text::*;
 pub(crate) use playlist_text::{
-    source_native_master, source_native_playlist, source_native_segment,
+    source_native_master, source_native_playlist, source_native_segment_window, source_native_slice,
 };
 // split: end hls-playlist-text
 

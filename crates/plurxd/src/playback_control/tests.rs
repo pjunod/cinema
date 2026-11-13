@@ -6198,7 +6198,9 @@ async fn terminal_commands_claim_due_expiry_before_end_or_authority_fence() {
             RollingTerminalCause::AuthorityFence => handle.authority_fence().await,
             RollingTerminalCause::LeaseExpired
             | RollingTerminalCause::StartupExpired
-            | RollingTerminalCause::PauseExpired => {
+            | RollingTerminalCause::PauseExpired
+            | RollingTerminalCause::Released
+            | RollingTerminalCause::Stopped => {
                 unreachable!()
             }
         }
@@ -17732,4 +17734,150 @@ fn rolling_seek_projection_uses_the_explicit_target_instead_of_the_predecessor_c
         rolling_estimated_position_ms(&demand, Duration::ZERO),
         1_417_211
     );
+}
+
+/// R1: the two lifecycle causes are wire-visible through `status()`, but the
+/// HTTP 410 body keeps an existing durable reason so older clients decode it.
+#[test]
+fn release_and_stop_causes_keep_existing_durable_reasons() {
+    use crate::vodserve::Terminal;
+
+    assert_eq!(
+        [
+            RollingTerminalCause::Released,
+            RollingTerminalCause::Stopped
+        ]
+        .map(RollingTerminalCause::status),
+        ["released", "stopped"]
+    );
+    assert_eq!(
+        RollingTerminalCause::Released.terminal_reason(),
+        Terminal::Deleted
+    );
+    assert_eq!(
+        RollingTerminalCause::Stopped.terminal_reason(),
+        Terminal::AdminStop
+    );
+    assert_eq!(
+        RollingTerminalCause::release_for(Terminal::Deleted),
+        Some(RollingTerminalCause::Released)
+    );
+    assert_eq!(
+        RollingTerminalCause::release_for(Terminal::AdminStop),
+        Some(RollingTerminalCause::Stopped)
+    );
+    for authority in [
+        Terminal::Superseded,
+        Terminal::Revoked,
+        Terminal::Replaced,
+        Terminal::AuthorityFenced,
+    ] {
+        assert_eq!(RollingTerminalCause::release_for(authority), None);
+    }
+    for cause in [
+        RollingTerminalCause::End,
+        RollingTerminalCause::AuthorityFence,
+        RollingTerminalCause::LeaseExpired,
+        RollingTerminalCause::StartupExpired,
+        RollingTerminalCause::PauseExpired,
+        RollingTerminalCause::Released,
+        RollingTerminalCause::Stopped,
+    ] {
+        assert_eq!(
+            RollingTerminalCause::from_projection(cause.projection()),
+            Some(cause)
+        );
+    }
+    let metrics = prometheus();
+    for event in ["released", "stopped"] {
+        for outcome in ["won", "already_terminal"] {
+            assert!(metrics.contains(&format!(
+                "plurx_playback_rolling_terminal_events_total{{event=\"{event}\",outcome=\"{outcome}\"}}"
+            )));
+        }
+    }
+}
+
+/// R1: a release projected on the handle is the actor's first terminal and
+/// keeps its cause; a fence or End that projected first keeps theirs.
+#[tokio::test]
+async fn release_projection_is_the_first_terminal_and_keeps_its_cause() {
+    let released = RollingControlHandle::spawn_for_test("session-start");
+    released.release_unavailable(RollingTerminalCause::Released);
+    assert!(released.is_retired());
+    assert_eq!(
+        released.projected_release(),
+        Some(RollingTerminalCause::Released)
+    );
+    released.fence_unavailable();
+    assert_eq!(
+        released.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::Released),
+        "the actor imports the projected release, not the default fence"
+    );
+    assert_eq!(
+        released.end().await.expect("late end").cause(),
+        RollingTerminalCause::Released
+    );
+
+    let fenced = RollingControlHandle::spawn_for_test("session-start");
+    fenced.fence_unavailable();
+    fenced.release_unavailable(RollingTerminalCause::Stopped);
+    assert_eq!(fenced.projected_release(), None);
+    assert_eq!(
+        fenced.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::AuthorityFence),
+        "a release cannot relabel an earlier serving fence"
+    );
+
+    let ended = RollingControlHandle::spawn_for_test("session-start");
+    assert!(ended.end().await.expect("end").won());
+    ended.release_unavailable(RollingTerminalCause::Released);
+    assert_eq!(ended.projected_release(), None);
+    assert_eq!(
+        ended.snapshot().await.expect("snapshot").terminal,
+        Some(RollingTerminalCause::End)
+    );
+}
+
+#[test]
+fn prepared_timeline_origin_is_signed_but_protocol_bounded() {
+    let session = uuid::Uuid::new_v4().to_string();
+    let playlist = format!("/api/v1/hls/{session}/index.m3u8");
+    let selection = prepared_selection();
+    for origin in [-MAX_MEDIA_ORIGIN_MILLIS, -83, 0, MAX_MEDIA_ORIGIN_MILLIS] {
+        assert!(prepared_payload_is_valid(
+            None, &session, &playlist, origin, &selection
+        ));
+    }
+    for origin in [
+        i64::MIN,
+        -MAX_MEDIA_ORIGIN_MILLIS - 1,
+        MAX_MEDIA_ORIGIN_MILLIS + 1,
+        i64::MAX,
+    ] {
+        assert!(!prepared_payload_is_valid(
+            None, &session, &playlist, origin, &selection
+        ));
+    }
+}
+
+#[test]
+fn committed_timeline_origin_is_signed_without_widening_buffer_positions() {
+    let mut ack = ActionAcknowledgement {
+        action_id: uuid::Uuid::new_v4().to_string(),
+        state: AcknowledgementState::Committed,
+        buffered_through_ms: Some(0),
+        committed_media_origin_ms: Some(-83),
+        first_frame_unix_ms: Some(1_700_000_000_000),
+    };
+    assert!(ack.validate().is_ok());
+    ack.committed_media_origin_ms = Some(MAX_MEDIA_ORIGIN_MILLIS + 1);
+    assert_eq!(
+        ack.validate(),
+        Err("acknowledgement.committed_media_origin_ms")
+    );
+    ack.committed_media_origin_ms = Some(-83);
+    ack.buffered_through_ms = Some(-1);
+    assert_eq!(ack.validate(), Err("acknowledgement.buffered_through_ms"));
 }

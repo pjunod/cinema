@@ -15,6 +15,23 @@ impl VodServe {
         Some((session.last_control_snapshot.clone(), touched))
     }
 
+    /// Where the viewer of `session_id` is now on the source timeline: the
+    /// latest newly accepted control demand, advanced by that observation's
+    /// age the way the delivery driver reads it
+    /// ([`crate::playback_control::rolling_estimated_position_ms`]). `None`
+    /// before any exchange was accepted, or for a session this engine does
+    /// not hold.
+    pub(crate) async fn accepted_playhead_estimate_ms(&self, session_id: &str) -> Option<i64> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        let demand = session.last_control_snapshot.as_ref()?;
+        let observed = session.control_observed_at?;
+        Some(crate::playback_control::rolling_estimated_position_ms(
+            demand,
+            observed.elapsed(),
+        ))
+    }
+
     /// Apply one fenced control exchange without conflating a replay or stale
     /// request with a media-object touch. Only a newly accepted non-terminal
     /// sequence moves the existing five-minute VOD activity clock. A fresh
@@ -685,7 +702,7 @@ impl VodServe {
                     )
                     .await
                 {
-                    tracing::debug!(session_id = control.session_id, rendition = %rendition_id,
+                    tracing::debug!(target: "plurxd::vodserve", session_id = control.session_id, rendition = %rendition_id,
                         %error, "accepted pending companion could not acquire its original source credit");
                 }
             }

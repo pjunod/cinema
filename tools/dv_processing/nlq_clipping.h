@@ -24,9 +24,11 @@ static inline bool nlq_clip_is_nonbinding(uint16_t offset, uint64_t slope,
   uint64_t limit = 2 * (maximum_integer * denominator + maximum_fraction);
   if (worst == 0)
     return true;
-  // Restrict reconstructed residual magnitude to <= 1 and reserve 2^-16 for
-  // binary32 shader rounding. With this bound, the folded slope is below 2.01;
-  // normalization/subtraction/multiply/add error is well below this margin.
+  // Restrict reconstructed residual magnitude to <= 1 and reserve 2^-16. The
+  // reserve was sized for the earlier renderer, which dequantized an unrounded
+  // interpolated sample in binary32. The pinned libplacebo release rounds the
+  // sample to its integer code first, so the reserve is now only conservative;
+  // it is kept so admission does not widen with the renderer.
   const uint64_t rounding_margin = 2 * denominator / 65536;
   return worst <= 2 * denominator && worst + rounding_margin <= limit;
 }

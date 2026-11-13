@@ -180,7 +180,7 @@ async fn visible_item(state: &AppState, id: i64, what: &'static str) -> Result<I
         Some(lib) => map::is_plex_visible(lib.kind),
         None => false,
     };
-    if visible {
+    if visible && item.offloaded_at.is_none() {
         Ok(item)
     } else {
         Err(ApiError::NotFound(what))
@@ -196,11 +196,8 @@ async fn element_for(state: &AppState, item: &Item, view: View) -> Result<plex::
         }
         ItemKind::Show | ItemKind::Season => {
             let children = state.catalogue.get_item_children(item.id).await?;
-            Ok(map::directory_element(
-                item,
-                Some(children.len() as i64),
-                view,
-            ))
+            let playable = children.iter().filter(|c| c.offloaded_at.is_none()).count();
+            Ok(map::directory_element(item, Some(playable as i64), view))
         }
         // Home and Books kinds are not exposed through the façade; the
         // handlers above filter them out before we get here.
@@ -225,7 +222,16 @@ pub async fn section_all(
     }
     let page = state
         .catalogue
-        .list_top_items_in_genre(id, Default::default(), 0, 5000, None)
+        // Offloaded titles have no files to play, so a third-party app is
+        // never offered one.
+        .list_top_items_filtered(
+            id,
+            Default::default(),
+            0,
+            5000,
+            None,
+            plurx_core::domain::ItemPresence::OnDisk,
+        )
         .await?;
     let views = views(&state, user.id, &page.items).await?;
     let mut elements = Vec::with_capacity(page.items.len());
@@ -256,7 +262,8 @@ pub async fn children(
     Path(key): Path<i64>,
 ) -> Result<Response, ApiError> {
     visible_item(&state, key, "metadata").await?;
-    let kids = state.catalogue.get_item_children(key).await?;
+    let mut kids = state.catalogue.get_item_children(key).await?;
+    kids.retain(|kid| kid.offloaded_at.is_none());
     let views = views(&state, user.id, &kids).await?;
     let mut elements = Vec::with_capacity(kids.len());
     for item in &kids {
@@ -421,7 +428,27 @@ pub async fn search(
         })
         .unwrap_or_default();
     let hits = state.catalogue.search_items(&query, 50).await?;
-    let items: Vec<Item> = hits.into_iter().map(|r| r.item).collect();
+    // Offloaded titles have no file to play: the façade does not list them.
+    let mut items: Vec<Item> = hits
+        .into_iter()
+        .map(|r| r.item)
+        .filter(|item| item.offloaded_at.is_none())
+        .collect();
+    // A show or season whose every episode is offloaded has nothing to play
+    // either, and carries no mark of its own.
+    let containers: Vec<i64> = items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Show | ItemKind::Season))
+        .map(|item| item.id)
+        .collect();
+    if !containers.is_empty() {
+        let counts = state.catalogue.offloaded_leaf_counts(&containers).await?;
+        items.retain(|item| {
+            counts
+                .get(&item.id)
+                .is_none_or(|count| count.offloaded < count.leaves)
+        });
+    }
     let views = views(&state, user.id, &items).await?;
     let mut elements = Vec::with_capacity(items.len());
     for item in &items {

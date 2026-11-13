@@ -35,12 +35,223 @@ pub(crate) struct SourceResourceReadCustody {
     guard: Arc<SourceResponseGuard>,
     hooks: Arc<SourceResourceHookOwner>,
 }
+/// Classify managed-cache admission pressure without hiding real input or
+/// authority errors. This is used only at cache allocation/pin/write sites.
+pub(crate) fn cache_io_error(error: std::io::Error) -> SourceWorkerError {
+    match error.kind() {
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::WouldBlock => {
+            SourceWorkerError::Capacity
+        }
+        std::io::ErrorKind::TimedOut => SourceWorkerError::Deadline,
+        _ => SourceWorkerError::Unavailable,
+    }
+}
+
 impl SourceResourceReadCustody {
     pub(super) fn new(
         guard: Arc<SourceResponseGuard>,
         hooks: Arc<SourceResourceHookOwner>,
     ) -> Self {
         Self { guard, hooks }
+    }
+    pub(crate) async fn open_ready_child(
+        &self,
+        directory: &plurx_core::fs_secure::SecureDirectory,
+        path: &Path,
+        name: &str,
+        etag: &str,
+        delivery: &Arc<crate::meter::Meter>,
+    ) -> std::io::Result<crate::vodserve::SegmentReady> {
+        let cache_pin = crate::playback_cache::pin(path)?;
+        if self
+            .guard
+            .source
+            .as_ref()
+            .is_none_or(|source| !source.unchanged())
+        {
+            return Err(std::io::Error::other(
+                "Source physical input changed before resource open",
+            ));
+        }
+        let file = directory.open_read_child(name).await?;
+        let file = file.into_std().await;
+        let custody = self.clone();
+        let (file, len) = tokio::task::spawn_blocking(move || {
+            custody.hooks.slot.get().opened(&file);
+            let metadata = file.metadata()?;
+            if !metadata.is_file()
+                || custody
+                    .guard
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| !source.unchanged())
+            {
+                return Err(std::io::Error::other(
+                    "Source resource changed during observation",
+                ));
+            }
+            Ok((file, metadata.len()))
+        })
+        .await
+        .map_err(|_| std::io::Error::other("Source resource observation job failed"))??;
+        Ok(crate::vodserve::SegmentReady {
+            observed_media_duration_ms: None,
+            retained_lease: None,
+            cache_pin,
+            file: tokio::fs::File::from_std(file),
+            len,
+            etag: etag.to_owned(),
+            delivery: Arc::clone(delivery),
+        })
+    }
+    pub(crate) fn source(&self) -> Result<&crate::fragment_index_cluster::SourceFence, String> {
+        self.guard
+            .source
+            .as_ref()
+            .filter(|source| source.unchanged())
+            .ok_or_else(|| "Source physical input changed".to_owned())
+    }
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.guard
+            .owner
+            .state
+            .lock()
+            .expect("Source resource retirement")
+            .retirement_requested
+            || self.source().is_err()
+    }
+    pub(crate) async fn cancelled(&self) {
+        self.guard.cancelled().await;
+    }
+    pub(crate) async fn authorize_work(&self) -> Result<SourceGenerationAuthority, String> {
+        if self.is_cancelled() {
+            return Err("Source resource retired".into());
+        }
+        let permission = self
+            .guard
+            .owner
+            .gate
+            .retained_ingress(self.guard.assignment())
+            .ok_or_else(|| "Source resource assignment changed".to_owned())?;
+        let authority = self
+            .guard
+            .owner
+            .gate
+            .authorize_generation(&[permission])
+            .await?;
+        if self.is_cancelled() {
+            return Err("Source resource retired during authorization".into());
+        }
+        authority.validate_before_spawn()?;
+        Ok(authority)
+    }
+    pub(crate) fn request_revocation(&self) {
+        self.guard.request_revocation();
+    }
+    pub(crate) async fn reserve_subtitle(
+        &self,
+        path: &Path,
+        bytes: u64,
+        deadline: Instant,
+    ) -> Result<Option<crate::playback_cache::CacheReservation>, SourceWorkerError> {
+        tokio::select! {
+            result = crate::playback_cache::reserve(path, bytes) => result.map_err(cache_io_error),
+            () = self.cancelled() => Err(SourceWorkerError::Unavailable),
+            () = tokio::time::sleep_until(deadline.into()) => Err(SourceWorkerError::Deadline),
+        }
+    }
+    /// All actual cache observations retain the counted Source guard, even if
+    /// their async waiter goes away while the filesystem job is blocked.
+    pub(crate) async fn read_subtitle(
+        &self,
+        path: &Path,
+        cap: usize,
+    ) -> Result<Option<Vec<u8>>, SourceWorkerError> {
+        let custody = self.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            let _pin = crate::playback_cache::pin(&path).map_err(cache_io_error)?;
+            let mut file = match plurx_core::fs_secure::open_read_nofollow_blocking(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(_) => return Err(SourceWorkerError::Unavailable),
+            };
+            custody.hooks.slot.get().opened(&file);
+            let metadata = file
+                .metadata()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            if !metadata.is_file() || metadata.len() > cap as u64 {
+                return Err(SourceWorkerError::Unsupported);
+            }
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(cap as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            if bytes.len() > cap {
+                return Err(SourceWorkerError::Unsupported);
+            }
+            if custody.is_cancelled() {
+                return Err(SourceWorkerError::Unavailable);
+            }
+            Ok(Some(bytes))
+        })
+        .await
+        .map_err(|_| SourceWorkerError::Unavailable)?
+    }
+    pub(crate) async fn publish_subtitle(
+        &self,
+        path: &Path,
+        bytes: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<(), SourceWorkerError> {
+        let reservation = self
+            .reserve_subtitle(path, (bytes.len() as u64).saturating_mul(2), deadline)
+            .await?;
+        let size = bytes.len() as u64;
+        let custody = self.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            if custody.is_cancelled() {
+                return Err(SourceWorkerError::Unavailable);
+            }
+            let directory = path.parent().ok_or(SourceWorkerError::Unavailable)?;
+            std::fs::create_dir_all(directory).map_err(cache_io_error)?;
+            let mut temporary = tempfile::Builder::new()
+                .prefix(".tmp-source-caption-")
+                .tempfile_in(directory)
+                .map_err(cache_io_error)?;
+            let _temporary_pin =
+                crate::playback_cache::pin(temporary.path()).map_err(cache_io_error)?;
+            temporary.write_all(&bytes).map_err(cache_io_error)?;
+            custody
+                .source()
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+            if custody.is_cancelled() {
+                return Err(SourceWorkerError::Unavailable);
+            }
+            temporary
+                .persist(&path)
+                .map_err(|error| cache_io_error(error.error))?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| SourceWorkerError::Unavailable)??;
+        if let Some(reservation) = reservation {
+            reservation.commit(size);
+        }
+        Ok(())
     }
     pub(crate) async fn open_ready(
         &self,
@@ -210,5 +421,30 @@ impl SourceResourceHookOwner {
             .as_any()
             .downcast_ref::<SourceResourceJobPause>()
             .expect("actual Source file job hook")
+    }
+}
+
+#[cfg(test)]
+mod caption_cache_pressure_tests {
+    use super::*;
+    #[test]
+    fn managed_caption_cache_pressure_keeps_typed_busy_and_deadline() {
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::StorageFull,
+        ] {
+            assert_eq!(
+                cache_io_error(std::io::Error::from(kind)),
+                SourceWorkerError::Capacity
+            );
+        }
+        assert_eq!(
+            cache_io_error(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            SourceWorkerError::Deadline
+        );
+        assert_eq!(
+            cache_io_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            SourceWorkerError::Unavailable
+        );
     }
 }

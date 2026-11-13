@@ -6,6 +6,7 @@ pub mod bounded;
 mod census;
 pub mod priority;
 pub mod rlimit;
+pub mod source_lifetime;
 
 pub use priority::{ChildClass, ChildWork};
 
@@ -81,14 +82,21 @@ pub fn spawn_job_owned(
     command: &mut tokio::process::Command,
     work: ChildWork,
 ) -> io::Result<(tokio::process::Child, ChildJob)> {
+    let descriptor_handoff = source_lifetime::has_descriptor_handoff(command.as_std());
+    let _reader_admission = source_lifetime::before_spawn(command.as_std_mut(), work.purpose)?;
     priority::apply(command, work.class);
     configure_suspended(command);
+    source_lifetime::strip_descriptor_handoff(command.as_std_mut());
     #[allow(clippy::disallowed_methods)] // the launcher itself
-    let mut child = spawn_on_owner(
+    let spawned = spawn_on_owner(
         command,
         || tokio::process::Command::new(""),
         |command| command.spawn(),
-    )?;
+    );
+    if descriptor_handoff {
+        source_lifetime::restore_descriptor_handoff(command.as_std_mut());
+    }
+    let mut child = spawned?;
     let mut job = ChildJob::attach(&child).inspect_err(|_| {
         let _ = child.start_kill();
     })?;
@@ -211,16 +219,24 @@ pub fn output_job_owned_blocking(
     command: &mut std::process::Command,
     work: ChildWork,
 ) -> io::Result<std::process::Output> {
+    let descriptor_handoff = source_lifetime::has_descriptor_handoff(command);
+    let reader_admission = source_lifetime::before_spawn(command, work.purpose)?;
     priority::apply_policy(command, work.class.policy());
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    source_lifetime::strip_descriptor_handoff(command);
     #[allow(clippy::disallowed_methods)] // the blocking launcher itself
-    let mut child = spawn_on_owner(
+    let spawned = spawn_on_owner(
         command,
         || std::process::Command::new(""),
         |command| command.spawn(),
-    )?;
+    );
+    if descriptor_handoff {
+        source_lifetime::restore_descriptor_handoff(command);
+    }
+    let mut child = spawned?;
+    drop(reader_admission);
     let mut job = match ChildJob::attach_pid(child.id()) {
         Ok(job) => job,
         Err(error) => {
@@ -430,6 +446,127 @@ mod tests {
 
     const TEST_WORK: ChildWork = ChildWork::background("process test");
 
+    static SOURCE_OBSERVATIONS: std::sync::Mutex<Vec<source_lifetime::LaunchObservation>> =
+        std::sync::Mutex::new(Vec::new());
+
+    fn observe_source_launch(observation: &source_lifetime::LaunchObservation) -> io::Result<()> {
+        if observation.purpose.starts_with("source observation ")
+            || observation.purpose == "descriptor handoff"
+        {
+            SOURCE_OBSERVATIONS
+                .lock()
+                .expect("observations")
+                .push(*observation);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn source_observer_attributes_launches_and_separates_descriptor_invalidation() {
+        use source_lifetime::{mediated, LaunchObservation, SourceAccess};
+
+        source_lifetime::install_observer(observe_source_launch).expect("observer");
+        let before = source_lifetime::launch_snapshot();
+        let ordinary = "source observation ordinary";
+        let brokered = "source observation brokered";
+        let inherited = "source observation inherited descriptor";
+        let after_scope = "source observation after scope";
+        for (purpose, declare_mediated, descriptor_handoff) in [
+            (ordinary, false, false),
+            (brokered, true, false),
+            (inherited, true, true),
+            (after_scope, false, false),
+        ] {
+            let mut command = child("echo");
+            if descriptor_handoff {
+                source_lifetime::tag_descriptor_handoff(&mut command);
+            }
+            let output =
+                async { output_job_owned(&mut command, ChildWork::background(purpose)).await };
+            let output = if declare_mediated {
+                mediated(output).await
+            } else {
+                output.await
+            }
+            .expect("observed child");
+            assert!(output.status.success());
+        }
+        source_lifetime::unmediated_descriptor().expect("descriptor invalidation");
+        let after = source_lifetime::launch_snapshot();
+        // Other tests may launch concurrently: only monotonic lower bounds
+        // are stable in this process, and the purpose list below is local.
+        assert!(after.mediated >= before.mediated);
+        assert!(after.unknown >= before.unknown.saturating_add(4));
+        assert!(after.latest_unknown.is_some());
+        let observed = SOURCE_OBSERVATIONS.lock().expect("observations");
+        for expected in [
+            LaunchObservation::unknown(ordinary, false, true),
+            LaunchObservation {
+                declared: SourceAccess::Brokered,
+                reason: Some("roots_unconfigured"),
+                ..LaunchObservation::unknown(brokered, false, true)
+            },
+            LaunchObservation {
+                declared: SourceAccess::Brokered,
+                reason: Some("roots_unconfigured"),
+                ..LaunchObservation::unknown(inherited, true, true)
+            },
+            LaunchObservation::unknown(after_scope, false, true),
+            LaunchObservation::unknown("descriptor handoff", true, false),
+        ] {
+            assert!(
+                observed.contains(&expected),
+                "missing {expected:?}: {observed:?}"
+            );
+        }
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| event.launch && event.purpose.starts_with("source observation "))
+                .count(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn source_snapshot_counts_failed_startup_attempts_without_descriptor_double_count() {
+        let output = output_job_owned(&mut child("source-snapshot"), TEST_WORK)
+            .await
+            .expect("snapshot subprocess");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_source_declaration_is_observed_before_debug_refusal() {
+        let output = output_job_owned(&mut child("source-verification-refusal"), TEST_WORK)
+            .await
+            .expect("refusal subprocess");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn approved_probe_cannot_load_explicit_or_inherited_environment_code() {
+        let mut command = child("source-environment-isolation");
+        command.env("LD_PRELOAD", "/plurx-missing-inherited-loader.so");
+        let output = output_job_owned(&mut command, TEST_WORK)
+            .await
+            .expect("isolated fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// Re-exec the portable test binary instead of relying on a platform shell.
     fn child(mode: &str) -> tokio::process::Command {
         let mut command =
@@ -443,6 +580,122 @@ mod tests {
     #[test]
     fn child_main() {
         match std::env::var("PLURX_CHILD_MODE").as_deref() {
+            #[cfg(target_os = "linux")]
+            Ok("source-environment-isolation") => {
+                use source_lifetime::{
+                    no_source_spawn, prepare_stdio_std, set_daemon_roots, with_descriptors,
+                    StdioFacts,
+                };
+                let data = tempfile::tempdir().expect("isolated probe cwd");
+                let program = std::fs::canonicalize("/usr/bin/true").expect("native probe tool");
+                set_daemon_roots(
+                    &[data.path().to_owned()],
+                    &[program.parent().expect("tool root").to_owned()],
+                )
+                .expect("roots");
+                // First demonstrate that the inherited loader override really
+                // reaches this platform's dynamic loader without isolation.
+                let mut baseline = std::process::Command::new(&program);
+                baseline.current_dir(data.path());
+                let output = output_job_owned_blocking(&mut baseline, TEST_WORK).expect("baseline");
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("plurx-missing-inherited-loader.so"));
+                for explicit in [false, true] {
+                    let mut command = std::process::Command::new(&program);
+                    command.current_dir(data.path());
+                    if explicit {
+                        command.env("LD_PRELOAD", "/plurx-missing-explicit-loader.so");
+                    }
+                    let manifest =
+                        prepare_stdio_std(&mut command, StdioFacts::CAPTURED).expect("manifest");
+                    let output = no_source_spawn(|| {
+                        with_descriptors(manifest, || {
+                            output_job_owned_blocking(&mut command, TEST_WORK)
+                        })
+                    })
+                    .expect("approved probe");
+                    assert!(output.status.success());
+                    assert!(
+                        output.stderr.is_empty(),
+                        "loader override escaped isolation: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert_eq!(command.get_envs().count(), 2, "only fixed locale survives");
+                }
+            }
+            Ok("source-verification-refusal") => {
+                use source_lifetime::{
+                    no_source_spawn, prepare_stdio_std, set_daemon_roots, with_descriptors,
+                    StdioFacts,
+                };
+                let root = tempfile::tempdir().expect("isolated policy");
+                let data = root.path().join("data");
+                let media = root.path().join("library");
+                std::fs::create_dir(&data).expect("data");
+                std::fs::create_dir(&media).expect("media");
+                let path = media.join("movie");
+                std::fs::write(&path, b"source").expect("source");
+                let program = std::env::current_exe().expect("program");
+                set_daemon_roots(
+                    std::slice::from_ref(&data),
+                    &[program.parent().expect("tool root").to_path_buf()],
+                )
+                .expect("roots");
+                source_lifetime::install_observer(observe_source_launch).expect("observer");
+                let mut command = std::process::Command::new(program);
+                command.current_dir(data).arg(path);
+                let manifest = prepare_stdio_std(&mut command, StdioFacts::CAPTURED)
+                    .expect("prepared command");
+                let admitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    no_source_spawn(|| {
+                        with_descriptors(manifest, || {
+                            source_lifetime::before_spawn(
+                                &mut command,
+                                "source observation refusal",
+                            )
+                            .map(drop)
+                        })
+                    })
+                }));
+                assert_eq!(admitted.is_err(), cfg!(debug_assertions));
+                let observations = SOURCE_OBSERVATIONS.lock().expect("observations");
+                let observed = observations
+                    .iter()
+                    .find(|event| event.purpose == "source observation refusal")
+                    .expect("observer precedes refusal");
+                assert!(!observed.verified);
+                assert!(!observed.mediated);
+                assert_eq!(observed.declared, source_lifetime::SourceAccess::NoSource);
+                assert_eq!(observed.reason, Some("path_outside_daemon_roots"));
+            }
+            Ok("source-snapshot") => {
+                // A fresh subprocess proves startup attribution before any
+                // observer exists, and failed attempts still count once.
+                assert_eq!(
+                    source_lifetime::launch_snapshot(),
+                    source_lifetime::LaunchSnapshot::default()
+                );
+                let mut command =
+                    tokio::process::Command::new("__plurx_missing_source_snapshot_child__");
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("snapshot runtime")
+                    .block_on(output_job_owned(
+                        &mut command,
+                        ChildWork::background("snapshot failed launch"),
+                    ));
+                assert!(result.is_err());
+                let snapshot = source_lifetime::launch_snapshot();
+                assert_eq!(snapshot.mediated, 0);
+                assert_eq!(snapshot.unknown, 1);
+                assert_eq!(
+                    snapshot.latest_unknown.expect("latest attempt").purpose,
+                    "snapshot failed launch"
+                );
+                source_lifetime::unmediated_descriptor().expect("invalidation without launch");
+                assert_eq!(source_lifetime::launch_snapshot(), snapshot);
+            }
             Ok("echo") => {
                 std::io::stdout().write_all(b"out-bytes").expect("stdout");
                 std::io::stderr().write_all(b"err-bytes").expect("stderr");
@@ -635,13 +888,14 @@ mod tests {
 
     #[test]
     fn output_job_owned_call_sites_are_the_audited_set() {
+        // Source-bound pixel, subtitle-offset and VTT probes use
+        // BoundedDiagnosticChild; its spawn remains registered by the launcher.
         let expected = BTreeMap::from([
-            ("ffmpeg.rs".to_owned(), 4),
+            ("ffmpeg.rs".to_owned(), 3),
             ("live_tv.rs".to_owned(), 1),
             ("live_tv/caption_probe.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
-            ("subtitles.rs".to_owned(), 2),
             ("transcode/media_origin.rs".to_owned(), 1),
         ]);
         let mut actual = BTreeMap::new();

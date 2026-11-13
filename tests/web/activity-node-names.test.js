@@ -74,9 +74,11 @@ const BORROWED = [
   "activityInspectorHtml",
   "activityJobProgress",
   "fmtDur",
+  "durableProcessingHtml",
   "durableQueueHtml",
   "clusterWorkersHtml",
   "activityIsClustered",
+  "durableKindLabel",
   "durableJobReason",
   "activityBlockedScans",
   "activityBlockedScansHtml",
@@ -95,6 +97,8 @@ const PRELUDE = `
   let ACTIVITY_SNAPSHOT = {};
   const ACTIVITY_VIEW={tab:"status",inspector:null,detailTab:"summary"};
   const DVR_PAGE={selectedId:null};
+  // The Starts tab has its own suite (activity-starts.test.js).
+  function activityStartsPaneHtml(){ return ""; }
   function paintActivityInspector(){}
   // The painter reads the open disclosures back out of #main before it
   // repaints; a string-backed stand-in has none unless a test plants some.
@@ -158,6 +162,7 @@ let started = 0;
 let finished = 0;
 let failures = 0;
 async function test(name, run) {
+  if (process.env.PLURX_ACTIVITY_TEST_NAME && name !== process.env.PLURX_ACTIVITY_TEST_NAME) return;
   started += 1;
   try {
     await run();
@@ -555,6 +560,34 @@ test("durable owners, attempts and repair destinations use roster names", () => 
   Object.assign(painter.durable,{rows:[],repairs:[],detail:null});
 });
 
+test("a waiting targeted library request names what it waits on", () => {
+  const reason = new Function(
+    `let ACTIVITY_SNAPSHOT={}; const ME={is_admin:true}; function activitySourceRecovery(){ return []; }
+     ${shippedSource("durableJobReason")}
+     return durableJobReason;`,
+  )();
+  const job = (waiting_on) => ({ kind: "library_scan", targeted: true, state: "queued", library_id: 3, waiting_on });
+  assert.equal(reason(job("full_scan:Movies")), "Waiting on: full scan of Movies");
+  // Decision (a) on #1405: a targeted job takes no background reader, so
+  // nothing writes `heavy_lane:`; an unknown value is not labelled.
+  assert.equal(reason(job("heavy_lane:title scan")), "");
+  assert.equal(reason(job("root_unreadable:/20t/tv")), "Waiting on: root unreadable: /20t/tv");
+  assert.equal(reason(job("queue_position:2")), "Waiting on: queue position 2");
+  assert.equal(reason(job("")), "", "nothing in the way, nothing said");
+  assert.equal(reason({ ...job("full_scan:Movies"), targeted: false }), "", "a full scan has no waiting_on");
+  // The row prints it through esc(), like every other reason.
+  assert.match(shippedSource("durableQueueHtml"), /esc\(durableJobReason\(job\)/);
+});
+
+test("a targeted library job is labelled as one, not as a library scan", () => {
+  const label = new Function(`${shippedSource("durableKindLabel")} return durableKindLabel;`)();
+  assert.equal(label({ kind: "library_scan", targeted: true }), "targeted scan");
+  assert.equal(label({ kind: "library_scan", targeted: false }), "library scan");
+  assert.equal(label({ kind: "dv_title_scan" }), "dv title scan");
+  for (const fn of ["durableQueueHtml", "activityInspectorHtml"])
+    assert.match(shippedSource(fn), /durableKindLabel\(job\)/, `${fn} labels through durableKindLabel`);
+});
+
 test("expired durable leases do not masquerade as live executions", () => {
   const now=Date.now();
   const job={id:"expired",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
@@ -580,7 +613,7 @@ function refreshingQueue(q,api){
     const ACTIVITY_VIEW={inspector:{kind:"job",id:"job"},detailTab:"history"};
     const ACTIVITY_SNAPSHOT={node_hostnames:{node:"lab6"}};
     function paintDurableActivity(){}
-    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","activityIsClustered","durableJobReason","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","activityIsClustered","durableKindLabel","durableJobReason","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
     return {page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
   `)(q,api);
 }
@@ -753,11 +786,32 @@ function sourceObservation(holders, overrides={}) {
 function sourceHolder(overrides={}) {
   return {active_occupancy:true,work_id:"pruned-job",resource_key:"source_io",lease_expires_at_ms:0,phase:"cleanup_pending",...overrides};
 }
+test("Jobs reports independent worker rates and flags overdue scans even when other workers finish", () => {
+  const prior={...painter.durable}, tab=painter.view.tab;
+  try {
+    painter.view.tab="jobs";
+    Object.assign(painter.durable,{observed:Date.now(),error:null,state:"running",rows:[],
+      counts:[{kind:"library_scan",state:"queued",count:3,overdue_manual:3}],
+      processing:{window_ms:300000,nodes:[{node_id:NODE_A,succeeded:10,failed:2}]}});
+    const d=snapshot({clustered:true,node_hostnames:{[NODE_A]:"alpha",[NODE_B]:"bravo"},
+      analysis:sourceObservation([sourceHolder({work_id:"prior-job",origin_node_id:NODE_A,origin_job_kind:"subtitle_extract",origin_job_state:"succeeded"})])});
+    const html=paint(d);
+    assert.match(html,/2.0 completed\/min.*0.4 failed\/min/);
+    assert.match(html,/<td>alpha<\/td><td>2.0<\/td><td>0.4<\/td>/);
+    assert.match(html,/<td>bravo<\/td><td>0.0<\/td><td>0.0<\/td>/);
+    assert.match(html,/3 manual library jobs have been due/);
+    assert.match(html,/href="#\/activity\/jobs\/prior-job">subtitle extract<\/a> · job now succeeded/);
+    assert.match(html,/reader on alpha/);
+    assert.ok(html.indexOf("data-activity-source-recovery")<html.indexOf('id="activity-status"'));
+    painter.durable.error="observation failed";
+    assert.match(paint(d),/Job processing rate unavailable/);
+  } finally {Object.assign(painter.durable,prior,{processing:prior.processing});painter.view.tab=tab;}
+});
 test("expired source custody stays prominent after its job disappears and escapes identities", () => {
   Object.assign(painter.durable,{rows:[],activeJobs:[]});
   const html=paint(snapshot({analysis:sourceObservation([sourceHolder({work_id:'gone-<reader>"',resource_key:'source_io:<disk>'})])}));
   const banner=html.indexOf("data-activity-source-recovery");
-  assert.ok(banner>html.indexOf('id="activity-status"'));
+  assert.ok(banner>=0 && banner<html.indexOf('id="activity-status"'));
   assert.ok(banner<html.indexOf('id="cluster-workers"'));
   assert.match(html,/Shared source reads need recovery/);
   assert.match(html,/even when their jobs are no longer listed/);
@@ -870,6 +924,10 @@ process.on("beforeExit", () => {
         `something the test never resolves, so it printed no result at all\n`,
     );
   }
+  if (process.env.PLURX_ACTIVITY_TEST_NAME && !started) {
+    process.stdout.write("FAIL requested Activity test did not exist\n");
+    failures += 1;
+  }
   if (failures) process.exitCode = 1;
 });
 
@@ -934,4 +992,23 @@ test("queued library jobs show their local mount problem by library identity", (
   job.state="queued";job.error_code="recorded_failure";
   assert.match(paint(snapshot({scans})), /durable-reason[^>]*>recorded_failure/);
   Object.assign(painter.durable,{rows:[],counts:[]});
+});
+
+
+test("learner worker telemetry contributes capacity independently of voter activity", () => {
+  const data=snapshot({node_hostnames:{voter:"voter",learner:"learner"},
+    activity_nodes:[{node_id:"voter",status:"timed_out"}],
+    worker_observed_nodes:["voter","learner"],
+    workers:{voter:workerObservation(),learner:workerObservation({heavy_in_use:1,
+      heavy_available:0,software_used:2,software_limit:6,hardware_used:1,hardware_limit:2})}});
+  let html=paint(data);
+  assert.match(html, /<b>2 \/ 2<\/b><span>nodes reporting capacity/);
+  assert.match(html, /<td>2 \/ 6<\/td>/);
+  assert.match(html, /<td>1 \/ 2<\/td>/);
+  assert.match(html, /<b>1 \/ 2<\/b><span>heavy slots occupied/);
+  assert.doesNotMatch(html, /partial total/);
+  data.workers.learner.observed_at_ms=Date.now()-60000;
+  html=paint(data);
+  assert.match(html, /<b>1 \/ 2<\/b><span>nodes reporting capacity/);
+  assert.match(html, /partial total/);
 });

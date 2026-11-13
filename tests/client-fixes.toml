@@ -712,7 +712,7 @@ test_anchor = "testTheaterPlaybackSkipsUnavailableFilesAndRejectsUnavailableTitl
 id = "apple.shared-initial-parking-readiness-budget"
 commits = ["39a72929788172b04d868618defbdc3eed69ae16"]
 source = "clients/apple/Sources/SharedPlayerController.swift"
-source_anchor = "guard await alignPrepared(item, to: preparedFilmPositionMs, boundMs: remaining)"
+source_anchor = "guard await alignPrepared(item, to: preparedTimeline.itemPositionMs(filmPositionMs: preparedFilmPositionMs), boundMs: remaining)"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
 test_anchor = "testStalledInitialSeekConsumesRemainingReadinessAndSettlesFailed"
 
@@ -7978,7 +7978,7 @@ test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
 id = "apple.prepared-successor-keeps-enhancement"
 commits = ["8a5672b3159e9f912d1826c23951d071124365c7"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "playbackEnhancement = action.enhancement"
+source_anchor = "adoptPlaybackEnhancement(action.enhancement)"
 test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
 test_anchor = "testCommitAdoptsTheSuccessorsEnhancementInsteadOfClearingIt"
 
@@ -8211,7 +8211,7 @@ test_anchor = "def test_cm29_evaluates_its_lattice_once_per_frame(self):"
 id = "claude.linux-player-control-capabilities"
 commits = ["484fbf97e51601a0d4dbfc309ec39cefdcbfc9e8"]
 source = "clients/linux-player/plurx_player/caps.py"
-source_anchor = "def control_capabilities():"
+source_anchor = "def control_capabilities(native_dovi=False):"
 test = "clients/linux-player/tests/test_launcher.py"
 test_anchor = "def test_the_first_control_exchange_is_the_one_the_server_validates(self):"
 
@@ -8232,6 +8232,15 @@ source = "clients/linux-player/packaging/patches/mpv/series"
 source_anchor = "0004-vulkan-context-start-Wayland-swapchains-pass-through.patch"
 test = "clients/linux-player/tests/test_packaging.py"
 test_anchor = "def test_the_first_wayland_swapchain_is_pass_through(self):"
+
+# mpv patch 0009: a dead Wayland display closes the player instead of spinning the vo thread at 100% CPU.
+[[fixes]]
+id = "claude.linux-player-wayland-display-error-spin"
+commits = ["c08b026720c286c0a3c989bca4de8b384c335fc9", "364aadcb4148cea8e70798b38536fdd0109e4c59"]
+source = "clients/linux-player/packaging/patches/mpv/0009-wayland-stop-dispatching-after-a-fatal-display-error.patch"
+source_anchor = "+static bool wayland_display_failed(struct vo_wayland_state *wl, int ret)"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_a_fatal_display_error_closes_the_window_instead_of_spinning(self):"
 
 # A portal-started launcher takes the session's display; a title with no window fails instead of playing audio only.
 [[fixes]]
@@ -8340,3 +8349,237 @@ source = "crates/plurxd/src/web/player/player.js"
 source_anchor = "function concludeNativeHlsObservation(player,episode){"
 test = "tests/playback/native-hls-startup.test.js"
 test_anchor = "native observer conclusion preserves later physical-freeze recovery and real element rejection"
+
+[[fixes]]
+id = "linux-player.dolby-final-unorm16-rounding"
+commits = ["28f2cb9a968f16425a42dc4201e9c3165192d31e"]
+source = "clients/linux-player/packaging/patches/mpv/0008-vo_gpu_next-round-the-final-DV-UNORM16-cache-exactly.patch"
+source_anchor = "+static const char dv_unorm16_glsl[] ="
+test = "clients/linux-player/tests/test_dv_unorm16.py"
+test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
+
+[[fixes]]
+id = "linux-player.dolby-reconstruction-color-metadata"
+commits = []
+supplements = "linux-player.dolby-final-unorm16-rounding"
+source = "clients/linux-player/packaging/patches/mpv/0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch"
+source_anchor = "+    image.color = plurx_dv_reconstruction_color();"
+test = "clients/linux-player/tests/dv_render_controls.c"
+test_anchor = "struct pl_color_space got=plurx_dv_reconstruction_color();"
+
+[[fixes]]
+id = "linux-player.dolby-hdr10-planar-10bit-upload"
+commits = []
+supplements = "linux-player.dolby-final-unorm16-rounding"
+source = "clients/linux-player/packaging/patches/mpv/0007-vo_gpu_next-preserve-DV-software-sampling-precision.patch"
+source_anchor = "+static bool frame_needs_precise_sw10(const struct pl_frame *frame)"
+test = "clients/linux-player/tests/dv_render_controls.c"
+test_anchor = "assert(upload_planes_sw(&vo,&gpu,&mpi,&hdr10,tex,frame_needs_precise_sw10(&hdr10)));"
+
+# Playback start Phase 1 (effort/playback-start, PR #1454): D1 prepared-switch seams.
+[[fixes]]
+id = "android.prepared-seam-reopen-on-every-refusal"
+commits = ["3b1a05c241e3fddb1886a75924420fa685068baa"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun reportPreparedSeam("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun theSeamReportNamesEachOutcomeAndOnlyACommitCanCount()"
+
+[[fixes]]
+id = "apple.shared-alignment-one-budget"
+commits = ["d686e9d8b1812f3d2f6605ab3188a573ccaec8ce"]
+source = "clients/apple/Sources/SharedPlayerController.swift"
+source_anchor = "let alignmentDeadlineMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testSharedCommitShowsADecodedFrameBeforeExposingTheSuccessor() throws {"
+
+[[fixes]]
+id = "apple.prepared-seam-reopen-from-window"
+commits = ["c13ff41721ad555dcbb3f4f845805c98e8f4037d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let reopensAtOutcome = reopensStarted"
+test = "clients/apple/Tests/PreparedSwitchMeasurementTests.swift"
+test_anchor = "func testSeamBeaconNamesEachOutcomeAndCountsOnlyACommit() throws {"
+
+[[fixes]]
+id = "clients.prepared-successor-decoded-frame-first"
+commits = ["6e970ed36e57d96e5b1b478f79be6e95647c53f0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private var mediaSessionRebindAwaitsFrame = false"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSwitchMeasurementTest.kt"
+test_anchor = "fun mediaSessionMovesToTheSuccessorOnlyAfterItsFrame()"
+
+[[fixes]]
+id = "playback.create-codes-in-surface-contract"
+commits = ["b452e7756ed67e7c06e27b093e08f64fb308dd5a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = 'const val CREATE_CAPACITY_TERMINAL = "create_capacity_terminal"'
+test = "tests/validation/test_control_wire_conformance.py"
+test_anchor = "def test_every_code_a_create_answers_with_is_in_the_contract(self) -> None:"
+
+# PR #1483: one system renderer, truthful format negotiation and current physical facts.
+
+[[fixes]]
+id = "linux-player.system-mpv-default"
+commits = ["37435a672570e209b2953a1962b4589038d08290"]
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "DEFAULT_BINARY = \"/usr/bin/mpv\""
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_system_mpv_wins_even_when_legacy_bundle_is_executable(self):"
+
+[[fixes]]
+id = "linux-player.system-mpv-native-capability"
+commits = []
+supplements = "linux-player.system-mpv-default"
+source = "clients/linux-player/plurx_player/mpv.py"
+source_anchor = "def native_dovi_capable(binary):"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_version_names_partial_markers_and_failed_probes_are_not_capabilities(self):"
+
+[[fixes]]
+id = "linux-player.system-mpv-frontend-package"
+commits = []
+supplements = "linux-player.system-mpv-default"
+source = "clients/linux-player/debian/control"
+source_anchor = "Depends: ${misc:Depends}, ${python3:Depends}, mpv, python3 (>= 3.10), zenity"
+test = "clients/linux-player/tests/test_packaging.py"
+test_anchor = "def test_package_ships_only_the_frontend_and_depends_on_system_mpv(self):"
+
+[[fixes]]
+id = "linux-player.frontend-verification-compiler"
+commits = ["c427d1e67b06452ea6c3eacbd9f04027b9452abe"]
+source = "clients/linux-player/packaging/verify-in-container.sh"
+source_anchor = "build-essential desktop-file-utils lintian binutils git lua5.2"
+test = "clients/linux-player/tests/test_dv_unorm16.py"
+test_anchor = "def test_exact_terminal_shader_against_rational_reference(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-physical-target"
+commits = ["3cb2b008d0c2ca48680d63c1cd8aa9121533574a"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "NATIVE_MAPPER = \"shared native Dolby renderer\""
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_authoritative_success_reports_physical_peak_in_existing_fact_fields(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-authoritative-state"
+commits = ["3024053e09c8d606724c82fb219567d7b86a7b1f"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def read_native_target_state(self):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_success_requires_current_active_matching_backend_generation(self):"
+
+[[fixes]]
+id = "linux-player.shared-native-state-lifecycle"
+commits = []
+supplements = "linux-player.shared-native-authoritative-state"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def invalidate_native_target(self, state):"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_load_source_and_changed_target_policy_require_a_fresh_success(self):"
+
+# A prepared successor is never tunneled: it took the incumbent's hardware A/V sync on a Google TV.
+[[fixes]]
+id = "android.successor-untunneled"
+commits = ["1f911234375d2b9c44531d0291dd882a53a3cf6e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+source_anchor = "role == PlayerRole.Finite && television"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
+test_anchor = "fun onlyTheFinitePlayerTunnelsSoASuccessorNeverTakesTheIncumbentsAvSync()"
+
+# PR #1551: the rendezvous never precedes a prepared successor's own start (a processed upgrade stages ahead of the viewer).
+[[fixes]]
+id = "android.rendezvous-floor-at-successor-origin"
+commits = ["e4cc25697a13d35b9d3d161262c75859b78155a0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "val target = maxOf(incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead, floorFilmMs)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun aSuccessorStagedAheadIsMetAtItsOwnStart()"
+
+# PR #1489: the Android decoder envelope claims only what Media3's selector admits.
+[[fixes]]
+id = "android.decoder-envelope-media3-admits"
+commits = ["a7b9ad4e35c52c1fc0a0819bcbcb9bf094c28f57", "b195904dd0fbe7c1707c0726115b2aab383a6ca0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
+source_anchor = "selector.isVideoSizeAndRateSupportedV21(width, height, rate)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun decoderEnvelopeAsksMedia3AtEveryRectangleAndRate()"
+
+# A1/B1 review: a whole-title shared attachment ending is the title's end.
+[[fixes]]
+id = "android.shared-whole-title-end"
+commits = ["26c0f3cc9c1344346ef779ed1b62e44290abb21b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/MediaOrigin.kt"
+source_anchor = "isVod || titleDurationMs?.takeIf { it > 0 }?.let { filmPositionMs >= it - 1_000L } == true"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
+test_anchor = "assertTrue(sharedTitleEnded(true, 7_198_000, range.duration_ms))"
+
+[[fixes]]
+id = "apple.shared-whole-title-end"
+commits = []
+supplements = "android.shared-whole-title-end"
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "if wholeTitle { return true }"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "XCTAssertTrue(whole.reachedTitleEnd(filmPositionMs: 7_197_000, durationMs: 7_200_000))"
+
+# PR #1491: Playback Info shows the owner's generation-scoped skip reason.
+[[fixes]]
+id = "apple.dv-enhancement-skip-reason"
+commits = ["481ac9de236fe3c93596973b34500f50cd831573"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "struct ProcessingSkip: Codable, Equatable {"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements()"
+
+[[fixes]]
+id = "android.dv-enhancement-skip-reason"
+commits = []
+supplements = "apple.dv-enhancement-skip-reason"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "data class ProcessingSkip(val generation: String, val reason: String) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun aSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements()"
+
+[[fixes]]
+id = "apple.one-published-enhancement-surface"
+commits = ["520e4615718c7976f9bf2f4a63ecee6fb96baa63"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "@Published private(set) var playbackEnhancement: PlaybackEnhancement?"
+test = "tests/operations/test_playback_surface_fence.py"
+test_anchor = "def test_the_player_controllers_published_surface_inventory_is_pinned(self):"
+
+# PR #1552: macOS is Apple Silicon only; the tray build refuses any other arch.
+[[fixes]]
+id = "macos.tray-build-arm64-only"
+commits = ["a16d342b4a8d965407f3e8c5064721ecf1b0ed08"]
+source = "clients/server-tray/macos/build"
+source_anchor = '[[ "$arch" == arm64 ]] || die "--arch must be arm64 (Intel Macs are not supported)"'
+test = "tests/operations/test_contracts.py"
+test_anchor = "def test_native_macos_tray_checks_build_arm64_only_and_run_swift_tests(self):"
+
+[[fixes]]
+id = "apple.offload-status-loop-ends-when-the-title-is-back"
+commits = ["bbf9da43ecc35625d37cfd6c4bc9d6278df937f1"]
+source = "clients/apple/Sources/Offload.swift"
+source_anchor = 'static func isGone(_ answer: OffloadAnswer) -> Bool { answer.state == "on_disk" }'
+test = "clients/apple/Tests/OffloadTests.swift"
+test_anchor = "func testATitleThatCameBackOrIsNoLongerOffloadedEndsTheStatusLoop()"
+
+# PR #1577: a replacement owns its first control sequence independently.
+[[fixes]]
+id = "linux-player.session-control-sequence-ownership"
+commits = ["0560936ff32e559161848a1b5d172a39a95e2025"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "if binding != self.control_binding:"
+test = "clients/linux-player/tests/test_launcher.py"
+test_anchor = "def test_seek_outside_the_range_recreates_the_session"
+
+[[fixes]]
+id = "linux-player.quality-rollback-control-sequence"
+commits = []
+supplements = "linux-player.session-control-sequence-ownership"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = '"origin_ms", "control_binding", "sequence")}'
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls"

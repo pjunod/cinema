@@ -504,7 +504,7 @@ data class ActionAcknowledgement(
             (firstFrameUnixMs == null || firstFrameUnixMs > 0) &&
             (
                 committedMediaOriginMs == null ||
-                    committedMediaOriginMs in 0..PlaybackControl.MAX_MEDIA_MILLIS
+                    committedMediaOriginMs in -PlaybackControl.MAX_MEDIA_MILLIS..PlaybackControl.MAX_MEDIA_MILLIS
                 ) &&
             (state != AcknowledgementState.BUFFER_READY || bufferedThroughMs != null) &&
             (state != AcknowledgementState.COMMITTED || firstFrameUnixMs != null) &&
@@ -746,7 +746,7 @@ data class ControlAction(
                 id.length <= PlaybackControl.MAX_ACTION_ID_LEN &&
                 PlaybackControl.isUuidShape(session) &&
                 PlaybackControl.isNodeRelativePlaylist(playlist, session) &&
-                origin in 0..PlaybackControl.MAX_MEDIA_MILLIS &&
+                origin in -PlaybackControl.MAX_MEDIA_MILLIS..PlaybackControl.MAX_MEDIA_MILLIS &&
                 selection.isValid
         }
 }
@@ -817,6 +817,7 @@ data class ControlResponse(
     val action: ControlAction,
     val delivery: ControlDelivery? = null,
     @SerialName("effective_processing") val effectiveProcessing: kotlinx.serialization.json.JsonElement? = null,
+    @SerialName("processing_skip") val processingSkip: kotlinx.serialization.json.JsonElement? = null,
     /**
      * What the session that is playing *now* delivers. The server has always
      * sent it; `ignoreUnknownKeys` meant this client dropped it. Comparing it

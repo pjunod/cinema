@@ -40,17 +40,42 @@ class ReleaseReadinessCase(unittest.TestCase):
     def test_ci_tools_use_the_media_stage_selected_by_publication(self):
         source = (ROOT / "Dockerfile").read_text()
         generated = readiness.ci_dockerfile(source)
-        self.assertEqual(readiness.media_target(source), "runtime-assets-dolby-amd64")
-        self.assertIn("FROM runtime-assets-dolby-amd64 AS ci\n", generated)
-        self.assertGreater(generated.index("FROM runtime-assets-dolby-amd64 AS ci"),
-                           generated.index("FROM runtime-assets AS runtime-assets-dolby-amd64"))
-        self.assertNotIn("FROM runtime-assets AS ci\n", generated)
+        self.assertEqual(readiness.media_target(source), "runtime-assets")
+        self.assertIn("FROM runtime-assets AS ci\n", generated)
         self.assertIn("COPY --from=ci-rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin", generated)
-        historical = source.replace("FROM scratch AS linux-dolby-package-export", "FROM scratch AS old-export")
-        self.assertEqual(readiness.media_target(historical), "runtime-assets")
-        self.assertIn("FROM runtime-assets AS ci\n", readiness.ci_dockerfile(historical))
+        self.assertNotIn("AS linux-dolby-package-export", generated)
+        # Older candidate tags still select their audited installer stage.
+        historical = source + "\nFROM scratch AS linux-dolby-package-export\nFROM runtime-assets AS runtime-assets-dolby-amd64\n"
+        self.assertEqual(readiness.media_target(historical), "runtime-assets-dolby-amd64")
+        historical_generated = readiness.ci_dockerfile(historical)
+        self.assertGreater(historical_generated.index("FROM runtime-assets-dolby-amd64 AS ci"),
+                           historical_generated.index("FROM runtime-assets AS runtime-assets-dolby-amd64"))
         self.assertIn("sha256sum -c /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt",
                       readiness.BOOTSTRAP)
+
+    def test_media_registry_prefers_explicit_override_without_reading_origin(self):
+        with patch.dict(os.environ, {"PLURX_MEDIA_RUNTIME_REPOSITORY": "mirror.example:5000/media/runtime"}, clear=True), \
+             patch.object(readiness.subprocess, "check_output") as origin:
+            self.assertEqual(readiness.media_repository(), "mirror.example:5000/media/runtime")
+            origin.assert_not_called()
+
+    def test_media_registry_strips_origin_credentials_and_repository_path(self):
+        # The public default supersedes origin parsing, so credentials and
+        # transport details never participate in registry selection.
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(readiness.subprocess, "check_output") as origin:
+            self.assertEqual(readiness.media_repository(), "ghcr.io/pjunod/cinema-media-runtime")
+            origin.assert_not_called()
+
+
+    def test_media_registry_falls_back_for_ssh_or_unavailable_origins(self):
+        with patch.dict(os.environ, {}, clear=True):
+            for value in ("git@forge.example:noirr/plurx.git", "https://github.com/pjunod/cinema.git"):
+                with self.subTest(origin=value), \
+                     patch.object(readiness.subprocess, "check_output", return_value=value) as origin:
+                    self.assertEqual(readiness.media_repository(), "ghcr.io/pjunod/cinema-media-runtime")
+                    origin.assert_not_called()
+
 
     def test_image_is_built_from_checkout_and_run_by_immutable_id(self):
         image = "sha256:" + "a" * 64
@@ -63,21 +88,18 @@ class ReleaseReadinessCase(unittest.TestCase):
                 self.assertEqual(args[-1], ".")
                 if "--file" in args:
                     self.assertIn("PLURX_CI_SOURCE_SHA=candidate-sha", args)
-                    self.assertIn("FROM runtime-assets-dolby-amd64 AS ci\n",
+                    self.assertIn("FROM runtime-assets AS ci\n",
                                   Path(args[args.index("--file") + 1]).read_text())
-                    self.assertIn("--build-context", args)
+                    self.assertNotIn("--build-context", args)
                 Path(args[args.index("--iidfile") + 1]).write_text(image)
             return 0
         with patch.object(readiness.subprocess, "check_output", return_value="candidate-sha\n"), \
              patch.object(readiness, "run_owned", side_effect=build), \
              patch.object(readiness.subprocess, "run") as cleanup:
             self.assertEqual(readiness.build_image(), image)
-        self.assertEqual(calls[0][calls[0].index("--target") + 1], "linux-dolby-package-export")
-        self.assertEqual(calls[1][:2], ["docker", "create"])
-        self.assertEqual(calls[2][:2], ["docker", "cp"])
-        self.assertTrue(calls[2][2].endswith(":/package"))
-        self.assertEqual(calls[3][calls[3].index("--target") + 1], "ci")
-        self.assertEqual(cleanup.call_args.args[0][:3], ["docker", "rm", "--force"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][calls[0].index("--target") + 1], "ci")
+        cleanup.assert_not_called()
 
     def test_missing_immutable_image_id_refuses_execution(self):
         def bad_build(args):

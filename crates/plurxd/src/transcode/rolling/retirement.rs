@@ -876,6 +876,14 @@ async fn own_rolling_retirement(
         crate::playback_control::RollingTerminalCause::PauseExpired => {
             settlement.set_cause("pause_expired");
         }
+        // The session-event vocabulary VOD already emits for the same two
+        // terminals.
+        crate::playback_control::RollingTerminalCause::Released => {
+            settlement.set_cause("client_released");
+        }
+        crate::playback_control::RollingTerminalCause::Stopped => {
+            settlement.set_cause("killed");
+        }
     }
     session.retirement_cleanup_started.store(true, Release);
     let _ = committed.send(());
@@ -913,7 +921,7 @@ async fn own_rolling_retirement(
                     .restore_fallback_analysis_interest(store.as_ref())
                     .await
                 {
-                    tracing::warn!(%error,session=%session_log_id(&session_id),"exact fallback interest restore will retry after physical retirement");
+                    tracing::warn!(target: "plurxd::transcode", %error, session = %session_log_id(&session_id), "exact fallback interest restore will retry after physical retirement");
                     tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
                     continue;
                 }

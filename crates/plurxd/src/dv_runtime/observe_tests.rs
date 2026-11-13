@@ -105,6 +105,7 @@ impl Fixture {
                 .expect("held evidence"),
             registration,
             display_target: None,
+            master_metadata: None,
         };
         Self {
             private,

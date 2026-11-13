@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use plurx_core::store::background_jobs::{
     BackgroundJob, CancelJob, EnqueueOutcome, JobKind, JobPayload, JobQuery, JobState, WaiterQuery,
+    JOB_PROCESSING_WINDOW_MS,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -37,6 +38,9 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
         "id": job.id, "kind": kind, "state": job.state, "priority": job.priority,
         "file_id": file_id.map(|id| id.to_string()),
         "library_id": job.payload.get("library_id").and_then(Value::as_i64),
+        // Contract v2 targeted library work: its own job on the scan kind.
+        "targeted": job.payload.get("generation").and_then(Value::as_str)
+            == Some(plurx_core::store::background_jobs_library::LIBRARY_TARGETED_GENERATION),
         "fence": job.fence,
         "owner_node_id": job.token.as_ref().map(|token| &token.node_id),
         "target_node_id": job.supported_payload().ok().and_then(|payload| payload.target_node_id().map(str::to_owned)),
@@ -79,7 +83,7 @@ pub async fn list(
         ));
     }
     let now_ms = crate::state::clock_ms();
-    let (page, counts, migration, repairs, running, cancelling) = tokio::try_join!(
+    let (page, counts, completions, migration, repairs, running, cancelling) = tokio::try_join!(
         state.store.list_jobs(JobQuery {
             node_id: query.node_id,
             state: query.state,
@@ -88,6 +92,7 @@ pub async fn list(
             limit
         }),
         state.store.job_counts(now_ms),
+        state.store.recent_job_completions(now_ms),
         state.store.job_migration_status(),
         state.store.artifact_repairs(false),
         state.store.list_jobs(JobQuery {
@@ -126,7 +131,38 @@ pub async fn list(
         }
         row
     };
-    let jobs = page.jobs.iter().map(&labeled).collect::<Vec<_>>();
+    let mut jobs = page.jobs.iter().map(&labeled).collect::<Vec<_>>();
+    // A queued targeted request says what it waits on (contract v2 §5.1):
+    // the oldest pending request of the job carries it.
+    for row in jobs
+        .iter_mut()
+        .filter(|row| row["targeted"] == true && row["state"] == "queued")
+    {
+        let Some(job_id) = row["id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let pending = state
+            .store
+            .library_work_requests(plurx_core::store::background_jobs::LibraryWorkQuery {
+                job_id: Some(job_id),
+                pending_only: true,
+                limit: 1,
+                ..Default::default()
+            })
+            .await?;
+        if let Some(request) = pending.first() {
+            // Advisory: a sidecar this node cannot read (a row written by a
+            // newer or older build) leaves the listing without `waiting_on`
+            // instead of failing it.
+            match state.store.scan_request_v2(&request.request_id).await {
+                Ok(Some(sidecar)) => row["waiting_on"] = json!(sidecar.waiting_on),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, request = %request.request_id, "reading scan request sidecar for the job listing");
+                }
+            }
+        }
+    }
     let active_jobs = running
         .jobs
         .iter()
@@ -141,6 +177,7 @@ pub async fn list(
     })).collect::<Vec<_>>();
     Ok(Json(json!({"jobs": jobs, "repairs":repairs,
         "active_jobs": active_jobs, "active_truncated": active_truncated,
+        "processing": {"window_ms": JOB_PROCESSING_WINDOW_MS, "nodes": completions},
         "counts": counts, "migration": migration, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
 }
 
@@ -290,24 +327,28 @@ pub async fn retry(
                 "the original video identity is ambiguous; request a specific analysis".into(),
             ));
         }
+        let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
         let request = state
             .store
-            .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
-                request_id: request_id.clone(),
-                file_id,
-                source_size,
-                source_mtime,
-                component: "fragment_index".into(),
-                pipeline_version: engine,
-                video_identity,
-                requested_generation: request_id.clone(),
-                priority: "forced".into(),
-                trigger: "admin".into(),
-                force_rebuild: true,
-                target_node_id: state.node_id.clone(),
-                not_before_ms: now_ms,
-                created_at_ms: now_ms,
-            })
+            .enqueue_analysis_request_with(
+                &plurx_core::store::NewAnalysisRequest {
+                    request_id: request_id.clone(),
+                    file_id,
+                    source_size,
+                    source_mtime,
+                    component: "fragment_index".into(),
+                    pipeline_version: engine,
+                    video_identity,
+                    requested_generation: request_id.clone(),
+                    priority: "forced".into(),
+                    trigger: "admin".into(),
+                    force_rebuild: true,
+                    target_node_id: state.node_id.clone(),
+                    not_before_ms: now_ms,
+                    created_at_ms: now_ms,
+                },
+                live.as_deref(),
+            )
             .await?;
         if request.request_id != request_id {
             return Err(ApiError::Conflict(
@@ -368,25 +409,60 @@ pub async fn storage_domains(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
-    let (mappings, libraries) =
-        tokio::try_join!(state.store.storage_domains(), state.store.list_libraries())?;
-    Ok(Json(json!({"mappings": mappings, "libraries": libraries,
-        "slots_per_domain": 2, "provider_slots": 2})))
+    let (domains, libraries) = tokio::try_join!(
+        state.store.storage_domain_state(crate::state::clock_ms()),
+        state.store.list_libraries()
+    )?;
+    Ok(Json(
+        json!({"mappings": domains.applied, "libraries": libraries,
+        "slots_per_domain": 2, "provider_slots": 2, "pending": domains.pending,
+        "waiting_on": domains.waiting_on, "waiting_total": domains.waiting_total}),
+    ))
 }
 
 pub async fn replace_storage_domains(
-    _admin: AdminUser,
+    AdminUser(admin): AdminUser,
     State(state): State<AppState>,
     Json(mappings): Json<Vec<plurx_core::store::background_jobs_resources::StorageDomainMapping>>,
 ) -> Result<Json<Value>, ApiError> {
     plurx_core::store::background_jobs_resources::validate(&mappings)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    if !state
-        .store
-        .replace_storage_domains(mappings, crate::state::clock_ms())
-        .await?
+    let now = crate::state::clock_ms();
+    if serde_json::to_vec(
+        &json!({"mappings": &mappings, "saved_by": Some(admin.id), "now_ms": now}),
+    )
+    .map_err(|error| ApiError::BadRequest(error.to_string()))?
+    .len()
+        > 64 * 1024
     {
-        return Err(ApiError::Conflict("Storage identities cannot change while background work owns live reservations, or when a root no longer exists. Retry after the active jobs finish and reload the library roots.".into()));
+        return Err(ApiError::BadRequest(
+            "storage domain configuration exceeds 64 KiB".into(),
+        ));
     }
-    Ok(Json(json!({"saved": true})))
+    let revision = state
+        .store
+        .save_storage_domains(mappings, Some(admin.id), now)
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "A library root changed since this page loaded. Load library roots again.".into(),
+            )
+        })?;
+    if state.jobs.may_run_cluster_jobs().await {
+        // The desired revision is durable already. Applying is independent of
+        // accepting the save; the existing upkeep loop retries failed applies.
+        if let Err(error) = state.store.apply_pending_storage_domains(now).await {
+            tracing::warn!(%error, revision, "saved storage domains await application");
+        }
+    }
+    let domains = state.store.storage_domain_state(now).await?;
+    let applied = domains
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.revision == revision && pending.state == "applied");
+    Ok(Json(
+        json!({"saved": true, "revision": revision, "applied": applied,
+        "pending": domains.pending, "waiting_on": domains.waiting_on,
+        "waiting_total": domains.waiting_total}),
+    ))
 }

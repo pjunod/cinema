@@ -878,7 +878,7 @@ def require_legacy_chronology(legacy_sequences):
                      'Original JVM negative/clock/Main repair chronology incomplete or reordered')
 
 
-def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest):
+def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest, *, selection=False):
     receipts.require(set(item) == {'name', 'invocation', 'protocol', 'contract', 'inventory', 'records', 'obligations'}
                      and item['protocol'] == 'source-cohort-v1' and item['name'] in KINDS
                      and item['contract'] == CONTRACTS[item['name']] and item['obligations'] == [],
@@ -991,6 +991,28 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
             if mode == 'python-named':
                 counts = re.findall(r'^Ran (\d+) tests? in [0-9.]+s$', text, re.M)
                 receipts.require(counts == [str(capture['count'])], 'Finite original named count differs')
+        elif 'reviewed_observation' in execution:
+            from validation.native_python_observation import observed
+            actual = observed(proof, record, raw, kind, discovery)
+            if any(outcome == 'opaque-pass' for outcome in actual.values()):
+                opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
+                                       'log_sha256': record['log']['sha256_ref'],
+                                       'membership_ids': sorted(set(actual) - invalid),
+                                       'runtime_named_outcomes': None})
+        elif 'measured_python_binding' in execution:
+            from validation.native_python_discovery import measured_named
+            actual = measured_named(proof, record, raw, kind, universe, archive_digest, discovery)
+        elif execution.get('native_discovery') is True:
+            from validation.native_python_discovery import source_cohort
+            old_ids, counts = source_cohort(record, text, kind, item['invocation'], discovery, candidate)
+            # Discovery authenticates the complete old universe and its original
+            # counts above. Retired IDs supply no current credit; replacements
+            # and affected survivors still need their own passing outcomes.
+            actual = {test_id: 'opaque-pass' for test_id in old_ids if test_id in universe}
+            opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
+                                   'log_sha256': record['log']['sha256_ref'],
+                                   'membership_ids': sorted(set(actual) - invalid),
+                                   'runtime_named_outcomes': None, **counts})
         elif opaque:
             expected = BASE_JVM_LOG if kind == 'android_jvm' else BASE_PYTHON_LOG
             receipts.require(origin['kind'] == 'authenticated-ci' and record['source_commit'] == BASE_SOURCE
@@ -1086,6 +1108,13 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                      'Original named JVM failure lacks a current-applicable native pass')
     if kind == 'android_jvm':
         require_legacy_chronology(legacy_sequences)
+    if selection:
+        receipts.require(kind in {'validation', 'operations'}, 'Partial execution is Python-only')
+        uncovered = sorted(name for name in universe if retained.get(name) not in {'pass', 'opaque-pass'}
+                           or (name in failures and passes.get(name, 0) <= failures[name]))
+        return {'inventory': ids, 'uncovered': uncovered,
+                'prior_discovery': [{key: value for key, value in source.items() if key.startswith('native_')}
+                                    for source in opaque_sources if 'native_discovered' in source]}
     receipts.require(set(retained) == universe and all(value in {'pass', 'opaque-pass'} for value in retained.values())
                      and all(passes.get(test_id, 0) > sequence for test_id, sequence in failures.items()),
                      'Incomplete source-applicable cohort or failure without later actual named pass')
@@ -1099,7 +1128,8 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                      and set(opaque_ids) | set(named) == universe, 'Ambiguous opaque/named source-cohort partition')
     cohort_summaries = [{'source_commit': source['source_commit'], 'log_sha256': source['log_sha256'],
                          'membership_ids_sha256': retention.digest(json.dumps(source['membership_ids'], separators=(',', ':')).encode()),
-                         'membership_count': len(source['membership_ids']), 'runtime_named_outcomes': None}
+                         'membership_count': len(source['membership_ids']), 'runtime_named_outcomes': None,
+                         **{key: value for key, value in source.items() if key.startswith('native_')}}
                         for source in opaque_sources]
     source_owners = None
     if kind == 'android_jvm':

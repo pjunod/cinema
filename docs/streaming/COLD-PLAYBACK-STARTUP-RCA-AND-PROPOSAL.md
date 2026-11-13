@@ -1,6 +1,6 @@
 # Cold playback startup — why The Craft timed out and how to reach a few seconds
 
-**Status:** revision 2; re-reviewed, findings addressed; proposed runtime work ·
+**Status:** revision 2; re-reviewed, findings addressed; the #1366 and #1376 repairs were deployed 2026-11-07 (media1/lab6 build `4ddbf1229`, lab4 `edf6d08fa`), remaining runtime work proposed ·
 **Written:** 2026-11-02 EST · **Runtime investigated:** `ed708eda6b1df140626e9851bed6afbf06391f3f` ·
 **Document base:** `c0f0051a1896245da5b12757a557fd3700147e5d` ·
 **Owner:** Codex, branch `codex/playback-startup-rca`.

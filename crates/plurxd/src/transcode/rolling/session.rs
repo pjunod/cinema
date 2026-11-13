@@ -1045,9 +1045,12 @@ impl Session {
         let first_new_segment = previous_served
             .as_ref()
             .map_or(i64::MIN, |served| served.last_segment.saturating_add(1));
+        let native_first_snapshot = previous_served.is_none()
+            && self.publication.lock().await.startup_policy
+                == RollingStartupPolicy::NativePresentationWindow;
         let selected_last = if end_list {
             last_segment
-        } else if budget.demand_sequence.is_none() {
+        } else if budget.demand_sequence.is_none() && !native_first_snapshot {
             // A legacy viewer has no accepted playback position with which to
             // authorize a rounded-up segment.  Its fixed wall/download clock
             // therefore exposes only the last complete endpoint *inside* the
@@ -1061,8 +1064,10 @@ impl Session {
             };
             selected.index
         } else {
-            // The producer retains its steady allowance plus a complete-cut
-            // envelope. An isolated candidate may use less of that paid allowance:
+            // Explicit demand and the frozen native bootstrap position can
+            // authorize the first complete cut beyond the admission floor.
+            // The producer retains its steady allowance plus that bounded
+            // complete-cut envelope. A short candidate may use less of it:
             // keep its first advertised endpoint within the policy ceiling.
             let first_web_snapshot = previous_served.is_none()
                 && self
@@ -1265,8 +1270,8 @@ impl Session {
                 .as_ref()
                 .is_some_and(|served| first_segment > served.first_segment)
         {
-            // Short bootstrap is permitted; removing a prefix must still leave
-            // three target durations. Retain the old prefix until it can.
+            // The audited hls.js bootstrap may be short. Native admission and
+            // every prefix removal retain three fixed target durations.
             let old_first = previous_served
                 .as_ref()
                 .expect("previous snapshot checked")
@@ -1750,6 +1755,24 @@ impl Session {
         &self,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<crate::playback_control::RollingTerminalCause, String> {
+        if let Some(release) = self.control.projected_release() {
+            // A release or operator stop already committed this generation's
+            // terminal synchronously. Observe the cause the actor committed
+            // first instead of racing it with an End that can only lose. Any
+            // command imports the projection, so the snapshot carries it; an
+            // unavailable actor (or a passed deadline) leaves the projected
+            // release as the first retirement.
+            let snapshot = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.control.snapshot())
+                    .await
+                    .ok()
+                    .flatten(),
+                None => self.control.snapshot().await,
+            };
+            return Ok(snapshot
+                .and_then(|snapshot| snapshot.terminal)
+                .unwrap_or(release));
+        }
         let outcome = match deadline {
             Some(deadline) => match self.control.end_before(deadline.into_std()).await {
                 Ok(outcome) => Ok(outcome),
@@ -1785,6 +1808,23 @@ impl Session {
         // actor response admission. The actor imports the shared retirement
         // bit as typed AuthorityFence before applying its next queued command.
         self.control.fence_unavailable();
+    }
+
+    /// Retire this generation because its viewer released it or an operator
+    /// stopped it. Same synchronous producer transition as the authority
+    /// fence, with its own typed cause; the first retirement keeps its cause.
+    pub(super) fn project_release(&self, cause: crate::playback_control::RollingTerminalCause) {
+        self.control.release_unavailable(cause);
+    }
+
+    /// Project a durable terminal intent onto this generation: a client
+    /// release or operator stop with its own cause, anything else as the
+    /// authority fence it is.
+    pub(super) fn project_terminal_intent(&self, terminal: crate::vodserve::Terminal) {
+        match crate::playback_control::RollingTerminalCause::release_for(terminal) {
+            Some(cause) => self.project_release(cause),
+            None => self.project_authority_fence(),
+        }
     }
 
     pub(super) async fn settle_authority_fence(&self) {

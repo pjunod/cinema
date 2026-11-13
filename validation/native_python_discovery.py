@@ -1,0 +1,181 @@
+"""Whole native unittest discovery from an authenticated promotion preflight."""
+
+import re
+
+from validation import promotion_unit_retention as retention
+from validation.python_unit_receipts import require
+from validation.native_makefile_compatibility import native_makefile_digest
+
+
+# Reviewed environment and command bodies. Neither a run ID nor its log
+# digest authorizes execution: the caller also authenticates both through CI.
+PREFLIGHT = 'e1c1d63930937e64b70da4e9de434c00d6416cad0182f95d6ba58570f7094cd2'
+CURRENT_PREFLIGHT = '8c31cb8cc8bc56c8625e5e1eff387801008521d1bbb696618efc421592840df5'
+# The trusted current job at 49c4ec103 and its 5ca3abcb0 successor differ
+# only in three top-level comment lines and the completed job's timeout
+# (10 -> 30). The earlier raw job is CURRENT_PREFLIGHT above.
+# Keep every step, command, action, runner, environment and error control.
+CURRENT_EXECUTION = '2f331e4884702090f48afd7ccd371ac227df485355775077ff798f9bb3f27cbd'
+HISTORICAL_SCOPE = '0ee1ac7960c2417e5eba56611b80ece17b81c30d9913ccf9aa38386b94c98a75'
+MAKEFILE = 'd74b5626264702988ac3d7bc9f64aac246a1656e8408d539c0241659375971d8'
+# From the original 5ab77b99 Makefile to 49c4ec103, seven inserted lines add
+# only the HDR Rust check and an activity Node web check. The full-file hash
+# still refuses any further Make recipe drift.
+CURRENT_MAKEFILE = 'df9c99f78aab7649439e60cc376cf0796ee744ff19b39396ef78aad5a079a112'
+
+
+def job_body(workflow, name):
+    jobs = re.findall(r'(?ms)^  ' + name + r':\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)', workflow)
+    require(len(jobs) == 1, 'Ambiguous Python preflight source')
+    return jobs[0]
+
+
+def job_digest(workflow, name):
+    return retention.digest(job_body(workflow, name).encode())
+
+
+def preflight_execution_digest(workflow):
+    lines = job_body(workflow, 'preflight').splitlines(keepends=True)
+    steps = [index for index, line in enumerate(lines) if line == '    steps:\n']
+    require(len(steps) == 1, 'Ambiguous Python preflight steps')
+    timeouts = [index for index, line in enumerate(lines[:steps[0]])
+                if re.fullmatch(r'    timeout-minutes: [1-9]\d*\n', line)]
+    require(len(timeouts) == 1, 'Ambiguous Python preflight timeout')
+    # Only YAML comments at the job's own indentation are metadata. Comments
+    # inside a nested run body remain part of the exact execution projection.
+    execution = ''.join(line for index, line in enumerate(lines)
+                        if index not in timeouts and not line.startswith('    #'))
+    return retention.digest(execution.encode())
+
+
+def environment(source, workflow, *, historical):
+    from validation.qualification_unit_continuation import canonical_job_keys
+
+    canonical_job_keys(workflow)
+    # This workflow has exactly five plain root entries. Checking the whole
+    # source refuses a trailing defaults/env override, duplicate key, alias,
+    # or alternate key spelling outside the pinned preflight job.
+    roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)
+    globals_ = re.findall(r'(?ms)^env:\n(.*?)(?=^[^ \n]|\Z)', workflow)
+    makefile = native_makefile_digest(retention.git_bytes(source, 'Makefile') or b'')
+    original = job_digest(workflow, 'preflight') == PREFLIGHT and makefile == MAKEFILE
+    current = preflight_execution_digest(workflow) == CURRENT_EXECUTION and makefile == CURRENT_MAKEFILE
+    require(roots == ['name: ci', 'on:', 'env:', 'concurrency:', 'jobs:']
+            and not re.search(r'(?m)^defaults:', workflow)
+            and globals_ == ['  CARGO_TERM_COLOR: always\n\n']
+            and ((historical and original) or current),
+            'Python command, executor or workflow environment differs from reviewed preflight')
+
+
+def native_event(source, workflow, inputs):
+    environment(source, workflow, historical=True)
+    require(job_digest(workflow, 'scope') == HISTORICAL_SCOPE
+            and all(not inputs.get(key) for key in (
+                'retained_units_sha256', 'retained_units_attachment_id',
+                'retained_units_attachment_uuid', 'python_unit_evidence')),
+            'Historical Python discovery may have adopted retained results')
+
+
+def outer_counts(text, kind, run_id, count):
+    require(kind in {'validation', 'operations'} and count > 0, 'Unknown Python discovery')
+    require(len(re.findall(r'^🏁  Job succeeded$', text, re.M)) == 1
+            and not re.search(r'^Adopted authenticated complete (?:validation|operations) unit discovery$', text, re.M),
+            'Native Python preflight success unavailable or adopted')
+    if kind == 'validation':
+        start = r'^catalog ok: [^\n]+$'
+        end = r'^##\[group\]Environment details$'
+    else:
+        start = rf'^Artifact formal-model-{run_id}-1 has been successfully uploaded! [^\n]+$'
+        end = r'^ok - every surface routes every state and every input to a defined outcome$'
+    starts, ends = list(re.finditer(start, text, re.M)), list(re.finditer(end, text, re.M))
+    require(len(starts) == len(ends) == 1 and starts[0].end() < ends[0].start(),
+            'Native Python preflight step boundaries missing or ambiguous')
+    block = text[starts[0].end():ends[0].start()]
+    summaries = list(re.finditer(r'^-{70}\nRan (\d+) tests? in [0-9.]+s\n\n([^\n]+)$', block, re.M))
+    require(summaries and int(summaries[-1][1]) == count
+            and sum(int(row[1]) == count for row in summaries) == 1,
+            'Native Python outer discovery count differs from source inventory')
+    terminal = re.fullmatch(r'OK(?: \(skipped=([1-9]\d*)\))?', summaries[-1][2])
+    require(terminal is not None, 'Native Python discovery did not complete successfully')
+    skipped = int(terminal[1] or 0)
+    require(skipped <= count, 'Impossible native Python skip count')
+    return {'native_discovered': count, 'native_skipped': skipped, 'native_skipped_ids': None}
+
+
+def source_cohort(record, text, kind, command, discovery, candidate):
+    from validation.qualification_unit_continuation import authenticated_ids
+
+    origin = record['origin']
+    require(origin['execution'] == {'mode': 'source-cohort-v1', 'kind': kind,
+                                    'native_discovery': True, 'job_status': 'success'}
+            and origin['kind'] == 'authenticated-ci' and origin['command'] == command
+            and type(record['exit_code']) is int and record['exit_code'] == 0,
+            'Wrong native Python command or disposition')
+    run_id, _ = authenticated_ids(origin['identity'])
+    workflow = retention.git_bytes(candidate, '.github/workflows/ci.yml')
+    require(workflow is not None, 'Candidate Python preflight unavailable')
+    environment(candidate, workflow.decode(), historical=False)
+    ids = list(discovery(record['source_commit'], kind))
+    require(record['coverage'] == {'mode': 'python-discovery', 'ids': ids},
+            'Native Python cohort differs from frozen source discovery')
+    return ids, outer_counts(text, kind, run_id, len(ids))
+
+
+# These source-level controls parse supplied fixtures and do not invoke either
+# platform's native binaries. Extending this set requires reviewing the inputs
+# a body consumes before applying a Darwin result to the Linux preflight.
+MEASURED_PORTABLE_CASES = {
+    'test_qualification_unit_continuation.NativeTopologyWorkflowTailCase.test_native_topology_tail_requires_reviewed_workflow_and_stays_outside_unit_coverage',
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_native_source_recipe_keeps_actual_unprinted_outcome_scope',
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_rejects_unbound_origin_neighbor_target_or_partial_terminal',
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_preceding_command_cannot_absorb_the_unprinted_openraft_result',
+    'test_native_wal_openraft.NativeWalOpenraftCase.test_echoed_next_command_keeps_the_existing_boundary_path',
+    'test_retained_lane_commands.NativePythonTransitionCase.test_only_reviewed_whole_preflight_transition_preserves_node_scope',
+    'test_native_python_discovery.NativeDiscoveryCase.test_native_skips_remain_unnamed_and_nested_fixtures_do_not_supply_outcomes',
+    'test_native_python_discovery.NativeDiscoveryCase.test_refuses_misplaced_adopted_failed_or_ambiguous_discovery',
+    'test_native_python_discovery.NativeDiscoveryCase.test_historical_retained_input_or_changed_scope_cannot_claim_execution',
+    'test_native_python_discovery.NativeDiscoveryCase.test_native_continuation_runs_only_selected_exact_cases',
+}
+
+
+def measured_named(proof, record, raw, kind, universe, archive_digest, discovery):
+    """Read a clean, measured archive capture on the reviewed local toolchain."""
+    from validation.nonrust_unit_cohort import blob, python_rows
+    from validation import python_unit_receipts as receipts
+
+    origin = record['origin']
+    execution = origin['execution']
+    require(kind in {'operations', 'validation'} and origin['kind'] == 'attested-local'
+            and set(execution) == {'mode', 'kind', 'measured_python_binding'}
+            and record['coverage'] == {'mode': 'python-named'}
+            and type(record['exit_code']) is int and record['exit_code'] in (0, 1),
+            'Unexpected measured Python evidence')
+    binding = receipts.bounded_json(blob(proof, execution['measured_python_binding']))
+    argv = binding['argv']
+    require(binding['source_commit'] == record['source_commit']
+            and binding['source_archive_sha256'] == archive_digest(record['source_commit'])
+            and all(binding[key] is True for key in ('source_clean_before', 'source_clean_after', 'source_stable'))
+            and binding['log_sha256'] == retention.digest(raw) and binding['exit_code'] == record['exit_code']
+            and binding['platform'] == 'darwin' and binding['python_version'] == '3.12.14'
+            and binding['python_binary_sha256'] == '9d1335796350848c36dc2711a3298e096deebee18c85f1ab36edd8747fdf85eb'
+            and binding['node_version'] == 'v24.22.1'
+            and binding['node_binary_sha256'] == '8a7dd4c5cb35e6171dfbea7303650bc311f46971b06dd7e1c62e3f291cfd746c'
+            and isinstance(argv, list) and argv[:4] == [binding['python_executable'], '-m', 'unittest', '-v']
+            and origin['command'] == argv and len(argv) > 4,
+            'Python archive, command, measured source or runtime differs')
+    prefix = 'tests.' + kind + '.'
+    require(all(token.startswith(prefix) for token in argv[4:]), 'Measured Python selector outside suite')
+    selectors = [token.removeprefix(prefix) for token in argv[4:]]
+    original = discovery(record['source_commit'], kind)
+    ids = []
+    for selector in selectors:
+        selected = [test for test in original if test == selector or test.rpartition('.')[0] == selector]
+        require(selected, 'Unknown measured method or test class')
+        ids.extend(selected)
+    actual = python_rows(raw.decode(), kind, universe)
+    passed = all(outcome == 'pass' for outcome in actual.values())
+    terminal = r'^OK\s*\Z' if passed else r'^FAILED \((?:errors|failures)=[1-9]\d*(?:, (?:errors|failures)=[1-9]\d*)?\)\s*\Z'
+    require(len(ids) == len(set(ids)) and set(actual) == set(ids) and set(ids) <= MEASURED_PORTABLE_CASES
+            and passed == (record['exit_code'] == 0) and re.search(terminal, raw.decode(), re.M),
+            'Measured Python selectors, terminal or disposition differ')
+    return actual

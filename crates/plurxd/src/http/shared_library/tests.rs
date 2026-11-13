@@ -782,6 +782,16 @@ async fn sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_mon
                 .expect_err("unpublished variant never falls back to original")
                 .into_response();
                 assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                // A not-yet-rendered size is a scheduled wait, not a failure:
+                // the Source says when to ask again.
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(axum::http::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("2"),
+                    "variant-busy carries the render retry bound"
+                );
             }
             let jobs = rusqlite::Connection::open(&fixture.path)
                 .expect("job census")

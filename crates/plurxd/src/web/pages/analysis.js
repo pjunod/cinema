@@ -137,6 +137,7 @@ function analysisErrorInfo(code){
     unsupported:["VOD analysis is not supported","The file’s codec or fragment structure cannot produce a safe VOD HLS index.","Live HLS can be used when live recovery is enabled in Playback settings; rebuilding will not help unless the source changes.","bad"],
     truncated:["Legacy index output was incomplete","The original record did not preserve enough detail to identify why analysis stopped early.","Preview the video-completion repair to resolve the exact pipeline without replacing successful siblings.","bad"],
     encode_failed:["Index encoding failed","The index was built but could not be serialized into the cache artifact.","Inspect server logs and retry; repeated failures need a server fix.","bad"],
+    pipeline_version_unavailable:["Indexing engine retired","The request named an index engine digest that no running node provides any more.","The queue reconciles these onto the live engine automatically; if they persist, check that the target node is up and indexing.","warn"],
     local_publish_failed:["Index could not be published","The completed artifact could not be written to this node’s index cache.","Check free space and permissions on the cache directory, then retry.","bad"],
   };
   const parts=known[code]||[String(code||"Analysis failed").replace(/_/g," "),"The analysis pipeline reported an unrecognized error code.","Copy the diagnostics and inspect the server logs before retrying.","bad"];
@@ -173,7 +174,10 @@ function analysisVerdictLine(value){
   // A queue that never got as far as a claim and a queue that claims and
   // fails are the same outage wearing different faces. Name whichever one the
   // numbers actually show, because they point at different first moves.
-  const deadDetail=claimed===0&&waiting>0
+  const stranded=health.incompatible||0;
+  const deadDetail=claimed===0&&stranded>=waiting&&stranded>0
+    ? `${plural(stranded,'request')} queued under an index engine no node runs, and nothing picked up in 24 hours. Last index built ${age}.`
+    : claimed===0&&waiting>0
     ? `${plural(waiting,'job')} waiting and nothing picked up in 24 hours. Last index built ${age}.`
     : `${plural(claimed,'job')} picked up in 24 hours and nothing finished. Last index built ${age}.`;
   const said={
@@ -189,6 +193,23 @@ function analysisVerdictLine(value){
   const [tone,title,detail]=said;
   return `<div class="analysis-verdict ${tone}"><b>${esc(title)}</b><p>${esc(detail)}</p></div>`;
 }
+// What is in front of the queue, split the way the verdict splits it: work a
+// live engine can claim, work still inside its retry wait, and work under an
+// engine digest no node runs (which nothing will ever claim until it is
+// reconciled). Then the failures by code, largest first.
+function analysisQueueBreakdown(health){
+  if(!health||health.eligible===undefined) return "";
+  const oldest=health.oldest_queued_at_ms?fmtAgo(Math.floor(health.oldest_queued_at_ms/1000)):"none";
+  const codes=(health.failed_by_code||[]).slice().sort((a,b)=>b.count-a.count);
+  const failed=codes.length
+    ? `<table class="analysis-failed-codes"><thead><tr><th>Failed by code</th><th>Rows</th><th></th></tr></thead><tbody>${codes.map(row=>{
+        const info=analysisErrorInfo(row.code);
+        const reopen=row.code==="other"?"":`<button class="ghost sm" onclick='reopenFailedByCode(${esc(JSON.stringify(row.code))},this)'>Reopen…</button>`;
+        return `<tr><td title="${esc(row.code)}">${esc(info&&info.title?info.title:row.code)}</td><td>${esc(String(row.count))}</td><td>${reopen}</td></tr>`;
+      }).join("")}</tbody></table>`
+    : "";
+  return `<p class="analysis-queue-split">Eligible ${esc(String(health.eligible||0))} · waiting ${esc(String(health.waiting||0))} · incompatible engine ${esc(String(health.incompatible||0))} · oldest queued ${esc(oldest)}</p>${failed}`;
+}
 function analysisSummaryCard(value,context="activity"){
   const s=analysisCounts(value), attention=s.attention||0, active=s.active||0, expected=s.expected||0;
   const headline=s.available===false?"Analysis status is unavailable"
@@ -203,7 +224,8 @@ function analysisSummaryCard(value,context="activity"){
     :s.ready?`${s.ready} recent file${s.ready===1?' is':'s are'} ready for VOD HLS. The workspace retains the full searchable history.`
     :"This compact summary covers active work and recent terminal results; open the workspace for exact retained history.";
   const latest=s.latest_error&&s.latest_error.code?analysisErrorInfo(s.latest_error.code):null;
-  return `<div class="analysis-brief">${analysisVerdictLine(value&&value.summary?value.summary:value)}<div class="analysis-brief-head"><div><h2>${esc(headline)}</h2><p>${esc(detail)}</p></div>
+  const briefSummary=value&&value.summary?value.summary:value;
+  return `<div class="analysis-brief">${analysisVerdictLine(briefSummary)}${analysisQueueBreakdown(briefSummary&&briefSummary.health)}<div class="analysis-brief-head"><div><h2>${esc(headline)}</h2><p>${esc(detail)}</p></div>
       <div class="analysis-actions"><a class="ghost sm" href="#/analysis">Open workspace</a>${context==="activity"?`<button class="ghost sm" onclick="openAnalysisSettings()">Settings</button>`:""}</div></div>
     <div class="analysis-brief-status">
       <span class="analysis-state running">${s.available===false?"—":s.running??"—"} running</span>
@@ -476,9 +498,15 @@ function toggleAnalysisCoverage(){
 function measureAnalysisCoverage(){
   return followAnalysisCoverage(()=>api("/analysis/coverage",{method:"POST",body:{}}));
 }
+// A copy-index build a local viewer's playback asked for. The stored trigger
+// is constrained to three values, so the request id carries the attribution:
+// local-play.u<user>.<playback>.<suffix>.
+function analysisLocalPlayback(row){
+  return typeof row.request_id==="string"&&row.request_id.startsWith("local-play.");
+}
 function analysisDiagnosticText(row,names){
   const diagnostic=row.index_diagnostic||{};
-  const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
+  const trigger=analysisLocalPlayback(row)?"Local playback":row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
   return [
     `Title: ${row.title||`File ${row.file_id}`}`,
     `File: ${row.file_id}`,
@@ -558,6 +586,25 @@ async function reopenFailedAnalysis(btn){
   }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
   finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
 }
+// Reopen one failure cause in bulk: dry run first for the count, then the
+// same call for real. Codes the operator cannot act on (`other`) get no button.
+async function reopenFailedByCode(code,btn){
+  const label=btn&&btn.textContent;
+  if(btn){btn.disabled=true;btn.textContent="Checking…";}
+  try{
+    const body={limit:500,last_error_code:code};
+    const preview=await api("/analysis/reopen",{method:"POST",body:{...body,dry_run:true}});
+    const rows=preview.reopened||0, files=preview.files||0;
+    if(!rows){ toast("Nothing with that error is reopenable"); return; }
+    const more=preview.scan_truncated||preview.stopped_at_headroom?" There is more waiting than one run can take; run it again afterwards.":"";
+    if(!confirm(`Reopen ${rows} failed analysis ${rows===1?'item':'items'} across ${files} ${files===1?'file':'files'}?${more}`)) return;
+    if(btn) btn.textContent="Reopening…";
+    const done=await api("/analysis/reopen",{method:"POST",body:{...body,dry_run:false}});
+    toast(`${done.reopened||0} reopened${done.skipped_unavailable?`, ${done.skipped_unavailable} changed or already had a successor`:""}`);
+    await renderAnalysis(PAGE_RENDER_GENERATION,true);
+  }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
+}
 async function actOnAnalysisRow(key,btn){
   const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row) return;
   const action=analysisAction(row); if(!action||action==="none") return;
@@ -603,7 +650,7 @@ function paintAnalysis(snapshot){
     const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
     const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
     const priorityLabel=({normal:"Normal",forced:"Forced",foreground:"Foreground"})[row.priority]||row.priority||"Normal";
-    const triggerLabel=({admin:"Admin",background:"Background",foreground:"Foreground"})[row.trigger]||row.trigger||"Background";
+    const triggerLabel=analysisLocalPlayback(row)?"Local playback":({admin:"Admin",background:"Background",foreground:"Foreground"})[row.trigger]||row.trigger||"Background";
     const details=[
       ["File",row.file_id],["Request",row.request_id],["Worker job",row.job_id],
       ["Target node",analysisNodeDetail(nodeNames,row.target_node_id)],

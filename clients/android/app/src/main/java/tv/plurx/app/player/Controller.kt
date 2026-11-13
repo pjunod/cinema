@@ -194,6 +194,61 @@ class Controller internal constructor(
      */
     private val preparedSwitch = PreparedSwitchRecorder()
 
+    /** True between a prepared commit and its successor's proven frame. */
+    private var mediaSessionRebindAwaitsFrame = false
+
+    /** One synchronous `DecoderCounters` read into the seam recorder. */
+    private fun sampleDecoderDropped(pipeline: ExoPlayer, force: Boolean = false) {
+        val counters = runCatching { pipeline.videoDecoderCounters }.getOrNull() ?: return
+        counters.ensureUpdated()
+        preparedSwitch.noteDecoderDropped(monotonicNowMs(), counters.droppedBufferCount.toLong(),
+            System.identityHashCode(pipeline), force)
+    }
+
+    /** One `prepared_seam` beacon. Observation only; nothing reads it back. */
+    private fun reportPreparedSeam(
+        outcome: String,
+        evidence: PreparedSeamEvidence?,
+        reopened: Boolean,
+        session: String?,
+    ) {
+        val seam = preparedSeamReport(outcome, evidence, reopened) ?: return
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "info", event = "prepared_seam",
+            message = "prepared switch: $outcome", detail = outcome, ua = "Android Media3",
+            sessionId = session, preparedSeam = seam))
+    }
+
+    /**
+     * Session opens [restartAt] has started. Only its movement matters: a
+     * seam report compares it across its window to say whether the change
+     * also took an ordinary reopen.
+     */
+    private var reopensStarted = 0L
+
+    /**
+     * Every seam outcome is reported once the ±2 s window has elapsed, with
+     * whether an ordinary reopen actually ran inside it (review 3 B2): a
+     * refused or frameless switch owes one and counts as reopened only once it
+     * ran. A committed switch also carries its evidence, with one last forced
+     * counter read on the successor, so the report has the coverage the
+     * ledger row shows; a successor a reopen has already replaced has no
+     * window left to read.
+     */
+    private fun reportPreparedSeamAfterWindow(outcome: String, successor: ExoPlayer?) {
+        val reopensAtOutcome = reopensStarted
+        val session = sessionId
+        scope.launch {
+            delay(PREPARED_SWITCH_WINDOW_MS + 250L)
+            val evidence = if (outcome == "committed" && successor != null && player === successor) {
+                sampleDecoderDropped(successor, force = true)
+                preparedSwitch.seamEvidence(monotonicNowMs())
+            } else {
+                null
+            }
+            reportPreparedSeam(outcome, evidence, reopensStarted != reopensAtOutcome, session)
+        }
+    }
+
     /**
      * The three rows the info panel shows, computed on demand. A closed panel
      * costs nothing, and the panel cannot change what it is reading.
@@ -641,8 +696,11 @@ class Controller internal constructor(
      * gated on [effectiveProcessing] matching the current generation
      * ([tv.plurx.app.data.PlaybackEnhancement.shown]).
      */
-    var enhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(null)
-        private set
+    private var baseEnhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(null)
+    private var processingSkip: tv.plurx.app.data.ProcessingSkip? by mutableStateOf(null)
+    var enhancement: tv.plurx.app.data.PlaybackEnhancement?
+        get() = baseEnhancement?.explainingSkip(processingSkip, effectiveProcessingGeneration)
+        private set(value) { baseEnhancement = value; processingSkip = null }
     var deliveredRange: String? by mutableStateOf(plan.deliveredDynamicRange)
         private set
 
@@ -2425,6 +2483,9 @@ class Controller internal constructor(
         }
         carryDirectedChangeIntoReopen(positionMs)
         if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
+        // An ordinary open is starting; a prepared seam report reads whether
+        // one ran inside its window.
+        reopensStarted += 1
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
@@ -3359,9 +3420,10 @@ class Controller internal constructor(
                 observe = ::playbackControlObservation,
                 linkReceipt = { if (playbackControlBootstrapFence.isCurrent(claim, sessionId)) currentLinkReceipt() else null },
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
-                onProcessingGeneration = { generation, report ->
+                onProcessingGeneration = { generation, report, skip ->
                     effectiveProcessing = report?.takeIf { it.matches(generation, deliveredRange) }
                     effectiveProcessingGeneration = generation
+                    processingSkip = skip?.takeIf { it.matches(generation) }
                 },
                 onSubtitleUnavailable = {
                     if (selectedSubtitle != null) raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
@@ -4731,6 +4793,12 @@ class Controller internal constructor(
         refusal.code == "vod_transcode_unavailable" -> SurfaceSources.VOD_TRANSCODE_UNAVAILABLE
         refusal.code == "vod_subtitle_burn_unavailable" -> SurfaceSources.VOD_SUBTITLE_BURN_UNAVAILABLE
         refusal.code == "vod_disabled" -> SurfaceSources.VOD_DISABLED
+        // A capacity refusal no re-post of the same request can outlive (a
+        // height this server cannot encode now, a scratch grant above its
+        // ceiling, a replacement past its deadline). Nothing here re-asks at a
+        // smaller height, so the start ends on the row that names it.
+        surfaceSourceForCode(refusal.code, SurfaceContext.Start) ==
+            SurfaceSources.CREATE_CAPACITY_TERMINAL -> SurfaceSources.CREATE_CAPACITY_TERMINAL
         else -> SurfaceSources.OWNER_STOPPED
     }
 
@@ -5221,7 +5289,7 @@ class Controller internal constructor(
         // From here the rendezvous owns this preparation. This tick keeps the
         // readiness bound and the terminal failures; it is far too coarse for
         // anything measured against a 250 ms window.
-        val hold = RendezvousHold()
+        val hold = RendezvousHold(floorFilmMs = originMs)
         rendezvous = hold
         // The incumbent is *not* touched here, and that is the change. It keeps
         // playing all the way to the meeting point.
@@ -5265,6 +5333,7 @@ class Controller internal constructor(
                     abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.RENDEZVOUS_OVERLAP)
                     return@launch
                 }
+                sampleDecoderDropped(player)
                 if (!hold.isReady) {
                     delay(RENDEZVOUS_READY_POLL_MS)
                     val target = hold.rendezvousFilmMs ?: return@launch
@@ -5445,6 +5514,8 @@ class Controller internal constructor(
             predecessor = System.identityHashCode(player),
             successor = System.identityHashCode(successor),
         )
+        sampleDecoderDropped(player, force = true)
+        sampleDecoderDropped(successor, force = true)
         val previous = player
         val previousVolume = previous.volume
         // An ON_STOP owner pause survives the prepared item becoming active;
@@ -5519,7 +5590,10 @@ class Controller internal constructor(
             sessionId = successorSession
             startStatusPolling(successorSession)
         }
-        rebindMediaSessionTransport()
+        // MediaSession.setPlayer waits for the successor's own proven frame
+        // (settleCommitOnFirstFrame): until then the system transport keeps
+        // the predecessor, which stays paused and is the rollback authority.
+        mediaSessionRebindAwaitsFrame = true
         action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
         // The badges and the info panel describe the stream on the screen, and
         // both halves of the grade move together or neither does.
@@ -5588,6 +5662,12 @@ class Controller internal constructor(
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
         preparedSwitch.noteFirstFrame(monotonicNowMs())
+        // The decoded frame is proven: now the system transport may own it.
+        if (mediaSessionRebindAwaitsFrame) {
+            mediaSessionRebindAwaitsFrame = false
+            rebindMediaSessionTransport()
+        }
+        reportPreparedSeamAfterWindow("committed", player)
         autoDesiredCandidate?.let { requested ->
             if (preparedLedger.action?.effectiveSelection?.candidateId == requested.id) {
                 autoActiveCandidateId = requested.id
@@ -5698,6 +5778,7 @@ class Controller internal constructor(
         retiredPlayer = failedSuccessor
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player
+        mediaSessionRebindAwaitsFrame = false
         rebindMediaSessionTransport()
         preparedVideoSurfaces?.expose(predecessor.player) { collectRetiredPlayer() }
         return true
@@ -5713,6 +5794,11 @@ class Controller internal constructor(
         if (awaitingCommitFrameSinceMs == null) return false
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
+        reportPreparedSeamAfterWindow("switched_without_a_frame", null)
+        if (mediaSessionRebindAwaitsFrame) {
+            mediaSessionRebindAwaitsFrame = false
+            rebindMediaSessionTransport()
+        }
         publishAcknowledgement(preparedLedger.failedAfterSwitch())
         return fallBackAfterPreparedFailure()
     }
@@ -5749,6 +5835,12 @@ class Controller internal constructor(
         // untouched, so nothing is drawn and this event is the only trace the
         // viewer's session keeps of it. A deliberate abandonment — a seek, a
         // quality change, a release — is not a failure and says nothing.
+        // A commit that began (the rendezvous owns the preparation) and never
+        // switched is the seam's `refused`, on every failure path that ends
+        // it, reported once: this is the one place they all end (review 3 S8).
+        if (failed && rendezvous != null && !preparedLedger.isSwitched) {
+            reportPreparedSeamAfterWindow("refused", null)
+        }
         if (failed) {
             // Capture before release resets readiness. Diagnostics must not own
             // recovery, extend overlap, or fail teardown if a player read races.
@@ -6449,19 +6541,15 @@ fun buildPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false):
  * the moment it commits, and it must be visibly a different construction so
  * that neither one can quietly acquire the other's properties.
  *
- * **Tunneling inherits the incumbent's setting**, which on a television means
- * the successor is tunneled too. That is deliberate and it is the *lossy*
- * choice: M5.5's only hard failure was same-codec dual prime on a tunneled
- * Google TV — two identical tunneled pipelines appear to contend where two
- * different codecs get distinct decoder instances — so this reproduces that
- * failure rather than dodging it. The alternative, building the successor with
- * tunneling forced off, would probably make that device pass, but the pipeline
- * that primed would not be the pipeline that serves after the switch, and a
- * measurement that cannot fail is the same class of error as M5.5's rejected
- * first instrument set. The failure path here is `failed` plus the fallback
- * ladder, which is a bounded cost; a successful prime that proves nothing is
- * not. Revisit with evidence if the tunneling-off re-run is ever taken
- * (`docs/playback-control/PLAYBACK-CONTROL-STATUS.md:1240-1243`).
+ * **The successor is never tunneled** ([requestsTunneling]). It used to
+ * inherit the incumbent's tunneling so that the primed pipeline would be the
+ * one that serves, with tunneling suspected but not measured as the cause of
+ * M5.5's Google TV dual-prime failure. The measurement is now in: on the Google
+ * TV Streamer the parked tunneled successor's audio output made the MS12 HAL
+ * invalidate the incumbent's HW_AV_SYNC stream, the incumbent stalled with
+ * runway in hand, and the overlap bound abandoned the switch. An untunneled
+ * successor is still the pipeline that serves after its commit, so the
+ * measurement stays honest.
  */
 @UnstableApi
 fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean = false): BuiltPlayer {
@@ -6876,6 +6964,13 @@ internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L 
 internal class SharedPlayerController(private val context: android.content.Context, private val vm: AppViewModel) {
     /** The pipeline on the surface. A committed handoff makes the successor this. */
     private var active: ExoPlayer = buildPlayer(context, vm).player
+    private var activeOriginMs = 0L
+    private var activeIsVod = true
+    private var activeTitleDurationMs: Long? = null
+    private var successorOriginMs = 0L
+    private var successorIsVod = false
+    private var successorTitleDurationMs: Long? = null
+    private var retainedTimeline: Triple<Long, Boolean, Long?>? = null
     val player: ExoPlayer get() = active
     /** What the view shows; a handoff moves it to the successor and, on rollback, back. */
     val surfacePlayer = kotlinx.coroutines.flow.MutableStateFlow(active)
@@ -6923,20 +7018,25 @@ internal class SharedPlayerController(private val context: android.content.Conte
     }
 
     private val renderer: SharedRenderer = object : SharedRenderer {
-        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) {
+        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean, start: HlsStart) {
+            activeOriginMs = sharedMediaOriginMs(start)
+            activeIsVod = sharedFilmLocalVod(start)
+            activeTitleDurationMs = start.duration_ms
             reachedTimeline = false; bindActiveFrameEvidence()
             val media = MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build()
-            active.setMediaItem(media, positionMs); active.prepare(); active.playWhenReady = playWhenReady
+            active.setMediaItem(media, successorAttachPositionMs(activeOriginMs, positionMs)); active.prepare(); active.playWhenReady = playWhenReady
         }
         override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) {
+            activeOriginMs = 0L; activeIsVod = true; activeTitleDurationMs = null
             reachedTimeline = false; bindActiveFrameEvidence()
             active.setMediaSource(directSource.createMediaSource(MediaItem.fromUri(url)), positionMs); active.prepare(); active.playWhenReady = playWhenReady
         }
-        override fun seekTo(positionMs: Long) = active.seekTo(positionMs)
+        override fun seekTo(positionMs: Long) = active.seekTo(successorAttachPositionMs(activeOriginMs, positionMs))
         override fun setPlaying(playing: Boolean) { active.playWhenReady = playing }
         override fun snapshot() = SharedRendererSnapshot(
-            positionMs = active.currentPosition.coerceAtLeast(0), bufferedMs = active.bufferedPosition.coerceAtLeast(0),
-            durationMs = active.duration.takeIf { it != C.TIME_UNSET && it >= 0 }, playing = active.playWhenReady,
+            positionMs = successorFilmPositionMs(activeOriginMs, active.currentPosition),
+            bufferedMs = successorFilmPositionMs(activeOriginMs, active.bufferedPosition),
+            durationMs = activeTitleDurationMs ?: active.duration.takeIf { activeIsVod && it != C.TIME_UNSET && it >= 0 }, playing = active.playWhenReady,
             renderState = when (active.playbackState) {
                 androidx.media3.common.Player.STATE_READY -> RenderState.RENDERING
                 androidx.media3.common.Player.STATE_BUFFERING -> if (reachedTimeline) RenderState.WAITING else RenderState.STARTING
@@ -6944,6 +7044,8 @@ internal class SharedPlayerController(private val context: android.content.Conte
                 else -> RenderState.STARTING
             },
             playbackRate = active.playbackParameters.speed.toDouble(), framePresented = frameEvidence.presented,
+            seekableFilmRangeMs = sharedSeekableFilmRange(activeOriginMs,
+                active.duration.takeIf { it != C.TIME_UNSET }, active.isCurrentMediaItemSeekable),
         )
         override fun release() {
             sharedCaptions.release()
@@ -6952,7 +7054,10 @@ internal class SharedPlayerController(private val context: android.content.Conte
             retired.value?.let { if (it !== active) it.release() }; retired.value = null
             active.stop(); active.release()
         }
-        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) {
+        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean, start: HlsStart) {
+            successorOriginMs = sharedMediaOriginMs(start)
+            successorIsVod = sharedFilmLocalVod(start)
+            successorTitleDurationMs = start.duration_ms
             dropSuccessor()
             val built = buildSuccessorPlayer(context, vm).player
             // Register ownership before any setup that can throw on a TV.
@@ -6966,7 +7071,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
                 // Parked from the start: a successor that runs keeps whatever lead
                 // it lands with. It still loads while paused.
                 built.playWhenReady = false
-                built.setMediaItem(MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build(), positionMs)
+                built.setMediaItem(MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build(), successorAttachPositionMs(successorOriginMs, positionMs))
                 built.prepare()
             } catch (error: Throwable) {
                 dropSuccessor()
@@ -6976,7 +7081,8 @@ internal class SharedPlayerController(private val context: android.content.Conte
         override fun successorSnapshot(): SharedSuccessorSnapshot? = successor?.let {
             SharedSuccessorSnapshot(
                 ready = it.playbackState == androidx.media3.common.Player.STATE_READY && !it.currentTracks.groups.isEmpty(),
-                positionMs = it.currentPosition.coerceAtLeast(0), bufferedMs = it.bufferedPosition.coerceAtLeast(0),
+                positionMs = successorFilmPositionMs(successorOriginMs, it.currentPosition),
+                bufferedMs = successorFilmPositionMs(successorOriginMs, it.bufferedPosition),
                 seekLanded = successorSeekLanded, failed = successorFailed, firstFrameUnixMs = successorFirstFrameUnixMs,
             )
         }
@@ -6984,7 +7090,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
             val next = successor ?: return
             successorSeekLanded = false
             next.playWhenReady = false
-            next.seekTo(positionMs)
+            next.seekTo(successorAttachPositionMs(successorOriginMs, positionMs))
         }
         override fun switchToSuccessor() {
             val next = successor ?: return
@@ -6995,6 +7101,9 @@ internal class SharedPlayerController(private val context: android.content.Conte
             next.playWhenReady = previous.playWhenReady
             previous.playWhenReady = false
             retained = previous; retainedFramePresented = frameEvidence.presented
+            retainedTimeline = Triple(activeOriginMs, activeIsVod, activeTitleDurationMs)
+            activeOriginMs = successorOriginMs; activeIsVod = successorIsVod
+            activeTitleDurationMs = successorTitleDurationMs
             active = next
             bindActiveFrameEvidence(successorFirstFrameUnixMs != null)
             reachedTimeline = true
@@ -7008,6 +7117,10 @@ internal class SharedPlayerController(private val context: android.content.Conte
             previous.playWhenReady = dropped.playWhenReady
             dropped.playWhenReady = false
             active = previous
+            retainedTimeline?.let { (origin, vod, duration) ->
+                activeOriginMs = origin; activeIsVod = vod; activeTitleDurationMs = duration
+            }
+            retainedTimeline = null
             bindActiveFrameEvidence(retainedFramePresented)
             retained = null; successor = null
             surfacePlayer.value = previous
@@ -7049,7 +7162,7 @@ internal class SharedPlayerController(private val context: android.content.Conte
         preparedHandoff = vm.preferences.value.preparedReplacement)
 
     val sharedCaptions = SharedProgressiveCaptions(api = { vm.api() }, scope = scope,
-        currentBinding = { owner.captionReadBinding.value }, player = { active })
+        currentBinding = { owner.captionReadBinding.value }, player = { active }, mediaOriginMs = { activeOriginMs })
 
     private var activeListener = activeListenerFor(active, frameEvidence.generation)
     private fun bindActiveFrameEvidence(alreadyPresented: Boolean = false) {
@@ -7064,7 +7177,13 @@ internal class SharedPlayerController(private val context: android.content.Conte
         override fun onPlaybackStateChanged(state: Int) {
             if (!current()) return
             if (state == androidx.media3.common.Player.STATE_READY && !reachedTimeline) { reachedTimeline = true; owner.timelineReached() }
-            if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { if (!stopped && current()) { stop(watched = true); ended.value = true } }
+            if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch {
+                if (!stopped && current()) {
+                    if (sharedTitleEnded(activeIsVod, successorFilmPositionMs(activeOriginMs, active.currentPosition), activeTitleDurationMs)) {
+                        stop(watched = true); ended.value = true
+                    } else owner.rangeEnded()
+                }
+            }
         }
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             if (current()) { playing.value = playWhenReady; sharedCaptions.reconcile() }

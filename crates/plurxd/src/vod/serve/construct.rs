@@ -1,6 +1,15 @@
 use super::*;
 
 impl VodServe {
+    /// Attach the Analysis worker's inbox for v3 copy-index defects. The
+    /// first attachment stands.
+    pub(crate) fn attach_copy_analysis(
+        &self,
+        registry: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
+    ) {
+        let _ = self.shared.copy_analysis.set(registry);
+    }
+
     pub(crate) fn set_source_identity(&self, identity: crate::source_custody::SourceIdentity) {
         *self.shared.source_identity.lock().expect("source identity") = Some(identity);
     }
@@ -233,6 +242,7 @@ impl VodServe {
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
+                copy_index_init_contract: None,
                 encoding: None,
             },
             source: None,
@@ -455,6 +465,8 @@ impl VodServe {
                 cluster_node_id,
                 cluster_index_root,
                 cluster_membership,
+                catalog_namespace: tokio::sync::OnceCell::new(),
+                copy_analysis: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
                 passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
@@ -570,6 +582,96 @@ impl VodServe {
             present.extend(answers);
         }
         Ok(present)
+    }
+
+    /// The published v3 copy index for this node's current source object,
+    /// when one is usable: the exact head this node published, or another
+    /// origin's head whose content this node has itself attested. It reads
+    /// metadata and one verified blob (hydrated from a listed holder when
+    /// absent here); it queues nothing and joins no viewer interest, so a
+    /// miss or a refusal leaves the existing index order untouched.
+    pub(super) async fn try_copy_index_v3(
+        &self,
+        file: &MediaFile,
+        video: CopyVideoOptions,
+    ) -> Option<crate::copy_index_v3::Resolution> {
+        let node_id = self.shared.cluster_node_id.as_deref()?;
+        // A recipe planned from a shared index is fenced on the engine at
+        // every generation, exactly as a v2 one is. With a changed engine it
+        // could not produce, so the node-local index keeps the title playing.
+        // Nothing is returned, so no index is asked for either: a changed
+        // engine could not build one.
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return None;
+        }
+        let resolved =
+            async {
+                let namespace =
+                    self.shared
+                        .catalog_namespace
+                        .get_or_try_init(|| async {
+                            self.shared.store.instance_id().await.map_err(|error| {
+                                format!("reading the catalogue namespace: {error}")
+                            })
+                        })
+                        .await?;
+                crate::copy_index_v3::resolve(
+                    self.shared.store.as_ref(),
+                    self.shared.cluster_membership.as_ref(),
+                    node_id,
+                    namespace,
+                    &self.shared.runtime_cache,
+                    file,
+                    video,
+                    self.shared.copy_analysis.get().map(Arc::as_ref),
+                )
+                .await
+            }
+            .await;
+        match resolved {
+            Ok(resolved) => Some(resolved),
+            Err(reason) => {
+                tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v3 copy index unavailable");
+                None
+            }
+        }
+    }
+
+    /// Ask the Analysis worker for the v3 copy index of the file a local
+    /// viewer is starting, when planning found none. `own` is the source the
+    /// lookup just derived, so nothing is read here: the authority is
+    /// checked, and one inbox message is sent unless one already was. The
+    /// start itself is served by the existing index order and waits on
+    /// nothing. The worker builds the index with its own generations of the
+    /// copy engine once the source is idle, and a later start of the title
+    /// plans from it. A Sharing principal has no local authority and asks
+    /// for nothing.
+    pub(super) fn demand_copy_index(
+        &self,
+        file: &MediaFile,
+        own: plurx_core::store::analysis_coordination::AnalysisCoordinationSource,
+        recipe: crate::copy_analysis::CopyRecipe,
+        viewer: &crate::state::PlaybackViewerDemand,
+    ) {
+        if let Err(reason) = viewer.require_local_authority() {
+            tracing::debug!(target: "plurxd::vodserve", file_id = file.id, reason, "no copy index demand");
+            return;
+        }
+        let (Some(registry), Some(namespace)) = (
+            self.shared.copy_analysis.get(),
+            self.shared.catalog_namespace.get(),
+        ) else {
+            return;
+        };
+        if let Ok(demand) = crate::copy_analysis::CopyIndexDemand::local(
+            viewer,
+            Arc::new(file.clone()),
+            namespace.clone(),
+            own,
+            recipe,
+        ) {
+            registry.notify_demand(demand);
+        }
     }
 
     pub(super) async fn try_cluster_fragment_index(

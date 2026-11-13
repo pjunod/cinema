@@ -533,7 +533,7 @@ class ModelContractTest {
         val wire = json.encodeToString(CreateSessionReq(playback_id = "player", caps = caps))
 
         assertTrue(wire.contains("\"caps\":{\"v\":2"))
-        assertTrue(wire.contains("\"transports\":[\"progressive\",\"hls\"]"))
+        assertTrue(wire.contains("\"transports\":[\"progressive\",\"hls\",\"hls-bounded-range-v1\"]"))
         assertTrue(wire.contains("\"present\":[\"sdr\"]"))
     }
 

@@ -1,0 +1,11 @@
+--- a/helper/fel_renderer.h
++++ b/helper/fel_renderer.h
+@@ -557,7 +557,7 @@
+   // bias. Our admitted ratios are 1, 1/2 and 1/4; every non-tie sample is at
+   // least 1/8 texel from an edge, so this does not change its nearest texel.
+   // This explicit point policy is backend mechanics, not a Dolby filter claim.
+-  for (int c = 0; c < source.num_planes; c++) {
++  for (int c = 1; c < source.num_planes; c++) {
+     source.planes[c].shift_x -= 1.0f / 64;
+     source.planes[c].shift_y -= 1.0f / 64;
+   }

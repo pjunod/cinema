@@ -24,6 +24,10 @@ mod backup;
 mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
+mod copy_analysis;
+mod copy_index_v3;
+mod copy_normalization;
+mod copyrange;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
@@ -92,6 +96,7 @@ mod sharing_network;
 #[cfg(test)]
 mod sharing_protocol_fixture;
 mod source_custody;
+mod source_generation;
 mod source_input;
 mod source_probe;
 mod state;
@@ -432,6 +437,12 @@ enum Command {
     Healthcheck,
     /// Print the exact fragment-index engine identity used by this binary.
     MediaRuntimeIdentity,
+    /// Validate the installed Dolby Vision helper bundle exactly as the worker
+    /// does and print its identity; exit 1 when this binary would refuse it or
+    /// none is installed. The image build runs this, so an image cannot ship a
+    /// bundle its own daemon rejects.
+    #[cfg(target_os = "linux")]
+    DvHelperIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
     /// remains attached to its normal Docker networks.
@@ -614,6 +625,7 @@ fn main() -> anyhow::Result<()> {
         result.context("launching namespace-bound probe")?;
         anyhow::bail!("probe exec unexpectedly returned");
     }
+    crate::source_custody::note_process_start();
     daemon_main()
 }
 
@@ -682,6 +694,8 @@ async fn dispatch(
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
+        #[cfg(target_os = "linux")]
+        Command::DvHelperIdentity => {}
         Command::Healthcheck
         | Command::MediaRuntimeIdentity
         | Command::Advertise { .. }
@@ -736,6 +750,22 @@ async fn dispatch(
                 serde_json::to_string(&media_runtime_identity().await)?
             );
             Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        Command::DvHelperIdentity => {
+            #[cfg(target_os = "linux")]
+            {
+                match crate::vodencode::dv_runtime::installed_helper_identity().await {
+                    Ok(identity) => println!("{identity}"),
+                    Err(error) => {
+                        eprintln!("DV helper bundle refused: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                Ok(())
+            }
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("DV helper bundles are supported only on Linux")
         }
         Command::Advertise { server } => advertise(&server).await,
         Command::ResetPassword { username, password } => {
@@ -1941,7 +1971,11 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
         let catalogue = selected.catalogue_reader();
+        let applied = selected.applied_view();
         let dirs = create_dirs_for_config(&config)?;
+        if let Err(error) = crate::source_custody::configure_access_roots(&config, &dirs) {
+            tracing::warn!(%error, "source-access roots unavailable; launches remain unverified");
+        }
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
         // slow probe from waiting out its grace period while this process
@@ -1961,6 +1995,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             replication,
             membership,
             catalogue,
+            applied,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
             backup_client: selected.local_client(),
@@ -2015,6 +2050,7 @@ struct Boot {
     source_activation_at_boot: Option<bool>,
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
+    applied: plurx_core::store::AppliedView,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     identity: plurx_core::cluster::ClusterIdentity,
@@ -2369,6 +2405,7 @@ async fn boot_observing(
         replication,
         membership,
         catalogue,
+        applied,
         identity,
         credential_key,
         backup_client,
@@ -2406,6 +2443,7 @@ async fn boot_observing(
         replication,
         membership,
         catalogue,
+        applied,
         store,
         dirs,
         encoder_caps,
@@ -3460,6 +3498,7 @@ fn build_state(
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     catalogue: plurx_core::store::CatalogueReader,
+    applied: plurx_core::store::AppliedView,
     store: Arc<dyn plurx_core::store::Store>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
@@ -3481,6 +3520,7 @@ fn build_state(
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
             shared_cache_id: config.cluster.shared_cache_id.clone(),
             catalogue,
+            applied,
             snapshot_recovery_budgets: crate::state::SnapshotRecoveryBudgets {
                 chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
                 transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
@@ -3617,6 +3657,10 @@ fn spawn_background_loops(
         ),
     );
     tokio::spawn(crate::http::cluster_operations::peer_status_cache_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(crate::http::cluster_operations::worker_status_cache_loop(
         state.clone(),
         background_shutdown.clone(),
     ));

@@ -1,6 +1,8 @@
-"""The desktop entry registers the scheme, the package never edits associations
-as root, and the private mpv/libplacebo build is pinned where the launcher and
-the package version expect it."""
+"""Cinema packaging owns the frontend; the system package owns its renderer.
+
+Historical renderer patch controls below describe retained source, never the
+capabilities of the selected system mpv.
+"""
 
 import configparser
 import glob
@@ -11,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import support
 from plurx_player import VERSION, mpv
@@ -63,6 +66,65 @@ class Packaging(unittest.TestCase):
 
     def test_launcher_script_is_executable(self):
         self.assertTrue(os.access(os.path.join(ROOT, "plurx-player"), os.X_OK))
+
+
+class BinarySelection(unittest.TestCase):
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_system_mpv_wins_even_when_legacy_bundle_is_executable(self):
+        with mock.patch.object(mpv.os, "access", return_value=True) as access, \
+                mock.patch.object(mpv.shutil, "which") as which:
+            self.assertEqual(mpv.resolve_binary(), "/usr/bin/mpv")
+        access.assert_called_once_with("/usr/bin/mpv", os.X_OK)
+        which.assert_not_called()
+
+    @mock.patch.dict(os.environ, {"PLURX_PLAYER_MPV": "/custom/env-mpv"}, clear=True)
+    def test_explicit_and_environment_overrides_keep_their_precedence(self):
+        with mock.patch.object(mpv.os, "access") as access:
+            self.assertEqual(mpv.resolve_binary("/custom/cli-mpv"), "/custom/cli-mpv")
+            self.assertEqual(mpv.resolve_binary(), "/custom/env-mpv")
+        access.assert_not_called()
+
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_path_fallback_and_missing_renderer(self):
+        with mock.patch.object(mpv.os, "access", return_value=False), \
+                mock.patch.object(mpv.shutil, "which", return_value="/opt/bin/mpv") as which:
+            self.assertEqual(mpv.resolve_binary(), "/opt/bin/mpv")
+            which.assert_called_once_with("mpv")
+            which.return_value = None
+            self.assertIsNone(mpv.resolve_binary())
+
+
+class RendererCapability(unittest.TestCase):
+    def probe(self, output, returncode=0):
+        result = subprocess.CompletedProcess([], returncode, stdout=output)
+        with mock.patch.object(mpv.subprocess, "run", return_value=result) as run:
+            capable = mpv.native_dovi_capable("/chosen/mpv")
+        return capable, run
+
+    def test_compiled_capability_marker_enables_native_dolby_vision(self):
+        capable, run = self.probe("mpv v0.42.0\nList of enabled features: lua native-dovi-api-1 vulkan\n")
+        self.assertTrue(capable)
+        self.assertEqual(run.call_args.args[0], ["/chosen/mpv", "--no-config", "--version"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 3)
+
+    def test_version_names_partial_markers_and_failed_probes_are_not_capabilities(self):
+        for output in ("mpv 0.42+rogdv5.1\nList of enabled features: lua vulkan\n",
+                       "mpv native-dovi-api-1\nList of enabled features: lua\n",
+                       "List of enabled features: native-dovi-api-10\n"):
+            self.assertFalse(self.probe(output)[0], output)
+        self.assertFalse(self.probe("List of enabled features: native-dovi-api-1", returncode=1)[0])
+        for failure in (OSError("missing"), subprocess.TimeoutExpired("mpv", 3)):
+            with mock.patch.object(mpv.subprocess, "run", side_effect=failure):
+                self.assertFalse(mpv.native_dovi_capable("/chosen/mpv"))
+
+    @mock.patch.dict(os.environ, {"LD_PRELOAD": "bad", "LD_LIBRARY_PATH": "bad",
+                                  "LD_AUDIT": "bad", "WAYLAND_DISPLAY": "wayland-1"})
+    def test_probe_uses_the_same_loader_isolation_as_playback(self):
+        _, run = self.probe("List of enabled features: lua")
+        env = run.call_args.kwargs["env"]
+        for key in mpv.LOADER_OVERRIDES:
+            self.assertNotIn(key, env)
+        self.assertEqual(env["WAYLAND_DISPLAY"], "wayland-1")
 
 
 def read(relative):
@@ -120,16 +182,17 @@ class PrivateBuild(unittest.TestCase):
         self.assertLess(snapshot.index('if [ -f "$marker" ]'), snapshot.index("apt-get -q -o APT::Update::Error-Mode=any"))
         self.assertIn('flock -n 9', build)
 
-    def test_package_version_names_the_pinned_versions(self):
-        rows = pins()
+    def test_package_version_names_only_the_frontend(self):
         version = re.match(r"plurx-player \(([^)]+)\)", read("debian/changelog")).group(1)
-        self.assertTrue(version.startswith(f"{VERSION}+"), (version, VERSION))
+        self.assertEqual(version, f"{VERSION}-1")
         self.assertIn(f'"plurx-player {VERSION}"', read("plurx-player.1"))
-        upstream, _, revision = version.rpartition("-")
-        self.assertRegex(revision, r"^[0-9]+$", "a Debian revision: the source package is 3.0 (quilt)")
-        self.assertTrue(
-            upstream.endswith(f"+lp{rows['libplacebo'][0]}.mpv{rows['mpv'][0]}"), version)
         self.assertEqual(read("debian/source/format").strip(), "3.0 (quilt)")
+        source = read("packaging/fetch-sources.sh")
+        self.assertNotIn("curl ", source)
+        self.assertNotIn("orig-$name", source)
+        container = read("packaging/build-in-container.sh")
+        self.assertNotIn(".orig-libplacebo.tar.gz", container)
+        self.assertNotIn(".orig-mpv.tar.gz", container)
 
     def test_each_patch_series_lists_exactly_its_patches(self):
         for name in ("libplacebo", "mpv"):
@@ -151,21 +214,34 @@ class PrivateBuild(unittest.TestCase):
             self.assertNotRegex(line, r"&&\s*pass\b", f"verify-in-container.sh:{number}")
             self.assertNotRegex(line, r"\|\|\s*true\b", f"verify-in-container.sh:{number}")
 
-    def test_launcher_default_is_the_installed_private_mpv(self):
+    def test_package_ships_only_the_frontend_and_depends_on_system_mpv(self):
+        control = read("debian/control")
+        depends = re.search(r"^Depends: (.*)$", control, re.M).group(1).split(", ")
+        self.assertIn("mpv", depends)
+        self.assertNotIn("Built-Using:", control)
+        self.assertNotIn("libdovi", control)
         rules = read("debian/rules")
-        private = re.search(r"^PRIVATE = (\S+)$", rules, re.M).group(1)
-        self.assertIn("$(PKG)/$(PRIVATE)/bin/mpv", rules)
-        self.assertEqual(mpv.DEFAULT_BINARY, f"/{private}/bin/mpv")
+        self.assertNotIn("build-private.sh", rules)
+        self.assertNotIn("/bin/mpv", rules)
+        self.assertNotIn("meson test", rules)
+        self.assertNotIn("install -", rules)
+        self.assertEqual(read("debian/install").splitlines(), [
+            "plurx_player/*.py usr/lib/plurx-player/plurx_player/",
+            "plurx-player usr/bin/",
+            "plurx-player.desktop usr/share/applications/",
+            "plurx_player/scripts/*.lua usr/lib/plurx-player/plurx_player/scripts/",
+        ])
+        verify = read("packaging/verify-in-container.sh")
+        self.assertIn('dpkg-query -L plurx-player', verify)
+        self.assertIn('frontend ships a renderer or libraries', verify)
+        self.assertIn('legacy bundled mpv remains after upgrade', verify)
 
     def test_description_states_what_hdr_needs(self):
         control = read("debian/control")
-        self.assertIn("Architecture: amd64", control)
-        self.assertIn("${shlibs:Depends}", control)
         self.assertIn("wp_color_manager_v1 in HDR mode", control)
         self.assertIn("reports the panel's real luminance", control)
-        self.assertNotIn("Recommends: mpv", control)
+        self.assertIn("require the native-dovi-api-1 compiled capability", control)
         self.assertIn("Recommends: desktop-file-utils, mesa-vulkan-drivers | vulkan-icd", control)
-        self.assertIn("Built-Using: ${plurx:Built-Using}", control)
 
     def test_libplacebo_is_linked_in_renamed_and_hidden(self):
         # The system FFmpeg's libavfilter loads the system libplacebo into
@@ -182,9 +258,6 @@ class PrivateBuild(unittest.TestCase):
         rules = read("debian/rules")
         self.assertNotIn("libplacebo.so", rules)
         self.assertNotIn("$(PRIVATE)/lib", rules)
-        verify = read("packaging/verify-in-container.sh")
-        self.assertIn("mpv would call the system libplacebo", verify)
-        self.assertIn("the package installs a private library directory", verify)
 
 
 # The libdovi C API header plurx's processing helper pins
@@ -240,22 +313,7 @@ class ClosedFormMapping(unittest.TestCase):
         if os.path.isfile(helper):
             with open(helper, encoding="utf-8") as handle:
                 self.assertIn(LIBDOVI_HEADER_SHA256, handle.read())
-        self.assertIn("libdovi-dev", read("debian/control"))
-        # The header's struct layouts are proven against libdovi3 3.3.
-        self.assertIn("libdovi3 (<< 3.4~)", read("debian/control"))
-
-    def test_the_changelog_names_the_equations_it_ships(self):
-        # dm/ is copied from tools/dv_processing at build time, so a change to
-        # the equations must come with a new package version: the newest
-        # changelog entry records their hash.
-        tools = os.path.join(ROOT, "..", "..", "tools", "dv_processing")
-        base = tools if os.path.isdir(tools) else os.path.join(ROOT, "dm")
-        digest = hashlib.sha256()
-        for header in DM_HEADERS:
-            with open(os.path.join(base, header), "rb") as handle:
-                digest.update(handle.read())
-        newest = read("debian/changelog").split("\n -- ", 1)[0]
-        self.assertIn(f"dm {digest.hexdigest()[:12]}", newest)
+        self.assertNotIn("libdovi", read("debian/control"))
 
     def test_cm29_evaluates_its_lattice_once_per_frame(self):
         # One 4K CM v2.9 frame cost 34 ms on an Intel Arc iGPU when the final
@@ -321,6 +379,30 @@ class EnhancementLayerOverHls(unittest.TestCase):
         self.assertIn("+    if ((!x || size <= 0) && c->lav_codecpar) {", hunk)
         self.assertIn("c->lav_codecpar->extradata_size", hunk)
         self.assertIn("x[0] != 1", hunk)
+
+
+class WaylandDisplayErrorSpin(unittest.TestCase):
+    """A dead Wayland display ends the VO thread's loop instead of spinning it (patch 0009)."""
+
+    def test_a_fatal_display_error_closes_the_window_instead_of_spinning(self):
+        series = read("packaging/patches/mpv/series")
+        patch = "0009-wayland-stop-dispatching-after-a-fatal-display-error.patch"
+        self.assertIn(patch, series)
+        text = read(f"packaging/patches/mpv/{patch}")
+        self.assertIn("+++ b/video/out/wayland_common.c", text)
+        # All three display calls share one failure path.
+        self.assertIn("+static bool wayland_display_failed(struct vo_wayland_state *wl, int ret)", text)
+        self.assertIn("+        if (wayland_display_failed(wl, wl_display_dispatch_pending(wl->display)))", text)
+        self.assertIn("+        if (wayland_display_failed(wl, wl_display_read_events(wl->display)))", text)
+        self.assertIn("+    wayland_display_failed(wl, wl_display_dispatch_pending(wl->display));", text)
+        # The failure path stops using the display and asks the player to close.
+        self.assertIn("+    wl->display_fd = -1;", text)
+        self.assertIn("+    mp_input_put_key(wl->vo->input_ctx, MP_KEY_CLOSE_WIN);", text)
+        # A dead display still sleeps on the wakeup pipe, and a protocol error is logged in full.
+        self.assertIn("+        mp_poll(&wakeup, nfds > 1, timeout_ns);", text)
+        self.assertIn("+        uint32_t code = wl_display_get_protocol_error(wl->display, &interface, &id);", text)
+        # The loop that spun forever no longer ignores the dispatch result.
+        self.assertNotIn("\n+        wl_display_dispatch_pending(wl->display);", text)
 
 
 class FilmTimelineOsc(unittest.TestCase):

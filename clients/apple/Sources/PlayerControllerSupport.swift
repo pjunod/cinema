@@ -825,11 +825,14 @@ func preparedCadenceProbeItemMs(
         overlapRemainingMs: overlapRemainingMs, loadedItemRanges: loadedItemRanges) {
         return plan.itemPositionMs
     }
-    guard stagedFilmPositionMs >= 0, incumbentFilmPositionMs >= 0, mediaOriginMs >= 0,
+    guard stagedFilmPositionMs >= 0, incumbentFilmPositionMs >= 0,
+          (-PlaybackControl.maximumMediaMs...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),
           playbackRate.isFinite, playbackRate > 0,
           let lead = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: overlapRemainingMs)
     else { return nil }
-    let originalSeconds = Double(max(0, stagedFilmPositionMs - mediaOriginMs)) / 1_000
+    let (originalItemMs, originalOverflow) = stagedFilmPositionMs.subtractingReportingOverflow(mediaOriginMs)
+    guard !originalOverflow else { return nil }
+    let originalSeconds = Double(max(0, originalItemMs)) / 1_000
     guard let interval = PreparedSeekPolicy.contiguousRanges(loadedItemRanges)
         .first(where: { $0.contains(originalSeconds) }) else { return nil }
     let physicalCeiling = Double(incumbentFilmPositionMs) + min(16, playbackRate) * Double(lead)
@@ -838,7 +841,8 @@ func preparedCadenceProbeItemMs(
     guard filmMs.isFinite, filmMs >= Double(max(stagedFilmPositionMs, mediaOriginMs)),
           filmMs >= Double(incumbentFilmPositionMs), filmMs < Double(Int.max),
           let film = Int(exactly: filmMs) else { return nil }
-    let item = film - mediaOriginMs
+    let (item, overflow) = film.subtractingReportingOverflow(mediaOriginMs)
+    guard !overflow else { return nil }
     return interval.contains(Double(item) / 1_000) ? item : nil
 }
 
@@ -2673,6 +2677,7 @@ enum PlaybackCreateRetry {
         "vod_index_pending",
         "vod_engine_unattested",
         "transcode_capacity_pending",
+        "media_session_overloaded",
         "quality_catalog_unavailable",
     ]
 

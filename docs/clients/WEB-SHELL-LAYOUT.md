@@ -227,7 +227,9 @@ had to be edited.
 | 95 | [`pages/settings-remote.js`](../../crates/plurxd/src/web/pages/settings-remote.js) | Non-admin device-local Developer choices, screen registration and account grant management. | **New.** Remote integration. |
 | 96 | [`pages/remote.js`](../../crates/plurxd/src/web/pages/remote.js) | Mobile web screen picker, foreground controls, safe suggestions and lifecycle integration. | **New.** Remote integration. |
 | 97 | [`pages/diagnostics.js`](../../crates/plurxd/src/web/pages/diagnostics.js) | Help/report dialog, frozen capture, portable export, consented send, phone approval and bounded checks. | **New.** Remote diagnostics. |
-| 98 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
+| 98 | [`pages/activity-starts.js`](../../crates/plurxd/src/web/pages/activity-starts.js) | Activity → Starts: one row per playback start across the cluster (each media-session create, and each direct or progressive request that opened one), with outcome (an unobserved row says why), time to first frame, where the time went, the title's index state and the `Index now` action. | **New.** Playback-start attribution. |
+| 99 | [`curator-login.js`](../../crates/plurxd/src/web/curator-login.js) | Explicit household-only Curator consent and local administrator connection registration. | New. |
+| 100 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
 
 ## 3. Adding a file
 
@@ -360,4 +362,3 @@ is that nothing else changed:
   earlier row. Changing them is a behaviour change, however small, so it is
   not this PR's.
 
-The `curator-login.js` body script owns optional Curator consent and application registration.

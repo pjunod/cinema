@@ -41,8 +41,8 @@ function activityStreamState(session){
     if(o.control_demand!=="hold"&&o.render_state!=="rendering")return {cls:"wait",label:"Client waiting",why:o.producer_hold?`producer held · ${o.producer_hold}`:""};
   }
   // `lease_state` is "active" for a live lease and "unavailable" for a legacy
-  // viewer with no actor at all; only the three terminal verdicts are news.
-  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced"})[session.lease_state];
+  // viewer with no actor at all; only the terminal verdicts are news.
+  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced",released:"released",stopped:"stopped"})[session.lease_state];
   if(terminal) return {cls:"bad",label:`Lease ${terminal}`};
   const hold=!session.suspended?""
     :({demand:"viewer has enough",time:"reserve full",bytes:"per-stream byte limit",
@@ -224,6 +224,7 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   const d=detail;
   ACTIVITY_SNAPSHOT=d;
+  if(ME?.is_admin&&ACTIVITY_VIEW.tab==="starts")refreshActivityStarts();
   try{
     if(d.dvr){dvrSetOverview(d.dvr);ACTIVITY_DVR.rows=d.dvr.active||[];}
     else ACTIVITY_DVR.rows=[];
@@ -322,9 +323,9 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     <h2 class="section">Happening now · Watching</h2>
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
     ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
+    ${activitySourceRecoveryHtml(d)}
     ${activityTabsHtml()}
     <section id="activity-status" ${ME?.is_admin?'role="tabpanel" aria-labelledby="activity-tab-status"':'aria-label="Activity status"'}${ACTIVITY_VIEW.tab!=="status"?" hidden":""}>
-    ${activitySourceRecoveryHtml(d)}
     ${activityBlockedScansHtml(d)}
     <div id="cluster-workers">${clusterWorkersHtml(d)}</div>
     ${section("recordings",`Recording activity · ${recording.length} active`,dvrActivityRows(recording,nodeNames,dvrState),!!DVR_PAGE.selectedId)}
@@ -340,7 +341,8 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${section("processes","Processes on this server",activityProcessesHtml(d.processes))}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
     ${section("trakt","Trakt",trakt)}</section>
-    ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}`;
+    ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}
+    ${activityStartsPaneHtml(nodeNames)}`;
   dvrRestoreUi(m,dvrUi);
   paintActivityInspector();
   if(durableFocus)restoreDurableFocus(m,durableFocus);

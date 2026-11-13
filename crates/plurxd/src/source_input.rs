@@ -18,6 +18,24 @@ const SOURCE_WINDOW_MAX: usize = 4 * 1024 * 1024;
 const SOURCE_WINDOW_CONTROL: usize = 256 * 1024;
 const SOURCE_HTTP_CHUNK: usize = 256 * 1024;
 
+/// One-way allowance for ONE already-authorized primary Input operation.
+/// This token cannot reset a census ceiling or address any other Input URL.
+#[derive(Clone)]
+pub(crate) struct SourceSeekBootstrap(Arc<SourceSeekBootstrapState>);
+struct SourceSeekBootstrapState {
+    bytes: u64,
+    verified: std::sync::atomic::AtomicBool,
+}
+impl SourceSeekBootstrap {
+    pub(crate) fn is_verified(&self) -> bool {
+        self.0.verified.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(crate) fn verified_landing(&self) {
+        self.0
+            .verified
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 pub(crate) trait SourceInputByteBudget: Send + Sync {
     fn allowance(
         &self,
@@ -154,6 +172,7 @@ impl SourceInputByteBudget for crate::background_jobs::SourceReadBudget {
 
 pub(crate) struct SourceInput {
     url: String,
+    broker: Arc<std::sync::Mutex<Option<plurx_core::process::source_lifetime::BrokerRegistration>>>,
     state: Arc<InputState>,
     close: tokio_util::sync::CancellationToken,
     server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -220,6 +239,7 @@ struct InputState {
     // Drop the original capability before its exact ledger guard.
     source: std::sync::Mutex<Option<crate::fragment_index_cluster::SourceFence>>,
     custody: std::sync::Mutex<Option<SourceCustody>>,
+    _background_holder: Option<crate::background_jobs::SourceHolder>,
     observer: Option<SourceObserver>,
     purpose_budget: Option<Arc<dyn SourceInputByteBudget>>,
     background_budget: Option<Arc<dyn SourceInputByteBudget>>,
@@ -230,6 +250,9 @@ struct InputState {
     len: u64,
     mime: &'static str,
     window_bytes: std::sync::atomic::AtomicUsize,
+    /// Immutable issued-read ceiling for a dedicated bounded census input.
+    read_ceiling: std::sync::atomic::AtomicU64,
+    seek_bootstrap: std::sync::OnceLock<Arc<SourceSeekBootstrapState>>,
     source_bytes: std::sync::atomic::AtomicU64,
     cache_hits: std::sync::atomic::AtomicU64,
     cached_bytes: std::sync::atomic::AtomicUsize,
@@ -238,6 +261,8 @@ struct InputState {
 }
 #[derive(Default)]
 struct ByteBudget {
+    /// Conservative issued bytes; never reset or refunded across seeks.
+    operation_used: u64,
     grant: Option<SourceServiceGrant>,
     used: u64,
     window: ReadWindow,
@@ -344,6 +369,7 @@ impl SourceInput {
         }
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
+            _background_holder: None,
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
             purpose_budget,
@@ -355,6 +381,8 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -410,6 +438,7 @@ impl SourceInput {
         observer.mediate_reads();
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
+            _background_holder: None,
             custody: std::sync::Mutex::new(Some(custody)),
             observer: Some(observer),
             purpose_budget: None,
@@ -421,6 +450,8 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -441,11 +472,59 @@ impl SourceInput {
         )
         .await
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn qualification_fixture(bytes: &[u8]) -> (Self, std::fs::File) {
+        let (input, file, _) = tests::input(bytes, SOURCE_HTTP_CHUNK, None).await;
+        (input, file)
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn completion_read_fixture(
+        file: &Arc<std::fs::File>,
+        owner: &Arc<crate::background_jobs::SourceReadBudget>,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        Arc<tests::ReadGate>,
+    ) {
+        let source = crate::fragment_index_cluster::SourceFence::clone_current_held(file)
+            .expect("fixture source");
+        let holder = owner.source_holder().expect("registered physical source");
+        let (reached, parked) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(tests::ReadGate::new(reached));
+        let len = file.metadata().expect("source metadata").len();
+        let state = Arc::new(InputState {
+            source: std::sync::Mutex::new(Some(source)),
+            custody: std::sync::Mutex::new(None),
+            _background_holder: holder,
+            observer: None,
+            purpose_budget: None,
+            background_budget: Some(Arc::new(tests::UnlimitedBudget::default())),
+            pause: None,
+            budget: tokio::sync::Mutex::new(ByteBudget::default()),
+            close: tokio_util::sync::CancellationToken::new(),
+            read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            len,
+            mime: "application/octet-stream",
+            window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            source_bytes: std::sync::atomic::AtomicU64::new(0),
+            cache_hits: std::sync::atomic::AtomicU64::new(0),
+            cached_bytes: std::sync::atomic::AtomicUsize::new(0),
+            read_gate: Some(Arc::clone(&gate)),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
+        });
+        (
+            Self::launch(state).await.expect("real input bridge"),
+            parked,
+            gate,
+        )
+    }
     pub(crate) async fn open_background_held(
         source: crate::fragment_index_cluster::SourceFence,
         mime: &'static str,
         budget: Arc<crate::background_jobs::SourceReadBudget>,
     ) -> Result<Self, String> {
+        let holder = budget.source_holder()?;
         if !source.unchanged() {
             return Err("held source changed before input bridge".into());
         }
@@ -456,6 +535,7 @@ impl SourceInput {
             .len();
         let state = Arc::new(InputState {
             source: std::sync::Mutex::new(Some(source)),
+            _background_holder: holder,
             custody: std::sync::Mutex::new(None),
             observer: None,
             purpose_budget: None,
@@ -467,6 +547,8 @@ impl SourceInput {
             len,
             mime,
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+            read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
+            seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -481,30 +563,56 @@ impl SourceInput {
             .map_err(|error| error.to_string())?;
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let route = format!("/{}", uuid::Uuid::new_v4().simple());
+        let url = format!("http://{address}{route}");
+        let broker = Arc::new(std::sync::Mutex::new(Some(
+            plurx_core::process::source_lifetime::register_broker(&url)
+                .map_err(|error| error.to_string())?,
+        )));
         let router = Router::new()
             .route(&route, any(serve_input))
             .with_state(Arc::clone(&state));
         let close = state.close.clone();
         if let Some(observer) = state.observer.clone() {
             let source_close = close.clone();
+            let authority_broker = Arc::clone(&broker);
             tokio::spawn(async move {
                 tokio::select! {
                     ()=source_close.cancelled()=>{},
-                    ()=observer.authority_lost()=>source_close.cancel(),
+                    ()=observer.authority_lost()=>{
+                        drop(authority_broker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+                        source_close.cancel();
+                    },
                 }
             });
         }
         let shutdown = close.clone();
+        let server_broker = Arc::clone(&broker);
+        let shutdown_broker = Arc::clone(&broker);
         let server = tokio::spawn(async move {
             let _ = axum::serve(
                 listener,
                 router.into_make_service_with_connect_info::<SocketAddr>(),
             )
-            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .with_graceful_shutdown(async move {
+                shutdown.cancelled().await;
+                drop(
+                    shutdown_broker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(),
+                );
+            })
             .await;
+            drop(
+                server_broker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
         });
         Ok(Self {
-            url: format!("http://{address}{route}"),
+            url,
+            broker,
             state,
             close,
             server: std::sync::Mutex::new(Some(server)),
@@ -522,6 +630,68 @@ impl SourceInput {
     /// Internal qualification control; no host tuning or Developer switch.
     /// Set before passing the URL to a child. Both candidates remain bounded.
     #[cfg_attr(not(test), allow(dead_code))]
+    /// A ceiling belongs to this input's unique URL for its complete lifetime.
+    /// There is deliberately no reset/remove API: late census requests cannot
+    /// acquire the allowance of a later primary-input operation.
+    pub(crate) fn seal_seek_bootstrap_limit(
+        &self,
+        bytes: u64,
+    ) -> Result<SourceSeekBootstrap, String> {
+        if bytes == 0 || bytes == u64::MAX {
+            return Err("source seek bootstrap ceiling invalid".into());
+        }
+        let budget = self
+            .state
+            .budget
+            .try_lock()
+            .map_err(|_| "source input already reading".to_owned())?;
+        if budget.operation_used != 0
+            || self
+                .state
+                .read_ceiling
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != u64::MAX
+        {
+            return Err("source seek bootstrap is not a fresh primary operation".into());
+        }
+        let state = Arc::new(SourceSeekBootstrapState {
+            bytes,
+            verified: std::sync::atomic::AtomicBool::new(false),
+        });
+        self.state
+            .seek_bootstrap
+            .set(Arc::clone(&state))
+            .map_err(|_| "source seek bootstrap already sealed".to_owned())?;
+        Ok(SourceSeekBootstrap(state))
+    }
+    pub(crate) fn seal_read_ceiling(&self, bytes: u64) -> Result<(), String> {
+        if bytes == 0 {
+            return Err("source census byte ceiling is empty".into());
+        }
+        {
+            let budget = self
+                .state
+                .budget
+                .try_lock()
+                .map_err(|_| "source input already reading".to_owned())?;
+            if budget.operation_used != 0 {
+                return Err("source input already read".into());
+            }
+            self.state
+                .read_ceiling
+                .compare_exchange(
+                    u64::MAX,
+                    bytes,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .map_err(|_| "source input ceiling already sealed".to_owned())?;
+        }
+        Ok(())
+    }
+
+    /// Qualification control only: the production read window is fixed.
+    #[cfg(test)]
     pub(crate) fn with_read_window(self, bytes: usize) -> Result<Self, String> {
         if !(SOURCE_WINDOW_CONTROL..=SOURCE_WINDOW_MAX).contains(&bytes) {
             return Err("source read window outside qualification bounds".into());
@@ -565,9 +735,19 @@ impl SourceInput {
             .expect("foreground source observer")
             .clone()
     }
+    fn revoke_broker(&self) {
+        let registration = self
+            .broker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(registration);
+    }
+
     /// Join actual source reads, then close the held capability before a
     /// background caller returns its job/resource claim.
     pub(crate) async fn close_and_wait(self) -> std::io::Result<()> {
+        self.revoke_broker();
         self.close.cancel();
         if let Some(observer) = &self.state.observer {
             observer.mark_cleanup_pending();
@@ -593,6 +773,7 @@ impl SourceInput {
         Ok(())
     }
     pub(crate) fn cleanup_pending(self) {
+        self.revoke_broker();
         self.close.cancel();
         if let Some(custody) = self.state.custody.lock().expect("source custody").take() {
             custody.cleanup_pending();
@@ -601,6 +782,7 @@ impl SourceInput {
 }
 impl Drop for SourceInput {
     fn drop(&mut self) {
+        self.revoke_broker();
         self.close.cancel();
     }
 }
@@ -732,9 +914,26 @@ async fn read_source(
     state
         .cached_bytes
         .store(0, std::sync::atomic::Ordering::SeqCst);
+    let seek_ceiling = state
+        .seek_bootstrap
+        .get()
+        .filter(|bootstrap| !bootstrap.verified.load(std::sync::atomic::Ordering::SeqCst))
+        .map_or(u64::MAX, |bootstrap| bootstrap.bytes);
     let wanted = remaining
         .min(state.len.saturating_sub(offset))
-        .min(state.window_bytes.load(std::sync::atomic::Ordering::SeqCst) as u64);
+        .min(state.window_bytes.load(std::sync::atomic::Ordering::SeqCst) as u64)
+        .min(
+            state
+                .read_ceiling
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .min(seek_ceiling)
+                .saturating_sub(budget.operation_used),
+        );
+    if wanted == 0 {
+        return Err(std::io::Error::other(
+            "source census byte ceiling exhausted",
+        ));
+    }
     let observer = state.observer.as_ref();
     if observer.is_some_and(|observer| !observer.has_authority()) {
         return Err(std::io::Error::other("source authority lost"));
@@ -809,6 +1008,10 @@ async fn read_source(
     // worker. Cancelled/short reads receive no refund and cannot reset an
     // epoch by abandoning their HTTP waiter.
     budget.used = budget.used.saturating_add(size as u64);
+    budget.operation_used = budget
+        .operation_used
+        .checked_add(size as u64)
+        .ok_or_else(|| std::io::Error::other("source issued-byte counter overflow"))?;
     if let Some(observer) = observer {
         tokio::select! {biased;
             ()=state.close.cancelled()=>return Err(std::io::Error::other("source input closed")),

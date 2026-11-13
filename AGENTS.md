@@ -60,6 +60,19 @@ every push. Forgejo runs it as the first job of every pull request, drafts
 included, and nothing else starts until it passes, so skipping it only costs
 you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules.
 
+`make paperwork-fix` applies the ones with a single right answer — release
+counters, host names in Markdown, missing index rows — and the lane does the
+same on its own: it pushes a `chore(paperwork)` commit to your branch instead
+of failing, so `git pull --rebase` before your next push. A new push cancels
+the PR's in-flight lane run; successes from earlier finished runs are still reused.
+[docs/ci/CI-THROUGHPUT.md](docs/ci/CI-THROUGHPUT.md) says what to run before
+pushing and what reruns.
+
+A start-path change — anything under `crates/plurxd/src/http/hls/`,
+`transcode/`, `vod/`, `playstart.rs`, or the client players — cites in its
+pull request a before reading from `/metrics` and names the after reading it
+expects, so the next reader can compare the fleet against the claim.
+
 ## Where the documents are
 
 [docs/README.md](docs/README.md) is a short router: the reference documents
@@ -136,6 +149,17 @@ card (and any temporary toggle) is removed and the feature is simply on.
 The rule and the current audit are in
 [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
 
+## Mobile publishing and signing
+
+Before diagnosing a missing signing identity or asking the owner for a key,
+read [the publishing recovery runbook](docs/PUBLISHING.md#recover-mobile-signing)
+and the previous setup receipts. Verify the actual signing controller from
+fresh fleet data; the current agent's Mac may be a different machine. Reuse
+and repair the existing account/runner configuration. Record the verified
+repair and private controller details in the durable external-drive handoff
+before declaring the task complete; keep secrets and real addresses out of
+this mirrored repository.
+
 ## Rust compile loop — do not use CI as a compiler
 
 At the start of any session that may change Rust, establish a working compiler
@@ -190,8 +214,10 @@ shape for an agent here — use the source-only loop in
   landing commit's message — `python3 -m validation.regression_field
   --body-file <description> --landing-lines` prints them — because once
   `validation/merge-errata.toml` sets its boundary, `make history-check`
-  reads them from the landing commit, and a corrective landing without them
-  turns every later pull request red until an errata row records it.
+  reads them from the landing commit. A corrective landing without them
+  fails the full audit on `main` and is reported (not failed) in every later
+  pull request's lane until an errata row records it
+  ([docs/ci/CI-THROUGHPUT.md](docs/ci/CI-THROUGHPUT.md) §2a).
   `.forgejo/default_merge_message/MERGE_TEMPLATE.md` prefills Forgejo's web
   merge form with the description, so a web merge left as prefilled carries
   them. The API does not: `POST …/pulls/<N>/merge` without

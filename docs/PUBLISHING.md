@@ -29,6 +29,11 @@ Docs, native test changes and server changes alone do not allocate a signing
 runner. Contributors still bump the affected build counter in their pull
 request; this job preserves those numbers rather than committing a new bump.
 
+A platform publishes only if no client path changed after the `main`
+commit that landed its counter (first-parent, so an early bump in a merged PR
+counts). Otherwise the log says `skipping Cinema <platform>` and the next bump
+publishes it. The controller guard must use the same first-parent rule.
+
 The job calls `media/mobile-channels.yml` in the private Ansible repository,
 selecting `cinema` only. This channel playbook is separate from the physical
 device playbook below. It builds signed archives/AABs, validates them, and
@@ -74,6 +79,64 @@ around by granting it more access. Export of the existing Cinema iOS and
 tvOS distribution archives succeeded with the Xcode account on 2026-11-03;
 these checks submitted no new builds to TestFlight.
 
+### Recover mobile signing
+
+Identify the actual signing controller from the current fleet/runner report
+before inspecting Keychain or asking the owner to supply a key. The current
+Codex host, a scrubbed host alias and an old DHCP address do not establish
+which Mac executes the publisher. Match the job's runner registration and
+work directory to the controller's hardware, user and running LaunchAgent.
+Private addresses and setup receipts belong in the private operational
+handoff, outside this mirrored repository.
+
+On the signing controller, check these existing paths first:
+
+```bash
+launchctl print gui/$(id -u)/tv.plurx.mobile-signing
+security list-keychains -d user
+security find-identity -v -p codesigning
+xcode-select -p
+xcodebuild -version
+```
+
+Inspect the configured `MOBILE_RELEASE_ENV` (default
+`~/.config/plurx/mobile-channels.env`) without printing its secrets. Its
+`PLURX_ANSIBLE_DIR` names the installed, versioned publisher, not necessarily
+the source checkout. The original setup/export receipts are under
+`~/.local/state/noirr/mobile-channels/setup-evidence-2026-11-03/`.
+
+Check credentials in the controller's actual GUI session. An SSH-session
+Keychain lock result does not establish the signing runner's GUI access.
+Certificates may be listed without usable private credentials. If the GUI
+confirms a locked login Keychain, its owner unlocks it locally. A successful
+export, rather than certificate metadata, establishes signing recovery.
+
+**M5 verification, 2026-11-09:** iOS and tvOS build294 were exported and
+uploaded from the M5 with the signed-in Xcode account and automatic signing.
+The exported summary names **Cloud Managed Apple Distribution**. Both builds
+reached `VALID` and `IN_BETA_TESTING`; the existing automatic internal group
+receives them. The M5 needed no local Apple Distribution private-key bundle.
+Use this account-based path before looking for a `.p12` or creating a new
+certificate. The existing API key cannot create a distribution certificate
+(HTTP403); increasing that key's privileges was unnecessary.
+
+The verified November 3 exports used the signed-in Xcode account and
+`-allowProvisioningUpdates`. Do not assume an exported mobile `.p12` was
+part of that setup, or confuse the standalone macOS Developer ID identity
+with an iOS/tvOS Apple Distribution identity. Xcode may use cloud-managed
+signing; account metadata alone does not establish that signing works now.
+A certificate marked **Not in keychain** on another Mac is not evidence
+that the controller's key was lost. [Apple describes the relationship
+between certificates and local private keys](https://help.apple.com/xcode/mac/current/en.lproj/dev97211aeac.html).
+
+Verify with an export-only check of an existing archive using the installed
+publisher's options. Keep agent output in the required external storage;
+never recreate signing or runner state from defaults merely because it is
+absent on the wrong host. If the actual controller requires account sign-in,
+the owner completes that step there. Record the exact repair, controller
+identity, export result and later store-processing result in the durable
+handoff. A green workflow that skips publication proves no upload.
+
 Cinema's internal TestFlight group `Developer Automatic` receives all current
 and future Apple builds. Its membership was verified on 2026-11-03 against
 the same one tester in `Internal Beta`; the original group was preserved.
@@ -86,12 +149,9 @@ permissions. On 2026-11-03 the Android Developer API was enabled and fastlane
 authenticated, read Cinema's internal track, and validated an empty edit.
 The edit was discarded without uploading an artifact or committing a release.
 This proves store access separately from the presence of a local key file.
-Missing credentials and rejected uploads fail the job.
-
-Credential checks do not prove an end-to-end store submission. Collect the
-first real mobile update's workflow result and store processing result as
-that acceptance evidence; do not bump versions or publish unchanged apps
-solely to exercise controller setup.
+Missing credentials and rejected uploads fail the job. Credential checks
+are not end-to-end evidence; never bump an unchanged app just to test
+the controller.
 
 **Queued runs and recovery.** Workflow concurrency queues this repository's
 releases without cancelling an upload. A controller file lock also refuses
@@ -99,10 +159,11 @@ overlapping publishers using this entry point; other apps and manual channel
 runs must honor the same lock or run separately. A queued run publishes the
 latest `origin/main` containing its triggering commit, and includes subsequent
 mobile changes in its selection. The selected revision is passed to the
-private publisher and checked before any build starts. Rewritten history and
-non-ancestor recovery baselines are refused. The private playbook checks main
-again before uploading; if main advances during the
-build, rerun after merges settle. Successful upload receipts let retries skip
+private publisher. Rewritten history and non-ancestor baselines are refused
+when the run selects; the playbook's pre-upload check of main reads
+`pinned-source.git`, which stays at the selection, so it no longer sees later
+merges (they publish in their own run) or a mid-build force-push, which branch
+protection on `main` forbids. Successful upload receipts let retries skip
 version/build/platform/track combinations already submitted. The receipt is
 not a live store query: after a crash between store acceptance and receipt
 writing, inspect the store before retrying.

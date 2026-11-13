@@ -62,6 +62,25 @@ pub enum Fmp4Error {
     MultipleHevcSampleEntries { count: usize },
 }
 
+/// Typed exceptional shapes carried by the existing Unsupported error arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fmp4UnsupportedKind {
+    InitContractChanged,
+}
+const INIT_CONTRACT_CHANGED: &str = "guarded stream replaced its initialization segment";
+impl Fmp4Error {
+    /// Keeps callers independent of diagnostic prose without broadening every
+    /// exhaustive error match used by legacy, unguarded copy readers.
+    pub fn unsupported_kind(&self) -> Option<Fmp4UnsupportedKind> {
+        match self {
+            Self::Unsupported(reason) if reason == INIT_CONTRACT_CHANGED => {
+                Some(Fmp4UnsupportedKind::InitContractChanged)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Output facts read structurally from the one actual AVC sample entry.
 /// These are container facts; decoded joins still need separate qualification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,6 +452,197 @@ impl Init {
     }
 }
 
+/// Decoder/timing identity for a copy output, independent of global muxer
+/// metadata such as `udta`'s Lavf version. Call after the shared init
+/// normalization/promotion recipe. This hashes the selected video sample
+/// entries (including codec/color/DV records), ftyp, timescale and track
+/// defaults; only the visual entry's descriptive compressor name is omitted.
+/// It is not a source attestation or a media-sample digest.
+pub fn copy_video_init_contract_sha256(init: &Init) -> Result<String, Fmp4Error> {
+    use sha2::{Digest, Sha256};
+    let video = init
+        .video()
+        .ok_or_else(|| Fmp4Error::Unsupported("copy init has no video".into()))?;
+    if video.timescale == 0
+        || video.has_edit_list
+        || video.codec.is_none()
+        || video.nal_length_size == 0
+    {
+        return Err(Fmp4Error::Unsupported(
+            "copy init violates the video timeline contract".into(),
+        ));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/copy-video-init/contract-v1\0");
+    digest.update(video.timescale.to_be_bytes());
+    digest.update(video.default_sample_duration.to_be_bytes());
+    digest.update(video.default_sample_size.to_be_bytes());
+    digest.update(video.default_sample_flags.to_be_bytes());
+    digest.update([video.nal_length_size, u8::from(video.dolby_vision_config)]);
+    let (ftyp_at, ftyp) = find_child(&init.bytes, 0..init.bytes.len(), b"ftyp")?
+        .ok_or_else(|| Fmp4Error::Malformed("copy init has no ftyp".into()))?;
+    let ftyp_bytes = &init.bytes[ftyp_at.start + ftyp.header_len..ftyp_at.start + ftyp.size];
+    if ftyp_bytes.len() < 8 || !(ftyp_bytes.len() - 8).is_multiple_of(4) {
+        return malformed("copy init ftyp is malformed");
+    }
+    digest.update((ftyp_bytes.len() as u64).to_be_bytes());
+    digest.update(ftyp_bytes);
+    let (moov_at, moov) = find_child(&init.bytes, 0..init.bytes.len(), b"moov")?
+        .ok_or_else(|| Fmp4Error::Malformed("copy init has no moov".into()))?;
+    let moov_body = moov_at.start + moov.header_len..moov_at.start + moov.size;
+    for (trak_at, trak) in find_children(&init.bytes, moov_body, b"trak")? {
+        let mut body = trak_at.start + trak.header_len..trak_at.start + trak.size;
+        if track_id_in_trak(&init.bytes, body.clone())? != Some(video.id) {
+            continue;
+        }
+        let (tkhd_at, tkhd) = find_child(&init.bytes, body.clone(), b"tkhd")?
+            .ok_or_else(|| Fmp4Error::Malformed("copy video has no track header".into()))?;
+        let track_header = &init.bytes[tkhd_at.start + tkhd.header_len..tkhd_at.start + tkhd.size];
+        let display_at = match track_header.first() {
+            Some(0) => 32,
+            Some(1) => 44,
+            _ => {
+                return Err(Fmp4Error::Unsupported(
+                    "copy video track-header version".into(),
+                ))
+            }
+        };
+        let display = track_header
+            .get(display_at..display_at + 52)
+            .ok_or_else(|| Fmp4Error::Malformed("copy video display matrix is truncated".into()))?;
+        // Track IDs and creation timestamps are muxer bookkeeping. Flags,
+        // layer/alternate group, matrix and display raster affect presentation.
+        digest.update(&track_header[1..4]);
+        digest.update(display);
+        for kind in [b"mdia", b"minf", b"stbl", b"stsd"] {
+            let (at, header) = find_child(&init.bytes, body, kind)?.ok_or_else(|| {
+                Fmp4Error::Malformed("copy video has no sample descriptions".into())
+            })?;
+            body = at.start + header.header_len..at.start + header.size;
+        }
+        if body.len() < 8 {
+            return malformed("copy video stsd is truncated");
+        }
+        if init.bytes[body.start..body.start + 4] != [0; 4] {
+            return Err(Fmp4Error::Unsupported(
+                "copy video stsd version/flags".into(),
+            ));
+        }
+        let count = be_u32(&init.bytes, body.start + 4);
+        if count == 0 {
+            return malformed("copy video stsd is empty");
+        }
+        digest.update(count.to_be_bytes());
+        let mut at = body.start + 8;
+        for _ in 0..count {
+            let entry = peek_box(&init.bytes, at)?
+                .ok_or_else(|| Fmp4Error::Malformed("copy video sample entry is missing".into()))?;
+            let end = at
+                .checked_add(entry.size)
+                .ok_or_else(|| Fmp4Error::Malformed("copy video sample entry overflow".into()))?;
+            let payload = at + entry.header_len;
+            if end > body.end || end.saturating_sub(payload) < 78 {
+                return malformed("copy video sample entry is truncated");
+            }
+            let kind: [u8; 4] = init.bytes[at + 4..at + 8]
+                .try_into()
+                .map_err(|_| Fmp4Error::Malformed("sample entry type".into()))?;
+            let supported = match video.codec {
+                Some(VideoCodec::H264) => [*b"avc1", *b"avc3", *b"dva1", *b"dvav"].contains(&kind),
+                Some(VideoCodec::Hevc) => [*b"hvc1", *b"hev1", *b"dvh1", *b"dvhe"].contains(&kind),
+                None => false,
+            };
+            if !supported {
+                return Err(Fmp4Error::Unsupported(
+                    "copy video has an unknown sample entry".into(),
+                ));
+            }
+            digest.update(kind);
+            digest.update(((end - payload - 32) as u64).to_be_bytes());
+            digest.update(&init.bytes[payload..payload + 42]);
+            digest.update(&init.bytes[payload + 74..end]);
+            at = end;
+        }
+        if at != body.end {
+            return malformed("copy video sample entry count is inconsistent");
+        }
+        return Ok(hex::encode(digest.finalize()));
+    }
+    malformed("copy init selected video track is missing")
+}
+
+#[cfg(test)]
+mod copy_init_contract_tests {
+    use super::*;
+
+    fn fixture() -> Init {
+        let mut reader = FragmentReader::new();
+        reader.push(include_bytes!("../tests/fixtures/dv-runtime/authored.mp4"));
+        let Some(Unit::Init(init)) = reader.next_unit().expect("embedded fixture init") else {
+            panic!("missing init");
+        };
+        init
+    }
+
+    #[test]
+    fn copy_init_contract_ignores_muxer_metadata_but_retains_decoder_and_timing() {
+        let init = fixture();
+        let original = copy_video_init_contract_sha256(&init).expect("fixture contract");
+        let mut metadata = init.clone();
+        let (at, moov) = find_child(&metadata.bytes, 0..metadata.bytes.len(), b"moov")
+            .expect("moov boxes")
+            .expect("moov");
+        assert_eq!(moov.header_len, 8);
+        let mut free = Vec::new();
+        free.extend_from_slice(&17u32.to_be_bytes());
+        free.extend_from_slice(b"free");
+        free.extend_from_slice(b"Lavf-test");
+        let mut udta = Vec::new();
+        udta.extend_from_slice(
+            &u32::try_from(free.len() + 8)
+                .expect("small metadata")
+                .to_be_bytes(),
+        );
+        udta.extend_from_slice(b"udta");
+        udta.extend_from_slice(&free);
+        let end = at.start + moov.size;
+        metadata.bytes.splice(end..end, udta.iter().copied());
+        metadata.bytes[at.start..at.start + 4].copy_from_slice(
+            &u32::try_from(moov.size + udta.len())
+                .expect("small moov")
+                .to_be_bytes(),
+        );
+        assert_ne!(metadata.bytes, init.bytes);
+        assert_eq!(
+            copy_video_init_contract_sha256(&metadata).expect("metadata-only contract"),
+            original
+        );
+
+        let mut decoder = init.clone();
+        let locations = locate_hevc_sample_entries(&decoder.bytes).expect("HEVC entries");
+        let location = locations
+            .first()
+            .and_then(Option::as_ref)
+            .expect("HEVC decoder record");
+        decoder.bytes[location.payload.start + 1] ^= 1;
+        assert_ne!(
+            copy_video_init_contract_sha256(&decoder).expect("changed decoder contract"),
+            original
+        );
+        let mut timing = init.clone();
+        timing
+            .tracks
+            .iter_mut()
+            .find(|t| t.kind == TrackKind::Video)
+            .expect("video")
+            .timescale += 1;
+        assert_ne!(
+            copy_video_init_contract_sha256(&timing).expect("changed timing contract"),
+            original
+        );
+    }
+}
+
 /// One sample, with every value resolved.
 ///
 /// "Resolved" is the point: MP4 lets a value live in the `trun`, or in the
@@ -670,7 +880,7 @@ impl FragmentReader {
 
             match hdr.kind() {
                 b"ftyp" | b"moov" if self.reject_reinitialization => {
-                    return malformed("guarded stream replaced its initialization segment");
+                    return Err(Fmp4Error::Unsupported(INIT_CONTRACT_CHANGED.into()));
                 }
                 b"moof" => {
                     let mdat_pos = self.pos + hdr.size;
@@ -2591,6 +2801,310 @@ pub fn validate_hevc_sample_description_reference(
     Ok(())
 }
 
+/// Declared decoder configuration of the selected single visual sample entry.
+/// These facts do not prove SPS geometry or the contents of subsequent samples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyVideoSampleEntryFacts {
+    pub codec: VideoCodec,
+    pub sample_entry: [u8; 4],
+    pub width: u16,
+    pub height: u16,
+    pub profile_idc: u8,
+    pub level_idc: u8,
+    pub bit_depth: u8,
+    pub chroma_format_idc: u8,
+    pub color: Option<(u16, u16, u16, bool)>,
+    pub dolby_vision_config: bool,
+}
+
+/// Read actual container declarations, not catalog tags or encoder arguments.
+/// High-profile AVC needs its explicit avcC depth/chroma extension; this API
+/// does not infer missing extension fields from an unparsed SPS. In-band
+/// parameter-set changes require an independent bitstream inspection.
+pub fn copy_video_sample_entry_facts(init: &Init) -> Result<CopyVideoSampleEntryFacts, Fmp4Error> {
+    let video = init
+        .video()
+        .ok_or_else(|| Fmp4Error::Unsupported("no copy video".into()))?;
+    let codec = video
+        .codec
+        .ok_or_else(|| Fmp4Error::Unsupported("unknown copy video codec".into()))?;
+    let (
+        entry,
+        stsd,
+        configuration,
+        sample_entry,
+        profile_idc,
+        level_idc,
+        bit_depth,
+        chroma_format_idc,
+    ) = match codec {
+        VideoCodec::H264 => {
+            let (count, locations) = locate_avc_sample_entries(&init.bytes, video.id)?;
+            if count != 1 || locations.len() != 1 {
+                return Err(Fmp4Error::Unsupported(
+                    "copy facts need one AVC description".into(),
+                ));
+            }
+            let location = &locations[0];
+            if !matches!(&location.sample_entry, b"avc1" | b"avc3") {
+                return Err(Fmp4Error::Unsupported(
+                    "unsupported AVC sample entry".into(),
+                ));
+            }
+            let record = &init.bytes[location.payload.clone()];
+            let (profile, level, depth, chroma) = copy_avcc_facts(record, video.nal_length_size)?;
+            (
+                location.entry,
+                location.ancestors[0],
+                *b"avcC",
+                location.sample_entry,
+                profile,
+                level,
+                depth,
+                chroma,
+            )
+        }
+        VideoCodec::Hevc => {
+            validate_hevc_decoder_configuration(init)?;
+            let location = locate_hvcc(&init.bytes)?
+                .ok_or_else(|| Fmp4Error::Malformed("missing copy hvcC".into()))?;
+            let trak = location.ancestors[6];
+            if track_id_in_trak(
+                &init.bytes,
+                trak.start + trak.header_len..copy_box_end(&init.bytes, trak)?,
+            )? != Some(video.id)
+            {
+                return Err(Fmp4Error::Unsupported(
+                    "hvcC is not the selected video track".into(),
+                ));
+            }
+            let record = &init.bytes[location.payload.clone()];
+            hvcc_nal_arrays(record)?;
+            if record[0] != 1
+                || record[13] & 0xf0 != 0xf0
+                || record[15] & 0xfc != 0xfc
+                || record[16] & 0xfc != 0xfc
+                || record[17] & 0xf8 != 0xf8
+                || record[18] & 0xf8 != 0xf8
+                || record[21] & 3 == 2
+                || (record[21] & 3) + 1 != video.nal_length_size
+            {
+                return malformed("invalid copy hvcC header");
+            }
+            let profile = record[1] & 0x1f;
+            let depth = 8 + (record[17] & 7);
+            if profile == 0
+                || profile > 11
+                || record[12] == 0
+                || record[12] > 186
+                || depth > 14
+                || record[17] & 7 != record[18] & 7
+            {
+                return Err(Fmp4Error::Unsupported(
+                    "unsupported HEVC profile/depth declaration".into(),
+                ));
+            }
+            // Array types must agree with the NAL headers, not merely their lengths.
+            let mut pos = 23;
+            for _ in 0..record[22] {
+                let kind = record[pos] & 0x3f;
+                if record[pos] & 0x40 != 0 {
+                    return malformed("reserved hvcC array bit");
+                }
+                let count = u16::from_be_bytes([record[pos + 1], record[pos + 2]]);
+                pos += 3;
+                for _ in 0..count {
+                    let len = u16::from_be_bytes([record[pos], record[pos + 1]]) as usize;
+                    pos += 2;
+                    let nal = &record[pos..pos + len];
+                    if nal.len() < 2
+                        || nal[0] & 0x80 != 0
+                        || nal[1] & 7 == 0
+                        || hevc_nal_type(nal) != Some(kind)
+                    {
+                        return malformed("hvcC array disagrees with NAL header");
+                    }
+                    pos += len;
+                }
+            }
+            let entry = location.ancestors[1];
+            let mut sample_entry = [0; 4];
+            sample_entry.copy_from_slice(&init.bytes[entry.start + 4..entry.start + 8]);
+            (
+                entry,
+                location.ancestors[2],
+                *b"hvcC",
+                sample_entry,
+                profile,
+                record[12],
+                depth,
+                record[16] & 3,
+            )
+        }
+    };
+    let entries = stsd.start + stsd.header_len + 8..copy_box_end(&init.bytes, stsd)?;
+    if entries.start > entries.end
+        || be_u32(&init.bytes, entries.start - 4) != 1
+        || entry.start != entries.start
+        || copy_box_end(&init.bytes, entry)? != entries.end
+    {
+        return Err(Fmp4Error::Unsupported(
+            "copy facts need exactly one visual description".into(),
+        ));
+    }
+    let body = entry.start + entry.header_len;
+    let extra = body + 78..copy_box_end(&init.bytes, entry)?;
+    if extra.start > extra.end {
+        return malformed("short copy visual header");
+    }
+    let boxes = children(&init.bytes[extra.clone()])?;
+    if boxes.last().map_or(0, |(_, _, end)| *end) != extra.len() {
+        return malformed("partial copy visual child box");
+    }
+    if find_children(&init.bytes, extra.clone(), &configuration)?.len() != 1 {
+        return malformed("copy visual entry has ambiguous decoder configuration");
+    }
+    let width = u16::from_be_bytes([init.bytes[body + 24], init.bytes[body + 25]]);
+    let height = u16::from_be_bytes([init.bytes[body + 26], init.bytes[body + 27]]);
+    if width == 0 || height == 0 {
+        return malformed("zero copy raster");
+    }
+    let colors = find_children(&init.bytes, extra.clone(), b"colr")?;
+    let color = match colors.as_slice() {
+        [] => None,
+        [(at, hdr)] => {
+            let c = &init.bytes[at.start + hdr.header_len..at.start + hdr.size];
+            if c.len() != 11 || c[..4] != *b"nclx" || c[10] & 0x7f != 0 {
+                return Err(Fmp4Error::Unsupported(
+                    "copy color requires a complete nclx record".into(),
+                ));
+            }
+            Some((
+                u16::from_be_bytes([c[4], c[5]]),
+                u16::from_be_bytes([c[6], c[7]]),
+                u16::from_be_bytes([c[8], c[9]]),
+                c[10] & 0x80 != 0,
+            ))
+        }
+        _ => return malformed("multiple copy color declarations"),
+    };
+    let dv = find_children(&init.bytes, extra.clone(), b"dvcC")?;
+    let dvv = find_children(&init.bytes, extra, b"dvvC")?;
+    if dv.len() + dvv.len() > 1 {
+        return malformed("multiple Dolby Vision declarations");
+    }
+    let dolby_vision_config = !dv.is_empty() || !dvv.is_empty();
+    for (at, hdr) in dv.iter().chain(dvv.iter()) {
+        DolbyVisionRecord::parse(&init.bytes[at.start + hdr.header_len..at.start + hdr.size])?;
+    }
+    Ok(CopyVideoSampleEntryFacts {
+        codec,
+        sample_entry,
+        width,
+        height,
+        profile_idc,
+        level_idc,
+        bit_depth,
+        chroma_format_idc,
+        color,
+        dolby_vision_config,
+    })
+}
+
+fn copy_box_end(bytes: &[u8], at: BoxAt) -> Result<usize, Fmp4Error> {
+    let header = peek_box_before(bytes, at.start, Some(bytes.len()))?
+        .ok_or_else(|| Fmp4Error::Malformed("partial copy sample-entry ancestor".into()))?;
+    at.start
+        .checked_add(header.size)
+        .filter(|end| *end <= bytes.len())
+        .ok_or_else(|| Fmp4Error::Malformed("copy sample-entry ancestor exceeds init".into()))
+}
+
+fn copy_avcc_facts(record: &[u8], nal_length_size: u8) -> Result<(u8, u8, u8, u8), Fmp4Error> {
+    if record.len() < 7
+        || record[0] != 1
+        || record[1] == 0
+        || record[3] == 0
+        || record[4] & 0xfc != 0xfc
+        || record[5] & 0xe0 != 0xe0
+        || record[4] & 3 == 2
+        || (record[4] & 3) + 1 != nal_length_size
+    {
+        return malformed("invalid copy avcC header");
+    }
+    let mut pos = 6;
+    let sps_count = record[5] & 31;
+    if sps_count == 0 {
+        return Err(Fmp4Error::Unsupported("avcC has no SPS declaration".into()));
+    }
+    for _ in 0..sps_count {
+        let nal = copy_avcc_nal(record, &mut pos, 7)?;
+        if nal.len() < 4 || nal[1..4] != record[1..4] {
+            return malformed("avcC SPS profile disagrees with header");
+        }
+    }
+    let count = *record
+        .get(pos)
+        .ok_or_else(|| Fmp4Error::Malformed("missing avcC PPS count".into()))?;
+    pos += 1;
+    if count == 0 {
+        return Err(Fmp4Error::Unsupported("avcC has no PPS declaration".into()));
+    }
+    for _ in 0..count {
+        copy_avcc_nal(record, &mut pos, 8)?;
+    }
+    let (depth, chroma) = if matches!(record[1], 66 | 77 | 88) {
+        (8, 1)
+    } else {
+        if !matches!(
+            record[1],
+            100 | 110 | 122 | 144 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134
+        ) {
+            return Err(Fmp4Error::Unsupported(
+                "unknown AVC profile depth/chroma semantics".into(),
+            ));
+        }
+        let ext = record
+            .get(pos..pos + 4)
+            .ok_or_else(|| Fmp4Error::Unsupported("AVC depth/chroma extension absent".into()))?;
+        if ext[0] & 0xfc != 0xfc || ext[1] & 0xf8 != 0xf8 || ext[2] & 0xf8 != 0xf8 {
+            return malformed("invalid AVC depth/chroma extension");
+        }
+        if ext[1] & 7 != ext[2] & 7 || ext[1] & 7 > 6 {
+            return Err(Fmp4Error::Unsupported(
+                "unequal or unsupported AVC bit depths".into(),
+            ));
+        }
+        let facts = (8 + (ext[1] & 7), ext[0] & 3);
+        let count = ext[3];
+        pos += 4;
+        for _ in 0..count {
+            copy_avcc_nal(record, &mut pos, 13)?;
+        }
+        facts
+    };
+    if pos != record.len() {
+        return malformed("trailing copy avcC bytes");
+    }
+    Ok((record[1], record[3], depth, chroma))
+}
+
+fn copy_avcc_nal<'a>(record: &'a [u8], pos: &mut usize, kind: u8) -> Result<&'a [u8], Fmp4Error> {
+    let length = record
+        .get(*pos..*pos + 2)
+        .ok_or_else(|| Fmp4Error::Malformed("truncated avcC NAL length".into()))?;
+    let len = u16::from_be_bytes([length[0], length[1]]) as usize;
+    *pos += 2;
+    let nal = record
+        .get(*pos..*pos + len)
+        .ok_or_else(|| Fmp4Error::Malformed("truncated avcC NAL".into()))?;
+    *pos += len;
+    if nal.is_empty() || nal[0] & 0x80 != 0 || nal[0] & 31 != kind {
+        return malformed("avcC NAL type disagrees with array");
+    }
+    Ok(nal)
+}
+
 /// Exact Main10/PQ/BT.2020/limited-range output configuration read from the
 /// private encoded artifact. Catalog tags and encoder argv cannot substitute
 /// for these bytes. SPS header probing remains the daemon's independent check.
@@ -3125,9 +3639,7 @@ struct AvcCLocation {
     payload: Range<usize>,
     /// Structural visual header used by actual raster/color facts and fixtures.
     entry: BoxAt,
-    /// `stsd` first, then every enclosing box through `moov`. Fixture-only,
-    /// like `entry`.
-    #[cfg_attr(not(any(test, feature = "fixtures")), expect(dead_code))]
+    /// `stsd` first, then every enclosing box through `moov`.
     ancestors: Vec<BoxAt>,
 }
 
@@ -4754,6 +5266,157 @@ pub fn merge_retaining(
     sequence: u32,
     retain_parameter_sets: bool,
 ) -> Result<Segment, Fmp4Error> {
+    merge_retaining_inner(fragments, init, sequence, retain_parameter_sets, None)
+}
+
+/// Exact span from earliest PTS to latest sample end across merged tracks.
+/// Uses the actual gap-repaired merge plan; no output parsing or second writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationDuration {
+    numerator: u128,
+    denominator: u64,
+    longest_track_ticks: u128,
+    longest_track_timescale: u32,
+}
+impl PresentationDuration {
+    pub fn within_seconds(self, seconds: u32) -> bool {
+        self.numerator <= u128::from(self.denominator) * u128::from(seconds)
+    }
+    pub fn seconds(self) -> f64 {
+        self.numerator as f64 / self.denominator as f64
+    }
+    /// End-of-range EXTINF follows the longest track duration, excluding
+    /// cross-track start offsets and presentation reorder overlap.
+    pub(crate) fn longest_track_seconds(self) -> f64 {
+        self.longest_track_ticks as f64 / f64::from(self.longest_track_timescale)
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresentationError {
+    Overflow,
+    Invalid,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MeasuredMergeError {
+    Media(Fmp4Error),
+    Presentation(PresentationError),
+}
+
+pub(crate) fn merge_retaining_measured(
+    fragments: &[Fragment],
+    init: &Init,
+    sequence: u32,
+    retain_parameter_sets: bool,
+) -> Result<(Segment, PresentationDuration), MeasuredMergeError> {
+    let mut duration = Err(PresentationError::Invalid);
+    let segment = merge_retaining_inner(
+        fragments,
+        init,
+        sequence,
+        retain_parameter_sets,
+        Some(&mut duration),
+    )
+    .map_err(MeasuredMergeError::Media)?;
+    Ok((segment, duration.map_err(MeasuredMergeError::Presentation)?))
+}
+
+fn merged_plan_presentation(
+    plans: &[Plan],
+    init: &Init,
+) -> Result<PresentationDuration, PresentationError> {
+    let mut earliest: Option<(i128, u32)> = None;
+    let mut latest: Option<(i128, u32)> = None;
+    let mut longest_track_ticks = 0u128;
+    let mut longest_track_timescale = 1u32;
+    for plan in plans {
+        let scale = init
+            .track(plan.track_id)
+            .map(|track| track.timescale)
+            .filter(|scale| *scale != 0)
+            .ok_or(PresentationError::Invalid)?;
+        let mut dts = i128::from(plan.base_decode_time);
+        for sample in &plan.samples {
+            let pts = dts
+                .checked_add(i128::from(sample.cto))
+                .ok_or(PresentationError::Overflow)?;
+            let end = pts
+                .checked_add(i128::from(sample.duration))
+                .ok_or(PresentationError::Overflow)?;
+            if sample.duration == 0 {
+                return Err(PresentationError::Invalid);
+            }
+            let before = match earliest {
+                None => true,
+                Some((ticks, denominator)) => {
+                    pts.checked_mul(i128::from(denominator))
+                        .ok_or(PresentationError::Overflow)?
+                        < ticks
+                            .checked_mul(i128::from(scale))
+                            .ok_or(PresentationError::Overflow)?
+                }
+            };
+            if before {
+                earliest = Some((pts, scale));
+            }
+            let after = match latest {
+                None => true,
+                Some((ticks, denominator)) => {
+                    end.checked_mul(i128::from(denominator))
+                        .ok_or(PresentationError::Overflow)?
+                        > ticks
+                            .checked_mul(i128::from(scale))
+                            .ok_or(PresentationError::Overflow)?
+                }
+            };
+            if after {
+                latest = Some((end, scale));
+            }
+            dts = dts
+                .checked_add(i128::from(sample.duration))
+                .ok_or(PresentationError::Overflow)?;
+        }
+        let ticks = u128::try_from(dts - i128::from(plan.base_decode_time))
+            .map_err(|_| PresentationError::Invalid)?;
+        if ticks
+            .checked_mul(u128::from(longest_track_timescale))
+            .ok_or(PresentationError::Overflow)?
+            > longest_track_ticks
+                .checked_mul(u128::from(scale))
+                .ok_or(PresentationError::Overflow)?
+        {
+            longest_track_ticks = ticks;
+            longest_track_timescale = scale;
+        }
+    }
+    let (start, start_scale) = earliest.ok_or(PresentationError::Invalid)?;
+    let (end, end_scale) = latest.ok_or(PresentationError::Invalid)?;
+    let numerator = end
+        .checked_mul(i128::from(start_scale))
+        .ok_or(PresentationError::Overflow)?
+        .checked_sub(
+            start
+                .checked_mul(i128::from(end_scale))
+                .ok_or(PresentationError::Overflow)?,
+        )
+        .ok_or(PresentationError::Overflow)?;
+    if numerator <= 0 {
+        return Err(PresentationError::Invalid);
+    }
+    Ok(PresentationDuration {
+        numerator: u128::try_from(numerator).map_err(|_| PresentationError::Invalid)?,
+        denominator: u64::from(start_scale) * u64::from(end_scale),
+        longest_track_ticks,
+        longest_track_timescale,
+    })
+}
+
+fn merge_retaining_inner(
+    fragments: &[Fragment],
+    init: &Init,
+    sequence: u32,
+    retain_parameter_sets: bool,
+    measured: Option<&mut Result<PresentationDuration, PresentationError>>,
+) -> Result<Segment, Fmp4Error> {
     if fragments.is_empty() {
         return malformed("nothing to merge");
     }
@@ -4881,6 +5544,10 @@ pub fn merge_retaining(
     }
     if plans.is_empty() {
         return malformed("no track survived the merge");
+    }
+
+    if let Some(measured) = measured {
+        *measured = merged_plan_presentation(&plans, init);
     }
 
     // Build the moof with zeroed data offsets to learn its size. Every field
@@ -5421,6 +6088,213 @@ impl PlannedAudioSegmenter {
     }
 }
 
+/// Existing segment presentation rule, shared without changing legacy EXTINF.
+pub(crate) fn range_seconds(
+    fragments: &[Fragment],
+    init: &Init,
+    video_timescale: u32,
+    reason: CutReason,
+) -> f64 {
+    let video_ticks: u64 = init
+        .video()
+        .map(|video| {
+            fragments
+                .iter()
+                .filter_map(|fragment| fragment.track(video.id))
+                .map(TrackFragment::duration)
+                .sum()
+        })
+        .unwrap_or(0);
+    let video_seconds = video_ticks as f64 / video_timescale as f64;
+    if video_ticks > 0 && reason != CutReason::EndOfStream {
+        return video_seconds;
+    }
+    let mut longest = video_seconds;
+    for track in &init.tracks {
+        let ticks: u64 = fragments
+            .iter()
+            .filter_map(|f| f.track(track.id))
+            .map(|t| t.duration())
+            .sum();
+        let secs = ticks as f64 / track.timescale.max(1) as f64;
+        if secs > longest {
+            longest = secs;
+        }
+    }
+    longest
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RangeSplitError {
+    Media(Fmp4Error),
+    MemoryLimit,
+    Overflow,
+}
+
+/// Partition terminal observed media at existing sample boundaries. This does
+/// not prove physical EOF. A bounded consumer supplies a cumulative byte-clone
+/// allowance, checked before cloning; legacy Segmenter retains its old policy.
+pub(crate) fn split_end_of_range(
+    fragments: &[Fragment],
+    init: &Init,
+    policy: CutPolicy,
+    video_timescale: u32,
+    planned_video_boundary: bool,
+    max_cloned_bytes: Option<usize>,
+) -> Result<Vec<Vec<Fragment>>, RangeSplitError> {
+    let video_ticks: u64 = fragments
+        .iter()
+        .map(|fragment| fragment.video_duration(init))
+        .sum();
+    let mut chunks: Vec<Vec<Fragment>> = Vec::new();
+    let mut cloned_bytes = 0usize;
+
+    for track in &init.tracks {
+        // `max_ticks` is the cutting ceiling; `strict_max_ticks` is the
+        // fixed covering duration advertised to the client. Keep the
+        // two separate here. Audio samples are indivisible, so allowing
+        // one boundary sample past an already-covering target can make a
+        // 16 second target produce a truthful 16.014 second EXTINF and
+        // then reject itself in `finish`.
+        let ceiling = scale_ticks(policy.max_ticks, video_timescale, track.timescale.max(1)).max(1);
+        let video_limit = scale_ticks(video_ticks, video_timescale, track.timescale.max(1));
+        // How much audio the FINAL VIDEO segment is allowed to absorb, and
+        // the one place the planned and unplanned paths part company.
+        //
+        // Without a plan this is `ceiling.max(video_limit)`: the last video
+        // segment may keep audio out to the whole duration ceiling, which
+        // is the `c58a4307` rule and is what a live session wants — fewer
+        // boundaries, and nobody is holding a playlist that says otherwise.
+        //
+        // With a plan it is `video_limit` exactly. `segplan`'s
+        // `append_audio_tail` models the tail as beginning where video
+        // ends and splitting at the ceiling from there, so a segmenter
+        // that let the last video segment swallow up to a ceiling of audio
+        // produces a different number of segments than the plan named —
+        // and the plan is already in a playlist the client holds, declared
+        // VOD and closed with ENDLIST. The reader then blocks on a segment
+        // no producer will ever emit and burns its first-byte deadline at
+        // the end of every affected film. That is ledger D10 again: the
+        // plan decides, here as everywhere.
+        let first_limit = if planned_video_boundary {
+            video_limit.max(1)
+        } else {
+            ceiling.max(video_limit)
+        };
+        let allow_boundary_sample = video_ticks > 0;
+        let mut chunk_index = 0usize;
+        let mut chunk_ticks = 0u64;
+
+        for fragment in fragments {
+            let Some(track_fragment) = fragment.track(track.id) else {
+                continue;
+            };
+            let mut decode_time = track_fragment.base_decode_time;
+            for run in &track_fragment.runs {
+                let mut data_offset = run.data_offset;
+                let mut group_start = 0usize;
+                while group_start < run.samples.len() {
+                    let sample = run.samples[group_start];
+                    let limit = if chunk_index == 0 {
+                        first_limit
+                    } else {
+                        ceiling
+                    };
+                    if sample.duration as u64 > ceiling {
+                        return Err(RangeSplitError::Media(Fmp4Error::Unsupported(format!(
+                            "track {} has a {:.3}s sample longer than the {:.3}s HLS ceiling",
+                            track.id,
+                            sample.duration as f64 / track.timescale.max(1) as f64,
+                            ceiling as f64 / track.timescale.max(1) as f64,
+                        ))));
+                    }
+                    let crosses_limit = chunk_ticks > 0
+                        && chunk_ticks.saturating_add(sample.duration as u64) > limit;
+                    let starts_after_video_boundary =
+                        chunk_index == 0 && allow_boundary_sample && chunk_ticks >= limit;
+                    if starts_after_video_boundary
+                        || (crosses_limit && !(chunk_index == 0 && allow_boundary_sample))
+                    {
+                        chunk_index += 1;
+                        chunk_ticks = 0;
+                        continue;
+                    }
+
+                    let selected_chunk = chunk_index;
+                    let selected_decode_time = decode_time;
+                    let selected_data_offset = data_offset;
+                    let mut group_end = group_start;
+                    while group_end < run.samples.len() {
+                        let candidate = run.samples[group_end];
+                        if candidate.duration as u64 > ceiling {
+                            return Err(RangeSplitError::Media(Fmp4Error::Unsupported(format!(
+                                "track {} has a {:.3}s sample longer than the {:.3}s HLS ceiling",
+                                track.id,
+                                candidate.duration as f64 / track.timescale.max(1) as f64,
+                                ceiling as f64 / track.timescale.max(1) as f64,
+                            ))));
+                        }
+                        let limit = if chunk_index == 0 {
+                            first_limit
+                        } else {
+                            ceiling
+                        };
+                        let crosses_limit = chunk_ticks > 0
+                            && chunk_ticks.saturating_add(candidate.duration as u64) > limit;
+                        let starts_after_video_boundary =
+                            chunk_index == 0 && allow_boundary_sample && chunk_ticks >= limit;
+                        if starts_after_video_boundary
+                            || (crosses_limit && !(chunk_index == 0 && allow_boundary_sample))
+                        {
+                            break;
+                        }
+                        chunk_ticks += candidate.duration as u64;
+                        decode_time += candidate.duration as u64;
+                        data_offset += candidate.size as usize;
+                        group_end += 1;
+                    }
+
+                    if chunks.len() <= selected_chunk {
+                        chunks.resize_with(selected_chunk + 1, Vec::new);
+                    }
+                    if let Some(limit) = max_cloned_bytes {
+                        cloned_bytes = cloned_bytes
+                            .checked_add(fragment.bytes.len())
+                            .ok_or(RangeSplitError::Overflow)?;
+                        if cloned_bytes > limit {
+                            return Err(RangeSplitError::MemoryLimit);
+                        }
+                    }
+                    chunks[selected_chunk].push(Fragment {
+                        bytes: fragment.bytes.clone(),
+                        mdat_payload: fragment.mdat_payload.clone(),
+                        tracks: vec![TrackFragment {
+                            track_id: track.id,
+                            base_decode_time: selected_decode_time,
+                            runs: vec![Run {
+                                version: run.version,
+                                composition_offsets_present: run.composition_offsets_present,
+                                data_offset_at: None,
+                                data_offset: selected_data_offset,
+                                samples: run.samples[group_start..group_end].to_vec(),
+                            }],
+                        }],
+                    });
+                    group_start = group_end;
+                }
+            }
+        }
+    }
+
+    chunks.retain(|chunk| !chunk.is_empty());
+    if chunks.is_empty() {
+        return Err(RangeSplitError::Media(Fmp4Error::Malformed(
+            "no track survived the end-of-stream split".into(),
+        )));
+    }
+    Ok(chunks)
+}
+
 /// Accumulates fragments and publishes segments that start on clean keyframes.
 ///
 /// Pure by design: the daemon feeds it fragments and writes what comes back
@@ -5588,34 +6462,7 @@ impl Segmenter {
     /// mixed final segment in the playlist. Ordinary cuts still use video: an
     /// audio frame of per-fragment drift must not accumulate across the film.
     fn seconds_for(&self, fragments: &[Fragment], reason: CutReason) -> f64 {
-        let video_ticks: u64 = self
-            .init
-            .video()
-            .map(|video| {
-                fragments
-                    .iter()
-                    .filter_map(|fragment| fragment.track(video.id))
-                    .map(TrackFragment::duration)
-                    .sum()
-            })
-            .unwrap_or(0);
-        let video_seconds = video_ticks as f64 / self.video_timescale as f64;
-        if video_ticks > 0 && reason != CutReason::EndOfStream {
-            return video_seconds;
-        }
-        let mut longest = video_seconds;
-        for track in &self.init.tracks {
-            let ticks: u64 = fragments
-                .iter()
-                .filter_map(|f| f.track(track.id))
-                .map(|t| t.duration())
-                .sum();
-            let secs = ticks as f64 / track.timescale.max(1) as f64;
-            if secs > longest {
-                longest = secs;
-            }
-        }
-        longest
+        range_seconds(fragments, &self.init, self.video_timescale, reason)
     }
 
     /// Bytes held back waiting for a cut point. Bounded by the byte ceiling
@@ -5820,153 +6667,21 @@ impl Segmenter {
     /// chunk is allowed to be as long as the unsplittable video run; later
     /// chunks contain only trailing tracks and observe the policy ceiling.
     fn end_of_stream_chunks(&self) -> Result<Vec<Vec<Fragment>>, Fmp4Error> {
-        let video_ticks: u64 = self
-            .pending
-            .iter()
-            .map(|fragment| fragment.video_duration(&self.init))
-            .sum();
-        let mut chunks: Vec<Vec<Fragment>> = Vec::new();
-
-        for track in &self.init.tracks {
-            // `max_ticks` is the cutting ceiling; `strict_max_ticks` is the
-            // fixed covering duration advertised to the client. Keep the
-            // two separate here. Audio samples are indivisible, so allowing
-            // one boundary sample past an already-covering target can make a
-            // 16 second target produce a truthful 16.014 second EXTINF and
-            // then reject itself in `finish`.
-            let ceiling = scale_ticks(
-                self.policy.max_ticks,
-                self.video_timescale,
-                track.timescale.max(1),
-            )
-            .max(1);
-            let video_limit =
-                scale_ticks(video_ticks, self.video_timescale, track.timescale.max(1));
-            // How much audio the FINAL VIDEO segment is allowed to absorb, and
-            // the one place the planned and unplanned paths part company.
-            //
-            // Without a plan this is `ceiling.max(video_limit)`: the last video
-            // segment may keep audio out to the whole duration ceiling, which
-            // is the `c58a4307` rule and is what a live session wants — fewer
-            // boundaries, and nobody is holding a playlist that says otherwise.
-            //
-            // With a plan it is `video_limit` exactly. `segplan`'s
-            // `append_audio_tail` models the tail as beginning where video
-            // ends and splitting at the ceiling from there, so a segmenter
-            // that let the last video segment swallow up to a ceiling of audio
-            // produces a different number of segments than the plan named —
-            // and the plan is already in a playlist the client holds, declared
-            // VOD and closed with ENDLIST. The reader then blocks on a segment
-            // no producer will ever emit and burns its first-byte deadline at
-            // the end of every affected film. That is ledger D10 again: the
-            // plan decides, here as everywhere.
-            let first_limit = if self.boundaries.is_some() {
-                video_limit.max(1)
-            } else {
-                ceiling.max(video_limit)
-            };
-            let allow_boundary_sample = video_ticks > 0;
-            let mut chunk_index = 0usize;
-            let mut chunk_ticks = 0u64;
-
-            for fragment in &self.pending {
-                let Some(track_fragment) = fragment.track(track.id) else {
-                    continue;
-                };
-                let mut decode_time = track_fragment.base_decode_time;
-                for run in &track_fragment.runs {
-                    let mut data_offset = run.data_offset;
-                    let mut group_start = 0usize;
-                    while group_start < run.samples.len() {
-                        let sample = run.samples[group_start];
-                        let limit = if chunk_index == 0 {
-                            first_limit
-                        } else {
-                            ceiling
-                        };
-                        if sample.duration as u64 > ceiling {
-                            return Err(Fmp4Error::Unsupported(format!(
-                                "track {} has a {:.3}s sample longer than the {:.3}s HLS ceiling",
-                                track.id,
-                                sample.duration as f64 / track.timescale.max(1) as f64,
-                                ceiling as f64 / track.timescale.max(1) as f64,
-                            )));
-                        }
-                        let crosses_limit = chunk_ticks > 0
-                            && chunk_ticks.saturating_add(sample.duration as u64) > limit;
-                        let starts_after_video_boundary =
-                            chunk_index == 0 && allow_boundary_sample && chunk_ticks >= limit;
-                        if starts_after_video_boundary
-                            || (crosses_limit && !(chunk_index == 0 && allow_boundary_sample))
-                        {
-                            chunk_index += 1;
-                            chunk_ticks = 0;
-                            continue;
-                        }
-
-                        let selected_chunk = chunk_index;
-                        let selected_decode_time = decode_time;
-                        let selected_data_offset = data_offset;
-                        let mut group_end = group_start;
-                        while group_end < run.samples.len() {
-                            let candidate = run.samples[group_end];
-                            if candidate.duration as u64 > ceiling {
-                                return Err(Fmp4Error::Unsupported(format!(
-                                    "track {} has a {:.3}s sample longer than the {:.3}s HLS ceiling",
-                                    track.id,
-                                    candidate.duration as f64 / track.timescale.max(1) as f64,
-                                    ceiling as f64 / track.timescale.max(1) as f64,
-                                )));
-                            }
-                            let limit = if chunk_index == 0 {
-                                first_limit
-                            } else {
-                                ceiling
-                            };
-                            let crosses_limit = chunk_ticks > 0
-                                && chunk_ticks.saturating_add(candidate.duration as u64) > limit;
-                            let starts_after_video_boundary =
-                                chunk_index == 0 && allow_boundary_sample && chunk_ticks >= limit;
-                            if starts_after_video_boundary
-                                || (crosses_limit && !(chunk_index == 0 && allow_boundary_sample))
-                            {
-                                break;
-                            }
-                            chunk_ticks += candidate.duration as u64;
-                            decode_time += candidate.duration as u64;
-                            data_offset += candidate.size as usize;
-                            group_end += 1;
-                        }
-
-                        if chunks.len() <= selected_chunk {
-                            chunks.resize_with(selected_chunk + 1, Vec::new);
-                        }
-                        chunks[selected_chunk].push(Fragment {
-                            bytes: fragment.bytes.clone(),
-                            mdat_payload: fragment.mdat_payload.clone(),
-                            tracks: vec![TrackFragment {
-                                track_id: track.id,
-                                base_decode_time: selected_decode_time,
-                                runs: vec![Run {
-                                    version: run.version,
-                                    composition_offsets_present: run.composition_offsets_present,
-                                    data_offset_at: None,
-                                    data_offset: selected_data_offset,
-                                    samples: run.samples[group_start..group_end].to_vec(),
-                                }],
-                            }],
-                        });
-                        group_start = group_end;
-                    }
-                }
+        split_end_of_range(
+            &self.pending,
+            &self.init,
+            self.policy,
+            self.video_timescale,
+            self.boundaries.is_some(),
+            None,
+        )
+        .map_err(|error| match error {
+            RangeSplitError::Media(error) => error,
+            RangeSplitError::MemoryLimit => Fmp4Error::Unsupported("tail split clone limit".into()),
+            RangeSplitError::Overflow => {
+                Fmp4Error::Unsupported("tail split clone accounting overflow".into())
             }
-        }
-
-        chunks.retain(|chunk| !chunk.is_empty());
-        if chunks.is_empty() {
-            return malformed("no track survived the end-of-stream split");
-        }
-        Ok(chunks)
+        })
     }
 
     /// Put a repositioned generation's fragments back on the film's timeline.

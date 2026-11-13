@@ -1772,6 +1772,38 @@ struct CreateBudgetLine {
     store_ms: u64,
     elapsed_ms: u64,
     phases: String,
+    /// `(method, (authority, local, writes))`, sorted by method: the same
+    /// operations by the Store method that issued them (D3a).
+    methods: Vec<(String, (u64, u64, u64))>,
+}
+
+/// Parse the budget line's `methods=a=1/0/0,b=0/0/2` field.
+fn parse_methods(text: &str) -> Vec<(String, (u64, u64, u64))> {
+    let mut methods = text
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (name, counts) = entry
+                .split_once('=')
+                .unwrap_or_else(|| panic!("method entry without counts: {entry}"));
+            let mut parts = counts.split('/').map(|part| {
+                part.parse::<u64>()
+                    .unwrap_or_else(|_| panic!("method counts are numbers: {entry}"))
+            });
+            let counts = (
+                parts.next().expect("authority"),
+                parts.next().expect("local"),
+                parts.next().expect("writes"),
+            );
+            assert!(
+                parts.next().is_none(),
+                "method counts have three parts: {entry}"
+            );
+            (name.to_owned(), counts)
+        })
+        .collect::<Vec<_>>();
+    methods.sort();
+    methods
 }
 
 fn log_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -1797,6 +1829,7 @@ fn create_budget_lines(log: &str) -> Vec<CreateBudgetLine> {
                 store_ms: number("store_ms"),
                 elapsed_ms: number("elapsed_ms"),
                 phases: log_field(&line, "phases").unwrap_or_default().to_owned(),
+                methods: parse_methods(log_field(&line, "methods").unwrap_or_default()),
             }
         })
         .collect()
@@ -1807,7 +1840,9 @@ fn create_budget_line_parser_reads_the_corrected_fields() {
     let log = "2026-10-04T00:00:00Z  INFO plurxd::http::hls: create startup read budget \
                finished \x1b[3mfile_id\x1b[0m=7 catalog_calls=0 authority_reads=21 \
                local_reads=2 mutations=6 store_ms=48 elapsed_ms=90 \
-               phases=lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w\nunrelated line\n";
+               phases=lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w \
+               methods=get_user=1/0/0,claim_media_session_request=0/0/1,get_file=1/1/0\n\
+               unrelated line\n";
     let lines = create_budget_lines(log);
     assert_eq!(lines.len(), 1);
     let line = &lines[0];
@@ -1817,6 +1852,15 @@ fn create_budget_line_parser_reads_the_corrected_fields() {
     );
     assert_eq!((line.store_ms, line.elapsed_ms), (48, 90));
     assert_eq!(line.phases, "lookup:3ms/1a/0l/0w,tail:0ms/0a/0l/0w");
+    assert_eq!(
+        line.methods,
+        vec![
+            ("claim_media_session_request".to_owned(), (0, 0, 1)),
+            ("get_file".to_owned(), (1, 1, 0)),
+            ("get_user".to_owned(), (1, 0, 0)),
+        ]
+    );
+    assert!(parse_methods("").is_empty());
 }
 
 /// Post one create to `base` and return the budget line of the create that
@@ -2204,6 +2248,49 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         "the index-miss create did not take the rolling fallback: {line:?}"
     );
     measured.push(("index miss, rolling copy", line));
+    // The fifth shape is the one a current client sends: capabilities (v2)
+    // and an intent envelope. The intent adds the selection write, which
+    // since D3c rides in the claim's transaction (no write of its own). The catalog read is NOT
+    // exercised: this fixture runs with the media pool off, so no
+    // `playback_planning_snapshot` per offer reads the catalog here. D3d
+    // measures that read, and owes its own pin.
+    let (with_intent, line) = create_and_measure(
+        &client,
+        &mut node_b,
+        &b_base,
+        &token,
+        encode_file,
+        json!({
+            "playback_id":"create-path-caps-intent",
+            "caps":{
+                "v":2,
+                "video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],
+                "audio":["aac"],
+                "containers":["mp4"],
+                "transports":["hls"]
+            },
+            "intent":{
+                "lifetime_id":"create-path-lifetime",
+                "recipe_revision":1,
+                "destination_revision":1,
+                "transport_revision":1,
+                "selection":{
+                    "quality":{"mode":"auto"},
+                    "codec":"auto",
+                    "dynamic_range":"auto",
+                    "audio_track":null,
+                    "audio_offset_ms":0,
+                    "subtitles":{"mode":"off"}
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        with_intent["vod"], true,
+        "a caps-v2 Auto create is a VOD session: {with_intent}"
+    );
+    measured.push(("caps-v2 Auto, intent", line));
 
     let table = measured
         .iter()
@@ -2221,17 +2308,38 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         .collect::<Vec<_>>()
         .join("\n");
     eprintln!("create-path store operations:\n{table}");
-    // (authority reads, local reads, writes) per shape on main fb4397c44
-    // with every reduction of handoff §5.2 (B-M1 measured 36, 46, 41 and 33
-    // there). The window is the create handler's own, plus the activation
-    // task it awaits; the bearer-token read happens before it. Every shape
-    // takes six writes (the reopen two more, to project and hand off its
-    // predecessor); the reductions remove reads only.
-    let expected: [(&str, (u64, u64, u64)); 4] = [
-        ("first play, VOD index", (26, 0, 6)),
-        ("reopen, new position", (34, 0, 8)),
-        ("Auto encode, VOD", (31, 0, 6)),
-        ("index miss, rolling copy", (25, 0, 6)),
+    // (authority reads, local reads, writes) for the create handler and the
+    // activation task it awaits. Bearer-token lookup precedes this window.
+    // Reopen also projects and hands off its predecessor. Auto encode and
+    // rolling copy each register and activate foreground source custody.
+    // Rolling fallback also reads the current source fingerprint and suspends
+    // the viewer's competing analysis demand for that source.
+    // E1a (#1503) reads PLAYBACK_DISPLAY_AWARE_AUTO from the node's applied
+    // view instead of the Store, so each shape's planning settings read is
+    // one Local read rather than one Authority read.
+    // Main's #1531 (A1/B1 gap filling and the v3 copy-index consumer) adds
+    // one `fragment_index_source` read and two `queue_sql` reads to every
+    // shape that serves from the copy index (first play, reopen, rolling),
+    // and first play reads one more `get_setting`; pinned on the E1c + D3a
+    // build (2026-11-12) so later D3 lanes measure against what runs now.
+    // D3b reads the create's planning inputs once, as one plan from node B's
+    // applied view (`local_playback_planning_snapshot`, the one new local
+    // read), and hands it down every chain: the planning snapshot re-reads,
+    // the typeless, placement and VOD settings reads, the encode's HWACCEL,
+    // software-budget and two stored-probe reads, and the rolling fallback's
+    // file read are gone (29/36/30/28/32 -> 23/30/19/20/21; writes
+    // unchanged). `docs/streaming/PLAYBACK-START-D3-RECORD.md` §9 has each
+    // delta.
+    // D3c folds the selection upsert into the claim's transaction: the
+    // intent shape's separate `record_desired_selection` write is gone (9 ->
+    // 8), and the claim answers the recorded row by one authority read that
+    // replaces the `desired_row` read-back that write made (21 stays 21).
+    let expected: [(&str, (u64, u64, u64)); 5] = [
+        ("first play, VOD index", (23, 2, 6)),
+        ("reopen, new position", (30, 2, 8)),
+        ("Auto encode, VOD", (19, 2, 8)),
+        ("index miss, rolling copy", (20, 2, 9)),
+        ("caps-v2 Auto, intent", (21, 2, 8)),
     ];
     let observed = measured
         .iter()
@@ -2261,7 +2369,198 @@ async fn create_path_store_operations_are_pinned_per_shape() {
             )
         })
         .collect::<Vec<_>>();
+    // Each shape's counts by the Store method that makes them, as
+    // (authority reads, local reads, writes). Measured on D3b's build;
+    // `docs/streaming/PLAYBACK-START-D3-RECORD.md` explains each row. Every
+    // later D3 lane changes these by exactly what it removes.
+    // The queue bridge now carries the Store method its create-path callers
+    // name (D3b, D3a review S5): the copy-index consumer's two reads are
+    // `copy_index_v3_variant` and `copy_index_source_attestation`, and the
+    // writes `queue_sql` used to hide are `register_foreground_source`,
+    // `activate_foreground_source_custody` and, on the rolling fallback,
+    // `suspend_playback_analysis_interest`. Any other queue statement keeps
+    // the label `queue_sql`, and none is on this path.
+    // Layout reads: `session_layout` is its own label. Its reads (the
+    // `cluster_meta` marker and guard reads) are paid only by a store whose
+    // cached session layout is still Legacy, as this fresh fixture is; a store
+    // that has installed the permanent v82 layout makes none, so a fleet
+    // reading shows these rows without the `session_layout` line.
+    #[allow(clippy::type_complexity)]
+    let expected_methods: [(&str, &[(&str, (u64, u64, u64))]); 5] = [
+        (
+            "first play, VOD index",
+            &[
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
+                ("fragment_index_source", (1, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("get_setting", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("session_layout", (8, 0, 0)),
+                // Two timed writes, one physical UPDATE: Confirm is double-timed
+                // (`source_layout_idempotent` times its retry loop and the inner
+                // `txn_source_layout_attempt` times the statement). Left as is
+                // for Paul; a Confirm retry makes it 4.
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+        (
+            "reopen, new position",
+            &[
+                ("activate_media_session", (3, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("complete_media_session_handoff", (1, 0, 1)),
+                ("complete_media_session_terminal_projection", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
+                ("fragment_index_source", (1, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_by_incarnation", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("session_layout", (12, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+        (
+            "Auto encode, VOD",
+            &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("register_foreground_source", (0, 0, 1)),
+                ("session_layout", (8, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+        (
+            "index miss, rolling copy",
+            &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                ("claim_media_session_request", (1, 0, 1)),
+                ("copy_index_source_attestation", (1, 0, 0)),
+                ("copy_index_v3_variant", (1, 0, 0)),
+                ("fragment_index_source", (1, 0, 0)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("register_foreground_source", (0, 0, 1)),
+                ("session_layout", (8, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("suspend_playback_analysis_interest", (0, 0, 1)),
+            ],
+        ),
+        (
+            "caps-v2 Auto, intent",
+            &[
+                ("activate_foreground_source_custody", (0, 0, 1)),
+                ("activate_media_session", (2, 0, 1)),
+                ("assign_media_session_request_owner", (0, 0, 1)),
+                // The claim's one transaction carries the ask (D3c); its
+                // second authority read is the recorded row.
+                ("claim_media_session_request", (2, 0, 1)),
+                ("get_file_probe_json", (1, 0, 0)),
+                ("local_get_settings", (0, 1, 0)),
+                ("local_playback_planning_snapshot", (0, 1, 0)),
+                ("maintain_media_sessions", (1, 0, 0)),
+                ("media_session_route_for_playback", (1, 0, 0)),
+                ("publish_media_session_activation", (2, 0, 1)),
+                ("register_foreground_source", (0, 0, 1)),
+                ("session_layout", (9, 0, 0)),
+                ("settle_media_session_activation", (1, 0, 2)),
+                ("timeline_annotation_set", (2, 0, 0)),
+            ],
+        ),
+    ];
+    // The same counts by the Store method that makes them. `methods_table`
+    // prints the observed split in the shape below so a deliberate change is
+    // a paste, and the assertion keeps each method's count, not just the
+    // total, from drifting.
+    let methods_table = measured
+        .iter()
+        .map(|(shape, line)| {
+            format!(
+                "(\"{shape}\", &[{}]),",
+                line.methods
+                    .iter()
+                    .map(|(method, (a, l, w))| format!("(\"{method}\", ({a}, {l}, {w}))"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("create-path store operations by method:\n{methods_table}");
     assert_eq!(observed, expected, "create-path counts changed:\n{table}");
+    // The rolling start's refreshed scratch bounds are `get_setting` reads
+    // (`ahead_limits` -> `num_setting`), so they are subtracted from that
+    // method, not from the total alone.
+    for ((shape, line), (pinned_shape, pinned)) in measured.iter().zip(&expected_methods) {
+        assert_eq!(shape, pinned_shape);
+        let mut observed = line.methods.clone();
+        let reads = line.authority_reads;
+        let total_pinned = expected
+            .iter()
+            .find(|(name, _)| name == shape)
+            .map_or(0, |(_, (authority, _, _))| *authority);
+        if shape.contains("rolling") && reads == total_pinned + AHEAD_LIMITS_REFRESH_READS {
+            let entry = observed
+                .iter_mut()
+                .find(|(method, _)| method == "get_setting")
+                .expect("the refreshed bounds are get_setting reads");
+            entry.1 .0 -= AHEAD_LIMITS_REFRESH_READS;
+            // Since D3b the rolling shape makes no other `get_setting` read.
+            observed.retain(|(_, counts)| *counts != (0, 0, 0));
+        }
+        let pinned = pinned
+            .iter()
+            .map(|(method, counts)| ((*method).to_owned(), *counts))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed, pinned,
+            "{shape}: operations by Store method changed:\n{methods_table}"
+        );
+        // The split is the total, not a sample of it.
+        let sum = |pick: fn(&(u64, u64, u64)) -> u64| {
+            observed.iter().map(|(_, counts)| pick(counts)).sum::<u64>()
+        };
+        let (authority, local, writes) = (sum(|c| c.0), sum(|c| c.1), sum(|c| c.2));
+        assert_eq!(
+            (authority, local, writes),
+            (
+                line.authority_reads - (reads - total_pinned).min(AHEAD_LIMITS_REFRESH_READS),
+                line.local_reads,
+                line.mutations
+            ),
+            "{shape}: the method split does not add up to the totals"
+        );
+    }
 
     drop(node_b);
     drop(node_a);

@@ -110,7 +110,11 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 17] = [
+    let inputs: [(&str, &[u8]); 22] = [
+        (
+            "author_p81.c",
+            include_bytes!("../../../tools/dv_processing/author_p81.c"),
+        ),
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -122,6 +126,10 @@ fn renderer_source_identity() -> String {
         (
             "dm_closed_form.h",
             include_bytes!("../../../tools/dv_processing/dm_closed_form.h"),
+        ),
+        (
+            "dm_cm29_gamut_tables.h",
+            include_bytes!("../../../tools/dv_processing/dm_cm29_gamut_tables.h"),
         ),
         (
             "dv_dm.h",
@@ -148,12 +156,24 @@ fn renderer_source_identity() -> String {
             include_bytes!("../../../tools/dv_processing/movie_source_io.h"),
         ),
         (
+            "mux_rgb.c",
+            include_bytes!("../../../tools/dv_processing/mux_rgb.c"),
+        ),
+        (
             "nlq_clipping.h",
             include_bytes!("../../../tools/dv_processing/nlq_clipping.h"),
         ),
         (
             "nut_timing.h",
             include_bytes!("../../../tools/dv_processing/nut_timing.h"),
+        ),
+        (
+            "refit_compose.h",
+            include_bytes!("../../../tools/dv_processing/refit_compose.h"),
+        ),
+        (
+            "refit_mode.h",
+            include_bytes!("../../../tools/dv_processing/refit_mode.h"),
         ),
         (
             "rgb48.h",
@@ -187,6 +207,25 @@ fn renderer_source_identity() -> String {
         identity.update(Sha256::digest(bytes));
     }
     hex::encode(identity.finalize())
+}
+/// The installed bundle's identity as this daemon accepts it, or why it does
+/// not. One validation path: the same capture the worker performs.
+pub(crate) async fn installed_helper_identity() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let tools = ToolSet::capture()
+            .await?
+            .ok_or_else(|| "no DV helper bundle is installed".to_string())?;
+        Ok(serde_json::json!({
+            "source_sha256": renderer_source_identity(),
+            "backend_digest": tools.backend_digest(),
+        })
+        .to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("DV helper bundles are a Linux runtime asset".into())
+    }
 }
 /// Decode on the GPU the renderer already draws on. The helper maps VA-API
 /// surfaces straight into its Vulkan renderer; a host copy of a decoded 4K
@@ -301,6 +340,12 @@ impl ToolSet {
         let root = std::env::var_os("PLURX_DV_PROCESSING_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/usr/lib/plurx/dv-processing".into());
+        Self::capture_at(root).await
+    }
+
+    // Keep the manifest-validation boundary identical for production discovery
+    // and fixture bundles without mutating process-global configuration.
+    async fn capture_at(root: PathBuf) -> Result<Option<Arc<Self>>, String> {
         tokio::task::spawn_blocking(move || {
             let manifest_path = root.join("build-identity.json");
             let bytes = match std::fs::read(&manifest_path) {
@@ -316,7 +361,7 @@ impl ToolSet {
             if manifest.schema != 1
                 || manifest.source_sha256 != renderer_source_identity()
                 || manifest.graph != "dv-native-master-or-closed-form-dm-v1"
-                || manifest.abi.get("libplacebo") != Some(&374)
+                || manifest.abi.get("libplacebo") != Some(&387)
                 || !["avcodec", "avformat", "avutil"]
                     .iter()
                     .all(|key| manifest.abi.get(*key).is_some_and(|major| *major > 0))
@@ -437,6 +482,7 @@ pub(crate) struct PrivateWindow {
     pub(crate) evidence: crate::dv_segment::SegmentEvidence,
     registration: crate::prodrun::ProducerRegistration,
     display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
 }
 
 #[cfg(target_os = "linux")]
@@ -465,12 +511,12 @@ impl PrivateWindow {
         first_global_frame: u64,
         raster: (u32, u32),
         destination: plurx_core::transcode::dv_processing::DvDestination,
-        source_level: Option<u8>,
+        envelope: Option<plurx_core::transcode::EnhancementRateEnvelope>,
         runtime_cache: &Path,
         audio_channels: Option<u32>,
     ) -> Result<VerifiedWindow, String> {
         use plurx_core::transcode::dv_processing::{
-            dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
+            dv_author_profile81_window_with_envelope, dv_validate_encoded_window, DvDestination,
         };
         if self
             .display_target
@@ -488,6 +534,14 @@ impl PrivateWindow {
         let origin =
             plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
                 .map_err(str::to_owned)?;
+        if let Some(envelope) = envelope {
+            let signalled_hrd = plurx_core::transcode::validate_encoded_enhancement_envelope(
+                &self.encoded,
+                envelope,
+            )
+            .map_err(str::to_owned)?;
+            tracing::debug!(target: "plurxd::dv", signalled_hrd, envelope = %envelope.identity(), "observed completed enhancement coded envelope");
+        }
         let bytes = match destination {
             DvDestination::Sdr => {
                 plurx_core::transcode::dv_processing::dv_author_sdr_window(&self.encoded)
@@ -504,16 +558,27 @@ impl PrivateWindow {
                     )
                     .map_err(|error| error.to_string())?
                 }
-                None => self.encoded,
+                // A master-grade window re-declares the source's own static
+                // metadata; a source that states none stays undeclared.
+                None => match self.master_metadata {
+                    Some(metadata) => plurx_core::transcode::dv_processing::dv_author_hdr10_window(
+                        &self.encoded,
+                        metadata
+                            .output_metadata()
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?,
+                    None => self.encoded,
+                },
             },
-            DvDestination::Profile81 => dv_author_profile81_window(
+            DvDestination::Profile81 => dv_author_profile81_window_with_envelope(
                 &self.encoded,
                 raster,
                 grid.numerator,
                 origin,
                 grid.denominator,
                 &rpus,
-                source_level.ok_or("held source has no DV level")?,
+                envelope.ok_or("frozen P81 rate envelope absent")?,
             )
             .map_err(|e| e.to_string())?,
         };
@@ -720,6 +785,10 @@ pub(crate) struct RuntimeRecipe {
         Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
     /// Independent SDR floor parse; invalid/absent HDR coordinates are irrelevant.
     pub(crate) source_mastering_minimum: Result<Option<u32>, String>,
+    /// The selected held stream's own static HDR10 declarations, which a
+    /// master-grade HDR10 render carries; `None` when it states none.
+    pub(crate) source_master_metadata:
+        Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
     /// Lazy, source/probe/absolute-stream-bound metadata. Master and SDR paths
     /// with a title floor never invoke this separate frame projection.
     pub(crate) source_frame_probe: Option<Arc<crate::decode_facts::SourceFrameProbe>>,
@@ -760,6 +829,45 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// The cache key and the window encoder must use the same destination and driver policy.
+    fn completed_output_for<'a>(
+        &self,
+        source: &'a plurx_core::transcode::ResolvedTranscode,
+    ) -> Option<plurx_core::transcode::CompletedReconstructedOutputPlan<'a>> {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let output = source
+            .completed_reconstructed_output(self.encoder)?
+            .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
+        Some(match self.destination {
+            DvDestination::Hdr10 => output,
+            DvDestination::Profile81 => output.with_reconstructed_profile81(),
+            DvDestination::Sdr => output.with_sdr_output(),
+        })
+    }
+
+    pub(crate) fn window_encoder_args(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        execution: &plurx_core::transcode::TranscodeExecution,
+        grid: plurx_core::transcode::VodFrameGrid,
+        end_seconds: f64,
+    ) -> Result<Vec<String>, &'static str> {
+        let output = self
+            .completed_output_for(plan)
+            .ok_or("unsupported reconstructed output encoder")?;
+        plurx_core::transcode::vod_completed_reconstructed_pipe_args(
+            file,
+            &output,
+            execution,
+            grid,
+            end_seconds,
+            "/proc/self/fd/3",
+            "/proc/self/fd/4",
+            self.source_clock,
+        )
+    }
+
     /// Physical/internal callers resolve before constructing the export policy;
     /// a frozen live target is rechecked and cannot acquire another floor.
     pub(crate) async fn resolve_display_target(
@@ -1098,16 +1206,6 @@ impl RuntimeRecipe {
             let execution =
                 TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
                     .map_err(|e| e.to_string())?;
-            let mut output = plan
-                .completed_reconstructed_output(self.encoder)
-                .ok_or("unsupported reconstructed output encoder")?
-                .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
-            if self.destination == DvDestination::Sdr {
-                output = output.with_sdr_output();
-            }
-            if self.destination == DvDestination::Profile81 {
-                output = output.with_reconstructed_profile81();
-            }
             let raster = plan
                 .output_contract()
                 .effective_width()
@@ -1116,24 +1214,27 @@ impl RuntimeRecipe {
             // Both destinations leave the GPU as 10-bit YCbCr at the output
             // raster: the encoder only uploads it, it never converts colour.
             use plurx_core::transcode::dv_processing::DvExportPolicy;
-            let export_policy = display_target
-                .map_or(DvExportPolicy::PqBilinearYuv420p10V1 { raster }, |target| {
-                    DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target }
-                });
+            let export_policy = display_target.map_or_else(
+                || {
+                    // Every processed master is a reconstruction: FEL adds
+                    // the enhancement layer, and base-RPU applies reshaping
+                    // this daemon cannot prove is the identity for the whole
+                    // title. The base layer's light levels are not carried.
+                    DvExportPolicy::for_master(
+                        raster,
+                        self.source_master_metadata
+                            .filter(|_| self.destination == DvDestination::Hdr10)
+                            .map(|metadata| metadata.for_processed(self.mode, false)),
+                    )
+                },
+                |target| DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target },
+            );
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
-            let args = plurx_core::transcode::vod_completed_reconstructed_pipe_args(
-                file,
-                &output,
-                &execution,
-                grid,
-                end_seconds,
-                "/proc/self/fd/3",
-                "/proc/self/fd/4",
-                self.source_clock,
-            )
-            .map_err(str::to_owned)?;
+            let args = self
+                .window_encoder_args(file, plan, &execution, grid, end_seconds)
+                .map_err(str::to_owned)?;
             tracing::debug!(target: "plurxd::dv", entry = entry.index, encoder = ?args,
                 "processed window encoder recipe");
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
@@ -1156,6 +1257,7 @@ impl RuntimeRecipe {
                 decode: self.decode,
                 export_raster: Some(export_raster),
                 display_target: export_policy.display_target(),
+                master_metadata: export_policy.master_metadata(),
                 request: crate::dv_segment::SegmentRequest {
                     source_input: Some(source_input),
                     renderer: self.tools.renderer.clone(),
@@ -1322,9 +1424,7 @@ impl RuntimeRecipe {
                         first_frame,
                         raster,
                         self.destination,
-                        file.dolby_vision
-                            .level
-                            .and_then(|level| u8::try_from(level).ok()),
+                        plan.enhancement_rate_envelope(),
                         &self.runtime_cache,
                         plan.options()
                             .input_has_audio
@@ -1414,6 +1514,7 @@ async fn run_private_window(
     request.request.cancel = cancel.clone();
     let deadline = request.renderer_deadline;
     let display_target = request.display_target;
+    let master_metadata = request.master_metadata;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
     let source_settlement = producer.take_source_settlement();
     let result = async {
@@ -1444,6 +1545,7 @@ async fn run_private_window(
                 evidence,
                 registration,
                 display_target,
+                master_metadata,
             })),
             WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
         }
@@ -2460,6 +2562,49 @@ mod helper_decoder_tests {
 }
 
 #[cfg(test)]
+mod pinned_runtime_renderer_sources {
+    /// plurxd refuses a DV helper bundle built from other renderer sources
+    /// (2026-11-11, after #1481: processed Dolby Vision off on every node).
+    /// The bundle is now compiled by the application image's helper stage
+    /// from this tree, and stamped by `bundle-manifest.py`. This daemon's own
+    /// identity must equal the one that installer computes for the same
+    /// sources, or the image build stops at `plurxd dv-helper-identity`.
+    ///
+    /// The name is the regression's recorded one: when it was written the
+    /// bundle came from the pinned media runtime and the identity was a value
+    /// recorded beside that pin. Nothing is recorded any more; the installer
+    /// is asked.
+    #[test]
+    fn this_daemon_accepts_the_pinned_media_runtimes_dv_helpers() {
+        let sources =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dv_processing");
+        let installer = std::process::Command::new("python3")
+            .arg(sources.join("bundle-manifest.py"))
+            .arg("--identity")
+            .arg(&sources)
+            .output()
+            .expect("run the bundle installer's identity");
+        assert!(
+            installer.status.success(),
+            "{}",
+            String::from_utf8_lossy(&installer.stderr)
+        );
+        assert_eq!(
+            super::renderer_source_identity(),
+            String::from_utf8_lossy(&installer.stdout).trim(),
+            "the daemon and tools/dv_processing/bundle-manifest.py digest different \
+             renderer sources: the helper stage would build a bundle this daemon refuses"
+        );
+        // The application build is where that bundle comes from, and where
+        // the daemon is asked again about the installed bytes.
+        let recipe = include_str!("../../../Dockerfile");
+        assert!(recipe.contains("COPY tools/dv_processing /build-inputs/dv_processing"));
+        assert!(recipe.contains("RUN [\"plurxd\", \"dv-helper-identity\"]"));
+        assert!(!recipe.contains("PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256"));
+    }
+}
+
+#[cfg(test)]
 mod private_window_outcome_tests {
     use super::encoder_diagnostic_tail;
 
@@ -2715,13 +2860,17 @@ mod processed_selection_has_no_software_gates {
     /// once the Developer setting is on and the first window verifies. These
     /// were silent gates (720p clamp, speed qualification, Auto only) that
     /// kept HDR10-E from ever playing; they must not return.
+    ///
+    /// Since plan ruling 3 the entry point is the post-first-frame upgrade:
+    /// its request-only gates (`processed_upgrade_gates`, which the create
+    /// also runs) and its trial (`prepare_processed_upgrade`).
     fn entry_body() -> &'static str {
         let source = include_str!("transcode/manager/create.rs");
         source
-            .split_once("pub(crate) async fn prepare_processed_hdr10(")
-            .expect("processed HDR10 entry point")
+            .split_once("pub(crate) fn processed_upgrade_gates(")
+            .expect("processed upgrade gates")
             .1
-            .split_once("pub(super) async fn prepare_vod_encoding_with_preference(")
+            .split_once("pub(crate) fn hold_processed_upgrade_root(")
             .expect("entry point end")
             .0
     }
@@ -2740,11 +2889,22 @@ mod processed_selection_has_no_software_gates {
         );
         // Every decline after the setting check, to the end of the entry
         // point, is reported, never silent.
-        let after_setting = body
+        let (gates, trial) = body
+            .split_once("pub(crate) async fn prepare_processed_upgrade(")
+            .expect("the trial follows its gates");
+        let after_setting = gates
             .split_once("// The setting is on for a DV source")
             .expect("setting check")
             .1;
         assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
+        let after_gates = trial
+            .split_once("Self::processed_upgrade_gates(request, &planning, hdr10_intent)?")
+            .expect("the trial reruns the gates")
+            .1
+            .split_once("else {\n                return Ok(None);\n            };")
+            .expect("the gates' own silent answer")
+            .1;
+        assert!(!after_gates.contains("Ok(None)"), "{after_gates}");
     }
 
     /// A Dolby Vision display's converted Profile 7 copy never reached the
@@ -2771,10 +2931,12 @@ mod processed_selection_has_no_software_gates {
     fn every_catalog_start_is_offered_processing() {
         let source = include_str!("http/hls/create.rs");
         let guard = source
-            .split_once(".prepare_processed_hdr10(")
-            .expect("processed call")
+            .split_once("let processed_upgrade_applies = if")
+            .expect("processed upgrade guard")
+            .1
+            .split_once("processed_upgrade_gates(")
+            .expect("processed gates call")
             .0;
-        let guard = &guard[guard.rfind("    if ").expect("call guard")..];
         assert!(!guard.contains("candidate_auto_policy"), "{guard}");
         assert!(!guard.contains("continuous.is_none()"), "{guard}");
     }
@@ -3193,8 +3355,128 @@ mod title_scanner_identity_tests {
         }
         let create = include_str!("transcode/manager/create.rs");
         assert!(create.contains("self.fel_identity(&tools.backend_digest())"));
-        assert!(create.contains(
-            "planning.probe_json.as_deref(),\n            &tools.title_scanner_digest(),"
-        ));
+        // FEL qualification is now a recipe request that carries no title
+        // demand, so the creator has no scanner-keyed call left. The backend
+        // key may still appear there only as the FEL identity it measures.
+        assert_eq!(
+            create.matches("backend_digest()").count(),
+            create
+                .matches("fel_identity(&tools.backend_digest())")
+                .count()
+                + create
+                    .matches("fel_identity_for_encoder(&tools.backend_digest(), ")
+                    .count()
+        );
+        assert!(!create.contains("dv_title_demand"));
+        // The index build is the remaining title-demand writer outside the probe.
+        assert!(include_str!("fragindex.rs")
+            .contains("scanner_digest: self.tools.title_scanner_digest(),"));
+    }
+}
+
+#[cfg(test)]
+mod bundle_capture_tests {
+    use super::*;
+
+    /// Generate the actual installer's manifest and enter the same capture
+    /// boundary as production. Stub artifacts are never executed.
+    #[tokio::test]
+    async fn revised_bundle_capture_accepts_current_sources_and_rejects_stale_or_incomplete_identity(
+    ) {
+        let fixture = tempfile::tempdir().expect("bundle fixture");
+        let root = fixture.path().join("bundle");
+        for directory in ["bin", "lib", "sources"] {
+            std::fs::create_dir_all(root.join(directory)).expect("fixture directory");
+        }
+        for name in [
+            "segment_decode_render",
+            "mux_rgb",
+            "author_p81",
+            "scan_title",
+        ] {
+            std::fs::write(root.join("bin").join(name), name).expect("stub helper");
+        }
+        std::fs::write(root.join("lib/libplacebo.so.387"), b"fixture placebo")
+            .expect("write stub placebo library");
+        std::fs::write(root.join("sources/libdovi.a"), b"fixture parser")
+            .expect("write stub parser library");
+        std::fs::write(
+            root.join("sources/abi.json"),
+            br#"{"libplacebo":387,"avcodec":62,"avformat":62,"avutil":60}"#,
+        )
+        .expect("write fixture ABI");
+        let source = fixture.path().join("source");
+        std::fs::create_dir(&source).expect("create copied-source directory");
+        let actual_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/dv_processing");
+        for entry in std::fs::read_dir(&actual_source).expect("enumerate actual helper sources") {
+            let entry = entry.expect("read source entry");
+            if entry
+                .file_type()
+                .expect("inspect source entry type")
+                .is_file()
+            {
+                std::fs::copy(entry.path(), source.join(entry.file_name()))
+                    .expect("copy manifest source input");
+            }
+        }
+        let installer = include_str!("../../../tools/dv_processing/bundle-manifest.py");
+        let generate = |script: &str| {
+            let result = std::process::Command::new("python3")
+                .args(["-c", script])
+                .arg(&source)
+                .arg(&root)
+                .output()
+                .expect("run installed manifest generator");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        generate(installer);
+        let tools = ToolSet::capture_at(root.clone())
+            .await
+            .expect("validate current installer bundle")
+            .expect("current bundle accepted");
+        assert!(tools.is_current().await);
+        assert_eq!(
+            tools.renderer,
+            root.join("bin/segment_decode_render")
+                .canonicalize()
+                .expect("canonical fixture renderer")
+        );
+        for missing in ["author_p81.c", "movie_source_io.h", "source_reader.h"] {
+            // Exercise the producer's actual INPUTS, independently of source
+            // formatting or quote style. The final generated manifest is
+            // internally consistent but incomplete for this daemon.
+            let incomplete = format!(
+                "{installer}\nimport sys\nomitted = {missing:?}\nassert omitted in INPUTS\n\
+                 INPUTS = tuple(name for name in INPUTS if name != omitted)\n\
+                 build(Path(sys.argv[1]), Path(sys.argv[2]))\n"
+            );
+            generate(&incomplete);
+            assert!(
+                matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity"),
+                "capture rejects a manifest missing {missing}"
+            );
+        }
+        // Self-consistent stale source bytes still cannot authorize this daemon.
+        for stale in ["author_p81.c", "movie_source_io.h", "source_reader.h"] {
+            let path = source.join(stale);
+            let original = std::fs::read(&path).expect("read current fixture source");
+            std::fs::write(&path, b"deliberately stale fixture source")
+                .expect("write stale fixture source");
+            generate(installer);
+            assert!(
+                matches!(ToolSet::capture_at(root.clone()).await, Err(error) if error == "unsupported DV build identity"),
+                "capture rejects stale {stale}"
+            );
+            std::fs::write(path, original).expect("restore current fixture source");
+        }
+        generate(installer);
+        assert!(ToolSet::capture_at(root)
+            .await
+            .expect("validate restored current bundle")
+            .is_some());
     }
 }

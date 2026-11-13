@@ -646,7 +646,11 @@ impl DvConversionStore for HiqliteAuthStore {
         );
         one_joined_conversion(
             self.client()
-                .query_consistent_map::<JoinedConversionRow, _>(sql, params!(file_id))
+                .query_consistent_map::<JoinedConversionRow, _>(
+                    "dv_conversion",
+                    sql,
+                    params!(file_id),
+                )
                 .await?,
         )
     }
@@ -667,6 +671,7 @@ impl DvConversionStore for HiqliteAuthStore {
         let encoded = serde_json::to_string(file_ids).map_err(database_error)?;
         self.client()
             .query_consistent_map::<JoinedConversionRow, _>(
+                "dv_conversions_for_files",
                 format!(
                     "SELECT {JOINED_CONVERSION_COLS} FROM dv_conversions d
                       LEFT JOIN dv_recovery_guards g ON g.guard_id = d.recovery_guard_id
@@ -699,6 +704,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .query_consistent_map::<EligibilityRow, _>(
+                "dv_conversion_eligibility_for_files",
                 "SELECT id AS file_id,
                         CASE WHEN LOWER(container) = 'mkv'
                                    AND dv_profile = 7
@@ -721,6 +727,7 @@ impl DvConversionStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<PresentRow, _>(
+                "dv_conversion_eligible",
                 "SELECT 1 AS present FROM files
                   WHERE id = $1 AND LOWER(container) = 'mkv' AND dv_profile = 7
                     AND dv_bl_compat_id IN (1, 6)
@@ -742,7 +749,7 @@ impl DvConversionStore for HiqliteAuthStore {
         );
         let row = self
             .client()
-            .execute_returning_map_one::<_, QueueAdmissionRow>(
+            .execute_returning_map_one::<_, QueueAdmissionRow>("queue_dv_conversion", 
                 "WITH requested(requested_file_id, requested_queued_at_ms, mode_key, request_key) AS
                        (VALUES ($1, $2, $3, $4)),
                  snapshot AS (
@@ -903,6 +910,7 @@ impl DvConversionStore for HiqliteAuthStore {
         let row = self
             .client()
             .execute_returning_map_one::<_, QueueAdmissionRow>(
+                "queue_library_dv_conversion_batch",
                 "WITH requested(
                        library_id, queued_at_ms, retry_failed, batch_limit,
                        mode_key, request_key, requested_manually) AS
@@ -1002,6 +1010,7 @@ impl DvConversionStore for HiqliteAuthStore {
         }
         self.client()
             .query_consistent_map::<CandidateRow, _>(
+                "dv_conversion_candidates",
                 "SELECT d.file_id, i.library_id, d.state
                    FROM dv_conversions d
                    JOIN files f ON f.id = d.file_id
@@ -1036,6 +1045,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .query_consistent_map::<PresentRow, _>(
+                "dv_committed_cleanup_candidate",
                 "SELECT file_id AS present FROM dv_conversions
                   WHERE file_id > $1 AND state = 'committed'
                     AND recovery_guard_id IS NULL
@@ -1052,6 +1062,7 @@ impl DvConversionStore for HiqliteAuthStore {
         one_guard(
             self.client()
                 .query_consistent_map::<GuardRow, _>(
+                    "dv_recovery_guard",
                     format!(
                         "SELECT {QUALIFIED_GUARD_COLS} FROM dv_recovery_guards g
                          JOIN dv_conversions d ON d.recovery_guard_id = g.guard_id
@@ -1070,6 +1081,7 @@ impl DvConversionStore for HiqliteAuthStore {
         one_guard(
             self.client()
                 .query_consistent_map::<GuardRow, _>(
+                    "dv_recovery_guard_by_id",
                     format!("SELECT {GUARD_COLS} FROM dv_recovery_guards WHERE guard_id = $1"),
                     params!(guard_id),
                 )
@@ -1088,6 +1100,7 @@ impl DvConversionStore for HiqliteAuthStore {
         }
         self.client()
             .query_consistent_map::<GuardRow, _>(
+                "dv_recovery_guard_orphans",
                 format!(
                     "SELECT {GUARD_COLS} FROM dv_recovery_guards g
                      WHERE g.guard_id > $1
@@ -1106,6 +1119,7 @@ impl DvConversionStore for HiqliteAuthStore {
     async fn dv_recovery_guard_summary(&self) -> Result<DvRecoveryGuardSummary, StoreError> {
         self.client()
             .query_consistent_map::<GuardSummaryRow, _>(
+                "dv_recovery_guard_summary",
                 "SELECT
                    COALESCE(SUM(CASE WHEN state = 'intent' THEN 1 ELSE 0 END), 0) AS intent,
                    COALESCE(SUM(CASE WHEN state = 'active' THEN 1 ELSE 0 END), 0) AS active,
@@ -1136,6 +1150,7 @@ impl DvConversionStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<GuardSnapshotRow, _>(
+                "dv_recovery_guard_snapshot",
                 "WITH guard_rows AS (
                    SELECT g.*,
                           CASE WHEN NOT EXISTS (
@@ -1197,6 +1212,7 @@ impl DvConversionStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<ProgressRow, _>(
+                "dv_conversion_progress",
                 "SELECT
                    COALESCE(SUM(CASE WHEN LOWER(f.container) = 'mkv'
                                           AND f.dv_profile = 7
@@ -1228,6 +1244,7 @@ impl DvConversionStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_consistent_map::<LibraryProgressRow, _>(
+                "dv_conversion_progress_snapshot",
                 "SELECT l.id AS library_id,
                    COALESCE(SUM(CASE WHEN LOWER(f.container) = 'mkv'
                                           AND f.dv_profile = 7
@@ -1265,6 +1282,7 @@ impl DvConversionStore for HiqliteAuthStore {
         let changed = self
             .client()
             .execute(
+                "set_library_dv_conversion_mode",
                 "WITH requested(setting_key, library_key, mode, updated_at, library_id, path) AS
                        (VALUES ($1, $2, $3, $4, $5, $6))
                  INSERT INTO settings (key, value, updated_at)
@@ -1312,9 +1330,11 @@ impl DvConversionStore for HiqliteAuthStore {
         validate_recovery_guard_identity(guard_id, recovery_path)?;
         let results = self
             .client()
-            .txn([
-                (
-                    "WITH requested(file_id, guard_id, recovery_path, now_ms) AS
+            .txn(
+                "begin_dv_recovery_guard",
+                [
+                    (
+                        "WITH requested(file_id, guard_id, recovery_path, now_ms) AS
                            (VALUES ($1, $2, $3, $4))
                      INSERT INTO dv_recovery_guards
                        (guard_id, file_id, library_id, source_path, recovery_path,
@@ -1330,10 +1350,10 @@ impl DvConversionStore for HiqliteAuthStore {
                         AND (d.recovery_guard_id IS NULL
                              OR d.recovery_guard_id = requested.guard_id)
                      ON CONFLICT(guard_id) DO NOTHING",
-                    params!(file_id, guard_id, recovery_path, now_ms),
-                ),
-                (
-                    "WITH requested(file_id, guard_id, recovery_path) AS
+                        params!(file_id, guard_id, recovery_path, now_ms),
+                    ),
+                    (
+                        "WITH requested(file_id, guard_id, recovery_path) AS
                            (VALUES ($1, $2, $3))
                      UPDATE dv_conversions AS d
                         SET recovery_guard_id = (SELECT guard_id FROM requested)
@@ -1351,9 +1371,10 @@ impl DvConversionStore for HiqliteAuthStore {
                             AND g.source_path = f.path
                             AND g.recovery_path = requested.recovery_path
                             AND g.state = 'intent')",
-                    params!(file_id, guard_id, recovery_path),
-                ),
-            ])
+                        params!(file_id, guard_id, recovery_path),
+                    ),
+                ],
+            )
             .await?;
         let changed = results
             .into_iter()
@@ -1370,6 +1391,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "mark_dv_conversion_running",
                 "UPDATE dv_conversions
                     SET state = 'running', bytes_before = $1, bytes_after = NULL,
                         error = NULL, finished_at_ms = NULL
@@ -1394,6 +1416,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "mark_dv_conversion_verified",
                 "UPDATE dv_conversions
                     SET state = 'verified', el_type = $1, bytes_after = $2, error = NULL
                   WHERE file_id = $3 AND state = 'running'",
@@ -1419,6 +1442,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "mark_dv_conversion_committed",
                 "UPDATE dv_conversions
                     SET state = 'committed', original_path = $1, bytes_after = $2,
                         error = NULL, finished_at_ms = $3
@@ -1439,9 +1463,11 @@ impl DvConversionStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         let results = self
             .client()
-            .txn([
-                (
-                    "WITH requested(file_id, guard_id, bytes_after, finished_at_ms) AS
+            .txn(
+                "mark_dv_conversion_committed_with_guard",
+                [
+                    (
+                        "WITH requested(file_id, guard_id, bytes_after, finished_at_ms) AS
                            (VALUES ($1, $2, $3, $4))
                      UPDATE dv_conversions
                         SET state = 'committed', original_path = NULL,
@@ -1475,10 +1501,10 @@ impl DvConversionStore for HiqliteAuthStore {
                                    AND g.library_id = i.library_id
                                    AND g.source_path = f.path
                                    AND g.state = 'active'))) ",
-                    params!(file_id, guard_id, bytes_after, finished_at_ms),
-                ),
-                (
-                    "WITH requested(file_id, guard_id, finished_at_ms, bytes_after) AS
+                        params!(file_id, guard_id, bytes_after, finished_at_ms),
+                    ),
+                    (
+                        "WITH requested(file_id, guard_id, finished_at_ms, bytes_after) AS
                            (VALUES ($1, $2, $3, $4))
                      UPDATE dv_recovery_guards
                         SET state = 'active',
@@ -1499,9 +1525,10 @@ impl DvConversionStore for HiqliteAuthStore {
                                (SELECT finished_at_ms FROM requested)
                              AND dv_recovery_guards.library_id = i.library_id
                              AND dv_recovery_guards.source_path = f.path)",
-                    params!(file_id, guard_id, finished_at_ms, bytes_after),
-                ),
-            ])
+                        params!(file_id, guard_id, finished_at_ms, bytes_after),
+                    ),
+                ],
+            )
             .await?;
         let changed = results
             .into_iter()
@@ -1527,6 +1554,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "advance_dv_recovery_guard",
                 "WITH requested(guard_id, expected, next, updated_at_ms) AS
                        (VALUES ($1, $2, $3, $4))
                  UPDATE dv_recovery_guards
@@ -1548,6 +1576,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "delete_dv_recovery_guard",
                 "DELETE FROM dv_recovery_guards
                   WHERE guard_id = $1 AND state = 'scratch_removed'
                     AND NOT EXISTS (SELECT 1 FROM dv_conversions d
@@ -1568,6 +1597,7 @@ impl DvConversionStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "mark_dv_conversion_failed",
                 "UPDATE dv_conversions
                     SET state = 'failed', error = $1, finished_at_ms = $2,
                         recovery_guard_id = NULL

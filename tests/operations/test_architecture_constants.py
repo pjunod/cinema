@@ -55,6 +55,16 @@ class ArchitectureConstantCase(unittest.TestCase):
         self.assertIn("`UNREGISTERED_LIMIT` = 9", errors[0])
         self.assertIn("does not know", errors[0])
 
+    def test_row_counts_are_spelled_past_ninety_nine(self) -> None:
+        # The asset table reached 99 rows; the next asset must not make the
+        # validator itself fail.
+        self.assertEqual(_spell_cardinal(99), "ninety-nine")
+        self.assertEqual(_spell_cardinal(100), "one hundred")
+        self.assertEqual(_spell_cardinal(101), "one hundred one")
+        self.assertEqual(_spell_cardinal(142), "one hundred forty-two")
+        with self.assertRaises(ValueError):
+            _spell_cardinal(1000)
+
     def test_a_new_web_asset_rejects_all_four_stale_prose_surfaces(self) -> None:
         def read(path: str) -> str:
             contents = repository_read(path)

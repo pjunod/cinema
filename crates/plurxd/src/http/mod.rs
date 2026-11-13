@@ -29,6 +29,7 @@ pub(crate) mod file_grants;
 pub(crate) mod playback_handoffs;
 pub(crate) mod delegation;
 pub(crate) use extract::CacheOnlyAdminProofCache;
+pub(crate) mod activity_starts;
 pub(crate) mod hls;
 mod https_admin;
 pub(crate) mod images;
@@ -41,6 +42,7 @@ pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
 mod jellyfin;
+mod offload;
 pub(crate) use jellyfin::{
     standard_port_app as jellyfin_standard_port_app, StandardPort as JellyfinStandardPort,
     StandardPortStatus as JellyfinStandardPortStatus,
@@ -56,6 +58,10 @@ mod pgs_overlay;
 mod photos;
 mod plex;
 pub(crate) use plex::looks_like_plex;
+#[cfg(test)]
+mod applied_route_inventory;
+#[cfg(test)]
+mod applied_settings_inventory;
 pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;
@@ -160,9 +166,101 @@ struct HttpRouteCell {
     buckets: [AtomicU64; HTTP_ROUTE_BUCKETS.len()],
 }
 
+/// The most `(route_group, class, method)` series
+/// `plurx_http_store_operations_by_method_total` ever holds. The method label
+/// is a `&'static str` chosen at a Store call site, so the set is bounded by
+/// the source (about 470 distinct labels today), but the product with route
+/// groups and classes is not what is expected to be reached: a method is
+/// issued in one or two classes, from two or three groups, so the live series
+/// number a few thousand at most. The cap is the guarantee, not the
+/// arithmetic: past it a new series is not created and the operation is counted
+/// in `plurx_http_store_operations_by_method_dropped_total` instead, so a
+/// mistake can never grow the exposition without bound. At the cap the series
+/// that arrived first are the ones kept, permanently until restart, and the
+/// dropped counter is what says a reading is incomplete.
+const HTTP_METHOD_SERIES_CAP: usize = 4096;
+
+/// Replicated Store operations by the Store method that issued them, per
+/// route group and class. Fed once per request from the request's own
+/// [`plurx_core::store::HttpStoreOperationCounts::method_snapshot`].
+struct HttpMethodMetrics {
+    cap: usize,
+    series: std::sync::Mutex<std::collections::BTreeMap<(usize, usize, &'static str), u64>>,
+    dropped: AtomicU64,
+}
+
+impl HttpMethodMetrics {
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            cap,
+            series: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// `methods` is `(method, [local, authority, write])`, the layout
+    /// `HttpStoreOperationCounts::snapshot` uses; `HTTP_STORE_CLASSES` is in
+    /// the same order.
+    fn record(&self, group: usize, methods: &[(&'static str, [u64; 3])]) {
+        // Segment and playlist requests make no Store operation: they do not
+        // take the process-wide lock.
+        if methods.is_empty() {
+            return;
+        }
+        let mut series = self
+            .series
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (method, counts) in methods {
+            for (class, count) in counts.iter().copied().enumerate() {
+                if count == 0 {
+                    continue;
+                }
+                let key = (group, class, *method);
+                if series.len() >= self.cap && !series.contains_key(&key) {
+                    HttpRouteMetrics::saturating_add(&self.dropped, count);
+                    continue;
+                }
+                let cell = series.entry(key).or_insert(0);
+                *cell = cell.saturating_add(count);
+            }
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_http_store_operations_by_method_total Replicated Store operations by the Store method that issued them, attributed to matched HTTP route group. Series exist only for methods that have run; their count is capped.\n\
+             # TYPE plurx_http_store_operations_by_method_total counter\n",
+        );
+        for ((group, class, method), count) in self
+            .series
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            let _ = writeln!(
+                out,
+                "plurx_http_store_operations_by_method_total{{route_group=\"{}\",class=\"{}\",method=\"{method}\"}} {count}",
+                HTTP_ROUTE_GROUPS[*group], HTTP_STORE_CLASSES[*class],
+            );
+        }
+        let _ = write!(
+            out,
+            "# HELP plurx_http_store_operations_by_method_dropped_total Store operations not attributed by method because the series cap was reached.\n\
+             # TYPE plurx_http_store_operations_by_method_dropped_total counter\n\
+             plurx_http_store_operations_by_method_dropped_total {}\n",
+            self.dropped.load(Ordering::Relaxed),
+        );
+        out
+    }
+}
+
 struct HttpRouteMetrics {
     store_reads: [AtomicU64; 9 * 3 * HTTP_NODE_ROLES.len()],
     routes: [HttpRouteCell; 9 * HTTP_NODE_ROLES.len()],
+    by_method: HttpMethodMetrics,
 }
 
 impl Default for HttpRouteMetrics {
@@ -170,6 +268,7 @@ impl Default for HttpRouteMetrics {
         Self {
             store_reads: std::array::from_fn(|_| AtomicU64::new(0)),
             routes: std::array::from_fn(|_| HttpRouteCell::default()),
+            by_method: HttpMethodMetrics::with_cap(HTTP_METHOD_SERIES_CAP),
         }
     }
 }
@@ -255,6 +354,7 @@ impl HttpRouteMetrics {
                 );
             }
         }
+        out.push_str(&self.by_method.render());
         out
     }
 }
@@ -335,6 +435,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
+        | "/api/v1/items/{id}/get-it-back"
+        | "/api/v1/items/{id}/offload-status"
         | "/api/v1/items/{id}/refresh-artwork"
         | "/api/v1/items/{id}/reading-state"
         | "/api/v1/items/{id}/annotations"
@@ -532,6 +634,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-transcription/jobs/{id}"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
+        | "/api/v1/developer/source-recovery"
         | "/api/v1/developer/macos-video-processing/reprobe"
         | "/api/v1/system/video-processing/reprobe"
         | "/api/v1/scan"
@@ -544,6 +647,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/producer"
         | "/api/v1/activity/retained/{nonce}"
         | "/api/v1/activity/processes/{pid}"
+        | "/api/v1/activity/starts"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
@@ -613,9 +717,11 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/learner/join/finalize"
         | "/internal/media/cache-copy/{recipe}/{digest}/{object}"
         | "/internal/media/fragment-index/{cache_key}"
+        | "/internal/media/copy-index-v3/{source_key}/{blob_sha256}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         crate::diagnostics::PEER_PATH
         | internal_activity::PATH
+        | activity_starts::PEER_PATH
         | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
@@ -692,6 +798,9 @@ async fn http_store_attribution(
     )
     .await;
     HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
+    HTTP_ROUTE_METRICS
+        .by_method
+        .record(group, &counts.method_snapshot());
     // K-04 M2: offer the acknowledged watch-write position so a client can
     // echo it as `X-Plurx-Read-After` to whichever node serves its next read,
     // or say that a watch write's position is unknown so it drops its echo.
@@ -1567,6 +1676,10 @@ pub fn router(state: AppState) -> Router {
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
         .route(
+            "/developer/source-recovery",
+            get(developer::source_recovery),
+        )
+        .route(
             "/developer/macos-video-processing/reprobe",
             post(developer::reprobe_macos_video),
         )
@@ -1584,6 +1697,7 @@ pub fn router(state: AppState) -> Router {
         .route("/scan/status", get(system::scan_status))
         .route("/activity", get(system::activity))
         .route("/activity/detail", get(system::activity_detail))
+        .route("/activity/starts", get(activity_starts::starts))
         .route(
             "/activity/sessions/{id}",
             axum::routing::delete(system::stop_session),
@@ -2011,6 +2125,8 @@ pub fn router(state: AppState) -> Router {
             post(libraries::reset_root_identity),
         )
         .route("/items/{id}/reanalyze", post(items::reanalyze))
+        .route("/items/{id}/get-it-back", post(offload::get_it_back))
+        .route("/items/{id}/offload-status", get(offload::offload_status))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/files/{id}/analysis", post(analysis::request))
         .route("/files/{id}/dv-conversion", post(dv_disk::queue_file))
@@ -2302,6 +2418,10 @@ pub fn router(state: AppState) -> Router {
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(
+            activity_starts::PEER_PATH,
+            post(activity_starts::peer).layer(DefaultBodyLimit::max(1_024)),
+        )
         .route(internal_clock::PATH, get(internal_clock::snapshot))
         .route(
             cluster_operations::INTERNAL_PATH,
@@ -2399,6 +2519,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/internal/media/fragment-index/{cache_key}",
             get(internal_media::fragment_index),
+        )
+        .route(
+            "/internal/media/copy-index-v3/{source_key}/{blob_sha256}",
+            get(internal_media::copy_index_v3),
         )
         .route(
             crate::subtitle_ranges::PATH,
@@ -2660,6 +2784,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     if https_admin::eligible(method, path)
         || remote::eligible(method, path)
         || crate::diagnostics::eligible(method, path)
+        || activity_starts::eligible(method, path)
         || crate::diagnostics_delivery::eligible(method, path)
     {
         return true;
@@ -2705,6 +2830,10 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && path
             .strip_prefix(crate::fragment_index_cluster::PEER_PATH_PREFIX)
             .is_some_and(|cache_key| !cache_key.is_empty() && !cache_key.contains('/'));
+    // The v3 copy-index read hydrates from the same learner-inclusive
+    // directory: exactly one source key and one blob digest.
+    let copy_index_read =
+        method == Method::GET && crate::copy_index_v3::peer_route_key(path).is_some();
     let subtitle_source_read = method == Method::GET
         && path
             .strip_prefix("/internal/media/subtitle-source/")
@@ -2716,6 +2845,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
             });
     if (method == Method::GET && transcode_copies::route_eligible(path))
         || fragment_index_read
+        || copy_index_read
         || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
@@ -2840,6 +2970,17 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
+/// Whether a node in `role` admits `method path`. The receiving gate
+/// (`capacity_role_refusal`) and any sender choosing peers for an internal
+/// route use this one predicate, so they cannot drift apart.
+fn serving_role_admits(role: LocalServingRole, method: &Method, path: &str) -> bool {
+    match role {
+        LocalServingRole::Unclustered | LocalServingRole::Voter => true,
+        LocalServingRole::Learner => learner_route_eligible(method, path),
+        LocalServingRole::Fenced => false,
+    }
+}
+
 fn capacity_role_refusal(
     role: Option<LocalServingRole>,
     method: &Method,
@@ -2847,7 +2988,7 @@ fn capacity_role_refusal(
 ) -> Option<Response> {
     match role {
         Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
-        Some(LocalServingRole::Learner) if learner_route_eligible(method, path) => None,
+        Some(role @ LocalServingRole::Learner) if serving_role_admits(role, method, path) => None,
         Some(LocalServingRole::Learner) => Some(
             (
                 StatusCode::SERVICE_UNAVAILABLE,

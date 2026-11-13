@@ -155,11 +155,12 @@ internal class SharedStart private constructor(val response: HlsStart, val wire:
             require(V4.matches(control.generation) && control.generation != previous.generation)
             require(control.nextExchangeMs == 5_000L && control.leaseTimeoutMs == 300_000L)
             val origin = action.getValue("media_origin_ms").jsonPrimitive.let { require(!it.isString); requireNotNull(it.longOrNull) }
-            require(origin in 0..9_007_199_254_740_991L)
+            require(origin in -9_007_199_254_740_991L..9_007_199_254_740_991L)
             val height = action["effective_selection"]?.jsonObject?.get("height")?.jsonPrimitive?.intOrNull?.takeIf { it > 0 }
             val response = predecessor.start.response.copy(
                 session_id = session, playlist_url = action.strictString("playlist_url"), control = control,
-                media_origin_ms = origin, height = height ?: predecessor.start.response.height,
+                media_origin_ms = origin, vod = false,
+                height = height ?: predecessor.start.response.height,
             )
             val bound = predecessor.context.withSession(session)
             val start = SharedStart(response, action).validated(bound)
@@ -177,7 +178,10 @@ internal class SharedStartedPlayback(val start: SharedStart, override val contex
 
 internal fun SharedStart.bindInitial(context: PlaybackFileContext, request: CreateSessionReq): SharedStartedPlayback {
     require(context.reference != null && context.sessionId == null)
-    require(response.vod == true && response.start_seconds.isFinite() && response.start_seconds >= 0 && response.start_seconds <= 9_007_199_254_740.0)
+    require((response.vod && (response.media_origin_ms ?: 0L) == 0L)
+        || (request.caps?.transports?.contains("hls-bounded-range-v1") == true
+            && response.media_origin_ms?.let { it in -9_007_199_254_740_991L..9_007_199_254_740_991L } == true))
+    require(response.start_seconds.isFinite() && response.start_seconds >= 0 && response.start_seconds <= 9_007_199_254_740.0)
     require(response.duration_ms?.let { it in 0..9_007_199_254_740_991L } != false)
     val control = requireNotNull(response.control)
     require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(control.generation))
@@ -190,6 +194,7 @@ internal fun SharedStart.bindInitial(context: PlaybackFileContext, request: Crea
 internal object SharedStartValidation {
     fun validated(start: HlsStart, context: PlaybackFileContext): HlsStart {
         context.validateSessionPlaylist(start.playlist_url, start.session_id)
+        require(start.vod || start.media_origin_ms?.let { it in -9_007_199_254_740_991L..9_007_199_254_740_991L } == true)
         val control = requireNotNull(start.control)
         require(control.isValid && control.url == "/api/v1/hls/${start.session_id}/control")
         return start

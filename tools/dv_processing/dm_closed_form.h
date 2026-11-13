@@ -13,7 +13,8 @@
  *               ictcp_pre[0] = I_out[i]; dm_cm4_finish(&s, ictcp_pre, rgb_out);
  * Usage, CM2.9: dm_cm29_state s; dm_cm29_prepare(&s, l1, smin_nits, spk_nits, &target, &l2);
  *               dm_cm29_pixel_pre(&s, rgb_in, &pix)           (per pixel: IPT and pointwise intensities)
- *               dm_detail(I, Ib, ..., l2.ms, Ib_out) (and the same for Io when cw != 0)
+ *               dm_detail(I, Ib, ..., l2.ms, Ib_out)          (I = pix.I, the source intensity)
+ *               (and dm_detail(I, Io, ...) when cw != 0)
  *               dm_cm29_finish(&s, &pix, Ib_out, Io_out, rgb_out);
  */
 #ifndef DM_CLOSED_FORM_H
@@ -22,6 +23,7 @@
 #define DM_PI 3.14159265358979323846
 #include <string.h>
 #include <stdlib.h>
+#include "dm_cm29_gamut_tables.h"
 
 #ifndef DM_STATIC
 #define DM_STATIC static
@@ -425,6 +427,7 @@ typedef struct {
   double rgb2lms[3][3], lms2rgb[3][3], ipt2lms[3][3], to_t[3][3], from_t[3][3];
   double native_black, native_span, decode_black, decode_span;
   double grid_origin, cube_min;             /* stock gamut cube and resolved output black */
+  const uint16_t *gamut;                    /* measured native vertices for an exact target, otherwise NULL */
 } dm_cm29_state;
 
 typedef struct { double ipt[3], C, I, Ib, Io; } dm_cm29_pix;
@@ -436,11 +439,13 @@ DM_STATIC double dm_pq_nits(double n) { return n > 0 ? dm_pq_oetf(n) : 0.0; }
 DM_STATIC int dm_solve3(double A[3][3], const double b[3], double x[3]) {
   double Ai[3][3]; if (!dm_mat_inv(A, Ai)) return 0; dm_mat_vec(Ai, b, x); return 1;
 }
+DM_STATIC double dm_cm29_tc(const dm_cm29_state *s, double v);
 DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin, double spk,
                               const dm_cm29_target *tg, const dm_cm29_trim *trim) {
   memset(s, 0, sizeof(*s));
   if (trim) s->tr = *trim;
   s->tg = *tg;
+  s->gamut = dm_cm29_gamut_table(tg->peak_nits, tg->min_nits, tg->prim);
   /* black and flat frames: crush and clip held one 12-bit code apart inside [0,1] */
   const double q = 1.0 / 4095;
   double crush = dm_mind(dm_maxd(l1[0], 0.0), 1 - q), mid = l1[1], clip = dm_maxd(dm_mind(l1[2], 1.0), crush + q);
@@ -487,16 +492,21 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   if (!(s->native_span > 0 && s->decode_span > 0)) return 0;
   return 1;
 }
+/* Neither the rational curve nor the L2 trim is clamped to the target range: below the shot's crush
+ * the curve falls under the target black (to 0), above the shot's clip it keeps rising, the trim
+ * acts on that value, and the detail stage works on the unclamped mapped intensity. Only the
+ * finished intensity is held to [0, target peak] (dm_cm29_finish). Measured with cm_offline 5.6.4:
+ * ramps running outside the L1 range (a darkening trim keeps its gradation above the L1 clip up to
+ * the peak; a negative lift takes black under the target minimum) and specks on fields above the
+ * clip (a one-pixel speck lands on min(peak, mapped field + speck - field)). */
 DM_STATIC double dm_cm29_curve(const dm_cm29_state *s, double x) {
   double xn = pow(dm_maxd(x, 0.0), s->n);
-  double v = cbrt(dm_maxd((s->a + s->b * xn) / (1 + s->c * xn), 0.0));
-  return dm_clampd(v, s->Tm, s->TM);
+  return cbrt(dm_maxd((s->a + s->b * xn) / (1 + s->c * xn), 0.0));
 }
 DM_STATIC double dm_cm29_sop(const dm_cm29_state *s, double y) {
   const dm_cm29_trim *t = &s->tr;
   if (t->lift == 0 && t->gain == 0 && t->gamma == 0) return y;
-  double v = pow(dm_maxd((1 + t->gain / 2) * ((1 - t->lift / 2) * y + t->lift / 2), 0.0), 2 / (2 + t->gamma));
-  return dm_clampd(v, s->Tm, s->TM);
+  return pow(dm_maxd((1 + t->gain / 2) * ((1 - t->lift / 2) * y + t->lift / 2), 0.0), 2 / (2 + t->gamma));
 }
 DM_STATIC double dm_cm29_tc(const dm_cm29_state *s, double v) { return dm_cm29_sop(s, dm_cm29_curve(s, v)); }
 /* per pixel, before the spatial stage: IPT, chroma, pointwise base (Ib) and chroma-weighted (Io) intensities */
@@ -509,11 +519,32 @@ DM_STATIC void dm_cm29_pixel_pre(const dm_cm29_state *s, const double rgb[3], dm
   p->Ib = dm_cm29_tc(s, p->I);
   p->Io = s->tr.cw != 0 ? dm_cm29_tc(s, p->I + 0.5 * s->tr.cw * p->C) : p->Ib;
 }
-/* The gamut operation is trilinear in target-peak-normalized IPT. Evaluate only its
- * eight analytic corners: inverse IPT, PQ EOTF, target matrix/cube, native encoding.
- * No measured output tables are required. The zero-intensity plane is black even
- * at virtual (nonphysical) chroma corners. BT.1886 uses the stock cube black as origin. */
+/* The gamut operation is trilinear in target-peak-normalized IPT. An exactly
+ * measured target uses its supported 16-bit native vertices; unsupported vertices
+ * retain inverse IPT, PQ EOTF, target matrix/cube and native encoding. The measured
+ * data includes the target's gray-axis gain and highlight desaturation, without
+ * altering the tone curve. The zero-intensity plane is black. BT.1886 uses the
+ * stock cube black as origin and retains the analytic calculation. */
+DM_STATIC int dm_cm29_measured_vertex(const dm_cm29_state *s, const double q[3], double out[3]) {
+  if (!s->gamut) return 0;
+  const double u[3] = {q[0] * 64 / s->TM, q[1] * 32 / s->TM, q[2] * 32 / s->TM};
+  int v[3];
+  for (int k = 0; k < 3; k++) {
+    if (!isfinite(u[k]) || u[k] < -DM_CM29_GAMUT_R || u[k] > DM_CM29_GAMUT_I) return 0;
+    v[k] = (int)floor(u[k] + 0.5);
+    if (fabs(u[k] - v[k]) > 1e-7) return 0;
+  }
+  if (v[0] < 0 || v[0] >= DM_CM29_GAMUT_I ||
+      v[1] < -DM_CM29_GAMUT_R || v[1] > DM_CM29_GAMUT_R ||
+      v[2] < -DM_CM29_GAMUT_R || v[2] > DM_CM29_GAMUT_R) return 0;
+  size_t idx = ((size_t)v[0] * DM_CM29_GAMUT_C + v[1] + DM_CM29_GAMUT_R) * DM_CM29_GAMUT_C + v[2] + DM_CM29_GAMUT_R;
+  const uint16_t *value = s->gamut + idx * 3;
+  if (value[0] == UINT16_MAX) return 0;
+  for (int k = 0; k < 3; k++) out[k] = value[k] / 65535.0;
+  return 1;
+}
 DM_STATIC void dm_cm29_grid_vertex(const dm_cm29_state *s, const double q[3], double out[3]) {
+  if (dm_cm29_measured_vertex(s, q, out)) return;
   if (q[0] <= s->grid_origin) {
     for (int k = 0; k < 3; k++) out[k] = 0;
     return;
@@ -531,7 +562,7 @@ DM_STATIC void dm_cm29_grid_vertex(const dm_cm29_state *s, const double q[3], do
   }
 }
 DM_STATIC void dm_cm29_finish(const dm_cm29_state *s, const dm_cm29_pix *p, double Ib, double Io, double rgb[3]) {
-  Ib = dm_maxd(Ib, 0); Io = dm_maxd(Io, 0);
+  Ib = dm_clampd(Ib, 0, s->TM); Io = dm_clampd(Io, 0, s->TM);   /* the one range clamp of the mapped intensity */
   const double Ii = dm_maxd(p->I, 1e-6);
   /* Colorfulness compensation, US20160005349A1 eqs. 11-14 (k1=.5, k2=1).
    * Bound the complete scale before the creative saturation trim. */

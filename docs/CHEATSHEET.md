@@ -80,6 +80,32 @@ gh pr create --base main                    # from effort/**: complete qualifica
 # Freeze both refs, then inspect the exact receipt before merging.
 ```
 
+**Forgejo CI failures and retries** ([tool](../scripts/ci-failures), Forgejo 17+):
+
+```bash
+scripts/ci-failures --pr 1145              # failed jobs and their task logs
+scripts/ci-failures --pr 1145 --all        # include successful and pending jobs
+scripts/ci-failures --retry-job 70312 --dry-run # preview a failed job retry
+scripts/ci-failures --retry-job 70312      # retry that job and its dependents
+```
+
+Create the git-ignored `scripts/ci-failures.fleet.json` from its
+[example](../scripts/ci-failures.fleet.example.json), then supply an API token
+through `FORGEJO_TOKEN` or the configured `token_file`. The token needs write
+access to the repository for retries.
+
+The report labels both `job` and `task`: pass the **job ID** to `--retry-job`;
+`--task` only reads a task's log. Reporting uses current job attempts, so a
+successful retry replaces the old failure in the report. A retry checks that
+the selected job is still failed, then posts to
+`/api/v1/repos/{owner}/{repo}/actions/jobs/{job_id}/rerun`. Forgejo also reruns
+jobs that depend on it; completed jobs can be retried while unrelated jobs
+are still running. A successful retry request exits 0 and says `Retry
+requested`; this means queued, not passed. Rerun the report to inspect its
+result. Reporting exits 1 for failures and 2 when `--wait` expires with pending
+jobs. A rejected or unsuccessful retry exits nonzero; an uncertain network
+response requires checking the job status before trying again.
+
 ## 3. When something's off (quick triage)
 
 ```bash
@@ -212,7 +238,7 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 | `PLURX_CONFIG` | — | Explicit config path |
 | `PLURX_FFMPEG` / `PLURX_FFPROBE` | `ffmpeg` / `ffprobe` | Media tools (use jellyfin-ffmpeg) |
 | `PLURX_HWACCEL` | `auto` | `auto` · `qsv` · `vaapi` · `nvenc` · `videotoolbox` |
-| `PLURX_VAAPI_DEVICE` | `/dev/dri/renderD128` | VA-API render node |
+| `PLURX_VAAPI_DEVICE` | first VA-API-capable render node, else `/dev/dri/renderD128` | VA-API render node |
 | `PLURX_TONEMAP` | auto | HDR→SDR filter override |
 | `PLURX_GDM_PORT` | `32414` | GDM host port |
 | `PLURX_TRAKT_BASE` | `https://api.trakt.tv` | Trakt API base (tests/mocks) |

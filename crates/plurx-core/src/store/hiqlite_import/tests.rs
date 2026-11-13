@@ -207,9 +207,11 @@ fn pre_v21_item_projection_supplies_null_book_facts() {
         .expect("items table plan");
     let v20 = value_projection(table, 20, false);
     let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
-    assert!(v20.ends_with("artwork_error, genres, NULL, NULL, NULL, NULL"));
+    // Book facts (v21) and the offload mark (v130) are both absent from a v20
+    // source, so each crosses as NULL.
+    assert!(v20.ends_with("artwork_error, genres, NULL, NULL, NULL, NULL, NULL"));
     assert!(current.ends_with(
-        "artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source"
+        "artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source, offloaded_at"
     ));
 }
 
@@ -407,6 +409,7 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
         "background_job_domain_leases",
         "background_provider_budgets",
         "background_storage_domains",
+        "background_storage_domain_pending",
     ] {
         assert!(names.contains(&name));
     }
@@ -455,9 +458,28 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // Playback handoff codes and tokens are durable account state.
     assert!(names.contains(&"playback_handoffs"));
     assert!(names.contains(&"playback_handoffs_tokens"));
-    // 95 with the three item-annotation tables (SQLite v113), 97 with the
-    // two playback handoff tables (SQLite v115).
-    assert_eq!(names.len(), 97, "review every imported durable table");
+    // SQLite v122 preserves source reservations, suspended work and its service credits.
+    for name in [
+        "foreground_source_owners",
+        "background_source_pauses",
+        "background_source_custody",
+        "background_source_service_epochs",
+        "background_source_service_grants",
+        "analysis_source_checkpoints",
+        "playback_analysis_suspensions",
+    ] {
+        assert!(
+            names.contains(&name),
+            "durable source arbitration table: {name}"
+        );
+    }
+    // The contract v2 scan request sidecar is durable request state; its
+    // schema marker is installed locally, like the annotations marker.
+    assert!(names.contains(&"background_scan_request_v2"));
+    assert!(!names.contains(&"background_scan_request_v2_schema"));
+    // 104 with the source arbitration tables (SQLite v122), 105 with the scan
+    // request sidecar (SQLite v125).
+    assert_eq!(names.len(), 105, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1035,12 +1057,18 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_job_domain_leases" => 72,
                 "background_library_requests" => 73,
                 "background_storage_domains" => 74,
+                "background_storage_domain_pending" => 131,
                 "background_provider_budgets" => 75,
                 "background_artwork_locations" => 77,
                 "background_transcode_artifacts" => 78,
                 "background_predictions" => 79,
                 "background_embeddings" => 80,
                 "background_artifact_repairs" => 82,
+                "background_source_pauses"
+                | "background_source_custody"
+                | "background_source_service_epochs"
+                | "background_source_service_grants" => 122,
+                "background_scan_request_v2" => 125,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

@@ -1,5 +1,13 @@
 use super::*;
 
+struct LibraryTurnWait<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+impl Drop for LibraryTurnWait<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|waiters| *waiters -= 1);
+    }
+}
+
 impl TranscodeManager {
     pub(crate) fn candidate_production_proof(&self, recipe: [u8; 32]) -> Option<u32> {
         self.candidate_production_proofs
@@ -88,6 +96,7 @@ impl TranscodeManager {
             ),
             #[cfg(target_os = "linux")]
             processed_preparation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            processed_upgrade_roots: Arc::default(),
             #[cfg(target_os = "linux")]
             processed_instance_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(target_os = "linux")]
@@ -133,6 +142,7 @@ impl TranscodeManager {
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
             background_heavy: Arc::new(tokio::sync::Semaphore::new(BACKGROUND_HEAVY_LIMIT)),
+            interactive_library_waiters: tokio::sync::watch::Sender::new(0),
             offline_waiting: AtomicBool::new(false),
             dv_strippable: false,
             dv_convertible: false,
@@ -439,6 +449,15 @@ impl TranscodeManager {
     ) -> Self {
         self.serving_authority = serving_authority;
         self
+    }
+
+    /// Give VOD planning the Analysis worker's inbox for v3 copy-index
+    /// defects.
+    pub(crate) fn attach_copy_analysis(
+        &self,
+        registry: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
+    ) {
+        self.vod.attach_copy_analysis(registry);
     }
 
     pub(crate) fn register_playback_cache(
@@ -1311,9 +1330,9 @@ impl TranscodeManager {
                         Priority::Live,
                     ) {
                         let admission = FragmentAdmission {
-                            _heavy: heavy,
+                            _heavy: Some(heavy),
                             threads: 2,
-                            _permit: permit,
+                            _permit: Some(permit),
                             extension: std::sync::Mutex::new(None),
                         };
                         // Our registration may not reject its own reservation.
@@ -1342,7 +1361,11 @@ impl TranscodeManager {
         &self,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Option<FragmentAdmission> {
-        let heavy = tokio::select! { biased; () = cancel.cancelled() => return None, permit = Arc::clone(&self.background_heavy).acquire_owned() => permit.ok()?, };
+        let heavy = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return None,
+            permit = self.queued_maintenance_turn() => permit?,
+        };
         if cancel.is_cancelled() {
             return None;
         }
@@ -1376,9 +1399,9 @@ impl TranscodeManager {
                 Priority::Speculative,
             )
             .map(|permit| FragmentAdmission {
-                _heavy: heavy,
+                _heavy: Some(heavy),
                 threads,
-                _permit: permit,
+                _permit: Some(permit),
                 extension: std::sync::Mutex::new(None),
             })
     }
@@ -1408,6 +1431,39 @@ impl TranscodeManager {
             .await
     }
 
+    /// Queue for the next safe heavy turn after the Store verifies interactive
+    /// interest. Awaiting this permit holds no CPU, GPU or source reservation.
+    pub(crate) async fn admit_interactive_library(&self) -> Option<FragmentAdmission> {
+        if self.background_yield_reason().is_some() {
+            return None;
+        }
+        self.interactive_library_waiters.send_modify(|n| *n += 1);
+        let waiting = LibraryTurnWait(&self.interactive_library_waiters);
+        let heavy = Arc::clone(&self.background_heavy)
+            .acquire_owned()
+            .await
+            .ok()?;
+        drop(waiting);
+        self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
+            .await
+    }
+
+    /// Ordinary FIFO waiters already in the semaphore queue can be woken
+    /// first. Pass the empty lane to a waiting manual scan before reserving CPU.
+    async fn queued_maintenance_turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let mut waiters = self.interactive_library_waiters.subscribe();
+        loop {
+            waiters.wait_for(|n| *n == 0).await.ok()?;
+            let heavy = Arc::clone(&self.background_heavy)
+                .acquire_owned()
+                .await
+                .ok()?;
+            if *waiters.borrow() == 0 {
+                return Some(heavy);
+            }
+        }
+    }
+
     /// The title scanner has one software decoder thread and never uses a GPU.
     #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_title(&self) -> Option<FragmentAdmission> {
@@ -1422,10 +1478,7 @@ impl TranscodeManager {
     /// pass takes this once per pass and uses [`Self::admit_fragment`] for
     /// the rest of it. Dropping the future leaves the queue.
     pub(crate) async fn admit_fragment_queued(&self) -> Option<FragmentAdmission> {
-        let heavy = Arc::clone(&self.background_heavy)
-            .acquire_owned()
-            .await
-            .ok()?;
+        let heavy = self.queued_maintenance_turn().await?;
         self.admit_source_work_with_heavy(self.software_budget().await.max(1), heavy)
             .await
     }
@@ -1460,10 +1513,10 @@ impl TranscodeManager {
                 Priority::Background,
             )
             .map(|permit| FragmentAdmission {
-                _heavy: heavy,
+                _heavy: Some(heavy),
                 threads,
                 extension: std::sync::Mutex::new(None),
-                _permit: permit,
+                _permit: Some(permit),
             })
     }
 
@@ -1515,6 +1568,13 @@ impl TranscodeManager {
     }
 
     pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
+        if admission.is_probe_only() {
+            // A probe admission holds no heavy-lane permit and no CPU or GPU
+            // reservation, so there is nothing for foreground demand to
+            // reclaim by stopping it: a targeted scan's `stat` + `ffprobe`
+            // keeps going while a viewer plays (contract v2 §5.1).
+            return true;
+        }
         let (hardware, threads) = admission.claimed();
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() <= hardware

@@ -421,7 +421,13 @@ impl TranscodeManager {
                     holders = ?self.scratch_ledger.describe(6),
                     "refusing a rolling start: scratch budget is full"
                 );
-                capacity_error(refusal.to_string())
+                // A grant larger than the whole ceiling waits for nothing:
+                // no session ending can make room for it.
+                if refusal.configured > 0 && refusal.requested > refusal.configured {
+                    terminal_capacity_error(TRANSCODE_SCRATCH_EXHAUSTED, refusal.to_string())
+                } else {
+                    capacity_error(refusal.to_string())
+                }
             })
     }
 

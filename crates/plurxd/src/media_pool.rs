@@ -26,15 +26,11 @@ pub(crate) const QUALITY_CANDIDATES_V2_PATH: &str = "/internal/v2/media/quality-
 pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 9 adds the resolved audio claim/delivery to `SessionRequest`,
-/// `QualityCatalogRequest` and `RemoteStartResponse`, all strict
-/// (`deny_unknown_fields`) envelopes; protocol 8 preserved canonical capability
-/// and planning bindings at dispatch, in addition to pre-filter HEVC proof and
-/// source-fenced copy VOD. Exact-version placement excludes strict older
-/// workers, so a one-node-at-a-time rollout places locally across the version
-/// line instead of failing mid-start. Old ingress and sessions must be drained
-/// on rollout.
-pub(crate) const PROTOCOL_VERSION: i64 = 9;
+/// Protocol 10 retains the original descriptive catalog query in the strict
+/// CandidateCatalogContext. Protocol 9 added resolved audio facts. Exact-version
+/// placement excludes older workers, so rolling upgrades retain an eligible
+/// owner in each cohort and drain old ingress/sessions before the last old node.
+pub(crate) const PROTOCOL_VERSION: i64 = 10;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -360,7 +356,34 @@ pub(crate) struct CreateStartupBudget {
     /// Where this create spent its time and its Store operations, phase by
     /// phase. Shared with the create worker, so marks it records land here.
     phases: std::sync::Arc<std::sync::Mutex<CreatePhaseLedger>>,
+    /// Set once, when the create acquires its durable request claim: the
+    /// instant its owned work must be finished by, inside the claim's window.
+    /// Before it is set the create's work runs to `deadline`, the viewer's.
+    owner: std::sync::Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// When the viewer's whole start runs out: what it said it had left as
+    /// this create began, unclamped. `deadline` bounds this create's answer;
+    /// this bounds the work an owner does for it.
+    viewer_end: tokio::time::Instant,
+    /// The create's plan (D3b): whether it was read from this node's view,
+    /// whether a catalog then refuted it by quorum (`StaleSource`) before the
+    /// claim, and whether the create has re-planned from Authority.
+    plan: std::sync::Arc<CreatePlanFlags>,
+    /// The create's own plan (D3d): what its local catalog answers from
+    /// instead of reading the planning snapshot again.
+    start_plan: std::sync::Arc<std::sync::Mutex<Option<crate::http::hls::start_plan::StartPlan>>>,
 }
+
+/// [`CreateStartupBudget::plan`].
+#[derive(Default)]
+struct CreatePlanFlags {
+    from_view: std::sync::atomic::AtomicBool,
+    refuted: std::sync::atomic::AtomicBool,
+    replanned: std::sync::atomic::AtomicBool,
+}
+
+/// Keeps the viewer's end a finite instant whatever a client sends; the
+/// claim's window bounds an owner long before this does.
+const VIEWER_REMAINING_CEILING_MS: u64 = 600_000;
 
 /// The per-phase split of one create, logged on its read-budget line.
 ///
@@ -400,14 +423,49 @@ impl CreatePhaseLedger {
 
 impl CreateStartupBudget {
     pub(crate) fn new(remaining_ms: u64) -> Self {
+        let now = tokio::time::Instant::now();
         Self {
-            deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
+            deadline: now + Duration::from_millis(remaining_ms.min(10_000)),
+            viewer_end: now + Duration::from_millis(remaining_ms.min(VIEWER_REMAINING_CEILING_MS)),
             calls: Default::default(),
             binding: Default::default(),
             advisory: Default::default(),
             source_link: Default::default(),
             phases: Default::default(),
+            owner: Default::default(),
+            plan: Default::default(),
+            start_plan: Default::default(),
         }
+    }
+    /// The bound this create's own work runs to: the viewer's allowance until
+    /// it owns its request claim, the claim's window after.
+    pub(crate) fn work_deadline(&self) -> tokio::time::Instant {
+        self.owner.get().copied().unwrap_or(self.deadline)
+    }
+    /// When the create's owned work must end, once it owns its claim.
+    pub(crate) fn owner_deadline(&self) -> Option<tokio::time::Instant> {
+        self.owner.get().copied()
+    }
+    /// How long an owner works for this create's viewer: until the viewer's
+    /// whole remaining start has run out plus `repost` (the wait and round
+    /// trip of the re-post that brings its last retry to the owner), never
+    /// past `claim_limit`. Past it nobody can take the answer, so a producer
+    /// spawned then would run for nobody; the viewer's own answer deadline is
+    /// never later than its end, so it is inside this window too.
+    pub(crate) fn owner_window(
+        &self,
+        claim_limit: tokio::time::Instant,
+        repost: Duration,
+    ) -> tokio::time::Instant {
+        (self.viewer_end + repost)
+            .max(self.deadline)
+            .min(claim_limit)
+    }
+    /// What is left of the viewer's whole start now: what a shared create's
+    /// receiver forwards to its Source, so both hops run on this one clock.
+    pub(crate) fn viewer_remaining(&self) -> Duration {
+        self.viewer_end
+            .saturating_duration_since(tokio::time::Instant::now())
     }
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
@@ -450,7 +508,15 @@ pub(crate) fn spawn_create_worker<T: Send + 'static>(
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> tokio::task::JoinHandle<T> {
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
-    let budget = CREATE_STARTUP_BUDGET.try_with(Clone::clone).ok();
+    // The worker outlives the attempt that spawned it, so it does not carry the
+    // attempt's plan: its catalog calls read by quorum (D3 review N1).
+    let budget = CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            let mut budget = budget.clone();
+            budget.start_plan = Default::default();
+            budget
+        })
+        .ok();
     let future = Box::pin(future);
     tokio::spawn(async move {
         let work = plurx_core::store::scope_http_store_operations(counts, future);
@@ -460,6 +526,89 @@ pub(crate) fn spawn_create_worker<T: Send + 'static>(
             work.await
         }
     })
+}
+
+/// The create task an HTTP request waits on.
+///
+/// Until the create owns its durable request claim it is that request, and
+/// dropping this (the viewer went away, or its allowance ended) cancels it, as
+/// the request future itself used to be cancelled. From the claim on it is the
+/// claim's owner: dropping this leaves it running to activation or failure,
+/// and only its owner deadline ends it, so a viewer that gave up mid-start
+/// never reaps the session its retry is about to be handed.
+pub(crate) struct OwnedCreate<T: Send + 'static> {
+    budget: CreateStartupBudget,
+    task: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T: Send + 'static> OwnedCreate<T> {
+    pub(crate) fn spawn(
+        budget: &CreateStartupBudget,
+        future: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> Self {
+        Self {
+            budget: budget.clone(),
+            // The request's span goes with it, so the create's log lines
+            // keep their request context after the viewer has gone.
+            task: Some(tokio::spawn(tracing::Instrument::in_current_span(future))),
+        }
+    }
+
+    /// The create's answer. Cancel-safe: a wait dropped part-way leaves the
+    /// task to the rules above.
+    pub(crate) async fn join(&mut self) -> Result<T, tokio::task::JoinError> {
+        let Some(task) = self.task.as_mut() else {
+            unreachable!("an owned create is joined at most once")
+        };
+        let answer = task.await;
+        self.task = None;
+        answer
+    }
+}
+
+impl<T: Send + 'static> Drop for OwnedCreate<T> {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        let (Some(deadline), Ok(runtime)) = (
+            self.budget.owner_deadline(),
+            tokio::runtime::Handle::try_current(),
+        ) else {
+            task.abort();
+            return;
+        };
+        let abort = task.abort_handle();
+        std::mem::drop(runtime.spawn(async move {
+            // Aborting drops the create at its await point; its armed guards
+            // then stop the worker and settle the claim, as for any failure.
+            if tokio::time::timeout_at(deadline, task).await.is_err() {
+                abort.abort();
+            }
+        }));
+    }
+}
+
+/// Mark the running create as the owner of its durable request claim, with
+/// its owned work bounded by `deadline`; a no-op outside a create. Every
+/// create-stage deadline taken after this runs to it rather than to the
+/// viewer's allowance. Production owns through [`own_create_for_viewer`];
+/// the tests that pin the detached window set it directly.
+#[cfg(test)]
+pub(crate) fn own_create_until(deadline: tokio::time::Instant) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        let _ = budget.owner.set(deadline);
+    });
+}
+
+/// Mark the running create as the owner of its durable request claim for as
+/// long as its viewer can still take the answer
+/// ([`CreateStartupBudget::owner_window`]), never past `claim_limit`; a no-op
+/// outside a create.
+pub(crate) fn own_create_for_viewer(claim_limit: tokio::time::Instant, repost: Duration) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        let _ = budget.owner.set(budget.owner_window(claim_limit, repost));
+    });
 }
 
 /// Close the current create phase as `name`; a no-op outside a create.
@@ -479,7 +628,7 @@ pub(crate) fn mark_create_phase(name: &str) {
 pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
     let deadline = deadline_after(maximum);
     CREATE_STARTUP_BUDGET
-        .try_with(|budget| deadline.min(budget.deadline - Duration::from_millis(250)))
+        .try_with(|budget| deadline.min(budget.work_deadline() - Duration::from_millis(250)))
         .unwrap_or(deadline)
 }
 
@@ -507,23 +656,8 @@ pub(crate) fn create_advisory_deadline(maximum: Duration) -> tokio::time::Instan
         .try_with(|budget| {
             *budget
                 .advisory
-                .get_or_init(|| advisory_share(budget.deadline, maximum))
+                .get_or_init(|| advisory_share(budget.work_deadline(), maximum))
         })
-        .unwrap_or_else(|_| deadline_after(maximum))
-}
-
-/// The deadline of an optional enhancement of a start that is already
-/// resolved, such as processed HDR qualification: [`advisory_share`] of the
-/// create budget left when the enhancement begins, at most `maximum`. The
-/// ordinary start, its admissibility, catalog, placement and durable writes
-/// keep at least half of what remained, whatever the enhancement spends.
-/// Deliberately not the memoized [`create_advisory_deadline`], which the same
-/// create's advisory-evidence reads share. One `maximum` window outside a
-/// create.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn create_enhancement_deadline(maximum: Duration) -> tokio::time::Instant {
-    CREATE_STARTUP_BUDGET
-        .try_with(|budget| advisory_share(budget.deadline, maximum))
         .unwrap_or_else(|_| deadline_after(maximum))
 }
 
@@ -558,16 +692,116 @@ pub(crate) fn remember_create_source_link(
     });
 }
 
-pub(crate) fn capture_create_planning_binding(
-    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
-) {
-    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+/// Remember the create's plan: the binding its catalog requests carry, and
+/// whether it was read from this node's view (D3b). A no-op outside a create.
+pub(crate) fn capture_create_plan(plan: &crate::http::hls::start_plan::StartPlan) -> CapturedPlan {
+    use std::sync::atomic::Ordering;
+    let held = CREATE_STARTUP_BUDGET.try_with(|budget| {
         *budget
             .binding
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(PlanningBinding::from_snapshot(snapshot));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plan.binding.clone());
+        *budget
+            .start_plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plan.clone());
+        budget.plan.from_view.store(
+            plan.source == plurx_core::store::ViewSource::View,
+            Ordering::Relaxed,
+        );
+        budget.start_plan.clone()
     });
+    CapturedPlan(held.ok())
+}
+
+/// The create attempt's hold on its captured plan: dropping it, when the
+/// attempt ends or is cancelled, clears the plan, so a later catalog call in
+/// the same scope reads by quorum instead of answering from a plan that
+/// belongs to an attempt that is over.
+#[must_use = "the plan is cleared when this is dropped"]
+pub(crate) struct CapturedPlan(
+    Option<std::sync::Arc<std::sync::Mutex<Option<crate::http::hls::start_plan::StartPlan>>>>,
+);
+
+impl Drop for CapturedPlan {
+    fn drop(&mut self) {
+        if let Some(held) = self.0.take() {
+            *held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+}
+
+/// The plan this create captured for `file_id`, when it is inside a create.
+fn create_plan_for(file_id: i64) -> Option<crate::http::hls::start_plan::StartPlan> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget
+                .start_plan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .ok()
+        .flatten()
+        .filter(|plan| plan.snapshot.file.id == file_id)
+}
+
+/// Whether the create's view plan was refuted by a catalog and is still
+/// unclaimed and not yet re-planned: the attempt ends before it picks a
+/// candidate, and [`take_create_replan`] acts on the same flag.
+pub(crate) fn create_plan_refuted() -> bool {
+    use std::sync::atomic::Ordering;
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget.owner.get().is_none()
+                && budget.plan.from_view.load(Ordering::Relaxed)
+                && budget.plan.refuted.load(Ordering::Relaxed)
+                && !budget.plan.replanned.load(Ordering::Relaxed)
+        })
+        .unwrap_or(false)
+}
+
+/// A catalog answered for this create: `StaleSource` from any node means a
+/// quorum read holds another revision than the plan (D3b, review B1). Only
+/// noted before the claim, while a re-plan costs nothing durable.
+pub(crate) fn note_create_catalog(result: &QualityCatalogResult) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        if budget.owner.get().is_none() && result.causes.contains(&CatalogCause::StaleSource) {
+            budget
+                .plan
+                .refuted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+/// Whether this create should plan again from Authority, once: its plan
+/// came from the view, a catalog refuted it by quorum, no claim is held yet,
+/// and it has not re-planned. Taking it marks the create re-planned.
+pub(crate) fn take_create_replan() -> bool {
+    use std::sync::atomic::Ordering;
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget.owner.get().is_none()
+                && budget.plan.from_view.load(Ordering::Relaxed)
+                && budget.plan.refuted.swap(false, Ordering::Relaxed)
+                && !budget.plan.replanned.swap(true, Ordering::Relaxed)
+        })
+        .unwrap_or(false)
+}
+
+/// Whether this create re-planned and must read its plan from Authority.
+pub(crate) fn create_replanned() -> bool {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget
+                .plan
+                .replanned
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .unwrap_or(false)
 }
 
 tokio::task_local! { static CREATE_STARTUP_BUDGET: CreateStartupBudget; }
@@ -761,9 +995,31 @@ pub(crate) struct MediaPool {
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
     root_probes: Arc<Mutex<RootProbeRegistry>>,
     root_probe_launcher: Arc<tokio::sync::Semaphore>,
+    /// Peer answers a test queues in place of the transport's (one entry per
+    /// catalog fan-out), so a create can be driven end to end against a peer
+    /// that refutes its plan.
+    #[cfg(test)]
+    injected_peer_answers:
+        Arc<std::sync::Mutex<std::collections::VecDeque<Vec<QualityCatalogResult>>>>,
 }
 
 impl MediaPool {
+    #[cfg(test)]
+    pub(crate) fn inject_peer_answers_for_test(&self, answers: Vec<QualityCatalogResult>) {
+        self.injected_peer_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(answers);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn injected_peer_answers_left_for_test(&self) -> usize {
+        self.injected_peer_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
         let now = tokio::time::Instant::now();
         self.snapshots
@@ -795,6 +1051,20 @@ impl MediaPool {
             })
     }
 
+    /// Every peer this ingress holds a fresh advertisement for, with the
+    /// reason it could answer no offer (`None` = eligible owner). A peer
+    /// absent here has no fresh, exact-protocol snapshot.
+    pub(crate) async fn placement_owner_reasons(&self) -> BTreeMap<String, Option<&'static str>> {
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .read()
+            .await
+            .iter()
+            .filter(|(_, cached)| now <= cached.expires_at)
+            .map(|(node_id, cached)| (node_id.clone(), placement_refusal(&cached.snapshot)))
+            .collect()
+    }
+
     /// Cache one peer advertisement as the poll loop would.
     #[cfg(test)]
     pub(crate) async fn cache_snapshot_for_test(&self, snapshot: MediaNodeSnapshot) {
@@ -814,6 +1084,8 @@ impl MediaPool {
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
             root_probe_launcher: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            injected_peer_answers: Default::default(),
         })
     }
 
@@ -1158,7 +1430,7 @@ impl MediaPool {
     /// Observed capacity ranks candidates; the selected worker still reserves
     /// the actual delivery plan atomically before starting its encoder.
     pub(crate) async fn live_tv_worker(&self, state: &AppState) -> String {
-        if !self.remote_placement_ready(state).await {
+        if !self.remote_placement_ready(state, None).await {
             return state.node_id.clone();
         }
         let voters = match self.membership.activity_peers().await {
@@ -1193,8 +1465,8 @@ impl MediaPool {
         );
         nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
         let remote_placement_enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
+            .applied
+            .setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
             .await
             .ok()
             .flatten()
@@ -1203,8 +1475,8 @@ impl MediaPool {
         let remote_placement_rollout_ready = self.remote_rollout_ready().await;
         let remote_placement_ready = remote_placement_enabled;
         let session_takeover_enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+            .applied
+            .setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
             .await
             .ok()
             .flatten()
@@ -1226,7 +1498,24 @@ impl MediaPool {
 
     /// The saved operator preference controls placement. Compatibility and
     /// capacity are evaluated for each candidate, independently of other peers.
-    pub(crate) async fn remote_placement_ready(&self, state: &AppState) -> bool {
+    ///
+    /// Quorum, not the applied view (E1b, contract §6.3): this read admits a
+    /// forwarded start on the worker and chooses the ingress placement before
+    /// either allocates, so it precedes a reservation in the same operation.
+    ///
+    /// A create answers it from its plan (D3b, contract §12-1): the binding
+    /// covers [`plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED`] since
+    /// D3t, so the value is the one the whole start was planned at; a changed
+    /// switch reaches a start in flight at most one plan late. `None` (the
+    /// Live TV worker choice) reads it by quorum, as before.
+    pub(crate) async fn remote_placement_ready(
+        &self,
+        state: &AppState,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
+    ) -> bool {
+        if let Some(plan) = plan {
+            return plan.setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED) == Some("1");
+        }
         state
             .store
             .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
@@ -1294,6 +1583,16 @@ impl MediaPool {
         state: &AppState,
         request: QualityCatalogRequest,
     ) -> QualityCatalogResult {
+        let result = self.quality_catalog_answer(state, request).await;
+        note_create_catalog(&result);
+        result
+    }
+
+    async fn quality_catalog_answer(
+        &self,
+        state: &AppState,
+        request: QualityCatalogRequest,
+    ) -> QualityCatalogResult {
         let started = tokio::time::Instant::now();
         let deadline = CREATE_STARTUP_BUDGET
             .try_with(|budget| {
@@ -1307,7 +1606,7 @@ impl MediaPool {
                     "create catalog accounting"
                 );
                 deadline_after(QUALITY_CATALOG_DEADLINE)
-                    .min(budget.deadline - Duration::from_millis(500))
+                    .min(budget.work_deadline() - Duration::from_millis(500))
             })
             .unwrap_or_else(|_| deadline_after(QUALITY_CATALOG_DEADLINE));
         if let Err(error) = request.validate() {
@@ -1332,8 +1631,28 @@ impl MediaPool {
             })
             .ok()
             .flatten();
-        let local = local_quality_catalog(state, &request, deadline, expected_binding.as_ref());
+        // The create's local catalog answers from the create's own plan
+        // (D3d): its planning inputs were read once, behind the view's
+        // floors, and the binding every peer is sent is that plan's. The
+        // quorum read this arm used to make is the peers' now: each checks
+        // the binding against its own view and Authority once, and answers
+        // `StaleSource` when it differs (which re-plans the create).
+        let plan = create_plan_for(request.file_id);
+        let source = match plan.as_ref() {
+            Some(plan) => CatalogSource::Plan(plan),
+            None => CatalogSource::Quorum(expected_binding.as_ref()),
+        };
+        let local = local_quality_catalog(state, &request, deadline, source);
         let remote = async {
+            #[cfg(test)]
+            if let Some(answers) = self
+                .injected_peer_answers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                return answers;
+            }
             let peers = match tokio::time::timeout_at(deadline, self.membership.media_peers()).await
             {
                 Ok(Ok(peers)) => peers,
@@ -1728,7 +2047,7 @@ fn spawn_library_root_probe(
     // to a regular file fails instead of being mistaken for an empty readable
     // directory by `find -H`.
     let directory = root.join(".");
-    let mut command = tokio::process::Command::new("find");
+    let mut command = tokio::process::Command::new("/usr/bin/find");
     command
         .arg("-H")
         .arg(directory)
@@ -1737,10 +2056,16 @@ fn spawn_library_root_probe(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    crate::process_control::spawn_job_owned(
+    let manifest = plurx_core::process::source_lifetime::prepare_stdio(
         &mut command,
-        crate::process_control::ChildWork::background("library root reachability probe"),
-    )
+        plurx_core::process::source_lifetime::StdioFacts::NULL,
+    )?;
+    let work = crate::process_control::ChildWork::background("library root reachability probe");
+    plurx_core::process::source_lifetime::metadata_only_spawn(|| {
+        plurx_core::process::source_lifetime::with_descriptors(manifest, || {
+            crate::process_control::spawn_job_owned(&mut command, work)
+        })
+    })
 }
 
 async fn fetch_offer(
@@ -1827,11 +2152,25 @@ impl QualityCatalogResult {
     }
 }
 
+/// Where a node's catalog gets the planning snapshot it describes.
+#[derive(Clone, Copy)]
+pub(crate) enum CatalogSource<'a> {
+    /// A quorum read of the snapshot, compared with `expected` when one is
+    /// given: the prepared successor's lookup, the legacy v1 route, a peer
+    /// sent no binding.
+    Quorum(Option<&'a PlanningBinding>),
+    /// The create's own plan (D3d): no read.
+    Plan(&'a crate::http::hls::start_plan::StartPlan),
+    /// A peer's request at the ingress's binding (D3d): this node's view,
+    /// then Authority once, `StaleSource` when Authority differs.
+    PeerView(&'a PlanningBinding),
+}
+
 pub(crate) async fn local_quality_catalog(
     state: &AppState,
     request: &QualityCatalogRequest,
     deadline: tokio::time::Instant,
-    expected_binding: Option<&PlanningBinding>,
+    source: CatalogSource<'_>,
 ) -> QualityCatalogResult {
     if deadline <= tokio::time::Instant::now() {
         return QualityCatalogResult::unavailable(CatalogCause::LocalDeadline);
@@ -1849,31 +2188,52 @@ pub(crate) async fn local_quality_catalog(
         if !state.serving.accepting_new_media().await {
             return Err(CatalogCause::AuthorityRefused);
         }
-        let snapshot = state
-            .store
-            .playback_planning_snapshot(request.file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
-            .await
-            .map_err(|_| CatalogCause::SnapshotUnavailable)?
-            .ok_or(CatalogCause::StaleSource)?;
+        let quorum_snapshot;
+        let peer_plan;
+        let (snapshot, plan_binding): (&plurx_core::store::PlaybackPlanningSnapshot, _) =
+            match source {
+                CatalogSource::Plan(plan) => (&*plan.snapshot, Some(plan.binding.clone())),
+                CatalogSource::PeerView(expected) => {
+                    peer_plan = crate::http::hls::start_plan::peer_catalog_plan(
+                        &state.applied,
+                        request.file_id,
+                        expected,
+                    )
+                    .await?;
+                    (&*peer_plan.snapshot, Some(peer_plan.binding.clone()))
+                }
+                CatalogSource::Quorum(_) => {
+                    quorum_snapshot = state
+                        .store
+                        .playback_planning_snapshot(
+                            request.file_id,
+                            &crate::transcode::QUALITY_PLANNING_KEYS,
+                        )
+                        .await
+                        .map_err(|_| CatalogCause::SnapshotUnavailable)?
+                        .ok_or(CatalogCause::StaleSource)?;
+                    (&quorum_snapshot, None)
+                }
+            };
         if snapshot.file.size != request.source_size || snapshot.file.mtime != request.source_mtime
         {
             return Err(CatalogCause::StaleSource);
         }
-        if expected_binding
-            .is_some_and(|expected| *expected != PlanningBinding::from_snapshot(&snapshot))
-        {
-            return Err(CatalogCause::StaleSource);
+        let this_binding = plan_binding.unwrap_or_else(|| PlanningBinding::from_snapshot(snapshot));
+        if let CatalogSource::Quorum(Some(expected)) = source {
+            if *expected != this_binding {
+                return Err(CatalogCause::StaleSource);
+            }
         }
         *binding
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(PlanningBinding::from_snapshot(&snapshot));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(this_binding);
         // These known descriptions have their own completed construction.
         // An unrelated ordinary planner timeout cannot erase an explicit ID
         // before its subsequent admitted qualification can start.
         let described = state
             .transcode
-            .processed_quality_descriptions(&snapshot, request);
+            .processed_quality_descriptions(snapshot, request);
         *complete_descriptions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -1886,7 +2246,7 @@ pub(crate) async fn local_quality_catalog(
         state
             .transcode
             .quality_catalog_from_snapshot_progress(
-                &snapshot,
+                snapshot,
                 &request.caps,
                 request.audio_index,
                 request.audio_offset_ms,
@@ -1978,7 +2338,13 @@ pub(crate) async fn prepared_vod_owner(
     // it gets that stage's bound; a miss is the conservative cache miss above
     // and leaves the rest of the prime budget to the attachment.
     let deadline = deadline.min(create_stage_deadline(QUALITY_CATALOG_DEADLINE));
-    let result = local_quality_catalog(state, &query, deadline, Some(&catalog.binding)).await;
+    let result = local_quality_catalog(
+        state,
+        &query,
+        deadline,
+        CatalogSource::Quorum(Some(&catalog.binding)),
+    )
+    .await;
     if result.causes.contains(&CatalogCause::LocalDeadline) {
         // The successor then encodes instead of reusing a complete cache.
         tracing::debug!(
@@ -2166,9 +2532,24 @@ fn requested_tracks_exist(
         })
 }
 
+/// The request-independent half of [`snapshot_can_answer`]: why this
+/// advertisement could answer no offer at all, or `None` when it is an
+/// eligible owner. The cluster panel shows it per node; placement itself
+/// still evaluates each request.
+pub(crate) fn placement_refusal(snapshot: &MediaNodeSnapshot) -> Option<&'static str> {
+    if snapshot.protocol_version != PROTOCOL_VERSION {
+        Some("protocol_mismatch")
+    } else if snapshot.egress_pressure == PressureBand::Unavailable {
+        Some("egress_unavailable")
+    } else if snapshot.encoders.is_empty() {
+        Some("no_encoder")
+    } else {
+        None
+    }
+}
+
 fn snapshot_can_answer(snapshot: &MediaNodeSnapshot, request: &MediaOfferRequest) -> bool {
-    snapshot.protocol_version == PROTOCOL_VERSION
-        && snapshot.egress_pressure != PressureBand::Unavailable
+    placement_refusal(snapshot).is_none()
         && snapshot.encoders.iter().any(|capability| {
             capability.max_target_height >= request.target_height
                 && capability
@@ -2554,39 +2935,6 @@ mod tests {
         assert!(!budget.phases().contains("outside"));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn enhancement_deadline_leaves_the_create_at_least_half_of_what_remains() {
-        let budget = CreateStartupBudget::new(10_000);
-        let create_deadline = budget.deadline;
-        budget
-            .scope(async move {
-                // Spent 4 s on the ordinary start: 6 s remain, so the
-                // enhancement gets 3 s, not its 8 s maximum.
-                tokio::time::advance(Duration::from_secs(4)).await;
-                let now = tokio::time::Instant::now();
-                let deadline = create_enhancement_deadline(Duration::from_secs(8));
-                assert_eq!(deadline - now, Duration::from_secs(3));
-                assert!(create_deadline - deadline >= Duration::from_secs(3));
-                // The maximum binds when half of what remains exceeds it.
-                let short = create_enhancement_deadline(Duration::from_millis(500));
-                assert_eq!(short - now, Duration::from_millis(500));
-                // It is not the memoized advisory-evidence window: that one
-                // is minted once and keeps answering the same instant.
-                let advisory = create_advisory_deadline(Duration::from_secs(2));
-                tokio::time::advance(Duration::from_secs(2)).await;
-                assert_eq!(advisory, create_advisory_deadline(Duration::from_secs(2)));
-                let later = create_enhancement_deadline(Duration::from_secs(8));
-                assert_eq!(later - tokio::time::Instant::now(), Duration::from_secs(2));
-            })
-            .await;
-        // Outside a create the enhancement takes one `maximum` window.
-        let now = tokio::time::Instant::now();
-        assert_eq!(
-            create_enhancement_deadline(Duration::from_secs(8)) - now,
-            Duration::from_secs(8)
-        );
-    }
-
     #[tokio::test]
     async fn startup_remaining_allowance_is_capped_and_keeps_one_deadline() {
         let before = tokio::time::Instant::now();
@@ -2608,6 +2956,161 @@ mod tests {
             })
             .await;
         assert!(short.deadline < bounded.deadline);
+    }
+
+    /// Raised when the future it lives in is dropped before it finishes.
+    struct DroppedBeforeDone(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DroppedBeforeDone {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// D2 item 3: a create that does not yet own its request claim is the
+    /// viewer's request and goes when the viewer goes; one that owns it runs
+    /// on to its answer, so the activation its retry will be handed is
+    /// published rather than reaped.
+    #[tokio::test]
+    async fn an_owned_create_outlives_its_viewer_and_an_unowned_one_does_not() {
+        for owned in [false, true] {
+            let budget = CreateStartupBudget::new(10_000);
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (claimed, claim) = tokio::sync::oneshot::channel::<()>();
+            let (release, released) = tokio::sync::oneshot::channel::<()>();
+            let create = OwnedCreate::spawn(&budget, {
+                let dropped = std::sync::Arc::clone(&dropped);
+                let finished = std::sync::Arc::clone(&finished);
+                budget.scope(async move {
+                    let mark = DroppedBeforeDone(dropped);
+                    if owned {
+                        own_create_until(tokio::time::Instant::now() + Duration::from_secs(30));
+                    }
+                    let _ = claimed.send(());
+                    let _ = released.await;
+                    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                    std::mem::forget(mark);
+                })
+            });
+            claim.await.expect("the create reached its claim");
+            assert_eq!(budget.owner_deadline().is_some(), owned);
+            // The viewer goes away (disconnect, or its allowance ended).
+            drop(create);
+            let _ = release.send(());
+            for _ in 0..50 {
+                if finished.load(std::sync::atomic::Ordering::SeqCst)
+                    || dropped.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                finished.load(std::sync::atomic::Ordering::SeqCst),
+                owned,
+                "owned={owned}: only the claim's owner runs to its answer"
+            );
+            assert_eq!(
+                dropped.load(std::sync::atomic::Ordering::SeqCst),
+                !owned,
+                "owned={owned}: an unowned create is cancelled with its viewer"
+            );
+        }
+    }
+
+    /// Review 1, S2: an owner works for as long as its viewer can still take
+    /// the answer (the viewer's whole remaining start plus one re-post), not
+    /// to the end of the claim's window, so a start the viewer abandoned does
+    /// not go on to spawn a producer nobody attaches.
+    #[tokio::test(start_paused = true)]
+    async fn an_owner_works_for_its_viewers_remaining_start_and_one_repost() {
+        let repost = Duration::from_secs(2);
+        let began = tokio::time::Instant::now();
+        let claim_limit = began + Duration::from_secs(55);
+        for (remaining_ms, expected) in [
+            // The web's 20 s start: its last re-post lands by 22 s.
+            (20_000, Duration::from_secs(22)),
+            // Less than one create's own answer window.
+            (3_000, Duration::from_secs(5)),
+            // A client with a minute left is bounded by the claim.
+            (120_000, Duration::from_secs(55)),
+        ] {
+            let budget = CreateStartupBudget::new(remaining_ms);
+            assert_eq!(
+                budget.owner_window(claim_limit, repost) - began,
+                expected,
+                "remaining {remaining_ms} ms"
+            );
+            budget
+                .scope(async { own_create_for_viewer(claim_limit, repost) })
+                .await;
+            assert_eq!(
+                budget.owner_deadline().map(|deadline| deadline - began),
+                Some(expected),
+                "remaining {remaining_ms} ms: the owner deadline is that window"
+            );
+            assert!(budget.owner_deadline() >= Some(budget.deadline));
+        }
+    }
+
+    /// The detached window is bounded: an owner still working at its owner
+    /// deadline is dropped there, and its armed guards clean up as for any
+    /// failure.
+    #[tokio::test]
+    async fn an_owned_create_ends_at_its_owner_deadline() {
+        let budget = CreateStartupBudget::new(10_000);
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (claimed, claim) = tokio::sync::oneshot::channel::<()>();
+        let create = OwnedCreate::spawn(&budget, {
+            let dropped = std::sync::Arc::clone(&dropped);
+            budget.scope(async move {
+                let _mark = DroppedBeforeDone(dropped);
+                own_create_until(tokio::time::Instant::now() + Duration::from_millis(30));
+                let _ = claimed.send(());
+                std::future::pending::<()>().await;
+            })
+        });
+        claim.await.expect("the create reached its claim");
+        drop(create);
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        assert!(
+            !dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "inside its window the owner keeps working"
+        );
+        for _ in 0..100 {
+            if dropped.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "past its window the owner is abandoned"
+        );
+    }
+
+    /// Once the create owns its claim, a stage deadline taken after that runs
+    /// to the claim's window, not to the viewer's allowance: a slow placement
+    /// is the owner's to finish, and the viewer is answered `startup_timeout`
+    /// on its own clock meanwhile.
+    #[tokio::test]
+    async fn stage_deadlines_follow_the_claim_once_the_create_owns_it() {
+        let budget = CreateStartupBudget::new(1_000);
+        let viewer = budget.deadline;
+        budget
+            .scope(async {
+                let before = create_stage_deadline(Duration::from_secs(50));
+                assert_eq!(before, viewer - Duration::from_millis(250));
+                let owner = tokio::time::Instant::now() + Duration::from_secs(55);
+                own_create_until(owner);
+                let after = create_stage_deadline(Duration::from_secs(50));
+                assert!(
+                    after > viewer,
+                    "the owned stage outlives the viewer's allowance"
+                );
+                assert!(after <= owner - Duration::from_millis(250));
+            })
+            .await;
     }
 
     #[test]

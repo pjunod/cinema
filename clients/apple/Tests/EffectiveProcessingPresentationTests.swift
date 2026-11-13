@@ -133,6 +133,28 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
         ], requiresEffectiveProcessing: requires)
     }
 
+    func testMalformedSkipDoesNotRejectTheControlResponse() throws {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let skip = try decoder.decode(ProcessingSkip.self, from: Data("{\"generation\":42,\"reason\":true}".utf8))
+        XCTAssertFalse(skip.matches(generation: generation))
+    }
+
+    func testSkippedUpgradeExplainsOnlyCurrentInactiveEnhancements() {
+        let ordinary = PlaybackEnhancement(active: [.dyn], details: [
+            .init(badge: "FEL", active: false, text: "FEL: not used for this play"),
+            .init(badge: "RPU", active: false, text: "RPU: converted reshaping is pass-through"),
+            .init(badge: "DYN", active: true, text: "DYN: carried to the display")])
+        let skip = ProcessingSkip(generation: generation, reason: "the title is being measured")
+        let shown = ordinary.explainingSkip(skip, generation: generation)
+        XCTAssertEqual(shown.active, [.dyn])
+        XCTAssertEqual(shown.detailLines.first, "FEL: not used for this play — the title is being measured")
+        XCTAssertEqual(shown.details[1], ordinary.details[1])
+        XCTAssertEqual(ordinary.explainingSkip(skip, generation: "replacement"), ordinary)
+        XCTAssertEqual(ordinary.explainingSkip(nil, generation: generation), ordinary)
+        XCTAssertEqual(ordinary.explainingSkip(ProcessingSkip(generation: generation, reason: "bad\nreason"), generation: generation), ordinary)
+        XCTAssertEqual(enhancement([.fel, .rpu, .dyn]).explainingSkip(skip, generation: generation), enhancement([.fel, .rpu, .dyn]))
+    }
+
     func testEnhancementDecodesPresentAbsentUnknownAndMalformed() throws {
         let present = try decodeStart("""
         ,"enhancement":{"active":["FEL","XFEL","RPU","DYN","FEL"],
@@ -309,7 +331,7 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
             .standardizedFileURL, encoding: .utf8)
         let commit = try XCTUnwrap(source.range(of: "func commitPreparedSuccessor("))
         let body = source[commit.upperBound...]
-        let adopt = try XCTUnwrap(body.range(of: "playbackEnhancement = action.enhancement"))
+        let adopt = try XCTUnwrap(body.range(of: "adoptPlaybackEnhancement(action.enhancement)"))
         let clear = try XCTUnwrap(body.range(of: "effectiveProcessingGeneration = nil"))
         XCTAssertLessThan(clear.lowerBound, adopt.lowerBound, "the report is cleared first")
     }

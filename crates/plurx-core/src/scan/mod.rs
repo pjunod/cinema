@@ -6,6 +6,7 @@
 //! cheap and easy on shared storage. Probing runs sequentially for the same
 //! reason — a scan should not thrash a NAS.
 
+pub mod containment;
 pub mod dv_title;
 pub mod exif;
 pub mod home;
@@ -14,8 +15,9 @@ pub mod parse;
 pub mod probe;
 mod probe_batch;
 pub mod recordings;
+pub mod removed;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -874,6 +876,9 @@ pub async fn scan_library_with_publication_and_prune_limit(
         &mut report,
         &mut seen,
         Some(&mut placed),
+        None,
+        None,
+        &HashMap::new(),
     )
     .await?;
     observe_scan_phase(&SCAN_PHASE_METRICS.process, process_started.elapsed());
@@ -928,7 +933,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
                 let current = remove_superseded(store, library, &superseded, &mut report).await?;
                 let gone: &[i64] = if current { &gone } else { &[] };
                 match store
-                    .reconcile_library(library.id, &fingerprint, gone, prune_limit)
+                    .reconcile_library(library.id, &fingerprint, gone, prune_limit, &[], 0)
                     .await?
                 {
                     ReconcileOutcome::Applied {
@@ -1206,6 +1211,14 @@ pub enum TargetError {
         path: String,
         roots: Vec<String>,
     },
+    /// The path is under a configured root that cannot be read right now —
+    /// an unmounted share, `ENOTCONN`, `EIO` — or is missing under it.
+    /// Transient: the same request can succeed once the root is back.
+    Unreadable {
+        path: String,
+        root: String,
+        error: String,
+    },
     Store(StoreError),
     /// The durable queue would not admit the request — it is full, or the
     /// same request is being cancelled. Nothing is broken and nothing was
@@ -1222,6 +1235,10 @@ impl std::fmt::Display for TargetError {
                 f,
                 "`{path}` is not under any root of this library ({})",
                 roots.join(", ")
+            ),
+            TargetError::Unreadable { path, root, error } => write!(
+                f,
+                "path_unreadable: `{path}` is under library root `{root}`, which could not be read: {error}"
             ),
             TargetError::Store(e) => write!(f, "{e}"),
             TargetError::Refused(outcome) => {
@@ -1264,6 +1281,73 @@ pub async fn scan_path_with_publication(
     library: &Library,
     target: &Path,
 ) -> Result<TargetedScan, TargetError> {
+    scan_path_targeted(store, library, target, &TargetedOptions::default())
+        .await
+        .map(|(scan, _)| scan)
+}
+
+/// What a targeted scan is asked to do beyond walking its path.
+#[derive(Debug, Clone, Default)]
+pub struct TargetedOptions {
+    /// Files probed even when their size and whole-second mtime match the
+    /// stored record, compared as canonical paths.
+    pub force_probe: HashSet<PathBuf>,
+    /// Probe-only (a request that names removed paths): record exactly these
+    /// canonical files and walk nothing. Each must be under the target; one
+    /// that is not, or is not a file, is left out.
+    pub only: Option<Vec<PathBuf>>,
+    /// The external ids the notifying application sent, keyed by the
+    /// canonical path of each file *that request named* in `expected_files`
+    /// (never a folder's other files). A file with no record yet is placed on
+    /// the *offloaded* item carrying them first, and only then by the title
+    /// and folder lookups: a re-acquired title keeps its item and watch
+    /// history whatever its release is named.
+    pub offload_hints: HashMap<PathBuf, OffloadHint>,
+}
+
+/// The offloaded item a hint resolved to earlier in one pass, keyed by the
+/// hint and, for an episode, its season and episode. A file attaching clears
+/// the offload, so a second part of the same title must not look it up again.
+type ResolvedOffloads = HashMap<(OffloadHint, Option<(i32, i32)>), i64>;
+
+/// External ids for finding an offloaded item (see
+/// [`TargetedOptions::offload_hint`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct OffloadHint {
+    /// The movie's own ids.
+    pub tmdb: Option<i64>,
+    pub imdb: Option<String>,
+    /// The SHOW's TMDB id, for an episode, with its season and episode taken
+    /// from the file name.
+    pub series_tmdb: Option<i64>,
+}
+
+/// What a targeted scan observed per file but does not keep in its durable
+/// result, for the caller's per-file report.
+#[derive(Debug, Clone, Default)]
+pub struct TargetedDetail {
+    /// Canonical path → why placement skipped it.
+    pub skipped: BTreeMap<String, String>,
+    /// Canonical paths the walk offered as media candidates.
+    pub candidates: HashSet<String>,
+    /// The canonical form of the requested path.
+    pub canonical_target: PathBuf,
+}
+
+/// [`scan_path_with_publication`], probing `options.force_probe`
+/// unconditionally and returning the per-file detail beside the result.
+pub async fn scan_path_targeted(
+    store: &PublicationStore<'_>,
+    library: &Library,
+    target: &Path,
+    options: &TargetedOptions,
+) -> Result<(TargetedScan, TargetedDetail), TargetError> {
+    let force_probe: HashSet<String> = options
+        .force_probe
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let mut detail = TargetedDetail::default();
     check_scan_cancellation()?;
     let roots: Vec<String> = library
         .paths
@@ -1294,11 +1378,23 @@ pub async fn scan_path_with_publication(
     })?;
     let (canonical, target_is_file, canonical_roots) = match canonicalized {
         Ok(result) => result,
-        Err(_) => {
-            return Err(TargetError::OutsideRoots {
-                path: target.display().to_string(),
-                roots,
-            })
+        // Lexically under one of this library's roots: the share dropped
+        // between admission and now, so the failure is transient. Anything
+        // else never belonged to this library.
+        Err(error) => {
+            return Err(
+                match containment::lexical_root(std::slice::from_ref(library), target) {
+                    Some((_, root)) => TargetError::Unreadable {
+                        path: target.display().to_string(),
+                        root: root.display().to_string(),
+                        error: error.to_string(),
+                    },
+                    None => TargetError::OutsideRoots {
+                        path: target.display().to_string(),
+                        roots,
+                    },
+                },
+            )
         }
     };
     let under_root = canonical_roots.iter().any(|root| {
@@ -1315,7 +1411,19 @@ pub async fn scan_path_with_publication(
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let mut report = ScanReport::default();
     let walk_started = Instant::now();
-    if target_is_file {
+    if let Some(only) = &options.only {
+        for path in only {
+            if !(path == &canonical || path.starts_with(&canonical)) {
+                continue;
+            }
+            let is_file = tokio::fs::metadata(path)
+                .await
+                .is_ok_and(|meta| meta.is_file());
+            if is_file && wanted_file(library, path) && !candidates.contains(path) {
+                candidates.push(path.clone());
+            }
+        }
+    } else if target_is_file {
         if wanted_file(library, &canonical) {
             candidates.push(canonical.clone());
         }
@@ -1355,8 +1463,13 @@ pub async fn scan_path_with_publication(
     candidates.sort();
     check_scan_cancellation()?;
     observe_scan_phase(&SCAN_PHASE_METRICS.walk, walk_started.elapsed());
+    detail.candidates = candidates
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    detail.canonical_target = canonical.clone();
 
-    if candidates.is_empty() {
+    if candidates.is_empty() && options.only.is_none() {
         report.note(format!(
             "no media files found under `{}` — the path exists but holds nothing \
              recognized ({})",
@@ -1376,6 +1489,9 @@ pub async fn scan_path_with_publication(
         &mut report,
         &mut seen,
         Some(&mut items),
+        Some(&force_probe),
+        Some(&mut detail.skipped),
+        &options.offload_hints,
     )
     .await?;
     observe_scan_phase(&SCAN_PHASE_METRICS.process, process_started.elapsed());
@@ -1395,7 +1511,7 @@ pub async fn scan_path_with_publication(
         items = items.len(),
         "targeted scan complete"
     );
-    Ok(TargetedScan { report, items })
+    Ok((TargetedScan { report, items }, detail))
 }
 
 /// Whether this file is one the library cares about. Same rule the full scan
@@ -1434,6 +1550,10 @@ fn scan_now_ms() -> i64 {
 /// Fills `seen` with every path it looked at, which the caller needs for
 /// reconcile. Deliberately does NOT reconcile: only the caller knows whether
 /// it saw the whole library.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the full and targeted scans share one per-file pass; the targeted one adds its forced probes and skip reasons"
+)]
 async fn record_candidates(
     store: &PublicationStore<'_>,
     library: &Library,
@@ -1442,7 +1562,11 @@ async fn record_candidates(
     report: &mut ScanReport,
     seen: &mut HashSet<String>,
     placed_out: Option<&mut Vec<PlacedFile>>,
+    force_probe: Option<&HashSet<String>>,
+    mut skipped_out: Option<&mut BTreeMap<String, String>>,
+    offload_hints: &HashMap<PathBuf, OffloadHint>,
 ) -> Result<BTreeMap<String, SkipGroup>, StoreError> {
+    let mut resolved_offloads = ResolvedOffloads::new();
     let mut placed_sink = placed_out;
     let mut reported_duplicate_directories = HashSet::new();
     // Skips are informational, not errors — kept apart so a library full of
@@ -1478,9 +1602,13 @@ async fn record_candidates(
             }
         };
 
-        // Incremental: unchanged file → skip probe entirely.
+        // Incremental: unchanged file → skip probe entirely. Except for a
+        // file the caller named as just placed: size and whole-second mtime
+        // cannot tell a same-path replacement from the file it replaced, so
+        // a named file is always probed again (contract v2 §5.1).
         let existing = store.get_file_by_path(&path_str).await?;
-        if let Some(ref ex) = existing {
+        let forced = force_probe.is_some_and(|forced| forced.contains(&path_str));
+        if let Some(ex) = existing.as_ref().filter(|_| !forced) {
             if ex.size == size && ex.mtime == mtime {
                 report.unchanged += 1;
                 // Unchanged is still an ANSWER. A caller that asks "what did
@@ -1579,10 +1707,21 @@ async fn record_candidates(
                 },
                 duplicate: None,
             },
-            None => match place_item(store, library, &path).await? {
+            None => match place_item(
+                store,
+                library,
+                &path,
+                offload_hints.get(&path),
+                &mut resolved_offloads,
+            )
+            .await?
+            {
                 Placement::Placed(placed) => placed,
                 Placement::Skipped(why) => {
                     report.skipped += 1;
+                    if let Some(skipped) = skipped_out.as_deref_mut() {
+                        skipped.insert(path_str.clone(), why.to_owned());
+                    }
                     // Still logged per file: the log is where completeness belongs,
                     // and the report line points at it.
                     tracing::warn!(path = %path_str, "skipped: {why}");
@@ -1890,10 +2029,25 @@ async fn place_item(
     store: &PublicationStore<'_>,
     library: &Library,
     path: &Path,
+    offload_hint: Option<&OffloadHint>,
+    resolved: &mut ResolvedOffloads,
 ) -> Result<Placement, StoreError> {
     match library.kind {
         LibraryKind::Movies => {
             let parsed = parse::parse_movie(path);
+            if let Some(hint) = offload_hint.filter(|h| h.tmdb.is_some() || h.imdb.is_some()) {
+                let key = (hint.clone(), None);
+                if let Some(id) = resolved.get(&key) {
+                    return Ok(placed(*id, false));
+                }
+                if let Some(offloaded) = store
+                    .find_offloaded_movie(library.id, hint.tmdb, hint.imdb.as_deref())
+                    .await?
+                {
+                    resolved.insert(key, offloaded.id);
+                    return Ok(placed(offloaded.id, false));
+                }
+            }
             if let Some(directory) =
                 usable_source_directory(library, parsed.source_directory.as_deref())
             {
@@ -2002,6 +2156,25 @@ async fn place_item(
                     ));
                 }
             };
+            if let Some((hint, series)) =
+                offload_hint.and_then(|hint| hint.series_tmdb.map(|series| (hint, series)))
+            {
+                let key = (hint.clone(), Some((parsed.season, parsed.episode)));
+                let found = match resolved.get(&key) {
+                    Some(id) => Some(*id),
+                    None => store
+                        .find_offloaded_episode(library.id, series, parsed.season, parsed.episode)
+                        .await?
+                        .map(|item| item.id),
+                };
+                if let Some(id) = found {
+                    resolved.insert(key, id);
+                    return Ok(Placement::Placed(PlacedItem {
+                        placed: home::Placed { id, created: false },
+                        duplicate: None,
+                    }));
+                }
+            }
             let (show, duplicate) = find_or_create_show(store, library, &parsed).await?;
             let season = find_or_create_season(store, library, show.id, parsed.season).await?;
             if let Some(existing) = store.find_episode(season, parsed.episode).await? {

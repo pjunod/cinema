@@ -14,6 +14,80 @@ const MAX_PARAMETER: usize = 65536;
 /// evidence; `parse` ignores the rest.
 const TRACE_PREFIX: &[u8] = b"[trace_headers @ ";
 
+/// FFmpeg messages that mean the pass read a damaged source and went on.
+/// `-xerror` used to turn each of them into a non-zero exit; the index argv no
+/// longer carries it, because the same flag also made the mp4 muxer's
+/// correctable `Non-monotonic DTS` fatal. Without it a truncated or corrupt
+/// packet is dropped and the pass exits 0 with a short but well-formed
+/// index, so these are matched explicitly. None of them is a muxer message.
+///
+/// Wording by FFmpeg release (packaging's floor is 5.1; the fleet runs newer):
+/// the mov demuxer's `Packet corrupt` is in `mov.c` and does not change; the
+/// CLI's `corrupt input packet in stream N` is in every release (5.1 prefixes
+/// the input url); a bitstream-filter failure reads `Error applying bitstream
+/// filters to an output packet` (5.1/6.0) or `... to a packet` (6.1+), both
+/// matched by the shared prefix; a non-EOF demux error reads `Error during
+/// demuxing` or `Error retrieving a packet from demuxer` (7+) and, through
+/// `print_error` up to 6.x, only `<input>: <strerror>`, so the two
+/// `AVERROR_INVALIDDATA`/`EIO` strerror texts are matched as well. Checked
+/// against 6.1 on a truncated fragmented MP4; the older wording is from the
+/// release sources and is not exercised here.
+const SOURCE_FAULTS: &[&str] = &[
+    // Demuxer flagged the packet (truncated fragment, "partial file").
+    "corrupt input packet",
+    "Packet corrupt",
+    // trace_headers could not parse a packet, which is then dropped.
+    "Error applying bitstream filters",
+    // A demux error other than EOF, which ffmpeg otherwise treats as EOF.
+    "Error during demuxing",
+    "Error retrieving a packet from demuxer",
+    "Invalid data found when processing input",
+    "Input/output error",
+];
+/// A line is searched whenever this many bytes are buffered, and again at its
+/// end, so a message glued onto a long unterminated trace line is still seen.
+const FAULT_CHUNK: usize = 1024;
+/// What survives a mid-line search: longer than any marker, so one split
+/// across two searches is still whole in the next.
+const FAULT_KEEP: usize = 64;
+
+/// Line-oriented, bounded scan of all stderr for [`SOURCE_FAULTS`]. It sees
+/// every byte, including after the trace has been refused.
+#[derive(Default)]
+struct FaultScan {
+    line: Vec<u8>,
+    fault: Option<&'static str>,
+}
+
+impl FaultScan {
+    fn search(&mut self) {
+        let text = String::from_utf8_lossy(&self.line);
+        self.fault = SOURCE_FAULTS.iter().copied().find(|m| text.contains(m));
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        if self.fault.is_some() {
+            return;
+        }
+        for &byte in bytes {
+            if byte == b'\n' || byte == b'\r' {
+                self.search();
+                self.line.clear();
+            } else {
+                self.line.push(byte);
+                if self.line.len() >= FAULT_CHUNK {
+                    self.search();
+                    let keep = self.line.len() - FAULT_KEEP;
+                    self.line.drain(..keep);
+                }
+            }
+            if self.fault.is_some() {
+                return;
+            }
+        }
+    }
+}
+
 /// Streaming search of one line for anything that could be trace output:
 /// the [`TRACE_PREFIX`], or a trace field's ` = <integer>`. FFmpeg omits the
 /// prefix on a message that follows an unterminated one, so a field glued onto
@@ -107,6 +181,24 @@ impl Proof {
     }
 }
 
+/// One closed, inspected source packet. This is range-local evidence, never
+/// a whole-source [`Proof`] or authorization to read or publish media.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PacketInspection {
+    pub sequence: u64,
+    pub slices: u64,
+    pub configuration_sha256: String,
+}
+
+/// Inspection of the packets actually drained from one range child. A seeked
+/// range can return this successfully without inspecting any preceding bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RangeInspection {
+    pub packets: u64,
+    pub slices: u64,
+    pub configuration_sha256: String,
+}
+
 #[derive(Default)]
 pub struct Trace {
     line: Vec<u8>,
@@ -123,15 +215,24 @@ pub struct Trace {
     slices: u64,
     packets: u64,
     packet_slices: u64,
+    configuration_sha256: Option<String>,
+    closed_packet: Option<PacketInspection>,
     /// Discarding the rest of an over-long line that is not trace output.
     skipping: bool,
     /// Search state across the bytes of the current over-long line, so trace
     /// content anywhere in it still fails closed.
     evidence: Evidence,
     refusal: Option<String>,
+    faults: FaultScan,
 }
 
 impl Trace {
+    /// The first FFmpeg message showing the pass read a damaged source, if
+    /// any. Independent of the trace verdict: the caller refuses the index.
+    pub fn source_fault(&self) -> Option<&'static str> {
+        self.faults.fault
+    }
+
     fn reject(&mut self, reason: &str) {
         if self.refusal.is_none() {
             self.refusal = Some(reason.to_owned());
@@ -139,6 +240,13 @@ impl Trace {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.feed_with_packets(bytes, |_| {});
+    }
+
+    /// Emits a packet only after the following packet header closes all of its
+    /// slice/parameter sections. No unbounded event queue is retained.
+    pub fn feed_with_packets(&mut self, bytes: &[u8], mut emit: impl FnMut(PacketInspection)) {
+        self.faults.feed(bytes);
         // A rejection is terminal: keep draining stderr, but bound parsing work.
         if self.refusal.is_some() {
             return;
@@ -154,7 +262,12 @@ impl Trace {
                 }
                 let line = std::mem::take(&mut self.line);
                 match std::str::from_utf8(&line) {
-                    Ok(line) => self.parse(line),
+                    Ok(line) => {
+                        self.parse(line);
+                        if let Some(packet) = self.closed_packet.take() {
+                            emit(packet);
+                        }
+                    }
                     Err(_) => self.reject("invalid trace encoding"),
                 }
             } else if self.skipping {
@@ -228,8 +341,19 @@ impl Trace {
                 if self.sets.iter().any(Option::is_none) {
                     self.reject("source extradata lacks a complete decoder configuration");
                 }
-                if self.packets > 0 && self.packet_slices == 0 {
-                    self.reject("video packet has no inspected slices");
+                self.close_packet();
+                if self.configuration_sha256.is_none()
+                    && self.refusal.is_none()
+                    && self.sets.iter().all(Option::is_some)
+                {
+                    use sha2::{Digest, Sha256};
+                    let mut digest = Sha256::new();
+                    digest.update(b"plurx.hevc-inspected-configuration.v1\0");
+                    for fields in self.sets.iter().flatten() {
+                        digest.update((fields.len() as u64).to_be_bytes());
+                        digest.update(fields);
+                    }
+                    self.configuration_sha256 = Some(format!("{:x}", digest.finalize()));
                 }
                 self.packets += 1;
                 self.packet_slices = 0;
@@ -317,7 +441,25 @@ impl Trace {
         }
     }
 
-    pub fn finish(mut self, source_object_version: String, stream_index: u32) -> Proof {
+    fn close_packet(&mut self) {
+        if self.packets == 0 {
+            return;
+        }
+        if self.packet_slices == 0 {
+            self.reject("video packet has no inspected slices");
+        }
+        if self.refusal.is_none() {
+            if let Some(configuration_sha256) = &self.configuration_sha256 {
+                self.closed_packet = Some(PacketInspection {
+                    sequence: self.packets - 1,
+                    slices: self.packet_slices,
+                    configuration_sha256: configuration_sha256.clone(),
+                });
+            }
+        }
+    }
+
+    fn finish_input(&mut self) {
         if !self.line.is_empty() || self.skipping {
             self.reject("truncated trace line");
         }
@@ -329,6 +471,34 @@ impl Trace {
         {
             self.reject("no complete pre-filter HEVC configuration scan");
         }
+        self.close_packet();
+    }
+
+    /// Close a drained range. The caller still checks successful child exit
+    /// and matches packet sequence/clock/sample coverage. This method cannot
+    /// mint a full-source proof, even when the range child exited at EOF.
+    pub fn finish_range(
+        mut self,
+        mut emit: impl FnMut(PacketInspection),
+    ) -> Result<RangeInspection, String> {
+        self.finish_input();
+        if let Some(reason) = self.refusal {
+            return Err(reason);
+        }
+        if let Some(packet) = self.closed_packet.take() {
+            emit(packet);
+        }
+        Ok(RangeInspection {
+            packets: self.packets,
+            slices: self.slices,
+            configuration_sha256: self
+                .configuration_sha256
+                .ok_or_else(|| "missing inspected configuration".to_owned())?,
+        })
+    }
+
+    pub fn finish(mut self, source_object_version: String, stream_index: u32) -> Proof {
+        self.finish_input();
         Proof {
             revision: REVISION,
             source_object_version,
@@ -369,6 +539,48 @@ mod tests {
         .map(line)
         .concat()
     }
+    #[test]
+    fn range_events_close_packets_in_order_across_arbitrary_stderr_chunks() {
+        let input = fixture()
+            + &line("Packet: 80 bytes")
+            + &line("Slice Segment Header")
+            + &line("0 slice_pic_parameter_set_id 0 = 0");
+        let mut trace = Trace::default();
+        let mut packets = Vec::new();
+        for chunk in input.as_bytes().chunks(7) {
+            trace.feed_with_packets(chunk, |packet| packets.push(packet));
+        }
+        assert_eq!(packets.len(), 1, "last packet is still open");
+        let range = trace
+            .finish_range(|packet| packets.push(packet))
+            .expect("range inspected");
+        assert_eq!(range.packets, 2);
+        assert_eq!(range.slices, 2);
+        assert_eq!(
+            packets.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(packets
+            .iter()
+            .all(|p| p.slices == 1 && p.configuration_sha256 == range.configuration_sha256));
+        assert_eq!(range.configuration_sha256.len(), 64);
+    }
+
+    #[test]
+    fn missing_or_changed_late_inspection_never_emits_that_packet() {
+        for suffix in [
+            line("Packet: 80 bytes"),
+            fixture().replace("pps_cb_qp_offset 0 = -6", "pps_cb_qp_offset 0 = -1"),
+        ] {
+            let mut trace = Trace::default();
+            let mut packets = Vec::new();
+            trace.feed_with_packets(fixture().as_bytes(), |packet| packets.push(packet));
+            trace.feed_with_packets(suffix.as_bytes(), |packet| packets.push(packet));
+            assert!(trace.finish_range(|packet| packets.push(packet)).is_err());
+            assert!(packets.iter().all(|p| p.sequence == 0));
+        }
+    }
+
     #[test]
     fn stable_repeats_are_proved_but_updates_and_distinct_ids_are_refused() {
         for change in [
@@ -461,6 +673,9 @@ mod tests {
     fn trace_errors_and_oversized_lines_fail_closed() {
         for bad in [
             line("Invalid NAL unit, skipping"),
+            // What `trace_headers` logs when a unit will not parse; with
+            // `-xerror` gone from the index argv this is what refuses it.
+            line("Failed to read unit 0 (type 33)."),
             line("0 unrecognized field"),
             "x".repeat(MAX_LINE + 1),
         ] {
@@ -470,6 +685,43 @@ mod tests {
             trace.feed(fixture().as_bytes());
             assert!(!trace.finish("source".into(), 0).permits("source"));
         }
+    }
+    /// With `-xerror` gone, a damaged source is caught by message, and the
+    /// muxer's correctable DTS warning is not mistaken for one.
+    #[test]
+    fn damaged_source_messages_are_faults_and_muxer_dts_is_not() {
+        for text in [
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] Packet corrupt (stream = 0, dts = 75328).\n",
+            "[in#0/mov,mp4 @ 0x1] corrupt input packet in stream 0\n",
+            "[vost#0:0/copy @ 0x1] Error applying bitstream filters to a packet\n",
+            "[in#0/matroska @ 0x1] Error during demuxing: Invalid data\n",
+            "in.mkv: Invalid data found when processing input\n",
+            "in.mkv: Input/output error\n",
+            "[out#0 @ 0x1] Error applying bitstream filters to an output packet for stream #0:0\n",
+        ] {
+            for split in [text.len(), 7] {
+                let mut trace = Trace::default();
+                trace.feed(fixture().as_bytes());
+                trace.feed(&text.as_bytes()[..split.min(text.len())]);
+                trace.feed(&text.as_bytes()[split.min(text.len())..]);
+                assert!(trace.source_fault().is_some(), "{text}");
+            }
+        }
+        // A fault glued onto a long unterminated line is still found, even
+        // when it straddles the mid-line search boundary.
+        for pad in [FAULT_CHUNK - 5, FAULT_CHUNK + 40, 5 * FAULT_CHUNK + 3] {
+            let mut trace = Trace::default();
+            trace.feed(fixture().as_bytes());
+            trace.feed("x".repeat(pad).as_bytes());
+            trace.feed(b"Packet corrupt (stream = 0, dts = 1).\n");
+            assert!(trace.source_fault().is_some(), "pad {pad}");
+        }
+        let mut trace = Trace::default();
+        trace.feed(fixture().as_bytes());
+        trace.feed(
+            b"[mp4 @ 0x1] Non-monotonic DTS in output stream 0:0; previous: 2000, current: 672; changing to 2001.\n",
+        );
+        assert!(trace.source_fault().is_none());
     }
     /// The index pass's stderr also carries FFmpeg's own output banner, and
     /// with one tee slave per PGS track that single line outgrows `MAX_LINE`

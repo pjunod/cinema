@@ -100,6 +100,34 @@ struct Watch: Codable, Hashable {
 struct WatchRollup: Codable, Hashable {
     var leaves: Int
     var watched: Int
+    /// How many of the leaves Curator offloaded (files removed to free disk).
+    /// Absent from servers that predate Offload.
+    var offloaded: Int? = nil
+}
+
+/// Which titles a library page lists. The server's default, `disk`, is what
+/// plays now; `offloaded` and `everything` bring back the titles whose files
+/// Curator removed to free disk.
+enum LibraryPresence: String, CaseIterable, Identifiable {
+    case disk
+    case offloaded
+    case everything
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .disk: return "On disk"
+        case .offloaded: return "Offloaded"
+        case .everything: return "Everything"
+        }
+    }
+}
+
+/// What the server answers to Get it back and to the status read.
+struct OffloadAnswer: Codable, Equatable {
+    var matched: Bool
+    var state: String
+    var message: String
 }
 
 struct Item: Codable, Identifiable, Hashable {
@@ -131,6 +159,13 @@ struct Item: Codable, Identifiable, Hashable {
     var updatedAt: Int?
     var watch: Watch?
     var rollup: WatchRollup?
+    /// Curator removed this title's files to free disk; the item, its
+    /// metadata and its watch history stay. For a show or season, true only
+    /// when every leaf is (`rollup.offloaded` counts a partial offload).
+    var offloaded: Bool? = nil
+
+    var isOffloaded: Bool { offloaded == true }
+    var hasOffloadedLeaves: Bool { isOffloaded || (rollup?.offloaded ?? 0) > 0 }
 
     var isMovieOrEpisode: Bool { kind == "movie" || kind == "episode" }
     var isPlayable: Bool { isMovieOrEpisode || kind == "video" || kind == "audiobook" }
@@ -1031,6 +1066,29 @@ struct EffectiveProcessingReport: Equatable, Codable {
     }
 }
 
+/// A bounded owner-authored reason why this session's optional enhancement
+/// upgrade was skipped. Invalid or stale explanations are informationally absent.
+struct ProcessingSkip: Codable, Equatable {
+    var generation: String
+    var reason: String
+
+    private enum CodingKeys: String, CodingKey { case generation, reason }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
+        reason = (try? values?.decode(String.self, forKey: .reason)) ?? ""
+    }
+    init(generation: String, reason: String) {
+        self.generation = generation
+        self.reason = reason
+    }
+
+    func matches(generation current: String?) -> Bool {
+        generation == current && !generation.isEmpty && !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && reason.unicodeScalars.count <= 512 && !reason.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+}
+
 /// What Dolby Vision enhancement the delivered picture carries, computed by
 /// the server (`plurx_core::playback::enhancement`) so every client shows the
 /// same thing: a pill per *active* enhancement (FEL, RPU, DYN) and one plain
@@ -1093,6 +1151,19 @@ struct PlaybackEnhancement: Equatable, Codable {
         self.active = active
         self.details = details
         self.requiresEffectiveProcessing = requiresEffectiveProcessing
+    }
+
+    func explainingSkip(_ skip: ProcessingSkip?, generation: String?) -> PlaybackEnhancement {
+        guard let skip, skip.matches(generation: generation) else { return self }
+        var result = self
+        result.details = details.map { detail in
+            guard !detail.active, ["FEL", "RPU"].contains(detail.badge),
+                  detail.text.hasPrefix("\(detail.badge): not used") else { return detail }
+            var explained = detail
+            explained.text = "\(detail.badge): not used for this play — \(skip.reason)"
+            return explained
+        }
+        return result
     }
 
     /// One neutral line per enhancement, blank server lines dropped.

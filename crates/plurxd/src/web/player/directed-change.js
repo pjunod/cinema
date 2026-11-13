@@ -784,7 +784,10 @@ function startPlaybackControl(v,p,bootstrap){
             reporter.bootstrap.generation,p.deliveredRange);
           const processingChanged=JSON.stringify(p.effectiveProcessing)!==JSON.stringify(processing);
           p.effectiveProcessing=processing;
-          if(processingChanged&&p===PLAYER&&typeof renderPlayerInfo==="function") renderPlayerInfo();
+          const skip=processingSkipFromWire(response?.processing_skip,reporter.bootstrap.generation);
+          const skipChanged=JSON.stringify(p.processingSkip)!==JSON.stringify(skip);
+          p.processingSkip=skip;
+          if((processingChanged||skipChanged)&&p===PLAYER&&typeof renderPlayerInfo==="function") renderPlayerInfo();
         }
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
@@ -922,6 +925,8 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
   }
   const fileContext=playbackFileContext(fileId);
   if(fileContext.source_ref.kind!=="local"){
+    // The same start clock a Local create sends; B carries it to the Source.
+    const startupRemainingMs=typeof preparationRemainingMs==='function'?preparationRemainingMs(signal):null;
     // Shared initial Start never inherits a Local control/recovery envelope.
     // Actual supplied unsupported fields are refused by the typed adapter.
     if(opts&&opts.presentation==="direct"){
@@ -929,7 +934,7 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
       // subtitle group exists for them, and the Source refuses a subtitle ask.
       body.presentation="direct";
       for(const field of ["block_budget_secs","transport","height","copy","native_subtitles","subtitle"]) delete body[field];
-      return SHARED_DECISION.start(fileContext,body,signal);
+      return SHARED_DECISION.start(fileContext,body,signal,startupRemainingMs);
     }
     const player=typeof PLAYER!=="undefined"?PLAYER:null;
     const natives=(player&&player.subs||[]).filter(sub=>sub.native===true);
@@ -937,7 +942,7 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     const hevcCopy=!!body.copy&&["hevc","h265","hevc10"].includes(String(player&&player.source&&player.source.video_codec||"").toLowerCase());
     const transport=typeof plannedHlsTransport==="function"?plannedHlsTransport(hevcCopy):null;if(transport)body.transport=transport;
     if(body.height==null&&!Object.hasOwn(opts||{},"height"))delete body.height;
-    return SHARED_DECISION.start(fileContext,body,signal);
+    return SHARED_DECISION.start(fileContext,body,signal,startupRemainingMs);
   }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle
@@ -1010,7 +1015,11 @@ async function openSession(fileId, opts, signal=null, requestId=null, restartSes
     ?await openContinuousQualitySession(playbackFileContext(fileId).source_ref.file_id,body,player,signal,restartSessionId):null;
   if(continuous) return continuous;
   const linkReceipt=typeof candidateLinkReceipt==='function'?candidateLinkReceipt(player,fileId):null;
-  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt});
+  // Every attempt, the first and each retry of the ladder, tells the server
+  // what this preparation still has, so the server answers inside it rather
+  // than on a 10 s guess.
+  const startupRemainingMs=typeof preparationRemainingMs==='function'?preparationRemainingMs(signal):null;
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal,linkReceipt,startupRemainingMs});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -1181,7 +1190,7 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
 // came to drop the burned subtitle, and `vod` would have gone the same way.
 //
 // `wantSec` is where the viewer expects to be in film time. Every HLS response
-// is now the whole immutable title, so the media element seeks there directly.
+// maps through this response's source origin onto the item's local clock.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
   clearEffectiveProcessing(t);
@@ -1200,7 +1209,8 @@ function attachSession(v, t, info, wantSec){
     t.meta={...(t.meta||{}),fileContext:t.fileContext};
   }
   t.streamId=null;
-  t.vod=!!info.vod;
+  t.vod=!!info.vod&&t.offset===0;
+  t.rangePresentation=!t.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
   t.qualityCandidates=Array.isArray(info.quality_candidates)?info.quality_candidates:null;
   t.measuredCandidateOutputs=Array.isArray(info.measured_candidate_outputs)?info.measured_candidate_outputs:null;
@@ -1233,12 +1243,15 @@ function attachSession(v, t, info, wantSec){
   // MEDIA-BADGES-PLAN.md requires the chip and the panel row to agree.
   t.continuousQualityBootstrap=info.continuous_quality||null;
   t.probeUrl=info.playlist_url;
-  const into = t.vod ? Math.max(0, wantSec||0) : 0;
+  const into = Math.max(0,(Number(wantSec)||0)-(t.offset||0));
   t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
   startPlaybackControl(v,t,info.control||null);
   t.effectiveProcessing=effectiveHdrProcessing(info.effective_processing,
     t.controlReporter?.bootstrap?.generation,info.delivered_dynamic_range);
+  // A new session has no skipped upgrade yet. Without this, the first control
+  // exchange saw undefined -> null as a change and repainted the panel.
+  t.processingSkip=null;
   if(t===PLAYER) renderPlayerInfo();
   markPlaybackControlSeekExecuted(t,wantSec||0);
   return into + (t.offset||0);

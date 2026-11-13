@@ -238,7 +238,10 @@ segments). This works with every encoder. The other options are ruled out:
   Some TVs gamut-compress a BT.2020 mastering declaration.
 - **Mastering luminance:** max = bucket; min = the title's mastering
   minimum.
-- **MaxCLL:** min(bucket, scanned title L1 max).
+- **MaxCLL:** min(bucket, scanned title L1 max), plus the largest step the
+  10-bit limited-range export can round one component up by (407 for a
+  400-nit bucket, 1015 for 1000), since 2026-11-12. The mapper clips every
+  component to the bucket; the declaration describes the decoded picture.
 - **MaxFALL:** 0 (unknown). A PQ average is not FALL, and inventing one is
   worse than declaring none.
 
@@ -324,9 +327,11 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   colour, MSWeight detail on intensity (and on chroma when the chroma weight
   is non-zero). L2 trims: the trim authored for the bucket's peak; otherwise
   each decoded trim field (lift, gain, gamma, chroma weight, saturation gain,
-  MS weight) linear in target PQ between the bracketing L2 targets, with
-  neutral trims at PQ 0 and at the mastering display. At or above the
-  mastering peak both families map untrimmed. The frame report names the
+  MS weight) linear in target PQ between the nearest L2 targets below and
+  above (also one at or above the mastering peak), with neutral trims at the
+  mastering display's minimum and peak for a missing side. CM v4 maps
+  untrimmed at or above the mastering peak; CM v2.9 does when no L2 lies
+  above the target. The frame report names the
   selection (`cm29-l2-exact`, `cm29-l2-interpolated`, `cm29-l1-only`).
 - **Targets.** HDR buckets: a P3-D65 display of the bucket peak inside the
   BT.2020/PQ container. SDR: a 100-nit BT.709 display. Target black is the
@@ -412,8 +417,9 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   target PQ reproduces it (2000 between the 1000 trim and the 4000-nit
   master: 0.004; 600 between the 100 and 1000 trims: 0.003; 1000 between
   the 600 trim and the master: 0.022); linear in nits does not (1.7).
-  Below the lowest target the trim fades to neutral at PQ 0 (0.019; holding
-  it is 0.74). 400 and 1600 use the same rule.
+  Below the lowest target the trim fades to neutral near black (0.019;
+  holding it is 0.74; the 2026-11-12 grid places the neutral point at the
+  mastering minimum). 400 and 1600 use the same rule.
 
 ### Phase 3: SDR target
 
@@ -484,7 +490,7 @@ a per-window target/master mix.
 | Core unit | bucket mapping, including elision; caps parsing of `max_nits`/`peak_source` | mapping is total, rounds down, refuses junk |
 | Core unit | `playback_enhancement` with `display_target` | DYN active only with a target, and the text names the nits |
 | Daemon unit | two buckets give two `semantic_digest`s (via `DvExportPolicy`); elision gives the master digest | rendition identity |
-| Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max), MaxFALL 0) | metadata reaches both client paths |
+| Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max) plus the export rounding step, MaxFALL 0) | metadata reaches both client paths |
 | Daemon unit | `prepare_processed_hdr10` declines are named (no peak, elided, L1 missing) | Paul's "every decline is named" |
 | Helper control | `test_dv_dm` (phase 2; replaced phase 1's `compare_display_target.py`): every bucket stays ≤ PQ(target) + 1 code with a monotonic grey axis. **Identical pixels with two different L1 sets must give different outputs.** Trims change the output at their target and vanish at the mastering peak; golden values pin the model | the mapping is driven by per-shot L1 and trims (a static curve fails) |
 | Helper control | `run_dm_parity.py`: GPU shader against the double-precision reference | the shader computes the equations |

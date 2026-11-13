@@ -675,14 +675,16 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
                 occurrences.len() != 1 || occurrences[0][1] != *value
             })
             || {
-                // The level describes the window's raster and cadence
-                // (`hevc_level_for`), so any defined Main-tier step is valid.
+                // Admit the same Main10 High-tier level vocabulary used by
+                // the frozen enhancement envelope, including high-rate 6.2.
                 let levels: Vec<_> = output
                     .windows(2)
                     .filter(|pair| pair[0] == "-level:v")
                     .collect();
                 levels.len() != 1
-                    || !["4", "4.1", "5", "5.1", "5.2", "6", "6.1"].contains(&levels[0][1].as_str())
+                    || !plurx_core::transcode::EnhancementRateEnvelope::supports_hevc_level_name(
+                        &levels[0][1],
+                    )
             }
         {
             return Err(
@@ -1032,6 +1034,9 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) export_raster: Option<(u32, u32)>,
     /// Explicit producer policy only; this layer never reads client caps.
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    /// The source's static HDR10 metadata a master-grade HDR10 window carries.
+    /// The helper never sees it; it is authored onto the encoded window.
+    pub(crate) master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
 }
 
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
@@ -1301,7 +1306,7 @@ async fn run_streaming(
                 progress: Progress::Stderr,
                 descriptors: Descriptors::from_files(
                     Some(&read),
-                    Some(&resources.source.handle),
+                    source_input.is_none().then_some(&resources.source.handle),
                     None,
                     false,
                 ),
@@ -1451,6 +1456,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
         return spawn_streaming(StreamingSegmentRequest {
             export_raster: None,
             display_target: None,
+            master_metadata: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             // The probe passes no decode device: the renderer decodes in software.
             decode: RendererDecode::Software,
@@ -2152,6 +2158,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn completed_vaapi_accepts_envelope_level_62_and_rejects_ambiguous_levels() {
+        use plurx_core::transcode::*;
+        let mut source = encoded_recipe_source(true);
+        source.width = Some(3840);
+        source.height = Some(2160);
+        source.bitrate = Some(300_000_000);
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Hdr10Passthrough,
+            audio_index: None,
+            ..Default::default()
+        };
+        let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("typed Main10 output");
+        let mut args = vod_completed_reconstructed_pipe_args(
+            &source,
+            &output,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            2.0,
+            &fd(3),
+            &fd(4),
+            VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("production graph");
+        let envelope = EnhancementRateEnvelope::resolve(
+            300_000,
+            EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+            3840,
+            2160,
+            (24, 1),
+            false,
+            Default::default(),
+        )
+        .expect("legal high-rate envelope");
+        assert_eq!(envelope.hevc_level(), "6.2");
+        envelope.apply_args(&mut args, Encoder::Vaapi);
+        for (flag, value) in [
+            ("-level:v", "6.2"),
+            ("-b:v", "300000k"),
+            ("-maxrate", "450000k"),
+            ("-bufsize", "600000k"),
+            ("-tier:v", "high"),
+        ] {
+            let actual: Vec<_> = args
+                .windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str())
+                .collect();
+            assert_eq!(actual, [value], "{flag}: {args:?}");
+        }
+        assert!(check_encoder_budget(&args, 5).is_ok(), "{args:?}");
+
+        let level = args
+            .iter()
+            .position(|arg| arg == "-level:v")
+            .expect("frozen level argument")
+            + 1;
+        for unknown in ["", "6.3", "6.20", "186"] {
+            let mut invalid = args.clone();
+            invalid[level] = unknown.into();
+            assert!(check_encoder_budget(&invalid, 5).is_err(), "{invalid:?}");
+        }
+        args.extend(["-level:v".into(), "6.2".into()]);
+        assert!(check_encoder_budget(&args, 5).is_err(), "duplicate level");
     }
 
     #[test]

@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "author": "Claude Opus 5.5, session_01BCWLA1yYosvau4xhfH6R4S",
+  "status": "Fixed before any held-out encode or score exists. The git commit timestamp is authoritative.",
+  "purpose": "Held-out test of the chosen arm (zero-mean -6 QP, protocol-roi-zeromean-qpm6-20261111.json) on a FEL title not used to design it.",
+  "fixture": {
+    "name": "beekeeper1800",
+    "source_sha256": "from inputs/beekeeper-1800-source.mkv (bound in the receipt)",
+    "window": ["83/1000", "2060/1000"],
+    "binding": "capture_layers on this window gives 48 accepted frames whose BL, EL and RPU sha256 equal the retained calibrated-quality/beekeeper-1800/R accepted_source_pair records (48/48 each). The retained events are a recovered set with 47 coded-AU records, so verify_layer_capture's one-AU-per-frame rule cannot apply; the direct per-frame hash binding replaces it.",
+    "encoder_input": "inputs/beekeeper1800-calibrated-topleft-point.nut (calibrated TopLeft point export, as for the Michael fixtures)",
+    "active_roi_xyxy": [0, 272, 3840, 1885]
+  },
+  "baseline": "encode_spatial_control.py --variant hdr-off-chroma9 --qg-size 32 --bitrate 115000 --maxrate 125000 --bufsize 136000 --chroma-loc 2: the retained single-pass115 policy.",
+  "arm": "Harness lumazm, grid 16, threshold 1.0 nit, qp offset -6, exactly as protocol-roi-zeromean-qpm6-20261111.json. Letterbox rows count as dark blocks, as on every fixture.",
+  "gates": "Harness E0 (no ROI) must reproduce this fixture's baseline elementary stream byte-for-byte; the v6 binary's zero-ROI gate already passed on Michael5400.",
+  "qualification": "qualify_spatial_control.py-equivalent checks: frozen Rust author, all-48 VCL/RPU/clock preservation, native frames 0/24, colour/siting syntax, AQ tuple and QP-group receipts.",
+  "scoring": {
+    "operators": "Frozen four_model_audit sample_codes/model_rgb and vector_metrics delta/stats, imported unchanged.",
+    "metadata": "From the native metadata observer (all 48 frames; header, mapping, NLQ and colour fields asserted per frame), because no retained parsed metadata exists for this fixture.",
+    "scorer_validation": "Before scoring Beekeeper, the same scorer must reproduce Michael5400 Z6's retained full-resolution frames 0/24 statistics (full active and reference bands, all four models) exactly.",
+    "selected_frames": "Full resolution frames 0/24, all four models: the unchanged strict bar (full active mean below F; reference<0.1-nit mean and p99 below F) plus the 130 Mb/s authored screen.",
+    "all48": "Stride-8 phase-0/1 lattice over this fixture's ROI, sampled and labelled as such."
+  },
+  "readout": "Report baseline and arm side by side whatever the outcome. A pass is evidence the fix generalizes beyond the design windows; a fail is retained and reported.",
+  "not_claimed": ["perceptual metric", "HRD/CPB conformance", "normative Dolby composition", "playback, packaging or live change"]
+}

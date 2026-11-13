@@ -96,10 +96,24 @@ const _: () = assert!(
 );
 const _: () = assert!(
     migration_is(
+        super::storage_domain_pending::SQLITE_INTRODUCED_SCHEMA,
+        super::storage_domain_pending::SCHEMA
+    ),
+    "storage_domain_pending::SQLITE_INTRODUCED_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(
         super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
         super::candidate_recovery::SCHEMA
     ),
     "candidate_recovery::SQLITE_INTRODUCED_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(
+        super::offload::SQLITE_INTRODUCED_SCHEMA,
+        super::offload::SQLITE_MIGRATION
+    ),
+    "offload::SQLITE_INTRODUCED_SCHEMA does not name its migration"
 );
 const _: () = assert!(
     migration_is(
@@ -1333,7 +1347,23 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA,
     // v123: prepared artifact operations do not read original media.
     super::subtitle_managed_schema::PREPARED_MIGRATION,
-    // v124: optional scoped application login, separate from native sessions.
+    // v124: shared dispatch turns for interactive library work.
+    super::background_job_turns::SCHEMA,
+    // v125: pipeline contract v2 sidecar for targeted scan requests.
+    super::scan_request_v2::SCHEMA,
+    // v126: targeted library probes do not reserve a background source reader.
+    super::subtitle_managed_schema::TARGETED_MIGRATION,
+    // v127: metadata-only index coordination and fenced physical phases.
+    super::analysis_coordination::SCHEMA,
+    // v128: canonical fragment publication never reserves original media.
+    super::subtitle_managed_schema::PUBLISH_MIGRATION,
+    // v129: retention keeps a job that still owns charged source custody.
+    super::custody_retention::SCHEMA,
+    // v130: offloaded titles keep their item; a file attaching ends the offload.
+    super::offload::SQLITE_MIGRATION,
+    // v131: storage-domain changes are saved at once and applied when safe.
+    super::storage_domain_pending::SCHEMA,
+    // v132: optional scoped application login, separate from native sessions.
     super::delegation::SCHEMA,
 ];
 
@@ -1350,7 +1380,7 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
      tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, \
      poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, \
      artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, \
-     book_metadata_source";
+     book_metadata_source, offloaded_at";
 
 /// How many columns [`ITEM_COLS`] selects — the offset of the first column a
 /// query appends after it. Keep in step with [`ITEM_COLS`].
@@ -1361,7 +1391,7 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
 /// makes all four read the *new* column as if it were their first appended
 /// one — no error, no type failure when both are TEXT, just a show title that
 /// is quietly a JSON array of genres. Add and bump together, always.
-const ITEM_COL_COUNT: usize = 28;
+const ITEM_COL_COUNT: usize = 29;
 
 /// `ITEM_COLS` qualified with a table alias (e.g. `i.id, i.library_id, ...`).
 fn item_cols(alias: &str) -> String {
@@ -1418,6 +1448,7 @@ fn item_from_row(row: &Row<'_>, base: usize) -> rusqlite::Result<Item> {
         book_work_id: row.get(base + 25)?,
         book_edition_id: row.get(base + 26)?,
         book_metadata_source: row.get(base + 27)?,
+        offloaded_at: row.get(base + 28)?,
     })
 }
 
@@ -1614,6 +1645,10 @@ impl SqliteStore {
     fn init(conn: Connection) -> Result<Self, StoreError> {
         housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
+        // D3t: planning keys outside `playback.*`/`transcode.*` move the
+        // planning generation too. An idempotent extension, not a migration:
+        // `user_version` stays where it is, so an older binary still opens it.
+        super::playback_input_keys::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
@@ -1797,6 +1832,12 @@ impl SqliteStore {
             if version == super::subtitle_managed_schema::PREPARED_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_prepared_predecessor(&tx)?;
             }
+            if version == super::subtitle_managed_schema::TARGETED_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_targeted_predecessor(&tx)?;
+            }
+            if version == super::subtitle_managed_schema::PUBLISH_MIGRATION_VERSION {
+                super::subtitle_managed_schema::verify_publish_predecessor(&tx)?;
+            }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
@@ -1817,7 +1858,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn migrate(conn: &Connection) -> Result<(), StoreError> {
+    pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
         if current > target {
@@ -1891,6 +1932,7 @@ impl SqliteStore {
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
         super::delegation::verify_sqlite(conn)?;
+        super::scan_request_v2::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn
@@ -2135,15 +2177,18 @@ impl SqliteStore {
 
 #[async_trait]
 impl MetricsStore for SqliteStore {
-    async fn prometheus_store_snapshot(
+    async fn prometheus_store_snapshot_with(
         &self,
         node_id: &str,
         now: i64,
+        live_fragment_engines: Option<&super::LiveAnalysisEngines>,
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
         let node_id = node_id.to_owned();
+        let live = super::live_engines_param(live_fragment_engines);
+        let request_health = super::analysis_request_health_sql("?2", "?3");
         self.with_read(move |conn| {
             conn.query_row(
-                "SELECT
+                &(String::from("SELECT
                     (SELECT COUNT(*) FROM libraries),
                     (SELECT COUNT(*) FROM users),
                     COALESCE(SUM(state = 'queued'), 0),
@@ -2184,7 +2229,7 @@ impl MetricsStore for SqliteStore {
                        FROM (SELECT component,
                               CASE
                                 WHEN last_error_code = 'source_superseded' THEN 'stale'
-                                WHEN state = 'queued' AND not_before_ms > ?2 THEN 'retry_wait'
+                                WHEN state = 'queued' AND not_before_ms > ?2 * 1000 THEN 'retry_wait'
                                 WHEN state = 'running' THEN 'claimed'
                                 WHEN state = 'submitted' THEN 'staged'
                                 WHEN state = 'ready' THEN 'published'
@@ -2192,8 +2237,8 @@ impl MetricsStore for SqliteStore {
                                 ELSE state END AS durable_state,
                               priority, trigger,
                               COUNT(*) AS depth,
-                              CASE WHEN ?2 > MIN(created_at_ms)
-                                THEN (?2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
+                              CASE WHEN ?2 * 1000 > MIN(created_at_ms)
+                                THEN (?2 * 1000 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
                          FROM (
                            SELECT component, state, last_error_code, not_before_ms,
                                   priority, trigger, created_at_ms
@@ -2271,9 +2316,11 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
-                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
-                 FROM offline_packages WHERE node_id = ?1",
-                params![node_id, now],
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= ?2 * 1000),
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
+                    + &request_health
+                    + " FROM offline_packages WHERE node_id = ?1"),
+                params![node_id, now, live],
                 |row| {
                     Ok(PrometheusStoreSnapshot {
                         background_jobs: super::background_jobs_observation::background_job_metrics(&row.get::<_, String>(24)?)
@@ -2297,14 +2344,18 @@ impl MetricsStore for SqliteStore {
                             &row.get::<_, String>(15)?,
                             &row.get::<_, String>(16)?,
                             &row.get::<_, String>(17)?,
-                            super::AnalysisQueueHealth {
-                                ready_24h: row.get(18)?,
-                                attempt_limit_24h: row.get(19)?,
-                                claimed_24h: row.get(20)?,
-                                claimable: row.get(21)?,
-                                running_past_lease: row.get(22)?,
-                                last_ready_at_ms: row.get(23)?,
-                            },
+                            &row.get::<_, String>(29)?,
+                            super::AnalysisQueueHealth::with_requests(
+                                [
+                                    row.get(18)?,
+                                    row.get(19)?,
+                                    row.get(20)?,
+                                    row.get(21)?,
+                                    row.get(22)?,
+                                    row.get(23)?,
+                                ],
+                                [row.get(25)?, row.get(26)?, row.get(27)?, row.get(28)?],
+                            ),
                         ),
                     })
                 },

@@ -38,7 +38,7 @@ class MacosReleaseSigningCase(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.tool = load_script("macos_release_signing_fixture", ROOT / "scripts/sign-macos-release")
         self.package_tool = self.tool.package_tool()
-        self.package = self.root / "plurxd-1.2.3-macos-universal"
+        self.package = self.root / "plurxd-1.2.3-macos-arm64"
         self.package.mkdir()
         self.app = self.package / "Plurx Server.app"
         self.images = ["runtime/plurxd", "runtime/ffmpeg", "runtime/ffprobe",
@@ -61,12 +61,12 @@ class MacosReleaseSigningCase(unittest.TestCase):
             "CFBundleIdentifier": "tv.plurx.Server", "CFBundleShortVersionString": "1.2.3",
             "CFBundleExecutable": "PlurxServer"}))
         self.write_json("release.json", {"schema_version": 1, "repository": "pjunod/cinema",
-            "version": "1.2.3", "source_commit": "a" * 40, "architecture": "universal"})
+            "version": "1.2.3", "source_commit": "a" * 40, "architecture": "arm64"})
         self.write_json("runtime/provenance/manifest.json", {"binaries": {
             name: {"sha256": self.digest(self.package / "runtime" / name), "bytes": 32}
             for name in ["ffmpeg", "ffprobe"]}})
         self.write_json("runtime/subtitle-engine/subtitle-engine.json", {
-            "platform": "macos-universal", "binary_sha256": self.digest(self.package / "runtime/subtitle-engine/whisper-cli"),
+            "platform": "macos-arm64", "binary_sha256": self.digest(self.package / "runtime/subtitle-engine/whisper-cli"),
             "binary_bytes": 32, "cpu_variants": {}})
         self.write_json("provenance/manifest.json", {"artifacts": {
             name: self.digest(self.package / "runtime" / name) for name in ["plurxd", "ffmpeg", "ffprobe"]},
@@ -306,14 +306,15 @@ class MacosReleaseSigningCase(unittest.TestCase):
         self.assertIn('--source-parser-package "$RUNNER_TEMP/source-parser"', native)
         self.assertNotIn("scripts/build-macos-source-parser", native)
 
-    def test_universal_media_refuses_different_parser_bytes_before_native_combination(self):
-        shared = dict(source_commit="source", source_sha256="source-hash", parser_abi="same-abi", module_bytes=8)
-        left, right = dict(shared, module_sha256="arm-host-bytes"), dict(shared, module_sha256="intel-host-bytes")
-        with patch.object(self.package_tool, "validate_native_package", side_effect=[left, right]), \
-             patch.object(self.package_tool.subprocess, "check_output") as lipo:
-            with self.assertRaisesRegex(ValueError, "different source parser bytes/ABI"):
-                self.package_tool.combine_ffmpeg_packages(self.root / "arm", self.root / "intel", self.root / "universal")
-        lipo.assert_not_called()
+    def test_macos_release_is_one_arm64_build_with_no_intel_slice_or_universal_join(self):
+        workflow = (ROOT / ".github/workflows/github-release.yml").read_text()
+        blocks = dict(re.findall(r"(?ms)^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:|\Z)", workflow.split("\njobs:\n", 1)[1]))
+        for name in ["macos_build", "macos"]:
+            with self.subTest(job=name):
+                for intel in ["x86_64", "macos-15-intel", "lipo -create", "--combine", "universal"]:
+                    self.assertNotIn(intel, blocks[name])
+        self.assertIn("- arch: arm64\n            runner: macos-15\n            target: aarch64-apple-darwin", blocks["macos_build"])
+        self.assertFalse(hasattr(self.package_tool, "combine_ffmpeg_packages"))
 
     def test_workflow_isolates_apple_credentials_and_routes_only_signed_release_artifact(self):
         workflow = (ROOT / ".github/workflows/github-release.yml").read_text()
@@ -424,7 +425,7 @@ class MacosReleaseSigningCase(unittest.TestCase):
             f"plurx-desktop_{version}-1_amd64.deb", f"plurx-desktop_{version}-1_arm64.deb",
             f"plurx-desktop-{version}-1.x86_64.rpm", f"plurx-desktop-{version}-1.aarch64.rpm",
             f"plurx-tray-{version}-linux-amd64.tar.gz", f"plurx-tray-{version}-linux-arm64.tar.gz",
-            f"plurxd-{version}-macos-universal.tar.gz", f"plurxd-{version}-windows-x86_64.zip"]
+            f"plurxd-{version}-macos-arm64.tar.gz", f"plurxd-{version}-windows-x86_64.zip"]
         metadata = ["plurx-update-v1.json", "plurx-update-v1.json.sig"]
         # Exercise the actual shell asset validator; macOS hosts may lack GNU sha256sum.
         tools = self.root / "checksum-tools"

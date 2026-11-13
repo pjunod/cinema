@@ -1,20 +1,17 @@
 #!/bin/bash
-# Assemble one architecture slice of "Plurx Server.app", the macOS menu-bar
+# Assemble the Apple Silicon "Plurx Server.app", the macOS menu-bar
 # companion (docs/features/DESKTOP-TRAY-IMPLEMENTATION.md, task M3).
 #
 #   clients/server-tray/macos/build --configuration release|debug \
 #       --version SEMVER --output "/abs/path/Plurx Server.app" \
-#       [--arch arm64|x86_64] [--build-id COMMIT] [--controller /abs/plurx-control] \
+#       [--arch arm64] [--build-id COMMIT] [--controller /abs/plurx-control] \
 #       [--sign-identity ID] [--release-repository OWNER/REPO] [--scratch DIR]
 #
-# One native slice per invocation; scripts/package-macos combines slices with
-# lipo and re-signs inside-out. --controller copies an already-built
+# macOS releases are Apple Silicon only; scripts/package-macos re-signs the
+# app inside-out. --controller copies an already-built
 # plurx-control to Contents/MacOS/plurx-control (the only path the app ever
 # runs); without it the packager inserts that file and re-signs. The default
 # signature is ad-hoc ("-"): this is not Developer ID or notarization.
-#
-# A cross-architecture slice (x86_64 on an Apple Silicon builder) is a compile
-# product only. It is not evidence that the app runs on physical Intel Macs.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +23,7 @@ minimum_os="13.0"
 configuration=""
 version=""
 output=""
-arch="$(uname -m)"
+arch=arm64
 build_id="unknown"
 controller=""
 identity="-"
@@ -58,7 +55,7 @@ core_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
 [[ "$output" == /* ]] || die "--output must be an absolute path"
 [[ "$output" == *.app ]] || die "--output must name a .app bundle"
 [[ "$(basename "$output")" == "$display_name.app" ]] || die "--output bundle must be named '$display_name.app'"
-[[ "$arch" == arm64 || "$arch" == x86_64 ]] || die "--arch must be arm64 or x86_64"
+[[ "$arch" == arm64 ]] || die "--arch must be arm64 (Intel Macs are not supported)"
 [[ "$build_id" =~ ^[0-9A-Za-z._+-]{1,80}$ ]] || die "--build-id has unexpected characters"
 [[ "$release_repository" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "--release-repository must be OWNER/REPO"
 if [[ -n "$controller" ]]; then

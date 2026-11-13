@@ -58,10 +58,9 @@ use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
 use crate::prodexec::{next_step, yield_step, Contention, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
-#[path = "vod/source_lifetime.rs"]
-mod source_lifetime;
 use crate::prodsched::{decide, Action, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
+use crate::source_generation as source_lifetime;
 use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
 use crate::vodgen::{self, Failure, Generation, Outcome};
@@ -1213,6 +1212,13 @@ struct Shared {
     cluster_node_id: Option<String>,
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    /// The cluster's catalogue identity (`instance.id`), read once: it never
+    /// changes, and v3 copy-index source keys are derived from it per start.
+    catalog_namespace: tokio::sync::OnceCell<String>,
+    /// The Analysis worker's inbox, attached once the job manager exists. A
+    /// defective healthy v3 head is reported there; this serving path never
+    /// claims or quarantines anything itself.
+    copy_analysis: std::sync::OnceLock<Arc<crate::copy_analysis::CopyAnalysisRegistry>>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
     /// This closes lease loss against a slow resurrection before attachment.

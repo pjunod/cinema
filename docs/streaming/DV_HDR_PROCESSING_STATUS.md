@@ -2,7 +2,7 @@
 
 **Status:** built for supported bounded routes and merged to `main`; full-suite
 qualification, broader reference and hardware acceptance open ·
-**Updated:** 2026-10-15 · **Integration:** merged to `main` as `c96142ac` (#968)
+**Updated:** 2026-11-09 (America/New_York) · **Integration:** merged to `main` as `c96142ac` (#968)
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -11,6 +11,74 @@ remaining milestones stay in the build handoff. The
 [project backlog](../features/PROJECT-BACKLOG.md) points here for progress.
 
 ## 1. Current boundary
+
+**CM4 active area (2026-11-09, merged #1481):** checked L5 offsets bound the
+CM4 detail filter to the uncropped native active rectangle, with vertical
+neighbours clamped to the active rows. This matches all 54 sampled codes of
+the licensed expanded-XML render. Outside the rectangle, pixels take the
+pointwise map without the detail pass. Bars keep their content (burned-in
+subtitles), never PQ black. No-L5 and full-frame L5 keep the original shader
+literals byte for byte (`dv_dm_active_partial`). Three crop-domain CPU
+controls and L5 GPU parity cases cover it. Whole-frame qualification and
+display/performance acceptance remain open.
+
+**CM v2.9 active area (2026-11-12):** L5 now bounds the CM v2.9 detail
+filter too. It had blended bars into two boundary rows: on four native frames,
+up to 27,652 pixels and 4.32 dE ITP worse than P8 (CPU reference with the
+fix: 1,658 to 3). Bars map pointwise; no partial L5, no change.
+
+**CM v2.9 range clamp and L2 selection (2026-11-12):** `cm_offline` clamps
+once, after trim and detail; the model clamped the curve first (and held the
+detail input at the clip). Outside a shot's L1 range it now matches ramps and
+specks within 1.5 codes (was up to 2,284). Without an exact L2 the reference
+interpolates in PQ between the nearest L2 below and above (also at or above
+the mastering peak), neutral at the mastering minimum and peak: 52 grid cases
+match as exact-L2 ones do. Its "default trim" was the harness: an XML target
+black applies only where an L2 names the target.
+
+**CM4 transfer precision (2026-11-11):** CM4 point and final passes now use
+the normative ST 2084 helpers (candidate C: precise split-float PQ OETF/EOTF,
+analytical black, exact 10000-nit white); CM v2.9, lattice and horizontal
+passes keep the legacy literal header byte for byte. On SourceB frame16
+(1000-nit P3/.005 target, 7,971,840 active pixels) the qualified native C
+capture is worse than unenhanced P8 at 0 pixels under both licensed
+references (5 equal, both zero error); the previous enhanced renderer was
+worse at 3. Local losses remain visible: against the previous enhanced
+renderer C is worse at 47,038 pixels and better at 579,677; against B
+(frozen-black EOTF) all 30,121 differences are single 16-bit codes (16,977
+worse, 13,144 better), with no near-black or spatial pattern. The frame peaks
+at 124 nits, so the bright-content difference between B and C (exact white)
+is not yet measured: that needs a bound clip from a 4000-nit title and a
+frame-parameterized diagnostic build. The historical P7 audit stays separate
+(C 10 pixels worse than P8, as B). GPU-versus-double parity on CM4 real
+crops tightened from 2-3e-6 to under 7e-7 PQ; `test_dm_precision.py`
+enforces 1.5e-6. The helpers are one three-channel branchless implementation
+with Horner loops, so a CM4 shader compiles in about 2.4 s on lavapipe
+instead of 33-47 s (first proposal), with every parity output bit-identical.
+Correct rounding needs fused `fma`: lavapipe does not fuse, so
+`run_pq_helper_exact.py` accepts its unfused result there and
+`PLURX_DM_REQUIRE_FUSED_FMA=1` demands correct rounding on real GPUs.
+On real GPUs both lab6's AMD (RADV) and ROG's NVIDIA fuse `fma` and the
+helpers are correctly rounded on every sampled input. The shrunk build is
+bit-identical to the first precise build on AMD; on NVIDIA ten parity cases
+that carry L8 hue/saturation vectors move by at most 6 ULP on real pixels,
+with GPU-versus-double error unchanged. A CM4 case compiles in 2.1 s on AMD
+and 4.1 s on NVIDIA, down from 23.5 s and 31.6 s.
+
+**Integrated acceptance (2026-11-11):** a native NVIDIA capture of the
+production header (L5 active area, normative CM4 helpers, shrunk helpers)
+is worse than unenhanced P8 at 0 of 7,971,840 Source16 pixels under both
+licensed references. On SourceA frame16 (1000-nit master; licensed 999/1001-nit
+proxies, because the licensed tool refuses an equal-peak target) the
+boundary-row losses of the earlier renderers are gone against the L5-aware
+reference; 239 and 47 interior pixels remain worse than P8, by at most
+0.0156 ΔE ITP, as for B and C. Its interior differs from the qualified C
+capture at 3-4 pixels by one code. Two frames are not whole-title, HDR10-E
+or performance acceptance. One frame is not whole-title or performance acceptance.
+
+The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
+all applicable current-head fast-lane jobs passed. Its bitrate, level and
+qualification fixes do not close picture, display or performance acceptance.
 
 The reviewed proposal landed in documentation PR #919, the comparator in
 PR #920, and the initial backend controls in PR #924. PR #928 merged at

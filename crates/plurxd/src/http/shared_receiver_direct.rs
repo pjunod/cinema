@@ -203,7 +203,13 @@ pub(super) async fn receiver_direct(
         );
     };
     let Some(actor) = actor else {
-        let route = match state.store.media_session_route(&session.to_string()).await {
+        let route = match crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Verdict,
+            &session.to_string(),
+        )
+        .await
+        {
             Ok(Some(route)) => route,
             Ok(None) => return refusal(StatusCode::NOT_FOUND, "sharing_delivery_unavailable"),
             Err(_) => {
