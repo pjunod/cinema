@@ -227,6 +227,7 @@ const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
         include_str!("fragment_index_cluster.rs"),
     ),
     ("mod.rs", include_str!("mod.rs")),
+    ("offload.rs", include_str!("offload.rs")),
     ("publication.rs", include_str!("publication.rs")),
     ("renditionplan.rs", include_str!("renditionplan.rs")),
     ("telemetry.rs", include_str!("telemetry.rs")),

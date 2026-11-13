@@ -11,6 +11,7 @@ use hiqlite::{Param, Row};
 
 use super::hiqlite::{database_error, HiqliteAuthStore};
 use super::hiqlite_media::{IDENTITY_REPAIR_FILE_COLS, IDENTITY_REPAIR_ITEM_COLS};
+use super::offload::MARK_KEPT_PREDICATE;
 use crate::cluster::coordination::{unix_ms, Lease};
 use crate::domain::{
     sort_title_for, ArtworkAttempt, BookMetadataPatch, Item, ItemKind, MetadataPatch, NewItem,
@@ -1848,13 +1849,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 // come before the library.
                 format!(
                     "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $1)
-                     WHERE {}
+                     WHERE {MARK_KEPT_PREDICATE}
                        AND library_id = $3
                        AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $3)
                        AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $4
                          AND owner_node_id = $5 AND fence = $6 AND revision = $7
-                         AND expires_at_ms = $8)",
-                    crate::store::offload::MARK_KEPT_PREDICATE
+                         AND expires_at_ms = $8)"
                 ),
                 params!(
                     offloaded_at,
@@ -1868,15 +1868,17 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 ),
             ),
             (
+                // The lease fence precedes the shared predicate so that the
+                // statement is one literal the placeholder census judges
+                // whole; the conjuncts are order-independent.
                 concat!(
                     "DELETE FROM items WHERE library_id = $1
                  AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)
-                 AND ",
-                    crate::store::offload::fileless_prunable_leaf!(),
-                    "
                  AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $2
                    AND owner_node_id = $3 AND fence = $4 AND revision = $5
-                   AND expires_at_ms = $6)"
+                   AND expires_at_ms = $6)
+                 AND ",
+                    crate::store::offload::fileless_prunable_leaf!()
                 )
                 .to_owned(),
                 reconcile_lease_params(library_id, lease)?,

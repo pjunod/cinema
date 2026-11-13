@@ -10,6 +10,7 @@ use hiqlite::Row;
 use super::hiqlite::{
     database_error, trace_statement, validate_sql, HiqliteAuthStore, TimedClient,
 };
+use super::offload::MARK_KEPT_PREDICATE;
 use super::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
     item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
@@ -4132,10 +4133,9 @@ impl MediaStore for HiqliteAuthStore {
                     // Placeholders must first appear in order: the mark ($1) and
                     // the keep list ($2, in the shared predicate) come first.
                     "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $1) \
-                     WHERE {} \
+                     WHERE {MARK_KEPT_PREDICATE} \
                        AND library_id = $3 \
-                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $3)",
-                    crate::store::offload::MARK_KEPT_PREDICATE
+                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $3)"
                 ),
                 params!(offloaded_at, &keep_json, library_id),
             ),

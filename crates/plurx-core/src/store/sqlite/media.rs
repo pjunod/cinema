@@ -564,8 +564,11 @@ impl MediaStore for SqliteStore {
         }
         let ids = serde_json::to_string(ids).map_err(|e| StoreError::Task(e.to_string()))?;
         self.with_read(move |conn| {
-            let mut stmt = conn.prepare(
-                "WITH RECURSIVE tree(root, id) AS (
+            // One expression from prepare to bind, so the placeholder census
+            // reads the statement's `?1` against its single bound value.
+            let rows = conn
+                .prepare(
+                    "WITH RECURSIVE tree(root, id) AS (
                      SELECT id, id FROM items WHERE id IN (SELECT value FROM json_each(?1))
                      UNION
                      SELECT t.root, i.id FROM items i JOIN tree t ON i.parent_id = t.id
@@ -574,8 +577,7 @@ impl MediaStore for SqliteStore {
                  FROM tree t JOIN items i ON i.id = t.id
                  WHERE i.kind IN ('movie', 'episode')
                  GROUP BY t.root HAVING SUM(i.offloaded_at IS NOT NULL) > 0",
-            )?;
-            let rows = stmt
+                )?
                 .query_map(params![ids], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
