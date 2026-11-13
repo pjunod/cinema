@@ -1,6 +1,6 @@
 # Playback start — E1 build contract (replication classes as designed)
 
-**Status:** open — design and build contract for lane **E1** of [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) revision 3 (§3 E1). E1a merged (PR #1500; what it built and where it departs from this text: §14); E1b built on `claude/ps-e1b` (§14); E1c not built. Revision 2: the adversarial review [PLAYBACK-START-E1-REVIEW.md](../reviews/PLAYBACK-START-E1-REVIEW-2026-11-11.md) is applied (§13). Needs Paul's answers to §12 before a build agent claims it. Where this contract and the plan disagree, the plan's §0 rulings win; raise the conflict in the lane PR.
+**Status:** open — design and build contract for lane **E1** of [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) revision 3 (§3 E1). E1a and E1b merged (PRs #1500, #1503); E1c built on `claude/ps-e1c`. What each built and where it departs from this text: §14. Revision 2: the adversarial review [PLAYBACK-START-E1-REVIEW.md](../reviews/PLAYBACK-START-E1-REVIEW-2026-11-11.md) is applied (§13). Needs Paul's answers to §12 before a build agent claims it. Where this contract and the plan disagree, the plan's §0 rulings win; raise the conflict in the lane PR.
 **Verified against:** `main @ 0c57d812` (2026-11-11), from source only — nothing was compiled or run. Re-anchor line numbers with `scripts/outline` and `rg` before editing.
 **Author:** Claude (claude-fable-5-2, session 01BCWL9xwmpSjitHqZMTRAht). **How to work:** [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) §0.
 
@@ -237,6 +237,8 @@ Auth, key and token reads; watch state (K-04 M2); `playback_planning_snapshot`, 
 6. **Background-worker settings reads** (≈ 80 sites) stay on quorum reads. Recommended: leave until a measurement asks.
 7. **Per-row route invalidation.** Per-table invalidation keeps cache lifetime near one second; the hook already receives the rowid. Decide after E1a reports local re-reads per request and read-pool wait. Recommended: per-table unless those numbers show contention.
 
+**Dispositions (2026-11-12, on E1a's fleet baseline; record §3).** 1 and 6 as E1b recorded; 2: the hook; 3: no switch; 4: accept the measured floor (verdict, control, status bracket and receipt fences stay; redesigning them is a follow-up); 5: `:39` moves; 7: per-table (no read-pool contention). The five `receipt_candidate` reads stay.
+
 ## 13. Review disposition
 
 Every finding of [PLAYBACK-START-E1-REVIEW.md](../reviews/PLAYBACK-START-E1-REVIEW-2026-11-11.md) was checked against source; none is rebutted in substance. Two are fixed by a different mechanism than the one proposed, noted below.
@@ -255,4 +257,4 @@ Every finding of [PLAYBACK-START-E1-REVIEW.md](../reviews/PLAYBACK-START-E1-REVI
 
 ## 14. Build records
 
-What E1a and E1b built, and where each departs from this text: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md) §1 (E1a, 2026-11-11) and §2 (E1b, 2026-11-11). References to "§14" above point there.
+What E1a and E1b built, and where each departs from this text: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md) §1 (E1a, 2026-11-11), §2 (E1b, 2026-11-11) and §3 (E1c, 2026-11-12). References to "§14" above point there.

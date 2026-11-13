@@ -78,7 +78,7 @@ impl AnnotationStore for HiqliteAuthStore {
         let Some(fetch) = self
             .client()
             // authority: a ratings read is a cache read; the item's own row decides what exists.
-            .query_consistent_map::<FetchRow, _>(sql, params!(item_id))
+            .query_consistent_map::<FetchRow, _>("item_ratings", sql, params!(item_id))
             .await
             .map_err(database_error)?
             .into_iter()
@@ -92,7 +92,7 @@ impl AnnotationStore for HiqliteAuthStore {
         let mut ratings = self
             .client()
             // authority: the same cache read as the fetch marker above.
-            .query_consistent_map::<RatingRow, _>(sql, params!(item_id))
+            .query_consistent_map::<RatingRow, _>("item_ratings", sql, params!(item_id))
             .await
             .map_err(database_error)?
             .into_iter()
@@ -153,7 +153,7 @@ impl AnnotationStore for HiqliteAuthStore {
         ));
         for result in self
             .client()
-            .txn(statements)
+            .txn("put_item_ratings", statements)
             .await
             .map_err(database_error)?
         {
@@ -176,7 +176,11 @@ impl AnnotationStore for HiqliteAuthStore {
                        ON CONFLICT(user_id, list, item_id) DO UPDATE SET added_at_ms = excluded.added_at_ms";
             validate_sql(sql)?;
             self.client()
-                .execute(sql, params!(user_id, list.as_str(), item_id, at_ms))
+                .execute(
+                    "set_item_listed",
+                    sql,
+                    params!(user_id, list.as_str(), item_id, at_ms),
+                )
                 .await
                 .map_err(database_error)?;
         } else {
@@ -184,7 +188,11 @@ impl AnnotationStore for HiqliteAuthStore {
                        WHERE user_id = $1 AND list = $2 AND item_id = $3";
             validate_sql(sql)?;
             self.client()
-                .execute(sql, params!(user_id, list.as_str(), item_id))
+                .execute(
+                    "set_item_listed",
+                    sql,
+                    params!(user_id, list.as_str(), item_id),
+                )
                 .await
                 .map_err(database_error)?;
         }
@@ -202,7 +210,11 @@ impl AnnotationStore for HiqliteAuthStore {
         for row in self
             .client()
             // authority: a person's own list membership, read where they wrote it.
-            .query_consistent_map::<ListNameRow, _>(sql, params!(user_id, item_id))
+            .query_consistent_map::<ListNameRow, _>(
+                "item_list_flags",
+                sql,
+                params!(user_id, item_id),
+            )
             .await
             .map_err(database_error)?
         {
@@ -232,7 +244,11 @@ impl AnnotationStore for HiqliteAuthStore {
         Ok(self
             .client()
             // authority: a person's own list, read where they wrote it.
-            .query_consistent_map::<ListRow, _>(sql, params!(user_id, list.as_str(), limit, offset))
+            .query_consistent_map::<ListRow, _>(
+                "listed_items",
+                sql,
+                params!(user_id, list.as_str(), limit, offset),
+            )
             .await
             .map_err(database_error)?
             .into_iter()
@@ -261,7 +277,11 @@ impl AnnotationStore for HiqliteAuthStore {
         Ok(self
             .client()
             // authority: a person's own list membership, read where they wrote it.
-            .query_consistent_map::<ListRow, _>(sql, params!(user_id, list.as_str(), ids))
+            .query_consistent_map::<ListRow, _>(
+                "items_on_list",
+                sql,
+                params!(user_id, list.as_str(), ids),
+            )
             .await
             .map_err(database_error)?
             .into_iter()

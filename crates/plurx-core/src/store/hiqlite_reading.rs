@@ -62,7 +62,11 @@ impl ReadingStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<ReadingRow, _>(sql, params!(user_id, item_id, file_id))
+            .query_consistent_map::<ReadingRow, _>(
+                "reading_state",
+                sql,
+                params!(user_id, item_id, file_id),
+            )
             .await
             .map_err(database_error)?
             .into_iter()
@@ -85,7 +89,11 @@ impl ReadingStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<ReadingRow, _>(sql, params!(user_id, item_id))
+            .query_consistent_map::<ReadingRow, _>(
+                "current_reading_state",
+                sql,
+                params!(user_id, item_id),
+            )
             .await
             .map_err(database_error)?
             .into_iter()
@@ -122,6 +130,7 @@ impl ReadingStore for HiqliteAuthStore {
         let returned = self
             .client()
             .execute_returning_map::<_, ReadingRow>(
+                "put_reading_state",
                 sql,
                 params!(
                     user_id,
@@ -161,7 +170,11 @@ impl ReadingStore for HiqliteAuthStore {
                    WHERE user_id = $1 AND item_id = $2 AND file_id = $3";
         validate_sql(sql)?;
         self.client()
-            .execute(sql, params!(user_id, item_id, file_id))
+            .execute(
+                "delete_reading_state",
+                sql,
+                params!(user_id, item_id, file_id),
+            )
             .await
             .map_err(database_error)?;
         Ok(())
