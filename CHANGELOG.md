@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **HDR:** fix the two remaining CM29 Smile outliers by measuring previously unreachable blue-gamut vertices with saturation-expanded synthetic probes. Existing observations retain priority; all six qualified frames stay below 0.05 dE, and every worsening coordinate is preserved. See [qualification](docs/streaming/CM29-MEASURED-GAMUT.md).
+
 - The host source census can release a dead owner's custody after the host
   has rebooted. It proves from the machine's own journal that the witness's
   kernel boot ended. A host without the identity binds had no other way to

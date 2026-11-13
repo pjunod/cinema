@@ -14,7 +14,7 @@
   "exported_csv_sha256": {
     "vertices-1000.csv": "e8cb1afb59155655fea55a6bde7dde98000c24f4be145e28e7b322e49e3ae67e",
     "vertices-2000.csv": "f567fdc3e7af926cac3930d3e2dccc8b631e54dffd4728893a3c34db699bfc42",
-    "vertices-600.csv": "00d15cce54f33361bef280d5ae1b7856e0fcfa6bc4d2afe6f7e501fb452f646b"
+    "vertices-600.csv": "235b729a1bdb46e8948a1327f7dd66f03bfdd81ec05c15a81c3d21d6a8fb06a5"
   },
   "fixtures": {
     "1000": {
@@ -189,7 +189,7 @@
         "u.f64": "636d48df2da2ec3cd270948336f11f4dbcf4b2bfccf947424d5010d20413cec5"
       },
       "max_overlap_quantized_delta_code": 8,
-      "merged_total": 31545,
+      "merged_total": 40726,
       "neutral_accepted": 30421,
       "neutral_direct": 28641,
       "overlap": 20341,
@@ -204,7 +204,9 @@
       },
       "target_id": 27,
       "target_min_nits": 0.005,
-      "target_peak_nits": 600
+      "target_peak_nits": 600,
+      "total_with_saturation_extension": 40726,
+      "neutral_dark_merged_total": 31545
     },
     "600-min0-experiment": {
       "interpretation": "Separate minimum-black experiment; does not establish independence from target minimum.",
@@ -251,5 +253,63 @@
     "identity_note": "Measurement-time header from the unmodified base commit; later integration edits in the working clone are not part of this measurement identity.",
     "path": "tools/dv_processing/dm_closed_form.h",
     "sha256": "c8337de47339b22d362575b9dbbba3d1a0cfa48cd7e468b9bfcd2017d395894f"
+  },
+  "saturation_coverage_extension": {
+    "base_commit": "e503f8bf3fca504f0facf6b26ff4306b25070cd9",
+    "prior_csv_sha256": "00d15cce54f33361bef280d5ae1b7856e0fcfa6bc4d2afe6f7e501fb452f646b",
+    "target_peak_nits": 600,
+    "target_min_nits": 0.005,
+    "saturation_gain": 0.5,
+    "lift": 0,
+    "seeds": [
+      71,
+      197
+    ],
+    "added_vertices": 9181,
+    "existing_vertices_unchanged": 31545,
+    "purpose": "Expand physical probe reach to previously unobserved blue-gamut lattice corners; no film pixels train the data.",
+    "priority": "Existing neutral and dark observations win every overlap.",
+    "accepted_supplement_vertices": 39774,
+    "max_overlap_quantized_delta_code": 7,
+    "critical_vertex": {
+      "coordinate": [
+        16,
+        -5,
+        -10
+      ],
+      "native_rgb_codes": [
+        0,
+        4784,
+        20525
+      ]
+    },
+    "sources_sha256": {
+      "probe.c": "5e22b9b5692d6f29edd22d272624263cd10e940eaba73fdea7a1939f952c59a8",
+      "coordinates.c": "7e5481a343bf3b5a78dc45e847348cc5cba9e45d13ee669d96d4f96e1c770937"
+    },
+    "datasets": [
+      {
+        "seed": 71,
+        "reference_exit_status": 0,
+        "sha256": {
+          "src.yuv": "60ea398d3dee1713e905c7432425d967ab684e5f6c58e436147b2b35bf1229dd",
+          "coords.txt": "66397254622c51d0af2d97037ec2e85b25a9871677df19bbf96f3bb5e557677c",
+          "u.f64": "6569ff31027eae416d731fc65b1be67d447543730c5ef487843d57c8c399e1ec",
+          "m.xml": "0ecfaf147d8a12292fd32f9e9b43c767a246187df4cf96c7255542f03fab9dca",
+          "reference.yuv": "b780c6ec1561f41964ba9c8099f90176945f5133b0b6547e4e71bef7d6fa8272"
+        }
+      },
+      {
+        "seed": 197,
+        "reference_exit_status": 0,
+        "sha256": {
+          "src.yuv": "b5f16f43599e3f2746361c58efc84a6853e4a35e1917897b548b0fd882673c00",
+          "coords.txt": "c0ec759a447765441eee1026b11773e36aaf45f4fb22db819223b37935e9ae76",
+          "u.f64": "0cc13e03acfa3f193b1959343b726fd985bf3c841bc5e8d36a34b5ec94460059",
+          "m.xml": "0ecfaf147d8a12292fd32f9e9b43c767a246187df4cf96c7255542f03fab9dca",
+          "reference.yuv": "2f7506058168c435929236a36e1e30c2102014228d63e563cf4611cc09d87c02"
+        }
+      }
+    ]
   }
 }

@@ -70,6 +70,16 @@ class MeasuredGamut(unittest.TestCase):
                         self.assertAlmostEqual(actual, wanted, places=7)
                     self.assertGreater(max(abs(a-b) for a, b in zip(measured, analytic)), 1)
 
+    def test_saturated_blue_corner_is_observed_without_analytic_fallback(self):
+        # Synthetic saturation-expanded probes reach this corner; neutral/dark
+        # probes could not. Its missing green caused the two Smile outliers.
+        flags, measured, analytic = self.vertex(600, .005, 1, (16, -5, -10))
+        self.assertEqual(flags, 3)
+        for actual, expected in zip(measured, (0, 4784, 20525)):
+            self.assertAlmostEqual(actual, expected, places=7)
+        self.assertLess(analytic[1], 1)
+        self.assertGreater(measured[1] - analytic[1], 4000)
+
     def test_only_exact_measured_target_uses_the_table(self):
         for peak, black, prim in ((400, .005, 1), (1600, .005, 1), (4000, .005, 1),
                                   (600.01, .005, 1), (1000, 0, 1), (1000, .0049, 1),
