@@ -352,12 +352,24 @@ function indexingWhileServingCard(readiness){
 // node's own applied replica whenever it can prove the replica is current.
 // No switch; the rows are facts loaded when the page asks.
 function appliedViewCard(readiness){
-  return setCard(`${cardHead("Applied view","Settings and playback routes read from this node's own replica when a current quorum proof covers it, and from a quorum read when it does not.",'<span class="pill">no readers yet</span>')}
+  return setCard(`${cardHead("Applied view","Settings and playback routes read from this node's own replica when a current quorum proof covers it, and from a quorum read when it does not.",`<span data-devstat="applied_view:applied_view_reads">${devReadinessPill(devReadinessRow(readiness,"applied_view","applied_view_reads"),readiness)}</span>`)}
     ${devReq(readiness,"applied_view","applied_view_proof","Replica proof present","A quorum-confirmed commit index this node has applied, inside its one-second lease. Without it every view read is a quorum read.")}
     ${devReq(readiness,"applied_view","applied_view_image","Replica image stable","Closed while a snapshot is installed, and after a failed restore until a later one completes or the node restarts.")}
     ${devReq(readiness,"applied_view","applied_view_reads","Reads through the view","View and quorum reads since this node started, and the last reason a read fell back.")}
     <p class="hint">Advisory: nothing here switches anything on or off, and fences never read the view.</p>
     ${devGraduation("settings (E1b) and media-session routes (E1c) read through the view and the fleet's authority-read rate per request drops as the E1 contract measures it.","this card goes; reading the applied replica is simply how settings and routes are served.")}`,{id:"applied-view-card"});
+}
+// D3b: one planning snapshot per create. Counts and reasons come from the
+// same readiness document as the applied-view rows; none is a setting.
+function createPlanCard(readiness){
+  return setCard(`${cardHead("Create plan","Each playback start plans from one snapshot of its source and settings. These readings show where plans came from and when a plan had to be replaced.",`<span data-devstat="create_plan:create_plan_source">${devReadinessPill(devReadinessRow(readiness,"create_plan","create_plan_source"),readiness)}</span>`)}
+    ${devReq(readiness,"create_plan","create_plan_source","Plans from this replica","The share of plans read from this node's replica, quorum reads and the last reason a plan needed quorum. Counts are since this node started.")}
+    ${devReq(readiness,"create_plan","create_plan_owner","Owner plans at a peer's binding","An owner uses the source and settings revisions a peer planned with, or asks quorum when those revisions differ or the start has no binding.")}
+    ${devReq(readiness,"create_plan","create_plan_peer_catalogs","Peer catalogs at a sender's binding","Peer catalog requests use the sender's source and settings revisions. A stale plan is refused so the sender can plan again.")}
+    ${devReq(readiness,"create_plan","create_plan_replans","Re-plans after a catalog refuted the view","How many starts planned again from quorum after a catalog found the replica's plan stale, before claiming playback.")}
+    ${devReq(readiness,"create_plan","create_plan_refusals","Views closed after an owner refusal","How many owner refusals made planning use quorum until this node could prove its replica held the source and settings revisions the owner saw.")}
+    <p class="hint">Advisory: these counts describe planning; they do not establish playback qualification.</p>
+    ${devGraduation("after a deploy, the fleet's create-plan replica share and quorum reasons are measured, stale plans re-plan safely, and playback-start qualification has its required receipts.","this card goes; planning from one snapshot is simply how playback starts.")}`,{id:"create-plan-card"});
 }
 // D1 (playback start, plan ruling 3): processed Dolby Vision / HDR10-E is an
 // upgrade after the first frame, switched in through the prepared
@@ -443,6 +455,7 @@ function developerPanel(settings,readiness,httpsCard="",sourceRecoveryHtml=""){
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
       <div class="setsection" id="enable-indexing-while-serving"><h2>Indexing while serving</h2><p>Content analysis beside playback. Automatic; the rows are advisory.</p></div>${indexingWhileServingCard(readiness)}
       <div class="setsection" id="enable-applied-view"><h2>Applied view</h2><p>Node-local reads of settings and playback routes. Automatic; the rows are advisory.</p></div>${appliedViewCard(readiness)}
+      <div class="setsection" id="create-plan"><h2>Create plan</h2><p>One source and settings snapshot per playback start. Automatic; the rows are advisory.</p></div>${createPlanCard(readiness)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
       <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}`;
 }

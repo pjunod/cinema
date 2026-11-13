@@ -706,7 +706,7 @@ function developerPanels(){
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
       shippedSource("indexingWhileServingCard"),
-      shippedSource("appliedViewCard"),
+      shippedSource("appliedViewCard"), shippedSource("createPlanCard"),
       shippedSource("processedDvUpgradeCard"), shippedSource("sourceRecoveryCard"),
       shippedSource("subtitleTranscriptionCard"),
       shippedSource("subtitleTranslationCard"),
@@ -773,6 +773,80 @@ function developerPanels(){
   );
   return panels;
 }
+
+test("Developer shows Create plan snapshot share and recovery evidence without controls", () => {
+  const requirements = [
+    {id:"create_plan_source",status:"met",evidence:"Since start: 9 of 12 plans (75%) read this node's replica and 3 read quorum; last quorum reason floor."},
+    {id:"create_plan_owner",status:"met",evidence:"2 plans asked quorum at another binding; 1 start had no binding."},
+    {id:"create_plan_peer_catalogs",status:"met",evidence:"7 peer catalogs used the sender's binding; 4 refused as stale."},
+    {id:"create_plan_replans",status:"met",evidence:"Since start: 5 re-plans."},
+    {id:"create_plan_refusals",status:"met",evidence:"Since start: 6 owner refusals."},
+  ];
+  const html = developerPanels().developerPanel({}, {items:[{id:"create_plan",requirements}]});
+  const card = /CARDHEAD:Create plan\|[\s\S]*?(?=<div class="setsection"|$)/.exec(html);
+  assert.ok(card, "the Developer panel renders Create plan, not just a detached renderer");
+  for (const row of requirements) {
+    assert.match(card[0], new RegExp(`data-devstat="create_plan:${row.id}"`));
+    assert.match(card[0], new RegExp(`data-devev="create_plan:${row.id}"`));
+    assert.ok(card[0].includes(esc(row.evidence)), `${row.id} shows the server's evidence`);
+  }
+  assert.match(card[0], /Leaves Developer when/);
+  assert.doesNotMatch(card[0], /TOG:|FOOT:|<button|<input|<select/, "planning has no operator control");
+});
+
+test("Applied view badge and Create plan rows follow arriving readiness", () => {
+  // Render the shipped cards with their actual badge argument, then discover
+  // the update targets from that markup. This covers the asynchronous path:
+  // Developer is drawn before its readiness request returns.
+  const nodes = {"[data-devstat]":[],"[data-devev]":[]};
+  const document = {querySelectorAll:selector=>nodes[selector]};
+  const cards = new Function("document","esc","setCard","cardHead", [
+    shippedConst("DEV_READINESS_LABEL"),
+    "let DEVELOPER_READINESS=null;",
+    ...["devReadinessRow","devReadinessPill","devReadinessEvidence","devReq","devGraduation",
+      "applyDeveloperReadiness","appliedViewCard","createPlanCard"].map(shippedSource),
+    "return {appliedViewCard,createPlanCard,applyDeveloperReadiness};",
+  ].join("\n"))(document,esc,body=>body,(title,description,badge)=>`<header>${title}${badge}</header>`);
+  const initial = cards.appliedViewCard(null)+cards.createPlanCard(null);
+  assert.match(initial, /<header>Applied view<span data-devstat="applied_view:applied_view_reads"><span class="pill">checking…<\/span>/);
+  assert.match(initial, /<header>Create plan<span data-devstat="create_plan:create_plan_source"><span class="pill">checking…<\/span>/);
+  assert.doesNotMatch(initial, /no readers yet/);
+  for (const attr of ["data-devstat","data-devev"]) {
+    nodes[`[${attr}]`] = [...initial.matchAll(new RegExp(`${attr}="([^"]+)"`,"g"))].map(match=>({
+      key:match[1],getAttribute:()=>match[1],innerHTML:"",textContent:"",
+    }));
+  }
+  const appliedBadges = nodes["[data-devstat]"].filter(node=>node.key==="applied_view:applied_view_reads");
+  assert.equal(appliedBadges.length,2,"the header and the reads row both receive updates");
+  const createBadges = nodes["[data-devstat]"].filter(node=>node.key==="create_plan:create_plan_source");
+  assert.equal(createBadges.length,2,"the plan header and source row both receive updates");
+  const requirements = ["source","owner","peer_catalogs","replans","refusals"].map((suffix,index)=>({
+    id:`create_plan_${suffix}`,status:"met",evidence:`Observed ${index+1} <${suffix}> & counts.`,
+  }));
+  const reading = status=>({items:[
+    {id:"applied_view",requirements:[{id:"applied_view_reads",status,evidence:"Since start: settings: 38 view, 1 quorum; routes: 19 view, 0 quorum; last fallback floor."}]},
+    {id:"create_plan",requirements},
+  ]});
+  for (const [status,label] of [["met","met"],["unmet","not met"],["unknown","unknown"]]) {
+    cards.applyDeveloperReadiness(reading(status));
+    for (const node of appliedBadges) assert.ok(node.innerHTML.includes(`>${label}</span>`));
+  }
+  for (const row of requirements) {
+    const evidence = nodes["[data-devev]"].find(node=>node.key===`create_plan:${row.id}`);
+    assert.equal(evidence.textContent,row.evidence,"asynchronous evidence stays literal text");
+  }
+  for (const node of createBadges) assert.match(node.innerHTML,/>met<\/span>/);
+  const seeded = cards.appliedViewCard(reading("met"));
+  assert.match(seeded, /<header>Applied view[\s\S]*?>met<\/span><\/span><\/header>/);
+  assert.match(seeded, /settings: 38 view, 1 quorum; routes: 19 view, 0 quorum; last fallback floor/);
+  const seededPlan = cards.createPlanCard(reading("met"));
+  assert.ok(seededPlan.includes(esc(requirements[0].evidence)),"initial evidence is escaped");
+  cards.applyDeveloperReadiness({items:[]});
+  for (const node of [...appliedBadges,...createBadges]) assert.match(node.innerHTML,/>not reported<\/span>/);
+  cards.applyDeveloperReadiness({unavailable:"offline"});
+  for (const node of [...appliedBadges,...createBadges]) assert.match(node.innerHTML,/>unavailable<\/span>/);
+  for (const node of nodes["[data-devev]"]) assert.equal(node.textContent,"The prerequisite reading failed: offline");
+});
 
 test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
   // Joined with newlines, never bare interpolation: `shippedSource` here
@@ -1056,8 +1130,10 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.ok(developerCards.length >= 15, `Developer renders its cards (${developerCards.length})`);
   // 21 since D1 (2026-11-07): the processed DV upgrade waits on its measured
   // switches. 22 since E1a (2026-11-11): the applied view waits on its
-  // readers. The bound still catches a card that should have graduated.
-  assert.ok(developerCards.length <= 23, `Developer holds only what still waits (${developerCards.length})`);
+  // readers. 23 since D3b (2026-11-13): Create plan reports its deployment
+  // evidence. 24 with reader recovery: its read-only card awaits native/fleet
+  // qualification. The bound still catches a card that should have graduated.
+  assert.ok(developerCards.length <= 24, `Developer holds only what still waits (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
