@@ -1101,7 +1101,9 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     };
                     let mut fragment = fragment;
                     if refit.is_some() {
-                        match plurx_core::segplan::refit_proof::FittedFragmentProof::observe(&fragment, init) {
+                        match plurx_core::segplan::refit_proof::FittedFragmentProof::observe(
+                            &fragment, init,
+                        ) {
                             Ok(proof) => refit_proofs.push(proof),
                             Err(reason) => return IndexOutcome::Unsupported(reason),
                         }

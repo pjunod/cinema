@@ -5246,11 +5246,19 @@ pub fn hevc_cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u
     let mut invalid = false;
     visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
         let nal = &framed[usize::from(length_size)..];
-        if kind.is_none() || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) { invalid = true; }
-        if count == 0 || matches!(kind, Some(32..=34)) { hash.update([0]); }
-        hash.update([0, 0, 1]); hash.update(nal); count += 1;
+        if kind.is_none() || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) {
+            invalid = true;
+        }
+        if count == 0 || matches!(kind, Some(32..=34)) {
+            hash.update([0]);
+        }
+        hash.update([0, 0, 1]);
+        hash.update(nal);
+        count += 1;
     })?;
-    if invalid { return malformed("fitted packet has a truncated header or unescaped Annex-B delimiter"); }
+    if invalid {
+        return malformed("fitted packet has a truncated header or unescaped Annex-B delimiter");
+    }
     Ok(hash.finalize().into())
 }
 

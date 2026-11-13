@@ -510,14 +510,33 @@ impl<S: Sink> GenerationRun<'_, S> {
             }
             return Ok(());
         }
-        if self.generation.dv_refit.is_some() && self.segmenter.is_some()
-            && self.video_bytes_of(&fragment).is_some() {
-            let row = self.fitted_next_row.ok_or_else(|| landing_failed("fitted producer lost its proof cursor".into()))?;
-            let translation = self.fitted_translation.ok_or_else(|| landing_failed("fitted producer lost its fixed clock".into()))?;
-            let index = self.generation.index.as_ref().ok_or_else(|| landing_failed("fitted producer lost its index".into()))?;
-            let init = self.fitted_init.as_ref().ok_or_else(|| landing_failed("fitted producer lost its proof init".into()))?;
-            plurx_core::segplan::refit_proof::verify_fitted_fragment(index, row, &fragment, init, translation)
-                .map_err(landing_failed)?;
+        if self.generation.dv_refit.is_some()
+            && self.segmenter.is_some()
+            && self.video_bytes_of(&fragment).is_some()
+        {
+            let row = self
+                .fitted_next_row
+                .ok_or_else(|| landing_failed("fitted producer lost its proof cursor".into()))?;
+            let translation = self
+                .fitted_translation
+                .ok_or_else(|| landing_failed("fitted producer lost its fixed clock".into()))?;
+            let index = self
+                .generation
+                .index
+                .as_ref()
+                .ok_or_else(|| landing_failed("fitted producer lost its index".into()))?;
+            let init = self
+                .fitted_init
+                .as_ref()
+                .ok_or_else(|| landing_failed("fitted producer lost its proof init".into()))?;
+            plurx_core::segplan::refit_proof::verify_fitted_fragment(
+                index,
+                row,
+                &fragment,
+                init,
+                translation,
+            )
+            .map_err(landing_failed)?;
             self.fitted_next_row = Some(row + 1);
         }
         if let Some(converter) = self.converter.as_mut() {
@@ -811,7 +830,14 @@ impl<S: Sink> GenerationRun<'_, S> {
             for original in &self.landing {
                 if original.track(video.id).is_some() {
                     if plurx_core::segplan::refit_proof::verify_fitted_fragment(
-                        index, raw_row, original, init, translation).is_err() {
+                        index,
+                        raw_row,
+                        original,
+                        init,
+                        translation,
+                    )
+                    .is_err()
+                    {
                         continue 'candidate;
                     }
                     raw_row += 1;
@@ -846,7 +872,8 @@ impl<S: Sink> GenerationRun<'_, S> {
         }
         let Some((landed, converted, observed, converter, translation)) = match_found else {
             return Err(landing_failed(
-                "no fitted landing row agrees with coded samples, cadence and converted bytes".into(),
+                "no fitted landing row agrees with coded samples, cadence and converted bytes"
+                    .into(),
             ));
         };
         self.fitted_translation = Some(translation);
@@ -1107,9 +1134,13 @@ impl<S: Sink> GenerationRun<'_, S> {
                 return outcome;
             }
         }
-        if complete && self.generation.dv_refit.is_some()
-            && self.fitted_next_row != self.generation.index.as_ref().map(|index| index.rows.len()) {
-            return landing_failed("fitted producer ended before every indexed row was verified".into());
+        if complete
+            && self.generation.dv_refit.is_some()
+            && self.fitted_next_row != self.generation.index.as_ref().map(|index| index.rows.len())
+        {
+            return landing_failed(
+                "fitted producer ended before every indexed row was verified".into(),
+            );
         }
         let Some(mut segmenter) = self.segmenter.take() else {
             unreachable!("engage constructs the segmenter or fails typed");
@@ -1678,16 +1709,27 @@ mod tests {
         sanitize_stale_dolby_brand(&mut muxer);
         film.identity = InitIdentity::establish(&muxer, film.index.promotion.clone())
             .expect("video-only fitted identity");
-        film.plan = plurx_core::segplan::plan_copy(&film.index, &film.policy,
-            &TrackDurations { video_ms: 12_000, audio_ms: 0, audio_bits_per_second: 0 });
+        film.plan = plurx_core::segplan::plan_copy(
+            &film.index,
+            &film.policy,
+            &TrackDurations {
+                video_ms: 12_000,
+                audio_ms: 0,
+                audio_bits_per_second: 0,
+            },
+        );
         let mut converter = None;
         let mut row = 0;
         let mut first_cto = None;
         let mut proofs = Vec::new();
         while let Some(unit) = reader.next_unit().expect("index fragment") {
             if let Unit::Fragment(mut fragment) = unit {
-                proofs.push(plurx_core::segplan::refit_proof::FittedFragmentProof::observe(&fragment, &init)
-                    .expect("raw fitted fixture proof"));
+                proofs.push(
+                    plurx_core::segplan::refit_proof::FittedFragmentProof::observe(
+                        &fragment, &init,
+                    )
+                    .expect("raw fitted fixture proof"),
+                );
                 if converter.is_none() {
                     let track = fragment.track(video.id).expect("video track");
                     first_cto = track.samples().next().map(|sample| sample.cto);
@@ -1813,15 +1855,22 @@ mod tests {
         let warped = testfixtures::with_dolby_vision_rpus(&pipe("clean-cra"));
         let mut muxer = muxer_init(&warped);
         sanitize_stale_dolby_brand(&mut muxer);
-        let identity = InitIdentity::establish(&muxer, film.index.promotion.clone()).expect("actual A/V init");
+        let identity =
+            InitIdentity::establish(&muxer, film.index.promotion.clone()).expect("actual A/V init");
         let mut request = generation(&film, 0);
         request.identity = identity;
         request.convert_dolby_vision = true;
         request.dv_refit = Some(table);
         let sink = MemSink::default();
         let outcome = run(&warped[..], request, &sink, "aac-clock-repair").await;
-        assert!(matches!(outcome, Outcome::Failed(Failure::Landing(_))), "{outcome:?}");
-        assert!(sink.taken().is_empty(), "warped cadence cannot publish even its first fitted segment");
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(_))),
+            "{outcome:?}"
+        );
+        assert!(
+            sink.taken().is_empty(),
+            "warped cadence cannot publish even its first fitted segment"
+        );
     }
 
     #[tokio::test]
@@ -1832,15 +1881,24 @@ mod tests {
         let mut omitted = film.feed[..cutoff].to_vec();
         box_walk(&film.feed, |name, body| {
             if name == b"mfra" {
-                omitted.extend_from_slice(&u32::try_from(body.len() + 8).expect("small trailer").to_be_bytes());
-                omitted.extend_from_slice(name); omitted.extend_from_slice(body);
+                omitted.extend_from_slice(
+                    &u32::try_from(body.len() + 8)
+                        .expect("small trailer")
+                        .to_be_bytes(),
+                );
+                omitted.extend_from_slice(name);
+                omitted.extend_from_slice(body);
             }
         });
         let mut request = generation(&film, 0);
-        request.convert_dolby_vision = true; request.dv_refit = Some(table);
+        request.convert_dolby_vision = true;
+        request.dv_refit = Some(table);
         let sink = MemSink::default();
         let outcome = run(&omitted[..], request, &sink, "missing-fitted-row").await;
-        assert!(matches!(outcome, Outcome::Failed(Failure::Landing(ref reason)) if reason.contains("every indexed row")), "{outcome:?}");
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(ref reason)) if reason.contains("every indexed row")),
+            "{outcome:?}"
+        );
     }
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {

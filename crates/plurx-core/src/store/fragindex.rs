@@ -355,11 +355,18 @@ pub(crate) fn put(
     now_ms: i64,
 ) -> Result<(), StoreError> {
     let packed = pack(&index.rows);
-    if index.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+    if index
+        .dv_refit_proofs
+        .as_ref()
+        .is_some_and(|proofs| proofs.len() != index.rows.len())
+    {
         return Err(StoreError::Task("fitted proof row count mismatch".into()));
     }
-    let metadata = IndexMetadata { promotion: index.promotion.clone(), dv_refit_origin: index.dv_refit_origin,
-        dv_refit_proofs: index.dv_refit_proofs.clone() };
+    let metadata = IndexMetadata {
+        promotion: index.promotion.clone(),
+        dv_refit_origin: index.dv_refit_origin,
+        dv_refit_proofs: index.dv_refit_proofs.clone(),
+    };
     let promotion = serde_json::to_string(&metadata)
         .map_err(|error| StoreError::Migration(error.to_string()))?;
     // The metadata-only status projection may trust this marker and nothing
@@ -527,7 +534,11 @@ pub(crate) fn get(
         Ok(inputs) => inputs,
         Err(_) => return Ok(None),
     };
-    if metadata.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+    if metadata
+        .dv_refit_proofs
+        .as_ref()
+        .is_some_and(|proofs| proofs.len() != index.rows.len())
+    {
         return Ok(None);
     }
     index.promotion = metadata.promotion;
@@ -1234,14 +1245,33 @@ mod tests {
         let conn = conn();
         let mut built = index();
         let legacy = serde_json::to_string(&built.promotion).expect("legacy promotion");
-        let metadata = IndexMetadata { promotion: built.promotion.clone(), dv_refit_origin: None, dv_refit_proofs: None };
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&metadata).expect("metadata")).expect("JSON"),
-            serde_json::from_str::<serde_json::Value>(&legacy).expect("legacy JSON"));
-        built.dv_refit_origin = Some(crate::segplan::DvRefitOrigin { first_dts: 0, first_pts: 125, time_base_num: 1, time_base_den: 1000 });
-        let proof = serde_json::from_value::<crate::segplan::refit_proof::FittedFragmentProof>(serde_json::json!("a".repeat(64))).expect("proof");
+        let metadata = IndexMetadata {
+            promotion: built.promotion.clone(),
+            dv_refit_origin: None,
+            dv_refit_proofs: None,
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &serde_json::to_string(&metadata).expect("metadata")
+            )
+            .expect("JSON"),
+            serde_json::from_str::<serde_json::Value>(&legacy).expect("legacy JSON")
+        );
+        built.dv_refit_origin = Some(crate::segplan::DvRefitOrigin {
+            first_dts: 0,
+            first_pts: 125,
+            time_base_num: 1,
+            time_base_den: 1000,
+        });
+        let proof = serde_json::from_value::<crate::segplan::refit_proof::FittedFragmentProof>(
+            serde_json::json!("a".repeat(64)),
+        )
+        .expect("proof");
         built.dv_refit_proofs = Some(vec![proof; built.rows.len()]);
         put(&conn, 7, &built, 1).expect("publish fitted metadata");
-        let loaded = get(&conn, 7, &built.source).expect("read").expect("retained index");
+        let loaded = get(&conn, 7, &built.source)
+            .expect("read")
+            .expect("retained index");
         assert_eq!(loaded, built);
     }
 

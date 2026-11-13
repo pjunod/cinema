@@ -2796,7 +2796,10 @@ pub fn encode_cluster_fragment_index_blob(
     if index.version != SEGPLAN_VERSION
         || index.timescale == 0
         || index.rows.is_empty()
-        || index.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len())
+        || index
+            .dv_refit_proofs
+            .as_ref()
+            .is_some_and(|proofs| proofs.len() != index.rows.len())
         || !is_sha256(source_sha256)
         || !is_sha256(pipeline_sha256)
     {
@@ -2943,7 +2946,11 @@ pub fn decode_cluster_fragment_index_blob(
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
     index.dv_refit_origin = header.dv_refit_origin;
-    if header.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+    if header
+        .dv_refit_proofs
+        .as_ref()
+        .is_some_and(|proofs| proofs.len() != index.rows.len())
+    {
         return Err(StoreError::Task("fitted proof row count mismatch".into()));
     }
     index.dv_refit_proofs = header.dv_refit_proofs;
@@ -3130,10 +3137,14 @@ pub fn cluster_fragment_index_output_identity(
         digest.update(origin.time_base_den.to_be_bytes());
     }
     if let Some(proofs) = &index.dv_refit_proofs {
-        if proofs.len() != index.rows.len() { return Err(v3_error("fitted proof row count mismatch")); }
+        if proofs.len() != index.rows.len() {
+            return Err(v3_error("fitted proof row count mismatch"));
+        }
         digest.update(b"plurx/fitted-copy/ordered-coded-cadence/v3\0");
         digest.update((proofs.len() as u64).to_be_bytes());
-        for proof in proofs { digest.update(proof.as_bytes()); }
+        for proof in proofs {
+            digest.update(proof.as_bytes());
+        }
     }
     let value = serde_json::to_value(&promotion)
         .map_err(|error| StoreError::Task(format!("encoding v3 promotion: {error}")))?;
@@ -3331,7 +3342,11 @@ pub fn decode_cluster_fragment_index_blob_v3(
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
     index.dv_refit_origin = header.dv_refit_origin;
-    if header.dv_refit_proofs.as_ref().is_some_and(|proofs| proofs.len() != index.rows.len()) {
+    if header
+        .dv_refit_proofs
+        .as_ref()
+        .is_some_and(|proofs| proofs.len() != index.rows.len())
+    {
         return Err(StoreError::Task("fitted proof row count mismatch".into()));
     }
     index.dv_refit_proofs = header.dv_refit_proofs;
