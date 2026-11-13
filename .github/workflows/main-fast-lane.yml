@@ -3,6 +3,14 @@ name: main fast lane
 # Every main-bound pull request, as soon as it is ready. `ready_for_review`
 # is what starts the lane now — a PR that is marked ready and merged can no
 # longer skip the gate, which is what an opt-in label allowed.
+#
+# With the merge train on (repository variable MERGE_TRAIN = on) the lane's
+# jobs after paperwork run only on the train's own pull requests: head
+# `train/...`, opened by the train's bot (MERGE_TRAIN_BOT, default train-bot).
+# A train PR is main plus the boarded PRs, so its promotion gate is the gate
+# for every one of them; a per-PR run would test a tree that never lands.
+# Off (unset or anything but `on`), every PR runs the whole lane as before.
+# docs/ci/MERGE-TRAIN.md.
 on:
   pull_request:
     branches: [main]
@@ -61,6 +69,8 @@ jobs:
           if python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env; then
             exit 0
           fi
+          # A merge train's tree is exactly the PRs it tests: never fix it in place.
+          case "$HEAD_REF" in train/*) exit 1 ;; esac
           # Derivable bookkeeping is fixed on the branch instead of failing the
           # lane (docs/ci/PAPERWORK.md "What fixes itself"). Anything else, or
           # a head that is already a fix, fails here with paperwork's own fix.
@@ -94,7 +104,11 @@ jobs:
     # `fast-lane` label, and the label is what let three lanes merge in one day
     # without this workflow ever running - one of them carrying a fix for the
     # regression the lane before it had shipped to the fleet.
-    if: github.event.pull_request.draft == false
+    # With the merge train on, only the train's own PRs go further (header).
+    if: >-
+      github.event.pull_request.draft == false &&
+      (vars.MERGE_TRAIN != 'on' || (startsWith(github.event.pull_request.head.ref, 'train/') &&
+       github.event.pull_request.user.login == (vars.MERGE_TRAIN_BOT || 'train-bot')))
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
@@ -105,6 +119,9 @@ jobs:
       web_layout: ${{ steps.scope.outputs.web_layout }}
       mobile_version: ${{ steps.scope.outputs.mobile_version }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
+      preflight: ${{ steps.scope.outputs.preflight }}
+      worker_control: ${{ steps.scope.outputs.worker_control }}
+      train_selected: ${{ steps.scope.outputs.train_selected }}
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -115,14 +132,18 @@ jobs:
         id: scope
         env:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
-        run: >-
-          python3 -m validation.ci_scope
-          --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}
+        # validation/merge_train.py: on a merge-train probe only its
+        # `Train-Jobs:` run; anywhere else the scope passes through.
+        run: |
+          set -euo pipefail
+          python3 -m validation.ci_scope --event pull_request --base "$VALIDATION_BASE" \
+            | python3 -m validation.merge_train scope >> "$GITHUB_OUTPUT"
 
   worker_control_proof:
     name: production worker controller proof
     needs: scope
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft == false && needs.scope.outputs.worker_control == 'true'
     runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
@@ -269,6 +290,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
+    if: needs.scope.outputs.preflight == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     # A cold continuation can run the full unit set when older receipts cannot
     # authenticate. History alone took seven minutes in run 6234; allow the
@@ -715,9 +737,14 @@ jobs:
 
   promotion_gate:
     name: Main promotion gate
+    # Not on a merge-train probe (it runs a few jobs only, and the train
+    # judges those itself), and with the train on only on the train's PRs.
     if: >-
       always() &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      needs.scope.outputs.train_selected != 'true' &&
+      (vars.MERGE_TRAIN != 'on' || (startsWith(github.event.pull_request.head.ref, 'train/') &&
+       github.event.pull_request.user.login == (vars.MERGE_TRAIN_BOT || 'train-bot')))
     needs:
       - paperwork
       - scope

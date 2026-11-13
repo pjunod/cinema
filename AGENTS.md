@@ -49,6 +49,16 @@ decides what a session costs. Every agent working here, Claude or GPT:
 - **Review the diff, not the repo.** An adversarial review gets the diff, the
   touched files' outlines and the relevant plan's head.
 
+## Landing on main: the merge train
+
+Read [docs/ci/MERGE-TRAIN.md](docs/ci/MERGE-TRAIN.md) before you merge
+anything into `main`. When the repository variable `MERGE_TRAIN` is `on`, you
+do not merge your own PR: take `WIP:` off its title and the merge train tests
+it with the PRs queued with it and merges it (`hold` keeps a ready PR out,
+`train:solo` sends a hotfix next, alone; putting `WIP:` back takes it off).
+The bot's single comment on the PR says where it stands. When `MERGE_TRAIN` is
+unset or `off`, land your PR yourself as below.
+
 ## Before you push: paperwork
 
 `make paperwork` (`scripts/paperwork`) checks, in about ten seconds, the
