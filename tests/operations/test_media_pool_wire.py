@@ -544,9 +544,12 @@ def protocol_version(source: str) -> int | None:
 
 
 def rollout_notes(operations: str) -> str:
-    start = operations.find(ROLLING_HEADING)
-    if start < 0:
+    # The heading itself, at the start of a line: the document's contents list
+    # names it in backticks first, and that mention is not the section.
+    heading = re.search(rf"^{re.escape(ROLLING_HEADING)}[ \t]*$", operations, re.MULTILINE)
+    if heading is None:
         return ""
+    start = heading.start()
     end = operations.find("\n## ", start + len(ROLLING_HEADING))
     return operations[start : end if end >= 0 else len(operations)]
 
@@ -967,3 +970,13 @@ class TreeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RolloutNotesTests(unittest.TestCase):
+    def test_the_section_is_found_past_a_contents_line_naming_it(self):
+        operations = (
+            "# Operations\n  - upgrades: `## Rolling upgrades`\n\n## Overview\ntext\n"
+            "## Rolling upgrades\n- 2026-11-12: protocol 10 — a change.\n## Next\n"
+        )
+        self.assertTrue(has_dated_note(rollout_notes(operations), 10))
+        self.assertFalse(has_dated_note(rollout_notes(operations), 11))
