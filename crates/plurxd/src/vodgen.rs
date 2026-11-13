@@ -1561,18 +1561,15 @@ mod tests {
     }
 
     /// Build a fitted index from the same RPU-bearing video-only pipe that
-    /// `converting_film` used. The two scene curves straddle row one, so a
-    /// candidate placed at row zero and a candidate placed at row one rewrite
-    /// the first buffered RPU differently.
+    /// `converting_film` used. An identity scene and a fitted scene straddle
+    /// row one, so the two candidate clocks rewrite the first RPU with
+    /// different lengths.
     async fn fitted_film() -> (Film, std::sync::Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>) {
         use plurx_core::transcode::dv_refit::{servable, RefitCurves};
         use plurx_core::transcode::dv_refit_serve::{ServedCurveTable, SourceClock};
         let mut film = converting_film().await;
-        let mut left = RefitCurves::identity();
         let mut right = RefitCurves::identity();
-        for piece in &mut left.luma { piece[0] += 2.0 / 4095.0; }
         for piece in &mut right.luma { piece[0] += 90.0 / 4095.0; }
-        let left = servable(&left).expect("first fitted scene");
         let right = servable(&right).expect("second fitted scene");
         let split = i64::try_from(film.index.rows[1].dts - film.index.rows[0].dts)
             .expect("scene boundary");
@@ -1582,7 +1579,7 @@ mod tests {
         let base = format!("1/{}", film.index.timescale);
         let table = std::sync::Arc::new(ServedCurveTable::from_servable(
             "d".repeat(64),
-            [(0, split, base.as_str(), Some(&left)),
+            [(0, split, base.as_str(), None),
              (split, end, base.as_str(), Some(&right))],
         ).expect("servable fitted table"));
 
