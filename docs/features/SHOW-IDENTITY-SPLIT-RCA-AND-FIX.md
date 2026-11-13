@@ -46,6 +46,17 @@ also captures every owner in a conservative indexed neighborhood, so a newly
 introduced sibling refuses a stale plan instead of escaping its preimage.
 Unrelated neighbors can invalidate a preview but never join the repair.
 
+Formal source-mapping review: the scanner directory lookup, identity-repair
+stale-plan guard and added catalogue tests change files pinned by the durable
+jobs and operation-progress packages. Their selected insertion, renewal,
+acknowledgement, walker/cancellation and per-file I/O authority anchors retain
+their behavior. The current base already carries the portable Linux
+declarations and custody fixes; their source pins remain unchanged. Refresh
+only the catalogue-touched whole-file source pins;
+no model action, configuration, invariant or fairness assumption changes.
+Catalogue consolidation remains outside the finite models and is covered by
+the focused runtime contract, rather than inferred from TLC results.
+
 Focused regressions cover targeted imports after title enrichment, a family
 without a physical base directory, overlapping file versions and watch-state
 preservation, exact suffix boundaries, and backend-neutral consolidation.
