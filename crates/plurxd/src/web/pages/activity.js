@@ -150,6 +150,8 @@ function durableJobReason(job){
   }
   // The title scan also measures a Profile 7 FEL title for the reconstructed
   // Profile 8.1, on this node's GPU, while it runs (FEL-P81-RECONSTRUCTION.md).
+  if(job.kind==="dv_refit"&&job.state==="running")return "Dolby Vision F+ curve fit. A Profile 7 FEL title is decoded on the CPU to fit the Profile 8.1 mapping copy playback can serve; it shares the CPU with playback and resumes where it left off if a viewer needs the capacity.";
+  if(job.kind==="dv_refit"&&["failed","cancelled"].includes(job.state))return "Dolby Vision F+ curve fit. This title is not fitted again automatically until its source changes; Retry fits it again.";
   if(job.kind==="dv_title_scan"&&job.state==="running")return "Complete-title Dolby Vision scan. A Profile 7 FEL title is also measured on the GPU (render, encode and compare sample windows) to decide whether it is served the reconstructed Profile 8.1.";
   if(job.library_id==null||job.state!=="queued"||!["library_scan","metadata_refresh"].includes(job.kind))return "";
   // Eligibility is a local observation, not a durable failure. Match by ID so

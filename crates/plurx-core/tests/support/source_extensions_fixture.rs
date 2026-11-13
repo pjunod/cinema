@@ -584,7 +584,8 @@ fn rewind_dv_refit_to_v129(connection: &rusqlite::Connection) {
     let rows: i64 = connection
         .query_row(
             "SELECT (SELECT count(*) FROM background_dv_refit_titles)
-              + (SELECT count(*) FROM background_dv_refit_scenes)",
+              + (SELECT count(*) FROM background_dv_refit_scenes)
+              + (SELECT count(*) FROM background_dv_refit_outcomes)",
             [],
             |row| row.get(0),
         )

@@ -745,6 +745,24 @@ struct PlurxAPI {
         try await get("developer/readiness")
     }
 
+    /// A Developer switch is a named `PUT /settings` field (the readiness
+    /// item's `setting`); the server answers with the saved settings.
+    func setDeveloperSwitch(field: String, enabled: Bool) async throws {
+        struct Saved: Decodable {}
+        let _: Saved = try await put("settings", body: [field: enabled])
+    }
+
+    /// `DELETE /developer/dv-refit/spool`: this node's F+ statistics spool.
+    func clearDolbyVisionRefitSpool() async throws -> Int {
+        struct Cleared: Decodable { let removed: Int }
+        guard let url = makeURL("developer/dv-refit/spool") else { throw APIError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        Session.shared.authorize(&req)
+        let cleared: Cleared = try await run(req)
+        return cleared.removed
+    }
+
     /// `vod` describes the presentation the server selected; it is not a
     /// client compatibility gate. During index recovery the same HLS contract
     /// is served by the retained live engine and arrives as `vod: false`.

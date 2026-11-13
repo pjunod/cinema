@@ -11,13 +11,24 @@ bump may break compatibility and a **patch** bump never does.
 ### Added
 
 - A per-title `dv_refit` background job fits F+ mapping curves for Profile 7
-  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3). It runs the Dolby Vision
-  helper's `--refit-stats` mode over the whole title on the title lane, shows
-  as "Dolby Vision F+ curve fit" in Activity, yields to media probes, and can
-  be cancelled and retried from the background-jobs page. Each scene's curves
-  or refusal, both statistics sets and the title's verdict, gain and curve
-  digest are stored per source (SQLite v130; a shape-verified hiqlite
-  extension). Nothing serves the curves yet.
+  FEL titles (FEL-RPU-REFIT-BUILD.md milestone 3), while any of four new
+  Developer switches is on (`playback.dolby_vision_refit_web`, `_apple`,
+  `_android`, `_linux`, default off; web and Apple Settings). It runs the
+  Dolby Vision helper's `--refit-stats` mode over the whole title beside
+  playback on a 3-thread reservation, shows as "Dolby Vision F+ curve fit" in
+  Activity, resumes from a node-local spool after a preemption, and can be
+  cancelled and retried from the background-jobs page; a failed or cancelled
+  title is not fitted again until its source changes or it is retried. Each
+  title's curve table (scene spans, the quantised served coefficients, held-out
+  errors, verdict and curve digest) is published in one replicated write
+  (SQLite v130; a shape-verified hiqlite extension; carried by the SQLite to
+  cluster import), and a superseded table stays addressable by digest for
+  seven days. The Developer card lists and deletes the spool. Nothing serves
+  the curves yet.
+- The Dolby Vision helper's `--refit-stats` mode takes `--threads N` and
+  `--resume FIRST FIRST_PTS`, reports each scene's RPU scene lengths, exits 3
+  for a refusal of the title's content (1 for any other failure), and logs
+  nothing from libav.
 
 ### Fixed
 

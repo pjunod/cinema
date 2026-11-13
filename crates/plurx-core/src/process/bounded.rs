@@ -184,6 +184,7 @@ pub async fn output_command(
         Environment::Service,
         None,
         &[],
+        None,
     )
     .await
 }
@@ -210,6 +211,7 @@ pub async fn output_command_clean_env(
         Environment::Clean,
         None,
         &[],
+        None,
     )
     .await
 }
@@ -231,6 +233,7 @@ pub async fn output_command_inherited_env(
         Environment::Inherited,
         None,
         &[],
+        None,
     )
     .await
 }
@@ -259,6 +262,38 @@ pub async fn output_command_bundle_env(
         Environment::Clean,
         None,
         bundle_env,
+        None,
+    )
+    .await
+}
+
+/// [`output_command_bundle_env`] with the child's stdout written straight to
+/// `stdout` (an open, writable file) as it is produced, so whatever a long
+/// run printed survives its interruption. The returned output's `stdout` is
+/// empty; `max_stderr_bytes` bounds what is kept of stderr.
+pub async fn output_command_bundle_env_to_file(
+    command: &mut Command,
+    wall_time: Duration,
+    max_stderr_bytes: usize,
+    work: super::ChildWork,
+    bundle_env: &[(String, std::ffi::OsString)],
+    stdout: std::fs::File,
+) -> io::Result<Output> {
+    if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed child executable must be absolute",
+        ));
+    }
+    output_command_environment(
+        command,
+        wall_time,
+        max_stderr_bytes,
+        work,
+        Environment::Clean,
+        None,
+        bundle_env,
+        Some(stdout),
     )
     .await
 }
@@ -288,6 +323,7 @@ pub async fn output_command_clean_env_selected_stderr(
         Environment::Clean,
         Some(select),
         &[],
+        None,
     )
     .await
 }
@@ -307,6 +343,7 @@ async fn output_command_environment(
     environment: Environment,
     stderr_selector: Option<fn(&[u8]) -> bool>,
     bundle_env: &[(String, std::ffi::OsString)],
+    stdout_file: Option<std::fs::File>,
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
@@ -320,9 +357,10 @@ async fn output_command_environment(
     for (name, value) in bundle_env {
         command.env(name, value);
     }
+    let stdout_to_file = stdout_file.is_some();
     command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
+        .stdout(stdout_file.map_or_else(std::process::Stdio::piped, std::process::Stdio::from))
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     if matches!(environment, Environment::Service) {
@@ -358,15 +396,21 @@ async fn output_command_environment(
         None => None,
     };
     let (mut child, job) = super::spawn_job_owned(command, work)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("probe stdout was not piped"))?;
+    let stdout = child.stdout.take();
+    if stdout.is_none() && !stdout_to_file {
+        return Err(io::Error::other("probe stdout was not piped"));
+    }
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
-    let mut stdout = tokio::spawn(drain_capped(stdout, max_output_bytes));
+    let mut stdout = tokio::spawn(async move {
+        match stdout {
+            Some(stdout) => drain_capped(stdout, max_output_bytes).await,
+            // Written straight to the caller's file; nothing to collect.
+            None => Ok(Vec::new()),
+        }
+    });
     let mut stderr = tokio::spawn(async move {
         match stderr_selector {
             Some(select) => drain_selected_lines(stderr, max_output_bytes, select).await,

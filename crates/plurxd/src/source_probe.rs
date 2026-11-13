@@ -10,6 +10,57 @@ mod refit_work;
 #[cfg(target_os = "linux")]
 mod title_work;
 
+/// The F+ statistics spool under a node's runtime cache (decision A):
+/// node-local, never replicated, listed and deleted from Developer.
+pub(crate) const REFIT_SPOOL_DIR: &str = "dv-refit";
+
+pub(crate) fn refit_spool_root(runtime_cache: &std::path::Path) -> std::path::PathBuf {
+    runtime_cache.join(REFIT_SPOOL_DIR)
+}
+
+/// (complete, bytes) per spool file.
+pub(crate) fn refit_spool_list(root: &std::path::Path) -> Vec<(bool, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::list(root)
+            .into_iter()
+            .map(|e| (e.complete, e.bytes))
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+pub(crate) fn refit_spool_entries(root: &std::path::Path) -> Vec<serde_json::Value> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::list(root)
+            .into_iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+pub(crate) fn refit_spool_clear(root: &std::path::Path) -> std::io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        dv_refit::clear(root)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Ok(0)
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use dv_title::{publish_title_for_control, publish_title_with_tools_for_control};
 

@@ -172,42 +172,107 @@ segment_decode_render --dump-composed SOURCE VIDEO_INDEX FIRST LAST
 It yields to media probes like the title scan does. It is attributable and
 stoppable from the background-jobs page, because it decodes a whole title
 on the CPU (Paul's rule: hardware use has to be visible and stoppable from
-inside the product). Request identity hashes the file, the probe revision,
-the helper identity and `dv_refit::FIT_VERSION`.
+inside the product). Request identity hashes the source, the selected
+video stream, the helper's refit identity and `dv_refit::FIT_VERSION` (the
+probe revision was dropped from it in review; see below).
 
-As built (milestone 3, `source_probe/refit_work.rs`,
-`store/dv_refit_jobs.{rs,sql}`, `transcode/dv_refit_title.rs`):
+As built (milestone 3, `source_probe/{refit_work,dv_refit}.rs`,
+`store/dv_refit_jobs.{rs,sql}`, `transcode/dv_refit_title.rs`; reworked after
+review of PR #1565):
+- **Switches.** Four Developer switches, one per
+  `playback_control::ClientPlatform`: `playback.dolby_vision_refit_web`,
+  `_apple`, `_android`, `_linux`, default off. Demand runs only while one is
+  on; copy-path serving (milestone 4) reads each. The card's rows are
+  advisory: whether this node's helper supports `--refit-stats`, N of M
+  Profile 7 FEL titles fitted, the spool's size, and the measured clients
+  line ("Apple app on macOS applies the 8.1 mapping (AVPlayerLayer); Lenovo
+  TB322FC (Android) ignores it; iOS, tvOS, Google TV, web unobservable").
 - **FEL, not MEL.** No catalogue fact separates them: the title scan's
   aggregate does not record the EL type. Demand takes a Profile 7 title with
   an EL and a published complete title aggregate only when its probe
   document holds a FEL fact for the current source (a FEL recipe request, a
-  recipe verdict or a legacy verdict). Only the FEL route writes those, and it
-  plans only for a source whose RPUs parse as FEL. A helper refusal (nonzero
-  exit, one stderr line) is stored as a `refused` title, so a title the
-  helper will not fit is not decoded again until its identity changes.
-- **Probe revision** is the title scan's demand generation
-  (`dv_title_jobs_demand.revision`): it moves with a fresh probe, a source
-  change and a scanner rebind, which also drop the aggregate the fit read.
-- **Storage.** `background_dv_refit_titles` (one row per file) and
-  `background_dv_refit_scenes`. A scene's two statistics sets are about
-  42 KB of JSON (the recorded Michael5400 run), so a feature film of ~1,500
-  scenes stores ~65 MB (an open question for review: see the milestone 3
-  PR); one replicated write
-  may not exceed the 16 MiB WAL entry. The attempt stages its scenes in
-  pages of at most 4 MiB under its token, and publication adopts exactly
-  those scenes, replaces the older fit and settles the job in one
-  transaction. A trigger on the job deletes an attempt's staged scenes when
-  it stops running or changes claim, so a cancel leaves no partial rows.
-- **Parsing.** The job reads the helper's lines through `dv_refit`'s typed
-  `RefitScene`/`RefitSummary` and `check_refit_run`, requires the run to
-  start at frame 0, and stores each scene's `first_pts` and `end_pts`; it
-  does not pool (the helper does). Output that breaks the contract fails the
-  job with nothing stored; it is not retried, since the same bits through
-  the same helper print the same thing.
-- **Title verdict.** Held-out squared error is pooled over the scenes,
-  counting identity for a refused scene; the gain is 1 − served/identity,
-  and under 5% the title serves identity. A degenerate summary is identity
-  for the whole title.
+  recipe verdict or a legacy verdict). Only the FEL route writes those, so a
+  FEL title the FEL route never planned for is not fitted. That coverage gap
+  is a follow-up: milestone 5 records the EL kind with the title facts.
+- **Identity** (the job's dedupe key) is the source (file, size, mtime), the
+  selected video stream, the helper's refit identity and `FIT_VERSION`. The
+  refit identity is `REFIT_MODE_VERSION` (bumped when `refit_mode.h` or
+  `refit_compose.h` change what a run prints; a test pins their sha256) and
+  the decoder ABI (the bundle's avcodec/avformat/avutil majors), not the
+  whole backend digest, so rebuilding the bundle for an unrelated change does
+  not decode every FEL title again. The complete title aggregate is a demand
+  precondition, not part of the identity. The title-scan generation
+  (`dv_title_jobs_demand.revision`) is recorded; when a newer generation
+  selects the same stream of the same source, the stored table (or terminal
+  outcome) is rebound to it instead of fitted again.
+- **Storage (one replicated write).** Statistics are never replicated.
+  `background_dv_refit_titles` (keyed by file and curve digest) holds the
+  title row; `background_dv_refit_scenes` each scene's first frame, frames,
+  `first_pts`/`end_pts`/time base, the served coefficients as the numerators
+  over 2^23 `apply_to_rpu` writes (identity: NULL), why a scene keeps
+  identity, and its held-out identity error, fitted error and gain. Error
+  numbers and the title's gain are stored as Rust's shortest round-trip
+  decimal text (`{:e}`), so they read back bit for bit; serde_json's
+  `float_roundtrip` is no longer used anywhere. A scene is about 1.2 KB with
+  curves; a publication is bounded at 12 MiB (some 10,000 fitted scenes), and
+  a title over it fails rather than splitting. The publication checks its
+  own rows (contiguity, the digest, every served table loading back through
+  `ServableCurves::from_quantised`, finite numbers, the bound) before it is
+  sent; a failure there settles Fail.
+- **Tables by digest.** Publication makes the new table current and the
+  file's previous one superseded, in the same transaction; a superseded table
+  stays addressable by `dv_refit_curves_by_digest(file_id, digest)` for seven
+  days after supersession, then publication or the idle pass's prune drops
+  it. `dv_refit_curves(file_id)` reads the current one. Both read with the
+  authority's consistency (a follower's local copy may still hold a table
+  publication has superseded) and require the catalogue row to still name the
+  table's source. A changed source (size or mtime) drops every table and
+  outcome of the file and supersedes its jobs (`background_dv_refit_source_change`).
+- **The spool.** The helper's stdout is written into a node-local spool
+  (`<runtime cache>/dv-refit`), keyed by the source, the stream and the refit
+  identity: `<key>.jsonl.gz` once a run completed, `<key>.partial` for the
+  whole scene lines of interrupted runs. A `FIT_VERSION` bump re-solves from
+  a complete spool without decoding; without one it decodes again. The
+  Developer card lists it (`GET /api/v1/developer/dv-refit/spool`) and deletes
+  it (`DELETE` on the same path).
+- **Resume and coexistence.** The helper resumes at a pooled scene's start
+  (`--resume FIRST FIRST_PTS`: it seeks to the key frame before it and
+  composes from there, its summary covering only that run). The job resumes
+  at the start of the last whole scene line the spool kept and joins the
+  resumed scenes to the ones before them; `dv_refit::summarise` rebuilds the
+  whole title's summary from the scenes' `rpu_scene_frames`. The helper's own
+  control (`controls/test_refit_resume.py`) shows the resumed scenes equal an
+  uninterrupted run's at every boundary of the real clip (resuming at frame
+  286 of 311 takes 1.1 s against 13.1 s). The helper runs with `--threads 2`
+  and the job reserves exactly 3 CPU threads (measured on nuc3: 1 thread 39 s
+  at 1.0 core, 2 threads 21.9 s at 2.2 cores, 3 threads 16 s at 3.2 cores, 4
+  threads no faster). It is admitted beside live sessions when that fits the
+  software budget and no viewer waits, and yields only when a viewer or an
+  offline download waits for capacity, or to a media probe. A yield keeps the
+  spool and requeues the same identity; a yield that kept no new scene counts
+  toward a bound of 8 in a row, after which it settles as a retry.
+- **Classification.** The helper exits 3 for a content refusal (not FEL, a
+  full-resolution or half-resolution EL that is not FEL-composable, the active
+  area, the stream) and 1 for any other refusal (I/O, allocation, decoder,
+  arguments); libav logging is quiet. The job reads only the exit status:
+  exit 3 stores a `refused` title with the last stderr line as its reason;
+  any other exit, a signal or a spawn error retries, resuming from the spool.
+- **Terminal outcomes.** A failed (after its retries) or cancelled identity
+  is recorded in `background_dv_refit_outcomes`, which outlives the job row,
+  so retention pruning job history does not demand the title again. A new
+  job for the identity (Retry on the jobs page) lifts it. Deterministic
+  failures (malformed output, a solve failure, rows that fail their check)
+  settle Fail; publication store errors retry with backoff while the lease
+  holds; a fenced publication settles nothing.
+- **Parsing and solving** run off the async runtime. The title verdict is as
+  before: held-out squared error pooled over the scenes, counting identity for
+  a refused scene; gain 1 − served/identity; under 5% the title serves
+  identity; a degenerate summary is identity for the whole title. The curve
+  digest is sha256 over each scene's span and served integers.
+- **Acceptance.** Two real helper runs over the Michael5400 window print the
+  same bytes and the same digest
+  (`2a8d78f7cf05fff325afe70c4f5ce2d1972317027cd0bdb045202d16310cb75b`,
+  pinned by `dv_refit_title` tests against the recorded run).
 
 ### 3.4 Solving and guard rails
 

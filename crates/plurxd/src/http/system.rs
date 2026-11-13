@@ -2554,6 +2554,11 @@ pub struct SettingsDto {
     pub dolby_vision_hdr_processing: bool,
     pub dolby_vision_display_target: bool,
     pub dolby_vision_fel_reencode: bool,
+    /// F+ curves per client platform, default off (Developer).
+    pub dolby_vision_refit_web: bool,
+    pub dolby_vision_refit_apple: bool,
+    pub dolby_vision_refit_android: bool,
+    pub dolby_vision_refit_linux: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -3073,6 +3078,22 @@ async fn settings_dto(
             setting(keys::DV_FEL_REENCODE).as_deref(),
             false,
         ),
+        dolby_vision_refit_web: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_WEB).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_apple: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_APPLE).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_android: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_ANDROID).as_deref(),
+            false,
+        ),
+        dolby_vision_refit_linux: plurx_core::store::stored_switch(
+            setting(keys::DV_REFIT_LINUX).as_deref(),
+            false,
+        ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -3363,6 +3384,10 @@ pub struct UpdateSettings {
     pub dolby_vision_hdr_processing: Option<bool>,
     pub dolby_vision_display_target: Option<bool>,
     pub dolby_vision_fel_reencode: Option<bool>,
+    pub dolby_vision_refit_web: Option<bool>,
+    pub dolby_vision_refit_apple: Option<bool>,
+    pub dolby_vision_refit_android: Option<bool>,
+    pub dolby_vision_refit_linux: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -3539,6 +3564,10 @@ impl UpdateSettings {
             || self.dolby_vision_hdr_processing.is_some()
             || self.dolby_vision_display_target.is_some()
             || self.dolby_vision_fel_reencode.is_some()
+            || self.dolby_vision_refit_web.is_some()
+            || self.dolby_vision_refit_apple.is_some()
+            || self.dolby_vision_refit_android.is_some()
+            || self.dolby_vision_refit_linux.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -4586,6 +4615,30 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::DV_FEL_REENCODE, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_web {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_WEB, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_apple {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_APPLE, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_android {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_ANDROID, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.dolby_vision_refit_linux {
+        state
+            .store
+            .put_setting(keys::DV_REFIT_LINUX, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(output) = live_tv_deinterlace_output {

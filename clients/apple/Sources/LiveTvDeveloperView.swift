@@ -18,6 +18,7 @@ struct LiveTvDeveloperView: View {
                 Text("Awaiting privacy/resource qualification and physical phone, iPad and Apple TV approval-flow acceptance. This advisory graduates from Developer after those checks pass; local history remains a privacy choice in Help.").font(.caption)
             }
             SharedSharingDeveloperCard()
+            DolbyVisionRefitDeveloperCard()
             Section("Cinema remotes · advisory enablement") {
                 Toggle("Enable Cinema remotes on this installation", isOn: $cinemaRemoteEnabled)
                 Text(remoteClient.status)

@@ -249,6 +249,35 @@ pub(crate) async fn reprobe_macos_video(
     )
 }
 
+/// `GET /api/v1/developer/dv-refit/spool` — admin: this node's F+
+/// statistics spool, one entry per file.
+pub(crate) async fn refit_spool(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let entries = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_entries(&root))
+        .await
+        .unwrap_or_default();
+    let bytes: u64 = entries.iter().map(|e| e["bytes"].as_u64().unwrap_or(0)).sum();
+    Json(serde_json::json!({"node_id": state.node_id, "entries": entries, "bytes": bytes}))
+}
+
+/// `DELETE /api/v1/developer/dv-refit/spool` — admin: deletes this node's
+/// F+ statistics spool. Stored curve tables are unaffected; a later fit of
+/// a title decodes it again, and a running fit restarts its title.
+pub(crate) async fn clear_refit_spool(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let removed = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_clear(&root))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({"node_id": state.node_id, "removed": removed})))
+}
+
 /// Neutral admin entry point; saved Mac choices do not govern Linux probing.
 pub(crate) async fn reprobe_video_processing(
     _admin: AdminUser,
@@ -525,6 +554,8 @@ pub(crate) async fn readiness(
         })
         .await?;
 
+    let [refit_web, refit_apple, refit_android, refit_linux] =
+        dolby_vision_refit(&state, &settings).await;
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
@@ -627,6 +658,10 @@ pub(crate) async fn readiness(
             dolby_vision_fel_reencode(&state, plurx_core::store::stored_switch(
                 settings.get(plurx_core::store::keys::DV_FEL_REENCODE).map(String::as_str), false),
                 convert_on).await,
+            refit_apple,
+            refit_web,
+            refit_android,
+            refit_linux,
             source_probe_comparison().await,
             output_preparation(&state, &settings).await,
             rolling_retention(&state, &settings).await,
@@ -2172,6 +2207,132 @@ async fn dolby_vision_fel_reencode(
         let _ = state;
         dolby_vision_fel_reencode_item(enabled, convert_on, Ok(false), None)
     }
+}
+
+/// What the client platforms do with an 8.1 mapping they are served, as
+/// measured. Advisory: nothing reads it.
+pub(crate) const DV_REFIT_CLIENTS: &str = "measured: Apple app on macOS applies the 8.1 mapping (AVPlayerLayer); Lenovo TB322FC (Android) ignores it; iOS, tvOS, Google TV, web unobservable";
+
+/// The F+ curve fit's four per-platform switches (`playback.dolby_vision_refit_*`,
+/// in `ClientPlatform` order: web, apple, android, linux). The Apple row
+/// carries the node's readings; every row carries the measured client
+/// behaviour. All advisory: a switch saves whatever the rows say.
+async fn dolby_vision_refit(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> [DeveloperEnableItem; 4] {
+    let on = |key: &str| plurx_core::store::stored_switch(settings.get(key).map(String::as_str), false);
+    let keys = plurx_core::store::keys::DV_REFIT_PLATFORMS;
+    #[cfg(target_os = "linux")]
+    let helper = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+        Ok(Some(tools)) => Ok(Some(format!(
+            "refit mode {}, decoder {}",
+            crate::vodencode::dv_runtime::REFIT_MODE_VERSION,
+            tools.decoder_abi()
+        ))),
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let helper: Result<Option<String>, String> = Ok(None);
+    let progress = state
+        .store
+        .dv_refit_progress()
+        .await
+        .map_err(|error| error.to_string());
+    let root = crate::source_probe::refit_spool_root(&state.runtime_cache_dir);
+    let spool = tokio::task::spawn_blocking(move || crate::source_probe::refit_spool_list(&root))
+        .await
+        .unwrap_or_default();
+    let [web, apple, android, linux] =
+        dolby_vision_refit_items([on(keys[0]), on(keys[1]), on(keys[2]), on(keys[3])], helper, progress, &spool);
+    [web, apple, android, linux]
+}
+
+fn dolby_vision_refit_items(
+    enabled: [bool; 4],
+    helper: Result<Option<String>, String>,
+    progress: Result<plurx_core::store::dv_refit_jobs::RefitProgress, String>,
+    spool: &[(bool, u64)],
+) -> [DeveloperEnableItem; 4] {
+    let clients = || DeveloperRequirement {
+        id: "refit_clients",
+        title: "Clients that apply the 8.1 mapping",
+        status: RequirementStatus::Unobservable,
+        evidence: format!("{DV_REFIT_CLIENTS}. Serving the curves to a platform that ignores them changes nothing it shows."),
+    };
+    let helper = match helper {
+        Ok(Some(identity)) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Met,
+            evidence: format!("The DV processing bundle on this node was built from this build's sources ({identity})."),
+        },
+        Ok(None) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Unmet,
+            evidence: "No DV processing bundle on this node: it fits no titles. Other nodes may.".into(),
+        },
+        Err(error) => DeveloperRequirement {
+            id: "refit_helper",
+            title: "Helper supports --refit-stats on this node",
+            status: RequirementStatus::Unavailable,
+            evidence: format!("The DV processing bundle could not be read: {error}."),
+        },
+    };
+    let coverage = match progress {
+        Ok(p) => DeveloperRequirement {
+            id: "refit_coverage",
+            title: "Profile 7 FEL titles fitted",
+            status: if p.fitted + p.identity + p.refused >= p.fel_titles {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            evidence: format!(
+                "{} of {} Profile 7 FEL titles fitted for their current source ({} keep identity curves, {} refused by the helper). Fits run in the background while a switch is on.",
+                p.fitted, p.fel_titles, p.identity, p.refused
+            ),
+        },
+        Err(error) => DeveloperRequirement {
+            id: "refit_coverage",
+            title: "Profile 7 FEL titles fitted",
+            status: RequirementStatus::Unavailable,
+            evidence: format!("The fit counts could not be read: {error}."),
+        },
+    };
+    let (complete, partial, bytes) = spool.iter().fold((0, 0, 0u64), |(c, p, b), (done, size)| {
+        if *done { (c + 1, p, b + size) } else { (c, p + 1, b + size) }
+    });
+    let spool = DeveloperRequirement {
+        id: "refit_spool",
+        title: "Statistics spool on this node",
+        status: RequirementStatus::Met,
+        evidence: format!(
+            "{complete} complete and {partial} partial runs, {:.1} MiB, under the runtime cache's {} directory. Delete it from this card; a later fit decodes its title again.",
+            bytes as f64 / (1024.0 * 1024.0),
+            crate::source_probe::REFIT_SPOOL_DIR
+        ),
+    };
+    let item = |id: &'static str, title: &'static str, enabled: bool, requirements| DeveloperEnableItem {
+        id,
+        title,
+        enabled: Some(enabled),
+        setting: Some(id),
+        requirements,
+    };
+    [
+        item("dolby_vision_refit_web", "Dolby Vision F+ curves: web", enabled[0], vec![clients()]),
+        item(
+            "dolby_vision_refit_apple",
+            "Dolby Vision F+ curves: Apple",
+            enabled[1],
+            vec![helper, coverage, clients(), spool],
+        ),
+        item("dolby_vision_refit_android", "Dolby Vision F+ curves: Android", enabled[2], vec![clients()]),
+        item("dolby_vision_refit_linux", "Dolby Vision F+ curves: Linux", enabled[3], vec![clients()]),
+    ]
 }
 
 /// What this node knows about the per-title FEL qualification.

@@ -2274,6 +2274,18 @@ pub mod keys {
     /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
     /// Missing is off; this never overrides the separate DV_CONVERT permission.
     pub const DV_FEL_REENCODE: &str = "playback.dolby_vision_fel_reencode";
+    /// F+ curve fits for Profile 7 FEL titles (FEL-RPU-REFIT-BUILD.md), one
+    /// switch per `playback_control::ClientPlatform`: whether copy playback
+    /// to that platform serves the fitted 8.1 mapping. Missing is off. With
+    /// any one on, idle nodes run the `dv_refit` job; copy-path serving
+    /// (milestone 4) reads each.
+    pub const DV_REFIT_WEB: &str = "playback.dolby_vision_refit_web";
+    pub const DV_REFIT_APPLE: &str = "playback.dolby_vision_refit_apple";
+    pub const DV_REFIT_ANDROID: &str = "playback.dolby_vision_refit_android";
+    pub const DV_REFIT_LINUX: &str = "playback.dolby_vision_refit_linux";
+    /// The four, in `ClientPlatform` order (web, apple, android, linux).
+    pub const DV_REFIT_PLATFORMS: [&str; 4] =
+        [DV_REFIT_WEB, DV_REFIT_APPLE, DV_REFIT_ANDROID, DV_REFIT_LINUX];
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite

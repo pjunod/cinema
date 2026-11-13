@@ -27,7 +27,7 @@ fn valid_id(id: &str) -> Result<(), ApiError> {
         .map_err(|_| ApiError::BadRequest("invalid job identity".into()))
 }
 
-fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
+pub(crate) fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
     let kind = job
         .payload
         .get("kind")
@@ -54,7 +54,8 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
         "retry_deadline_ms": job.retry_deadline_ms,
         "retry_supported": matches!(job.state, JobState::Failed | JobState::Cancelled)
             && matches!(job.supported_payload(), Ok(JobPayload::TranscodePrepare { .. }
-                | JobPayload::FragmentIndexBuild { .. } | JobPayload::ArtifactHydrate { .. })),
+                | JobPayload::FragmentIndexBuild { .. } | JobPayload::ArtifactHydrate { .. }
+                | JobPayload::DvRefit { .. })),
         "observation": "durable_state", "observed_at_ms": now_ms,
     })
 }
