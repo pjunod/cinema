@@ -277,85 +277,85 @@
       },
       {
         "anchor": "seam.acknowledgement(&observed).apply(results)",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "M2 Hiqlite acknowledgement hook application"
       },
       {
         "anchor": "fn acknowledgement(&self, attempt: &InsertionAttempt) -> Acknowledgement;",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "M2 Hiqlite acknowledgement hook contract"
       },
       {
         "anchor": "pub(crate) struct InsertionSeamSlot",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "M2 Hiqlite per-store seam slot"
       },
       {
         "anchor": "async fn insert_item_fenced(",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "proposal \u00a74.1 Hiqlite catalogue insertion"
       },
       {
         "anchor": "pub(super) fn atomic_renewal_statement(",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "proposal \u00a74.1 Hiqlite renewal SQL"
       },
       {
         "anchor": "        let renewal = atomic_renewal_statement(lease, replacement, unix_ms()?)?;",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:187"
       },
       {
         "anchor": "        let results = match transaction {",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:198"
       },
       {
         "anchor": "        || replacement.expires_at_unix_ms <= lease.expires_at_unix_ms",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:38"
       },
       {
         "anchor": "            AND expires_at_ms > $9",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:49"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:61"
       },
       {
         "anchor": "fn bind_atomic_authority(params: &mut hiqlite::Params, lease: &Lease) -> Result<(), StoreError> {",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:82"
       },
       {
         "anchor": "        };\n        let now = self.now()?;\n        // authority: current allocator installation selects the identity-fenced write path.",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:915"
       },
       {
         "anchor": "for attempt in 0..4 {",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:918"
       },
       {
         "anchor": "                 WHERE EXISTS (",
-        "sha256": "c219284b2d241e3d63e9e56b17cb10ad845d77498c58b82a234c1d9413c35a24",
+        "sha256": "d5b31dd0a7f1202cf9afd1729b6c97e5d64c99423fd270bd1306132838a6c577",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/hiqlite_publication.rs:934"
       },
