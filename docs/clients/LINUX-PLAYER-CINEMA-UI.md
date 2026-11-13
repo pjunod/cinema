@@ -14,14 +14,15 @@ qualify a different Dolby Vision processor or change the display stack.
 ## Session control sequence repair (0.5.1)
 
 **Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source
-implemented; adversarial review and final affected validation pending.
+implemented and independently reviewed; final affected validation is recorded
+in the pull request.
 Deployment and physical acceptance remain owner-controlled.
 
 Seeking outside the produced range creates a new server session, whose first
 control exchange must use sequence 1. The frontend previously retained its
 run-wide sequence counter, so the replacement's controls were refused as stale
-until its lease expired. Quality replacement, retry and next-episode creation
-shared the same ownership mismatch. The counter now belongs to the advertised
+until its lease expired. Quality replacement and retry shared the same ownership mismatch; next
+episode already constructs a fresh controller. The counter now belongs to the advertised
 session ID, generation and owner epoch. A provisional quality change retains
 the incumbent counter so rollback continues monotonically on that session.
 Server generation, client-instance and sequence fences retain their contract.
