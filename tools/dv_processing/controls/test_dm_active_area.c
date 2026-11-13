@@ -116,8 +116,10 @@ static void test_l5_absent_and_zero_preserve_full_frame(void) {
 
 // FNV-1a 64 of every full-frame shader literal as it was before any active-area body existed for
 // its family (main c0a23481). A frame without a partial L5 compiles exactly these bytes.
-// The common header and the two CM v2.9 full-frame bodies were re-pinned once since, when the detail
-// input was held at the tone curve's top clip (c29din); the lattice and horizontal bodies are as then.
+// The common header was re-pinned twice since: when the CM v2.9 detail input was held at the tone
+// curve's top clip (c29din, which also re-pinned the two CM v2.9 full-frame bodies), and when that
+// hold was removed and the range clamp moved from c29curve/c29sop into c29finish (the bodies kept
+// their bytes: c29din remains, as the source intensity). The lattice and horizontal bodies are as then.
 static uint64_t fnv1a(const char *s) {
   uint64_t h=UINT64_C(0xcbf29ce484222325);
   for(;*s;s++){ h^=(unsigned char)*s; h*=UINT64_C(0x100000001b3); }
@@ -240,6 +242,8 @@ static void test_l5_cm29_crop_domain_excludes_adversarial_bars(void) {
 //  A darkening exact L2 (gain raw 1843; 4000-nit master, L1 2/2048/3697, black 0; cm29-l2,
 //   2026-11-12): the trimmed curve passes the peak at 0.9868 with slope 0.38. Holding the detail
 //   input at the clip point gave 0.69629 for every speck above 0.9868 there.
+//   Values: corpus8-v1/cm29-l2-grid/out/S_gain27_specks_field*.txt, MANIFEST.sha256
+//   22105f7eab75f8bc8ba98c446115d32e71673f35c9c01e75a0a695496e0b3e72.
 static void test_cm29_detail_runs_on_the_unclamped_mapping(void) {
   static const DoviExtMetadataBlockLevel2 smile = {.target_max_pq=2851, .trim_slope=2071, .trim_offset=2048, .trim_power=1963,
       .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
@@ -275,17 +279,21 @@ static void test_cm29_detail_runs_on_the_unclamped_mapping(void) {
   puts("test_cm29_detail_runs_on_the_unclamped_mapping: PASS");
 }
 
-// Large L2 chroma weights, raw 1000 and 3000 (cw -0.5117 and +0.4648), above the clip: the
-// chroma-weighted plane takes its detail from the same unclamped mapping. The CPU reference must
-// (a) leave a gray speck at its pointwise value even with the chroma plane live (both of its planes
-// stay above the peak), and (b) give a chroma-rich speck the pinned CPU-reference value (a
-// characterization of the CPU model at this commit: there is no licensed measurement of the chroma plane).
+// Large L2 chroma weights, raw 1000 and 3000 (cw -0.5117 and +0.4648): the chroma-weighted plane
+// takes its detail from the same unclamped mapping as the base plane. The CPU reference must
+// (a) leave a gray speck above the clip at its pointwise value even with the chroma plane live (both
+// of its planes stay above the peak), and (b) give a chroma-rich speck on a field below the clip,
+// where the chroma-weighted plane finishes under the peak, the pinned CPU-reference value. The pins
+// differ per weight and move when the chroma plane's detail pass is dropped (checked by deleting
+// that dm_detail call: the test fails). They characterize the CPU model at this commit: there is
+// no licensed measurement of the chroma plane.
 static void test_cm29_detail_chroma_weight(void) {
   static const struct { unsigned raw; double cw; float gold[3]; } cw[] = {
-    {1000,(1000-2048)/2048.0,{0.6858370f,0.6660268f,0.4647649f}}, {3000,(3000-2048)/2048.0,{0.6858370f,0.6660268f,0.4647649f}},
+    {1000,(1000-2048)/2048.0,{0.6738409f,0.5725778f,0.3964595f}}, {3000,(3000-2048)/2048.0,{0.6747292f,0.5822781f,0.4078794f}},
   };
-  const float speck[3]={0.97f,0.80f,0.55f};
+  const float speck[3]={0.70f,0.58f,0.40f};
   enum { W=33, H=17 };
+  assert(memcmp(cw[0].gold,cw[1].gold,sizeof(cw[0].gold)));
   for(size_t k=0;k<sizeof(cw)/sizeof(cw[0]);k++) {
     DoviExtMetadataBlockLevel1 l1 = {.min_pq=0, .avg_pq=1229, .max_pq=2841};
     DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=1000, .min_display_mastering_luminance=1};
@@ -300,7 +308,8 @@ static void test_cm29_detail_chroma_weight(void) {
     assert(f.algo==29 && f.weight>-1 && fabs(f.c29.tr.cw-cw[k].cw)<1e-12 && !strcmp(f.trim,"l2-exact"));
     dm_cm29_pix px; const double rgb[3]={speck[0],speck[1],speck[2]};
     dm_cm29_pixel_pre(&f.c29,rgb,&px);
-    assert(px.C>0.1 && fabs(0.5*f.c29.tr.cw*px.C)>0.01 && px.Ib>f.c29.TM && px.Io!=px.Ib);
+    // the chroma plane is live, differs from the base plane and stays under the peak
+    assert(px.C>0.1 && fabs(px.Io-px.Ib)>0.01 && px.Io<f.c29.TM-0.01 && px.Ib<f.c29.TM-0.01);
     float in[W*H*4], out[W*H*4], uni[W*H*4];
     const int c=(H/2)*W+W/2;
     // (a) gray speck above the clip, chroma plane live: its own pointwise value
@@ -310,8 +319,8 @@ static void test_cm29_detail_chroma_weight(void) {
     assert(dv_dm_cpu_render(&f,in,W,H,out) && dv_dm_cpu_render(&f,uni,W,H,uni));
     for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-uni[4*c+ch])>1e-6) {
       fprintf(stderr,"raw %u gray speck: ch %d %.7f, pointwise %.7f\n",cw[k].raw,ch,out[4*c+ch],uni[4*c+ch]); abort(); }
-    // (b) chroma-rich speck
-    for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.90f; in[4*i+3]=1; }
+    // (b) chroma-rich speck on a 0.62 gray field, both planes under the peak
+    for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.62f; in[4*i+3]=1; }
     in[4*c]=speck[0]; in[4*c+1]=speck[1]; in[4*c+2]=speck[2];
     assert(dv_dm_cpu_render(&f,in,W,H,out));
     for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cw[k].gold[ch])>1e-6) {
@@ -323,6 +332,8 @@ static void test_cm29_detail_chroma_weight(void) {
 // L2 trim selection and the order of trim and range clamp, against the licensed cm_offline 5.6.4
 // output (cm29-l2 grid, 2026-11-12): uniform gray fields, L1 2/2048/3697 unless noted, P3 targets.
 // The reference's 600- and 2000-nit targets have black 0 unless an L2 names the target.
+// Values: corpus8-v1/cm29-l2-grid (out/G*.npy, gray index k), MANIFEST.sha256
+// 22105f7eab75f8bc8ba98c446115d32e71673f35c9c01e75a0a695496e0b3e72.
 //  interp:  L2 at 100 nits only, 4000-nit master, 600-nit target: the trim fades linearly in PQ to
 //           neutral at the mastering peak, and above the L1 clip (0.9028) the darkened curve keeps
 //           rising to the peak (the old clamp-then-trim order held 0.6795 there).

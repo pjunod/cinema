@@ -272,8 +272,9 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
     // passes, including one-row/one-column pictures. Pixels outside the active
     // area keep their source content and take the pointwise mapping (no detail
     // pass), so a stale or wrong L5 or picture in the bars (burned-in
-    // subtitles) is never erased, and black bars land on the target floor
-    // exactly as in-picture black does.
+    // subtitles) is never erased, and black bars map exactly as in-picture
+    // black does: through the unclamped curve and trim, so CM v2.9 bars darker
+    // than the shot's L1 minimum go to 0, under a non-zero target black.
     int cw = active.x1 - active.x0, ch = active.y1 - active.y0;
     size_t bytes = (size_t)cw * ch * 4 * sizeof(float);
     float *crop = malloc(bytes), *mapped = malloc(bytes);
