@@ -116,8 +116,10 @@ static void test_l5_absent_and_zero_preserve_full_frame(void) {
 
 // FNV-1a 64 of every full-frame shader literal as it was before any active-area body existed for
 // its family (main c0a23481). A frame without a partial L5 compiles exactly these bytes.
-// The common header and the two CM v2.9 full-frame bodies were re-pinned once since, when the detail
-// input was held at the tone curve's top clip (c29din); the lattice and horizontal bodies are as then.
+// The common header was re-pinned twice since: when the CM v2.9 detail input was held at the tone
+// curve's top clip (c29din, which also re-pinned the two CM v2.9 full-frame bodies), and when that
+// hold was removed and the range clamp moved from c29curve/c29sop into c29finish (the bodies kept
+// their bytes: c29din remains, as the source intensity). The lattice and horizontal bodies are as then.
 static uint64_t fnv1a(const char *s) {
   uint64_t h=UINT64_C(0xcbf29ce484222325);
   for(;*s;s++){ h^=(unsigned char)*s; h*=UINT64_C(0x100000001b3); }
@@ -126,7 +128,7 @@ static uint64_t fnv1a(const char *s) {
 
 static void test_l5_cm29_absent_and_zero_preserve_full_frame(void) {
   const struct { const char *name,*text; size_t bytes; uint64_t hash; } pinned[]={
-    {"dv_dm_glsl_common",dv_dm_glsl_common,sizeof(dv_dm_glsl_common)-1,UINT64_C(0x5e81da51f2dc4c74)},
+    {"dv_dm_glsl_common",dv_dm_glsl_common,sizeof(dv_dm_glsl_common)-1,UINT64_C(0xc3cf0592537b3c26)},
     {"dv_dm_body_point_cm29",dv_dm_body_point_cm29,sizeof(dv_dm_body_point_cm29)-1,UINT64_C(0x91b13abfbd77aa08)},
     {"dv_dm_body_lattice",dv_dm_body_lattice,sizeof(dv_dm_body_lattice)-1,UINT64_C(0x03994d4550df62ee)},
     {"dv_dm_body_h",dv_dm_body_h,sizeof(dv_dm_body_h)-1,UINT64_C(0xf0a6ba996a6b0485)},
@@ -231,96 +233,67 @@ static void test_l5_cm29_crop_domain_excludes_adversarial_bars(void) {
   puts("test_l5_cm29_crop_domain_excludes_adversarial_bars: PASS");
 }
 
-// Smile w33 (CM v2.9, 1000-nit P3 master, 600-nit target, exact L2): gray fields at and above the
-// point where the tone curve reaches its top clip (PQ 0.693885), one darker speck each. The
-// expected values are the licensed cm_offline output for the same picture and metadata
-// (cm29-speck-sweep, 2026-11-12): on the clip the reference restores no detail, so each speck lands
-// on its pointwise value. Before the detail input was held at the clip point the CPU reference
-// gave 0.64841, 0.69446 and 0.65033 for the first three.
-static void test_cm29_detail_holds_at_the_top_clip(void) {
-  DoviExtMetadataBlockLevel1 l1 = {.min_pq=0, .avg_pq=1229, .max_pq=2841};
-  DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=1000, .min_display_mastering_luminance=1};
-  DoviExtMetadataBlockLevel2 l2 = {.target_max_pq=2851, .trim_slope=2071, .trim_offset=2048, .trim_power=1963,
+// The detail stage works on the unclamped mapped intensity; only the finished value is held to the
+// target range. Expected values are the licensed cm_offline output for the same picture and
+// metadata: gray fields at and above the point where the mapped intensity reaches the target peak,
+// one darker one-pixel speck each, which lands on min(peak, mapped field + speck - field).
+//  Smile w33 (1000-nit P3 master, 600-nit target, exact L2; cm29-speck-sweep, 2026-11-12): the curve
+//   passes the peak at PQ 0.693885 with slope 1, so a speck keeps its distance from that point.
+//  A darkening exact L2 (gain raw 1843; 4000-nit master, L1 2/2048/3697, black 0; cm29-l2,
+//   2026-11-12): the trimmed curve passes the peak at 0.9868 with slope 0.38. Holding the detail
+//   input at the clip point gave 0.69629 for every speck above 0.9868 there.
+//   Values: corpus8-v1/cm29-l2-grid/out/S_gain27_specks_field*.txt, MANIFEST.sha256
+//   22105f7eab75f8bc8ba98c446115d32e71673f35c9c01e75a0a695496e0b3e72.
+static void test_cm29_detail_runs_on_the_unclamped_mapping(void) {
+  static const DoviExtMetadataBlockLevel2 smile = {.target_max_pq=2851, .trim_slope=2071, .trim_offset=2048, .trim_power=1963,
       .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
-  const DoviExtMetadataBlockLevel2 *list[1] = {&l2};
-  DoviVdrDmData dm = {0};
-  dm.dm_data.level1=&l1; dm.dm_data.level6=&l6;
-  dm.dm_data.level2.list=(__typeof__(dm.dm_data.level2.list))list; dm.dm_data.level2.len=1;
-  dv_dm_frame f;
-  assert(dv_dm_prepare(&dm,600,.005,DM_P3D65,1000,true,true,&f)==NULL);
-  assert(f.algo==29 && f.weight>-1 && f.c29.tr.cw==0 && !strcmp(f.trim,"l2-exact"));
-  assert(fabs(f.c29.xtop-0.693885345)<1e-7 && f.u[10][3]==(float)f.c29.xtop);
-  enum { W=33, H=17 };
-  static const struct { float field, speck; double licensed; } cases[] = {
-    {0.72f, 0.67f, 0.67243}, {0.72f, 0.718f, 0.69630}, {0.76f, 0.71f, 0.69630}, {0.90f, 0.85f, 0.69630},
-    {0.69f, 0.64f, 0.64243},   // below the clip: detail as before
+  static const DoviExtMetadataBlockLevel2 dark = {.target_max_pq=2851, .trim_slope=1843, .trim_offset=2048, .trim_power=2048,
+      .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
+  static const struct { const DoviExtMetadataBlockLevel2 *l2; unsigned l1[3], smin, smast; double black; float field, speck; double licensed; } cases[] = {
+    {&smile,{0,1229,2841},1,1000,.005, 0.72f, 0.67f, 0.67243}, {&smile,{0,1229,2841},1,1000,.005, 0.72f, 0.718f, 0.69630},
+    {&smile,{0,1229,2841},1,1000,.005, 0.76f, 0.71f, 0.69630}, {&smile,{0,1229,2841},1,1000,.005, 0.90f, 0.85f, 0.69630},
+    {&smile,{0,1229,2841},1,1000,.005, 0.69f, 0.64f, 0.64243},   // below the clip
+    {&dark,{2,2048,3697},50,4000,0, 0.995f, 0.992f, 0.69630}, {&dark,{2,2048,3697},50,4000,0, 0.995f, 0.990f, 0.69463},
+    {&dark,{2,2048,3697},50,4000,0, 0.995f, 0.987f, 0.69178}, {&dark,{2,2048,3697},50,4000,0, 0.995f, 0.975f, 0.68038},
+    {&dark,{2,2048,3697},50,4000,0, 0.995f, 0.945f, 0.65183}, {&dark,{2,2048,3697},50,4000,0, 0.99f, 0.985f, 0.69275},
+    {&dark,{2,2048,3697},50,4000,0, 0.99f, 0.97f, 0.67849},
   };
+  enum { W=33, H=17 };
   float in[W*H*4], out[W*H*4];
   for(size_t k=0;k<sizeof(cases)/sizeof(cases[0]);k++) {
+    DoviExtMetadataBlockLevel1 l1 = {.min_pq=(uint16_t)cases[k].l1[0], .avg_pq=(uint16_t)cases[k].l1[1], .max_pq=(uint16_t)cases[k].l1[2]};
+    DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=(uint16_t)cases[k].smast, .min_display_mastering_luminance=(uint16_t)cases[k].smin};
+    const DoviExtMetadataBlockLevel2 *list[1] = {cases[k].l2};
+    DoviVdrDmData dm = {0};
+    dm.dm_data.level1=&l1; dm.dm_data.level6=&l6;
+    dm.dm_data.level2.list=(__typeof__(dm.dm_data.level2.list))list; dm.dm_data.level2.len=1;
+    dv_dm_frame f;
+    assert(dv_dm_prepare(&dm,600,cases[k].black,DM_P3D65,cases[k].smast,true,true,&f)==NULL);
+    assert(f.algo==29 && f.weight>-1 && f.c29.tr.cw==0 && !strcmp(f.trim,"l2-exact"));
     for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=cases[k].field; in[4*i+3]=1; }
     const int c=(H/2)*W+W/2; in[4*c]=in[4*c+1]=in[4*c+2]=cases[k].speck;
     assert(dv_dm_cpu_render(&f,in,W,H,out));
     for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cases[k].licensed)>6e-5) {
-      fprintf(stderr,"top clip: field %.3f speck %.3f channel %d: %.6f, licensed %.5f\n",cases[k].field,cases[k].speck,ch,out[4*c+ch],cases[k].licensed); abort(); }
+      fprintf(stderr,"detail: field %.3f speck %.3f channel %d: %.6f, licensed %.5f\n",cases[k].field,cases[k].speck,ch,out[4*c+ch],cases[k].licensed); abort(); }
   }
-  puts("test_cm29_detail_holds_at_the_top_clip: PASS");
+  puts("test_cm29_detail_runs_on_the_unclamped_mapping: PASS");
 }
 
-// Direct bisection of the tone curve: the smallest intensity in [0,1] that maps to tc(1), or 1 for a
-// flat curve. An independent restatement of what dm_cm29_prepare must produce in xtop.
-static double bisect_top_clip(const dm_cm29_state *s) {
-  const double top=dm_cm29_tc(s,1.0);
-  if(!(dm_cm29_tc(s,0.0)<top)) return 1.0;
-  double lo=0.0, hi=1.0;
-  for(int i=0;i<100;i++){ const double m=0.5*(lo+hi); if(dm_cm29_tc(s,m)>=top) hi=m; else lo=m; }
-  return hi;
-}
-
-// xtop from a real dm_cm29_prepare state (not a hand-set field): each case is checked against the
-// direct bisection, and against where the source intensity range ends (L1 max).
-static double clip_state(double l1max, double spk, double tpk, const dm_cm29_trim *tr, dm_cm29_state *s) {
-  const double l1[3]={0.0,0.3,l1max};
-  const dm_cm29_target tg={.peak_nits=tpk,.min_nits=0.005,.prim=DM_P3D65,.floor_pq=0.0};
-  assert(dm_cm29_prepare(s,l1,0.0001,spk,&tg,tr)==1);
-  const double want=bisect_top_clip(s);
-  if(fabs(s->xtop-want)>1e-9){ fprintf(stderr,"xtop %.12f, bisection %.12f\n",s->xtop,want); abort(); }
-  return s->xtop;
-}
-
-static void test_cm29_top_clip_state(void) {
-  const dm_cm29_trim off={0};
-  dm_cm29_state s;
-  // target peak above the source max, trims off: the curve reaches its top value only at or above
-  // the highest source intensity, so no source pixel is held (min(I, xtop) == I for every I <= L1 max)
-  const double l4000=3728/4095.0, l1000=2841/4095.0;
-  assert(clip_state(l4000,4000,4000,&off,&s)>=l4000-1e-6);
-  assert(clip_state(l1000,1000,10000,&off,&s)>=1.0-1e-3);   // target at the PQ ceiling: the curve is unclipped on [0,1]
-  dm_cm29_pix p={.I=l1000,.C=0.1}; assert(dm_cm29_detail_in(&s,&p,0)==p.I);
-  assert(dm_cm29_detail_in(&s,&p,1)==p.I);   // cw is 0 here: the chroma form is the base form
-  // L1 max at the target (shift keeps the clip anchor under the peak) and above it (the curve is on
-  // its top value at or before the source maximum)
-  const double at=clip_state(2851/4095.0,1000,600,&off,&s); assert(at>2851/4095.0);
-  const double above=clip_state(3079/4095.0,1000,600,&off,&s); assert(above<=3079/4095.0+1e-9);
-  // a non-neutral L2 trim: xtop follows the trimmed curve, not the base one
-  const dm_cm29_trim trim={.lift=0.1,.gain=0.05,.gamma=-0.1};
-  const double base=clip_state(l1000,1000,600,&off,&s), trimmed=clip_state(l1000,1000,600,&trim,&s);
-  assert(fabs(trimmed-base)>1e-2);
-  assert(clip_state(l1000,1000,4000,&trim,&s)>0.5);
-  puts("test_cm29_top_clip_state: PASS");
-}
-
-// The chroma-weighted hold (xtop - 0.5*cw*C) at large L2 chroma weights, raw 1000 and 3000
-// (cw -0.5117 and +0.4648), on chroma-rich specks above the clip. The CPU reference must (a) hold the
-// chroma plane's tone-curve argument on the clip, (b) leave a gray speck at its pointwise value even
-// with the chroma plane live (it has no chroma to keep), and (c) give a chroma-rich speck a value
-// that differs from the unheld detail term and matches the pinned CPU-reference value (a
-// characterization of the CPU model at this commit: there is no licensed measurement of the chroma plane).
-static void test_cm29_detail_hold_chroma_weight(void) {
+// Large L2 chroma weights, raw 1000 and 3000 (cw -0.5117 and +0.4648): the chroma-weighted plane
+// takes its detail from the same unclamped mapping as the base plane. The CPU reference must
+// (a) leave a gray speck above the clip at its pointwise value even with the chroma plane live (both
+// of its planes stay above the peak), and (b) give a chroma-rich speck on a field below the clip,
+// where the chroma-weighted plane finishes under the peak, the pinned CPU-reference value. The pins
+// differ per weight and move when the chroma plane's detail pass is dropped (checked by deleting
+// that dm_detail call: the test fails). They characterize the CPU model at this commit: there is
+// no licensed measurement of the chroma plane.
+static void test_cm29_detail_chroma_weight(void) {
   static const struct { unsigned raw; double cw; float gold[3]; } cw[] = {
-    {1000,(1000-2048)/2048.0,{0.6923612f,0.6952758f,0.5542746f}}, {3000,(3000-2048)/2048.0,{0.6751965f,0.5883724f,0.3776678f}},
+    {1000,(1000-2048)/2048.0,{0.6738409f,0.5725778f,0.3964595f}}, {3000,(3000-2048)/2048.0,{0.6747292f,0.5822781f,0.4078794f}},
   };
-  const float speck[3]={0.97f,0.80f,0.55f};
+  const float speck[3]={0.70f,0.58f,0.40f};
   enum { W=33, H=17 };
+  assert(memcmp(cw[0].gold,cw[1].gold,sizeof(cw[0].gold)));
   for(size_t k=0;k<sizeof(cw)/sizeof(cw[0]);k++) {
     DoviExtMetadataBlockLevel1 l1 = {.min_pq=0, .avg_pq=1229, .max_pq=2841};
     DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=1000, .min_display_mastering_luminance=1};
@@ -333,36 +306,92 @@ static void test_cm29_detail_hold_chroma_weight(void) {
     dv_dm_frame f;
     assert(dv_dm_prepare(&dm,600,.005,DM_P3D65,1000,true,true,&f)==NULL);
     assert(f.algo==29 && f.weight>-1 && fabs(f.c29.tr.cw-cw[k].cw)<1e-12 && !strcmp(f.trim,"l2-exact"));
-    assert(fabs(f.c29.xtop-bisect_top_clip(&f.c29))<1e-9 && f.u[10][3]==(float)f.c29.xtop);
-    const double top=dm_cm29_tc(&f.c29,1.0);
-    // (a) the chroma plane's argument lands on the clip for a speck above it
     dm_cm29_pix px; const double rgb[3]={speck[0],speck[1],speck[2]};
     dm_cm29_pixel_pre(&f.c29,rgb,&px);
-    assert(px.C>0.1 && fabs(0.5*f.c29.tr.cw*px.C)>0.01 && px.I>f.c29.xtop);
-    assert(fabs(dm_cm29_detail_in(&f.c29,&px,0)-f.c29.xtop)<1e-12);
-    const double held=dm_cm29_detail_in(&f.c29,&px,1);
-    assert(fabs(held-(f.c29.xtop-0.5*f.c29.tr.cw*px.C))<1e-12);
-    assert(fabs(dm_cm29_tc(&f.c29,held+0.5*f.c29.tr.cw*px.C)-top)<1e-9);
-    float in[W*H*4], out[W*H*4], uni[W*H*4], unheld[W*H*4];
+    // the chroma plane is live, differs from the base plane and stays under the peak
+    assert(px.C>0.1 && fabs(px.Io-px.Ib)>0.01 && px.Io<f.c29.TM-0.01 && px.Ib<f.c29.TM-0.01);
+    float in[W*H*4], out[W*H*4], uni[W*H*4];
     const int c=(H/2)*W+W/2;
-    // (b) gray speck above the clip, chroma plane live: its own pointwise value
+    // (a) gray speck above the clip, chroma plane live: its own pointwise value
     for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.90f; in[4*i+3]=1; }
     in[4*c]=in[4*c+1]=in[4*c+2]=0.80f;
     for(int i=0;i<W*H;i++){ uni[4*i]=uni[4*i+1]=uni[4*i+2]=0.80f; uni[4*i+3]=1; }
     assert(dv_dm_cpu_render(&f,in,W,H,out) && dv_dm_cpu_render(&f,uni,W,H,uni));
     for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-uni[4*c+ch])>1e-6) {
       fprintf(stderr,"raw %u gray speck: ch %d %.7f, pointwise %.7f\n",cw[k].raw,ch,out[4*c+ch],uni[4*c+ch]); abort(); }
-    // (c) chroma-rich speck: held, against the same frame with the hold switched off
-    for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.90f; in[4*i+3]=1; }
+    // (b) chroma-rich speck on a 0.62 gray field, both planes under the peak
+    for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=0.62f; in[4*i+3]=1; }
     in[4*c]=speck[0]; in[4*c+1]=speck[1]; in[4*c+2]=speck[2];
-    dv_dm_frame nohold=f; nohold.c29.xtop=1e9;
-    assert(dv_dm_cpu_render(&f,in,W,H,out) && dv_dm_cpu_render(&nohold,in,W,H,unheld));
-    double dmax=0; for(int ch=0;ch<3;ch++) dmax=fmax(dmax,fabs(out[4*c+ch]-unheld[4*c+ch]));
-    if(dmax<2e-3){ fprintf(stderr,"raw %u: hold moves the chroma speck by only %.2e\n",cw[k].raw,dmax); abort(); }
+    assert(dv_dm_cpu_render(&f,in,W,H,out));
     for(int ch=0;ch<3;ch++) if(fabs(out[4*c+ch]-cw[k].gold[ch])>1e-6) {
-      fprintf(stderr,"raw %u chroma speck: ch %d %.7f, pinned %.7f\n",cw[k].raw,ch,out[4*c+ch],cw[k].gold[ch]); abort(); }
+      fprintf(stderr,"raw %u chroma speck: %.7ff,%.7ff,%.7ff pinned %.7f\n",cw[k].raw,out[4*c],out[4*c+1],out[4*c+2],cw[k].gold[ch]); abort(); }
   }
-  puts("test_cm29_detail_hold_chroma_weight: PASS");
+  puts("test_cm29_detail_chroma_weight: PASS");
+}
+
+// L2 trim selection and the order of trim and range clamp, against the licensed cm_offline 5.6.4
+// output (cm29-l2 grid, 2026-11-12): uniform gray fields, L1 2/2048/3697 unless noted, P3 targets.
+// The reference's 600- and 2000-nit targets have black 0 unless an L2 names the target.
+// Values: corpus8-v1/cm29-l2-grid (out/G*.npy, gray index k), MANIFEST.sha256
+// 22105f7eab75f8bc8ba98c446115d32e71673f35c9c01e75a0a695496e0b3e72.
+//  interp:  L2 at 100 nits only, 4000-nit master, 600-nit target: the trim fades linearly in PQ to
+//           neutral at the mastering peak, and above the L1 clip (0.9028) the darkened curve keeps
+//           rising to the peak (the old clamp-then-trim order held 0.6795 there).
+//  crush:   L1 205/1229/2457, exact L2, black 0.005: under the L1 crush the curve runs below the
+//           target black, so black is the trim's offset alone (0.01508 lifted before).
+//  smin:    L2 at 1000 only under a 0.05-nit mastering minimum: neutral at that minimum, not PQ 0.
+//  atpeak:  1000-nit master, L2 at 1000 only: an L2 at the mastering peak brackets a 600-nit target
+//           (untrimmed before).
+//  above:   1000-nit master, exact L2 at 2000: applied (untrimmed before).
+//  across:  1000-nit master, L2 at 100 and 2000: interpolated between them at 600.
+//  gain:    exact darkening L2: gradation above the L1 clip (held at 0.6615 before).
+static void test_cm29_l2_selection_matches_licensed(void) {
+  static const DoviExtMetadataBlockLevel2 t100 = {.target_max_pq=2081, .trim_slope=1500, .trim_offset=2010, .trim_power=1300,
+      .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
+  static const DoviExtMetadataBlockLevel2 t600 = {.target_max_pq=2851, .trim_slope=2200, .trim_offset=2060, .trim_power=2300,
+      .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
+  static const DoviExtMetadataBlockLevel2 t600g = {.target_max_pq=2851, .trim_slope=1843, .trim_offset=2048, .trim_power=2048,
+      .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
+  static const DoviExtMetadataBlockLevel2 t1000 = {.target_max_pq=3079, .trim_slope=1400, .trim_offset=2000, .trim_power=1400,
+      .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
+  static const DoviExtMetadataBlockLevel2 t2000 = {.target_max_pq=3388, .trim_slope=2150, .trim_offset=2052, .trim_power=1900,
+      .trim_chroma_weight=2048, .trim_saturation_gain=2048, .ms_weight=2048};
+  static const struct {
+    const char *name, *trim; unsigned l1[3], smin, smast; const DoviExtMetadataBlockLevel2 *l2[2]; double nits, black;
+    struct { int k; double licensed; } at[5];   // gray k/2399
+  } cases[] = {
+    {"interp", "l2-interpolated", {2,2048,3697}, 50, 4000, {&t100}, 600, 0,
+      {{720,0.27099},{1440,0.50723},{2208,0.68020},{2300,0.69492},{2376,0.69630}}},
+    {"crush", "l2-exact", {205,1229,2457}, 50, 4000, {&t600}, 600, 0.005,
+      {{0,0.00205},{72,0.00205},{113,0.01835},{480,0.17076},{1440,0.58305}}},
+    {"smin", "l2-interpolated", {2,2048,3697}, 500, 4000, {&t1000}, 600, 0, {{720,0.25711},{1440,0.47737},{2100,0.62126}}},
+    {"atpeak", "l2-interpolated", {2,2048,3697}, 50, 1000, {&t1000}, 600, 0, {{720,0.29453},{1440,0.50918},{2100,0.62419}}},
+    {"above", "l2-exact", {2,2048,3697}, 50, 1000, {&t2000}, 2000, 0, {{720,0.32709},{1440,0.61833},{2100,0.82742},{2300,0.82742}}},
+    {"across", "l2-interpolated", {2,2048,3697}, 50, 1000, {&t100,&t2000}, 600, 0,
+      {{720,0.31530},{1440,0.55390},{2100,0.68431},{2300,0.69630}}},
+    {"gain", "l2-exact", {2,2048,3697}, 50, 4000, {&t600g}, 600, 0, {{1440,0.48374},{2208,0.66925},{2300,0.68531},{2376,0.69630}}},
+  };
+  enum { W=33, H=17 };
+  float in[W*H*4], out[W*H*4];
+  for(size_t c=0;c<sizeof(cases)/sizeof(cases[0]);c++) {
+    DoviExtMetadataBlockLevel1 l1 = {.min_pq=(uint16_t)cases[c].l1[0], .avg_pq=(uint16_t)cases[c].l1[1], .max_pq=(uint16_t)cases[c].l1[2]};
+    DoviExtMetadataBlockLevel6 l6 = {.max_display_mastering_luminance=(uint16_t)cases[c].smast, .min_display_mastering_luminance=(uint16_t)cases[c].smin};
+    DoviVdrDmData dm = {0};
+    dm.dm_data.level1=&l1; dm.dm_data.level6=&l6;
+    dm.dm_data.level2.list=(__typeof__(dm.dm_data.level2.list))cases[c].l2; dm.dm_data.level2.len=cases[c].l2[1]?2:1;
+    dv_dm_frame f;
+    assert(dv_dm_prepare(&dm,cases[c].nits,cases[c].black,DM_P3D65,cases[c].smast,true,true,&f)==NULL);
+    if(f.algo!=29 || strcmp(f.trim,cases[c].trim)) { fprintf(stderr,"L2 selection %s: %s\n",cases[c].name,f.trim); abort(); }
+    for(int j=0;j<5 && (j==0 || cases[c].at[j].k);j++) {
+      const float v=(float)(cases[c].at[j].k/2399.0);
+      for(int i=0;i<W*H;i++){ in[4*i]=in[4*i+1]=in[4*i+2]=v; in[4*i+3]=1; }
+      assert(dv_dm_cpu_render(&f,in,W,H,out));
+      const int m=(H/2)*W+W/2;
+      for(int ch=0;ch<3;ch++) if(fabs(out[4*m+ch]-cases[c].at[j].licensed)>6e-5) {
+        fprintf(stderr,"L2 selection %s: gray %.5f channel %d: %.6f, licensed %.5f\n",cases[c].name,v,ch,out[4*m+ch],cases[c].at[j].licensed); abort(); }
+    }
+  }
+  puts("test_cm29_l2_selection_matches_licensed: PASS");
 }
 
 int main(int argc,char **argv) {
@@ -375,9 +404,9 @@ int main(int argc,char **argv) {
   RUN(test_l5_cm29_owned_offsets_and_rectangles);
   RUN(test_l5_cm29_absent_and_zero_preserve_full_frame);
   RUN(test_l5_cm29_crop_domain_excludes_adversarial_bars);
-  RUN(test_cm29_detail_holds_at_the_top_clip);
-  RUN(test_cm29_top_clip_state);
-  RUN(test_cm29_detail_hold_chroma_weight);
+  RUN(test_cm29_detail_runs_on_the_unclamped_mapping);
+  RUN(test_cm29_detail_chroma_weight);
+  RUN(test_cm29_l2_selection_matches_licensed);
 #undef RUN
   if(!matched)return 2;
   puts("test_dm_active_area: PASS");
