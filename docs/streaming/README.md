@@ -14,6 +14,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-E1-BUILD.md](PLAYBACK-START-E1-BUILD.md) | E1 contract; build record: [PLAYBACK-START-E1-RECORD.md](PLAYBACK-START-E1-RECORD.md). | open |
 | [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) | D3 contract; records: [PLAYBACK-START-D3-RECORD.md](PLAYBACK-START-D3-RECORD.md). | open |
 | [PLAYBACK-START-D3B-RECORD.md](PLAYBACK-START-D3B-RECORD.md) | D3b build record: what was built per contract item, decisions, gates. | open |
+| [PLAYBACK-START-D3CDE-RECORD.md](PLAYBACK-START-D3CDE-RECORD.md) | D3c and D3d build record, and why D3e was not built. | open |
 | [PLAYBACK-START-PLAN-ASTRA-REVIEW.md](PLAYBACK-START-PLAN-ASTRA-REVIEW.md) | Astra's plan review; dispositions in plan §7. | done |
 | [PLAYBACK-START-PLAN.md](PLAYBACK-START-PLAN.md) | Effort plan: rulings, lanes, status. | open |
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |

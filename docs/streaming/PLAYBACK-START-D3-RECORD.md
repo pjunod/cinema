@@ -1,6 +1,6 @@
 # Playback start — D3 build records
 
-**Status:** open — what each D3 sub-lane built against [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) and where it departs from that contract. D3a recorded and its adversarial review applied ([PLAYBACK-START-D3A-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3A-REVIEW-2026-11-12.md)); D3t recorded and its adversarial review applied ([PLAYBACK-START-D3T-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3T-REVIEW-2026-11-12.md)); D3b recorded (§9–10 and [its own record](PLAYBACK-START-D3B-RECORD.md)); D3c–D3e not built. Section numbers (§7.1, §9-1 …) refer to the contract.
+**Status:** open — what each D3 sub-lane built against [PLAYBACK-START-D3-BUILD.md](PLAYBACK-START-D3-BUILD.md) and where it departs from that contract. D3a recorded and its adversarial review applied ([PLAYBACK-START-D3A-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3A-REVIEW-2026-11-12.md)); D3t recorded and its adversarial review applied ([PLAYBACK-START-D3T-REVIEW-2026-11-12.md](../reviews/PLAYBACK-START-D3T-REVIEW-2026-11-12.md)); D3b recorded (§9–10 and [its own record](PLAYBACK-START-D3B-RECORD.md)); D3c and D3d recorded in [PLAYBACK-START-D3CDE-RECORD.md](PLAYBACK-START-D3CDE-RECORD.md); D3e not built (same record, §3). Section numbers (§7.1, §9-1 …) refer to the contract.
 **Author:** Claude (claude-sonnet-5-5, session 01BCWL9xwmpSjitHqZMTRAht); D3b: claude-opus-5-5, same session.
 
 ## 1. D3a build record (2026-11-12)
