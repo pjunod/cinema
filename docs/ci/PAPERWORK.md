@@ -50,11 +50,18 @@ again on it, and the commit is pushed to the PR branch. Guards:
   `refs/…` head, and its token reaches git through the environment, never a
   command line, with hooks off.
 
-The push uses the repository secret `PAPERWORK_PUSH_TOKEN` when it is set, so
-the push starts the next lane run and that run cancels this one: no red run.
-Without it the push uses the run's own token, which starts no workflow; the
-job then fails saying the fix is on the branch and any push runs the lane on
-it. Either way, `git pull --rebase` before your next push.
+The push uses the run's own token, which starts no workflow; the job then
+fails saying the fix is on the branch and any push runs the lane on it.
+`git pull --rebase` before your next push.
+
+Do not expose a persistent `PAPERWORK_PUSH_TOKEN` to these workflows: they
+execute PR-controlled scripts and can be edited by the PR. Seamless publication
+requires a dedicated repository-write bot behind a separately trusted publisher,
+with the credential outside this repository's PR Actions secrets. That publisher
+must independently verify the generated bookkeeping edits, exact parent and
+current open same-repository PR head before a leased push, reject protected and
+train branches, and prove that exactly one replacement lane starts. This trusted
+publisher is not implemented here; adding a secret alone is not a safe setup.
 
 Rules that need a decision (a `Regression-Test:` line, a functionality point,
 a doc split, a status move) still fail, with the fix printed under them. A

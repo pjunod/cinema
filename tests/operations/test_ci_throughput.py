@@ -236,6 +236,10 @@ class PaperworkFixTests(unittest.TestCase):
         args = mock.Mock(head_sha=head, base=head, merge_target="main", run_url="u")
         self.assertEqual(self.fix.ci(args), 1)
 
+    def test_pr_workflows_never_receive_a_persistent_publisher_token(self):
+        for path in (LANE, PAPERWORK_PR):
+            self.assertNotIn("secrets.PAPERWORK_PUSH_TOKEN", path.read_text())
+
     def test_both_paperwork_jobs_fix_then_push_and_never_loop(self):
         for path in (LANE, PAPERWORK_PR):
             with self.subTest(workflow=path.name):

@@ -38,10 +38,8 @@ jobs:
           # (validation/pr_event.py), never the environment: a long
           # description made the runner unable to start this step at all.
           GITHUB_TOKEN: ${{ github.token }}
-          # A push made with the run's own token starts no workflow, so a fix
-          # pushed with it leaves its head without a lane run. With this
-          # secret set the fix's push starts the next run itself.
-          PAPERWORK_PUSH_TOKEN: ${{ secrets.PAPERWORK_PUSH_TOKEN }}
+          # Persistent publisher credentials must never enter a PR-controlled
+          # workflow. The job token can publish a fix but starts no new run.
         run: |
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
@@ -67,12 +65,6 @@ jobs:
           echo "::notice::paperwork pushed $fixed to $HEAD_REF with the derivable fixes; pull it before your next push (git pull --rebase)."
           if [ -n "${remaining:-}" ]; then
             echo "Paperwork still fails after the derivable fixes; the [FAIL] above is the author's to fix."
-            exit 1
-          fi
-          if [ -n "$PAPERWORK_PUSH_TOKEN" ]; then
-            # The push started the lane on $fixed, which cancels this run.
-            sleep 300
-            echo "The fix push started no new run within five minutes; push any commit to run the lane on $fixed."
             exit 1
           fi
           echo "The fix was pushed with the run's own token, which starts no run: push any commit (git commit --allow-empty) to run the lane on $fixed."
