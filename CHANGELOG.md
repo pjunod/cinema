@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux replicated servers validate actual-host reboot identity before serving;
+  required deployment mounts preserve source-custody recovery after a reboot.
 - Playback-control refusal logs retain the protocol code, route-read failure
   stage and sanitized source location, distinguishing release reconciliation
   from storage errors without exposing session capabilities.

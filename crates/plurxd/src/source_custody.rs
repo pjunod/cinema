@@ -20,6 +20,10 @@ use tokio::sync::{mpsc, oneshot};
 
 mod recovery;
 
+pub(crate) fn validate_recovery_startup(authoritative: bool) -> Result<(), String> {
+    recovery::validate_startup(authoritative)
+}
+
 pub(crate) fn configure_recovery_backend(
     store: &Arc<dyn Store>,
     data_dir: &Path,

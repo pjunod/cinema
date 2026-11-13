@@ -69,6 +69,13 @@ decoder does not establish HDR or Dolby Vision HDMI output on a particular TV.
 
 ## Docker / Compose (recommended for homelabs)
 
+Linux replicated source ownership requires the actual host machine and boot
+identities. The tracked Compose file supplies read-only `/etc/machine-id` and
+procfs boot-ID binds with missing-source creation disabled. Preserve them in
+overrides; startup refuses an invalid reboot-recovery identity before serving.
+The [source-custody recovery procedure](../docs/server/SOURCE-CUSTODY-RECOVERY.md#15-linux-replicated-startup-requires-actual-host-identity)
+explains why adding mounts now cannot repair an old empty-identity record.
+
 One command from the repository root brings the stack up for the first time:
 
 ```sh

@@ -1,6 +1,6 @@
 # Shared-library playback — implementation and merge status
 
-**Status:** built · **Updated:** 2026-11-09 · **Owner:** Codex/root
+**Status:** built; lab4 custody recovery completed on four replicas; Linux startup identity prevention prepared for rollout · **Updated:** 2026-11-13 · **Owner:** Codex/root
 
 PR #1472, `claude/shared-library-standalone-fixes`, carries the standalone
 repairs and relay budget, retry and abandonment work. Its live gate and
@@ -19,8 +19,18 @@ HDR and queued-analysis custody repairs from #1475–#1478.
 S5's Source-owned caption windows and the fixture Start503 landed in
 [#1490](SHARED-SUBTITLE-CUSTODY-AND-START-503.md). S1–S3, S8 and S9 remain A1 work. Native Apple/Android startup headers
 require a client release. RX-ring sizing is built in the host baseline
-(2026-11-12) and awaits the owner's apply; deployment and physical playback
-acceptance remain separate.
+(2026-11-12) and was applied on 2026-11-13 with the persistent rule included
+in every installed kernel boot image. Post-reboot and physical playback
+acceptance remain separate. Merged PR #1567's existing census recovery released
+the lab4 preparation owner at 19:01:59.868984 UTC. Read-only checks at 19:06:45
+UTC found the exact custody row absent and
+`plurx_background_source_recovery_pending=0` on lab3, lab4, lab6 and media1,
+all at revision `882d4b691e048f24b6c3e665717aa5966db71a28`. The four
+hosts had valid, matching read-only identity mounts at 19:03:52 UTC, but that
+revision does not include PR #1570's startup guard; prevention rollout remains
+pending. These checks cover one recovered owner on four replicas, not broader
+fleet or physical playback acceptance. The [RCA §5.1](SHARED-LIBRARY-PLAYBACK-RCA.md#51-missing-host-identity-let-a-replicated-linux-daemon-start-without-reboot-recovery)
+records the startup cause and recovery.
 
 ## Fixture correction
 
