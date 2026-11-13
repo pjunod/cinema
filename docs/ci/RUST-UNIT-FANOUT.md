@@ -67,10 +67,22 @@ What `make unit` runs and this stage does not: doctests (nextest cannot run
 them; `make unit` runs them through `cargo test`), and `spike-lock-check` /
 `test-socket-permission-check` (preconditions, not tests; the Rust gate runs
 `spike-lock-check`). Each test runs in its own process under nextest, where
-`make unit` runs a binary's tests as threads of one process; a test that only
-passed because a process-local lock serialized it against another test
-would now show up as a failure — that is a real defect in the test, and the
-merge-base check reports it as new or pre-existing like any other.
+`make unit` runs a binary's tests as threads of one process. Two harness
+adjustments follow from that, both in files that are key inputs:
+
+- `RUST_MIN_STACK=8388608` (the workflow): state `cargo test` builds once per
+  binary is built again on every test's own 2 MiB thread, and the first full
+  run overflowed it in 59 plurxd tests (mostly `transcode::source_actor`).
+  8 MiB is what the replicated Store shards already use.
+- The ci profile's `default-filter` leaves out
+  `scan::probe::tests::fixture_child_*`: child bodies that decide they are the
+  child from `--exact <name>` in their arguments — exactly how nextest starts
+  every test — and then sleep for minutes or exit 13. Their parent tests still
+  spawn them; a test keeps the filter equal to that set.
+
+A test that only passed because a process-local lock serialized it against
+another would also surface here; the merge-base check reports it as new or
+pre-existing like any other failure.
 
 ## 2. Run the same selection locally — one command
 
@@ -214,6 +226,7 @@ Filled from dispatched runs on the branch; see the Execution log.
 | Android JVM | `fast Android compile` builds the debug app; `make android-test` runs only in ci.yml. | Add `make android-test` to the Android job, gated by `ci_scope.android_jvm`, with a content key over `clients/android/**` plus the Gradle wrapper, stored in this receipt format with Gradle's per-test JUnit as evidence. |
 | Apple unit (XCTest) | The Apple job compiles and runs the 32 TV navigation journeys with native receipts ([NATIVE-CI-RECEIPTS.md](NATIVE-CI-RECEIPTS.md)); `make apple-test` runs only in ci.yml. | Add `make apple-test` beside the journeys on the same runner, keyed by the native receipts' existing source closure. |
 | Rust doctests | Not run at PR time. | One `cargo test --doc` job per due crate on the archive host, keyed by the same crate key. |
+| Merge-base outcomes as receipts | Each lane run with failures rebuilds the merge-base and re-runs them, even when the same merge-base was checked before. | Publish the merge-base check's outcomes under the merge-base keys (`selection.json` has them) and consult them before compiling. |
 | Per-test keys for declared readers | A plurxd source change re-runs all of plurx-core (two census tests read plurxd). | Key `[[dynamic]]` readers by test, so only those tests re-run. |
 
 ## Execution log
