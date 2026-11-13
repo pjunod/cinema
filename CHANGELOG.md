@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- The host source census can release a dead owner's custody after the host
+  has rebooted. It proves from the machine's own journal that the witness's
+  kernel boot ended. A host without the identity binds had no other way to
+  release such custody.
 - A plurxd restart no longer fences every source-reading job in the cluster
   until a host reboot. A restart during a read left that owner's custody
   stranded. A new daemon now releases it when the old daemon's whole PID
