@@ -91,9 +91,22 @@ def pinned_source(source: Path, state: Path, commit: str) -> Path:
     common = Path(git(source, "rev-parse", "--path-format=absolute", "--git-common-dir"))
     (pin / "objects" / "info").mkdir(parents=True, exist_ok=True)
     (pin / "objects" / "info" / "alternates").write_text(f"{common / 'objects'}\n")
+    # The pin owns no objects. Drop what an earlier run left so a replaced or
+    # rewritten source clone cannot leave refs naming objects it no longer has.
+    for ref in git(pin, "for-each-ref", "--format=%(refname)", "refs/remotes").splitlines():
+        subprocess.run(["git", "-C", str(pin), "update-ref", "-d", ref], check=True)
+    subprocess.run(["git", "-C", str(pin), "worktree", "prune"], check=True)
     subprocess.run(["git", "-C", str(pin), "config", "remote.origin.url", str(pin)], check=True)
     subprocess.run(["git", "-C", str(pin), "update-ref", "refs/heads/main", commit], check=True)
     return pin
+
+
+def require_first_parent_guard(ansible: Path) -> None:
+    """Refuse a controller whose guard would reject what this job selects."""
+    guard = ansible / "library" / "noirr_mobile_release_guard.py"
+    if guard.is_file() and "--first-parent" not in guard.read_text():
+        raise ValueError(f"{guard} predates the first-parent bump rule; install a controller version "
+                         "whose guard uses --first-parent --diff-merges=first-parent")
 
 
 def platforms_for_paths(paths: tuple[str, ...]) -> list[str]:
@@ -149,6 +162,7 @@ def release(base: str, head: str) -> None:
             raise ValueError("another mobile channel release is running; retry this job") from exc
         if not (ansible / "mobile-channels.yml").is_file() or not inventory.is_file():
             raise ValueError("configure PLURX_ANSIBLE_DIR and PLURX_ANSIBLE_INVENTORY on the signing runner")
+        require_first_parent_guard(ansible)
         subprocess.run(["git", "-C", str(source), "fetch", "origin",
                         "+refs/heads/main:refs/remotes/origin/main"], check=True)
         current = git(source, "rev-parse", "origin/main")

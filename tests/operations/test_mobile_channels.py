@@ -16,6 +16,7 @@ from unittest.mock import patch
 from validation.mobile_channels import (
     changed_platforms,
     main,
+    pinned_source,
     platforms_for_paths,
     release,
     scope_platforms,
@@ -254,6 +255,31 @@ class MobileChannelsCase(unittest.TestCase):
         newer = self.bump("android", 3)
         release(head, newer)
         self.assertEqual(json.loads((self.root / "command.json").read_text())[0], newer)
+
+    def test_controller_with_the_old_guard_is_refused_before_building(self) -> None:
+        guard = self.ansible / "library" / "noirr_mobile_release_guard.py"
+        guard.parent.mkdir()
+        guard.write_text('["log", "-1", "--format=%H", "-G"]\n')
+        head = self.bump("android", 2)
+        with self.assertRaisesRegex(ValueError, "first-parent"):
+            release(self.base, head)
+        self.assertFalse((self.root / "command.json").exists())
+        guard.write_text('["log", "-1", "--first-parent", "--diff-merges=first-parent", "-G"]\n')
+        with contextlib.redirect_stdout(io.StringIO()):
+            release(self.base, head)
+        self.assertTrue((self.root / "command.json").exists())
+
+    def test_pin_drops_refs_left_by_an_earlier_run(self) -> None:
+        state = self.root / "state"
+        state.mkdir()
+        first = self.bump("android", 2)
+        pin = pinned_source(self.source, state, first)
+        subprocess.run(["git", "-C", str(pin), "update-ref", "refs/remotes/origin/stale", first], check=True)
+        second = self.bump("android", 3)
+        pinned_source(self.source, state, second)
+        refs = subprocess.check_output(["git", "-C", str(pin), "for-each-ref", "--format=%(refname)"], text=True).split()
+        self.assertEqual(refs, ["refs/heads/main"])
+        self.assertEqual(subprocess.check_output(["git", "-C", str(pin), "rev-parse", "main"], text=True).strip(), second)
 
     def test_rewritten_history_does_not_publish_an_unrelated_main(self) -> None:
         trigger = self.commit("clients/apple/project.yml")

@@ -149,7 +149,9 @@ permissions. On 2026-11-03 the Android Developer API was enabled and fastlane
 authenticated, read Cinema's internal track, and validated an empty edit.
 The edit was discarded without uploading an artifact or committing a release.
 This proves store access separately from the presence of a local key file.
-Missing credentials and rejected uploads fail the job.
+Missing credentials and rejected uploads fail the job. Credential checks
+are not end-to-end evidence; never bump an unchanged app just to test
+the controller.
 
 **Queued runs and recovery.** Workflow concurrency queues this repository's
 releases without cancelling an upload. A controller file lock also refuses
@@ -157,11 +159,11 @@ overlapping publishers using this entry point; other apps and manual channel
 runs must honor the same lock or run separately. A queued run publishes the
 latest `origin/main` containing its triggering commit, and includes subsequent
 mobile changes in its selection. The selected revision is passed to the
-private publisher and checked before any build starts. Rewritten history and
-non-ancestor recovery baselines are refused. The private playbook checks main
-again before uploading, against `pinned-source.git` in the state directory,
-whose `main` stays at the selected revision; later merges publish in their own
-run. Successful upload receipts let retries skip
+private publisher. Rewritten history and non-ancestor baselines are refused
+when the run selects; the playbook's pre-upload check of main reads
+`pinned-source.git`, which stays at the selection, so it no longer sees later
+merges (they publish in their own run) or a mid-build force-push, which branch
+protection on `main` forbids. Successful upload receipts let retries skip
 version/build/platform/track combinations already submitted. The receipt is
 not a live store query: after a crash between store acceptance and receipt
 writing, inspect the store before retrying.
