@@ -1,3 +1,36 @@
+# F+ PR1565 ownership review (2026-11-13), independently reviewed against
+# main e503f8bf3 with the unchanged rust_structural_source extractor and the
+# declared module_roots. Static source ownership evidence only; no runtime or
+# physical-settlement qualification is inferred from these counts.
+# namespaced-task-spawn 1152 -> 1162 (+10): eight production spawn_blocking
+# sites are awaited spool I/O/parsing (source_probe/dv_refit.rs:2), fit solving
+# (refit_work.rs:1), disk RPU author/readback (dv_disk.rs:2), and Developer
+# spool list/delete/readiness (http/developer.rs:3). They retain their captured
+# data/handles through actual closure return; an HTTP waiter disappearing does
+# not establish that blocking work stopped. Two refit_work_tests execute tasks
+# receive cancellation and are joined on normal fixture completion; their
+# twenty-second timeout is a test failure, not child-reap evidence.
+# bare-task-spawn 22 -> 25 (+3): one definition and two awaited calls of the
+# local source_probe::dv_refit::spawn helper, not detached Tokio tasks. The
+# helper delegates to the existing managed child owner, with a clean bundle
+# environment, inherited held descriptors and kernel-bounded direct file output.
+# namespaced-time-constructor 2211 -> 2219 (+8): one production publication
+# retry sleep releases the claim lock so the existing heartbeat can renew;
+# the same exact token/authority fences every retry. Six refit lifecycle
+# fixture sleeps/timeouts and the real-acceptance output deadline are test
+# observations; expiration never establishes process or writer settlement.
+# process-command-construction 342 -> 351 (+9): two production commands are
+# the managed refit helper and the held-source, cancellation-bound, capped
+# first-packet identity probe. Their existing process owners join/reap before
+# returning and retain admission/source ownership. Seven commands are fixtures:
+# the kernel file-limit child, explicit ignored disk helper, four finite
+# nonzero-clock FFmpeg/ffprobe commands, and the ignored acceptance tool helper.
+# process-capable-launch-method 927 -> 930 (+3): awaited fixture output() calls
+# in disk acceptance, nonzero-clock coverage and the real acceptance helper.
+# No new production direct launch/kill/wait, alias, producer-policy owner or
+# forbidden-zero shape is admitted. Patterns, roots, exclusions and every other
+# structural count remain unchanged. Passing source review is not test evidence.
+#
 # S5 source custody / VOD Source-copy yield audit (2026-11-09), authored
 # structural comparison of origin/main c8f8b5aa9 with 3e17df55f using the
 # unchanged rust_structural_source extractor over module_roots. This is static
@@ -3956,7 +3989,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merged main again: 1144 base, +4 main (#1546), +2 this branch.
 # Merged main into E1c: 1148 base, +1 main, +2 E1c.
 # Offload integration: main 1151 plus the fake_curator test task above.
-expected_occurrences = 1152
+expected_occurrences = 1162
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4237,7 +4270,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # PR1491: +3 closure calls, not task calls: producer_spawn.rs calls its
 # `spawn` builder argument twice (mediated and direct), and reader.rs's
 # declared_background_spawn calls `spawn()` after recording the escape tick.
-expected_occurrences = 22
+expected_occurrences = 25
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5859,7 +5892,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # pending candidate's cancellation token while the incumbent retains its
 # admitted root; and five test-only timeout/sleep calls that bound or pace
 # the successor scheduling fixture. No new task, producer, or process.
-expected_occurrences = 2211
+expected_occurrences = 2219
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6367,7 +6400,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # #1546, +1 test-only (341 -> 342): http/tests.rs makes one real Matroska
 # fixture with ffmpeg via testfixtures::run, which waits for and reaps the child
 # before the test continues. No production producer.
-expected_occurrences = 342
+expected_occurrences = 351
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7083,7 +7116,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # status of an axum response built in the test. It launches no process.
 # Offload integration: main 925 plus the fake_curator in-process task.
 # D3b/main integration: 925 base + 1 D3b + 1 main = 927; keep both additions.
-expected_occurrences = 927
+expected_occurrences = 930
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

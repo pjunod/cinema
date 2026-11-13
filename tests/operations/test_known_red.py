@@ -61,6 +61,9 @@ class KnownRedContractTest(unittest.TestCase):
         validate_opt_in_fixtures(fixtures, ignored, load_entries())
         fixture_ids = {fixture["test"] for fixture in fixtures}
         self.assertEqual(fixture_ids, {
+            "crates/plurx-core/src/transcode/dv_refit_title_tests.rs::transcode::dv_refit_title::tests::two_real_helper_runs_give_the_same_digest",
+            "crates/plurxd/src/dv_disk/tests.rs::dv_disk::tests::real_fel_fit_is_written_and_read_back",
+            "crates/plurxd/src/fragindex/refit_acceptance_tests.rs::fragindex::refit_acceptance_tests::real_fitted_index_and_seek_publish_stored_curves",
             "crates/plurxd/src/playback_cache.rs::playback_cache::tests::actual_playback_cache_inventory_cost",
             "crates/plurxd/src/decode_facts/tests.rs::decode_facts::tests::packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls",
             "crates/plurxd/src/transcoder_optimization/comparison.rs::transcoder_optimization::comparison::tests::real_media_production_tools_comparison",
@@ -253,8 +256,10 @@ class KnownRedContractTest(unittest.TestCase):
         )
         self.assertEqual(len(additional_fixtures), 16)
         # HDR/DV and the explicit Mac graph check are operator-run fixtures.
-        # Explicitly registered CGNAT fixtures are excluded from this unchanged
-        # unadmitted-identity bound; they are not known-red exemptions.
+        # Explicitly registered CGNAT and private F+ acceptance fixtures are
+        # excluded from this unchanged unadmitted-identity bound; each has an
+        # exact identity, owner, input requirements and opt-in command above.
+        # They are not known-red exemptions.
         self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 40)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
