@@ -324,7 +324,7 @@ A site that fails waits for a broker change (a second read slot for disjoint
 ranges, a larger sequential window), never for a raw fallback. The
 implementer of each B2 task — or the GPT lab session for lab runs — records
 the numbers in the Execution log below and in a "Measurements" table in
-`docs/server/PLAYBACK-READER-WITNESS.md`.
+`PLAYBACK-READER-WITNESS.md` in this folder.
 
 ## 6. Fit with in-flight work
 
@@ -484,7 +484,7 @@ AGENTS.md.
   (declared raw and the lifetime lock), §1.3 (census as fallback).
 - `docs/OPERATIONS.md`: the Developer card and when a census is needed.
 - `docs/API.md`: `GET /api/v1/developer/source-recovery`.
-- This plan moves to `docs/server/PLAYBACK-READER-WITNESS.md`, linked from
+- This plan moves to `PLAYBACK-READER-WITNESS.md` in this folder, linked from
   `docs/server/README.md`.
 
 ## 14. Review

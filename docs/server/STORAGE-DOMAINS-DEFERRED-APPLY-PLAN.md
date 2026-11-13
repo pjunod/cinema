@@ -565,7 +565,7 @@ review fixes.
   card shows it.
 - `docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md` ≈202: the
   pending state.
-- This plan moves to `docs/server/STORAGE-DOMAINS-DEFERRED-APPLY.md`, linked
+- This plan moves to `STORAGE-DOMAINS-DEFERRED-APPLY.md` in this folder, linked
   from `docs/server/README.md`.
 
 ## 10. Delivery
