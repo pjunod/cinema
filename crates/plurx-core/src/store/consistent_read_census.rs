@@ -55,7 +55,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // protocol singleton before admitting adjunct work: three more.
     // The planning-key extension (D3t) checks its object shape and marker: two more.
     // Custody retention (main) checks its trigger shape and marker: two more.
-    ("hiqlite.rs", 71),
+    // Offload: committed column shape before its additive schema migration.
+    ("hiqlite.rs", 72),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -79,7 +80,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
     // #1546: the probe-only scan's removal sweep reads the files under one folder.
-    ("hiqlite_media.rs", 73),
+    // Offload: two identity lookups and one authoritative leaf-count read.
+    ("hiqlite_media.rs", 76),
     // Handoff status, the redemption verdict, handoff-audience authentication
     // and the token scope each read committed authority; see the
     // `authority:` reasons at the sites.
@@ -559,6 +561,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("migrate_additive_schema_step", STARTUP),
     ("migrate_playback_inputs", STARTUP),
     ("migrate_schema", STARTUP),
+    ("offloaded_column_present", STARTUP),
     ("playback_handoffs_schema_version", STARTUP),
     ("playback_input_keys_shape", STARTUP),
     ("pointer_desired_revision_column_present", STARTUP),

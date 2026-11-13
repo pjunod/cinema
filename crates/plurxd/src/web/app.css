@@ -403,6 +403,13 @@
   @media(max-width:520px){ .azbar{gap:0;padding:5px 2px} .azbar button,.azbar .off{height:13px;width:15px} }
   .badge{position:absolute;top:8px;right:8px;width:24px;height:24px;display:grid;place-items:center;
     background:var(--good);color:#04120a;border-radius:50%;font-size:14px;font-weight:800;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+  /* Offload: Curator removed the files to free disk; the title stays, dimmed. */
+  .poster.offloaded .artbox img,.poster.offloaded .artbox .ph{filter:grayscale(.85) brightness(.6)}
+  .poster.offloaded .t{color:var(--muted)}
+  .offbadge{position:absolute;left:8px;bottom:8px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;
+    background:var(--panel);color:var(--muted);border:1px solid var(--line);letter-spacing:.02em}
+  .eprow .offbadge{position:static;flex:none}
+  .offstatus{margin:10px 0 0;color:var(--muted);font-size:14px}
   .amenu{position:absolute;top:38px;right:0;min-width:180px;background:var(--panel);border:1px solid var(--line);
     border-radius:10px;padding:6px;display:none;z-index:40;box-shadow:0 12px 34px rgba(0,0,0,.45)}
   .amenu.on{display:block}

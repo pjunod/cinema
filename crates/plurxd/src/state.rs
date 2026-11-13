@@ -5736,7 +5736,11 @@ impl JobManager {
         } else {
             req.path.clone()
         };
-        let removed = library_work::probe_removed_paths(&library, &scope, targeted.removed).await?;
+        let mut removed =
+            library_work::probe_removed_paths(&library, &scope, targeted.removed, false).await?;
+        removed.extend(
+            library_work::probe_removed_paths(&library, &scope, targeted.offloaded, true).await?,
+        );
         // Files the caller says it just placed are probed whatever their
         // size and whole-second mtime say (contract v2 §5.1).
         let force_probe = library_work::canonical_expected(expected, &library, &scope).await;
@@ -5756,6 +5760,16 @@ impl JobManager {
                     .probe_only
                     .then(|| canonical.iter().cloned().collect()),
                 force_probe: canonical,
+                offload_hints: targeted
+                    .offload_hints
+                    .iter()
+                    .filter_map(|(raw, hint)| match force_probe.get(raw) {
+                        Some(library_work::ExpectedPath::Canonical(path)) => {
+                            Some((path.clone(), hint.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
             },
         )
         .await?;

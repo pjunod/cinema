@@ -87,7 +87,7 @@ final class TVPhysicalNavigationAcceptanceTests: TVNavigationTestCase {
         XCTAssertTrue(app.staticTexts["library-loaded-summary"].waitForExistence(timeout: 30))
         XCTAssertFalse(app.buttons["diagnostics-open"].exists,
                        "Browsing must not expose a global reporting overlay")
-        for key in ["view", "sort", "filter"] {
+        for key in ["view", "sort", "filter", "files"] {
             let opener = app.buttons["library:" + key]
             reachForSetup(opener, in: app, limit: 8)
             assertFocus(opener, in: app, context: "Physical " + key + " opener")

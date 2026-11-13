@@ -161,6 +161,11 @@ cannot decode the request's sidecar, leaves it pending for a newer one, and
 answers `500` on status reads of it). Wire, states and codes:
 [INTEGRATION.md](../INTEGRATION.md) §1.10, [API.md](../API.md) §6.3.
 
+#### 4.2.2 Amendment Offload (cinema side built; Curator side open)
+
+Curator can delete a title's files to free disk and keep the title. Wire,
+states, errors and deploy order: [PIPELINE-CONTRACT-OFFLOAD.md](PIPELINE-CONTRACT-OFFLOAD.md).
+
 ### 4.3 Path check at setup
 
 The notifier's **Test** sends the configured library roots (from Settings →

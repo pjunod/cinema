@@ -157,6 +157,7 @@ mod sqlite;
 mod telemetry;
 mod timeline_annotations;
 
+pub(crate) mod offload;
 mod publication;
 mod scan_identity_repair;
 mod schema_lineage;
@@ -1203,14 +1204,15 @@ use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
     DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
-    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
-    MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
-    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
-    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    ItemPresence, ItemSort, Library, MediaFile, MediaSessionActivation,
+    MediaSessionActivationOutcome, MediaSessionActivationSettlement,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, OfflineActivityPackage,
+    OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
+    OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease, PlaybackEvent,
+    PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -3146,6 +3148,32 @@ pub trait MediaStore: Send + Sync + 'static {
         library_id: i64,
         directory: &str,
     ) -> Result<Vec<Item>, StoreError>;
+    /// The offloaded movie of this library carrying these external ids, for
+    /// placing files that come back after Get it back. Ids only, never a
+    /// title: a re-acquired title must not become a duplicate when its
+    /// release name differs from the library title (`Tar` / `Tár`).
+    async fn find_offloaded_movie(
+        &self,
+        library_id: i64,
+        tmdb_id: Option<i64>,
+        imdb_id: Option<&str>,
+    ) -> Result<Option<Item>, StoreError>;
+    /// The offloaded episode of the show with this TMDB id, by season and
+    /// episode number.
+    async fn find_offloaded_episode(
+        &self,
+        library_id: i64,
+        series_tmdb_id: i64,
+        season_number: i32,
+        episode_number: i32,
+    ) -> Result<Option<Item>, StoreError>;
+    /// How many offloaded leaves sit under each container, of how many in
+    /// all (the item itself counts when it is a leaf). A container with none
+    /// offloaded is absent.
+    async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError>;
     async fn find_book(
         &self,
         library_id: i64,
@@ -3233,6 +3261,28 @@ pub trait MediaStore: Send + Sync + 'static {
         offset: i64,
         limit: i64,
         genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            ItemPresence::Everything,
+        )
+        .await
+    }
+    /// [`list_top_items_in_genre`](Self::list_top_items_in_genre) narrowed by
+    /// whether the title is on disk or offloaded. One `WHERE` term shared by
+    /// the count and the page, like the genre.
+    async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: ItemPresence,
     ) -> Result<ItemPage, StoreError>;
     /// The unfiltered grid: every caller that had no opinion about genres
     /// before this existed and still has none. Provided rather than
@@ -3648,12 +3698,19 @@ pub trait MediaStore: Send + Sync + 'static {
     /// Atomically remove vanished files and their empty item hierarchy only
     /// when the scanner sees the expected roots and stays within its deletion
     /// budget. This is the M1c publication boundary; M4 adds its lease fence.
+    ///
+    /// `offload_keep` names movie/episode items an offload wants kept: any
+    /// of them left with no files by this very removal is marked offloaded
+    /// (`offloaded_at`) between the file delete and the leaf prune, in the
+    /// same transaction, so nothing can observe it fileless and unmarked.
     async fn reconcile_library(
         &self,
         library_id: i64,
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError>;
     /// Remove `file_ids` — files of the library that the caller found under
     /// none of `configured_paths`, which is what an operator removing a
@@ -5042,6 +5099,8 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
@@ -6915,6 +6974,27 @@ impl CatalogueReader {
         self.authority.get_item(id).await
     }
 
+    /// Offloaded leaves under each container, from the bounded replica when
+    /// it is proven fresh enough, like the item reads beside it.
+    pub async fn offloaded_leaf_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, crate::domain::LeafOffload>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let owned = ids.to_vec();
+            if let Some(result) = self
+                .bounded(
+                    move |store| async move { store.local_offloaded_leaf_counts(&owned).await },
+                )
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.offloaded_leaf_counts(ids).await
+    }
+
     pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
@@ -6934,6 +7014,26 @@ impl CatalogueReader {
         limit: i64,
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
+        self.list_top_items_filtered(
+            library_id,
+            sort,
+            offset,
+            limit,
+            genre,
+            crate::domain::ItemPresence::Everything,
+        )
+        .await
+    }
+
+    pub async fn list_top_items_filtered(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+        presence: crate::domain::ItemPresence,
+    ) -> Result<ItemPage, StoreError> {
         // Both the existing Authority implementation and this local variant
         // read the page and count in separate statements. The bounded permit
         // covers that whole operation but deliberately does not promise a
@@ -6950,6 +7050,7 @@ impl CatalogueReader {
                             offset,
                             limit,
                             genre.as_deref(),
+                            presence,
                         )
                         .await
                 })
@@ -6959,7 +7060,7 @@ impl CatalogueReader {
             }
         }
         self.authority
-            .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+            .list_top_items_filtered(library_id, sort, offset, limit, genre, presence)
             .await
     }
 

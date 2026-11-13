@@ -598,10 +598,41 @@ impl JobManager {
                         removed.push(path.clone());
                     }
                 }
+                let mut offloaded: Vec<String> = Vec::new();
+                for path in sidecars.iter().flat_map(|row| &row.offloaded_paths) {
+                    if !offloaded.contains(path) {
+                        offloaded.push(path.clone());
+                    }
+                }
+                let mut offload_hints: Vec<(String, plurx_core::scan::OffloadHint)> = Vec::new();
+                for row in &sidecars {
+                    let Some(ids) = group
+                        .iter()
+                        .find(|request| request.id == row.request_id)
+                        .and_then(|request| request.ids.as_ref())
+                    else {
+                        continue;
+                    };
+                    // An episode request's own `ids` are the episode's; the
+                    // show's id travels in `series_tmdb`.
+                    let hint = plurx_core::scan::OffloadHint {
+                        tmdb: (!ids.episodeish).then_some(ids.tmdb).flatten(),
+                        imdb: (!ids.episodeish).then(|| ids.imdb.clone()).flatten(),
+                        series_tmdb: ids.series_tmdb,
+                    };
+                    if hint == plurx_core::scan::OffloadHint::default() {
+                        continue;
+                    }
+                    for file in &row.expected_files {
+                        offload_hints.push((file.path.clone(), hint.clone()));
+                    }
+                }
                 let targeted = Targeted {
                     expected: &expected,
                     removed: &removed,
+                    offloaded: &offloaded,
                     probe_only,
+                    offload_hints: &offload_hints,
                 };
                 let result = match self.run_targeted(&group, &targeted, publisher).await {
                     Ok((scan, files)) => {
@@ -615,6 +646,10 @@ impl JobManager {
                                         .iter()
                                         .any(|expected| expected.path == file.path())
                                         || row.removed_paths.iter().any(|path| path == file.path())
+                                        || row
+                                            .offloaded_paths
+                                            .iter()
+                                            .any(|path| path == file.path())
                                 })
                                 .cloned()
                                 .collect();
@@ -744,8 +779,14 @@ pub(super) struct Targeted<'a> {
     pub expected: &'a [ExpectedFile],
     /// Removed paths (contract amendment `removed_paths`).
     pub removed: &'a [String],
+    /// Offloaded paths (contract amendment `offload`): removed paths whose
+    /// items stay.
+    pub offloaded: &'a [String],
     /// Record exactly the expected files and walk nothing else.
     pub probe_only: bool,
+    /// The ids each request sent, for the expected files *that request*
+    /// named (as sent): placement looks for an offloaded item by them.
+    pub offload_hints: &'a [(String, plurx_core::scan::OffloadHint)],
 }
 
 /// One removed path, as the disk answered for it.
@@ -766,6 +807,7 @@ pub(super) async fn probe_removed_paths(
     library: &plurx_core::domain::Library,
     target: &std::path::Path,
     removed: &[String],
+    offload: bool,
 ) -> Result<Vec<RemovedEntry>, TargetError> {
     use plurx_core::scan::{containment, removed as probe};
     if removed.is_empty() {
@@ -793,8 +835,22 @@ pub(super) async fn probe_removed_paths(
                 error: failure.error,
             };
             if !listable.contains(&root) {
-                probe::root_listable(&root).map_err(unreadable)?;
-                listable.push(root.clone());
+                match probe::root_listable(&root) {
+                    Ok(()) => listable.push(root.clone()),
+                    // An offload that empties a root is lasting, not a share
+                    // that will come back.
+                    Err(failure) if offload && failure.empty_root => {
+                        entries.push(RemovedEntry::Absent(probe::AbsentPath {
+                            spellings: vec![path.to_path_buf()],
+                            path: raw,
+                            root: root.clone(),
+                            offload,
+                            root_empty: true,
+                        }));
+                        continue;
+                    }
+                    Err(failure) => return Err(unreadable(failure)),
+                }
             }
             entries.push(
                 match probe::probe_removed(&root, path).map_err(unreadable)? {
@@ -804,6 +860,8 @@ pub(super) async fn probe_removed_paths(
                             path: raw,
                             spellings,
                             root: root.clone(),
+                            offload,
+                            root_empty: false,
                         })
                     }
                 },
@@ -2069,6 +2127,7 @@ mod tests {
                         request_key: String::new(),
                         expected_files,
                         removed_paths: Vec::new(),
+                        offloaded_paths: Vec::new(),
                         probe_only: false,
                     },
                 )

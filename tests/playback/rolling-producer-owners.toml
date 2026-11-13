@@ -3937,6 +3937,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # spawn_blocking; state.rs run_targeted scopes a probe-only group to the nearest
 # existing folder on one awaited spawn_blocking. Each JoinHandle is awaited by
 # the request's own future, so cancellation and panics surface as task errors.
+# Offload, +1 test-only (1148 -> 1149): http/tests.rs `fake_curator` serves a
+# stand-in Curator on one axum task bound to a loopback port. It owns no
+# producer or process, holds no lease, and is not joined: it ends with the
+# test's own runtime, which every `#[tokio::test]` tears down before returning.
 # #1566, +1 detached bounded store write: processed_upgrade_qualification.rs
 # `hold_viewer_demand` records a waiting viewer's live demand on its title scan
 # in one spawned task that makes a single store call and logs its outcome. It
@@ -3951,7 +3955,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # counts into the same awaited task (counted under process-capable-launch-method).
 # Merged main again: 1144 base, +4 main (#1546), +2 this branch.
 # Merged main into E1c: 1148 base, +1 main, +2 E1c.
-expected_occurrences = 1151
+# Offload integration: main 1151 plus the fake_curator test task above.
+expected_occurrences = 1152
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -7045,13 +7050,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # not a process.
 # PR1527: +1 (923 -> 924), the synchronous `.output()` of the test-only
 # bundle-installer --identity child above; it waits for and reaps the child.
+# Offload: +1 (924 -> 925), the `tokio::spawn` in http/tests.rs `fake_curator`
+# counted above; the broad matcher reads it as a launch method, but it starts an
+# in-process HTTP server task, not an operating-system process.
 # D3a: +1 (924 -> 925), `spawn_in_http_store_scope(`, the owner start's one
 # spawn (the line above); it is the task `ims.rs::start` already awaited, not a
 # process, and joins before the handler returns.
 # D3b review S3: +1 lexical `.status()` in `media_sessions/tests.rs`
 # (`an_owner_plan_refusal_crosses_to_the_ingress_as_plan_changed`), the
 # status of an axum response built in the test. It launches no process.
-expected_occurrences = 926
+# Offload integration: main 925 plus the fake_curator in-process task.
+# D3b/main integration: 925 base + 1 D3b + 1 main = 927; keep both additions.
+expected_occurrences = 927
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
