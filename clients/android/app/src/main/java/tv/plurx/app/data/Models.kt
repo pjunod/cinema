@@ -99,6 +99,16 @@ data class Watch(
 data class Rollup(
     val leaves: Long = 0,
     val watched: Long = 0,
+    /** Leaves whose files Curator removed to free disk (absent before Offload). */
+    val offloaded: Long = 0,
+)
+
+/** `POST items/{id}/get-it-back` and `GET items/{id}/offload-status`. */
+@Serializable
+data class OffloadAnswer(
+    val matched: Boolean = false,
+    val state: String = "",
+    val message: String = "",
 )
 
 @Serializable
@@ -134,7 +144,14 @@ data class Item(
     val added_at: Long? = null,
     val watch: Watch? = null,
     val rollup: Rollup? = null,
+    /**
+     * Curator removed this title's files to free disk; the item, its metadata
+     * and its watch history stay. For a show or season, true only when every
+     * leaf is (`rollup.offloaded` counts a partial offload).
+     */
+    val offloaded: Boolean = false,
 ) {
+    val hasOffloadedLeaves get() = offloaded || (rollup?.offloaded ?: 0L) > 0L
     val isPlayableVideo get() = kind == "movie" || kind == "episode" || kind == "video"
     val isPlayable get() = isPlayableVideo || kind == "audiobook"
     val isBook get() = kind == "book"

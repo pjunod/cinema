@@ -8548,3 +8548,11 @@ source = "clients/server-tray/macos/build"
 source_anchor = '[[ "$arch" == arm64 ]] || die "--arch must be arm64 (Intel Macs are not supported)"'
 test = "tests/operations/test_contracts.py"
 test_anchor = "def test_native_macos_tray_checks_build_arm64_only_and_run_swift_tests(self):"
+
+[[fixes]]
+id = "apple.offload-status-loop-ends-when-the-title-is-back"
+commits = ["bbf9da43ecc35625d37cfd6c4bc9d6278df937f1"]
+source = "clients/apple/Sources/Offload.swift"
+source_anchor = 'static func isGone(_ answer: OffloadAnswer) -> Bool { answer.state == "on_disk" }'
+test = "clients/apple/Tests/OffloadTests.swift"
+test_anchor = "func testATitleThatCameBackOrIsNoLongerOffloadedEndsTheStatusLoop()"

@@ -268,6 +268,18 @@ bump may break compatibility and a **patch** bump never does.
   removed path is not `path_unreadable`; an unreadable chain or an empty mount
   point is, and removes nothing. The connection test advertises
   `"features": ["removed_paths"]`.
+- Offload: when Curator deletes a title's files to free disk, plurx keeps the
+  item, its metadata and its watch history, greyed out with an Offloaded badge.
+  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
+  connection test lists `offload`), an item is flagged `offloaded` only when no
+  file is left, and no prune ever deletes one. Library lists take
+  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
+  in the web, Apple and Android clients); search always includes them, flagged.
+  An administrator's **Get it back** asks Curator for the title again
+  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
+  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
+  kept item by the request's ids and clear the flag. Deploy every cinema node
+  before Curator sends offload. [Contract](docs/INTEGRATION.md).
 - `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
   say which media files left a folder (a Re-match). Such a request probes
   exactly its expected and removed paths, walks nothing else, never becomes a
