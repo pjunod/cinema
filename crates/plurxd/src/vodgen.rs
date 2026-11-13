@@ -225,11 +225,14 @@ pub struct Generation {
 }
 
 /// A generation's F+ curves and the anchor of its index's timeline: the
-/// index's first row decodes at the source's first video keyframe.
+/// index presents the source's first video keyframe at `anchor_ticks`.
 #[derive(Debug, Clone)]
 pub struct GenerationRefit {
     pub table: std::sync::Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>,
     pub keyframe: plurx_core::transcode::dv_refit_serve::SourceKeyframe,
+    /// Where the index's timeline presents that keyframe, in index ticks
+    /// ([`crate::fragindex::index_first_presentation`]).
+    pub anchor_ticks: i128,
 }
 
 /// Where film-indexed segments go. Implemented by the rendition layer
@@ -1081,9 +1084,9 @@ impl<S: Sink> GenerationRun<'_, S> {
     }
 
     /// Give a converting generation its F+ curves, anchored on its index's
-    /// timeline: the index's first row decodes at the source's first video
-    /// keyframe, and a fragment landed on row *r* is shifted onto the index
-    /// by that row's `dts` ([`crate::dvpipe::Converter::convert_placed`]).
+    /// timeline (where the index presents the source's first keyframe); a
+    /// fragment landed on row *r* is shifted onto the index by that row's
+    /// `dts` ([`crate::dvpipe::Converter::convert_placed`]).
     fn attach_refit(
         &self,
         converter: crate::dvpipe::Converter,
@@ -1097,10 +1100,6 @@ impl<S: Sink> GenerationRun<'_, S> {
                 "an F+ generation needs the index its landing is placed on".into(),
             ));
         };
-        let first = index
-            .rows
-            .first()
-            .ok_or_else(|| crate::dvpipe::Refused("an F+ generation's index has no rows".into()))?;
         if served.video().map(|video| video.timescale) != Some(index.timescale) {
             return Err(crate::dvpipe::Refused(
                 "the generation's video timescale is not its index's".into(),
@@ -1108,7 +1107,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         }
         converter.with_refit(
             refit.table.clone(),
-            refit.keyframe.clock(index.timescale, i128::from(first.dts)),
+            refit.keyframe.clock(index.timescale, refit.anchor_ticks),
         )
     }
 
@@ -2589,5 +2588,250 @@ mod tests {
             assert!(why.contains("landing time"), "{why}");
             assert!(sink.taken().is_empty());
         }
+    }
+
+    // ---- F+ (FEL-RPU-REFIT-BUILD.md §3.5) ----
+
+    /// As in the fragindex tests: identity nudged by `eps`, whose sign
+    /// moves integer parts and so the RPU's size.
+    fn nudged_curves(eps: f64) -> plurx_core::transcode::dv_refit::RefitCurves {
+        let mut curves = plurx_core::transcode::dv_refit::RefitCurves::identity();
+        for piece in &mut curves.luma {
+            piece[2] += eps;
+        }
+        for term in &mut curves.mmr {
+            term[0] += eps;
+            term[1] += eps;
+        }
+        curves
+    }
+
+    fn clean_cra_file() -> MediaFile {
+        MediaFile {
+            downloaded_subtitles: Vec::new(),
+            id: 1,
+            item_id: 1,
+            path: testfixtures::source("clean-cra"),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(12_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: Some("Main".into()),
+            width: Some(640),
+            height: Some(360),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            bitrate: Some(1_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
+    /// The converting fixture as an F+ title: its index built by the F+ pass,
+    /// anchored on the source's first keyframe (the production probe), with
+    /// curves A before index row `split` and B from it on. A and B write RPUs
+    /// of different sizes, so where a fragment lands decides what it weighs.
+    async fn refit_film(split: usize) -> (Film, GenerationRefit) {
+        use plurx_core::transcode::dv_refit_serve::ServedCurveTable;
+        testfixtures::require_ffmpeg();
+        let source = testfixtures::source("clean-cra");
+        let mut probe = std::process::Command::new(testfixtures::ffprobe());
+        probe
+            .args(["-v", "error", "-show_streams", "-of", "json"])
+            .arg(&source);
+        let probe = String::from_utf8(testfixtures::run(&mut probe)).expect("probe JSON");
+        let stream = crate::fragindex::selected_video_stream(&probe).expect("a video stream");
+        let keyframe = crate::dv_refit_serving::source_keyframe(
+            &std::fs::File::open(&source).expect("source"),
+            stream,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("the keyframe anchor");
+        let record = plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1)
+            .expect("a describable record");
+        let indexed = testfixtures::with_dolby_vision_rpus(&index_pipe_bytes("clean-cra"));
+        let rows = match index_stream(
+            std::io::Cursor::new(indexed.clone()),
+            SourceIdentity::new(1, 1, "v1"),
+            None,
+            DolbyVisionPass::Rewrite(Box::new(record.clone())),
+        )
+        .await
+        {
+            IndexOutcome::Built(index) => *index,
+            other => panic!("the v1 pass must index: {other:?}"),
+        };
+        assert!(rows.rows.len() > split + 2, "a fixture worth splitting");
+        let runtime = crate::test_tempdir().expect("tempdir");
+        let (timescale, anchor_ticks) = crate::fragindex::index_first_presentation(
+            &clean_cra_file(),
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+            &std::fs::File::open(&source).expect("source"),
+            runtime.path(),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("the anchor probe");
+        assert_eq!(timescale, rows.timescale);
+        let clock = keyframe.clock(rows.timescale, anchor_ticks);
+        let at = |ticks: u64| {
+            clock
+                .source_pts(i128::from(ticks))
+                .expect("a whole source tick")
+        };
+        let last = rows.rows.last().expect("rows");
+        let base = format!("{}/{}", keyframe.time_base.0, keyframe.time_base.1);
+        let (a, b) = (nudged_curves(1e-4), nudged_curves(-1e-4));
+        let boundary = at(rows.rows[split].dts);
+        let table = std::sync::Arc::new(
+            ServedCurveTable::new(
+                "d".repeat(64),
+                [
+                    (keyframe.pts - 100_000, boundary, base.as_str(), Some(&a)),
+                    (
+                        boundary,
+                        at(last.dts + last.duration) + 100_000,
+                        base.as_str(),
+                        Some(&b),
+                    ),
+                ],
+            )
+            .expect("table"),
+        );
+        let refit = crate::fragindex::IndexRefit {
+            table: table.clone(),
+            keyframe,
+        };
+        let index = match index_stream(
+            std::io::Cursor::new(indexed),
+            SourceIdentity::new(1, 1, "f+"),
+            None,
+            DolbyVisionPass::RewriteWithCurves(Box::new(record), std::sync::Arc::new(refit)),
+        )
+        .await
+        {
+            IndexOutcome::Built(index) => *index,
+            other => panic!("the F+ pass must index: {other:?}"),
+        };
+        let feed = testfixtures::with_dolby_vision_rpus(&pipe("clean-cra"));
+        let policy = CutPolicy::new(3, 1, 48_000_000, 15, index.timescale);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &policy,
+            &TrackDurations {
+                video_ms: 12_000,
+                audio_ms: 12_000,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let mut init = muxer_init(&feed);
+        sanitize_stale_dolby_brand(&mut init);
+        let video_id = init.video().expect("a video track").id;
+        let identity =
+            InitIdentity::establish(&init, index.promotion.clone()).expect("establishing identity");
+        (
+            Film {
+                index,
+                plan,
+                identity,
+                policy,
+                video_id,
+                feed,
+            },
+            GenerationRefit {
+                table,
+                keyframe,
+                anchor_ticks,
+            },
+        )
+    }
+
+    fn refit_generation(film: &Film, refit: &GenerationRefit, start_entry: u32) -> Generation {
+        let mut generation = generation(film, start_entry);
+        generation.convert_dolby_vision = true;
+        generation.refit = Some(refit.clone());
+        generation
+    }
+
+    /// An F+ generation is placed only exactly, and the production A/V pipe
+    /// cannot be: with an audio lead the mov muxer (no edit list) shifts the
+    /// video timeline and pins its first sample back to zero, so that pipe's
+    /// timeline is not a shift of the video-only index's. The placement then
+    /// refuses, loudly and with nothing published, rather than write a
+    /// sample its neighbouring scene's curves. Exact VOD placement needs
+    /// each sample's packet identity (FEL-RPU-REFIT-BUILD.md §3.5, open).
+    #[tokio::test]
+    async fn an_f_plus_generation_refuses_a_pipe_it_cannot_place_exactly() {
+        let (film, refit) = refit_film(1).await;
+        let sink = MemSink::default();
+        let outcome = run(
+            &film.feed[..],
+            refit_generation(&film, &refit, 0),
+            &sink,
+            "full",
+        )
+        .await;
+        match &outcome {
+            Outcome::Failed(failure) => assert!(
+                format!("{failure:?}").contains("not a whole tick"),
+                "{failure:?}"
+            ),
+            other => panic!("an unplaceable F+ generation must fail, got {other:?}"),
+        }
+        assert!(sink.taken().is_empty(), "nothing is published");
+
+        // The retiming itself: the first video fragment's sample decode times
+        // in the A/V pipe against the video-only index pipe's.
+        let decode_times = |stream: &[u8]| {
+            let mut reader = FragmentReader::new();
+            reader.push(stream);
+            let mut init = None;
+            loop {
+                match reader.next_unit().expect("parsing") {
+                    Some(Unit::Init(parsed)) => init = Some(parsed),
+                    Some(Unit::Fragment(fragment)) => {
+                        let video = init.as_ref().and_then(Init::video).expect("video").id;
+                        let Some(track) = fragment.track(video) else {
+                            continue;
+                        };
+                        let mut at = track.base_decode_time;
+                        let mut times = Vec::new();
+                        for sample in track.samples() {
+                            times.push(at);
+                            at += u64::from(sample.duration);
+                        }
+                        return times;
+                    }
+                    Some(Unit::Trailer) => continue,
+                    None => panic!("no video fragment"),
+                }
+            }
+        };
+        let indexed = decode_times(&index_pipe_bytes("clean-cra"));
+        let served = decode_times(&film.feed);
+        let shift: Vec<i128> = indexed
+            .iter()
+            .zip(&served)
+            .map(|(i, s)| i128::from(*s) - i128::from(*i))
+            .collect();
+        assert_eq!(shift[0], 0, "the first sample is pinned to zero");
+        assert!(shift[1] > 0, "and the rest are shifted: {shift:?}");
+        assert!(
+            shift[1..].windows(2).all(|pair| pair[0] == pair[1]),
+            "{shift:?}"
+        );
     }
 }

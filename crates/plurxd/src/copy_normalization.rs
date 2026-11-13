@@ -208,14 +208,14 @@ fn normalize_fragment(
     if let Some(converter) = &mut pipe.converter {
         let converted = if converter.refits() {
             // The fragment's first video sample is the clock's first packet,
-            // so that packet's source decode time anchors its samples.
+            // so that packet's source presentation time anchors its samples.
             let video = pipe
                 .served_init
                 .video()
                 .ok_or_else(|| CopyNormalizationError::Conversion("no video track".into()))?;
             let first = fragment
                 .track(video.id)
-                .map(|track| i128::from(track.base_decode_time))
+                .and_then(crate::fragindex::first_presentation)
                 .ok_or_else(|| CopyNormalizationError::Conversion("no video traf".into()))?;
             let packet = clock.first_packet;
             converter.convert_anchored(
@@ -223,7 +223,7 @@ fn normalize_fragment(
                 plurx_core::transcode::dv_refit_serve::SourceClock {
                     track_timescale: video.timescale,
                     track_ticks: first,
-                    source_pts: packet.dts,
+                    source_pts: packet.pts,
                     source_time_base: (packet.time_base_num, packet.time_base_den),
                 },
             )

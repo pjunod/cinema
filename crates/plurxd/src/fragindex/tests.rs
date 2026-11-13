@@ -2252,3 +2252,341 @@ exec /bin/sleep 60
         );
     }
 }
+
+// ---- F+ (FEL-RPU-REFIT-BUILD.md §3.5) ----
+
+/// Identity curves with every coefficient nudged by `eps`: servable, and a
+/// negative nudge moves integer parts (0 → −1, 1 → 0) so the two signs write
+/// RPUs of different sizes.
+fn nudged_curves(eps: f64) -> plurx_core::transcode::dv_refit::RefitCurves {
+    let mut curves = plurx_core::transcode::dv_refit::RefitCurves::identity();
+    for piece in &mut curves.luma {
+        piece[2] += eps;
+    }
+    for term in &mut curves.mmr {
+        term[0] += eps;
+        term[1] += eps;
+    }
+    curves
+}
+
+/// The fixture's video packets' pts in demux order from the first
+/// keyframe: ffprobe's, the truth the clock is checked against. (A Matroska
+/// B-frame head reports no dts, which is why the anchor is a pts.)
+fn ffprobe_pts(path: &std::path::Path) -> Vec<i64> {
+    let mut probe = std::process::Command::new(testfixtures::ffprobe());
+    probe
+        .args(["-v", "error", "-select_streams", "0", "-show_packets"])
+        .args(["-show_entries", "packet=pts,flags", "-of", "json"])
+        .arg(path);
+    let document: serde_json::Value =
+        serde_json::from_slice(&testfixtures::run(&mut probe)).expect("ffprobe JSON");
+    let packets = document["packets"].as_array().expect("packets");
+    let first = packets
+        .iter()
+        .position(|packet| packet["flags"].as_str().is_some_and(|f| f.starts_with('K')))
+        .expect("a keyframe");
+    packets[first..]
+        .iter()
+        .map(|packet| {
+            packet["pts"]
+                .as_i64()
+                .or_else(|| packet["pts"].as_str().and_then(|v| v.parse().ok()))
+                .expect("every packet has a pts")
+        })
+        .collect()
+}
+
+/// A B-frame HEVC remux whose timeline starts 1.5 s in.
+fn offset_bframe_source(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("bframes-offset.mkv");
+    let mut make = std::process::Command::new(testfixtures::ffmpeg());
+    make.args(["-y", "-v", "error", "-f", "lavfi"])
+        .args(["-i", "testsrc2=size=160x96:rate=24:duration=4"])
+        .args(["-c:v", "libx265", "-x265-params"])
+        .arg("keyint=24:min-keyint=24:open-gop=0:bframes=3:b-adapt=0:repeat-headers=1:scenecut=0:log-level=none:pools=1")
+        .args(["-output_ts_offset", "1.5", "-f", "matroska"])
+        .arg(&path);
+    testfixtures::run(&mut make);
+    path
+}
+
+fn units(stream: &[u8]) -> (Init, Vec<fmp4::Fragment>) {
+    let mut reader = FragmentReader::new();
+    reader.push(stream);
+    let mut init = None;
+    let mut fragments = Vec::new();
+    while let Some(unit) = reader.next_unit().expect("parsing the pipe") {
+        match unit {
+            Unit::Init(parsed) => init = Some(parsed),
+            Unit::Fragment(fragment) => fragments.push(fragment),
+            Unit::Trailer => {}
+        }
+    }
+    (init.expect("an init"), fragments)
+}
+
+/// Each video sample: (presentation ticks, the bytes of its RPU NAL).
+fn sample_rpus(fragment: &fmp4::Fragment, init: &Init) -> Vec<(i128, Vec<u8>)> {
+    let video = init.video().expect("video");
+    let track = fragment.track(video.id).expect("video traf");
+    let width = usize::from(video.nal_length_size);
+    let mut out = Vec::new();
+    let mut decode = i128::from(track.base_decode_time);
+    for run in &track.runs {
+        let mut at = run.data_offset;
+        for sample in &run.samples {
+            let bytes = &fragment.bytes[at..at + sample.size as usize];
+            let mut cursor = 0;
+            let mut rpu = None;
+            while cursor < bytes.len() {
+                let length = bytes[cursor..cursor + width]
+                    .iter()
+                    .fold(0usize, |acc, b| (acc << 8) | usize::from(*b));
+                let nal = &bytes[cursor + width..cursor + width + length];
+                if (nal[0] >> 1) & 0x3f == 62 {
+                    rpu = Some(nal.to_vec());
+                }
+                cursor += width + length;
+            }
+            out.push((decode + i128::from(sample.cto), rpu.expect("an RPU")));
+            decode += i128::from(sample.duration);
+            at += sample.size as usize;
+        }
+    }
+    out
+}
+
+/// The mapping proof and acceptance 1: on a real B-frame source whose
+/// timeline starts off zero, the index pipe's every sample, mapped through
+/// the clock anchored on the source's first keyframe (the production
+/// `source_keyframe` probe), lands on exactly its own packet's ffprobe pts;
+/// and the F+ index pass writes each sample the curves of the scene that pts
+/// falls in, read back from the bytes.
+#[tokio::test]
+async fn an_f_plus_index_pass_places_every_sample_by_its_ffprobe_pts() {
+    use plurx_core::transcode::dv_refit::servable;
+    use plurx_core::transcode::dv_refit_serve::{curves_match, written_curves, ServedCurveTable};
+    testfixtures::require_ffmpeg();
+    let temp = crate::test_tempdir().expect("tempdir");
+    let path = offset_bframe_source(temp.path());
+    let mut file = hevc_file(None, None);
+    file.path = path.clone();
+    let argv = index_argv(
+        &file,
+        transcode::CopyVideoOptions::new(false, false),
+        Some(&path.to_string_lossy()),
+        None,
+    );
+    let mut pipe = std::process::Command::new(testfixtures::ffmpeg());
+    pipe.args(&argv);
+    let stream = testfixtures::with_dolby_vision_rpus(&testfixtures::run(&mut pipe));
+
+    let pts = ffprobe_pts(&path);
+    assert!(
+        pts.windows(2).any(|pair| pair[1] < pair[0]),
+        "the fixture must reorder presentation (B-frames)"
+    );
+    let keyframe = crate::dv_refit_serving::source_keyframe(
+        &std::fs::File::open(&path).expect("source"),
+        0,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("the keyframe anchor");
+    assert_eq!(keyframe.pts, pts[0], "the probe names the first keyframe");
+    assert!(
+        keyframe.pts >= 1_400,
+        "the timeline starts off zero: {keyframe:?}"
+    );
+
+    let (init, fragments) = units(&stream);
+    let video = init.video().expect("video");
+    let first = first_presentation(fragments[0].track(video.id).expect("video")).expect("a sample");
+    // The VOD anchor probe re-runs the pass's argv for one frame and finds
+    // the same first presentation.
+    assert_eq!(
+        index_first_presentation(
+            &file,
+            transcode::CopyVideoOptions::new(false, false),
+            &std::fs::File::open(&path).expect("source"),
+            temp.path(),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("the anchor probe"),
+        (video.timescale, first)
+    );
+    let clock = keyframe.clock(video.timescale, first);
+    let mapped: Vec<i64> = fragments
+        .iter()
+        .flat_map(|fragment| sample_rpus(fragment, &init))
+        .map(|(presentation, _)| clock.source_pts(presentation).expect("a whole source tick"))
+        .collect();
+    assert_eq!(mapped, pts, "every sample maps to its own packet's pts");
+
+    let mut sorted = pts.clone();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let cuts = [sorted[1], sorted[n / 3], sorted[2 * n / 3], sorted[n - 1]];
+    let (a, b) = (nudged_curves(1e-4), nudged_curves(-1e-4));
+    let base = format!("{}/{}", keyframe.time_base.0, keyframe.time_base.1);
+    let fits = [Some(&a), None, Some(&b)];
+    let table = Arc::new(
+        ServedCurveTable::new(
+            "c".repeat(64),
+            (0..3).map(|i| (cuts[i], cuts[i + 1], base.as_str(), fits[i])),
+        )
+        .expect("table"),
+    );
+    let served = [servable(&a).ok(), None, servable(&b).ok()];
+    let expected = |pts: i64| {
+        if pts < cuts[0] || pts >= cuts[3] {
+            return None;
+        }
+        served[cuts[1..3].iter().filter(|&&cut| pts >= cut).count()].clone()
+    };
+
+    // The production pass over the stream, and the conversion it builds.
+    let record = plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1)
+        .expect("a describable record");
+    let refit = Arc::new(IndexRefit {
+        table: table.clone(),
+        keyframe,
+    });
+    let fitted = match index_stream(
+        std::io::Cursor::new(stream.clone()),
+        SourceIdentity::new(1, 1, "f+"),
+        None,
+        DolbyVisionPass::RewriteWithCurves(Box::new(record.clone()), refit),
+    )
+    .await
+    {
+        IndexOutcome::Built(index) => *index,
+        other => panic!("the F+ pass must index: {other:?}"),
+    };
+    let plain = match index_stream(
+        std::io::Cursor::new(stream.clone()),
+        SourceIdentity::new(1, 1, "v1"),
+        None,
+        DolbyVisionPass::Rewrite(Box::new(record)),
+    )
+    .await
+    {
+        IndexOutcome::Built(index) => *index,
+        other => panic!("the v1 pass must index: {other:?}"),
+    };
+    let mut converter = crate::dvpipe::Converter::for_init(&init)
+        .expect("init")
+        .with_refit(table, clock)
+        .expect("the clock fits");
+    let (mut checked, mut identity) = (0, 0);
+    for (row, fragment) in fragments.iter().enumerate() {
+        let mut converted = fragment.clone();
+        converter.convert(&mut converted).expect("converts");
+        assert_eq!(
+            fitted.rows[row].video_bytes,
+            u32::try_from(converted.track(video.id).expect("video").byte_len()).expect("small"),
+            "row {row}: the pass converted exactly this"
+        );
+        for (presentation, rpu) in sample_rpus(&converted, &init) {
+            let pts = clock.source_pts(presentation).expect("whole tick");
+            let parsed =
+                dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(&rpu).expect("parses");
+            match expected(pts) {
+                Some(curves) => {
+                    let written = written_curves(&parsed).expect("the F+ shape");
+                    assert!(
+                        curves_match(&written, curves.curves()),
+                        "sample at pts {pts}"
+                    );
+                    checked += 1;
+                }
+                None => {
+                    assert!(
+                        written_curves(&parsed).is_none_or(|w| {
+                            !curves_match(&w, served[0].as_ref().expect("a").curves())
+                                && !curves_match(&w, served[2].as_ref().expect("b").curves())
+                        }),
+                        "pts {pts} keeps identity curves"
+                    );
+                    identity += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 0 && identity > 0);
+    assert_ne!(
+        fitted
+            .rows
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect::<Vec<_>>(),
+        plain
+            .rows
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect::<Vec<_>>(),
+        "the F+ index describes different bytes from the v1 one"
+    );
+}
+
+/// Acceptance 3 at the identity: a title with no curves, or a session on a
+/// disabled platform (no digest), keeps the v1 identity byte for byte; a
+/// fitted digest moves it, and a refit (a new digest) moves it again.
+#[test]
+fn only_a_pinned_digest_moves_the_converting_identity() {
+    let mut file = hevc_file(Some("dolby_vision"), Some("Dolby Vision Profile 7"));
+    file.dolby_vision.profile = Some(7);
+    file.dolby_vision.level = Some(6);
+    file.dolby_vision.bl_compat_id = Some(1);
+    let converted = transcode::CopyVideoOptions::new(true, true).with_dolby_vision_conversion(true);
+    let v1 = identity_for_transform(&file, converted, Some(DV_CONVERSION_TRANSFORM_REVISION));
+    assert_eq!(
+        identity_for(&file, converted).argv_fingerprint,
+        v1.argv_fingerprint,
+        "no digest is v1, unchanged"
+    );
+    assert_eq!(
+        identity_for(&file, converted.with_dolby_vision_refit(None)).argv_fingerprint,
+        v1.argv_fingerprint
+    );
+    let fitted = identity_for(&file, converted.with_dolby_vision_refit(Some([1; 32])));
+    let refit = identity_for(&file, converted.with_dolby_vision_refit(Some([2; 32])));
+    assert_ne!(fitted.argv_fingerprint, v1.argv_fingerprint);
+    assert_ne!(fitted.argv_fingerprint, refit.argv_fingerprint);
+    assert_eq!(
+        output_transform_identity(&file, converted.with_dolby_vision_refit(Some([1; 32]))),
+        Some(format!("dv-p7-to-p81-rpu-v2+{}", "01".repeat(32)))
+    );
+    // A digest on a copy that does not convert is not carried at all.
+    let preserved = transcode::CopyVideoOptions::new(true, true);
+    assert_eq!(
+        identity_for(&file, preserved.with_dolby_vision_refit(Some([1; 32]))).argv_fingerprint,
+        identity_for(&file, preserved).argv_fingerprint
+    );
+    // The indexer adds the v2 identity only when it is handed a digest.
+    let without = video_identities(&file, None, true, true, None);
+    let with = video_identities(&file, None, true, true, Some([1; 32]));
+    assert_eq!(with.len(), without.len() + 1);
+    assert_eq!(&with[..without.len()], &without[..]);
+    assert_eq!(
+        with.last().and_then(|v| v.dolby_vision_refit()),
+        Some([1; 32])
+    );
+}
+
+/// An F+ identity whose table is not loaded is refused, never indexed with
+/// identity curves under its v2 identity.
+#[test]
+fn an_f_plus_output_without_its_table_is_refused() {
+    let mut file = hevc_file(Some("dolby_vision"), Some("Dolby Vision Profile 7"));
+    file.dolby_vision.profile = Some(7);
+    file.dolby_vision.level = Some(6);
+    file.dolby_vision.bl_compat_id = Some(1);
+    let fitted = transcode::CopyVideoOptions::new(true, true)
+        .with_dolby_vision_conversion(true)
+        .with_dolby_vision_refit(Some([1; 32]));
+    let refused = IndexOutput::new(&file, fitted).err().expect("refused");
+    assert!(refused.contains("curve table"), "{refused}");
+}

@@ -816,6 +816,73 @@ pub enum DolbyVisionPass {
     Remove,
 }
 
+/// A video traf's first sample's presentation time: `tfdt` plus its
+/// composition offset, in track ticks.
+pub(crate) fn first_presentation(track: &fmp4::TrackFragment) -> Option<i128> {
+    let sample = track.samples().next()?;
+    Some(i128::from(track.base_decode_time) + i128::from(sample.cto))
+}
+
+/// The index timeline's presentation time of the source's first keyframe,
+/// in index ticks: the anchor of a VOD rendition's F+ clock.
+///
+/// The index pass is the only reader that sees the title's first sample, and
+/// its index stores decode times only, so this re-runs the pass's own argv
+/// for one video frame over the held source: the same input, the same
+/// filters and the same timestamp normalization, so the same first sample.
+pub(crate) async fn index_first_presentation(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+    source: &std::fs::File,
+    runtime_cache: &Path,
+    timeout: Duration,
+) -> Result<(u32, i128), String> {
+    #[cfg(unix)]
+    let input = "/dev/fd/3".to_owned();
+    #[cfg(windows)]
+    let input = crate::ffmpeg::windows_source_path(source)?
+        .to_string_lossy()
+        .into_owned();
+    let mut args = index_argv(file, video, Some(&input), None);
+    let output = args.len() - 1;
+    args.splice(output..output, ["-frames:v".to_owned(), "1".to_owned()]);
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    command.args(&args);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
+    let output = crate::ffmpeg::bounded_command_output_cancellable(
+        command,
+        timeout,
+        64 * 1024 * 1024,
+        "F+ anchor probe",
+        None,
+        crate::process_control::ChildWork::background("F+ anchor probe"),
+    )
+    .await?;
+    let mut reader = FragmentReader::new();
+    reader.push(&output.stdout);
+    let mut init: Option<Init> = None;
+    while let Some(unit) = reader.next_unit().map_err(|error| error.to_string())? {
+        match unit {
+            Unit::Init(parsed) => init = Some(parsed),
+            Unit::Fragment(fragment) => {
+                let video = init
+                    .as_ref()
+                    .and_then(Init::video)
+                    .ok_or("the anchor probe wrote no video init")?;
+                let first = fragment
+                    .track(video.id)
+                    .and_then(first_presentation)
+                    .ok_or("the anchor probe's fragment carries no video")?;
+                return Ok((video.timescale, first));
+            }
+            Unit::Trailer => {}
+        }
+    }
+    Err("the anchor probe wrote no fragment".into())
+}
+
 /// What an F+ index pass writes into each RPU, and where its timeline sits
 /// in the source: the pinned table, and the source's first video keyframe,
 /// which is the index's first sample (the pipe drops the packets before it).
@@ -948,12 +1015,12 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                                         return Ok(ready);
                                     };
                                     // The first fragment's first sample is the
-                                    // source's first keyframe: its decode time
-                                    // anchors the track in the source.
+                                    // source's first keyframe: its presentation
+                                    // time anchors the track in the source.
                                     let video = init.video().expect("checked at the init");
                                     let first = fragment
                                         .track(video.id)
-                                        .map(|track| i128::from(track.base_decode_time))
+                                        .and_then(first_presentation)
                                         .ok_or_else(|| {
                                             crate::dvpipe::Refused(
                                                 "the first fragment carries no video".into(),

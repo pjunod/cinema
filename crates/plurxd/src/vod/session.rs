@@ -100,7 +100,7 @@ pub(super) struct Rendition {
     /// The source's first video keyframe, read once for an F+ rendition: the
     /// anchor of its index's timeline in the source.
     pub(super) refit_keyframe:
-        tokio::sync::OnceCell<plurx_core::transcode::dv_refit_serve::SourceKeyframe>,
+        tokio::sync::OnceCell<(plurx_core::transcode::dv_refit_serve::SourceKeyframe, i128)>,
     /// The capacity hold this rendition is under, if any, retained across the
     /// producer that was terminated for it.
     ///

@@ -176,24 +176,28 @@ impl SourceClock {
 
 /// The first video keyframe of a source, as the demuxer reports it: what a
 /// copy's timeline is anchored to. A copy pipe drops the packets before the
-/// first keyframe and shifts every timestamp by one offset, so that packet's
-/// decode time is the first output sample's decode time; the pair places
-/// the whole track in the source (see [`SourceKeyframe::clock`]).
+/// first keyframe and shifts every timestamp by one offset, so that packet is
+/// the first output sample and its presentation time places the whole track
+/// in the source (see [`SourceKeyframe::clock`]).
+///
+/// Presentation, never decode time: a Matroska B-frame stream's first packets
+/// carry no dts at all (ffprobe reports `N/A`), and the dts a muxer writes for
+/// them is its own invention. Every packet carries its pts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceKeyframe {
-    pub dts: i64,
     pub pts: i64,
     pub time_base: (u32, u32),
 }
 
 impl SourceKeyframe {
-    /// The clock of a track whose first sample (this keyframe) decodes at
-    /// `first_decode` track ticks.
-    pub fn clock(&self, track_timescale: u32, first_decode: i128) -> SourceClock {
+    /// The clock of a track whose first sample (this keyframe) presents at
+    /// `first_presentation` track ticks (its decode time plus its
+    /// composition offset).
+    pub fn clock(&self, track_timescale: u32, first_presentation: i128) -> SourceClock {
         SourceClock {
             track_timescale,
-            track_ticks: first_decode,
-            source_pts: self.dts,
+            track_ticks: first_presentation,
+            source_pts: self.pts,
             source_time_base: self.time_base,
         }
     }
@@ -201,7 +205,7 @@ impl SourceKeyframe {
     /// Reads the first keyframe out of an ffprobe packet document of one
     /// stream (`-show_entries packet=pts,dts,flags:stream=time_base`),
     /// packets in demux order. Refused when the stream's time base, or the
-    /// keyframe's dts or pts, is missing.
+    /// keyframe's pts, is missing.
     pub fn from_ffprobe(document: &serde_json::Value) -> Result<Self, ServeError> {
         let refused = |why: &'static str| ServeError::Keyframe(why);
         let time_base = document
@@ -231,7 +235,6 @@ impl SourceKeyframe {
             })
             .ok_or(refused("the probed prefix holds no keyframe"))?;
         Ok(Self {
-            dts: integer(keyframe.get("dts")).ok_or(refused("the keyframe has no dts"))?,
             pts: integer(keyframe.get("pts")).ok_or(refused("the keyframe has no pts"))?,
             time_base,
         })

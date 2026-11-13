@@ -1285,7 +1285,7 @@ async fn generation_refit(
         .refit
         .clone()
         .ok_or("this F+ rendition's pinned curve table is not loaded")?;
-    let keyframe = *rendition
+    let (keyframe, anchor_ticks) = *rendition
         .refit_keyframe
         .get_or_try_init(|| async {
             let file = &rendition.recipe.file;
@@ -1306,15 +1306,31 @@ async fn generation_refit(
                     &opened.handle
                 }
             };
-            crate::dv_refit_serving::source_keyframe(
+            let keyframe = crate::dv_refit_serving::source_keyframe(
                 handle,
                 stream,
                 crate::transcode::MEDIA_ORIGIN_PROBE_TIMEOUT,
             )
-            .await
+            .await?;
+            let (timescale, anchor) = crate::fragindex::index_first_presentation(
+                file,
+                rendition.recipe.video,
+                handle,
+                &shared.runtime_cache,
+                crate::transcode::MEDIA_ORIGIN_PROBE_TIMEOUT,
+            )
+            .await?;
+            if rendition.index.as_ref().map(|index| index.timescale) != Some(timescale) {
+                return Err("the F+ anchor probe's timescale is not the index's".to_owned());
+            }
+            Ok::<_, String>((keyframe, anchor))
         })
         .await?;
-    Ok(Some(vodgen::GenerationRefit { table, keyframe }))
+    Ok(Some(vodgen::GenerationRefit {
+        table,
+        keyframe,
+        anchor_ticks,
+    }))
 }
 
 /// Read one generation to its end: establish or verify the init identity,
