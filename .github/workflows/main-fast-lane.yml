@@ -543,6 +543,19 @@ jobs:
           owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
+  # The Rust unit tests this change can affect, each at most once per set of
+  # inputs, fanned out over idle runners: docs/ci/RUST-UNIT-FANOUT.md. Its own
+  # gate job is the stage's one result; a failure that also fails at the
+  # merge-base is reported there and does not block.
+  rust_units:
+    name: Rust unit tests
+    needs: [scope, preflight]
+    if: needs.scope.outputs.rust == 'true'
+    uses: ./.github/workflows/rust-units.yml
+    with:
+      base: ${{ github.event.pull_request.base.sha }}
+    secrets: inherit
+
   web_compile:
     name: fast web syntax gate
     needs: [scope, preflight]
@@ -730,6 +743,7 @@ jobs:
       - preflight
       - worker_control_proof
       - rust_compile
+      - rust_units
       - web_compile
       - apple_compile
       - android_compile
@@ -743,6 +757,7 @@ jobs:
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
+          RUST_UNITS_RESULT: ${{ needs.rust_units.result }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
@@ -758,7 +773,7 @@ jobs:
           fi
           for result in \
             "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
-            "$RUST_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
+            "$RUST_RESULT" "$RUST_UNITS_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
             "$ANDROID_RESULT"; do
             case "$result" in
               success|skipped) ;;

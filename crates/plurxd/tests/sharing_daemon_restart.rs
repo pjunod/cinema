@@ -38,15 +38,18 @@ struct Daemon {
 impl Daemon {
     fn spawn(config: PathBuf, log: PathBuf, port: u16) -> Self {
         let output = File::create(&log).expect("daemon log");
-        let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-            .args(["--config", config.to_str().expect("config path"), "run"])
-            .env("NO_COLOR", "1")
-            .env("PLURX_NODE_HOSTNAME", format!("sharing-restart-{port}"))
-            .stdin(Stdio::null())
-            .stderr(output.try_clone().expect("stderr log"))
-            .stdout(output)
-            .spawn()
-            .expect("start separate daemon");
+        let child = Command::new(
+            std::env::var_os("CARGO_BIN_EXE_plurxd")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+        )
+        .args(["--config", config.to_str().expect("config path"), "run"])
+        .env("NO_COLOR", "1")
+        .env("PLURX_NODE_HOSTNAME", format!("sharing-restart-{port}"))
+        .stdin(Stdio::null())
+        .stderr(output.try_clone().expect("stderr log"))
+        .stdout(output)
+        .spawn()
+        .expect("start separate daemon");
         Self {
             child,
             config,

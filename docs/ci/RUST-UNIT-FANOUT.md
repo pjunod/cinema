@@ -1,6 +1,6 @@
 # Rust unit fan-out — the relevant tests, compiled once, run across the fleet
 
-**Status:** open — Rust built; Android JVM and Apple unit stages planned (§8) ·
+**Status:** open — Rust built; Android JVM and Apple unit stages planned (§9) ·
 **Decision:** Paul, 2026-11-12 ("all I care about is the code getting the
 relevant unit tests run on it") · **Workflow:**
 [`rust-units.yml`](../../.github/workflows/rust-units.yml) ·
@@ -74,6 +74,13 @@ adjustments follow from that, both in files that are key inputs:
   binary is built again on every test's own 2 MiB thread, and the first full
   run overflowed it in 59 plurxd tests (mostly `transcode::source_actor`).
   8 MiB is what the replicated Store shards already use.
+- Archived CLI integration tests use the runtime `CARGO_BIN_EXE_*` path
+  nextest remaps, with Cargo's compiled path as a fallback for ordinary test
+  runs. A baked builder path cannot launch a binary extracted on a shard.
+  This covers desktop-control, notification-broker and plurxd CLI fixtures.
+- Shard and merge-base containers provision `dbus-daemon`: the tray's private
+  session test launches `dbus-run-session`, which development libraries alone
+  do not provide. No host service or runner installation changes.
 - The ci profile's `default-filter` leaves out
   `scan::probe::tests::fixture_child_*`: child bodies that decide they are the
   child from `--exact <name>` in their arguments — exactly how nextest starts
@@ -220,7 +227,15 @@ reimplement the archive and remapping for thirty test binaries.
 
 ## 8. Measured cost
 
-Filled from dispatched runs on the branch; see the Execution log.
+The recovered first full run reached all six shards (jobs 69739–69744).
+Its logs show stack overflow aborts, child fixtures invoked as standalone tests,
+a baked CLI executable path and a missing `dbus-run-session`; the harness fixes
+above address those concrete causes. Those logs predate the corrected harness
+and are not passing evidence for it.
+
+One-leaf-crate timing, core-crate timing, and authenticated no-change reuse are
+still awaiting the final candidate's dispatched runs. No speedup or acceptance
+claim is made from the interrupted builder's run.
 
 ## 9. Other languages — follow-up plan
 

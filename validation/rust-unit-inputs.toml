@@ -34,6 +34,7 @@ excluded_crates = ["plurx-cluster-check"]
 harness = [
     ".config/nextest.toml",
     ".github/workflows/rust-units.yml",
+    ".github/workflows/main-fast-lane.yml",
     ".github/actions/ffmpeg/**",
     ".github/actions/rust-native-deps/**",
     "validation/rust_units.py",

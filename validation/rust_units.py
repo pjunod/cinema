@@ -68,7 +68,7 @@ ARTIFACT_ARCHIVE = "rust-units-archive-{run}"
 # in a log's first line) that may publish or evidence one.
 RECEIPT_WORKFLOWS = ("rust-units.yml", "main-fast-lane.yml")
 TASK_LINE = re.compile(r"received task \d+ of job (?:rust_units\.)?([A-Za-z0-9_-]+), "
-                       r"triggered by event: (workflow_dispatch|workflow_call)\b")
+                       r"triggered by event: (workflow_dispatch|workflow_call|pull_request)\b")
 CRATE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")

@@ -196,7 +196,7 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def forge(self, receipt=None, shard_log=None, publisher_log=None, run_commit=None,
-              workflow="rust-units.yml", shard_job="shard"):
+              workflow="rust-units.yml", shard_job="shard", event="workflow_dispatch"):
         name = ru.receipt_name("app", self.key)
         receipt = receipt or {
             "schema": 1, "producer": "validation.rust_units", "crate": "app", "key": self.key,
@@ -219,8 +219,8 @@ class ReceiptAuthenticationTests(unittest.TestCase):
                 {"id": 501, "name": ru.JOB_VERDICT, "status": "success"},
                 {"id": 502, "name": ru.JOB_SHARD.format(index=1) + " (1)", "status": "success"}],
             "/actions/artifacts/7/zip": buffer.getvalue(),
-            "/actions/jobs/501/logs": (self.task("verdict") + publisher_log).encode(),
-            "/actions/jobs/502/logs": (self.task(shard_job) + shard_log).encode(),
+            "/actions/jobs/501/logs": (self.task("verdict", event) + publisher_log).encode(),
+            "/actions/jobs/502/logs": (self.task(shard_job, event) + shard_log).encode(),
         }
 
         class Forge:
@@ -236,9 +236,9 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         return Forge()
 
     @staticmethod
-    def task(job):
+    def task(job, event="workflow_dispatch"):
         return (f"2026-11-12T10:00:00.0Z Runner 1f (version:v13.2.0) received task 77 of job {job}, "
-                "triggered by event: workflow_dispatch\n")
+                f"triggered by event: {event}\n")
 
     def adopted(self, forge):
         authenticator = ru.Authenticator(forge, current_run=99, config=self.config,
@@ -247,6 +247,17 @@ class ReceiptAuthenticationTests(unittest.TestCase):
 
     def test_an_authenticated_receipt_is_adopted(self):
         self.assertEqual(self.adopted(self.forge()), set(self.passes))
+
+    def test_receipts_from_the_main_lane_reusable_stage_are_adopted(self):
+        for event in ("workflow_call", "pull_request"):
+            with self.subTest(event=event):
+                self.assertEqual(
+                    self.adopted(self.forge(workflow="main-fast-lane.yml", event=event)),
+                    set(self.passes),
+                )
+
+    def test_dispatch_cannot_impersonate_the_main_lane_stage(self):
+        self.assertEqual(self.adopted(self.forge(workflow="main-fast-lane.yml")), set())
 
     def test_a_pass_missing_from_the_shard_log_is_not_adopted(self):
         log = "2026-11-12T10:00:00.1Z         PASS [   0.012s] app aa::first\n"
@@ -450,6 +461,13 @@ class RepositoryContractTests(unittest.TestCase):
         for name in (ru.JOB_SELECT, ru.JOB_ARCHIVE, ru.JOB_VERDICT, ru.JOB_BASELINE):
             self.assertIn(f'name: "{name}"', self.workflow)
         self.assertIn('name: "' + ru.JOB_SHARD.format(index="${{ matrix.shard }}") + '"', self.workflow)
+
+    def test_the_main_lane_invokes_units_and_requires_their_result(self):
+        lane = (ROOT / ".github/workflows/main-fast-lane.yml").read_text()
+        self.assertIn("uses: ./.github/workflows/rust-units.yml", lane)
+        self.assertIn("RUST_UNITS_RESULT: ${{ needs.rust_units.result }}", lane)
+        self.assertIn('"$RUST_UNITS_RESULT"', lane)
+        self.assertIn(".github/workflows/main-fast-lane.yml", self.config.harness)
 
     def test_the_default_filter_covers_exactly_the_argv_detected_child_fixtures(self):
         children = set()
