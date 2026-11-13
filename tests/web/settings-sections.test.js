@@ -2523,6 +2523,77 @@ test("HTTPS unavailable card retries independently of replicated settings",async
   assert.equal(retry.data.https,value);
 });
 
+test("storage domains save reports in effect",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""};
+  const roots={dataset:{loaded:"true",edited:"true"},querySelectorAll:()=>[
+    {dataset:{library:"2",root:"/movies"},value:"nas-a"},
+  ]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const messages=[];
+  const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
+    async()=>({saved:true,revision:7,applied:true}),{getElementById:id=>elements[id]},message=>messages.push(message),esc,
+  );
+  await save({disabled:false});
+  assert.equal(status.textContent,"Saved and in effect (revision 7).");
+  assert.deepEqual(messages,["Storage domains saved and in effect"]);
+  assert.equal(roots.dataset.edited,"false");
+});
+
+test("storage domains save reports pending readers and library jobs",async()=>{
+  const status={textContent:"",innerHTML:""},error={textContent:""};
+  const roots={dataset:{loaded:"true",edited:"true"},querySelectorAll:()=>[]};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const messages=[];
+  const save=new Function("api","document","toast","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("saveStorageDomains")}\nreturn saveStorageDomains;`)(
+    async()=>({saved:true,revision:8,applied:false,waiting_on:[
+      {holder_kind:"foreground",work_id:"reader-123456",node_id:"media1",resource_key:"source_io:nas-a",reason:"old_domain_reader"},
+      {holder_kind:"foreground",work_id:"reader-2",node_id:"media2",resource_key:"source_io:nas-a",reason:"old_domain_reader",stuck:true},
+      {holder_kind:"job",work_id:"job-123456",node_id:"lab3",library_id:2,reason:"library_job"},
+    ],waiting_total:3,libraries:[{id:2,name:"Movies"}]}),
+    {getElementById:id=>elements[id]},message=>messages.push(message),esc,
+  );
+  await save({disabled:false});
+  assert.match(status.innerHTML,/Waiting on 2 readers on nas-a to finish before it takes effect\./);
+  assert.match(status.innerHTML,/Waiting on 1 library job in Movies to finish before it takes effect\./);
+  assert.match(status.innerHTML,/2 of the readers belong to a process that is no longer running/);
+  assert.match(status.innerHTML,/Playback and jobs keep their current budgets until then\./);
+  assert.match(status.innerHTML,/Playback reader-/);
+  assert.equal(error.textContent,"");
+  assert.deepEqual(messages,["Storage domains saved — takes effect when current work finishes"]);
+});
+
+test("storage domains load marks pending roots",async()=>{
+  const roots={dataset:{},innerHTML:""},status={textContent:"",innerHTML:""},error={textContent:""};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  const load=new Function("api","document","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("loadStorageDomains")}\nreturn loadStorageDomains;`)(
+    async()=>({libraries:[{id:2,name:"Movies",paths:["/movies"]}],mappings:[],pending:{revision:9,state:"pending",mappings:[{library_id:2,root_path:"/movies",domain_id:"nas-b"}]},waiting_on:[],waiting_total:0}),
+    {getElementById:id=>elements[id]},esc,
+  );
+  await load({disabled:false});
+  assert.match(roots.innerHTML,/value="nas-b"/);
+  assert.match(roots.innerHTML,/<span class="pill">pending · now Shared default<\/span>/);
+  assert.match(status.innerHTML,/Saved \(revision 9\)\./);
+  assert.match(roots.innerHTML,/oninput=/);
+});
+
+test("storage domains superseded asks to save again",async()=>{
+  const roots={dataset:{},innerHTML:""},status={textContent:"",innerHTML:""},error={textContent:""};
+  const elements={"storage-domain-roots":roots,"storage-domain-error":error,"storage-domain-status":status};
+  let calls=0;
+  const load=new Function("api","document","esc",`${shippedSource("storageDomainsStatus")}\n${shippedSource("loadStorageDomains")}\nreturn loadStorageDomains;`)(
+    async()=>{calls++;return {libraries:[{id:2,name:"Movies",paths:["/movies"]}],mappings:[{library_id:2,root_path:"/movies",domain_id:"nas-a"}],pending:{revision:10,state:"superseded",mappings:[{library_id:2,root_path:"/movies",domain_id:"nas-b"}]},waiting_on:[],waiting_total:0};},
+    {getElementById:id=>elements[id]},esc,
+  );
+  await load({disabled:false});
+  assert.match(status.textContent,/Revision 10 was not applied: storage domains were changed from a node running an older version/);
+  assert.match(status.textContent,/Check the roots below and save again\./);
+  assert.match(roots.innerHTML,/value="nas-a"/,"superseded desired values are not staged as if they were saved");
+  roots.dataset.edited="true";
+  await load({disabled:false});
+  assert.equal(calls,1,"reload does not overwrite unsaved root edits");
+  assert.match(error.textContent,/unsaved edits/);
+});
+
 test("display targeting remains editable with unavailable or unmet advice",()=>{
   const panels=developerPanels();
   for(const readiness of [{unavailable:"offline"},{items:[{id:"dolby_vision_display_target",requirements:[{id:"dv_target_helper",status:"unmet",evidence:"helper absent"}]}]}]){

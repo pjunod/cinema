@@ -467,21 +467,82 @@ function storageDomainsCard(){
   return setCard(`${cardHead(settingsClusterEnabled()?"Shared storage budgets":"Storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
     <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced${settingsClusterEnabled()?" across nodes":" on this server"}: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
     <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
-    <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. Two readers share each domain.</p>
+    <p class="hint">Changes save at once and take effect as soon as nothing would lose its budget: library jobs on a changed root finish first, and readers on a domain a root is leaving finish first. Playback never has to stop.</p>
+    <div id="storage-domain-status" role="status"></div>
     <div id="storage-domain-error" class="err" role="alert"></div>
     <button type="button" class="ghost" onclick="saveStorageDomains(this)">Save storage domains</button>`);
 }
+function storageDomainsStatus(data,libraries){
+  const status=document.getElementById("storage-domain-status");if(!status)return;
+  const revision=Number(data.revision||data.pending&&data.pending.revision||0);
+  const pending=data.pending||((data.applied===false||data.state==="pending")?data:null);
+  const state=pending?pending.state||data.state||"pending":data.state;
+  let line="",toastText="";
+  if(state==="superseded"){
+    line=`Revision ${revision} was not applied: storage domains were changed from a node running an older version. Check the roots below and save again.`;
+  }else if(state==="pending"||data.applied===false){
+    const holders=data.waiting_on||pending.waiting_on||[];
+    const readers=new Map(),jobs=new Map();let stuckReaders=0;
+    for(const holder of holders){
+      if(holder.reason==="old_domain_reader"){
+        const domain=String(holder.resource_key||"").replace(/^source_io:/,"")||"Shared default";
+        const group=readers.get(domain)||{count:0,stuck:0};group.count++;if(holder.stuck){group.stuck++;stuckReaders++;}readers.set(domain,group);
+      }else if(holder.reason==="library_job"){
+        const library=(libraries||[]).find(row=>String(row.id)===String(holder.library_id));
+        const name=library&&library.name||`Library ${holder.library_id}`;
+        jobs.set(name,(jobs.get(name)||0)+1);
+      }
+    }
+    const waiting=[];
+    for(const [domain,group] of readers)waiting.push(`Waiting on ${group.count} ${group.count===1?"reader":"readers"} on ${esc(domain)} to finish before it takes effect.`);
+    for(const [name,count] of jobs)waiting.push(`Waiting on ${count} ${count===1?"library job":"library jobs"} in ${esc(name)} to finish before it takes effect.`);
+    const total=Number(data.waiting_total||pending.waiting_total||holders.length);
+    line=`Saved (revision ${revision}). ${waiting.join(" ")}`;
+    if(total>holders.length)line+=` Waiting on ${total} holders in total.`;
+    if(stuckReaders)line+=` ${stuckReaders} of the readers belong to a process that is no longer running. They clear when source custody recovery settles them (Activity → Source readers).`;
+    line+=` Playback and jobs keep their current budgets until then.`;
+    const kindLabels={job:"Background job",analysis:"Analysis",lease:"Library lease",offline:"Offline download",foreground:"Playback",pause:"Paused job"};
+    const rows=holders.slice(0,8).map(holder=>{
+      const kind=kindLabels[holder.holder_kind]||"Reader";
+      const id=String(holder.work_id||"").slice(0,8)||"unknown";
+      const node=holder.node_id?` on ${esc(holder.node_id)}`:"";
+      const label=holder.reason==="old_domain_reader"?String(holder.resource_key||"").replace(/^source_io:/,""):(libraries||[]).find(row=>String(row.id)===String(holder.library_id))?.name||`Library ${holder.library_id}`;
+      return `<li>${kind} ${esc(id)}${node} · ${esc(label)}</li>`;
+    }).join("");
+    status.innerHTML=`<p>${line}</p>${rows?`<ul>${rows}</ul>`:""}`;
+    toastText="Storage domains saved — takes effect when current work finishes";
+    if(data.saved===true)toast(toastText);
+    return;
+  }else{
+    line=`Saved and in effect (revision ${revision}).`;
+    toastText="Storage domains saved and in effect";
+  }
+  status.textContent=line;
+  if(data.saved===true)toast(toastText);
+}
 async function loadStorageDomains(btn){
+  const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
+  if(roots&&roots.dataset.loaded==="true"&&roots.dataset.edited==="true"){
+    if(error)error.textContent="Roots have unsaved edits. Save them before loading again.";
+    return;
+  }
   btn.disabled=true;
-  const error=document.getElementById("storage-domain-error");if(error)error.textContent="";
+  if(error)error.textContent="";
   try{
     const data=await api("/cluster/work/storage-domains");
-    const roots=document.getElementById("storage-domain-roots");if(!roots)return;
+    if(!roots)return;
+    const pending=data.pending&&data.pending.state==="pending"?data.pending:null;
+    const values=pending?pending.mappings:data.mappings||[];
     roots.innerHTML=(data.libraries||[]).flatMap(library=>(library.paths||[]).map(root=>{
-      const mapping=(data.mappings||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
-      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(mapping?mapping.domain_id:"")}" placeholder="Shared default"></label>`;
+      const applied=(data.mappings||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
+      const mapping=(values||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
+      const desired=mapping?mapping.domain_id:"",old=applied?applied.domain_id:"";
+      const changed=pending&&desired!==old;
+      const now=old||"Shared default";
+      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(desired)}" placeholder="Shared default" oninput="this.closest('#storage-domain-roots').dataset.edited='true'">${changed?` <span class="pill">pending · now ${esc(now)}</span>`:""}</label>`;
     })).join("")||'<p class="hint">No library roots configured.</p>';
-    roots.dataset.loaded="true";
+    roots.dataset.loaded="true";roots.dataset.edited="false";
+    storageDomainsStatus({...data,...(data.pending||{}),pending:data.pending},data.libraries||[]);
   }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
 }
 async function saveStorageDomains(btn){
@@ -490,7 +551,7 @@ async function saveStorageDomains(btn){
   if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
   const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
   btn.disabled=true;
-  try{await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});toast("Storage domains saved");}
+  try{const result=await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});roots.dataset.edited="false";storageDomainsStatus(result,result.libraries||[]);}
   catch(e){if(error)error.textContent=e.message||String(e);}
   finally{btn.disabled=false;}
 }
