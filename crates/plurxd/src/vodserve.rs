@@ -535,6 +535,8 @@ pub struct VodSessionInfo {
     pub dolby_vision_refit: Option<crate::transcode::RefitPlaybackReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dv_refit_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_identity_reason: Option<String>,
     /// Optional facts from this attached rendition's immutable recipe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_format: Option<StreamFormat>,
@@ -744,6 +746,7 @@ impl VodActivityObservation {
 pub struct VodDeliveryInfo {
     pub dolby_vision_refit: Option<crate::transcode::RefitPlaybackReport>,
     pub dv_refit_digest: Option<String>,
+    pub dv_refit_identity_reason: Option<String>,
     pub observation: Option<VodActivityObservation>,
     pub id: String,
     pub method: crate::delivery::Method,

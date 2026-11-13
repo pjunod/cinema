@@ -212,16 +212,25 @@ pub(crate) async fn pin_for_session(
     request: &mut crate::transcode::SessionRequest,
     platform: Option<ClientPlatform>,
 ) -> Result<(), String> {
-    let converts = matches!(request.kind,
-        crate::transcode::SessionKind::Copy { convert_dolby_vision: true, .. });
+    let converts = matches!(
+        request.kind,
+        crate::transcode::SessionKind::Copy {
+            convert_dolby_vision: true,
+            ..
+        }
+    );
     let Some(platform) = platform.filter(|_| converts) else {
         request.dv_refit_digest = None;
         return Ok(());
     };
     let key = setting_key(platform);
-    let settings = store.get_settings(&[key]).await.map_err(|error| error.to_string())?;
+    let settings = store
+        .get_settings(&[key])
+        .await
+        .map_err(|error| error.to_string())?;
     let enabled = enabled_in(&settings, platform);
-    request.dv_refit_digest = session_digest(store, file, converts, enabled).await?
+    request.dv_refit_digest = session_digest(store, file, converts, enabled)
+        .await?
         .map(digest_hex);
     Ok(())
 }
@@ -250,14 +259,14 @@ pub(crate) async fn rendition_refit(
         Ok(Some(table)) => Some(table),
         Ok(None) => {
             let current = current_selection(store, file).await?;
-                tracing::info!(
-                    file_id = file.id,
-                    pinned = %digest_hex(digest),
-                    current = current.as_ref().map(|selection| selection.table.digest()),
-                    "the session's F+ curves are no longer kept; re-pinning at this rendition"
-                );
-                current
-        },
+            tracing::info!(
+                file_id = file.id,
+                pinned = %digest_hex(digest),
+                current = current.as_ref().map(|selection| selection.table.digest()),
+                "the session's F+ curves are no longer kept; re-pinning at this rendition"
+            );
+            current
+        }
         Err(error) => return Err(format!("reading the pinned F+ curve table: {error}")),
     };
     match selection {

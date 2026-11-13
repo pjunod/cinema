@@ -26,8 +26,11 @@ async fn fitted_status_uses_only_the_attached_digest_and_does_not_change_renditi
     assert_eq!(rendition_key(&recipe, &identity), key);
     assert!(recipe.fitted_refit_report().is_none());
 
-    recipe.video = recipe.video.with_dolby_vision_conversion(true)
-        .with_dolby_vision_refit(Some(digest));
+    recipe.video = recipe.video.with_dolby_vision_conversion(true);
+    let identity_report = recipe.refit_report().expect("actual To81 identity copy");
+    assert_eq!(identity_report.state, "identity");
+    assert!(identity_report.reason.is_some());
+    recipe.video = recipe.video.with_dolby_vision_refit(Some(digest));
     let report = recipe.fitted_refit_report().expect("matching attached table");
     assert_eq!(report.state, "fitted");
     assert_eq!(report.gain, Some(0.37));

@@ -38,6 +38,16 @@ impl Recipe {
         let fact = self.dv_refit_gain?;
         (fact.digest == digest).then(|| crate::transcode::RefitPlaybackReport::fitted(fact.gain))
     }
+
+    pub(super) fn refit_report(&self) -> Option<crate::transcode::RefitPlaybackReport> {
+        if let Some(report) = self.fitted_refit_report() {
+            return Some(report);
+        }
+        (self.video.converts_dolby_vision() && self.video.dolby_vision_refit().is_none())
+            .then(|| crate::transcode::RefitPlaybackReport::identity(
+                "No F+ curve table is pinned to this rendition".to_owned(),
+            ))
+    }
 }
 
 /// One attached reader, in plan indexes.

@@ -8,7 +8,8 @@ impl VodServe {
     ) -> Option<crate::playback_control::ClientPlatform> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
-        session.control.lock().ok()?.client_platform()
+        let platform = session.control.lock().ok()?.client_platform();
+        platform
     }
 }
 

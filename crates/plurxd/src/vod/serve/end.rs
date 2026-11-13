@@ -839,8 +839,11 @@ impl VodServe {
         let tone_map_peak = stream_format::tone_map_peak(&rendition);
         Some(VodPublication {
             result: Ok(VodSessionInfo {
-                dolby_vision_refit: rendition.recipe.fitted_refit_report(),
+                dolby_vision_refit: rendition.recipe.refit_report(),
                 dv_refit_digest: rendition.recipe.video.dolby_vision_refit().map(hex::encode),
+                dv_refit_identity_reason: (rendition.recipe.video.converts_dolby_vision()
+                    && rendition.recipe.video.dolby_vision_refit().is_none())
+                    .then(|| "No F+ curve table is pinned to this rendition".to_owned()),
                 stream_format: StreamFormat::for_rendition(&rendition),
                 active_encode_milli_realtime: active_production.map(|proof| proof.milli_realtime),
                 active_encode_age_ms: active_production.map(|proof| {

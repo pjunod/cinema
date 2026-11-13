@@ -29,6 +29,8 @@ pub struct SessionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dv_refit_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_identity_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vod_observation: Option<crate::vodserve::VodActivityObservation>,
     pub id: String,
     /// `vod` for the immutable presentation; `live-recovery` for the

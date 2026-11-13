@@ -439,6 +439,7 @@ impl SourceGrowingBacking {
         Ok(crate::vodserve::VodSessionInfo {
             dolby_vision_refit: None,
             dv_refit_digest: None,
+            dv_refit_identity_reason: None,
             stream_format: None,
             active_encode_milli_realtime: None,
             active_encode_age_ms: None,

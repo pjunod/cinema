@@ -301,27 +301,37 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
   time (the fragment's `tfdt` and `trun` cts) against the stored scene table,
   which keys scenes by their first presentation time. It never uses a
   running count, because a seek starts mid-title.
-- `DV_CONVERSION_TRANSFORM_REVISION` becomes `dv-p7-to-p81-rpu-v2`, and the
-  title's curve digest joins the fragment-index identity. Indexes built with
-  identity curves stay valid for titles without curves, and are rebuilt for
-  titles with them.
-- Caller sites: `fragindex.rs`, `copyseg.rs`, `vodgen.rs` and
-  `copy_normalization.rs` (survey of 2026-11-12; re-verify at build time).
+- A fitted output uses `dv-p7-to-p81-rpu-v2` and its curve digest in the
+  fragment-index identity. The v1 output stays alongside it for disabled
+  platforms and titles without a fit. Live `copyseg` stays on v1 until it
+  shares the indexed copy engine; no fitted scene is selected from a live
+  session's floating-point clock.
+- The indexed copy path (`fragindex.rs`, `vodgen.rs`) carries the fitted table.
+  Its source packet DTS/PTS and stream time base anchor the index clock.
+  A seek's measured clock bounds candidate index rows. The buffered fragments
+  are converted once per candidate with that row's exact rational clock and
+  compared against converted index byte counts. A unique match is required;
+  an unmeasured or inconsistent landing refuses the fitted generation.
 
 Decisions (2026-11-12, settled for milestone 4):
-- **Pinned per session.** A session reads the curve table once when it
-  starts, and every fragment it converts uses that table and its digest. A
-  refit published mid-playback reaches only sessions started after it.
+- **Pinned per session.** The digest in the server-owned copy intent is fixed
+  at a session boundary. Its producers load the table by file ID and digest.
+  If retention has removed the table, a new rendition generation may pin the
+  current digest under a new identity before publishing. A refit published
+  mid-generation cannot change that generation's bytes.
 - **v2 only for fitted titles.** A title without a fitted table keeps
   `dv-p7-to-p81-rpu-v1`, so its indexes and caches stay valid. A fitted
   title's identity is `dv-p7-to-p81-rpu-v2` plus the curve digest. Identity
   and bytes always agree: if curves cannot be applied, the conversion is
   refused, never served as identity bytes under v2.
 - **Enable, not gate.** Per-platform settings
-  `playback.dolby_vision_refit_{macos,ios,tvos,web,android}`, default off,
-  read against the session's client platform. Off ⇒ v1 bytes and identity.
+  `playback.dolby_vision_refit_{apple,web,android,linux}`, default off, are
+  read against the accepted control snapshot's typed `ClientPlatform`.
+  Initial playback has no accepted control snapshot yet and serves v1; the
+  next session boundary can pin a fit. The diagnostic `client.kind` never
+  selects curves. Off ⇒ v1 bytes and identity.
 
-As built so far (milestone 4, part 1):
+As built (milestone 4; acceptance remains open):
 - `fmp4::rewrite_timed_video_samples` hands the closure each sample's decode
   time (`tfdt` plus earlier durations) and composition offset.
 - `transcode::dv_refit_serve`: `ServedCurveTable` (scenes by `first_pts`,
@@ -330,9 +340,12 @@ As built so far (milestone 4, part 1):
 - `dvconvert::convert_length_prefixed` takes the sample's curves and writes
   them after `To81`; `dvpipe::Converter::with_refit` holds the pinned table
   and clock and resolves each sample's scene.
-- Not yet wired to the call sites: where each one gets an exact clock, and
-  how a VOD generation lands when converted sizes depend on position, are
-  open (see the milestone 4 PR).
+- The index pass records a source packet clock origin and converts every
+  fragment under the digest-named output. VOD generation loads the pinned
+  table and converts its candidate landing before comparing video byte
+  counts. Its resolved digest is reported in session and start information.
+- Real-source validation of a nonzero start with B frames, seek-window
+  readback, and the full milestone 4 acceptance checks remain open.
 
 ### 3.6 Serving: permanent on-disk conversion
 

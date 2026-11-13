@@ -1443,6 +1443,8 @@ mod tests {
     fn vod_session_participates_in_the_bounded_peer_inventory() {
         let session = crate::vodserve::VodDeliveryInfo {
             dolby_vision_refit: None,
+            dv_refit_digest: None,
+            dv_refit_identity_reason: None,
             observation: None,
             // Non-zero on purpose: the peer snapshot hard-coded zero here, so
             // a fixture that also says zero cannot see the difference.

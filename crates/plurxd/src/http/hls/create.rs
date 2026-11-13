@@ -2571,8 +2571,13 @@ async fn resolve_plan_for_principal_with_local_evidence(
             None => None,
         };
         crate::dv_refit_serving::pin_for_session(
-            state.store.as_ref(), file, &mut request, platform,
-        ).await.map_err(ApiError::Internal)?;
+            state.store.as_ref(),
+            file,
+            &mut request,
+            platform,
+        )
+        .await
+        .map_err(ApiError::Internal)?;
     }
     // Observational retained-output override follows the original intent hash
     // and full route/audio reconciliation. Advisory JSON cannot construct it.
