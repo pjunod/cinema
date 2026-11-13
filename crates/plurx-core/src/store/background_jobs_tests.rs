@@ -2506,3 +2506,82 @@ async fn retention_keeps_a_job_that_still_owns_charged_source_custody() {
         "a released owner's job expires like any other"
     );
 }
+
+#[tokio::test]
+async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work() {
+    // 2026-11-12: Twilight's FEL measurement sat queued for five days behind
+    // library and subtitle work, because only playback demand may read
+    // alongside the one background source reader and a viewer waiting on a
+    // measurement was not counted as playback demand.
+    let store = SqliteStore::open_in_memory().expect("store");
+    let job = |index: usize, viewer: Option<i64>| {
+        let mut request = enqueue(1_000);
+        request.dedupe_key = format!("fragment:{index}");
+        if let Some(deadline) = viewer {
+            request.request.scope = "playback-qualification".to_owned();
+            request.request.consumer_kind = "playback_qualification".to_owned();
+            request.request.deadline_ms = Some(deadline);
+        }
+        request
+    };
+    let background = job(0, None);
+    store.enqueue_job(background.clone()).await.expect("background");
+    claimed(&store, claim(&background.id, 0, 1_000)).await;
+    let ordinary = job(1, None);
+    let lapsed = job(2, Some(1_001));
+    let watching = job(3, Some(60_000));
+    for request in [&ordinary, &lapsed, &watching] {
+        store.enqueue_job(request.clone()).await.expect("enqueue");
+    }
+    for request in [&ordinary, &lapsed] {
+        assert!(matches!(
+            store
+                .claim_job(claim(&request.id, 0, 1_002))
+                .await
+                .expect("claim"),
+            ClaimOutcome::Contended
+        ));
+    }
+    claimed(&store, claim(&watching.id, 0, 1_002)).await;
+}
+
+#[tokio::test]
+async fn a_waiting_viewer_attaches_and_renews_its_demand_on_the_title_scan() {
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("jobs.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let db = rusqlite::Connection::open(path).expect("fixture connection");
+    // No scan yet: nothing to attach to, and the next exchange retries.
+    assert!(!store
+        .attach_dv_title_viewer(7, "viewer-1", 60_000, 1_000)
+        .await
+        .expect("no scan"));
+    let job = enqueue(1_000);
+    store.enqueue_job(job.clone()).await.expect("accepted");
+    db.execute(
+        "UPDATE background_jobs SET kind='dv_title_scan',payload_json='{\"file_id\":7}' WHERE id=?1",
+        [&job.id],
+    )
+    .expect("queued title scan");
+    assert!(store
+        .attach_dv_title_viewer(7, "viewer-1", 60_000, 1_000)
+        .await
+        .expect("attach"));
+    assert!(store
+        .attach_dv_title_viewer(7, "viewer-1", 90_000, 30_000)
+        .await
+        .expect("renew"));
+    let (count, deadline): (i64, i64) = db
+        .query_row(
+            "SELECT count(*), max(deadline_ms) FROM background_job_waiters
+             WHERE job_id=?1 AND consumer_kind='playback_qualification' AND state='pending'",
+            [&job.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("viewer waiter");
+    assert_eq!((count, deadline), (1, 90_000), "one renewed waiter per viewer");
+    assert!(store
+        .attach_dv_title_viewer(7, "viewer-1", 1_000, 2_000)
+        .await
+        .is_err());
+}

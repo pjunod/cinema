@@ -611,3 +611,44 @@ RETURNING 'true' AS result_json
 "#.into(),encode(&body)?,true,true).await?;
     Ok(!rows.is_empty())
 }
+
+/// The live-demand waiter a viewer holds on its title's scan while a play
+/// waits for that title's FEL measurement. Background source readers take
+/// turns one at a time, and only playback demand may read alongside them, so
+/// a play waiting on a measurement queued behind library or subtitle work
+/// would otherwise wait for all of it. The waiter is bounded by `deadline_ms`
+/// and renewed by the viewer's own rendering exchanges; upkeep cancels it once
+/// the viewer stops renewing, and publishing the scan settles it with every
+/// other waiter.
+pub(super) async fn attach_viewer<T: QueueSql>(
+    store: &T,
+    file_id: i64,
+    viewer: &str,
+    deadline_ms: i64,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    if file_id <= 0
+        || viewer.is_empty()
+        || viewer.len() > 128
+        || viewer.chars().any(|c| c.is_control())
+        || deadline_ms <= now_ms
+    {
+        return Err(StoreError::Task("invalid title viewer demand".into()));
+    }
+    let body = serde_json::json!({"file":file_id,"viewer":viewer,"deadline":deadline_ms,"now":now_ms});
+    let rows = store.queue_sql(r#"
+INSERT INTO background_job_waiters(request_scope,request_id,request_digest,job_id,consumer_kind,consumer_ref,
+ priority,state,target_node_id,deadline_ms,receipt_expires_ms,created_at_ms,updated_at_ms)
+SELECT 'playback-qualification',json_extract($1,'$.viewer'),json_extract($1,'$.viewer'),j.id,
+ 'playback_qualification',json_extract($1,'$.viewer'),3,'pending',NULL,
+ json_extract($1,'$.deadline'),json_extract($1,'$.deadline'),json_extract($1,'$.now'),json_extract($1,'$.now')
+FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running')
+ AND json_extract(j.payload_json,'$.file_id')=json_extract($1,'$.file')
+ORDER BY j.created_at_ms,j.id LIMIT 1
+ON CONFLICT(request_scope,request_id) DO UPDATE SET job_id=excluded.job_id,deadline_ms=excluded.deadline_ms,
+ receipt_expires_ms=excluded.receipt_expires_ms,updated_at_ms=excluded.updated_at_ms
+ WHERE background_job_waiters.state='pending'
+RETURNING 'true' AS result_json
+"#.into(),encode(&body)?,true,true).await?;
+    Ok(!rows.is_empty())
+}

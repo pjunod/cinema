@@ -239,6 +239,36 @@ sudo rm /run/plurx-physical-stop/source-census-v1/<uuid>.json
 
 The container needs the existing read-only bind of `/run/plurx-physical-stop`.
 
+### 1.4 A daemon restart proves its old namespace's readers gone
+
+A plurxd restart during any read left that owner's witness poisoned by some
+earlier unmediated launch. Its expired custody then held the shared storage
+fence, and every source-reading job in the cluster, live work included, was
+refused until the next host reboot. On 2026-11-12 one nynuc restart fenced
+the cluster this way within a minute of the restart.
+
+Each witness now records its daemon's PID namespace and whether the daemon was
+that namespace's init (PID 1). Replay releases a poisoned witness only when
+all of these hold:
+
+- the witness's daemon was the init of its PID namespace;
+- the replaying daemon is the init of a different PID namespace;
+- the anchor lock is free.
+
+When a namespace's init exits, the kernel kills every process left in the
+namespace, and the init's exit completes only once they have all been reaped.
+A process cannot leave its PID namespace, so every child the old daemon ever
+launched, mediated or not, died with it. Only the old daemon held the anchor
+lock, and close-on-exec keeps that descriptor from its children. The container
+runtime starts the replacement daemon in a new namespace only after the old
+init has exited.
+
+A same-namespace replay, a daemon that is not an init, and evidence written
+before this field existed prove nothing and keep their reboot or census path.
+An older daemon refuses the new evidence field and so skips the record, the
+safe direction during a rolling upgrade. Each release logs `source custody
+recovered after its daemon's PID namespace was torn down`.
+
 ## 2. The journal never impersonates an activation or completed join
 
 [Recovery replay](../../crates/plurxd/src/source_custody/recovery.rs) uses

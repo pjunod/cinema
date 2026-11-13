@@ -299,3 +299,31 @@ fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() 
         Ok(Admission::Proven)
     );
 }
+
+#[test]
+fn an_upgrade_displaced_by_another_preparation_waits_for_the_free_slot() {
+    // 2026-11-12: every Twilight play's in-session preparation took the
+    // playback's slot, which cancelled the processed upgrade for good.
+    let (playback, session, incarnation) = waiting(71);
+    let holder = tokio_util::sync::CancellationToken::new();
+    let held = super::super::preparation::begin_processed_upgrade(&playback, &holder)
+        .expect("another preparation holds the slot");
+    // While the slot is held, a rendering exchange leaves the upgrade waiting.
+    assert!(take_on_rendering(71, &session, &incarnation).is_none());
+    assert!(is_waiting(&session));
+    drop(held);
+    let (intent, run) = take_on_rendering(71, &session, &incarnation).expect("slot is free");
+    // Losing the slot is not the session ending: the upgrade waits again.
+    assert!(run.displaced("cancelled") && run.displaced(SLOT_HELD));
+    assert!(!run.displaced("declined"));
+    run.wait_again(intent);
+    drop(run);
+    assert!(is_waiting(&session));
+    // A released session's run is cancelled, never displaced.
+    let (intent, run) = take_on_rendering(71, &session, &incarnation).expect("retaken");
+    cancel_for_session(&session);
+    assert!(!run.displaced("cancelled"));
+    run.wait_again(intent);
+    drop(run);
+    assert!(!is_waiting(&session) && !is_running(&session));
+}

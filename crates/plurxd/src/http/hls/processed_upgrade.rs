@@ -210,6 +210,13 @@ pub(in crate::http) fn take_on_rendering(
     session_id: &str,
     incarnation_id: &str,
 ) -> Option<(Box<UpgradeIntent>, UpgradeRun)> {
+    // Another preparation holds the playback's slot: leave the upgrade
+    // waiting for a later exchange rather than spend it against that slot.
+    if matches!(lock().get(session_id), Some(Entry::Waiting { intent, .. })
+        if super::preparation::preparation_slot_held(&intent.playback_id))
+    {
+        return None;
+    }
     take_waiting(user_id, session_id, Some(incarnation_id))
 }
 
@@ -274,6 +281,30 @@ pub(in crate::http) struct UpgradeRun {
 impl UpgradeRun {
     pub(in crate::http) fn cancelled(&self) -> &tokio_util::sync::CancellationToken {
         &self.cancelled
+    }
+
+    /// Whether `outcome` only lost the playback's preparation slot to another
+    /// preparation: the run itself (its session's release or supersession)
+    /// was not cancelled, so the session may still be upgraded.
+    fn displaced(&self, outcome: &str) -> bool {
+        (outcome == "cancelled" || outcome == SLOT_HELD) && !self.cancelled.is_cancelled()
+    }
+
+    /// Put the upgrade back to wait for the session's next rendering exchange,
+    /// if the entry is still this run's.
+    fn wait_again(&self, intent: Box<UpgradeIntent>) {
+        let mut entries = lock();
+        if matches!(entries.get(&self.session_id),
+            Some(Entry::Running { claim, report: None, .. }) if *claim == self.claim)
+        {
+            entries.insert(
+                self.session_id.clone(),
+                Entry::Waiting {
+                    intent,
+                    registered: std::time::Instant::now(),
+                },
+            );
+        }
     }
 
     fn skipped(&self, reason: &str) {
@@ -401,6 +432,9 @@ pub(in crate::http) fn note_rendering(state: &AppState, route: &MediaSessionRout
     if route.owner_node_id != state.node_id || route.state != "active" {
         return;
     }
+    // A viewer still waiting on its title's measurement keeps that scan's
+    // live demand while it is watching.
+    qualification::hold_viewer_demand(state, &route.session_id, &route.incarnation_id);
     let Some(user_id) = route.principal.local_user_id() else {
         return;
     };
@@ -443,11 +477,19 @@ fn start_upgrade_claim(
     crate::playback_control::record_processed_upgrade("scheduled");
     let state = state.clone();
     tokio::spawn(async move {
-        let outcome = run_upgrade(&state, &intent, &run, pending).await;
+        let mut outcome = run_upgrade(&state, &intent, &run, pending).await;
+        if run.displaced(outcome) {
+            outcome = "displaced";
+            run.wait_again(intent);
+        }
         crate::playback_control::record_processed_upgrade(outcome);
         drop(run);
     });
 }
+
+/// The run found another preparation holding the playback's slot before it
+/// claimed it; [`start_upgrade_claim`] puts the upgrade back to wait.
+const SLOT_HELD: &str = "slot_held";
 
 /// What the trial step answers; see [`run_upgrade_with`].
 pub(in crate::http) type TrialOutcome =
@@ -584,8 +626,8 @@ where
             return "cancelled";
         }
         tracing::info!(target: "plurxd::http::hls", session = %session,
-            "processed upgrade skipped: a viewer-directed preparation holds the playback's slot");
-        return "not_applicable";
+            "processed upgrade waits: another preparation holds the playback's slot");
+        return SLOT_HELD;
     };
     if pending.cancelled() {
         return "cancelled";
@@ -688,6 +730,11 @@ where
         Err(reason) => {
             if let Some(wait) = crate::transcode::pending_fel_qualification(&reason) {
                 if qualification::retain(intent, run, wait) {
+                    qualification::hold_viewer_demand(
+                        state,
+                        &intent.session_id,
+                        &intent.incarnation_id,
+                    );
                     return "qualification_pending";
                 }
                 if run.cancelled().is_cancelled() {

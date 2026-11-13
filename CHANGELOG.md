@@ -10,6 +10,18 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A plurxd restart no longer fences every source-reading job in the cluster
+  until a host reboot. A restart during a read left that owner's custody
+  stranded. A new daemon now releases it when the old daemon's whole PID
+  namespace is proven torn down.
+- A play waiting on its title's FEL measurement now counts as playback demand
+  for that title's scan. The scan runs beside background work instead of
+  waiting behind every library and subtitle job, and the upgrade lands in the
+  same play.
+- A processed upgrade that lost the playback's preparation slot to another
+  preparation now waits for the free slot instead of being dropped. The
+  processed-upgrade metric now reports waiting-on-measurement and displaced
+  outcomes, which it previously counted as cancelled.
 - A resumed play, or one restarted after a stall, is now offered its
   processed Dolby Vision upgrade. The upgrade waited for the client's
   first-frame beacon, which only a fresh start sends, so a play that resumed

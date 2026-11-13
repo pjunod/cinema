@@ -1420,3 +1420,89 @@ async fn live_completion_waits_for_read_original_clones_and_explicit_raw_retirem
 async fn quiet_for_veto() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 }
+
+fn namespace(pid_namespace: u64, init: bool) -> DaemonNamespace {
+    DaemonNamespace {
+        pid_namespace,
+        init,
+    }
+}
+
+/// Rewrite the witness's writer namespace in place (same inode and mode), as
+/// the daemon that wrote it would have recorded it.
+fn written_by(proof: &Path, writer: Option<DaemonNamespace>) {
+    let mut evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(proof).expect("witness")).expect("witness json");
+    let object = evidence.as_object_mut().expect("witness object");
+    match writer {
+        Some(writer) => {
+            object.insert(
+                "daemon_namespace".into(),
+                serde_json::to_value(writer).expect("namespace json"),
+            );
+        }
+        None => {
+            object.remove("daemon_namespace");
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(proof)
+        .expect("existing witness");
+    file.write_all(&serde_json::to_vec(&evidence).expect("witness bytes"))
+        .and_then(|()| file.sync_all())
+        .expect("rewritten witness");
+}
+
+#[tokio::test]
+async fn a_restarted_init_daemon_releases_a_raw_launch_from_its_torn_down_namespace() {
+    // 2026-11-12: each plurxd restart during a read left that owner's anchor
+    // invalidated by an unmediated launch. Its custody then fenced every
+    // source reader in the cluster until the next host reboot.
+    let cases = [
+        (Some(namespace(11, true)), Some(namespace(22, true)), true),
+        // The same namespace still holds whatever the writer launched.
+        (Some(namespace(11, true)), Some(namespace(11, true)), false),
+        // A writer that was not its namespace's init left children behind.
+        (Some(namespace(11, false)), Some(namespace(22, true)), false),
+        // A replay that is not an init cannot speak for a container restart.
+        (Some(namespace(11, true)), Some(namespace(22, false)), false),
+        // Evidence written before namespaces were recorded keeps its reboot.
+        (None, Some(namespace(22, true)), false),
+    ];
+    for family in ["foreground", "job"] {
+        for (writer, current, released) in cases {
+            let fixture = Fixture::new();
+            let record = if family == "foreground" {
+                fixture.foreground()
+            } else {
+                fixture.background(family)
+            };
+            preread(&fixture, &record);
+            let (path, config) = configuration(&fixture, &record, "unmediated");
+            let mut child = OwnedChild::start(&path);
+            child.wait_for("READER_PREPARED");
+            assert!(activate(&fixture, &record, &config.activation_id).await);
+            child.send("arm");
+            child.wait_for("READER_ARMED");
+            let proof = config.directory.join(record.name().expect("name"));
+            written_by(&proof, writer);
+            // The writer is alive and holds its lock: nothing is torn down.
+            replay_at_in(&fixture.store, &config.directory, &fixture.dir, NODE, current)
+                .await
+                .expect("live writer observation");
+            assert_eq!(count(&fixture, &record), 1, "{family}: live writer");
+            child.exit();
+            replay_at_in(&fixture.store, &config.directory, &fixture.dir, NODE, current)
+                .await
+                .expect("replay after the writer's exit");
+            assert_eq!(
+                count(&fixture, &record),
+                if released { 0 } else { 1 },
+                "{family}: writer {writer:?}, replay {current:?}"
+            );
+            assert_eq!(proof.exists(), !released, "{family}: evidence cleanup");
+        }
+    }
+}
