@@ -802,6 +802,94 @@ pub enum DolbyVisionPass {
     Remove,
 }
 
+/// A probe's first packet may have PTS but no DTS (ordinary Matroska with
+/// reordered pictures). Missing DTS is resolved only after the first muxed
+/// sample is proven to be the same filtered packet, never by assuming PTS=DTS.
+#[derive(Clone, Copy)]
+struct RefitPacketOrigin {
+    first_dts: Option<i64>,
+    first_pts: i64,
+    time_base_num: u32,
+    time_base_den: u32,
+    first_sample_sha256: Option<[u8; 32]>,
+}
+
+impl RefitPacketOrigin {
+    fn resolve(self, init: &Init, fragment: &fmp4::Fragment) -> Result<plurx_core::segplan::DvRefitOrigin, String> {
+        let video = init.video().ok_or("F+ first packet has no video track")?;
+        let track = fragment.track(video.id).ok_or("F+ first packet has no video fragment")?;
+        let run = track.runs.first().ok_or("F+ first packet has no sample run")?;
+        let sample = run.samples.first().ok_or("F+ first packet has no sample")?;
+        if self.first_dts.is_none() {
+            let expected = self.first_sample_sha256.ok_or("F+ missing-DTS packet has no independent identity")?;
+            let end = run.data_offset.checked_add(sample.size as usize).ok_or("F+ sample extent overflow")?;
+            let bytes = fragment.bytes.get(run.data_offset..end).ok_or("F+ first sample extent is invalid")?;
+            let actual: [u8; 32] = Sha256::digest(bytes).into();
+            if actual != expected {
+                return Err("F+ first emitted sample differs from the independently probed source packet".into());
+            }
+        }
+        let clock = plurx_core::transcode::dv_refit_serve::SourceClock {
+            track_timescale: video.timescale,
+            track_ticks: i128::from(track.base_decode_time) + i128::from(sample.cto),
+            source_pts: self.first_pts,
+            source_time_base: (self.time_base_num, self.time_base_den),
+        };
+        let first_dts = clock.source_pts(i128::from(track.base_decode_time)).map_err(|error| error.to_string())?;
+        if self.first_dts.is_some_and(|known| known != first_dts) {
+            return Err("F+ source packet DTS/PTS disagree with the emitted composition offset".into());
+        }
+        Ok(plurx_core::segplan::DvRefitOrigin { first_dts, first_pts: self.first_pts,
+            time_base_num: self.time_base_num, time_base_den: self.time_base_den })
+    }
+}
+
+fn filtered_packet_hash_args(input: &str, stream: u32, retain_parameter_sets: bool) -> Vec<String> {
+    let filter = transcode::hevc_copy_bsf_for_copy_retaining(
+        Some("dolby_vision"), false, true, true, retain_parameter_sets);
+    ["-hide_banner", "-loglevel", "error", "-copyts", "-i", input, "-map", &format!("0:{stream}"),
+        "-an", "-sn", "-c:v", "copy", "-bsf:v", filter.as_str(),
+        "-frames:v", "1", "-f", "framehash", "-hash", "sha256", "pipe:1"]
+        .map(str::to_owned).into()
+}
+
+fn filtered_packet_hash(raw: &[u8], pts: i64, time_base: (u32, u32)) -> Result<[u8; 32], String> {
+    let text = std::str::from_utf8(raw).map_err(|error| error.to_string())?;
+    let base = text.lines().find_map(|line| line.strip_prefix("#tb 0:")).ok_or("F+ packet hash has no time base")?;
+    let observed = parse_time_base(base.trim()).ok_or("F+ packet hash time base is invalid")?;
+    if observed != (u64::from(time_base.0), u64::from(time_base.1)) {
+        return Err("F+ packet hash uses a different source time base".into());
+    }
+    let packets: Vec<_> = text.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty()).collect();
+    if packets.len() != 1 { return Err("F+ packet hash did not identify exactly one source packet".into()); }
+    let fields: Vec<_> = packets[0].split(',').map(str::trim).collect();
+    if fields.len() != 6 || fields[2].parse::<i64>().ok() != Some(pts) {
+        return Err("F+ packet hash does not identify the probed first source PTS".into());
+    }
+    hex::decode(fields[5]).map_err(|error| error.to_string())?.try_into().map_err(|_| "F+ packet hash is not SHA256".into())
+}
+
+async fn held_filtered_packet_hash(source: &std::fs::File, stream: u32, pts: i64,
+    time_base: (u32, u32), budget: Duration, cancel: Option<&tokio_util::sync::CancellationToken>,
+    retain_parameter_sets: bool,
+) -> Result<[u8; 32], String> {
+    let mut view = source;
+    view.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    #[cfg(unix)]
+    { command.args(filtered_packet_hash_args("/dev/fd/3", stream, retain_parameter_sets));
+      crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]); }
+    #[cfg(windows)]
+    { let path = crate::ffmpeg::windows_source_path(source)?;
+      crate::ffmpeg::verify_windows_source_path(source, &path)?;
+      command.args(filtered_packet_hash_args(&path.to_string_lossy(), stream, retain_parameter_sets)); }
+    let result = crate::ffmpeg::bounded_command_output_cancellable(command,
+        budget.min(Duration::from_secs(30)), 64 * 1024, "F+ first packet identity", cancel,
+        crate::process_control::ChildWork::realtime("F+ first packet identity")).await;
+    view.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    filtered_packet_hash(&result?.stdout, pts, time_base)
+}
+
 async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
@@ -809,7 +897,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
     refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
-    refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
+    refit_origin: Option<RefitPacketOrigin>,
 ) -> IndexOutcome {
     let convert = matches!(dolby_vision, DolbyVisionPass::Rewrite(_));
     // A converting identity's index has to describe the CONVERTED bytes. An
@@ -819,6 +907,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     // identity never produces. The conversion shortens every RPU, so every
     // fragment carrying one is a different size.
     let mut converter: Option<crate::dvpipe::Converter> = None;
+    let mut resolved_refit_origin = None;
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
     let mut init_sha = String::new();
@@ -921,6 +1010,11 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                                             return IndexOutcome::Unsupported(
                                                 "fitted conversion has no exact source packet origin".into());
                                         };
+                                        let origin = match origin.resolve(init, &fragment) {
+                                            Ok(origin) => origin,
+                                            Err(reason) => return IndexOutcome::Unsupported(reason),
+                                        };
+                                        resolved_refit_origin = Some(origin);
                                         let Some(video) = init.video() else {
                                             return IndexOutcome::Unsupported(
                                                 "fitted conversion has no video track".into(),
@@ -1204,7 +1298,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     built.promotion = promotion;
     built.parameter_sets_constant = parameter_sets_constant;
     if refit.is_some() {
-        built.dv_refit_origin = refit_origin;
+        built.dv_refit_origin = resolved_refit_origin;
     }
     IndexOutcome::Built(Box::new(built))
 }
@@ -1448,7 +1542,7 @@ struct IndexPass {
     /// source, one index per output.
     outputs: Vec<IndexOutput>,
     expectation: VideoCompletionExpectation,
-    refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
+    refit_origin: Option<RefitPacketOrigin>,
     /// The PGS tracks this pass also keeps, and the stage it keeps them in.
     /// Its argv is already at the end of `args`; the plan rides with the pass
     /// so the verdict and the stage's removal belong to the same owner.
@@ -1671,6 +1765,7 @@ fn dv_title_aggregate(
 /// the same class of mismatch as the argv and the record answer disagreeing.
 struct IndexOutput {
     video: transcode::CopyVideoOptions,
+    refit_origin: Option<RefitPacketOrigin>,
     dolby_vision: DolbyVisionPass,
     refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
 }
@@ -1679,6 +1774,7 @@ impl IndexOutput {
     fn new(file: &MediaFile, video: transcode::CopyVideoOptions) -> Result<Self, String> {
         Ok(Self {
             video,
+            refit_origin: None,
             dolby_vision: dolby_vision_pass_for(file, video)?,
             refit: None,
         })
@@ -1801,7 +1897,7 @@ impl IndexBuild {
 struct ProbedSource {
     expectation: VideoCompletionExpectation,
     subtitle_tracks: Vec<crate::subtitle_ride_along::ProbedTrack>,
-    dv_refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
+    dv_refit_origin: Option<RefitPacketOrigin>,
 }
 
 async fn probe_completion_expectation(
@@ -1975,8 +2071,7 @@ async fn probe_completion_expectation_inner(
             })?;
         let first_dts = packet_integer(packet.get("dts")).and_then(|n| i64::try_from(n).ok());
         let first_pts = packet_integer(packet.get("pts")).and_then(|n| i64::try_from(n).ok());
-        let (Some(first_dts), Some(first_pts), Ok(time_base_num), Ok(time_base_den)) = (
-            first_dts,
+        let (Some(first_pts), Ok(time_base_num), Ok(time_base_den)) = (
             first_pts,
             u32::try_from(context.time_base.0),
             u32::try_from(context.time_base.1),
@@ -1987,12 +2082,8 @@ async fn probe_completion_expectation_inner(
                 0,
             ));
         };
-        Some(plurx_core::segplan::DvRefitOrigin {
-            first_dts,
-            first_pts,
-            time_base_num,
-            time_base_den,
-        })
+        Some(RefitPacketOrigin { first_dts, first_pts, time_base_num, time_base_den,
+            first_sample_sha256: None })
     } else {
         None
     };
@@ -2808,7 +2899,25 @@ async fn build_attested_pass(
                         continue;
                     };
                     match crate::dv_refit_serving::pinned_table(store, file, digest).await {
-                        Ok(Some(table)) => output.refit = Some(table),
+                        Ok(Some(table)) => {
+                            let mut origin = probed.dv_refit_origin;
+                            if let Some(pending) = origin.as_mut().filter(|origin| origin.first_dts.is_none()) {
+                                match held_filtered_packet_hash(source, probed.expectation.stream_index,
+                                    pending.first_pts, (pending.time_base_num, pending.time_base_den),
+                                    budget.saturating_sub(started.elapsed()), cancel,
+                                    video.retains_hevc_parameter_sets()).await {
+                                    Ok(hash) => pending.first_sample_sha256 = Some(hash),
+                                    Err(reason) => {
+                                        builds[slot] = Some(IndexBuild::plain(IndexOutcome::Failed(Box::new(
+                                            IndexFailure::new(IndexFailureCode::IndexCompletionUnverified,
+                                                format!("F+ source packet identity: {reason}"), 0)))));
+                                        continue;
+                                    }
+                                }
+                            }
+                            output.refit_origin = origin;
+                            output.refit = Some(table);
+                        },
                         Ok(None) => {
                             builds[slot] = Some(IndexBuild::plain(IndexOutcome::Unsupported(
                                 "the fitted index's curve digest is no longer kept".into(),
@@ -3342,7 +3451,7 @@ async fn build_with_args_owned(
         &expectation,
         first.dolby_vision,
         first.refit,
-        refit_origin,
+        first.refit_origin.or(refit_origin),
         Some(&record_progress),
         shared,
     )));
@@ -3357,7 +3466,7 @@ async fn build_with_args_owned(
             &expectation,
             output.dolby_vision,
             output.refit,
-            refit_origin,
+            output.refit_origin.or(refit_origin),
             None,
             shared,
         )));
@@ -3636,7 +3745,7 @@ async fn index_output<R: AsyncRead + Unpin>(
     expectation: &VideoCompletionExpectation,
     dolby_vision: DolbyVisionPass,
     refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
-    refit_origin: Option<plurx_core::segplan::DvRefitOrigin>,
+    refit_origin: Option<RefitPacketOrigin>,
     progress: Option<&IndexProgress>,
     drain: bool,
 ) -> (IndexOutcome, bool) {

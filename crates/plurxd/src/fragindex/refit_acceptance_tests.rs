@@ -5,7 +5,7 @@ use super::*;
 use crate::renditiondir::InitIdentity;
 use dolby_vision::rpu::dovi_rpu::DoviRpu;
 use plurx_core::fmp4::{CutPolicy, Fragment};
-use plurx_core::segplan::{self, DvRefitOrigin, SegmentPlan, TrackDurations};
+use plurx_core::segplan::{self, SegmentPlan, TrackDurations};
 use plurx_core::store::dv_refit_jobs::{RefitCurveScene, RefitCurveTable, RefitVerdict};
 use plurx_core::transcode::dv_refit::{ServableCurves, LUMA_PIVOT_DELTAS};
 use plurx_core::transcode::dv_refit_serve::{
@@ -53,7 +53,7 @@ fn input_args(source: &str, seek: Option<f64>) -> Vec<String> {
     args
 }
 
-async fn copy_pipe(ffmpeg: &str, source: &str, stream: u32, seek: Option<f64>) -> Vec<u8> {
+async fn copy_pipe(ffmpeg: &str, source: &str, stream: u32, seek: Option<f64>, retain_parameter_sets: bool) -> Vec<u8> {
     let mut args = input_args(source, seek);
     args.extend([
         "-map_chapters".into(),
@@ -67,7 +67,7 @@ async fn copy_pipe(ffmpeg: &str, source: &str, stream: u32, seek: Option<f64>) -
         "-tag:v".into(),
         "hvc1".into(),
         "-bsf:v".into(),
-        "filter_units=remove_types=32-34|63".into(),
+        transcode::hevc_copy_bsf_for_copy_retaining(Some("dolby_vision"), false, true, true, retain_parameter_sets),
         "-avoid_negative_ts".into(),
         "make_zero".into(),
         "-movflags".into(),
@@ -415,17 +415,23 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
             .expect("time base"),
     )
     .expect("rational base");
-    let origin = DvRefitOrigin {
-        first_dts: packet["dts"].as_i64().expect("first DTS"),
+    let first_pts = packet["pts"].as_i64().expect("first PTS");
+    let packet_hash_output = output(&ffmpeg, &filtered_packet_hash_args(&source, stream, false)).await;
+    std::fs::write(dir.join("source-first-filtered.framehash"), &packet_hash_output).expect("first source packet identity receipt");
+    let sample_hash = filtered_packet_hash(&packet_hash_output, first_pts,
+        (u32::try_from(num).expect("num"), u32::try_from(den).expect("den"))).expect("independent first packet identity");
+    let origin = RefitPacketOrigin {
+        first_dts: packet["dts"].as_i64(),
         first_pts: packet["pts"].as_i64().expect("first PTS"),
         time_base_num: u32::try_from(num).expect("num"),
         time_base_den: u32::try_from(den).expect("den"),
+        first_sample_sha256: Some(sample_hash),
     };
     assert_eq!(
         (origin.time_base_num, origin.time_base_den),
         table.time_base()
     );
-    let feed = copy_pipe(&ffmpeg, &source, stream, None).await;
+    let feed = copy_pipe(&ffmpeg, &source, stream, None, false).await;
     let (init, fragments) = split(&feed);
     let first_rpu = rpus(fragments.first().expect("real fragments"), &init)[0]
         .1
@@ -601,7 +607,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         &dir,
     )
     .await;
-    let seek_feed = copy_pipe(&ffmpeg, &source, stream, Some(seek_seconds)).await;
+    let seek_feed = copy_pipe(&ffmpeg, &source, stream, Some(seek_seconds), false).await;
     let seek_init = publish(
         &seek_feed,
         &index,
@@ -646,7 +652,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
     let receipt = json!({"scope": "offline video-only production index/converter/VOD publisher; no deployed HTTP session",
         "source_sha256": hex::encode(Sha256::digest(std::fs::read(&source).expect("source hash"))),
         "candidate_sha": candidate, "helper_path": helper, "helper_sha256": key.helper_identity,
-        "ffmpeg_path": ffmpeg, "ffprobe_path": ffprobe, "curve_digest": table.digest(), "source_origin": origin,
+        "ffmpeg_path": ffmpeg, "ffprobe_path": ffprobe, "curve_digest": table.digest(), "source_origin": index.dv_refit_origin,
         "seek_seconds": seek_seconds, "seek_entry": target.index,
         "measured_landing_ticks": measured.ticks, "measured_frame_ticks": measured.frame_ticks, "frames": full.len(),
         "fitted_frames": fitted_count, "seek_frames": seek_frames,
@@ -657,4 +663,96 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         serde_json::to_vec_pretty(&receipt).expect("receipt JSON"),
     )
     .expect("acceptance receipt");
+}
+
+
+fn clock_fixture() -> (Init, Fragment, [u8; 32]) {
+    let feed = include_bytes!("../../../plurx-core/tests/fixtures/dv-runtime/authored.mp4");
+    let (mut init, mut fragments) = split(feed);
+    let video = init.tracks.iter_mut().find(|track| track.kind == TrackKind::Video).expect("video");
+    video.timescale = 1000;
+    let id = video.id;
+    let mut fragment = fragments.remove(0);
+    let track = fragment.tracks.iter_mut().find(|track| track.track_id == id).expect("video track");
+    track.base_decode_time = 1000;
+    track.runs[0].samples[0].cto = 83;
+    let run = &track.runs[0];
+    let sample = &run.samples[0];
+    let hash = Sha256::digest(&fragment.bytes[run.data_offset..run.data_offset + sample.size as usize]).into();
+    (init, fragment, hash)
+}
+
+fn packet_origin(first_dts: Option<i64>, hash: Option<[u8; 32]>) -> RefitPacketOrigin {
+    RefitPacketOrigin { first_dts, first_pts: 125, time_base_num: 1, time_base_den: 1000,
+        first_sample_sha256: hash }
+}
+
+#[test]
+fn known_dts_is_checked_against_the_first_sample_composition_offset() {
+    let (init, fragment, _) = clock_fixture();
+    assert_eq!(packet_origin(Some(42), None).resolve(&init, &fragment).expect("matching DTS").first_dts, 42);
+    assert!(packet_origin(Some(43), None).resolve(&init, &fragment).is_err());
+}
+
+#[test]
+fn missing_dts_is_resolved_only_from_the_same_independently_hashed_packet() {
+    let (init, fragment, hash) = clock_fixture();
+    assert_eq!(packet_origin(None, Some(hash)).resolve(&init, &fragment).expect("same first packet").first_dts, 42);
+    assert!(packet_origin(None, None).resolve(&init, &fragment).is_err());
+    let mut wrong = hash; wrong[0] ^= 1;
+    assert!(packet_origin(None, Some(wrong)).resolve(&init, &fragment).is_err());
+}
+
+#[test]
+fn missing_dts_refuses_a_nonintegral_composition_offset() {
+    let (mut init, mut fragment, hash) = clock_fixture();
+    init.tracks.iter_mut().find(|track| track.kind == TrackKind::Video).expect("video").timescale = 24000;
+    fragment.tracks[0].runs[0].samples[0].cto = 1;
+    assert!(packet_origin(None, Some(hash)).resolve(&init, &fragment).is_err());
+}
+
+#[test]
+fn filtered_packet_hash_binds_its_first_pts_and_time_base() {
+    let hash = "ab".repeat(32);
+    let raw = format!("#tb 0: 1/1000\n0, NOPTS, 125, 41, 123, {hash}\n");
+    assert_eq!(hex::encode(filtered_packet_hash(raw.as_bytes(), 125, (1, 1000)).expect("matching packet")), hash);
+    assert!(filtered_packet_hash(raw.as_bytes(), 126, (1, 1000)).is_err());
+    assert!(filtered_packet_hash(raw.as_bytes(), 125, (1, 24000)).is_err());
+}
+
+
+/// Both header policies must identify their own first packet. A hash from
+/// the stripping output must never qualify the retained-header sample.
+#[tokio::test]
+async fn missing_dts_probe_matches_each_outputs_parameter_set_retention() {
+    use plurx_core::testfixtures;
+    testfixtures::require_ffmpeg();
+    let ffmpeg = testfixtures::ffmpeg();
+    let source = testfixtures::source("closed-gop");
+    let source = source.to_str().expect("fixture path");
+    let raw = output(&testfixtures::ffprobe(), &[
+        "-v".into(), "error".into(), "-select_streams".into(), "v:0".into(),
+        "-show_packets".into(), "-show_streams".into(), "-show_entries".into(),
+        "packet=pts:stream=time_base".into(), "-of".into(), "json".into(), source.into()]).await;
+    let probe: Value = serde_json::from_slice(&raw).expect("source packet clock");
+    let pts = probe["packets"][0]["pts"].as_i64().expect("first packet PTS");
+    let (num, den) = parse_time_base(probe["streams"][0]["time_base"].as_str().expect("source base")).expect("rational source base");
+    let base = (u32::try_from(num).expect("num"), u32::try_from(den).expect("den"));
+    let mut cases = Vec::new();
+    for retain in [false, true] {
+        let video = transcode::CopyVideoOptions::new(false, true)
+            .with_dolby_vision_conversion(true).with_parameter_set_retention(retain);
+        let hash_output = output(&ffmpeg, &filtered_packet_hash_args(source, 0,
+            video.retains_hevc_parameter_sets())).await;
+        let hash = filtered_packet_hash(&hash_output, pts, base).expect("actual filtered first packet");
+        let feed = copy_pipe(&ffmpeg, source, 0, None, video.retains_hevc_parameter_sets()).await;
+        let (init, mut fragments) = split(&feed);
+        let origin = RefitPacketOrigin { first_dts: None, first_pts: pts, time_base_num: base.0,
+            time_base_den: base.1, first_sample_sha256: Some(hash) };
+        origin.resolve(&init, &fragments[0]).expect("same selected header policy matches");
+        cases.push((hash, init, fragments.remove(0), origin));
+    }
+    assert_ne!(cases[0].0, cases[1].0, "fixture must exercise actual in-band parameter sets");
+    let wrong = RefitPacketOrigin { first_sample_sha256: Some(cases[0].0), ..cases[1].3 };
+    assert!(wrong.resolve(&cases[1].1, &cases[1].2).is_err(), "stripped packet cannot qualify retained headers");
 }

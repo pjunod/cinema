@@ -311,6 +311,12 @@ everywhere, because a negligible gain is not worth new bytes in every cache.
   session's floating-point clock.
 - The indexed copy path (`fragindex.rs`, `vodgen.rs`) carries the fitted table.
   Its source packet DTS/PTS and stream time base anchor the index clock.
+  Matroska may omit the first DTS. In that case a bounded, held-source
+  first-packet SHA-256 probe uses the selected output's exact parameter-set
+  retention filter. The first emitted sample must match those bytes and the
+  independently measured PTS/time base. Its composition offset then resolves
+  the decode origin with exact integer arithmetic; a mismatch or nonintegral
+  clock refuses the fitted index. PTS is never substituted for DTS.
   A seek's measured clock bounds candidate index rows. The buffered fragments
   are converted once per candidate with that row's exact rational clock and
   compared against converted index byte counts. A unique match is required;
@@ -379,7 +385,9 @@ exists; it does not occupy a conversion slot for the duration of the fit.
 For a fitted title the existing scanner makes an optional sidecar from the same
 held source: selected-stream time base, then each displayed RPU's exact packet
 PTS and SHA-256 in decode order. The raw HEVC extraction has no presentation
-clock. Before authoring, the converter matches every extracted RPU to that
+clock. dovi_tool 2.3.3 extracts presentation-ordered RPU payloads without
+HEVC NAL headers. The converter sorts sidecar rows by unique PTS, restores
+headers for parsing/hash comparison, and matches every extracted RPU to its
 sidecar hash and the stored title frame count. It selects each stored scene by
 PTS, converts that RPU with `To81`, applies its stored curve when present, and
 injects the resulting RPU stream. After remuxing, it extracts RPUs from the
@@ -388,6 +396,19 @@ incomplete mapping refuses the candidate while the original source remains.
 MEL and recorded identity/refusal outcomes retain the existing `-m 2 convert`
 path. The source and replacement still pass the held-inode binding, content
 hash, owned-scratch and recovery-guard checks of `dv_disk`.
+
+**Qualification boundary:** the original 311-packet Michael window has an
+84 ms uncovered tail interval and is correctly refused by the complete-title
+scanner. Acceptance preserves it as a negative control and uses its contiguous
+310-packet prefix. Disk authoring/readback uses a timestamp-normalized copy of
+that prefix; indexed-copy acceptance keeps the nonzero-origin prefix.
+
+The existing raw-HEVC disk remux does not preserve a positive video start
+offset. The nonzero-origin prefix is safely refused by the unchanged duration
+guard (124 ms drift versus one 41.708 ms frame), with the original retained.
+Preserving that origin is a separate open disk-conversion finding, not covered
+or repaired by F+. Zero-origin acceptance must not be presented as nonzero
+origin disk qualification.
 
 ## 4. Developer tab and visibility
 
