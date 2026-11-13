@@ -151,7 +151,29 @@ pub(super) enum RollingStartupPolicy {
     WebFixedHlsV1,
 }
 
+/// The usable forward media a growing presentation must have committed from
+/// its requested position before its first playlist is answered: A1-N's one
+/// rule ([`RollingStartupPolicy::for_transport`]), as rolling publication,
+/// the shared Source range and a local range all apply it. At the fixed
+/// 16-second target and rate 1 that is 48 seconds for native, missing and
+/// unknown transports and one target for exact `hlsjs`.
+pub(crate) fn startup_admission_window_ms(transport: Option<&str>, rate: f64) -> u64 {
+    RollingStartupPolicy::for_transport(transport)
+        .bootstrap_ms(rate)
+        .max(1) as u64
+}
+
 impl RollingStartupPolicy {
+    /// Only the audited hls.js path has evidence for the short reload
+    /// window; native, omitted and future transports get the window derived
+    /// from the same fixed presentation target.
+    pub(super) fn for_transport(transport: Option<&str>) -> Self {
+        match transport {
+            Some("hlsjs") => Self::FirstReloadWindow,
+            _ => Self::NativePresentationWindow,
+        }
+    }
+
     pub(super) fn uses_small_bootstrap(self) -> bool {
         match self {
             #[cfg(test)]
@@ -243,10 +265,7 @@ impl RollingPublicationClock {
         // a window derived from that same fixed presentation target. Keep the
         // producer's paid steady reserve and all media validation unchanged.
         if !self.startup_policy_bound && self.served.is_none() {
-            self.startup_policy = match transport {
-                Some("hlsjs") => RollingStartupPolicy::FirstReloadWindow,
-                _ => RollingStartupPolicy::NativePresentationWindow,
-            };
+            self.startup_policy = RollingStartupPolicy::for_transport(transport);
             self.startup_policy_bound = true;
         }
     }

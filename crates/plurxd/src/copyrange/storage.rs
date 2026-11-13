@@ -262,7 +262,8 @@ pub(crate) struct CopyRangeFiles {
     eof: bool,
     rendered: bool,
     pub(super) committed_segments: usize,
-    committed_eof: bool,
+    /// Visible to the range's owners' tests, which end a hand-set bank.
+    pub(super) committed_eof: bool,
     current: Option<Arc<CopyRangeCheckpoint>>,
     old: Vec<OldManifest>,
 }
@@ -290,6 +291,7 @@ impl CopyRangeFiles {
         }
         let owner = owner.binding()?;
         let (payload_namespace, payload_owner) = owner.payload();
+        let settles = matches!(owner, OwnerBinding::Local { .. });
         let work = SecureDirectory::open(payload_root)
             .await
             .map_err(|_| "copy_payload_root_unavailable".to_owned())?;
@@ -298,14 +300,20 @@ impl CopyRangeFiles {
             .await
             .map_err(|_| "copy_payload_namespace_unavailable".to_owned())?;
         let range = range_id.to_string();
-        let payload_parent = ranges
-            .create_child_directory(payload_owner)
-            .await
-            .map_err(|_| "copy_payload_owner_unavailable".to_owned())?;
-        let payload = payload_parent
-            .create_child_directory(&range)
-            .await
-            .map_err(|_| "copy_payload_range_unavailable".to_owned())?;
+        let payload_parent = create_owned_directory(
+            &ranges,
+            payload_owner,
+            settles,
+            "copy_payload_owner_unavailable",
+        )
+        .await?;
+        let payload = create_owned_directory(
+            &payload_parent,
+            &range,
+            settles,
+            "copy_payload_range_unavailable",
+        )
+        .await?;
         // This configured path is derived by AppState from its durable data
         // root. Tests must provide the same explicit shape; no scratch fallback.
         if observation_root.file_name().and_then(|name| name.to_str()) != Some("observations")
@@ -421,6 +429,25 @@ impl CopyRangeFiles {
     }
     pub(crate) fn complete(&self) -> bool {
         self.committed_eof
+    }
+    /// What this range has written to the playback cache: its AV init and
+    /// every segment written, committed or not, as its reservations charged
+    /// them.
+    #[cfg_attr(
+        not(all(test, target_os = "linux")),
+        allow(
+            dead_code,
+            reason = "read by a local range's snapshot, which no session takes yet"
+        )
+    )]
+    pub(crate) fn payload_bytes(&self) -> u64 {
+        let init = self
+            .av_init
+            .as_ref()
+            .map_or(0, |init| init.bytes.len() as u64);
+        self.segments
+            .iter()
+            .fold(init, |bytes, segment| bytes.saturating_add(segment.bytes))
     }
     pub(crate) fn set_origin(&mut self, origin: i64) -> Result<(), String> {
         if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&origin)
@@ -754,6 +781,31 @@ impl CopyRangeFiles {
         }
         serde_json::to_vec(&manifest).map_err(|_| "copy_manifest_encode".to_owned())
     }
+}
+/// Make (or open) one directory of a range's payload path in `parent`.
+///
+/// A local session's own directory, `local-copy-ranges/<session>`, is
+/// removed by the settlement of its last range once it is empty. A second
+/// range of that session whose start opened or is inside that directory at
+/// that moment finds it unlinked (`ENOENT` from the `mkdirat` or `openat`
+/// on it, which the kernel orders against the `rmdir`), and is refused as
+/// `copy_range_session_settling`, one of the engine's typed refusals: its
+/// session serves the start another way. A start that comes after the
+/// removal makes the directory again. Nothing removes a Source owner's
+/// directory under a live range, so its errors keep their own names.
+pub(super) async fn create_owned_directory(
+    parent: &SecureDirectory,
+    name: &str,
+    settles: bool,
+    unavailable: &str,
+) -> Result<SecureDirectory, String> {
+    parent
+        .create_child_directory(name)
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound if settles => "copy_range_session_settling".to_owned(),
+            _ => unavailable.to_owned(),
+        })
 }
 fn fmp4_name(index: u32) -> String {
     plurx_core::fmp4::segment_name(u64::from(index))

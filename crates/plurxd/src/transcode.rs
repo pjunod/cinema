@@ -461,6 +461,7 @@ use attempt_child::*;
 mod publication;
 use publication::*;
 // split: end publication
+pub(crate) use publication::startup_admission_window_ms;
 
 // split: begin session
 #[path = "transcode/rolling/session.rs"]

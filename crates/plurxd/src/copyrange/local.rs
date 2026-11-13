@@ -35,8 +35,15 @@
 //!   every pipe task and the Input before it removes the payload. A range
 //!   dropped unsettled is retired: its run task still reaps the child and
 //!   closes the Input, and only its files are left, for the next boot.
+//! - **Serving half.** [`LocalCopyRange::snapshot`] is one coherent view of
+//!   what the range can serve (playlist, the committed segments behind it,
+//!   init, origin, completion and the bytes it holds in the playback
+//!   cache), all read under one lock; [`LocalCopyRange::wait_admitted`]
+//!   answers a start by A1-N's one rule. A second range of a session whose
+//!   settlement is removing its directory is refused
+//!   `copy_range_session_settling`.
 //!
-//! Nothing here is served. Attaching a session to a range is a later step.
+//! No session attaches a range yet, so nothing here is served.
 use super::{
     run_source_census, spawn_source_generation, CopyClockCensus, CopyGenerationOwner,
     CopyRangeFiles, CopyRangeOwner, CopyRangeProduction, ObservedCopyMux,
@@ -149,6 +156,34 @@ impl Drop for UnstartedFiles {
             Err(_) => drop(files),
         }
     }
+}
+
+/// One coherent view of what a local range can serve (contract §5.1): the
+/// playlist and the committed segments that back it, the init, the media
+/// origin and completion, observed together under the range's one files
+/// lock, so a playlist never names a segment its snapshot does not hold.
+/// Committed segments are immutable, so a name in a snapshot stays valid
+/// for the range's life; a later snapshot only appends to them.
+#[cfg_attr(
+    not(all(test, target_os = "linux")),
+    allow(dead_code, reason = "no local VOD session attaches a range yet")
+)]
+pub(crate) struct LocalRangeSnapshot {
+    /// The EVENT media playlist at the fixed 16-second target; `ENDLIST`
+    /// only once the range committed its end.
+    pub(crate) playlist: Vec<u8>,
+    pub(crate) segments: Vec<super::storage::StoredCopySegment>,
+    /// The AV init is committed.
+    pub(crate) init: bool,
+    /// Where the range's first segment starts on the title, once known.
+    pub(crate) media_origin_ms: Option<i64>,
+    pub(crate) complete: bool,
+    /// What the range holds in the playback cache, for its session's line
+    /// in Activity.
+    pub(crate) payload_bytes: u64,
+    /// Not retired, not failed and over an unchanged object, read after the
+    /// rest: a snapshot of a range that ended says so.
+    pub(crate) live: bool,
 }
 
 /// A started local range. Retained by its session until [`Self::settle`].
@@ -419,6 +454,54 @@ impl LocalCopyRange {
     pub(crate) async fn refresh(&self, startup_protected: bool) -> Result<(), String> {
         self.production
             .refresh_rolling_read_bank(startup_protected)
+            .await
+    }
+
+    /// One coherent view of what the range can serve now.
+    pub(crate) async fn snapshot(&self) -> LocalRangeSnapshot {
+        let files = self.production.files.lock().await;
+        let snapshot = LocalRangeSnapshot {
+            playlist: files.playlist(),
+            segments: files.segments().to_vec(),
+            init: files.canonical_init().is_some(),
+            media_origin_ms: files.media_origin_ms(),
+            complete: files.complete(),
+            payload_bytes: files.payload_bytes(),
+            live: false,
+        };
+        drop(files);
+        LocalRangeSnapshot {
+            live: self.is_live(),
+            ..snapshot
+        }
+    }
+
+    /// Wait until the range may answer a start's first playlist under
+    /// A1-N's one rule ([`crate::transcode::startup_admission_window_ms`]):
+    /// usable media committed forward of `requested_seconds`, at the
+    /// viewer's `rate`, of three target durations for native, missing and
+    /// unknown transports and one for exact `hlsjs`, or the range's whole
+    /// end when it is shorter. Returns the range's media origin. Every
+    /// failure is the engine's own typed refusal, the deadline included
+    /// (`copy_range_start_deadline`); the session answers it another way.
+    pub(crate) async fn wait_admitted(
+        &self,
+        transport: Option<&str>,
+        requested_seconds: f64,
+        rate: f64,
+        deadline: Instant,
+    ) -> Result<i64, String> {
+        if !requested_seconds.is_finite() || !rate.is_finite() || rate <= 0.0 {
+            return Err("copy_range_start_invalid".into());
+        }
+        self.production
+            .wait_eligible(
+                (requested_seconds * 1000.0)
+                    .round()
+                    .clamp(0.0, i64::MAX as f64) as i64,
+                crate::transcode::startup_admission_window_ms(transport, rate),
+                deadline,
+            )
             .await
     }
 

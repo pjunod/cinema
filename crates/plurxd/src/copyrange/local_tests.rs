@@ -20,7 +20,9 @@
 //! test runs a whole local range and holds its settlement to leaving nothing
 //! behind: no custody row, no pressure, no payload, no manifest, no session
 //! directory. The panic test unwinds a run task. The reaping test kills
-//! ranges of both owners and boots.
+//! ranges of both owners and boots. The serving half's tests hold a
+//! hand-banked range to A1-N's one admission rule and to one coherent
+//! snapshot, and race a start against its session's settlement.
 use super::*;
 use plurx_core::store::background_jobs_resources::ForegroundSourceOwner;
 use std::time::Duration;
@@ -823,6 +825,32 @@ async fn a_local_range_runs_under_its_own_request_and_settles_to_nothing() {
             .count(),
         1
     );
+    // What it can serve is one view: the playlist advertises exactly the
+    // committed segments and ends, and the bytes it says it holds in the
+    // playback cache are the bytes on disk.
+    let snapshot = range.snapshot().await;
+    assert!(snapshot.live && snapshot.init && snapshot.complete);
+    assert!(!snapshot.segments.is_empty());
+    assert_eq!(
+        advertised(&snapshot.playlist),
+        snapshot
+            .segments
+            .iter()
+            .map(|segment| segment.name.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(snapshot.playlist.ends_with(b"#EXT-X-ENDLIST\n"));
+    let on_disk: u64 = std::fs::read_dir(&payload)
+        .expect("the session's payload")
+        .flat_map(|range| std::fs::read_dir(range.expect("a range").path()).expect("its files"))
+        .map(|file| {
+            file.expect("a payload file")
+                .metadata()
+                .expect("its size")
+                .len()
+        })
+        .sum();
+    assert_eq!(snapshot.payload_bytes, on_disk);
     let rendered = range
         .mark_rendered()
         .await
@@ -865,4 +893,232 @@ async fn a_local_range_runs_under_its_own_request_and_settles_to_nothing() {
         0
     );
     assert!(!session.observation_root.exists());
+}
+
+/// A range made by hand over `session`'s file, with no generation: its
+/// committed media is what [`bank`] says. The Input holds its custody.
+async fn idle_range(session: &Session) -> (LocalCopyRange, SourceInput) {
+    let source = crate::fragment_index_cluster::open_source_playback_fence(&session.file, None)
+        .await
+        .expect("the held source");
+    let custody = local_range_source_request(
+        &session.identity,
+        Arc::clone(&session.store),
+        &session.file,
+        SESSION,
+    )
+    .object_version(source.object_version())
+    .register("local-copy-range")
+    .await
+    .expect("the range's custody");
+    let input = SourceInput::open_foreground_with_custody(
+        custody,
+        source.reopen(&session.file).await.expect("a descriptor"),
+        &session.file.path,
+    )
+    .await
+    .expect("the range's Input");
+    let range = LocalCopyRange {
+        production: CopyRangeProduction::new(
+            range_files(session, &source).await,
+            input.observer(),
+            0,
+            crate::transcode::rolling_source_watermarks(1.0),
+            input
+                .seal_seek_bootstrap_limit(super::super::SOURCE_SEEK_BOOTSTRAP_BYTES)
+                .expect("a seek bootstrap"),
+            super::super::production::ReadBankRule::Rolling,
+        ),
+        source,
+        file: Arc::new(session.file.clone()),
+    };
+    (range, input)
+}
+
+/// A 64 KiB stand-in for a title nothing decodes.
+fn stand_in(directory: &tempfile::TempDir) -> std::path::PathBuf {
+    let path = directory.path().join("film.mkv");
+    std::fs::write(&path, vec![7u8; 64 * 1024]).expect("source bytes");
+    path
+}
+
+/// The segment names a media playlist advertises, in order.
+fn advertised(playlist: &[u8]) -> Vec<String> {
+    std::str::from_utf8(playlist)
+        .expect("a text playlist")
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A local range answers a start's first playlist by A1-N's one rule, the
+/// one rolling publication and the shared range apply: three 16-second
+/// targets of usable media forward of the requested position for native,
+/// missing and unknown transports (the contract's 48-second native rate-1
+/// case, where 21.897 s stays insufficient), one target for exact `hlsjs`,
+/// and a range's whole end when it is shorter. Every refusal is typed.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_local_range_admits_a_start_by_the_one_a1n_rule() {
+    use crate::transcode::startup_admission_window_ms;
+    assert_eq!(startup_admission_window_ms(None, 1.0), 48_000);
+    assert_eq!(startup_admission_window_ms(Some("native"), 1.0), 48_000);
+    assert_eq!(startup_admission_window_ms(Some("HLSJS"), 1.0), 48_000);
+    assert_eq!(startup_admission_window_ms(Some("hlsjs"), 1.0), 16_000);
+    assert!(startup_admission_window_ms(None, 2.0) > 48_000);
+
+    let directory = crate::test_tempdir().expect("source directory");
+    let session = Session::on(&stand_in(&directory), 600_000).await;
+    let (range, input) = idle_range(&session).await;
+    let soon = || Instant::now() + Duration::from_millis(200);
+    let deadline = Err("copy_range_start_deadline".to_owned());
+
+    // Nothing committed: no start is answered.
+    assert_eq!(range.wait_admitted(None, 0.0, 1.0, soon()).await, deadline);
+    // 21.897 s is not three targets for a native viewer, and is one for
+    // exact hls.js.
+    bank(&range, 21_897).await;
+    assert_eq!(range.wait_admitted(None, 0.0, 1.0, soon()).await, deadline);
+    assert_eq!(
+        range.wait_admitted(Some("native"), 0.0, 1.0, soon()).await,
+        deadline
+    );
+    assert_eq!(
+        range.wait_admitted(Some("hlsjs"), 0.0, 1.0, soon()).await,
+        Ok(0)
+    );
+    // 48 s at rate 1 is three targets.
+    bank(&range, 47_999).await;
+    assert_eq!(range.wait_admitted(None, 0.0, 1.0, soon()).await, deadline);
+    bank(&range, 48_000).await;
+    assert_eq!(range.wait_admitted(None, 0.0, 1.0, soon()).await, Ok(0));
+    // Measured forward of the requested position, and scaled by the rate.
+    assert_eq!(range.wait_admitted(None, 1.0, 1.0, soon()).await, deadline);
+    assert_eq!(range.wait_admitted(None, 0.0, 2.0, soon()).await, deadline);
+    // A start the range cannot place is refused before it waits.
+    for (requested, rate) in [(f64::NAN, 1.0), (0.0, 0.0), (0.0, f64::INFINITY)] {
+        assert_eq!(
+            range.wait_admitted(None, requested, rate, soon()).await,
+            Err("copy_range_start_invalid".to_owned())
+        );
+    }
+
+    // A range shorter than the window answers once it has committed its end,
+    // and refuses a start past that end.
+    bank(&range, 10_000).await;
+    assert_eq!(range.wait_admitted(None, 0.0, 1.0, soon()).await, deadline);
+    range.production.files.lock().await.committed_eof = true;
+    assert_eq!(range.wait_admitted(None, 0.0, 1.0, soon()).await, Ok(0));
+    assert_eq!(
+        range.wait_admitted(None, 11.0, 1.0, soon()).await,
+        Err("copy_range_seek_past_end".to_owned())
+    );
+
+    // A retired range that has not ended answers no start.
+    range.production.files.lock().await.committed_eof = false;
+    range.retire();
+    assert_eq!(
+        range.wait_admitted(None, 0.0, 1.0, soon()).await,
+        Err("copy_range_cancelled".to_owned())
+    );
+    input.close_and_wait().await.expect("the Input closes");
+    released(&session.store).await;
+}
+
+/// A snapshot is one view: its playlist advertises exactly its segments, in
+/// order, at the fixed 16-second target, as an EVENT that ends only once the
+/// range committed its end; it says where the range starts, whether it is
+/// live, and what it holds in the playback cache.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_local_range_snapshot_is_one_coherent_view() {
+    let directory = crate::test_tempdir().expect("source directory");
+    let session = Session::on(&stand_in(&directory), 600_000).await;
+    let (range, input) = idle_range(&session).await;
+
+    let empty = range.snapshot().await;
+    assert!(advertised(&empty.playlist).is_empty());
+    assert!(empty.segments.is_empty() && !empty.init && !empty.complete);
+    assert_eq!((empty.media_origin_ms, empty.payload_bytes), (None, 0));
+    assert!(empty.live);
+
+    bank(&range, 20_000).await;
+    let growing = range.snapshot().await;
+    let text = String::from_utf8(growing.playlist.clone()).expect("a text playlist");
+    assert!(text.contains("#EXT-X-TARGETDURATION:16\n"), "{text}");
+    assert!(text.contains("#EXT-X-PLAYLIST-TYPE:EVENT\n"), "{text}");
+    assert!(!text.contains("#EXT-X-ENDLIST"), "{text}");
+    assert_eq!(
+        advertised(&growing.playlist),
+        growing
+            .segments
+            .iter()
+            .map(|segment| segment.name.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(growing.media_origin_ms, Some(0));
+
+    range.production.files.lock().await.committed_eof = true;
+    let ended = range.snapshot().await;
+    assert!(ended.complete);
+    assert!(String::from_utf8(ended.playlist)
+        .expect("a text playlist")
+        .ends_with("#EXT-X-ENDLIST\n"));
+
+    range.retire();
+    assert!(!range.snapshot().await.live);
+    input.close_and_wait().await.expect("the Input closes");
+    released(&session.store).await;
+}
+
+/// A second range of a session that starts while the settlement of the
+/// session's last range removes the session's payload directory finds the
+/// directory it opened unlinked. It is refused `copy_range_session_settling`,
+/// one of the engine's typed refusals, so its session serves that start
+/// another way; a Source owner's directory, which nothing removes under a
+/// live range, keeps its own error. A start after the removal makes the
+/// directory again.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_range_starting_while_its_session_settles_is_refused_as_settling() {
+    use super::super::storage::create_owned_directory;
+    let directory = crate::test_tempdir().expect("source directory");
+    let session = Session::on(&stand_in(&directory), 600_000).await;
+    let owner = session.work.path().join("local-copy-ranges").join(SESSION);
+    // The second start has opened its session's directory...
+    let opened = plurx_core::fs_secure::SecureDirectory::open(session.work.path())
+        .await
+        .expect("the transcode scratch")
+        .create_child_directory("local-copy-ranges")
+        .await
+        .expect("the local namespace")
+        .create_child_directory(SESSION)
+        .await
+        .expect("the session's directory");
+    // ...when the settlement of the session's last range removes it.
+    remove_empty_owner_directory(&owner).await;
+    assert!(!owner.exists());
+    let range = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        create_owned_directory(&opened, &range, true, "copy_payload_range_unavailable")
+            .await
+            .err()
+            .as_deref(),
+        Some("copy_range_session_settling")
+    );
+    assert_eq!(
+        create_owned_directory(&opened, &range, false, "copy_payload_range_unavailable")
+            .await
+            .err()
+            .as_deref(),
+        Some("copy_payload_range_unavailable")
+    );
+    // A later start makes the session's directory again.
+    let source = crate::fragment_index_cluster::open_source_playback_fence(&session.file, None)
+        .await
+        .expect("the held source");
+    let mut files = range_files(&session, &source).await;
+    assert!(files.payload_path.starts_with(&owner) && files.payload_path.is_dir());
+    files.retire_payload().await.expect("retirement");
 }

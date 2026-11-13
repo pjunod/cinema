@@ -734,18 +734,13 @@ impl TranscodeManager {
             // Existing fresh shared Apple/Android attachment starts at 1x.
             // A future prepared successor must pass its accepted actual rate;
             // this constructor never resets a retained playback preference.
-            let policy = if prepared.request().transport.as_deref() == Some("hlsjs") {
-                RollingStartupPolicy::FirstReloadWindow
-            } else {
-                RollingStartupPolicy::NativePresentationWindow
-            };
             let origin = actual
                 .production
                 .wait_eligible(
                     (prepared.request().start_seconds * 1000.0)
                         .round()
                         .clamp(0.0, i64::MAX as f64) as i64,
-                    policy.bootstrap_ms(1.0) as u64,
+                    startup_admission_window_ms(prepared.request().transport.as_deref(), 1.0),
                     deadline,
                 )
                 .await
