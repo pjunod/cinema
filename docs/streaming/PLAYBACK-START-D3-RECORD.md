@@ -172,6 +172,8 @@ Same fixture and cells as §2 (**authority/local/writes**, `·` none), measured 
 Each run on a scratch commit, then discarded; results from the build host.
 
 - **The files floor never raised** (`WrittenTables::of` with `files: false`): `store_contract::applied_view::applied_planning_view_reads_the_replica_behind_the_settings_and_files_floors` fails at the direct `files` write (`left: (View, 200)`, the view answered the new row). On the D3b head it passes.
-- **No re-plan** (`replan_once_after_stale` returning the first attempt's answer): `start_plan_tests::a_stale_view_plan_replans_once_from_authority_before_the_claim` fails with the first attempt's `quality_catalog_unavailable`.
+- **No re-plan** (`replan_once_after_stale` never taking the re-plan): `start_plan_tests::a_stale_view_plan_replans_once_from_authority_before_the_claim` fails with the first attempt's answer (`Typed { status: 503, code: "quality_catalog_unavailable" }`), and `a_create_replans_only_before_its_claim_and_only_once` fails at "refuted twice" (1 attempt, not 2).
 - **The refusal arm without its floor close** (`remote_plan_refused` with `close_after_refusal` removed): `start_plan_tests::a_setting_saved_before_the_owner_starts_refuses_rather_than_mixing` fails at "the refusal closes the view".
+
+Both on one scratch commit over `78925e3e7`; the other four `start_plan` tests passed on it.
 - **The create-path pin** against the D3a + D3t code: that build measured 29/1/6, 36/1/8, 30/1/8, 28/1/9, 32/1/9 (§2), so the D3b pin fails there by construction.
