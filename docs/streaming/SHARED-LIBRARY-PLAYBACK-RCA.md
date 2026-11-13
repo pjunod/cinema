@@ -344,25 +344,37 @@ recovery and non-authoritative SQLite startup remain unchanged; see the
 
 ### 5.1 Missing host identity let a replicated Linux daemon start without reboot recovery
 
-On 2026-11-13, all four replicas retain the same `2b6f4c0e…` custody for
+On 2026-11-13, all four replicas had the same `2b6f4c0e…` custody for
 `transcode_prepare` job `49dd5948…` (file 104, recent-demand preparation).
-The job is cancelled; custody remains active without settlement. Its anchor
-was invalidated by a raw launch at 02:30:05 UTC; Docker records daemon
-replacement at 02:30:23–24 UTC, and the host rebooted at 03:54:57 UTC.
-The v2 record's kernel UUID is now historical and it has no namespace field.
-The v1 machine/boot IDs are empty because the deployment lacked both actual-host
+The job was cancelled while custody remained active without settlement. Its
+anchor was invalidated by a raw launch at 02:30:05 UTC; Docker records daemon
+replacement at 02:30:23–24 UTC, and the host rebooted at 03:54:57 UTC. The v2
+record's kernel UUID is now historical and it has no namespace field. The v1
+machine/boot IDs are empty because the deployment lacked both actual-host
 identity binds. Cancelling the job, replacing the daemon, or observing a later
 host reboot did not itself settle that custody. This is a separate owner from
 the resolved lab3 DV migration above; the exact child executable was not
 recorded.
 
+Merged PR #1567's existing exact-custody census recovery released this owner
+at 2026-11-13 19:01:59.868984 UTC. Managed sidecars were clean; the daemon
+recorded the normal release acknowledgement before the temporary root proof
+was removed, and the census binding remains installed. No direct database
+edits were made. Read-only checks at 19:06:45 UTC found the exact custody row
+absent and `plurx_background_source_recovery_pending=0` on lab3, lab4, lab6
+and media1, all at revision
+`882d4b691e048f24b6c3e665717aa5966db71a28`. This verifies only that owner on
+those four replicas.
+
 The missing prevention was a serving-boundary check: replicated Linux could
 start without machine and boot IDs tied to the actual host and current kernel.
 PR #1570 adds that fail-closed startup requirement and the mandatory read-only
-Compose/systemd mounts. It does not add an alternate historical recovery path.
-The existing [exact-custody census recovery in the ledger §1.3](../server/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census),
-implemented by merged PR #1567, still owns the old lab4 record; fleet evidence
-and acceptance remain pending. No recovery or deployment acceptance is claimed.
+Compose/systemd mounts. The four audited hosts had valid matching mount inputs
+at 19:03:52 UTC, but their running revision 882 does not include the startup
+guard; rollout remains pending. The historical owner was recovered through
+the existing [exact-custody census path in ledger §1.3](../server/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census).
+No alternate recovery path was added. Broader fleet and playback acceptance
+remain open.
 
 ## 6. Every node warns about two removed Raft members, every minute
 

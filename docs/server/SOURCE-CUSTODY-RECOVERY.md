@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · Linux startup identity guard prepared; qualification, fleet rollout and exact-owner recovery pending · **Updated:** 2026-11-13
+**Status:** open · PR #1570 fast lane passed; Linux startup guard rollout pending; the lab4 exact-owner recovery completed 2026-11-13 · **Updated:** 2026-11-13
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
@@ -299,7 +299,7 @@ recovered after its daemon's PID namespace was torn down`.
 ### 1.5 Linux replicated startup requires actual-host identity
 
 **Owner:** Codex/root · **PR:** #1570 · **Scope:** startup prevention only;
-qualification and fleet rollout remain pending.
+fast lane passed on head `876c6c5858c2`; fleet rollout remains pending.
 
 A replicated Linux daemon must read the actual host's machine ID and boot ID
 through read-only binds before it starts source readers or listeners. It
@@ -317,10 +317,21 @@ requires the same mounts. These are required host configuration, not an
 optional feature switch.
 
 This guard prevents new Linux replicated owners from starting without valid
-host identity; it does not repair historical records. The lab4 incident and
-the [existing exact-custody census recovery in §1.3](#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census)
-remain separate: that recovery is implemented by merged PR #1567, and the
-fleet evidence and acceptance are still pending. See the
+host identity; it does not repair historical records. The lab4 owner was
+released at 2026-11-13 19:01:59.868984 UTC through the existing exact-custody
+census recovery in §1.3, implemented by merged PR #1567. The daemon recorded
+the release; managed sidecars were clean, the temporary root proof was removed
+after the normal release acknowledgement, and the census binding remains
+installed. No direct database edits were made.
+
+Read-only queries at 19:06:45 UTC on lab3, lab4, lab6 and media1, all running
+revision `882d4b691e048f24b6c3e665717aa5966db71a28`, found the exact custody
+row absent and `plurx_background_source_recovery_pending=0` on each replica.
+A separate 19:03:52 UTC host audit found both required read-only identity
+mounts valid and matching on those four hosts. Revision 882 does not include
+PR #1570's startup guard, so rollout of the prevention remains pending. These
+bounded checks establish recovery of this one owner, not general fleet or
+playback acceptance. See the
 [shared-playback RCA §5.1](../streaming/SHARED-LIBRARY-PLAYBACK-RCA.md#51-missing-host-identity-let-a-replicated-linux-daemon-start-without-reboot-recovery).
 
 ## 2. The journal never impersonates an activation or completed join
