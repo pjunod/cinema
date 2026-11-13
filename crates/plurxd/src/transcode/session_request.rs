@@ -1316,7 +1316,6 @@ impl SessionRequest {
 }
 
 pub struct StartInfo {
-    pub(crate) dv_refit_digest: Option<String>,
     /// Profile of an admitted, prepared processed presentation. Independent
     /// of the physical transcode kind and its PQ base grade; never source tags.
     pub(crate) processed_dv_profile: Option<u8>,

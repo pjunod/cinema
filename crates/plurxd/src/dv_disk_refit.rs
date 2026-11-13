@@ -204,7 +204,7 @@ mod tests {
         let decode_order_pts = [100, 240, 180, 200];
         let starts: Vec<i64> = decode_order_pts
             .into_iter()
-            .map(|pts| scene_for_pts(&scenes, pts).unwrap().first_pts)
+            .map(|pts| scene_for_pts(&scenes, pts).expect("scene for test PTS").first_pts)
             .collect();
         assert_eq!(starts, [100, 200, 100, 200]);
         assert!(scene_for_pts(&scenes, 99).is_err());

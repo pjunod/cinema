@@ -1983,7 +1983,6 @@ impl ReservedSourceVodRendition {
                     .encoding
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
-                dv_refit_digest: self
                     .rendition
                     .recipe
                     .video

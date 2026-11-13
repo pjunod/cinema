@@ -350,17 +350,15 @@ impl Spool {
 fn spool_name(name: &str) -> Option<(&str, bool)> {
     let (key, complete) = if let Some(key) = name.strip_suffix(".jsonl.gz") {
         (key, true)
-    } else if let Some(key) = name
+    } else {
+        let key = name
         .strip_suffix(".partial")
         .or_else(|| name.strip_suffix(".run"))
         .or_else(|| {
             name.strip_suffix(".tmp")
                 .map(|n| n.trim_end_matches(".jsonl.gz").trim_end_matches(".partial"))
-        })
-    {
+        })?;
         (key, false)
-    } else {
-        return None;
     };
     (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())).then_some((key, complete))
 }

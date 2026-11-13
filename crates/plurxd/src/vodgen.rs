@@ -1639,7 +1639,7 @@ mod tests {
             if let Unit::Fragment(mut fragment) = unit {
                 if converter.is_none() {
                     let track = fragment.track(video.id).expect("video track");
-                    first_cto = track.samples().next().map(|sample| i64::from(sample.cto));
+                    first_cto = track.samples().next().map(|sample| sample.cto);
                     let clock = SourceClock {
                         track_timescale: video.timescale,
                         track_ticks: i128::from(track.base_decode_time),

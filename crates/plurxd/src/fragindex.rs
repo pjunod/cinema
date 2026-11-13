@@ -2500,7 +2500,7 @@ pub async fn build_from_attested_file(
 
 /// One identity, progress reported and PGS tracks kept: the shape tests drive
 /// a single pass through. The worker builds through
-/// [`build_shared_from_attested_file_with_progress`].
+/// [`build_shared_from_attested_file_with_progress_and_store`].
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_from_attested_file_with_progress<F>(
@@ -2536,36 +2536,6 @@ where
 /// reported and the file's PGS tracks kept when `ride_along` allows. The
 /// worker publishes the harvest only after its own `source_still_matches` and
 /// `still_current` checks.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_shared_from_attested_file_with_progress<F>(
-    file: &MediaFile,
-    source: &std::fs::File,
-    source_object_version: &str,
-    videos: &[transcode::CopyVideoOptions],
-    runtime_cache: &Path,
-    budget: Duration,
-    progress: F,
-    ride_along: Option<&RideAlongGate>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Vec<IndexBuild>
-where
-    F: Fn(&PassProgress) + Send + Sync + 'static,
-{
-    build_shared_from_attested_file_with_progress_and_store(
-        file,
-        source,
-        source_object_version,
-        videos,
-        runtime_cache,
-        budget,
-        progress,
-        ride_along,
-        cancel,
-        None,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_shared_from_attested_file_with_progress_and_store<F>(
     file: &MediaFile,
@@ -3659,6 +3629,7 @@ type OutputRead<'a> =
 /// One output of an index pass: its index, and — in a shared pass — the rest
 /// of its pipe read and discarded once the index has its answer, so a refused
 /// output never holds its siblings behind a full pipe.
+#[allow(clippy::too_many_arguments)]
 async fn index_output<R: AsyncRead + Unpin>(
     mut reader: R,
     identity: SourceIdentity,

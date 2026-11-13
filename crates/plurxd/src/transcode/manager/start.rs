@@ -1746,7 +1746,6 @@ impl TranscodeManager {
         Ok(StartInfo {
             processed_dv_profile: None,
             processed_fel: None,
-            dv_refit_digest: None,
             degraded_processing: None,
             processing_note: None,
             retained_output: None,
@@ -2561,7 +2560,6 @@ impl TranscodeManager {
         Ok(StartInfo {
             processed_dv_profile: None,
             processed_fel: None,
-            dv_refit_digest: None,
             degraded_processing: None,
             processing_note: None,
             retained_output: None,
