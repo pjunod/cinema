@@ -21344,11 +21344,7 @@ fn contract_inventory_matches_every_store_method() {
     // main declared (551) without naming them here; named above.
     // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
     // exercised by the source-fenced DV title-job contracts.
-    // +1: `claim_media_session_request_recording` (D3c), the claim that also
-    // records the viewer's ask in its own transaction, in
-    // `MEDIA_SESSION_METHODS` and covered on both backends by
-    // `store_contract/claim_selection.rs`.
-    assert_eq!(declared.len(), 560, "review the Store method count");
+    assert_eq!(declared.len(), 559, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

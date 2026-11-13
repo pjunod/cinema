@@ -451,7 +451,7 @@
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "74d019a2ab10c1fc3205f851fdd242a156d72ee614bfb4b7f468bd9d4f6ee7c6",
+        "sha256": "cb7dd6a88544b0d37ef521a89f5a0aabd3bf899ea5364f8ea11c4a2f71a5e20f",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },

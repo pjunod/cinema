@@ -2154,7 +2154,7 @@ pub(crate) async fn local_quality_catalog(
         // before its subsequent admitted qualification can start.
         let described = state
             .transcode
-            .processed_quality_descriptions(&snapshot, request);
+            .processed_quality_descriptions(snapshot, request);
         *complete_descriptions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -2167,7 +2167,7 @@ pub(crate) async fn local_quality_catalog(
         state
             .transcode
             .quality_catalog_from_snapshot_progress(
-                &snapshot,
+                snapshot,
                 &request.caps,
                 request.audio_index,
                 request.audio_offset_ms,
