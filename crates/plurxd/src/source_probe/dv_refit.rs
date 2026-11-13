@@ -474,12 +474,17 @@ pub(super) async fn settle_child(
             Ok(HelperRun::Refused(reason))
         }
         Exit::Failed(reason) => {
-            let mut lines = prefix_lines;
-            lines.extend(
-                dv_refit_title::continue_scenes(prefix.last(), &bytes)
-                    .into_iter()
-                    .map(|(line, _)| line),
-            );
+            let lines = off_runtime(move || {
+                let mut lines = prefix_lines;
+                lines.extend(
+                    dv_refit_title::continue_scenes(prefix.last(), &bytes)
+                        .into_iter()
+                        .map(|(line, _)| line),
+                );
+                Ok(lines)
+            })
+            .await
+            .map_err(RunError::Transient)?;
             if let Err(error) = spool.keep_partial(lines).await {
                 tracing::warn!(target: "plurxd::dv", %error, "F+ progress not kept");
             }

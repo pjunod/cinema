@@ -1,8 +1,8 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** in progress — milestones 1 (the arithmetic) and 3 (the job and
-store) are in main or review; 2 and 4–7 are open · **Written:** 2026-11-12 ·
-**Owner:** Claude · **Decision:** Paul approved building F+ and per-title
+**Status:** in progress — milestones 1–2 merged; milestone 3 recovered by
+Codex for completion in PR #1565; milestones 4–7 are open · **Written:** 2026-11-12 ·
+**Owner:** Codex (continuing Claude) · **Decision:** Paul approved building F+ and per-title
 re-encode trials against it, 2026-11-12
 
 Companion to the offline result,
@@ -325,7 +325,7 @@ and its EL are then deleted.
 ## 4. Developer tab and visibility
 
 Developer gets an enable section, "F+ curves for converted Dolby Vision"
-(setting `playback.dolby_vision_refit`). Its requirements are advisory, per
+(settings `playback.dolby_vision_refit_{apple,web,android,linux}`). Its requirements are advisory, per
 the house rule, and never block the enable:
 - the helper supports `--refit-stats` on this node;
 - *N of M* P7 FEL titles have been fitted;
@@ -366,7 +366,7 @@ green fast lane.
        fixtures;
      - the composer domain within 1e-6;
      - a real P7 RPU round trip exact to 2⁻²³.
-2. **Helper `--refit-stats`:** built (branch `claude/fel-refit-helper`).
+2. **Helper `--refit-stats`:** merged (#1542).
    - **Contents:** CPU composition, the lattice, and per-scene JSON.
    - **Acceptance:**
      - on the Michael5400 window, curves solved from the helper's stats

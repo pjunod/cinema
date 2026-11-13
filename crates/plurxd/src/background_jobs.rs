@@ -1701,9 +1701,7 @@ impl JobFence {
         scenes: Vec<plurx_core::store::dv_refit_jobs::RefitSceneRow>,
     ) -> Result<RefitPublication, StoreError> {
         use plurx_core::store::dv_refit_jobs::PublishRefitJob;
-        const TRIES: u32 = 6;
         let mut delay = std::time::Duration::from_millis(500);
-        let mut tries = 0;
         loop {
             let mut state = self.0.state.lock().await;
             if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
@@ -1734,11 +1732,7 @@ impl JobFence {
                     return Ok(RefitPublication::Fenced);
                 }
                 Err(error) => {
-                    tries += 1;
-                    if tries >= TRIES {
-                        return Err(error);
-                    }
-                    tracing::debug!(%error, tries, "F+ publication retried");
+                    tracing::debug!(%error, "F+ publication retried while the claim holds");
                 }
             }
             drop(state);
