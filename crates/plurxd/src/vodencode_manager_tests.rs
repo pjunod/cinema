@@ -1343,6 +1343,7 @@ async fn admit_native_processed_window_control(
         request: processed,
         candidate,
         root,
+        ..
     } = manager
         .prepare_processed_upgrade("native-sdr-control", &request, &recovery, false)
         .await

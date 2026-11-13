@@ -3062,17 +3062,19 @@ mod snapshot_catalog_regression {
             .expect("production preparation projection");
             assert_eq!(prepared.grade, grade);
             assert!(prepared.playable());
-            assert!(crate::http::hls::processed_candidate_is_admitted(
+            assert!(crate::http::hls::processed_candidate_kept(
                 std::slice::from_ref(&prepared),
                 &prepared
-            ));
+            )
+            .is_some_and(|row| row.playable()));
             let mut collision = prepared.clone();
             collision.recipe_digest = [99; 32];
             assert!(
-                !crate::http::hls::processed_candidate_is_admitted(
+                !crate::http::hls::processed_candidate_kept(
                     std::slice::from_ref(&collision),
                     &prepared
-                ),
+                )
+                .is_some_and(|row| row.playable()),
                 "same short id cannot substitute another recipe"
             );
             let wire = serde_json::to_value(&prepared).expect("legacy wire");
@@ -3088,7 +3090,8 @@ mod snapshot_catalog_regression {
             let cold = hints.project([1; 32], &proofs);
             assert_eq!(cold.len(), 1, "qualified SDR must be remembered too");
             assert!(
-                !crate::http::hls::processed_candidate_is_admitted(&cold, &prepared),
+                !crate::http::hls::processed_candidate_kept(&cold, &prepared)
+                    .is_some_and(|row| row.playable()),
                 "a description has no current production proof"
             );
             let mut ordinary = prepared.clone();
@@ -3120,9 +3123,8 @@ mod snapshot_catalog_regression {
                 .expect("processed selection");
             assert_eq!(selected.id, prepared.id);
             assert_eq!(selected.grade, grade, "SDR never acquires an HDR grade");
-            assert!(crate::http::hls::processed_candidate_is_admitted(
-                &warm, selected
-            ));
+            assert!(crate::http::hls::processed_candidate_kept(&warm, selected)
+                .is_some_and(|row| row.playable()));
             for mutation in ["codec", "profile", "transfer", "transport"] {
                 let mut bad = caps.clone();
                 match mutation {
