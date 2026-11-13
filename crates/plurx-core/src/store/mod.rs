@@ -17,6 +17,7 @@
 
 pub mod analysis_coordination;
 mod copy_index_v3;
+pub mod playback_input_keys;
 pub use copy_index_v3::{
     copy_index_v3_publish_payload, copy_index_v3_rebuild_generation, copy_index_v3_source_key,
     CopyIndexSourceAttestation, CopyIndexV3Artifact, CopyIndexV3Head, CopyIndexV3HeadState,
@@ -174,7 +175,7 @@ pub use scan_identity_repair::{
 
 pub mod applied_view;
 pub use applied_view::{
-    AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
+    AppliedRoute, AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
     AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
     ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,
 };
@@ -6200,6 +6201,39 @@ pub struct HttpStoreOperationCounts {
     /// exceed the request's elapsed time; on the serial create path it is
     /// the share of the handler spent waiting on the Store.
     store_nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The same operations split by the Store method that issued them.
+    methods: std::sync::Arc<std::sync::Mutex<MethodOperationCounts>>,
+}
+
+/// The most distinct Store-method labels one request records. A request that
+/// touches more folds the rest into [`METHOD_OVERFLOW_LABEL`], so a request's
+/// map (and the `methods=` log line built from it) is bounded whatever the
+/// call graph does. The widest request measured touches fewer than 40.
+pub const MAX_METHODS_PER_REQUEST: usize = 128;
+
+/// The label the operations of a request's 129th and later distinct methods
+/// are counted under.
+pub const METHOD_OVERFLOW_LABEL: &str = "other";
+
+/// Operations by Store method for one request: (local, authority, write)
+/// in [`HttpStoreOperationCounts::snapshot`]'s class order.
+#[derive(Default)]
+struct MethodOperationCounts {
+    by_method: std::collections::BTreeMap<&'static str, [u64; 3]>,
+}
+
+impl MethodOperationCounts {
+    fn record(&mut self, method: &'static str, class_index: usize) {
+        let key = if self.by_method.contains_key(method)
+            || self.by_method.len() < MAX_METHODS_PER_REQUEST
+        {
+            method
+        } else {
+            METHOD_OVERFLOW_LABEL
+        };
+        let cell = self.by_method.entry(key).or_default();
+        cell[class_index] = cell[class_index].saturating_add(1);
+    }
 }
 
 impl HttpStoreOperationCounts {
@@ -6237,15 +6271,59 @@ impl HttpStoreOperationCounts {
         self.watch_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// [`Self::snapshot`] split by the Store method that issued each
+    /// operation, sorted by method name; each entry is `(method, [local,
+    /// authority, write])`. The entries sum to [`Self::snapshot`]. A method
+    /// beyond [`MAX_METHODS_PER_REQUEST`] distinct ones is counted under
+    /// [`METHOD_OVERFLOW_LABEL`].
+    #[must_use]
+    pub fn method_snapshot(&self) -> Vec<(&'static str, [u64; 3])> {
+        let methods = self
+            .methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        methods
+            .by_method
+            .iter()
+            .map(|(method, counts)| (*method, *counts))
+            .collect()
+    }
+
+    /// What this request did since `before`, a snapshot taken earlier from
+    /// [`Self::method_snapshot`], by Store method; only methods that did
+    /// something. The create budget line and the owner's start line log
+    /// this, so they describe their own window and not the whole request.
+    #[must_use]
+    pub fn method_snapshot_since(
+        &self,
+        before: &[(&'static str, [u64; 3])],
+    ) -> Vec<(&'static str, [u64; 3])> {
+        self.method_snapshot()
+            .into_iter()
+            .filter_map(|(method, now)| {
+                let was = before
+                    .iter()
+                    .find(|(name, _)| *name == method)
+                    .map_or([0; 3], |(_, counts)| *counts);
+                let delta = std::array::from_fn(|class| now[class].saturating_sub(was[class]));
+                (delta != [0; 3]).then_some((method, delta))
+            })
+            .collect()
+    }
+
     /// Summed wall time of every operation counted in [`Self::snapshot`].
     #[must_use]
     pub fn store_time(&self) -> std::time::Duration {
         std::time::Duration::from_nanos(self.store_nanos.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    fn record(&self, class_index: usize, elapsed: std::time::Duration) {
+    fn record(&self, class_index: usize, method: &'static str, elapsed: std::time::Duration) {
         use std::sync::atomic::Ordering;
 
+        self.methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(method, class_index);
         let _ =
             self.counts[class_index].try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 (current != u64::MAX).then(|| current.saturating_add(1))
@@ -6257,6 +6335,18 @@ impl HttpStoreOperationCounts {
                 Some(current.saturating_add(nanos))
             });
     }
+}
+
+/// Render [`HttpStoreOperationCounts::method_snapshot`]-shaped counts as the
+/// `method=authority/local/write` list a log line carries, in the order the
+/// create budget line prints its totals.
+#[must_use]
+pub fn format_method_counts(methods: &[(&'static str, [u64; 3])]) -> String {
+    methods
+        .iter()
+        .map(|(method, [local, authority, write])| format!("{method}={authority}/{local}/{write}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 tokio::task_local! {
@@ -6279,8 +6369,29 @@ pub fn scope_http_store_operations<T>(
     HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
-pub(super) fn record_http_store_operation(class_index: usize, elapsed: std::time::Duration) {
-    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, elapsed));
+/// Spawn a detached task that counts its Store operations into the request
+/// that spawned it. A task-local scope is not inherited by `tokio::spawn`, so
+/// a bare spawn makes every operation inside it count nowhere, and an absent
+/// operation looks like a saved one. `make` gets the request's counts (a fresh
+/// set outside any request) so the task can report its own window with
+/// [`HttpStoreOperationCounts::method_snapshot_since`].
+pub fn spawn_in_http_store_scope<F, Fut>(make: F) -> tokio::task::JoinHandle<Fut::Output>
+where
+    F: FnOnce(HttpStoreOperationCounts) -> Fut,
+    Fut: std::future::Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    let counts = current_http_store_operations().unwrap_or_default();
+    tokio::spawn(scope_http_store_operations(counts.clone(), make(counts)))
+}
+
+pub(super) fn record_http_store_operation(
+    class_index: usize,
+    method: &'static str,
+    elapsed: std::time::Duration,
+) {
+    let _ =
+        HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, method, elapsed));
 }
 
 /// Count one watch-state read into the current request, if any. Called by
@@ -6920,7 +7031,7 @@ impl CatalogueReader {
         // is not a new transaction spanning these independent aggregates.
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
-            .bounded(|store| async move { store.local_media_shape().await })
+            .bounded(|store| async move { store.local_media_shape("media_shape").await })
             .await
         {
             return Ok(result);
@@ -7012,3 +7123,6 @@ mod item_sort_order_tests;
 
 #[cfg(test)]
 mod sharing_recovery_principal_tests;
+
+#[cfg(test)]
+mod http_operation_method_tests;

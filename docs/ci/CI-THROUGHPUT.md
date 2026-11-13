@@ -72,7 +72,7 @@ Preflight failures, 117 job logs of the 127 failed preflight jobs:
 | Cause | Runs | PRs | Now |
 |---|---|---|---|
 | superseded run refused by the head guard | 33 | 28 | gone: cancelled instead (§1) |
-| `history-check`: a landing already on `main` lacks `Regression-Test:` lines or lost an anchor | 31 | 15 | proposed change below |
+| `history-check`: a landing already on `main` lacks `Regression-Test:` lines or lost an anchor | 31 | 15 | gone: reported, not failed (§2a) |
 | rolling-producer ownership inventory count moved | 17 | 15 | author (reviewed allowlist count) |
 | `validation-lint` exited 1 with nothing in its log | 9 | 9 | not diagnosed |
 | package/toolchain download 5xx or timeout | 6 | 3 | infrastructure |
@@ -80,15 +80,29 @@ Preflight failures, 117 job logs of the 127 failed preflight jobs:
 | other unit/contract tests | 14 | 13 | author |
 | a re-run job attempt refused by receipts | 2 | 2 | by design: dispatch fresh runs |
 
+### 2a. `history-check` fails a PR only for its own gaps
+
+31 failures across 15 PRs came from two or three landings on `main` that
+lacked their lines (run 7556: `db1c581e` landed in `90a1bf97`, #1542); every
+PR opened after them was red and nothing its author could do fixed it. The
+fast lane's preflight now sets `PLURX_HISTORY_MERGE_TARGET=origin/<base>`
+(`scripts/history-audit --merge-target REF` does the same locally). An error
+then fails the PR only when it is about a commit not reachable from the base,
+or about a file the PR changes against the merge base (the merge ledger, a
+`regressions.d/` fragment, `tests/client-fixes.toml` or an anchored source or
+test), or about nothing more specific. Everything else is printed under
+`history gaps already on origin/main -- reported, NOT failing this change`
+and written to `target/validation/history.json` as `inherited`; it needs a
+follow-up on `main` (an errata row, or the evidence).
+
+The full failing audit is unchanged wherever no merge target is given: `make
+history-check` and `make check` locally, `ci.yml` (release tags and manual
+dispatch, which is where `main` itself is audited) and `effort-ci.yml`. No
+workflow audits `main` on every push, so the PR lane's report is where a new
+gap on `main` first shows up.
+
 ### Proposed, not done here
 
-- **`history-check` judges `main`, not the PR.** 31 failures across 15 PRs
-  came from two or three landings on `main` that lacked their lines; every PR
-  opened after them was red until an errata row landed, and nothing the PR
-  author did could fix it. Proposal: in the PR lane, report history problems
-  that predate the PR's merge base as a warning and fail only on the PR's own
-  commits; keep the full audit on `main` pushes, where a breakage belongs to
-  whoever landed it.
 - **Description edits do not start the lane** (`edited` is not a trigger, by
   design: status edits would restart it). After adding a `Regression-Test:`
   line, push any commit (`git commit --allow-empty -m 'chore: rerun lane'`).

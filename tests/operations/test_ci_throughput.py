@@ -236,6 +236,10 @@ class PaperworkFixTests(unittest.TestCase):
         args = mock.Mock(head_sha=head, base=head, merge_target="main", run_url="u")
         self.assertEqual(self.fix.ci(args), 1)
 
+    def test_pr_workflows_never_receive_a_persistent_publisher_token(self):
+        for path in (LANE, PAPERWORK_PR):
+            self.assertNotIn("secrets.PAPERWORK_PUSH_TOKEN", path.read_text())
+
     def test_both_paperwork_jobs_fix_then_push_and_never_loop(self):
         for path in (LANE, PAPERWORK_PR):
             with self.subTest(workflow=path.name):
@@ -243,11 +247,13 @@ class PaperworkFixTests(unittest.TestCase):
                 self.assertLess(run.index("scripts/paperwork --base"), run.index("scripts/paperwork-fix --ci"))
                 self.assertIn('--head-sha "$PR_HEAD_SHA"', run)
                 self.assertIn('[ "$SAME_REPO" = true ] || exit 1', run)
-                self.assertIn('push origin "HEAD:refs/heads/$HEAD_REF"', run)
-                push = [line for line in run.splitlines() if re.search(r"\bgit .* push origin", line)]
-                self.assertEqual(len(push), 1)
-                self.assertNotIn("--force", push[0])
-                self.assertNotIn("+HEAD", push[0])
+                # The push is the script's leased, tested one; the workflow
+                # neither pushes nor puts a credential on a command line.
+                self.assertIn('python3 scripts/paperwork-fix --push --head-ref "$HEAD_REF" --base-ref "$BASE_REF" \\\n'
+                              '  --head-sha "$PR_HEAD_SHA" || exit 1', run)
+                self.assertNotRegex(run, r"\bgit\b[^\n]*\bpush\b")
+                self.assertNotIn("extraheader", run.split("scripts/paperwork-fix --ci", 1)[1])
+                self.assertLess(run.index("scripts/paperwork-fix --ci"), run.index("scripts/paperwork-fix --push"))
         effort_fix = [line for line in run_text(steps(PAPERWORK_PR, "paperwork")[
             "Check index rows, release counters, names and Regression-Test fields"]).splitlines()
             if "scripts/paperwork-fix --ci" in line]
@@ -256,6 +262,109 @@ class PaperworkFixTests(unittest.TestCase):
         with mock.patch("sys.stdout"), self.assertRaises(SystemExit) as done:
             self.fix.main(["--counter-target", "origin/main", "--help"])
         self.assertEqual(done.exception.code, 0)
+
+
+class PaperworkFixCommitAndPushTests(unittest.TestCase):
+    """ci() and push() end to end, against a local bare remote."""
+
+    # The fixture, not the tests, of PaperworkFixTests.
+    tearDown = PaperworkFixTests.tearDown
+    git = PaperworkFixTests.git
+    write = PaperworkFixTests.write
+    repository = PaperworkFixTests.repository
+
+    def setUp(self):
+        PaperworkFixTests.setUp(self)
+        self.repository()
+        self.remote = Path(self.temporary.name + "-remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", str(self.remote)], check=True)
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(self.remote)])
+        self.git("remote", "add", "origin", str(self.remote))
+        self.git("checkout", "-q", "-b", "work")
+        self.write("src/work.rs", "fn work() {}\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "feat: work")
+        self.git("push", "-q", "origin", "main", "work")
+        self.head = self.git("rev-parse", "HEAD").strip()
+
+    def args(self, **extra):
+        values = dict(head_sha=self.head, base=self.head, merge_target="main", counter_target=None,
+                      run_url="u", head_ref="work", base_ref="main")
+        values.update(extra)
+        return mock.Mock(**values)
+
+    def fixed(self, changes):
+        def apply(base, target):
+            for path, text in changes.items():
+                self.write(path, text)
+            return sorted(changes)
+        return mock.patch.object(self.fix, "apply", side_effect=apply)
+
+    def remote_head(self, ref="work"):
+        return subprocess.run(["git", "--git-dir", str(self.remote), "rev-parse", ref],
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit_fix(self):
+        with self.fixed({f"{FIXTURE_DOCS}/README.md": "# ci, fixed\n"}), mock.patch("sys.stdout"):
+            self.assertEqual(self.fix.ci(self.args()), 0)
+
+    def test_a_bookkeeping_fix_is_committed_with_its_trailer(self):
+        self.commit_fix()
+        self.assertTrue(self.fix.head_is_fix())
+        self.assertEqual(self.git("rev-parse", "HEAD^").strip(), self.head)
+        self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD").split(), [f"{FIXTURE_DOCS}/README.md"])
+
+    def test_a_code_change_is_never_committed(self):
+        with self.fixed({"src/code.rs": "fn main() { evil(); }\n"}), mock.patch("sys.stdout"):
+            self.assertEqual(self.fix.ci(self.args()), 1)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.head)
+
+    def test_a_checkout_that_is_not_the_head_is_never_fixed(self):
+        with self.fixed({f"{FIXTURE_DOCS}/README.md": "# x\n"}) as apply, mock.patch("sys.stdout"):
+            self.assertEqual(self.fix.ci(self.args(head_sha="0" * 40)), 1)
+        apply.assert_not_called()
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.head)
+
+    def push(self, **extra):
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "job-token"}), mock.patch("sys.stdout"):
+            return self.fix.push(self.args(**extra))
+
+    def test_the_fix_is_pushed_to_the_head_branch(self):
+        self.commit_fix()
+        self.assertEqual(self.push(), 0)
+        self.assertEqual(self.remote_head(), self.git("rev-parse", "HEAD").strip())
+
+    def test_a_force_push_that_dropped_the_head_is_not_undone(self):
+        self.commit_fix()
+        # The author dropped the head commit while the run was fixing it.
+        subprocess.run(["git", "--git-dir", str(self.remote), "update-ref", "refs/heads/work", self.head + "^"],
+                       check=True)
+        self.assertEqual(self.push(), 1)
+        self.assertEqual(self.remote_head(), self.git("rev-parse", self.head + "^").strip())
+
+    def test_only_a_fix_on_the_head_goes_only_to_a_work_branch(self):
+        self.assertEqual(self.push(), 1, "HEAD is not a fix commit")
+        self.commit_fix()
+        for ref in ("main", "refs/pull/7/head", "", "bad..name"):
+            with self.subTest(ref=ref):
+                # Refused by name, not only by the lease finding no such branch.
+                self.assertIsNotNone(self.fix.push_refusal(ref, self.head, "main"))
+                self.assertEqual(self.push(head_ref=ref), 1)
+        self.assertIsNone(self.fix.push_refusal("work", self.head, "main"))
+        self.assertEqual(self.push(base_ref="work"), 1, "the base branch is never pushed")
+        self.assertEqual(self.push(head_sha="0" * 40), 1, "the fix must sit on the checked head")
+        self.assertEqual(self.remote_head(), self.head)
+        self.assertEqual(self.remote_head("main"), self.git("rev-parse", "main").strip())
+
+    def test_the_token_never_reaches_the_command_line(self):
+        command, environment = self.fix.push_command("work", self.head, "s3cret")
+        self.assertIn(f"--force-with-lease=refs/heads/work:{self.head}", command)
+        self.assertNotIn("--force", [part for part in command if not part.startswith("--force-with-lease=")])
+        encoded = self.fix.basic_auth("s3cret")
+        self.assertFalse(any("s3cret" in part or encoded in part for part in command))
+        values = [environment[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(environment["GIT_CONFIG_COUNT"]))]
+        self.assertIn(f"AUTHORIZATION: basic {encoded}", values)
+        self.assertIn(os.devnull, values, "repository hooks must not run with the token")
 
 
 if __name__ == "__main__":

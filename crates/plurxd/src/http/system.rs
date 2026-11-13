@@ -1170,17 +1170,22 @@ impl ClientPreparedSeam {
 /// every client version. Bounded: a read that misses its budget, or a session
 /// with no route (a refused successor that never committed), counts as an
 /// ordinary switch.
+///
+/// A read-only observer, so it reads the node's applied view (E1c, §6.1).
 async fn prepared_seam_session_processed(state: &AppState, session_id: &str) -> bool {
     let read = tokio::time::timeout(
         std::time::Duration::from_millis(250),
-        crate::media_sessions::read_media_session_route(
-            &*state.store,
+        crate::media_sessions::read_media_session_route_view(
+            &state.applied,
             crate::media_sessions::RouteReadSite::Observer,
             session_id,
         ),
     )
     .await;
-    let Ok(Ok(Some(route))) = read else {
+    let Ok(Ok(crate::media_sessions::RouteViewAnswer {
+        route: Some(route), ..
+    })) = read
+    else {
         return false;
     };
     serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json).is_ok_and(
@@ -6298,7 +6303,7 @@ fn render_applied_view_metrics(
         ));
     }
     out.push_str(
-        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view. view=settings counts settings-memo reloads, at most one per settings change a reader saw; view=route stays zero until the route cache (E1c) reads through the view. plurx_applied_view_table_changes_total is the upper bound per-table invalidation can reload at.\n\
+        "# HELP plurx_applied_view_reloads_total Memo or route-cache reloads caused by an applied-view stamp that no longer matched, by view. view=settings counts settings-memo reloads, at most one per settings change a reader saw; view=route counts route-cache entries a moved route slot made stale, each followed by one local re-read. plurx_applied_view_table_changes_total is the upper bound per-table invalidation can reload at.\n\
          # TYPE plurx_applied_view_reloads_total counter\n",
     );
     for (view, count) in &observation.reloads {

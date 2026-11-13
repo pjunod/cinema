@@ -224,8 +224,10 @@ shape for an agent here — use the source-only loop in
   landing commit's message — `python3 -m validation.regression_field
   --body-file <description> --landing-lines` prints them — because once
   `validation/merge-errata.toml` sets its boundary, `make history-check`
-  reads them from the landing commit, and a corrective landing without them
-  turns every later pull request red until an errata row records it.
+  reads them from the landing commit. A corrective landing without them
+  fails the full audit on `main` and is reported (not failed) in every later
+  pull request's lane until an errata row records it
+  ([docs/ci/CI-THROUGHPUT.md](docs/ci/CI-THROUGHPUT.md) §2a).
   `.forgejo/default_merge_message/MERGE_TEMPLATE.md` prefills Forgejo's web
   merge form with the description, so a web merge left as prefilled carries
   them. The API does not: `POST …/pulls/<N>/merge` without

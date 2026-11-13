@@ -1016,6 +1016,38 @@ enum StrandedFieldOrder {
 }
 
 impl StrandedFieldOrder {
+    /// Delete one settings row by key: the Store trait has no setting delete,
+    /// and the planning triggers must be shown to fire on one.
+    async fn delete_setting(&self, key: &str) {
+        match self {
+            Self::Sqlite(path) => {
+                let connection = rusqlite::Connection::open(path).expect("open raw SQLite handle");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("raw SQLite busy timeout");
+                assert_eq!(
+                    connection
+                        .execute(
+                            "DELETE FROM settings WHERE key = ?1",
+                            rusqlite::params![key]
+                        )
+                        .expect("delete SQLite setting"),
+                    1
+                );
+            }
+            #[cfg(feature = "hiqlite-contract-tests")]
+            Self::Hiqlite(client) => {
+                assert_eq!(
+                    client
+                        .execute("DELETE FROM settings WHERE key = $1", hiqlite::params!(key))
+                        .await
+                        .expect("delete replicated setting"),
+                    1
+                );
+            }
+        }
+    }
+
     async fn strand(&self, file_id: i64) {
         match self {
             Self::Sqlite(path) => {
@@ -18949,6 +18981,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
             "DROP TRIGGER IF EXISTS playback_settings_insert;
              DROP TRIGGER IF EXISTS playback_settings_update;
              DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_insert;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_update;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_delete;
+             DROP TABLE IF EXISTS playback_input_keys_schema;
              DROP TABLE IF EXISTS playback_input_generation;
              ",
         )
@@ -21551,6 +21587,86 @@ async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
                 .expect("unknown source")
                 .is_none(),
             "{backend}"
+        );
+    })
+    .await;
+}
+
+/// D3t: the planning binding covers every planning key, on both stores. A
+/// write (insert, update, delete) to every key the planning snapshot reads and
+/// to every key of the extension moves the generation, as does a
+/// representative of each glob family; a job key does not. Before the
+/// extension `cache.max_gb`, `vod.output_preparation`, `vod.rolling_retention`,
+/// the two cluster switches and `subtitles.stored_sources` moved nothing.
+#[tokio::test]
+async fn every_planning_key_write_moves_the_playback_input_generation() {
+    for_each_strandable_backend(|store, backend, raw| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "binding".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/binding".into()],
+                anime: false,
+            })
+            .await
+            .expect("binding library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "binding".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("binding item");
+        let file = store
+            .upsert_file(item, "/binding/movie.mkv", 100, 42, &ProbeResult::default())
+            .await
+            .expect("binding file");
+        let generation = || async {
+            store
+                .playback_planning_snapshot(file, &[])
+                .await
+                .expect("binding snapshot")
+                .expect("known source")
+                .generation
+        };
+        // Every key the planning snapshot reads, every extension key, and a
+        // representative of each glob family (a `plurxd` test pins the first
+        // list equal to `QUALITY_PLANNING_KEYS`).
+        let mut bound = plurx_core::store::playback_input_keys::PLAYBACK_PLANNING_KEYS.to_vec();
+        bound.extend(plurx_core::store::playback_input_keys::PLAYBACK_INPUT_EXTRA_KEYS);
+        bound.extend(["playback.binding_fixture", "transcode.binding_fixture"]);
+        bound.sort_unstable();
+        bound.dedup();
+        for key in bound {
+            let before = generation().await;
+            store.put_setting(key, "one").await.expect("insert");
+            let inserted = generation().await;
+            assert!(inserted > before, "{backend}: insert {key}");
+            store.put_setting(key, "two").await.expect("update");
+            let updated = generation().await;
+            assert!(updated > inserted, "{backend}: update {key}");
+            raw.delete_setting(key).await;
+            assert!(generation().await > updated, "{backend}: delete {key}");
+        }
+        let before = generation().await;
+        store
+            .put_setting("jobs.binding_fixture", "one")
+            .await
+            .expect("job insert");
+        store
+            .put_setting("jobs.binding_fixture", "two")
+            .await
+            .expect("job update");
+        raw.delete_setting("jobs.binding_fixture").await;
+        assert_eq!(
+            generation().await,
+            before,
+            "{backend}: job keys do not move planning"
         );
     })
     .await;

@@ -1624,6 +1624,10 @@ impl SqliteStore {
     fn init(conn: Connection) -> Result<Self, StoreError> {
         housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
+        // D3t: planning keys outside `playback.*`/`transcode.*` move the
+        // planning generation too. An idempotent extension, not a migration:
+        // `user_version` stays where it is, so an older binary still opens it.
+        super::playback_input_keys::install_sqlite(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
