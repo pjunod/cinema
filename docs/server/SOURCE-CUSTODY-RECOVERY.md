@@ -244,8 +244,8 @@ The container needs the existing read-only bind of `/run/plurx-physical-stop`.
 A plurxd restart during any read left that owner's witness poisoned by some
 earlier unmediated launch. Its expired custody then held the shared storage
 fence, and every source-reading job in the cluster, live work included, was
-refused until the next host reboot. On 2026-11-12 one nynuc restart fenced
-the cluster this way within a minute of the restart.
+refused until the next host reboot. On 2026-11-12 one daemon restart fenced
+the cluster this way within a minute.
 
 Each witness now records its daemon's PID namespace and whether the daemon was
 that namespace's init (PID 1). Replay releases a poisoned witness only when
