@@ -18,6 +18,8 @@ INPUTS = (
     'mux_rgb.c',
     'nlq_clipping.h',
     'nut_timing.h',
+    'refit_compose.h',
+    'refit_mode.h',
     'rgb48.h',
     'scan_title.c',
     'segment_decode_render.c',
