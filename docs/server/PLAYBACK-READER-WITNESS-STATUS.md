@@ -8,7 +8,7 @@ authorized by the operator on 2026-11-13. Qualification precedes promotion.
 
 | Phase | State | Evidence or next action |
 |---|---|---|
-| B0 launch attribution | Implemented; unqualified | Static purpose at the central launcher, bounded snapshots, first-purpose sidecars, node-local Developer observation and metrics |
+| B0 launch attribution | Attribution built; benchmark harness unbuilt | Static launch purpose, bounded snapshots, first-purpose sidecars and Developer/metrics reporting are built. The planned dual-lent-input rate harness and lab measurements await the B2 input API. |
 | B1 access verification and descriptor builder | Local focused checks pass; gates pending | Exact no-input profiles, isolated probe environment and identity-bound descriptor construction; media inputs remain unqualified |
 | B2 source reads through the broker | Dependency open | Reconcile playback-start-phase2 and lent-input ownership before overlapping source-input work |
 | B3 residual raw lifetime lock | Conditional; unbuilt | Required where B2 leaves raw readers; inherits the exact owner lock and qualifies packaged children |
