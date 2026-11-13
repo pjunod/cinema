@@ -136,7 +136,7 @@ results are retained for those unchanged paths. This qualifies the recorded
 libplacebo 360 / lavapipe test environment, not a physical display or every
 production driver. Log and binary hashes are in the qualification record.
 
-Adversarial review found no actionable issues. The PR records final CI and
-merge state. The daemon and bundle both include the generated table header
+Adversarial review found no actionable issues. [PR #1575](http://forge.lan:3000/noirr/plurx/pulls/1575)
+records final CI and merge state. The daemon and bundle both include the generated table header
 in their source identities, so future data changes invalidate stale bundles
 without changing the dependency-image recipe.
