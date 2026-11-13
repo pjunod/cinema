@@ -2343,6 +2343,7 @@ mod tests {
             .expect("establishing identity");
         let generation = Generation {
             convert_dolby_vision: false,
+            dv_refit: None,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
