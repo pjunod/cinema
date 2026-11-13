@@ -281,7 +281,7 @@ recovered after its daemon's PID namespace was torn down`.
 ### 1.5 Linux startup preserves reboot recovery; old empty-identity records need independent proof
 
 **Owner:** Codex/root · **Branch:** `codex/source-custody-cross-boot` ·
-**State:** source prepared; final review, qualification and fleet recovery pending.
+**PR:** #1570 · **State:** final review corrections, qualification and fleet recovery pending.
 This is an independent corrective PR to `main`; it does not change the active
 foreground-census or playback-start projects.
 
@@ -317,12 +317,15 @@ ended, including raw children. A worker cannot publish this evidence.
 
 The [consumer](../../crates/plurxd/src/source_custody/recovery/reboot_proof.rs)
 accepts only protected root-owned local proof files, an unprivileged worker,
-the same actual host/current boot/node, a proof younger than 15 minutes, the
+the same actual host/current boot/node, a proof younger than 15 minutes before
+settlement, the
 exact original v1/v2 bytes, matching armed activation and immutable owner, and
 expired original authority. It resolves that exact custody through Store,
 uses the existing typed settlement/release, and requires acknowledged exact
 absence before clearing worker evidence. Failed settlement retains evidence
-for retry; a replacement owner is never settled. The root proof remains
+for retry; a replacement owner is never settled. A delayed cleanup retry may
+finish after proof expiry only when Store already acknowledges that exact
+owner absent, without invoking settlement again. The root proof remains
 read-only until its operator removes it. No database or old worker-record edits
 are part of this procedure.
 
@@ -361,7 +364,9 @@ Qualification is recorded on the PR and in the ledger below. Prepared Rust
 regressions exercise startup validation, poisoned-witness recovery, foreign and
 stale proof refusals, ownership replacement, release retry, and the normal v1
 fallback. Prepared Python tests exercise protected host/journal boundaries and
-check-only/publication behavior. These definitions are not execution evidence.
+check-only/publication behavior. Review found and is correcting the local-filesystem
+provenance requirement and acknowledged partial-cleanup retry. These definitions
+are not execution evidence.
 
 ## 2. The journal never impersonates an activation or completed join
 

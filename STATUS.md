@@ -1,17 +1,9 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-11 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-13 · Source custody across Linux reboot:** Owner Codex/root,
-  `codex/source-custody-cross-boot`; source prepared, compiler qualification
-  running, final review/tests/merge and exact fleet recovery pending.
-  [Canonical recovery ledger](docs/server/SOURCE-CUSTODY-RECOVERY.md#15-linux-startup-preserves-reboot-recovery-old-empty-identity-records-need-independent-proof).
-  Mandatory host identity at startup prevents new missing-fallback owners;
-  root-admin local-journal proof handles the old lab4 custody through the normal
-  typed Store settlement and acknowledgement. No database edits or watchdogs.
-
-
+- **2026-11-13 · Source custody across Linux reboot:** Owner Codex/root, PR #1570; final review corrections, qualification and exact fleet recovery in progress. [Canonical ledger](docs/server/SOURCE-CUSTODY-RECOVERY.md#15-linux-startup-preserves-reboot-recovery-old-empty-identity-records-need-independent-proof).
 - **2026-11-12 · Fast-lane throughput:** [throughput](docs/ci/CI-THROUGHPUT.md), [Rust gate image](docs/ci/RUST-GATE-IMAGE.md). Owner Claude (claude-opus-5-5, session 01BCWLA2), PR #1550. A push cancels the PR's in-flight run; derivable paperwork (counters, Markdown host names, index rows) is committed by the lane; the Rust gate runs once in a pinned image at `-j4` (8.2 min on a lab1 guest, was 22-25). The high-CPU pool stays unused until its runners apply the job's CPU, PID and swap limits.
 - **2026-11-12 · Offload (cinema):** Owner Claude (Claude Sonnet 5.5 builds, Opus 5.5 orchestrates). Cinema half of Offload on `claude/offload`, on top of the merged `removed_paths` (#1546): `offloaded_at` on items kept by every prune, `offloaded_paths` on `/api/v1/scan`, placement by ids, Get it back and its status read, `presence` library filter, web UI, Apple and Android clients. [Contract](docs/features/PIPELINE-CONTRACT-OFFLOAD.md). Focused plurx-core, plurxd and web tests, clippy, paperwork and the Python validation suites pass on the Linux build host. Swift and Android are compiled and tested only by the fast lane (no Xcode or accepted Android SDK on the build hosts). Curator 0.49.0 sends offload only to a cinema advertising `offload`; deploy every cinema node first.
 

@@ -81,9 +81,12 @@ impl Proof {
                 })
             && self.at_ms > 0
             && self.at_ms <= now_ms.saturating_add(MAX_SKEW_MS)
-            && self.at_ms >= now_ms.saturating_sub(MAX_AGE_MS)
             && self.previous_boot_entry_ms > 0
             && self.previous_boot_entry_ms <= self.at_ms
+    }
+
+    fn fresh(&self, now_ms: i64) -> bool {
+        self.at_ms >= now_ms.saturating_sub(MAX_AGE_MS)
     }
 }
 
@@ -214,15 +217,27 @@ async fn apply(
     {
         return Err("host reboot proof and exact expired reader owner differ".into());
     }
-    let armed_path = witnesses.join(format!("background-{}.armed", proof.custody_id));
-    if read_bytes(&armed_path)? != proof.activation_id.as_bytes() {
-        return Err("host reboot proof activation marker differs".into());
-    }
     let present = store
         .resolve_background_source_custody(token.clone())
         .await
         .map_err(|error| error.to_string())?
         .is_some();
+    // Fresh physical-death evidence is required for settlement. Once the
+    // exact owner is authoritatively absent, this path can only finish its
+    // acknowledged cleanup, including a delayed retry after proof expiry.
+    if present && !proof.fresh(now_ms) {
+        return Err("host reboot proof expired before settlement".into());
+    }
+    let armed_path = witnesses.join(format!("background-{}.armed", proof.custody_id));
+    match std::fs::symlink_metadata(&armed_path) {
+        Ok(_) => {
+            if read_bytes(&armed_path)? != proof.activation_id.as_bytes() {
+                return Err("host reboot proof activation marker differs".into());
+            }
+        }
+        Err(error) if !present && error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
     let legacy_path = legacy.join(&name);
     // A prior acknowledged settlement may have removed v1 before a crash.
     // Only authoritative exact absence permits finishing that partial cleanup.

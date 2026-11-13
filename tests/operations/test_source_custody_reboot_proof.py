@@ -157,6 +157,7 @@ class RebootProofFixtureTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(helper, 'ADMIN_UID', os.getuid()))
         self.stack.enter_context(mock.patch.object(helper, 'admin_directory'))
         self.stack.enter_context(mock.patch.object(helper, 'journal_ancestor'))
+        self.filesystem = self.stack.enter_context(mock.patch.object(helper, 'local_filesystem', return_value=True))
         # Isolated test temp ancestors may be shared; the production path walker
         # is tested separately, while the actual private recovery files stay pinned.
         self.stack.enter_context(mock.patch.object(helper, 'trusted_data_ancestors'))
@@ -202,6 +203,35 @@ class RebootProofFixtureTests(unittest.TestCase):
         changed = self.verify()
         self.assertNotEqual(original['witness_sha256'], changed['witness_sha256'])
         self.assertEqual(original['legacy_sha256'], changed['legacy_sha256'])
+
+    def test_nonlocal_recovery_directories_cannot_supply_historical_timestamps(self):
+        base = self.data / 'source-custody-recovery'
+        for path in (base, base / 'v1', base / 'v2'):
+            target = (path.stat().st_dev, path.stat().st_ino)
+            def local(fd):
+                s = os.fstat(fd)
+                return (s.st_dev, s.st_ino) != target
+            self.filesystem.side_effect = local
+            with self.subTest(path=path), self.assertRaisesRegex(helper.Refused, 'recovery directory.*local filesystem'):
+                self.verify(True)
+        self.publisher.assert_not_called(); self.journal.assert_not_called()
+        self.filesystem.side_effect = None
+        self.assertEqual(self.verify()['model'], 'host_journal_reboot_v1')
+
+    def test_each_nonlocal_worker_file_is_refused_even_inside_local_private_directories(self):
+        for path in (self.witness, self.legacy, self.armed):
+            self.assertLessEqual(path.stat().st_mtime_ns, self.boot_started_at_ms * 1_000_000)
+            self.assertLessEqual(path.stat().st_ctime_ns, self.boot_started_at_ms * 1_000_000)
+            target = (path.stat().st_dev, path.stat().st_ino)
+            def local(fd):
+                s = os.fstat(fd)
+                return (s.st_dev, s.st_ino) != target
+            self.filesystem.side_effect = local
+            with self.subTest(path=path), self.assertRaisesRegex(helper.Refused, 'worker input.*local filesystem'):
+                self.verify(True)
+        self.publisher.assert_not_called(); self.journal.assert_not_called()
+        self.filesystem.side_effect = None
+        self.assertEqual(self.verify()['model'], 'host_journal_reboot_v1')
 
     def test_inputs_modified_after_boot_cannot_receive_a_proof(self):
         for path in (self.witness, self.legacy, self.armed):

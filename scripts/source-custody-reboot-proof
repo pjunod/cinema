@@ -151,6 +151,7 @@ class PinnedInput:
             if administrator:
                 require(s.st_uid==ADMIN_UID and s.st_mode&0o022==0,'input is not protected by host root')
             if private_owner is not None:
+                require(local_filesystem(self.fd), 'worker input is not on a local filesystem')
                 require(s.st_uid==private_owner and stat.S_IMODE(s.st_mode)==0o600,
                         'activation is not private to the data owner')
             self.stamp=fd_stamp(self.fd);self.raw=os.read(self.fd,MAX_INPUT+1)
@@ -257,6 +258,7 @@ def private_inputs(data_dir, custody):
         v1 = directory_at(base, 'v1'); stack.callback(os.close, v1)
         v2 = directory_at(base, 'v2'); stack.callback(os.close, v2)
         for fd in (base, v1, v2):
+            require(local_filesystem(fd), 'recovery directory is not on a local filesystem')
             s = os.fstat(fd)
             require(s.st_uid == owner and stat.S_IMODE(s.st_mode) == 0o700,
                     'recovery ancestor is not private to the data owner')

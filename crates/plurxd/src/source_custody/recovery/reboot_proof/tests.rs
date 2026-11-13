@@ -216,14 +216,18 @@ async fn reboot_proof_refuses_unarmed_and_different_legacy_owner() {
 #[tokio::test]
 async fn reboot_proof_cannot_settle_replacement_owner_and_retains_failed_release_for_retry() {
     let case = Case::new();
-    let replacement_key = "replacement-owner";
-    case.fixture
-        .connection()
-        .execute(
-            "UPDATE background_source_custody SET owner_key=?1",
-            [replacement_key],
-        )
-        .expect("replacement owner");
+    let Record::Background { token } = &case.record else { unreachable!() };
+    let mut replacement = token.owner.clone();
+    let BackgroundSourceOwner::Job { token: owner } = &mut replacement else { unreachable!() };
+    owner.claim_id = uuid::Uuid::new_v4().to_string();
+    owner.fence += 1;
+    let replacement_fence = owner.fence;
+    let replacement_key = plurx_core::store::background_jobs_resources::background_owner_key(&replacement)
+        .expect("replacement immutable owner key");
+    case.fixture.connection().execute(
+        "UPDATE background_source_custody SET owner_key=?1,owner_json=?2,fence=?3",
+        rusqlite::params![replacement_key, serde_json::to_string(&replacement).expect("replacement owner JSON"), replacement_fence],
+    ).expect("replacement owner");
     case.apply(&case.proof)
         .await
         .expect("old owner is authoritatively absent");
@@ -252,6 +256,29 @@ async fn reboot_proof_cannot_settle_replacement_owner_and_retains_failed_release
         .await
         .expect("retry acknowledged release");
     assert_eq!(case.custody_count(), 0);
+}
+
+#[tokio::test]
+async fn acknowledged_reboot_cleanup_resumes_without_sidecars_even_after_proof_expiry() {
+    for delay in [0, MAX_AGE_MS + 1] {
+        let case = Case::new();
+        // Emulate a crash only AFTER the normal Store settlement/release
+        // acknowledgement and partway through its existing subsidiary cleanup.
+        settle_records(&case.fixture.store, std::slice::from_ref(&case.record))
+            .await.expect("prior acknowledged exact settlement");
+        let name = case.record.name().expect("name");
+        let witnesses = case.fixture.dir.with_file_name("v2");
+        std::fs::remove_file(case.fixture.dir.join(&name)).expect("v1 cleanup completed");
+        for suffix in ["anchor", "armed"] {
+            std::fs::remove_file(witnesses.join(format!("background-{}.{suffix}", case.proof.custody_id)))
+                .expect("subsidiary cleanup before crash");
+        }
+        assert!(witnesses.join(&name).exists());
+        apply(&case.fixture.store, &case.fixture.dir, NODE, &identity(), 10_000 + delay, &case.proof)
+            .await.expect("only acknowledged cleanup can resume");
+        assert_eq!(case.custody_count(), 0);
+        assert!(!witnesses.join(&name).exists());
+    }
 }
 
 #[tokio::test]
