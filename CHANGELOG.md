@@ -243,6 +243,28 @@ bump may break compatibility and a **patch** bump never does.
   other nodes see it within about a second. Planning, encoder admission,
   background workers, the save response, fences, auth, membership, ownership
   and pre-mutation reads stay quorum reads (playback-start E1b).
+- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
+  files left a folder (a Re-match). Such a request probes exactly its expected
+  and removed paths, walks nothing else and never becomes a full scan; each
+  removed path is reported `gone` (its file record removed, and the item too
+  when that was its last file), `unknown`, `present` or `retained`. A missing
+  removed path is not `path_unreadable`; an unreadable chain or an empty mount
+  point is, and removes nothing. The connection test advertises
+  `"features": ["removed_paths"]`.
+- `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
+  say which media files left a folder (a Re-match). Such a request probes
+  exactly its expected and removed paths, walks nothing else, never becomes a
+  full scan and is a job of its own that no walking request joins. Each removed
+  path is reported `gone` (file records removed, `item_ids` listed, the items
+  too when that left them empty), `unknown`, `present` (with a `reason`:
+  `exists`, `symlink_in_chain`, `case_variant`, `reappeared_before_removal`),
+  `retained` (with a machine `code` and `retryable`) or `skipped`. Nothing is
+  removed while an expected file is not placed. A missing removed path is not
+  `path_unreadable`; an unreadable chain, an empty mount point or a nested
+  mount on another filesystem is, and removes nothing. The connection test
+  advertises `"features": ["removed_paths", "probe_only"]`. Deploy every cinema
+  node before Curator sends `removed_paths` (docs/INTEGRATION.md §1.10).
+
 - Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
   `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
   request and result), `wait_ms` (hold the answer up to 15 s for a `200` with

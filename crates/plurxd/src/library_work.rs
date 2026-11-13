@@ -481,7 +481,14 @@ impl JobManager {
                 continue;
             }
             let mut full = Vec::new();
-            let mut groups: BTreeMap<PathBuf, Vec<(String, ScanRequest)>> = BTreeMap::new();
+            // Same-path requests share a pass, but a probe-only one never
+            // shares with one that did not ask for it: it would walk what the
+            // other forbade, or forbid what it wanted.
+            let mut groups: BTreeMap<(PathBuf, bool), Vec<(String, ScanRequest)>> = BTreeMap::new();
+            let mut sidecars_by_request: HashMap<
+                String,
+                plurx_core::store::scan_request_v2::ScanRequestV2,
+            > = HashMap::new();
             for request in requests {
                 match request.input {
                     LibraryWorkInput::Full { refresh, trigger } => {
@@ -497,7 +504,15 @@ impl JobManager {
                         let normalized = tokio::fs::canonicalize(&path)
                             .await
                             .unwrap_or_else(|_| path.clone());
-                        groups.entry(normalized).or_default().push((
+                        // Contract v2 sidecars: the files each request expects
+                        // and removes. A request admitted by an older node has
+                        // none.
+                        let sidecar = self.store.scan_request_v2(&request.request_id).await?;
+                        let probe_only = sidecar.as_ref().is_some_and(|row| row.probe_only);
+                        if let Some(row) = sidecar {
+                            sidecars_by_request.insert(request.request_id.clone(), row);
+                        }
+                        groups.entry((normalized, probe_only)).or_default().push((
                             request.request_id.clone(),
                             ScanRequest {
                                 id: request.request_id,
@@ -561,27 +576,34 @@ impl JobManager {
                     .await?;
                 }
             }
-            for requests in groups.into_values() {
+            for ((_, probe_only), requests) in groups {
                 check_active()?;
                 let group: Vec<_> = requests
                     .iter()
                     .map(|(_, request)| request.clone())
                     .collect();
-                // Contract v2 sidecars: the files each request expects. A
-                // request admitted by an older node has none.
-                let mut sidecars = Vec::new();
-                for (id, _) in &requests {
-                    if let Some(row) = self.store.scan_request_v2(id).await? {
-                        sidecars.push(row);
-                    }
-                }
+                let sidecars: Vec<_> = requests
+                    .iter()
+                    .filter_map(|(id, _)| sidecars_by_request.remove(id))
+                    .collect();
                 let mut expected: Vec<ExpectedFile> = Vec::new();
                 for file in sidecars.iter().flat_map(|row| &row.expected_files) {
                     if !expected.iter().any(|known| known.path == file.path) {
                         expected.push(file.clone());
                     }
                 }
-                let result = match self.run_targeted(&group, &expected, publisher).await {
+                let mut removed: Vec<String> = Vec::new();
+                for path in sidecars.iter().flat_map(|row| &row.removed_paths) {
+                    if !removed.contains(path) {
+                        removed.push(path.clone());
+                    }
+                }
+                let targeted = Targeted {
+                    expected: &expected,
+                    removed: &removed,
+                    probe_only,
+                };
+                let result = match self.run_targeted(&group, &targeted, publisher).await {
                     Ok((scan, files)) => {
                         // Written before the completion, so a caller that
                         // reads `done` also reads its per-file report.
@@ -592,6 +614,7 @@ impl JobManager {
                                     row.expected_files
                                         .iter()
                                         .any(|expected| expected.path == file.path())
+                                        || row.removed_paths.iter().any(|path| path == file.path())
                                 })
                                 .cloned()
                                 .collect();
@@ -714,6 +737,126 @@ impl JobManager {
             waiter.notify_one();
         }
     }
+}
+
+/// What one targeted pass is asked to look at beyond its path.
+pub(super) struct Targeted<'a> {
+    pub expected: &'a [ExpectedFile],
+    /// Removed paths (contract amendment `removed_paths`).
+    pub removed: &'a [String],
+    /// Record exactly the expected files and walk nothing else.
+    pub probe_only: bool,
+}
+
+/// One removed path, as the disk answered for it.
+#[derive(Debug)]
+pub(super) enum RemovedEntry {
+    /// Not under the request path or the library; never looked at.
+    Outside(String),
+    Present(String, plurx_core::store::scan_request_v2::PresentReason),
+    Absent(plurx_core::scan::removed::AbsentPath),
+}
+
+/// Probe each removed path from its library root down, never following a
+/// symlink. Absence is the expected answer; any other error on the chain,
+/// or a root that cannot be listed or lists nothing (an empty mount point),
+/// is `path_unreadable` for the whole request, so nothing is removed while
+/// a share is away. Revalidates scope here rather than trusting admission.
+pub(super) async fn probe_removed_paths(
+    library: &plurx_core::domain::Library,
+    target: &std::path::Path,
+    removed: &[String],
+) -> Result<Vec<RemovedEntry>, TargetError> {
+    use plurx_core::scan::{containment, removed as probe};
+    if removed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let library = library.clone();
+    let target = containment::lexical(target);
+    let removed = removed.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut listable: Vec<PathBuf> = Vec::new();
+        let mut entries = Vec::with_capacity(removed.len());
+        for raw in removed {
+            let path = std::path::Path::new(&raw);
+            let root = (path.is_absolute() && containment::lexical(path).starts_with(&target))
+                .then(|| containment::lexical_root(std::slice::from_ref(&library), path))
+                .flatten()
+                .map(|(_, root)| root);
+            let Some(root) = root else {
+                entries.push(RemovedEntry::Outside(raw));
+                continue;
+            };
+            let unreadable = |failure: probe::RemovedUnreadable| TargetError::Unreadable {
+                path: raw.clone(),
+                root: failure.root.display().to_string(),
+                error: failure.error,
+            };
+            if !listable.contains(&root) {
+                probe::root_listable(&root).map_err(unreadable)?;
+                listable.push(root.clone());
+            }
+            entries.push(
+                match probe::probe_removed(&root, path).map_err(unreadable)? {
+                    probe::RemovedProbe::Present { reason } => RemovedEntry::Present(raw, reason),
+                    probe::RemovedProbe::Absent { spellings } => {
+                        RemovedEntry::Absent(probe::AbsentPath {
+                            path: raw,
+                            spellings,
+                            root: root.clone(),
+                        })
+                    }
+                },
+            );
+        }
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| {
+        TargetError::Store(StoreError::Task(format!(
+            "removed path probe task failed: {error}"
+        )))
+    })?
+}
+
+/// Forget what each absent removed path held and report every removed path
+/// in the order the caller named them: `gone`, `unknown`, `present`, or
+/// `retained` when plurx kept a record it could not safely remove.
+pub(super) async fn remove_paths(
+    publisher: &PublicationStore<'_>,
+    library: &plurx_core::domain::Library,
+    entries: Vec<RemovedEntry>,
+    expected_not_placed: bool,
+    report: &mut plurx_core::scan::ScanReport,
+) -> Result<Vec<PlacedReport>, TargetError> {
+    let absent: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            RemovedEntry::Absent(absent) => Some(absent.clone()),
+            _ => None,
+        })
+        .collect();
+    let removal =
+        plurx_core::scan::removed::remove_absent(publisher, library, &absent, expected_not_placed)
+            .await?;
+    report.removed_files += usize::try_from(removal.deleted_files).unwrap_or(usize::MAX);
+    report.pruned_items += usize::try_from(removal.pruned_items).unwrap_or(usize::MAX);
+    // `remove_absent` answers one report per absent path, in their order.
+    let mut removal = removal.reports.into_iter();
+    let mut reports = Vec::with_capacity(entries.len());
+    for entry in entries {
+        reports.push(match entry {
+            RemovedEntry::Outside(path) => PlacedReport::Skipped {
+                path,
+                reason: "outside the requested path or library".into(),
+            },
+            RemovedEntry::Present(path, reason) => PlacedReport::Present { path, reason },
+            RemovedEntry::Absent(absent) => removal
+                .next()
+                .unwrap_or(PlacedReport::Unknown { path: absent.path }),
+        });
+    }
+    Ok(reports)
 }
 
 /// An expected file may be outside the request scope even when it exists.
@@ -1925,6 +2068,8 @@ mod tests {
                         key_hash: "a".repeat(64),
                         request_key: String::new(),
                         expected_files,
+                        removed_paths: Vec::new(),
+                        probe_only: false,
                     },
                 )
                 .await
