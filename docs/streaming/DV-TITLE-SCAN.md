@@ -93,6 +93,14 @@ foreground sharing permission, physical pause and freshness fences. Expired
 playback interest returns the task to maintenance. Ordinary complete-title
 scans retain their idle-node admission and index-read reuse.
 
+SQLite migration 132 and the matching replicated-store extension upgrade install
+version 2 of the title outbox. A successful aggregate publication keeps demand
+open when exact current recipes remain pending, and preserves those recipe
+waiters until their receipts arrive. Rollout repairs previously stranded pending
+recipes once; it preserves cancellation and failure authority. The scheduler's
+live and maintenance discovery remain read-only. The original version 1 SQL is
+retained unchanged for historical migration replay.
+
 ## Scanner identity keeps renderer updates from re-queuing titles
 
 Title demand is keyed by the scanner executable alone

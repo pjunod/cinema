@@ -229,6 +229,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         file_id: file,
         probe_revision: revision,
         playback_requested: false,
+        playback_recipe: None,
         live_after: 0,
     };
     assert!(!task
@@ -331,11 +332,12 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         .request_dv_fel_variant(file, &recipe)
         .await
         .expect("pending exact recipe"));
+    task.playback_recipe = Some(recipe.identity.clone());
     assert!(store
         .attach_dv_title_viewer(plurx_core::store::dv_title_jobs::TitleViewerRequest {
             file_id: file,
             viewer: viewer_id.clone(),
-            request: recipe,
+            request: recipe.clone(),
             scanner_digest: task.scanner.clone(),
             deadline_ms: now_ms().saturating_add(60_000),
             now_ms: now_ms(),
@@ -352,6 +354,46 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         .await
         .expect("same-file live upgrade preempts maintenance"));
     task.playback_requested = true;
+    let peer_envelope = plurx_core::transcode::EnhancementRateEnvelope::resolve(
+        90_000,
+        plurx_core::transcode::EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        3840,
+        2160,
+        (24, 1),
+        true,
+        plurx_core::transcode::EnhancementRateLimits {
+            video_peak_bps: Some(130_000_000),
+            ..Default::default()
+        },
+    )
+    .expect("peer envelope");
+    let peer_recipe = plurx_core::transcode::dv_fel_qualification::FelRecipeRequest::new(
+        recipe.backend_identity.clone(),
+        size,
+        mtime,
+        peer_envelope,
+        recipe.output,
+    );
+    assert_ne!(peer_recipe.identity, recipe.identity);
+    assert!(store
+        .request_dv_fel_variant(file, &peer_recipe)
+        .await
+        .expect("peer recipe"));
+    assert!(store
+        .attach_dv_title_viewer(plurx_core::store::dv_title_jobs::TitleViewerRequest {
+            file_id: file,
+            viewer: "peer-viewer".into(),
+            request: peer_recipe,
+            scanner_digest: task.scanner.clone(),
+            deadline_ms: now_ms().saturating_add(60_000),
+            now_ms: now_ms(),
+        })
+        .await
+        .expect("peer retains a different recipe on the same file"));
+    assert!(!task
+        .should_yield(&state)
+        .await
+        .expect("peer live demand does not preempt this live recipe"));
     store
         .cancel_waiter(plurx_core::store::background_jobs::CancelWaiter {
             scope: "playback-qualification".into(),
@@ -363,7 +405,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
     assert!(task
         .should_yield(&state)
         .await
-        .expect("live admission returns to maintenance"));
+        .expect("another recipe cannot retain the cancelled measurement"));
 }
 
 #[tokio::test]
@@ -388,6 +430,7 @@ async fn title_stop_awaits_owned_work_instead_of_dropping_it() {
         file_id: 0,
         probe_revision: 0,
         playback_requested: false,
+        playback_recipe: None,
         live_after: 0,
     };
     assert!(!task.stop().await);
@@ -780,6 +823,7 @@ fn stored_title() -> TitleDemand {
     });
     TitleDemand {
         queued_job_id: None,
+        active_job_id: None,
         playback_requested: false,
         scanner_digest: None,
         playback_recipes: Vec::new(),

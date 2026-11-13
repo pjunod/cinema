@@ -29,11 +29,14 @@ pub(super) struct AwaitingQualification {
 /// viewer that is not counted waits for every library and subtitle job ahead
 /// of its title. The demand does not lift the cap on concurrent readers or the
 /// viewer's own playback priority; upkeep cancels it once renewals stop.
+#[cfg(target_os = "linux")]
 const VIEWER_DEMAND_MS: i64 = 90_000;
+#[cfg(target_os = "linux")]
 const VIEWER_RENEWAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Hold (or renew) the live demand of `session_id`, awaiting its title's FEL
 /// measurement as `generation`, on that title's scan.
+#[cfg(target_os = "linux")]
 pub(in crate::http::hls) fn hold_viewer_demand(
     state: &AppState,
     session_id: &str,
@@ -85,6 +88,15 @@ pub(in crate::http::hls) fn hold_viewer_demand(
                 "a waiting viewer's demand on its title scan was not recorded"),
         }
     });
+}
+
+// FEL measurement workers and their installed scanner exist only on Linux.
+#[cfg(not(target_os = "linux"))]
+pub(in crate::http::hls) fn hold_viewer_demand(
+    _state: &AppState,
+    _session_id: &str,
+    _generation: &str,
+) {
 }
 
 pub(super) fn retain(

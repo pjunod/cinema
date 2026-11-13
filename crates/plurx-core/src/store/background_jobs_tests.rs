@@ -2697,4 +2697,51 @@ async fn a_waiting_viewer_attaches_and_renews_its_demand_on_the_title_scan() {
         .attach_dv_title_viewer(viewer(1_000, 2_000))
         .await
         .is_err());
+    // A worker can consume the exact request after registration commits but
+    // before its caller's authoritative observation. That is success too.
+    struct ConsumeBeforeRead<'a> {
+        store: &'a SqliteStore,
+        file: i64,
+        receipt: serde_json::Value,
+    }
+    #[async_trait::async_trait]
+    impl QueueSql for ConsumeBeforeRead<'_> {
+        async fn queue_transaction(
+            &self,
+            statements: Vec<(String, String)>,
+        ) -> Result<(), crate::error::StoreError> {
+            self.store.queue_transaction(statements).await?;
+            assert!(
+                self.store
+                    .put_dv_fel_verdict(self.file, 100, 1, &self.receipt)
+                    .await?
+            );
+            Ok(())
+        }
+        async fn queue_sql(
+            &self,
+            sql: String,
+            request: String,
+            mutation: bool,
+            authoritative: bool,
+        ) -> Result<Vec<String>, crate::error::StoreError> {
+            self.store
+                .queue_sql(sql, request, mutation, authoritative)
+                .await
+        }
+    }
+    let receipt = q::FelRecipeVerdict {
+        request: recipe.clone(),
+        verdict: q::FelVerdict::unmeasurable(recipe.identity.clone(), 100, 1, 120_001),
+    };
+    let racing = ConsumeBeforeRead {
+        store: &store,
+        file,
+        receipt: serde_json::to_value(receipt).expect("receipt"),
+    };
+    assert!(
+        super::dv_title_jobs::request_fel_variant(&racing, file, &recipe)
+            .await
+            .expect("worker finished before observation")
+    );
 }

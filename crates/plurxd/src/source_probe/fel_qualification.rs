@@ -921,7 +921,7 @@ pub(super) async fn qualify_if_due(
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Qualification, String> {
-    qualify_due(state, file, document, tools, admission, cancel, false).await
+    qualify_due(state, file, document, tools, admission, cancel, None).await
 }
 
 /// A live successor may only measure an explicit, still-pending recipe.
@@ -933,8 +933,18 @@ pub(super) async fn qualify_requested_if_due(
     tools: &crate::vodencode::dv_runtime::ToolSet,
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
+    recipe_identity: &str,
 ) -> Result<Qualification, String> {
-    qualify_due(state, file, document, tools, admission, cancel, true).await
+    qualify_due(
+        state,
+        file,
+        document,
+        tools,
+        admission,
+        cancel,
+        Some(recipe_identity),
+    )
+    .await
 }
 
 async fn qualify_due(
@@ -944,9 +954,9 @@ async fn qualify_due(
     tools: &crate::vodencode::dv_runtime::ToolSet,
     admission: &crate::transcode::FragmentAdmission,
     cancel: &tokio_util::sync::CancellationToken,
-    requested_only: bool,
+    requested_recipe: Option<&str>,
 ) -> Result<Qualification, String> {
-    let live_recipes = if requested_only {
+    let live_recipes = if let Some(recipe) = requested_recipe {
         state
             .store
             .dv_title_playback_demands(0, super::now_ms(), Some(file.id))
@@ -957,11 +967,12 @@ async fn qualify_due(
                 demand.scanner_digest.as_deref() == Some(tools.title_scanner_digest().as_str())
             })
             .flat_map(|demand| demand.playback_recipes)
+            .filter(|identity| identity == recipe)
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
-    if requested_only && live_recipes.is_empty() {
+    if requested_recipe.is_some() && live_recipes.is_empty() {
         return Ok(Qualification::NotDue);
     }
     let renderer = Renderer {
@@ -982,7 +993,7 @@ async fn qualify_due(
         admission,
         cancel,
         measure_title,
-        requested_only.then_some(live_recipes.as_slice()),
+        requested_recipe.map(|_| live_recipes.as_slice()),
     )
     .await
 }

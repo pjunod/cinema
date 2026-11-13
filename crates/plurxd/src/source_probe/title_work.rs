@@ -31,6 +31,7 @@ pub(super) struct TitleTask {
     file_id: i64,
     probe_revision: i64,
     playback_requested: bool,
+    playback_recipe: Option<String>,
     live_after: i64,
 }
 impl TitleTask {
@@ -47,6 +48,16 @@ impl TitleTask {
         if !authority.may_execute_job(JobKind::DvTitleScan).await {
             return Ok(None);
         }
+        // Maintenance retains its early physical idle check; only a real
+        // viewer request may use the companion admission below.
+        let mut ordinary_admission = if playback_only {
+            None
+        } else {
+            let Some(admission) = state.transcode.admit_dv_title(false).await else {
+                return Ok(None);
+            };
+            Some(admission)
+        };
         // Empty viewer queues must not hash installed bundles or submit the
         // maintenance outbox's replicated reopen operation on every probe pass.
         let live_demands = if playback_only {
@@ -58,7 +69,37 @@ impl TitleTask {
                 *live_after = 0;
                 return Ok(None);
             }
-            Some(demands)
+            let mut dispatchable = Vec::new();
+            for demand in demands {
+                *live_after = demand.probe_revision;
+                let Some(id) = demand.active_job_id.as_deref() else {
+                    continue;
+                };
+                let Some(job) = state.store.background_job(id).await? else {
+                    continue;
+                };
+                let now = now_ms();
+                let healthy_owner = job
+                    .token
+                    .as_ref()
+                    .is_some_and(|token| token.lease_expires_ms > now);
+                if job.state == plurx_core::store::background_jobs::JobState::Running
+                    && healthy_owner
+                {
+                    continue;
+                }
+                if job.not_before_ms > now
+                    || job.failed_attempts >= job.attempt_limit
+                    || (job.retry_deadline_ms != 0 && job.retry_deadline_ms <= now)
+                {
+                    continue;
+                }
+                dispatchable.push(demand);
+            }
+            if dispatchable.is_empty() {
+                return Ok(None);
+            }
+            Some(dispatchable)
         } else {
             None
         };
@@ -119,12 +160,42 @@ impl TitleTask {
             if !demand.playback_requested && state.jobs.title_scan_awaits_index_pass(file.id) {
                 continue;
             }
-            let Some(admission) = state
-                .transcode
-                .admit_dv_title(demand.playback_requested)
-                .await
-            else {
-                return Ok(None);
+            let playback_recipe = if demand.playback_requested {
+                let backend = state
+                    .transcode
+                    .fel_identity(&tools.backend_digest())
+                    .await
+                    .ok();
+                let selected = plurx_core::transcode::dv_fel_qualification::pending_recipes(
+                    &demand.probe_json,
+                    file.size,
+                    file.mtime,
+                )
+                .into_iter()
+                .find(|request| {
+                    Some(&request.backend_identity) == backend.as_ref()
+                        && demand.playback_recipes.contains(&request.identity)
+                })
+                .map(|request| request.identity);
+                let Some(identity) = selected else {
+                    continue;
+                };
+                demand.playback_recipes = vec![identity.clone()];
+                Some(identity)
+            } else {
+                None
+            };
+            let admission = if let Some(admission) = ordinary_admission.take() {
+                admission
+            } else {
+                let Some(admission) = state
+                    .transcode
+                    .admit_dv_title(demand.playback_requested)
+                    .await
+                else {
+                    return Ok(None);
+                };
+                admission
             };
             let Some(revision) = state
                 .store
@@ -157,7 +228,11 @@ impl TitleTask {
                 .expect("title request identity"),
             ));
             let now = now_ms();
-            let id = if let Some(id) = demand.queued_job_id.clone() {
+            let id = if let Some(id) = demand
+                .active_job_id
+                .clone()
+                .or_else(|| demand.queued_job_id.clone())
+            {
                 id
             } else {
                 let outcome = state
@@ -261,6 +336,7 @@ impl TitleTask {
                 file_id,
                 probe_revision,
                 playback_requested,
+                playback_recipe,
                 live_after: 0,
             }));
         }
@@ -280,6 +356,10 @@ impl TitleTask {
                 .await?;
             for demand in own {
                 if demand.probe_revision == self.probe_revision
+                    && self
+                        .playback_recipe
+                        .as_ref()
+                        .is_some_and(|recipe| demand.playback_recipes.contains(recipe))
                     && demand.scanner_digest.as_deref() == Some(self.scanner.as_str())
                     && eligible_file(state, &demand, &self.backend_digest)
                         .await?
@@ -708,6 +788,11 @@ async fn qualify_owned(
                     tools,
                     admission,
                     &qualification,
+                    demand
+                        .playback_recipes
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or(""),
                 )
                 .await
             } else {

@@ -1126,6 +1126,10 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
             q::verdict_state(Some(&document), file.size, file.mtime, &first.identity),
             q::VerdictState::Current(_)
         ));
+        assert!(store.attach_dv_title_viewer(TitleViewerRequest {
+            file_id:id,viewer:"late-exact-viewer".into(),request:second.clone(),scanner_digest:scanner.clone(),
+            deadline_ms:60_000,now_ms:1007,
+        }).await.expect("late exact viewer"));
         assert!(matches!(
             store
                 .publish_dv_title_job(publication(&scanned, &job, &scanner, 1008))
@@ -1133,6 +1137,9 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
                 .expect("complete"),
             JobPublishOutcome::Published { .. }
         ));
+        let waiters=store.job_waiters(WaiterQuery {job_id:job.id.clone(),after:None,limit:20}).await.expect("late viewer waits");
+        assert!(waiters.waiters.iter().any(|w|w.consumer_ref==second.identity && w.state=="pending"),
+            "a full title aggregate cannot claim exact quality measurement complete");
         assert!(store
             .dv_title_demands(&scanner, 0, 1_000)
             .await
@@ -1148,6 +1155,8 @@ async fn fel_recipe_variants_preserve_peers_and_late_requests_reopen_the_title_o
             )
             .await
             .expect("publish second"));
+        let waiters=store.job_waiters(WaiterQuery {job_id:job.id.clone(),after:None,limit:20}).await.expect("exact verdict completion");
+        assert!(waiters.waiters.iter().any(|w|w.consumer_ref==second.identity && w.state=="succeeded"));
         let document = store
             .get_file_probe_json(id)
             .await
@@ -1331,6 +1340,7 @@ async fn title_live_playback_demands_precede_cursor_and_remain_visible_while_run
             .expect("direct owned live interest");
         assert_eq!(rows.len(), 1, "{backend}");
         assert!(rows[0].queued_job_id.is_none());
+        assert_eq!(rows[0].active_job_id.as_deref(), Some(job_id.as_str()));
         assert!(store.dv_title_playback_demands(0, -1, None).await.is_err());
     })
     .await;
@@ -1858,6 +1868,81 @@ async fn title_terminal_episode_new_recipe_bootstraps_a_new_job() {
             "{backend}"
         );
         assert_eq!(next[0].playback_recipes, vec![second.identity]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn title_manual_cancellation_suppresses_same_viewer_renewal_until_new_intent() {
+    for_each_backend(|store, backend| async move {
+        let scanner = "a".repeat(64);
+        let file = seed_playback(&store, "title-cancelled-viewer").await;
+        let demand = demand(&store, file.id, &scanner).await;
+        let recipe = playback_recipe(&demand);
+        assert!(store
+            .request_dv_fel_variant(file.id, &recipe)
+            .await
+            .expect("pending"));
+        let viewer = |name: &str, now| TitleViewerRequest {
+            file_id: file.id,
+            viewer: name.into(),
+            request: recipe.clone(),
+            scanner_digest: scanner.clone(),
+            deadline_ms: now + 60_000,
+            now_ms: now,
+        };
+        assert!(store
+            .attach_dv_title_viewer(viewer("original", 1_000))
+            .await
+            .expect("first intent"));
+        let id = store
+            .dv_title_playback_demands(0, 1_001, None)
+            .await
+            .expect("live")[0]
+            .active_job_id
+            .clone()
+            .expect("job");
+        store
+            .cancel_job(CancelJob {
+                job_id: id.clone(),
+                now_ms: 1_002,
+            })
+            .await
+            .expect("manual cancel");
+        assert!(store
+            .request_dv_fel_variant(file.id, &recipe)
+            .await
+            .expect("retained request"));
+        assert!(
+            !store
+                .attach_dv_title_viewer(viewer("original", 1_003))
+                .await
+                .expect("renewal respects manual cancellation"),
+            "{backend}"
+        );
+        assert!(store
+            .dv_title_demands(&scanner, 0, 1_004)
+            .await
+            .expect("cancelled outbox stays terminal")
+            .is_empty());
+        assert!(store
+            .dv_title_playback_demands(0, 1_004, None)
+            .await
+            .expect("no revived viewer")
+            .is_empty());
+        assert!(store
+            .attach_dv_title_viewer(viewer("new-viewer", 1_005))
+            .await
+            .expect("new independent intent"));
+        assert_ne!(
+            store
+                .dv_title_playback_demands(0, 1_006, None)
+                .await
+                .expect("new viewer")[0]
+                .active_job_id
+                .as_deref(),
+            Some(id.as_str())
+        );
     })
     .await;
 }
