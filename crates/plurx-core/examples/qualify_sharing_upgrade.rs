@@ -4,6 +4,96 @@
 #[cfg(not(feature = "hiqlite-store"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     Err("qualification requires --features hiqlite-store".into())
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn closed_sqlite_store_rebuild_and_restore_retains_legacy_rows() {
+            let directory = tempfile::tempdir().expect("fixture root");
+            let path = directory.path().join("sqlite-store");
+            let receipt = sqlite_drill(&path).expect("closed SQLite Store drill");
+            assert_eq!(receipt["store_only"], true);
+            assert_eq!(receipt["statement_error_rollback"], true);
+            let before: Value = serde_json::from_slice(
+                &std::fs::read(path.join("retained-before.json")).expect("baseline inventory"),
+            )
+            .expect("baseline JSON");
+            for phase in ["rebuilt", "reopened", "restored"] {
+                let after: Value = serde_json::from_slice(
+                    &std::fs::read(path.join(format!("retained-{phase}.json")))
+                        .expect("phase inventory"),
+                )
+                .expect("phase JSON");
+                for table in TABLES {
+                    let columns = before[table]["columns"]
+                        .as_array()
+                        .expect("original columns");
+                    let rows = after[table]["rows"]
+                        .as_array()
+                        .expect("candidate rows")
+                        .iter()
+                        .map(|row| {
+                            let mut projected = serde_json::Map::new();
+                            for column in columns {
+                                let name = column.as_str().expect("column name");
+                                projected.insert(name.to_owned(), row[name].clone());
+                            }
+                            Value::Object(projected)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(Value::Array(rows), before[table]["rows"], "{phase} {table}");
+                }
+            }
+        }
+
+        #[test]
+        fn terminal_retention_fixture_obeys_production_sqlite_constraints() {
+            let directory = tempfile::tempdir().expect("fixture directory");
+            let path = directory.path().join("plurx.db");
+            drop(SqliteStore::open(&path).expect("production schema"));
+            let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+            connection.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'owner', 'fixture-hash', 1, 1)", []).expect("daemon-owned user");
+            connection
+                .execute_batch(&fixture_sql())
+                .expect("retained fixture must obey real schema checks");
+            let ended: i64 = connection.query_row("SELECT COUNT(*) FROM media_sessions WHERE state='ended' AND terminal_reason='admin_stop' AND drain_deadline_ms IS NULL", [], |row| row.get(0)).expect("terminal inventory");
+            assert_eq!(ended, 2);
+            let unresolved: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM media_session_requests WHERE state != 'resolved'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("request inventory");
+            assert_eq!(unresolved, 0);
+            let observed = chrono::Utc::now().timestamp_millis();
+            let fresh: i64 = connection.query_row("SELECT updated_at_ms FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000072'", [], |row| row.get(0)).expect("fresh ended fixture");
+            assert!((observed - 10_000..=observed).contains(&fresh));
+            let stale: i64 = connection.query_row("SELECT updated_at_ms FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000073'", [], |row| row.get(0)).expect("stale ended fixture");
+            assert_eq!(stale, 10);
+
+            for (table, column) in [
+                ("media_session_requests", "updated_at_ms"),
+                ("media_session_preparations", "created_at_ms"),
+                ("media_playback_desired", "updated_at_ms"),
+                ("media_playback_pointers", "updated_at_ms"),
+                ("media_session_producer_recovery", "created_at_ms"),
+                ("library_channel_session_recipes", "created_at_ms"),
+                ("media_session_terminal_acks", "updated_at_ms"),
+            ] {
+                let oldest: i64 = connection
+                    .query_row(&format!("SELECT MIN({column}) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .expect("seeded retention clock");
+                assert!(
+                    (observed - 10_000..=observed).contains(&oldest),
+                    "stale fixture clock {table}.{column}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -204,97 +294,6 @@ mod qualification {
         Ok(
             json!({"store_only":true,"sqlite_schema_version":version,"closed_file_backup_restore":true,"statement_error_rollback":true,"candidate_store_reopened":true,"restored_legacy_store_reopened":true,"retained_tables":TABLES.len(),"capabilities_advertised":false}),
         )
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn closed_sqlite_store_rebuild_and_restore_retains_legacy_rows() {
-            let directory = tempfile::tempdir().expect("fixture root");
-            let path = directory.path().join("sqlite-store");
-            let receipt = sqlite_drill(&path).expect("closed SQLite Store drill");
-            assert_eq!(receipt["store_only"], true);
-            assert_eq!(receipt["statement_error_rollback"], true);
-            let before: Value = serde_json::from_slice(
-                &std::fs::read(path.join("retained-before.json")).expect("baseline inventory"),
-            )
-            .expect("baseline JSON");
-            for phase in ["rebuilt", "reopened", "restored"] {
-                let after: Value = serde_json::from_slice(
-                    &std::fs::read(path.join(format!("retained-{phase}.json")))
-                        .expect("phase inventory"),
-                )
-                .expect("phase JSON");
-                for table in TABLES {
-                    let columns = before[table]["columns"]
-                        .as_array()
-                        .expect("original columns");
-                    let rows = after[table]["rows"]
-                        .as_array()
-                        .expect("candidate rows")
-                        .iter()
-                        .map(|row| {
-                            let mut projected = serde_json::Map::new();
-                            for column in columns {
-                                let name = column.as_str().expect("column name");
-                                projected.insert(name.to_owned(), row[name].clone());
-                            }
-                            Value::Object(projected)
-                        })
-                        .collect::<Vec<_>>();
-                    assert_eq!(Value::Array(rows), before[table]["rows"], "{phase} {table}");
-                }
-            }
-        }
-
-        #[test]
-        fn terminal_retention_fixture_obeys_production_sqlite_constraints() {
-            let directory = tempfile::tempdir().expect("fixture directory");
-            let path = directory.path().join("plurx.db");
-            drop(SqliteStore::open(&path).expect("production schema"));
-            let connection = rusqlite::Connection::open(&path).expect("fixture connection");
-            connection.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'owner', 'fixture-hash', 1, 1)", []).expect("daemon-owned user");
-            connection
-                .execute_batch(&fixture_sql())
-                .expect("retained fixture must obey real schema checks");
-            let ended: i64 = connection.query_row("SELECT COUNT(*) FROM media_sessions WHERE state='ended' AND terminal_reason='admin_stop' AND drain_deadline_ms IS NULL", [], |row| row.get(0)).expect("terminal inventory");
-            assert_eq!(ended, 2);
-            let unresolved: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM media_session_requests WHERE state != 'resolved'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("request inventory");
-            assert_eq!(unresolved, 0);
-            let observed = chrono::Utc::now().timestamp_millis();
-            let fresh: i64 = connection.query_row("SELECT updated_at_ms FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000072'", [], |row| row.get(0)).expect("fresh ended fixture");
-            assert!((observed - 10_000..=observed).contains(&fresh));
-            let stale: i64 = connection.query_row("SELECT updated_at_ms FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000073'", [], |row| row.get(0)).expect("stale ended fixture");
-            assert_eq!(stale, 10);
-
-            for (table, column) in [
-                ("media_session_requests", "updated_at_ms"),
-                ("media_session_preparations", "created_at_ms"),
-                ("media_playback_desired", "updated_at_ms"),
-                ("media_playback_pointers", "updated_at_ms"),
-                ("media_session_producer_recovery", "created_at_ms"),
-                ("library_channel_session_recipes", "created_at_ms"),
-                ("media_session_terminal_acks", "updated_at_ms"),
-            ] {
-                let oldest: i64 = connection
-                    .query_row(&format!("SELECT MIN({column}) FROM {table}"), [], |row| {
-                        row.get(0)
-                    })
-                    .expect("seeded retention clock");
-                assert!(
-                    (observed - 10_000..=observed).contains(&oldest),
-                    "stale fixture clock {table}.{column}"
-                );
-            }
-        }
     }
 
     pub async fn run() -> Result<()> {
