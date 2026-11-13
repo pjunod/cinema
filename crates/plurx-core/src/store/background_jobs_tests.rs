@@ -2295,7 +2295,7 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
 async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_disk(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
-    use super::background_jobs_resources::StorageDomainMapping;
+    use super::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
     use super::LibraryStore;
     use crate::domain::{LibraryKind, NewLibrary};
 
@@ -2318,19 +2318,22 @@ async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_dis
     }
     let a = &libraries[0];
     let b = &libraries[1];
+    let mappings = libraries
+        .iter()
+        .map(|l| StorageDomainMapping {
+            library_id: l.id,
+            root_path: l.paths[0].display().to_string(),
+            domain_id: l.name.clone(),
+        })
+        .collect();
     store
-        .replace_storage_domains(
-            libraries
-                .iter()
-                .map(|l| StorageDomainMapping {
-                    library_id: l.id,
-                    root_path: l.paths[0].display().to_string(),
-                    domain_id: l.name.clone(),
-                })
-                .collect(),
-            900,
-        )
-        .await?;
+        .save_storage_domains(mappings, None, 900)
+        .await?
+        .expect("valid roots");
+    assert!(matches!(
+        store.apply_pending_storage_domains(900).await?,
+        StorageDomainApply::Applied { .. }
+    ));
     let enqueue_library = |library_id, trigger| NewLibraryWork {
         library_id,
         request_id: uuid::Uuid::new_v4().to_string(),

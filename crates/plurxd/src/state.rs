@@ -6607,6 +6607,7 @@ impl JobManager {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
         }
+        self.apply_storage_domains().await;
         if let Err(error) = self.prepare_predictions().await {
             tracing::warn!(%error, "predictive preparation deferred");
         }
@@ -6803,6 +6804,23 @@ impl JobManager {
         crate::source_custody::source_pressure_changed().notify_waiters();
     }
 
+    async fn apply_storage_domains(&self) {
+        use plurx_core::store::background_jobs_resources::StorageDomainApply;
+        match self.store.apply_pending_storage_domains(clock_ms()).await {
+            Ok(StorageDomainApply::Applied { revision }) => {
+                tracing::info!(revision, "saved storage domains are now in effect");
+            }
+            Ok(StorageDomainApply::Superseded { revision }) => {
+                tracing::info!(
+                    revision,
+                    "saved storage domains superseded by another mapping change"
+                );
+            }
+            Ok(StorageDomainApply::Waiting { .. } | StorageDomainApply::NothingPending) => {}
+            Err(error) => tracing::warn!(%error, "storage domain application unavailable"),
+        }
+    }
+
     async fn maintain_background_queue(self: Arc<Self>) {
         if self.background_upkeep_running.swap(true, Ordering::AcqRel) {
             return;
@@ -6814,6 +6832,7 @@ impl JobManager {
         if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue upkeep unavailable");
         }
+        self.apply_storage_domains().await;
         if let Err(error) = self.store.import_legacy_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue legacy import unavailable");
         }
