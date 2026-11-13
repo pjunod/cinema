@@ -937,7 +937,7 @@ async fn live_title_qualification_publishes_its_receipt_without_polling_full_sca
     let stats = reusable_aggregate(&stored_title(), 7).expect("existing aggregate");
     let acquired = acquire_title(
         true,
-        Some(stats.clone()),
+        Some(stats),
         async { panic!("a stored aggregate does not turn live work into a scan") },
         async {},
     )
@@ -958,7 +958,7 @@ async fn ordinary_title_acquisition_scans_before_qualification_and_preserves_err
         None,
         async {
             order.lock().expect("order").push("scan");
-            Ok(stats.clone())
+            Ok(stats)
         },
         async {
             order.lock().expect("order").push("qualify");

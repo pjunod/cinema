@@ -2627,7 +2627,6 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let foreground = tokio::spawn({
             let admissions = admissions.clone();
-            let resources = resources.clone();
             async move {
                 crate::vodencode::admit_frozen_preparation(
                     &admissions,
