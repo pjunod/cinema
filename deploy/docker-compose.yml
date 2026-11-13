@@ -172,6 +172,7 @@ services:
       # Root-owned host proofs that a dead reader has stopped, read-only to
       # the worker; it can never write or remove them. Empty unless an
       # operator runs a recovery helper (docs/server/SOURCE-CUSTODY-RECOVERY.md).
+      # Linux hosts only; on Docker Desktop, remove this entry.
       - type: bind
         source: /run/plurx-physical-stop
         target: /run/plurx-physical-stop

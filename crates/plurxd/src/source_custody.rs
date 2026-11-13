@@ -77,6 +77,19 @@ pub(crate) fn process_started_ms() -> Option<i64> {
     PROCESS_STARTED_MS.get().copied()
 }
 
+static PROCESS_SOURCE_BOOT: OnceLock<uuid::Uuid> = OnceLock::new();
+
+/// The boot id this process stamps on every foreground owner it registers.
+/// A host census uses it to prove a dead owner belonged to another process.
+pub(crate) fn note_process_source_boot(boot_id: uuid::Uuid) {
+    PROCESS_SOURCE_BOOT.get_or_init(|| boot_id);
+}
+
+/// `None` when this process has never registered foreground sources.
+pub(crate) fn process_source_boot() -> Option<uuid::Uuid> {
+    PROCESS_SOURCE_BOOT.get().copied()
+}
+
 /// Bind the exact inode an enrolled owner opened to its live witness, so a
 /// later host census can refuse a path that now names another file.
 pub(crate) fn record_background_source(
@@ -1007,6 +1020,13 @@ impl SourceRequest {
         // returning a guard that can open input; an uncertain activation never
         // authorizes a read. The existing owner resolves and retries settlement.
         activate_foreground_with_journal(&self.store, token.clone()).await?;
+        // The inode this path names as the owner is armed, before any input
+        // opens it. A later host census refuses a path that names another.
+        if let Err(error) = recovery::record_foreground_source(&self.store, &token, &self.file.path)
+        {
+            tracing::warn!(%error, owner_id = %token.owner.owner_id,
+                "playback source identity not recorded; only a host reboot can prove this reader stopped");
+        }
         source_pressure_changed().notify_waiters();
         let (commands, receiver) = mpsc::unbounded_channel();
         let reads = Arc::new(ReadActivity::default());

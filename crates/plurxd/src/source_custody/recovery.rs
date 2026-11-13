@@ -32,6 +32,24 @@ pub(super) fn record_background_source(
     reader::record_source(&context.dir.with_file_name("v2"), receipt, source)
 }
 
+pub(super) fn record_foreground_source(
+    store: &Arc<dyn Store>,
+    token: &ForegroundSourceToken,
+    path: &Path,
+) -> Result<(), String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
+        return Ok(());
+    };
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    reader::record_source_identity(
+        &context.dir.with_file_name("v2"),
+        &Record::Foreground {
+            token: token.clone(),
+        },
+        &metadata,
+    )
+}
+
 pub(super) fn live_background_join(
     store: &Arc<dyn Store>,
     receipt: &BackgroundSourceCustodyToken,

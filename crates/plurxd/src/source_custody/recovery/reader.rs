@@ -382,10 +382,21 @@ pub(super) fn record_source(
     receipt: &BackgroundSourceCustodyToken,
     source: &std::fs::File,
 ) -> Result<(), String> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let record = Record::Background {
         token: receipt.clone(),
     };
+    let metadata = source.metadata().map_err(|error| error.to_string())?;
+    record_source_identity(directory, &record, &metadata)
+}
+
+/// Write `<witness>.source` (`dev ino`) beside this process's own live
+/// witness for `record`; first write wins, and a foreign witness is skipped.
+pub(super) fn record_source_identity(
+    directory: &Path,
+    record: &Record,
+    metadata: &std::fs::Metadata,
+) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let name = record.name()?.trim_end_matches(".json").to_owned();
     if !OWNED
         .lock()
@@ -394,7 +405,6 @@ pub(super) fn record_source(
     {
         return Ok(());
     }
-    let metadata = source.metadata().map_err(|error| error.to_string())?;
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

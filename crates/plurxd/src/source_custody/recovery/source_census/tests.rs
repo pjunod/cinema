@@ -162,6 +162,7 @@ impl Dead {
                 now_ms: self.lease + 5_000,
                 namespace_init,
                 storage_devices: namespace_init.map(|_| vec![STORAGE, self.source.dev()]),
+                source_boot: None,
             },
             proof,
         )
@@ -400,6 +401,7 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
                 now_ms: dead.lease + 5_000,
                 namespace_init: Some(NAMESPACE),
                 storage_devices: Some(vec![STORAGE]),
+                source_boot: None,
             },
             &with(NAMESPACE, true, 0, 0),
         )
@@ -446,22 +448,27 @@ async fn a_forgotten_job_releases_only_with_the_owners_process_tree_proved_gone(
     assert!(!dead.anchor.exists(), "the worker clears its own witness");
 }
 
-/// A playback owner that died with its daemon: its Store row still holds
-/// custody (not quiescent), its lease was renewed past the activation copy in
-/// the witness, and an unmediated FFmpeg launch poisoned the anchor.
+/// A playback owner that died with its daemon: registered, armed and renewed
+/// through the real Store API (each heartbeat advances the row's fence and
+/// lease past the activation copy in its witness), never quiescent, with its
+/// witness poisoned by an unmediated FFmpeg launch.
 struct DeadPlayback {
     _root: tempfile::TempDir,
     database: std::path::PathBuf,
     store: Arc<dyn Store>,
     witnesses: std::path::PathBuf,
     legacy: std::path::PathBuf,
+    /// The activation-time token the witness carries.
     token: ForegroundSourceToken,
-    /// The Store row's renewed lease; the witness carries an older one.
+    /// The Store row's renewed lease.
     lease: i64,
     source: std::fs::Metadata,
     source_path: std::path::PathBuf,
     anchor: std::path::PathBuf,
+    sidecar: std::path::PathBuf,
 }
+
+const PLAYBACK_NODE: &str = "playback-census-node";
 
 async fn dead_playback() -> DeadPlayback {
     use plurx_core::store::background_jobs_resources::{
@@ -518,49 +525,45 @@ async fn dead_playback() -> DeadPlayback {
         .await
         .expect("read")
         .expect("file row");
-    const NODE: &str = "playback-census-node";
-    let activation_lease = 1_794_000_000_000;
-    let lease = activation_lease + 600_000;
-    let token = ForegroundSourceToken {
-        owner: ForegroundSourceOwner {
-            owner_id: uuid::Uuid::new_v4().to_string(),
-            lifetime_id: uuid::Uuid::new_v4().to_string(),
-            session_incarnation: uuid::Uuid::new_v4().to_string(),
-            producer_attempt: "1".into(),
-            node_id: NODE.into(),
-            boot_id: uuid::Uuid::new_v4().to_string(),
-            file_id,
-            source_size: 100,
-            source_mtime: 1,
-            source_generation: crate::source_custody::source_generation(&file),
-            policy: ForegroundSourcePolicy::Rolling,
-        },
-        fence: 1,
-        lease_expires_at_ms: activation_lease,
+    let registered = 1_794_000_000_000_i64;
+    let owner = ForegroundSourceOwner {
+        owner_id: uuid::Uuid::new_v4().to_string(),
+        lifetime_id: uuid::Uuid::new_v4().to_string(),
+        session_incarnation: uuid::Uuid::new_v4().to_string(),
+        producer_attempt: "1".into(),
+        node_id: PLAYBACK_NODE.into(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        file_id,
+        source_size: 100,
+        source_mtime: 1,
+        source_generation: crate::source_custody::source_generation(&file),
+        policy: ForegroundSourcePolicy::Rolling,
     };
-    // The live row, renewed after activation and never marked quiescent.
-    let mut projection = serde_json::to_value(ForegroundSourceProjection::startup(lease - 5_000))
-        .expect("projection");
-    projection["phase"] = "refill".into();
-    projection["source_quiescent"] = false.into();
-    rusqlite::Connection::open(&database)
-        .expect("fixture connection")
-        .execute(
-            "INSERT INTO foreground_source_owners
-             (owner_id,identity_json,resource_keys_json,fence,phase,projection_json,
-              started_at_ms,updated_at_ms,lease_expires_at_ms,settlement_proof,activation_id)
-             VALUES (?1,?2,'[\"source_io\"]',1,'refill',?3,?4,?4,?5,NULL,?6)",
-            rusqlite::params![
-                token.owner.owner_id,
-                serde_json::to_string(&serde_json::to_value(&token.owner).expect("owner"))
-                    .expect("canonical owner JSON"),
-                projection.to_string(),
-                activation_lease - 30_000,
-                lease,
-                uuid::Uuid::new_v4().to_string(),
-            ],
-        )
-        .expect("dead playback owner");
+    let token = store
+        .register_foreground_source(owner, registered, registered + 30_000)
+        .await
+        .expect("register")
+        .expect("registered owner");
+    let activation = uuid::Uuid::new_v4().to_string();
+    assert!(store
+        .activate_foreground_source_custody(token.clone(), activation.clone())
+        .await
+        .expect("activate"));
+    // Heartbeats renew the row for ten minutes; each advances its fence.
+    let mut current = token.clone();
+    let mut lease = registered + 30_000;
+    for beat in 1..=120_u64 {
+        let now = registered + beat as i64 * 5_000;
+        let mut projection = ForegroundSourceProjection::startup(now);
+        projection.observation_version = beat;
+        lease = now + 30_000;
+        current = store
+            .project_foreground_source(current, projection, now, lease)
+            .await
+            .expect("heartbeat")
+            .expect("renewed owner");
+    }
+    assert!(current.fence > token.fence, "heartbeats advance the fence");
     let source = std::fs::metadata(&path).expect("source identity");
     let recovery = root.path().join("source-custody-recovery");
     let witnesses = recovery.join("v2");
@@ -574,14 +577,13 @@ async fn dead_playback() -> DeadPlayback {
     let nonce = uuid::Uuid::new_v4().to_string();
     private(&anchor, nonce.as_bytes());
     let metadata = std::fs::metadata(&anchor).expect("anchor identity");
-    let activation = uuid::Uuid::new_v4().to_string();
     private(
         &witnesses.join(format!("{name}.armed")),
         activation.as_bytes(),
     );
     let evidence = serde_json::json!({
         "version": 2, "reader_model": "daemon_mediated_v1", "kernel_instance": KERNEL,
-        "activation_id": activation, "node_id": NODE, "anchor_nonce": nonce,
+        "activation_id": activation, "node_id": PLAYBACK_NODE, "anchor_nonce": nonce,
         "anchor_device": metadata.dev(), "anchor_inode": metadata.ino(),
         "anchor_ctime": reader::anchor_ctime(&metadata),
         "record": Record::Foreground { token: token.clone() },
@@ -589,6 +591,12 @@ async fn dead_playback() -> DeadPlayback {
     private(
         &witnesses.join(format!("{name}.json")),
         serde_json::to_vec(&evidence).expect("evidence").as_slice(),
+    );
+    // The inode the path named as the owner was armed.
+    let sidecar = witnesses.join(format!("{name}.source"));
+    private(
+        &sidecar,
+        format!("{} {}", source.dev(), source.ino()).as_bytes(),
     );
     std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::write(&anchor, format!("!{}", &nonce[1..])).expect("poison anchor");
@@ -603,6 +611,7 @@ async fn dead_playback() -> DeadPlayback {
         source,
         source_path: path,
         anchor,
+        sidecar,
     }
 }
 
@@ -641,29 +650,52 @@ impl DeadPlayback {
     fn proof(&self, readers: i64) -> Proof {
         serde_json::from_value(self.proof_value(readers)).expect("proof shape")
     }
-    async fn apply(&self, proof: &Proof, process_started_ms: i64) -> Result<(), String> {
+    /// A daemon on `node` that minted `source_boot` for its own owners.
+    async fn apply_as(
+        &self,
+        proof: &Proof,
+        node: &str,
+        kernel: &str,
+        source_boot: Option<&str>,
+    ) -> Result<(), String> {
         apply(
             &self.store,
             &self.witnesses,
             &self.legacy,
-            &self.token.owner.node_id,
+            node,
             &Context {
-                kernel: KERNEL,
-                process_started_ms,
+                kernel,
+                // A quick restart: this process started inside the dead
+                // owner's lease window. Identity, not wall clock, decides.
+                process_started_ms: self.lease - 20_000,
                 now_ms: self.lease + 5_000,
                 namespace_init: None,
                 storage_devices: None,
+                source_boot,
             },
             proof,
         )
         .await
+    }
+    async fn apply(&self, proof: &Proof) -> Result<(), String> {
+        let this_process = uuid::Uuid::new_v4().to_string();
+        self.apply_as(proof, PLAYBACK_NODE, KERNEL, Some(&this_process))
+            .await
+    }
+    fn set_file(&self, column: &str, value: &str) {
+        rusqlite::Connection::open(&self.database)
+            .expect("fixture connection")
+            .execute(
+                &format!("UPDATE files SET {column}={value} WHERE id=?1"),
+                [self.token.owner.file_id],
+            )
+            .expect("change file row");
     }
 }
 
 #[tokio::test]
 async fn dead_playback_owner_source_census_releases_only_exact_quiescent_custody() {
     let dead = dead_playback().await;
-    let started = dead.lease + 500;
     assert_eq!(
         dead.held(),
         1,
@@ -673,55 +705,97 @@ async fn dead_playback_owner_source_census_releases_only_exact_quiescent_custody
         let error = result.expect_err(reason);
         assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
     };
-    // The helper's playback shape parses as a foreground owner, not a job.
+    // The helper's playback shape parses as a foreground owner, and an owner
+    // carrying both shapes' fields parses as neither.
     assert!(matches!(dead.proof(0).owner, Owner::Foreground(_)));
+    let mut both = dead.proof_value(0);
+    both["owner"]["job_id"] = "job".into();
+    both["owner"]["claim_id"] = "claim".into();
+    assert!(serde_json::from_value::<Proof>(both).is_err());
     // Any open file description on a counted superblock refuses.
     refused(
-        dead.apply(&dead.proof(1), started).await,
+        dead.apply(&dead.proof(1)).await,
         "stale, partial or nonzero",
     );
-    // Authority is the Store row's renewed lease, not the witness's
-    // activation copy: a process that started after the activation lease
-    // but before the renewed lease ended may itself be the owner.
+    // An owner this very process registered may be live, however old.
     refused(
-        dead.apply(&dead.proof(0), dead.token.lease_expires_at_ms + 1)
-            .await,
+        dead.apply_as(
+            &dead.proof(0),
+            PLAYBACK_NODE,
+            KERNEL,
+            Some(&dead.token.owner.boot_id),
+        )
+        .await,
         "may still be live",
     );
-    // A census taken before the renewed lease ended refuses too.
+    // A census taken before the renewed lease ended refuses; the witness's
+    // activation-time lease is long past.
     let mut early = dead.proof(0);
     early.passes[0].at_ms = dead.lease - 1;
-    refused(dead.apply(&early, started).await, "may still be live");
+    early.passes[1].at_ms = dead.lease + 3_000;
+    refused(dead.apply(&early).await, "may still be live");
+    // Another node's or another kernel's daemon is not this owner's.
+    refused(
+        dead.apply_as(&dead.proof(0), "another-node", KERNEL, None)
+            .await,
+        "exact dead-owner witness differ",
+    );
+    let mut other_kernel = dead.proof_value(0);
+    other_kernel["kernel_instance"] = "linux:another-boot".into();
+    refused(
+        dead.apply_as(
+            &serde_json::from_value(other_kernel).expect("shape"),
+            PLAYBACK_NODE,
+            "linux:another-boot",
+            None,
+        )
+        .await,
+        "exact dead-owner witness differ",
+    );
     // A census naming another owner of the same title refuses.
     let mut other = dead.proof_value(0);
     other["owner"]["session_incarnation"] = uuid::Uuid::new_v4().to_string().into();
     refused(
-        dead.apply(&serde_json::from_value(other).expect("shape"), started)
+        dead.apply(&serde_json::from_value(other).expect("shape"))
             .await,
         "exact dead-owner witness differ",
     );
-    // A census of another inode is not the owner's source.
+    // A census of another inode is not the inode the owner was armed on.
     let mut foreign = dead.proof(0);
     foreign.source.inode += 1;
     for pass in &mut foreign.passes {
         pass.superblocks[0].inode += 1;
     }
-    refused(
-        dead.apply(&foreign, started).await,
-        "differs from the owner's exact source",
-    );
+    refused(dead.apply(&foreign).await, "not the inode the owner opened");
     // The anchor must be unchanged since the census observed it.
     let mut touched = dead.proof(0);
     touched.anchor.ctime.1 ^= 1;
-    refused(dead.apply(&touched, started).await, "anchor changed");
+    refused(dead.apply(&touched).await, "anchor changed");
     // The daemon's own anchor observation: another lock holder refuses.
     let holder = std::fs::File::open(&dead.anchor).expect("anchor");
     holder.try_lock().expect("foreign lock holder");
     refused(
-        dead.apply(&dead.proof(0), started).await,
+        dead.apply(&dead.proof(0)).await,
         "still holds the anchor lock",
     );
     drop(holder);
+    // A path now naming another inode than the one recorded refuses.
+    std::fs::remove_file(&dead.sidecar).expect("remove sidecar");
+    private(
+        &dead.sidecar,
+        format!("{} {}", dead.source.dev(), dead.source.ino() + 1).as_bytes(),
+    );
+    refused(
+        dead.apply(&dead.proof(0)).await,
+        "not the inode the owner opened",
+    );
+    // Without a recorded inode only a host reboot proves the stop.
+    std::fs::remove_file(&dead.sidecar).expect("remove sidecar");
+    refused(dead.apply(&dead.proof(0)).await, "recorded no source inode");
+    private(
+        &dead.sidecar,
+        format!("{} {}", dead.source.dev(), dead.source.ino()).as_bytes(),
+    );
     // A source rewritten in place since registration is not the owner's.
     std::fs::File::options()
         .write(true)
@@ -731,7 +805,7 @@ async fn dead_playback_owner_source_census_releases_only_exact_quiescent_custody
         })
         .expect("touch source");
     refused(
-        dead.apply(&dead.proof(0), started).await,
+        dead.apply(&dead.proof(0)).await,
         "differs from the owner's exact source",
     );
     std::fs::File::options()
@@ -741,10 +815,19 @@ async fn dead_playback_owner_source_census_releases_only_exact_quiescent_custody
             file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
         })
         .expect("restore source mtime");
+    // A rescan that changed the Store's file row is not the owner's source.
+    dead.set_file("size", "101");
+    refused(
+        dead.apply(&dead.proof(0)).await,
+        "differs from the owner's exact source",
+    );
+    dead.set_file("size", "100");
     assert_eq!(dead.held(), 1, "every refusal keeps the custody");
 
+    // After a quick restart (this process started inside the dead owner's
+    // lease window), with a fence advanced by heartbeats.
     let quiescent = dead.proof(0);
-    dead.apply(&quiescent, started)
+    dead.apply(&quiescent)
         .await
         .expect("exact quiescent census releases");
     assert_eq!(dead.held(), 0, "background reads are no longer blocked");
@@ -757,6 +840,7 @@ async fn dead_playback_owner_source_census_releases_only_exact_quiescent_custody
     assert_eq!(owners, 0, "the exact owner row is released");
     assert!(
         !dead.anchor.exists()
+            && !dead.sidecar.exists()
             && !dead
                 .witnesses
                 .join(format!("foreground-{}.json", dead.token.owner.owner_id))
@@ -764,7 +848,26 @@ async fn dead_playback_owner_source_census_releases_only_exact_quiescent_custody
         "the worker clears only its own witness"
     );
     // Replay after release is a no-op until the operator removes the proof.
-    dead.apply(&quiescent, started)
+    dead.apply(&quiescent).await.expect("idempotent replay");
+}
+
+#[tokio::test]
+async fn a_census_settled_but_unreleased_playback_owner_finishes_on_replay() {
+    let dead = dead_playback().await;
+    // A crash after the settlement mark, before the row release.
+    rusqlite::Connection::open(&dead.database)
+        .expect("fixture connection")
+        .execute(
+            "UPDATE foreground_source_owners SET settlement_proof='joined' WHERE owner_id=?1",
+            [&dead.token.owner.owner_id],
+        )
+        .expect("crash after settlement mark");
+    dead.apply(&dead.proof(0))
         .await
-        .expect("idempotent replay");
+        .expect("replay finishes the exact release");
+    assert_eq!(dead.held(), 0);
+    assert!(
+        !dead.anchor.exists(),
+        "the witness leaves only after release"
+    );
 }

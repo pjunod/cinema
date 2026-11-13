@@ -250,18 +250,25 @@ registration (`lifetime_id`, `session_incarnation`, `producer_attempt`,
 `node_id`, `boot_id`, `fence`) and no teardown view. The daemon requires:
 
 - the poisoned v2 foreground witness for that owner, from this kernel and node;
-- the Store row's **renewed** lease, not the witness's activation-time copy,
-  ended before the census's first pass and before this daemon process
-  started, so an earlier process held it;
-- the owner's registration binding: the file row's size, mtime and path
-  generation unchanged, matching the census and the daemon's own `stat`;
+- an owner `boot_id` other than this process's own. Every daemon process
+  mints one and stamps it on each owner it registers, so another one means
+  an earlier process registered it, and the data-directory lock excludes
+  that process. This holds after a restart of any length; the wall clock
+  plays no part;
+- the Store row's renewed lease (heartbeats advance its fence and lease past
+  the witness's activation copy) ended before the census's first pass;
+- the inode the path named when the owner was armed (`<witness>.source`),
+  matching the census and the daemon's own `stat`, plus the registration's
+  file binding (size, mtime, path generation) unchanged in the Store;
 - the unchanged, unlocked anchor, as for a job.
 
 It then marks the exact owner settled, releases its row and clears only its
-witness. A playback owner whose file row is gone refuses; there is no
-teardown fallback. This is the stopgap for owners already stuck: the
-root-cause work keeps playback witnesses unpoisoned, so a restart settles
-through the ordinary v2 replay with no host step.
+witness. An owner armed before its inode was recorded, or whose title was
+rescanned, replaced or removed since, refuses with no teardown fallback; a
+host reboot is its proof, and the ordinary reboot replay releases it. This is
+the stopgap for owners already stuck: the root-cause work keeps playback
+witnesses unpoisoned, so a restart settles through the ordinary v2 replay
+with no host step.
 
 ```bash
 # On the owner host, as root, with the owner id from Activity.

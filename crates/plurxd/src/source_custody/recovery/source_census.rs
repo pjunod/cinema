@@ -429,6 +429,7 @@ pub(super) async fn replay(
     let started = crate::source_custody::process_started_ms()
         .or_else(process_started_ms)
         .ok_or("daemon process start time unavailable")?;
+    let source_boot = crate::source_custody::process_source_boot().map(|id| id.to_string());
     let mut result = Ok(());
     for proof in proofs {
         let applied = apply(
@@ -442,6 +443,7 @@ pub(super) async fn replay(
                 now_ms: crate::state::clock_ms(),
                 namespace_init: namespace_init(),
                 storage_devices: storage.clone(),
+                source_boot: source_boot.as_deref(),
             },
             &proof,
         )
@@ -464,6 +466,9 @@ pub(super) struct Context<'a> {
     /// Every network or FUSE superblock mounted for this daemon, and the
     /// superblock of every library root it serves.
     pub(super) storage_devices: Option<Vec<u64>>,
+    /// The boot id this process stamps on the foreground owners it
+    /// registers; `None` when it has registered none.
+    pub(super) source_boot: Option<&'a str>,
 }
 
 /// `(mount point, device, fstype)` for every mount in this process's mount
@@ -741,14 +746,18 @@ fn held_anchor(
 }
 
 /// A playback owner died with its daemon, after an unmediated FFmpeg launch
-/// poisoned its witness. Its authority is the Store row's renewed lease, not
-/// the witness's activation-time copy: that lease must have ended before the
-/// census's first pass and before this daemon process started, so it was
-/// issued to an earlier process, which the data-directory lock this process
-/// holds excludes. The exact source is the owner's own registration binding
-/// (file row, size, mtime and path generation), checked against the Store,
-/// the census and this daemon's own `stat`. There is no teardown fallback:
-/// a foreground owner without its file row refuses.
+/// poisoned its witness. The owner is proved to belong to an earlier process
+/// by identity, not wall clock: the boot id every foreground owner carries
+/// is minted once per daemon process, so an owner stamped with another one
+/// was registered by a process other than this one, which the data-directory
+/// lock this process holds excludes from still running. Only that process
+/// renews the row, so its renewed lease (not the witness's activation copy)
+/// must also have ended before the census's first pass. The exact source is
+/// the inode the path named when the owner was armed (`.source`), checked
+/// against the census and this daemon's own `stat`, plus the registration's
+/// file binding (size, mtime, path generation) against the Store. An owner
+/// without a recorded inode, or whose title has since changed or gone,
+/// refuses: a host reboot is its proof (SOURCE-CUSTODY-RECOVERY.md §1.3).
 async fn apply_foreground(
     store: &Arc<dyn Store>,
     witnesses: &Path,
@@ -784,10 +793,12 @@ async fn apply_foreground(
         .await
         .map_err(|e| e.to_string())?
     {
+        // Every heartbeat projection advances the row's fence past the
+        // activation-time copy in the witness; identity is the exact owner.
         if current.owner != token.owner
-            || current.fence != token.fence
+            || current.fence < token.fence
+            || context.source_boot == Some(token.owner.boot_id.as_str())
             || current.lease_expires_at_ms >= proof.passes[0].at_ms
-            || current.lease_expires_at_ms >= context.process_started_ms
         {
             return Err("authoritative playback owner may still be live".into());
         }
@@ -797,12 +808,14 @@ async fn apply_foreground(
             .map_err(|e| e.to_string())?
             .ok_or("census source file row unavailable")?;
         let seen = std::fs::metadata(&file.path).map_err(|e| e.to_string())?;
-        if witness.source.is_some_and(|(device, inode)| {
-            seen.dev() != device
-                || seen.ino() != inode
-                || inode != proof.source.inode
-                || !proof.census_devices().any(|counted| counted == device)
-        }) {
+        let Some((device, inode)) = witness.source else {
+            return Err("playback owner recorded no source inode; a host reboot proves it".into());
+        };
+        if seen.dev() != device
+            || seen.ino() != inode
+            || inode != proof.source.inode
+            || !proof.census_devices().any(|counted| counted == device)
+        {
             return Err("census source is not the inode the owner opened".into());
         }
         let (size, mtime) = (token.owner.source_size, token.owner.source_mtime);
