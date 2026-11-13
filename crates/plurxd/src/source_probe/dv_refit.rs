@@ -199,7 +199,7 @@ impl Spool {
             .take(MAX_SPOOL_BYTES + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_SPOOL_BYTES {
-            return Err(std::io::Error::other("F+ spool exceeds its bound"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "F+ spool exceeds its bound"));
         }
         Ok(bytes)
     }
@@ -320,10 +320,17 @@ impl Spool {
         .map_err(|e| format!("F+ spool: {e}"))
     }
 
-    pub(super) async fn run_output(&self) -> Vec<u8> {
-        self.blocking(|spool| Self::read_bounded(&spool.path(".run")).unwrap_or_default())
+    pub(super) async fn run_output(&self) -> Result<Vec<u8>, RunError> {
+        self.blocking(|spool| Self::read_bounded(&spool.path(".run")))
             .await
-            .unwrap_or_default()
+            .map_err(RunError::Transient)?
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    RunError::Malformed(error.to_string())
+                } else {
+                    RunError::Transient(format!("reading F+ output: {error}"))
+                }
+            })
     }
 
     pub(super) async fn discard(&self) {
@@ -467,7 +474,14 @@ pub(super) async fn settle_child(
         prefix_lines.push(line);
         prefix.push(scene);
     }
-    let bytes = spool.run_output().await;
+    let bytes = match spool.run_output().await {
+        Ok(bytes) => bytes,
+        Err(error @ RunError::Malformed(_)) => {
+            spool.discard().await;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     match exit {
         Exit::Success => {
             let at = resume.map(|(_, at)| at);
