@@ -772,7 +772,6 @@ const PLAN_CALLS: &[(&str, &str, &str, &str)] = &[
     ("transcode/manager/create.rs", "start_live_recovery_session", "start_copy_with_audio_offset", "plan"),
     ("transcode/manager/create.rs", "start_live_recovery_session", "start_with_audio_offset", "plan"),
     ("transcode/manager/create.rs", "try_vod_session", "prepare_vod_encoding_noting", "plan"),
-    ("transcode/manager/create.rs", "vod_preparation_snapshot", "vod_preparation_snapshot_planned", "None"),
     ("transcode/manager/create.rs", "vod_settings", "vod_settings_planned", "None"),
     ("transcode/manager/plan.rs", "resolve_held_movie_plan", "resolve_held_movie_plan_with_fonts", "None"),
     ("transcode/manager/plan.rs", "resolve_held_movie_plan_with_fonts", "resolve_movie_plan_with_processing_exclusion", "plan"),

@@ -1262,8 +1262,8 @@ impl TranscodeManager {
         .await
     }
 
-    /// Retain the accepted inputs or acquire one real bounded atomic snapshot.
-    /// Revalidation can reject it, but cannot silently replace its choice.
+    /// Test the legacy path without an ingress plan.
+    #[cfg(test)]
     pub(super) async fn vod_preparation_snapshot(
         &self,
         req: &SessionRequest,
@@ -1272,8 +1272,10 @@ impl TranscodeManager {
         self.vod_preparation_snapshot_planned(req, file, None).await
     }
 
-    /// [`Self::vod_preparation_snapshot`] that answers from the create's plan
-    /// (D3b) where the request carries no accepted snapshot of its own.
+    /// Retain the accepted inputs or acquire one real bounded atomic snapshot.
+    /// Revalidation can reject it, but cannot silently replace its choice.
+    /// Answer from the create's plan (D3b) where the request carries no
+    /// accepted snapshot of its own.
     pub(super) async fn vod_preparation_snapshot_planned(
         &self,
         req: &SessionRequest,
