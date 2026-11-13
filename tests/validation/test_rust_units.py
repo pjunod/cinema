@@ -14,6 +14,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 from validation import rust_units as ru
@@ -270,6 +271,46 @@ class ReceiptAuthenticationTests(unittest.TestCase):
 
     def test_dispatch_cannot_impersonate_the_main_lane_stage(self):
         self.assertEqual(self.adopted(self.forge(workflow="main-fast-lane.yml")), set())
+
+    def test_malformed_artifact_lookup_json_runs_tests_instead_of_adopting(self):
+        forge = ru.Forge("https://forge.invalid/api/v1", "owner/repo", "fixture-token")
+        authenticator = mock.Mock()
+        with mock.patch.object(forge, "bytes", return_value=b"{malformed"):
+            result = ru.history(forge, authenticator, "app", self.key)
+        self.assertEqual(result["passed"], set())
+        self.assertEqual(result["runs"], [])
+        authenticator.authenticate.assert_not_called()
+
+    def test_malformed_artifact_lookup_shapes_run_tests_instead_of_adopting(self):
+        for value in (None, 7, "bad", {}, {"artifacts": None}, {"artifacts": {}}, {"artifacts": "bad"}):
+            with self.subTest(value=value):
+                forge, authenticator = mock.Mock(), mock.Mock()
+                forge.get.return_value = value
+                result = ru.history(forge, authenticator, "app", self.key)
+                self.assertEqual(result["passed"], set())
+                self.assertEqual(result["runs"], [])
+                authenticator.authenticate.assert_not_called()
+
+    def test_malformed_artifact_run_ids_do_not_hide_valid_history(self):
+        forge = self.forge()
+        original_get = forge.get
+        artifacts = original_get("/actions/artifacts")
+        name = ru.receipt_name("app", self.key)
+        malformed = [{"name": name, "run_id": value} for value in (None, "41", {}, True, 0, -1)]
+        def get(path, query=None):
+            return artifacts + malformed if path == "/actions/artifacts" else original_get(path, query)
+        with mock.patch.object(forge, "get", side_effect=get):
+            self.assertEqual(self.adopted(forge), set(self.passes))
+
+    def test_a_timed_out_history_commit_fetch_runs_tests_instead_of_adopting(self):
+        forge = self.forge()
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "fixture-token"}), mock.patch.object(
+            ru.subprocess, "run", side_effect=[
+                mock.Mock(returncode=1), subprocess.TimeoutExpired(["git", "fetch"], 120)
+            ]
+        ) as run:
+            self.assertEqual(self.adopted(forge), set())
+            self.assertEqual(run.call_count, 2)
 
     def test_a_pass_missing_from_the_shard_log_is_not_adopted(self):
         log = "2026-11-12T10:00:00.1Z         PASS [   0.012s] app aa::first\n"
