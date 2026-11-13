@@ -363,9 +363,9 @@ fn inherit_renderer_outputs(
     command: &mut tokio::process::Command,
     directory: &std::fs::File,
     output: &std::fs::File,
-) -> Result<(), String> {
+    stdio: crate::producer_spawn::ChildStdios<'_>,
+) -> Result<std::sync::Arc<crate::producer_spawn::DescriptorManifest>, String> {
     use std::os::unix::fs::FileTypeExt;
-    use std::os::unix::process::CommandExt;
     if !directory
         .metadata()
         .map_err(|error| error.to_string())?
@@ -383,38 +383,12 @@ fn inherit_renderer_outputs(
     if flags < 0 || flags & libc::O_ACCMODE != libc::O_WRONLY {
         return Err("FEL renderer pipe must be write-only".into());
     }
-    let descriptors = [(directory.as_raw_fd(), 4), (output.as_raw_fd(), 5)];
-    // SAFETY: the post-fork hook uses only descriptor syscalls. Duplicate every
-    // source before assigning targets, since either source may occupy 4 or 5.
-    unsafe {
-        command.as_std_mut().pre_exec(move || {
-            let mut copies = [-1; 2];
-            for (index, (source, _)) in descriptors.iter().enumerate() {
-                copies[index] = libc::fcntl(*source, libc::F_DUPFD_CLOEXEC, 10);
-                if copies[index] < 0 {
-                    let error = std::io::Error::last_os_error();
-                    for copy in copies.into_iter().filter(|copy| *copy >= 0) {
-                        libc::close(copy);
-                    }
-                    return Err(error);
-                }
-            }
-            for (copy, (_, target)) in copies.into_iter().zip(descriptors) {
-                if libc::dup2(copy, target) < 0 {
-                    let error = std::io::Error::last_os_error();
-                    for copy in copies {
-                        libc::close(copy);
-                    }
-                    return Err(error);
-                }
-            }
-            for copy in copies {
-                libc::close(copy);
-            }
-            Ok(())
-        });
-    }
-    Ok(())
+    crate::producer_spawn::Descriptors::from_mappings(
+        &[(directory.as_raw_fd(), 4), (output.as_raw_fd(), 5)],
+        None,
+    )
+    .prepare(command, stdio)
+    .map_err(|error| error.to_string())
 }
 
 /// Retain child registrations and the input bridge until every child has been
@@ -583,10 +557,19 @@ async fn render_owned(
     std::fs::create_dir(&evidence).map_err(|error| error.to_string())?;
     let directory = plurx_core::fs_secure::open_directory_nofollow_blocking(&evidence)
         .map_err(|error| error.to_string())?;
+    // This directory was created immediately above for this qualification;
+    // an arbitrary media or subtitle handle must never gain this registration.
+    let _directory_registration =
+        plurx_core::process::source_lifetime::register_daemon_file(&directory, &evidence)
+            .map_err(|error| error.to_string())?;
     let (read, write) = std::io::pipe().map_err(|error| error.to_string())?;
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
-    let diagnostics = std::fs::File::create(scratch.join(format!("{mode}-{export}.log")))
-        .map_err(|error| error.to_string())?;
+    let diagnostics_path = scratch.join(format!("{mode}-{export}.log"));
+    let diagnostics =
+        std::fs::File::create(&diagnostics_path).map_err(|error| error.to_string())?;
+    let _diagnostics_registration =
+        plurx_core::process::source_lifetime::register_daemon_file(&diagnostics, &diagnostics_path)
+            .map_err(|error| error.to_string())?;
     let mut args = helper_args(&sample.clock, window, mode, export);
     args[0] = stage
         .input
@@ -607,9 +590,17 @@ async fn render_owned(
         .env("MESA_SHADER_CACHE_MAX_SIZE", "64M")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::from(diagnostics))
         .kill_on_drop(true);
-    inherit_renderer_outputs(&mut helper, &directory, &write)?;
+    let helper_manifest = inherit_renderer_outputs(
+        &mut helper,
+        &directory,
+        &write,
+        crate::producer_spawn::ChildStdios {
+            stdin: crate::producer_spawn::ChildStdio::Null,
+            stdout: crate::producer_spawn::ChildStdio::Piped,
+            stderr: crate::producer_spawn::ChildStdio::File(&diagnostics),
+        },
+    )?;
     let mut consumer = tokio::process::Command::new(&sample.ffmpeg);
     match encode_to {
         Some(output) => {
@@ -629,22 +620,38 @@ async fn render_owned(
             consumer.stdout(Stdio::piped());
         }
     }
-    consumer
-        .stdin(Stdio::from(read_end_file(read)))
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    consumer.kill_on_drop(true);
+    let read = read_end_file(read);
+    let consumer_manifest = crate::producer_spawn::Descriptors::default()
+        .prepare(
+            &mut consumer,
+            crate::producer_spawn::ChildStdios {
+                stdin: crate::producer_spawn::ChildStdio::File(&read),
+                stdout: if encode_to.is_some() {
+                    crate::producer_spawn::ChildStdio::Null
+                } else {
+                    crate::producer_spawn::ChildStdio::Piped
+                },
+                stderr: crate::producer_spawn::ChildStdio::Piped,
+            },
+        )
+        .map_err(|error| error.to_string())?;
     let work = if encode_to.is_some() {
         "Dolby Vision FEL qualification encode"
     } else {
         "Dolby Vision FEL qualification sample"
     };
-    let group = plurx_core::process::source_lifetime::mediated(child_group::Group::start(
-        &mut helper,
-        &sample.cancel,
-        ChildWork::background("Dolby Vision FEL qualification render"),
-    ))
-    .await?;
+    let group =
+        plurx_core::process::source_lifetime::mediated(child_group::Group::start_with_manifest(
+            &mut helper,
+            &sample.cancel,
+            ChildWork::background("Dolby Vision FEL qualification render"),
+            helper_manifest,
+        ))
+        .await?;
     stage.group = Some(group);
+    // The command's prepared hook pins the output writer until it is dropped.
+    drop(helper);
     drop(write);
     // Only the output NUT pipe crosses this mediated spawn boundary.
     plurx_core::process::source_lifetime::mediated(async {
@@ -652,9 +659,14 @@ async fn render_owned(
             .group
             .as_mut()
             .expect("owned renderer group")
-            .add(&mut consumer, ChildWork::background(work))
+            .add_with_manifest(
+                &mut consumer,
+                ChildWork::background(work),
+                &consumer_manifest,
+            )
     })
     .await?;
+    drop((consumer, consumer_manifest, read));
     let group = stage.group.as_mut().expect("owned qualification group");
     let (guard, id, children) = group.parts();
     let (helper, consumer) = children.split_at_mut(1);
@@ -1312,10 +1324,22 @@ mod tests {
             }
         }
         assert!(
-            inherit_renderer_outputs(&mut command, &directory, &source).is_err(),
+            inherit_renderer_outputs(
+                &mut command,
+                &directory,
+                &source,
+                crate::producer_spawn::ChildStdios::CAPTURED
+            )
+            .is_err(),
             "a regular source file must never qualify as an output pipe"
         );
-        inherit_renderer_outputs(&mut command, &directory, &write).expect("output-only handoff");
+        inherit_renderer_outputs(
+            &mut command,
+            &directory,
+            &write,
+            crate::producer_spawn::ChildStdios::CAPTURED,
+        )
+        .expect("output-only handoff");
         assert!(
             !plurx_core::process::source_lifetime::has_descriptor_handoff(command.as_std()),
             "the audited outputs do not clear or require a raw-source exemption"

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
+mod diagnostics;
 mod recovery;
 
 pub(crate) fn validate_recovery_startup(authoritative: bool) -> Result<(), String> {
@@ -80,6 +81,75 @@ pub(crate) fn note_process_start() {
 #[cfg(target_os = "linux")]
 pub(crate) fn process_started_ms() -> Option<i64> {
     PROCESS_STARTED_MS.get().copied()
+}
+
+/// Configure the process-wide verifier once from startup's canonical managed
+/// roots. Unit AppStates do not mutate this registry or inherit test roots.
+pub(crate) fn configure_access_roots(
+    config: &plurx_core::config::Config,
+    dirs: &crate::state::Dirs,
+) -> Result<(), String> {
+    let owned = vec![
+        config.storage.data_dir.clone(),
+        dirs.artwork.clone(),
+        dirs.transcode.clone(),
+        dirs.cache.clone(),
+        dirs.subs.clone(),
+        dirs.runtime_cache.clone(),
+        dirs.renditions.clone(),
+    ];
+    let mut tools = Vec::new();
+    for directory in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+        if let Ok(path) = std::fs::canonicalize(directory) {
+            tools.push(path);
+        }
+    }
+    let search: Vec<_> = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .collect();
+    for program in [
+        crate::ffmpeg::ffmpeg_bin(),
+        crate::ffmpeg::ffprobe_bin(),
+        crate::ffmpeg::bound_ffprobe_bin(),
+        "dovi_tool".into(),
+        "mkvmerge".into(),
+        "nvidia-smi".into(),
+        "vainfo".into(),
+        "vulkaninfo".into(),
+    ] {
+        let path = Path::new(&program);
+        let found = if path.components().count() > 1 {
+            std::fs::canonicalize(path).ok()
+        } else {
+            search
+                .iter()
+                .map(|directory| directory.join(path))
+                .find(|candidate| candidate.is_file())
+                .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+        };
+        if let Some(parent) = found.as_deref().and_then(Path::parent) {
+            tools.push(parent.to_owned());
+        }
+    }
+    if let Ok(executable) = std::env::current_exe().and_then(std::fs::canonicalize) {
+        if let Some(parent) = executable.parent() {
+            tools.push(parent.to_owned());
+        }
+    }
+    // Daemon-created executable snapshots live in this managed runtime cache.
+    tools.push(dirs.runtime_cache.clone());
+    plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
+        .map_err(|error| error.to_string())
+}
+
+/// Local observations only; source recovery never uses these diagnostics as proof.
+pub(crate) fn recovery_status(store: &Arc<dyn Store>) -> serde_json::Value {
+    recovery::status(store)
+}
+
+pub(crate) fn launch_prometheus() -> String {
+    diagnostics::prometheus()
 }
 
 /// Bind the exact inode an enrolled owner opened to its live witness, so a

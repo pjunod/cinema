@@ -15,6 +15,7 @@ SOURCES = (
     "tools/dv_processing/controls/test_dm_active_area.c",
     "tools/dv_processing/dv_dm.h",
     "tools/dv_processing/dm_closed_form.h",
+    "tools/dv_processing/dm_cm29_gamut_tables.h",
 )
 
 

@@ -32,6 +32,62 @@ pub(super) fn record_background_source(
     reader::record_source(&context.dir.with_file_name("v2"), receipt, source)
 }
 
+/// Read-only observations; none of these fields authorizes settlement.
+pub(super) fn status(store: &Arc<dyn Store>) -> serde_json::Value {
+    let kernel_available = reader::kernel_instance().is_some();
+    let mut authoritative_backend = false;
+    let mut local_filesystem = false;
+    let mut poisoned = serde_json::Value::Null;
+    let mut error = None;
+    match context_snapshot(store) {
+        Ok(Some(context)) if context.authoritative => {
+            authoritative_backend = true;
+            #[cfg(unix)]
+            {
+                // No witness directory is needed before the first reader. The
+                // configured durable data root is two levels above v1/v2.
+                local_filesystem = context
+                    .dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(|root| std::fs::File::open(root).ok())
+                    .is_some_and(|file| reader::local_filesystem(&file));
+            }
+            match reader::poisoned_witnesses(&context.dir.with_file_name("v2")) {
+                Ok(snapshot) => {
+                    poisoned = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null)
+                }
+                Err(reason) => error = Some(reason),
+            }
+        }
+        Ok(_) => {}
+        Err(reason) => error = Some(reason),
+    }
+    #[cfg(target_os = "linux")]
+    let daemon_init_or_subreaper = {
+        let mut subreaper: libc::c_int = 0;
+        // SAFETY: read-only prctl writes one integer through a live pointer.
+        let result = unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut subreaper, 0, 0, 0) };
+        if std::process::id() == 1 {
+            Some(true)
+        } else if result == 0 {
+            Some(subreaper != 0)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let daemon_init_or_subreaper: Option<bool> = None;
+    serde_json::json!({
+        "supported": authoritative_backend && kernel_available && local_filesystem,
+        "authoritative_backend": authoritative_backend,
+        "kernel_available": kernel_available,
+        "local_filesystem": local_filesystem,
+        "daemon_init_or_subreaper": daemon_init_or_subreaper,
+        "poisoned": poisoned, "error": error,
+    })
+}
+
 pub(super) fn live_background_join(
     store: &Arc<dyn Store>,
     receipt: &BackgroundSourceCustodyToken,

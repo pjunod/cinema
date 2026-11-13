@@ -1,5 +1,5 @@
 /* Research-only native coordinate extraction for flat CM v2.9 probe tiles.
- * Usage: coordinates PEAK_NITS MIN_NITS SRC_YUV COORDS_TXT OUT_F64 [LIFT]
+ * Usage: coordinates PEAK_NITS MIN_NITS SRC_YUV COORDS_TXT OUT_F64 [LIFT [SATURATION_GAIN]]
  * Input raster is little-endian BT.2020/PQ f32 RGB; output coordinates are
  * explicitly serialized as little-endian IEEE-754 binary64.
  */
@@ -30,8 +30,8 @@ static int write_f64le(FILE *out, double value) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 6 && argc != 7) {
-    fprintf(stderr, "usage: %s PEAK_NITS MIN_NITS SRC_YUV COORDS_TXT OUT_F64 [LIFT]\n", argv[0]);
+  if (argc != 6 && argc != 7 && argc != 8) {
+    fprintf(stderr, "usage: %s PEAK_NITS MIN_NITS SRC_YUV COORDS_TXT OUT_F64 [LIFT [SATURATION_GAIN]]\n", argv[0]);
     return 2;
   }
   char *end_peak, *end_min;
@@ -44,6 +44,10 @@ int main(int argc, char **argv) {
   if (argc > 6) {
     char *end; trim.lift = strtod(argv[6], &end);
     if (!*argv[6] || *end || !isfinite(trim.lift) || trim.lift < -1 || trim.lift > 1) return 2;
+  }
+  if (argc > 7) {
+    char *end; trim.sg = strtod(argv[7], &end);
+    if (!*argv[7] || *end || !isfinite(trim.sg) || trim.sg < -1 || trim.sg > 1) return 2;
   }
   if (!dm_cm29_prepare(&state, L1, 0.005, 4000.0, &target, &trim)) return 3;
 
@@ -62,7 +66,7 @@ int main(int argc, char **argv) {
     dm_cm29_pix pixel;
     dm_cm29_pixel_pre(&state, rgb, &pixel);
     double Ib = dm_clampd(pixel.Ib, 0, state.TM), Ii = dm_maxd(pixel.I, 1e-6);
-    double sc = dm_clampd((Ib / Ii) * (2 + Ii) / (2 + Ib), .5, 2);
+    double sc = dm_clampd((Ib / Ii) * (2 + Ii) / (2 + Ib), .5, 2) * (1 + .5 * state.tr.sg);
     double u[3] = {Ib * 64 / state.TM,
                    pixel.ipt[1] * sc * 32 / state.TM,
                    pixel.ipt[2] * sc * 32 / state.TM};

@@ -1,6 +1,6 @@
 # Playback reads keep a valid recovery witness
 
-**Status:** proposed · revised after Fable review · plan only, nothing built ·
+**Status:** implementation in progress; [execution status](PLAYBACK-READER-WITNESS-STATUS.md) · revised after Fable review · plan only, nothing built ·
 **Updated:** 2026-11-12 · **Source baseline:** `origin/main` at `54aebebf9`;
 in-flight `effort/playback-start-phase2` at `50fa67f41`; census stopgap
 PR #1561 (`claude/playback-census-recovery`)
@@ -258,8 +258,9 @@ wrote it (an extracted sidecar in the cache); a sidecar next to the media is
 
 ### 4.4 Witness changes
 
-`reader.rs`, after PR #1561 (which prefixes witness and sidecar names with a
-`CensusFamily` and adds a foreground `.source` sidecar written at arming):
+`reader.rs`, using existing family-prefixed witness names. PR #1561 is held for the
+physical-proof findings in the [execution status](PLAYBACK-READER-WITNESS-STATUS.md);
+B0 diagnostics neither depend on its foreground path stat nor authorize release:
 
 - **B0 `.poisoned`:** `observe_launch` writes `<family-prefixed name>.poisoned`
   (0600, ≤128 bytes: the first poisoning purpose and boot tick) before
@@ -460,7 +461,7 @@ AGENTS.md.
 
 | Phase | Content | Depends on | Behaviour change |
 |---|---|---|---|
-| B0 | `.poisoned`, launch counters, Developer card, broker bench, lab4 measurement | PR #1561 merged | none; shows which launches poison |
+| B0 | `.poisoned`, launch counters, Developer card, broker bench, lab4 measurement | Existing family-prefixed names; #1561 unsafe settlement remains held | none; shows which launches poison |
 | B1 | §4.1–4.3: classes, allowlist verification, single descriptor builder (all `pre_exec` sites moved), declarations for P1–P5, P9, P16, P18, §2.2 `NoSource`/`MetadataOnly` | — | most witnesses stop being poisoned; no bytes path changes |
 | B2 | every "broker" row moves to the broker with the §5.2 policy; one task PR per site with its §5.3 numbers | `effort/playback-start-phase2` merged for P6, P7, P11, P12, P13, P15 | raw media readers disappear |
 | B3 | §4.4 lifetime lock, only if B2 leaves a raw site | B2 | residual raw children self-settle |

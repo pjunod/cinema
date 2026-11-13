@@ -2383,7 +2383,17 @@ assert.equal(context.ACT_TIMER, null);
             with self.subTest(unit_step=name):
                 self.assertIn("if: ${{ !inputs.compile_only }}", steps[name])
         self.assertIn("steps.receipts.outcome == 'success'", steps["Preserve Python success journal even on unit failure"])
-        self.assertNotIn("compile_only", steps["Audit corrective-history evidence"])
+        history_step = steps["Audit corrective-history evidence"]
+        # Selection of the inherited-gap baseline is data, not permission to
+        # skip the audit. Both dispatch modes must execute the authenticated
+        # history check; only compile-only tasks use main as a merge target.
+        self.assertNotRegex(history_step, r"(?m)^\s*if:")
+        self.assertIn("run: make history-check", history_step)
+        self.assertIn("PLURX_HISTORY_CONTEXT: effort-task", history_step)
+        self.assertIn(
+            "PLURX_HISTORY_MERGE_TARGET: ${{ inputs.compile_only && 'origin/main' || '' }}",
+            history_step,
+        )
         catalog_step = steps["Check validation catalog and contract unit tests"].split("      - uses:", 1)[0]
         self.assertIn("make validation-lint", catalog_step)
         self.assertNotIn("compile_only", catalog_step)

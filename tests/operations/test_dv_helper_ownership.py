@@ -121,6 +121,40 @@ class DvHelperOwnershipTests(unittest.TestCase):
             self.assertIn(case, wrapper)
         self.assertIn("test_l5_cm29_crop_domain_excludes_adversarial_bars", cases)
 
+    def test_active_area_receipt_rejects_changed_measured_tables(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        path = ROOT / "tools/dv_processing/controls/test_dm_active_area.py"
+        spec = importlib.util.spec_from_file_location("active_area_receipt_boundary", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        target = ROOT / "target"
+        target.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=target, prefix="dm-receipt-") as directory:
+            fixture = Path(directory).resolve()
+            sources = (*module.SOURCES, "tools/dv_processing/dm_cm29_gamut_tables.h")
+            for name in sources:
+                source = fixture / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(name.encode())
+            binary = fixture / "control"
+            binary.write_bytes(b"receipt-boundary fixture; never executed")
+            receipt = fixture / "receipt.json"
+            receipt.write_text(json.dumps({
+                "schema": "plurx.dm-active-area-cpu-build.v1",
+                "source_sha256": {name: module.sha(fixture / name) for name in module.SOURCES},
+                "binary": {"path": str(binary), "sha256": module.sha(binary)},
+            }))
+            with patch.object(module, "ROOT", fixture), patch.dict(
+                "os.environ", {"PLURX_DM_ACTIVE_AREA_BUILD": str(receipt)}
+            ):
+                module.ActiveAreaCControl.setUpClass()
+                (fixture / "tools/dv_processing/dm_cm29_gamut_tables.h").write_bytes(b"changed table")
+                with self.assertRaisesRegex(RuntimeError, "compiled from different source"):
+                    module.ActiveAreaCControl.setUpClass()
+
     def test_published_media_images_never_carry_a_helper_bundle(self):
         media = MEDIA_DOCKERFILE.read_text(encoding="utf-8")
         for owner_only in ("build-bundle.sh", "bundle-manifest.py", "/usr/lib/plurx/dv-processing",

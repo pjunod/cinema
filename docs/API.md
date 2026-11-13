@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-12, plurx has 414 routes declared by the ordinary listener's
+As of 2026-11-12, plurx has 415 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 414 routes across the registered routers.
+plurx has 415 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -510,6 +510,7 @@ of never storing it.
 | POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
 | GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
+| GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes. Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |

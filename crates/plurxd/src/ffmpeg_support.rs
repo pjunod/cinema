@@ -520,9 +520,34 @@ fn rows(contract: Contract, profiles: &BTreeSet<String>, inventory: &Inventory) 
         .collect()
 }
 
+fn is_no_source_inventory(args: &[&str]) -> bool {
+    match args {
+        [option] => [
+            "-version",
+            "-filters",
+            "-encoders",
+            "-decoders",
+            "-hwaccels",
+            "-bsfs",
+        ]
+        .contains(option),
+        ["-h", topic] => topic.strip_prefix("filter=").is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }),
+        _ => false,
+    }
+}
+
 async fn probe(ffmpeg: &str, args: &[&str]) -> Result<String, String> {
+    let declared_no_source = is_no_source_inventory(args);
     let mut command = tokio::process::Command::new(ffmpeg);
     command.args(["-hide_banner"]).args(args);
+    if declared_no_source {
+        plurx_core::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
+    }
     let output = crate::ffmpeg::bounded_command_output_cancellable(
         command,
         Duration::from_secs(10),
@@ -530,8 +555,12 @@ async fn probe(ffmpeg: &str, args: &[&str]) -> Result<String, String> {
         "media support inventory",
         None,
         crate::process_control::ChildWork::background("media support inventory"),
-    )
-    .await?;
+    );
+    let output = if declared_no_source {
+        plurx_core::process::source_lifetime::no_source(output).await?
+    } else {
+        output.await?
+    };
     Ok(format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
