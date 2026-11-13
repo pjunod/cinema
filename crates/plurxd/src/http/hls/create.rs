@@ -87,14 +87,6 @@ pub(super) fn auto_bootstrap_encode_fallback(
         .max_by_key(|candidate| candidate.target_height)
 }
 
-/// Admission is for the exact prepared recipe, independent of its SDR/HDR grade.
-pub(crate) fn processed_candidate_is_admitted(
-    admitted: &[plurx_core::playback::candidate::QualityCandidate],
-    candidate: &plurx_core::playback::candidate::QualityCandidate,
-) -> bool {
-    processed_candidate_kept(admitted, candidate).is_some_and(|admitted| admitted.playable())
-}
-
 /// The exact recipe's row among the rows the link filters kept, whatever its
 /// production proof: the same short id never stands for another recipe.
 pub(crate) fn processed_candidate_kept<'a>(

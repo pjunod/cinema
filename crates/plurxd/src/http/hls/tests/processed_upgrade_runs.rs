@@ -393,10 +393,10 @@ async fn a_description_without_production_proof_still_reaches_the_trial() {
     described.complete_cache = false;
     described.sustainable = false;
     assert!(
-        !crate::http::hls::processed_candidate_is_admitted(
+        !crate::http::hls::processed_candidate_kept(
             std::slice::from_ref(&described),
             &described
-        ),
+        ).is_some_and(|row| row.playable()),
         "the description has no current production proof"
     );
     intent.request.quality_catalog = Some(std::sync::Arc::new(
