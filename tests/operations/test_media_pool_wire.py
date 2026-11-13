@@ -757,7 +757,7 @@ class BaseResolutionTests(unittest.TestCase):
     def test_pr_wire_change_still_requires_a_bump_when_main_advanced(self):
         self.write_wire(STRICT_SNAPSHOT.replace("    pub file_id: i64,", "    pub file_id: i64,\n    pub pr_only: bool,"), 9)
         findings = self.findings()
-        self.assertTrue(any("PROTOCOL_VERSION bump" in finding and "pr_only" in finding for finding in findings), findings)
+        self.assertTrue(any("PROTOCOL_VERSION bump" in finding and "::Strict" in finding for finding in findings), findings)
 
     def test_breaking_pr_cannot_reuse_a_protocol_number_consumed_on_target(self):
         changed = STRICT_SNAPSHOT.replace("    pub file_id: i64,", "    pub file_id: i64,\n    pub pr_only: bool,")
