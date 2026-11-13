@@ -423,15 +423,18 @@ fn migration_quiescence_precedes_directory_cleanup_probes_and_http_bind() {
     )
     .expect("activation config");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "run",
-        ])
-        .env("PLURX_CLUSTER_ACTIVATION_FAILPOINT", "after-quiescence")
-        .output()
-        .expect("run injected daemon");
+    let output = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurxd")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+    )
+    .args([
+        "--config",
+        config_path.to_str().expect("config path"),
+        "run",
+    ])
+    .env("PLURX_CLUSTER_ACTIVATION_FAILPOINT", "after-quiescence")
+    .output()
+    .expect("run injected daemon");
     assert_eq!(output.status.code(), Some(86));
     assert!(String::from_utf8_lossy(&output.stderr).contains("rollback command: plurxd run"));
     assert!(
@@ -536,17 +539,20 @@ fn run_to_completion_with_failpoint(root: &std::path::Path, failpoint: &str) -> 
     )
     .expect("shutdown failpoint config");
 
-    let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "run",
-        ])
-        .env("PLURX_SHUTDOWN_REGISTRATION_FAILPOINT", failpoint)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("run shutdown failpoint regression");
+    let child = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurxd")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+    )
+    .args([
+        "--config",
+        config_path.to_str().expect("config path"),
+        "run",
+    ])
+    .env("PLURX_SHUTDOWN_REGISTRATION_FAILPOINT", failpoint)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("run shutdown failpoint regression");
 
     wait_bounded(child, Duration::from_secs(60))
 }
@@ -586,15 +592,18 @@ fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
     )
     .expect("listener host config");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "run",
-        ])
-        .env("PLURX_CLUSTER_ACTIVATION_FAILPOINT", "after-incoming")
-        .output()
-        .expect("run listener host regression");
+    let output = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurxd")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+    )
+    .args([
+        "--config",
+        config_path.to_str().expect("config path"),
+        "run",
+    ])
+    .env("PLURX_CLUSTER_ACTIVATION_FAILPOINT", "after-incoming")
+    .output()
+    .expect("run listener host regression");
     assert_eq!(
         output.status.code(),
         Some(86),
@@ -643,7 +652,10 @@ fn maintenance_commands_obey_their_activated_store_boundaries() {
     )
     .expect("maintenance config");
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
+    let mut command = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurxd")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+    );
     command.args([
         "--config",
         config_path.to_str().expect("config path"),
@@ -653,17 +665,20 @@ fn maintenance_commands_obey_their_activated_store_boundaries() {
     wait_for_bind(&mut daemon, server_port);
     assert!(data.join("hiqlite/activation.json").is_file());
 
-    let reset = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "reset-password",
-            "owner",
-            "--password",
-            "a-new-password",
-        ])
-        .output()
-        .expect("run reset refusal");
+    let reset = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurxd")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+    )
+    .args([
+        "--config",
+        config_path.to_str().expect("config path"),
+        "reset-password",
+        "owner",
+        "--password",
+        "a-new-password",
+    ])
+    .output()
+    .expect("run reset refusal");
     let reset_stderr = String::from_utf8_lossy(&reset.stderr);
     assert!(!reset.status.success());
     assert!(
@@ -672,14 +687,17 @@ fn maintenance_commands_obey_their_activated_store_boundaries() {
     );
     assert!(!reset_stderr.contains("CryptoProvider"), "{reset_stderr}");
 
-    let refresh = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "refresh-metadata",
-        ])
-        .output()
-        .expect("run metadata maintenance command");
+    let refresh = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurxd")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+    )
+    .args([
+        "--config",
+        config_path.to_str().expect("config path"),
+        "refresh-metadata",
+    ])
+    .output()
+    .expect("run metadata maintenance command");
     let refresh_stderr = String::from_utf8_lossy(&refresh.stderr);
     assert!(
         !refresh_stderr.contains("CryptoProvider"),
@@ -724,7 +742,10 @@ fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
     .expect("daemon config");
 
     let start = |activation_failpoint: Option<&str>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
+        let mut command = Command::new(
+            std::env::var_os("CARGO_BIN_EXE_plurxd")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+        );
         command.args([
             "--config",
             config_path.to_str().expect("config path"),
@@ -739,14 +760,17 @@ fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
     let mut first = start(None);
     wait_for_bind(&mut first, server_port);
     assert!(data.join("hiqlite/activation.json").is_file());
-    let contender = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "run",
-        ])
-        .output()
-        .expect("run competing daemon");
+    let contender = Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurxd")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+    )
+    .args([
+        "--config",
+        config_path.to_str().expect("config path"),
+        "run",
+    ])
+    .output()
+    .expect("run competing daemon");
     assert!(!contender.status.success());
     // The genuine double-start, and the only condition entitled to this text.
     // Since #374 the contender waits out a departing owner before refusing, so
@@ -840,7 +864,10 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
     .expect("SIGKILL recovery config");
 
     let start = || {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
+        let mut command = Command::new(
+            std::env::var_os("CARGO_BIN_EXE_plurxd")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurxd").into()),
+        );
         command.args([
             "--config",
             config_path.to_str().expect("config path"),

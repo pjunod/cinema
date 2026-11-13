@@ -51,7 +51,13 @@ fn trust_roots_reject_wrong_repository_duplicates_and_malformed_keys() {
     reason = "Executes only the finite test-owned CLI; no daemon or activity store"
 )]
 fn trust_info_reports_exact_candidate_roots_without_installation() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_plurx-control"))
+    // cargo bakes the binary's build path in; nextest runs archived tests
+    // from wherever the archive was extracted and publishes the real path at
+    // run time (docs/ci/RUST-UNIT-FANOUT.md).
+    let binary = std::env::var_os("CARGO_BIN_EXE_plurx-control")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_plurx-control")));
+    let output = std::process::Command::new(binary)
         .arg("trust-info")
         .env_clear()
         .output()
