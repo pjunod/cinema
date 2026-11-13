@@ -317,6 +317,15 @@ class PlanTests(unittest.TestCase):
         mentioned = re.findall(r"test\(=([^)]*)\)", " ".join(expressions))
         self.assertEqual(sorted(mentioned), sorted(names))
 
+    def test_tests_the_default_filter_excludes_are_not_planned(self):
+        listing = self.listing
+        listing["rust-suites"]["app"]["testcases"]["child::body"] = {
+            "ignored": False, "filter-match": {"status": "mismatch", "reason": "default-filter"}}
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": []}}}
+        plan = ru.make_plan(self.selection, pending, listing, self.config, run=5)
+        self.assertNotIn("app child::body", plan["crates"]["app"]["remaining"])
+        self.assertEqual(plan["crates"]["app"]["listing"]["count"], 4)
+
     def test_shard_count_follows_the_selection(self):
         self.assertEqual(ru.shard_count(1), 1)
         self.assertEqual(ru.shard_count(ru.TESTS_PER_SHARD), 1)
@@ -356,23 +365,20 @@ class VerdictTests(unittest.TestCase):
             failures = Path(directory, "failures.json")
             failures.write_text(json.dumps({"head": "a" * 40, "base": "b" * 40, "failures": {
                 "app": ["app t::old", "app t::new", "app t::added"]}}))
-            junit = Path(directory, "junit.xml")
-            junit.write_text('<testsuites><testsuite name="app">'
-                             '<testcase name="t::old"><failure/></testcase>'
-                             '<testcase name="t::new"/></testsuite></testsuites>')
+            output = Path(directory, "merge-base.log")
+            output.write_text("        FAIL [   0.010s] app t::old\n        PASS [   0.010s] app t::new\n")
             previous = os.getcwd()
             os.chdir(directory)
             try:
-                status = ru.main(["classify", "--failures", str(failures), "--junit", str(junit)])
+                status = ru.main(["classify", "--failures", str(failures), "--log", str(output)])
                 result = json.loads(Path("target/rust-units/classification.json").read_text())
                 self.assertEqual(status, 1)
                 self.assertEqual(result["pre_existing"], {"app": ["app t::old"]})
                 self.assertEqual(result["new"], {"app": ["app t::new", "app t::added"]})
-                junit.write_text('<testsuites><testsuite name="app">'
-                                 '<testcase name="t::old"><failure/></testcase></testsuite></testsuites>')
+                output.write_text("    SIGABRT [   0.010s] app t::old\n")
                 failures.write_text(json.dumps({"head": "a" * 40, "base": "b" * 40,
                                                 "failures": {"app": ["app t::old"]}}))
-                self.assertEqual(ru.main(["classify", "--failures", str(failures), "--junit", str(junit)]), 0)
+                self.assertEqual(ru.main(["classify", "--failures", str(failures), "--log", str(output)]), 0)
             finally:
                 os.chdir(previous)
 
@@ -420,6 +426,19 @@ class RepositoryContractTests(unittest.TestCase):
         for name in (ru.JOB_SELECT, ru.JOB_ARCHIVE, ru.JOB_VERDICT, ru.JOB_BASELINE):
             self.assertIn(f'name: "{name}"', self.workflow)
         self.assertIn('name: "' + ru.JOB_SHARD.format(index="${{ matrix.shard }}") + '"', self.workflow)
+
+    def test_the_default_filter_covers_exactly_the_argv_detected_child_fixtures(self):
+        children = set()
+        for path in ROOT.joinpath("crates").rglob("*.rs"):
+            children.update(re.findall(r'invoked_as_child\("([^"]+)"\)', path.read_text(errors="replace")))
+        config = (ROOT / ".config/nextest.toml").read_text()
+        prefix = re.search(r'default-filter = "not test\(/\^([^/]+)/\)"', config).group(1)
+        self.assertTrue(children)
+        self.assertTrue(all(child.startswith(prefix) for child in children), children)
+        # ...and the filter excludes nothing else: every test it can match is one.
+        probe = (ROOT / "crates/plurx-core/src/scan/probe.rs").read_text()
+        named = {"scan::probe::tests::" + name for name in re.findall(r"fn (fixture_child_\w+)\(", probe)}
+        self.assertEqual(named, {child for child in children if child.startswith(prefix)})
 
     def test_the_excluded_crates_match_make_unit(self):
         makefile = (ROOT / "Makefile").read_text()

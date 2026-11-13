@@ -38,7 +38,6 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 import zipfile
 
 from validation.runner import matches
@@ -724,11 +723,17 @@ def fully_passed(listing_options, passed):
 
 
 def nextest_suites(listing):
-    """{binary id: {test name: ignored}} from `cargo nextest list --message-format json`."""
+    """{binary id: {test name: ignored}} from `cargo nextest list --message-format json`.
+
+    Tests the profile's `default-filter` excludes are left out entirely:
+    nextest never runs them, so they are not part of any crate's listing.
+    """
     suites = {}
     for binary_id, suite in listing.get("rust-suites", {}).items():
         cases = suite.get("testcases", {})
-        suites[binary_id] = {name: bool(case.get("ignored")) for name, case in cases.items()}
+        suites[binary_id] = {
+            name: bool(case.get("ignored")) for name, case in cases.items()
+            if (case.get("filter-match") or {}).get("reason") != "default-filter"}
     return suites
 
 
@@ -808,21 +813,16 @@ def make_plan(selection_doc, pending, listing, config, run):
 # Running a shard
 
 
-def junit_outcomes(path):
-    """{test id: 'PASS' | 'FAIL' | 'SKIP'} from nextest's JUnit report."""
+def run_nextest(command):
+    """Run nextest, echo its output into the job log, and read each outcome
+    from the same status lines a later run authenticates against."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, errors="replace", bufsize=1)
     outcomes = {}
-    root = ET.parse(path).getroot()
-    for suite in root.iter("testsuite"):
-        binary_id = suite.get("name")
-        for case in suite.iter("testcase"):
-            test = f"{binary_id} {case.get('name')}"
-            if case.find("failure") is not None or case.find("error") is not None:
-                outcomes[test] = "FAIL"
-            elif case.find("skipped") is not None:
-                outcomes[test] = "SKIP"
-            else:
-                outcomes[test] = "PASS"
-    return outcomes
+    for line in process.stdout:
+        sys.stdout.write(line)
+        outcomes.update(logged_outcomes(line))
+    return process.wait(), outcomes
 
 
 EXTRACT = STATE / "extract"
@@ -881,20 +881,15 @@ def run_shard(plan_path, archive, index, threads):
                      ["--run-ignored", "only", "--test-threads", "1"]))
     EXTRACT.mkdir(parents=True, exist_ok=True)
     for label, filters, extra in runs:
-        for stale in EXTRACT.rglob("junit.xml"):
-            stale.unlink()
         command = nextest_command(archive, filters, extra)
         print(f"::group::nextest {label}: shard {index}/{count}")
         started = time.monotonic()
-        result = subprocess.run(command)
-        print(f"::endgroup::\nnextest {label} exited {result.returncode} after "
+        returncode, seen = run_nextest(command)
+        print(f"::endgroup::\nnextest {label} exited {returncode} after "
               f"{time.monotonic() - started:.0f}s")
         # 0: all passed; 100: tests failed; 4: no tests matched this partition.
-        require(result.returncode in (0, 4, 100), f"nextest {label} could not run (exit {result.returncode})")
-        if result.returncode != 4:
-            reports = sorted(EXTRACT.rglob("junit.xml"))
-            require(len(reports) == 1, f"nextest {label} wrote {len(reports)} JUnit reports")
-            outcomes.update(junit_outcomes(reports[0]))
+        require(returncode in (0, 4, 100), f"nextest {label} could not run (exit {returncode})")
+        outcomes.update(seen)
     planned = {t for crate in plan["crates"].values() for t in crate["remaining"] + crate["serial"]}
     unexpected = sorted(set(outcomes) - planned)
     require(not unexpected, f"shard ran tests outside the plan: {unexpected[:5]}")
@@ -903,7 +898,7 @@ def run_shard(plan_path, archive, index, threads):
         mine = {t: o for t, o in outcomes.items() if crate_of(t.split(" ", 1)[0]) == crate}
         results[crate] = {"passed": sorted(t for t, o in mine.items() if o == "PASS"),
                           "failed": sorted(t for t, o in mine.items() if o == "FAIL"),
-                          "skipped": sorted(t for t, o in mine.items() if o == "SKIP")}
+                          "skipped": []}
     receipt = {"schema": SCHEMA, "producer": "validation.rust_units", "run": plan["run"],
                "index": index, "shards": count, "head": plan["head"],
                "job": JOB_SHARD.format(index=index), "results": results}
@@ -1106,8 +1101,8 @@ def command_classify(args):
     failures = read_json(args.failures)
     head_failures = failures["failures"]
     base_outcomes = {}
-    if Path(args.junit).exists():
-        base_outcomes = junit_outcomes(args.junit)
+    if Path(args.log).exists():
+        base_outcomes = logged_outcomes(Path(args.log).read_text(encoding="utf-8", errors="replace"))
     pre_existing, new = {}, {}
     for crate, tests in sorted(head_failures.items()):
         for test in tests:
@@ -1117,8 +1112,8 @@ def command_classify(args):
         lines += [f"- pre-existing on main (`{crate}`, not blocking): `{t}`" for t in tests]
     for crate, tests in sorted(new.items()):
         for test in tests:
-            state = {"PASS": "passes at the merge-base", "SKIP": "skipped at the merge-base"}.get(
-                base_outcomes.get(test), "absent at the merge-base")
+            state = ("passes at the merge-base" if base_outcomes.get(test) == "PASS"
+                     else "not run at the merge-base (absent there, or it did not build)")
             lines.append(f"- NEW failure (`{crate}`, {state}): `{test}`")
     summarize(lines)
     write_json(STATE / "classification.json", {"pre_existing": pre_existing, "new": new})
@@ -1210,7 +1205,7 @@ def main(argv=None):
     p.set_defaults(func=command_baseline_filter)
     p = sub.add_parser("classify", help="pre-existing versus new failures")
     p.add_argument("--failures", default=str(STATE / "failures.json"))
-    p.add_argument("--junit", required=True)
+    p.add_argument("--log", required=True, help="the merge-base nextest output")
     p.set_defaults(func=command_classify)
     p = sub.add_parser("local", help="print (or --run) the same selection with cargo nextest")
     p.add_argument("--base", default="origin/main")

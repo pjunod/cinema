@@ -191,7 +191,9 @@ nextest 0.9.151 (`Apache-2.0 OR MIT`), a single static binary fetched from
 its GitHub release and checked against its SHA-256; nothing enters the Cargo
 graph. It buys the archive (compile once on one host, execute on others, with
 the workspace remapped), deterministic `hash:i/N` partitions, filtersets that
-name exact tests, per-test process isolation and JUnit output. The costs: one
+name exact tests, and per-test process isolation; each outcome is read from
+nextest's own status lines in the job log — the same lines a later run
+authenticates a receipt against. The costs: one
 more pinned tool to bump (version in the workflow, `.config/nextest.toml` and
 `NEXTEST_VERSION` in the module — a test keeps them equal), no doctests, and
 per-process isolation that can surface tests which relied on sharing a

@@ -33,6 +33,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: never
+  PYTHONUNBUFFERED: "1"
+  # nextest gives every test a fresh process, so state that `cargo test`
+  # initializes once per binary is built on each test's own 2 MiB thread;
+  # debug-build futures in plurxd's source-actor tests then overflow it.
+  # 8 MiB is the stack the replicated Store shards already run with
+  # (validation/store_shard.py TEST_THREAD_STACK_BYTES).
+  RUST_MIN_STACK: "8388608"
   # cargo-nextest, pinned with the release asset's SHA-256 (MIT OR Apache-2.0).
   NEXTEST_VERSION: "0.9.151"
   NEXTEST_SHA256: 1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4
@@ -498,19 +505,18 @@ jobs:
         run: |
           mapfile -t filters < <(cd "$RUST_UNITS_TOOLS" && python3 -m validation.rust_units \
             baseline-filter --failures "$RUST_UNITS_TOOLS/failures.json")
-          report="${CARGO_TARGET_DIR:-$GITHUB_WORKSPACE/target}/nextest/ci/junit.xml"
-          rm -f -- "$report"
+          output="$RUST_UNITS_TOOLS/merge-base-nextest.log"
           args=()
           for expression in "${filters[@]}"; do args+=(-E "$expression"); done
           set +e
           cargo nextest run --locked --workspace --exclude plurx-cluster-check \
             --config-file "$RUST_UNITS_TOOLS/nextest.toml" --profile ci --no-fail-fast \
-            --color never --run-ignored all --test-threads 2 "${args[@]}"
-          echo "merge-base nextest exited $?"
+            --color never --run-ignored all --test-threads 2 "${args[@]}" 2>&1 | tee "$output"
+          echo "merge-base nextest exited ${PIPESTATUS[0]}"
           set -e
           cd "$RUST_UNITS_TOOLS"
           python3 -m validation.rust_units classify \
-            --failures "$RUST_UNITS_TOOLS/failures.json" --junit "$report"
+            --failures "$RUST_UNITS_TOOLS/failures.json" --log "$output"
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true
