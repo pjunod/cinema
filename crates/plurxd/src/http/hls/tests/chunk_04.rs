@@ -1450,6 +1450,117 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
     );
 }
 
+/// A processed recipe has an Encode carrier but keeps its Copy discovery
+/// provenance. Exercise the durable serialization and real COMMITTED control
+/// exchange: rebuilding discovery from decoder-only caps or the Encode kind
+/// used to erase this valid description and retire the successor as Replaced.
+/// The descriptor is synthetic; this proves commit identity, not GPU output.
+#[tokio::test]
+async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance() {
+    use crate::transcode::{SessionKind, TranscodeManager};
+    use plurx_core::playback::audio::{AudioClaim, AudioRoute};
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::store::keys;
+    use plurx_core::transcode::{dv_processing::DvDestination, OutputGrade};
+
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("processed-commit-provenance");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let old = fixture.store.get_file(fixture.file_id()).await.expect("source read").expect("source");
+    let mut dv = dolby_vision_p7_file().dolby_vision;
+    dv.el_present = Some(true);
+    dv.rpu_present = Some(true);
+    fixture.store.upsert_file(old.item_id, old.path.to_str().expect("source path"), old.size, old.mtime,
+        &plurx_core::domain::ProbeResult {
+            duration_ms: old.duration_ms,
+            container: Some("mkv".into()), video_codec: Some("hevc".into()),
+            video_profile: Some("Main 10".into()), width: Some(3840), height: Some(2160),
+            bit_depth: Some(10), hdr: Some("smpte2084".into()), dolby_vision: dv,
+            audio_streams: vec![plurx_core::domain::AudioStream {
+                index: 2, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+                channel_layout: Some("5.1".into()), language: None, title: None, default: true,
+            }],
+            ..Default::default()
+        }).await.expect("source DV metadata");
+    fixture.store.put_setting(keys::DV_HDR_PROCESSING, "1").await.expect("processing enabled");
+    let snapshot = fixture.store.playback_planning_snapshot(fixture.file_id(), &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await.expect("planning read").expect("planning snapshot");
+    let source = &snapshot.file;
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_width":3840,"max_height":2160,"max_frame_rate":24}],
+        "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
+    let body = CreateSession { playback_id: playback.clone(), copy: Some(true), audio: Some(2), caps: Some(caps.clone()), ..bare_create() };
+    let query = body.selection_catalog_request(source, &caps, body.reviewed_copy_scope(None));
+    assert!(query.copy_contract.is_some(), "the source route really is Copy");
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest([0xa7; 32]), recipe_digest: [0xa7; 32],
+        route: CandidateRoute::Encode, planned_codec: Some("hevc".into()), processed_dv: true,
+        normalized_geometry: true, width: 3840, height: 2160, target_height: 2160,
+        average_bps: Some(12_000_000), peak_bps: Some(18_000_000), grade: OutputGrade::Hdr10,
+        decoder_compatible: true, complete_cache: false, sustainable: true,
+    };
+    let claim = AudioClaim::from_caps(&caps).expect("audio caps").expect("audio claim");
+    let audio = plurx_core::playback::audio::resolve_audio(source.audio_streams.first(), &claim.profile(), AudioRoute::EncodedVod, 0);
+    let mut context = TranscodeManager::candidate_context(&candidate);
+    context.catalog_query = Some(query.clone());
+    context.canonical_caps = Some(caps.clone());
+    context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+    context.planning_snapshot = Some(Arc::new(snapshot.clone()));
+    let processed = crate::transcode::SessionRequest {
+        file_id: source.id, playback_id: playback.clone(), kind: SessionKind::Transcode { height: 2160 },
+        audio_index: Some(2), audio_claim: Some(claim), audio_delivery: Some(audio),
+        hdr10: true, dv_processing_destination: Some(DvDestination::Hdr10),
+        candidate_context: Some(Box::new(context)), ..staged_candidate_request()
+    };
+    fixture.state.transcode.remember_processed_candidate(&processed);
+    assert!(fixture.state.transcode.processed_quality_descriptions(&snapshot, &query)
+        .iter().any(|row| row.id == candidate.id), "the actual description cache holds the recipe");
+    let decoder = crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder snapshot");
+    let mut predecessor = staged_predecessor_recipe(&route);
+    predecessor.decoder_caps = Some(decoder.clone());
+    fixture.state.transcode.vod_for_test().install_http_test_session(&session_id, source.clone(), dir.path()).await;
+    stage_prepared_successor(&fixture.state, &session_id, &route, &predecessor, &processed, Some(source),
+        AcceptedAsk { prepared_proof: None, planning_registration: None, quality_intent: None,
+            planning_cancellation: None, film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS, desired_digest: None }).await;
+    let staged = fixture.store.staged_media_session_for_playback(&route.principal, &playback).await
+        .expect("staged read").expect("successor staged");
+    let staged_route = fixture.store.media_session_route_by_incarnation(&staged.staged_incarnation_id).await
+        .expect("route read").expect("successor route");
+    let serialized: RemoteStartRequest = serde_json::from_str(&staged_route.recipe_json).expect("durable recipe");
+    assert!(matches!(serialized.request.kind, SessionKind::Transcode { .. }));
+    let retained = serialized.candidate_catalog.as_ref().expect("retained candidate").catalog_query.as_ref().expect("retained query");
+    assert_eq!(retained.copy_contract, query.copy_contract, "the durable Encode recipe retains its original Copy query");
+    assert_eq!(retained.caps.hls_hevc_sample_entries, caps.hls_hevc_sample_entries);
+
+    let mut request = control_request(route.incarnation_id.clone());
+    request.supported_actions = Some(vec![crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()]);
+    let capabilities = request.capabilities.as_mut().expect("dynamic caps");
+    capabilities.decoder_caps = Some(decoder);
+    capabilities.max_height = 2160;
+    capabilities.codecs = vec![crate::playback_control::CodecPolicy::Hevc];
+    capabilities.dynamic_ranges = vec![crate::playback_control::DynamicRangePolicy::Hdr10];
+    capabilities.dual_player_preparation = true;
+    let offered = accepted_exchange(&fixture, &route, &request).await;
+    assert_eq!(offered["action"]["type"], "prepare");
+    pace_control_exchanges().await;
+    request.sequence = 2;
+    request.capabilities = None;
+    request.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+        action_id: offered["action"]["action_id"].as_str().expect("action id").to_owned(),
+        state: crate::playback_control::AcknowledgementState::Committed,
+        buffered_through_ms: None, committed_media_origin_ms: offered["action"]["media_origin_ms"].as_i64(),
+        first_frame_unix_ms: Some(unix_ms()),
+    });
+    let committed = accepted_exchange(&fixture, &route, &request).await;
+    assert_eq!(committed["action"]["type"], "none");
+    let current = fixture.store.media_session_route_for_playback(&route.principal, &playback).await
+        .expect("current route read").expect("current route");
+    assert_eq!(current.incarnation_id, staged.staged_incarnation_id);
+    assert_eq!(current.state, "active", "commit must not abort the valid processed recipe as Replaced");
+    assert!(control_start_response(&current).is_some(), "the successor still advertises usable control");
+}
+
 #[tokio::test]
 async fn incumbent_wait_cancels_planning_without_cancelling_a_later_ask() {
     let playback_id = unique_playback_id("incumbent-wait-planning");

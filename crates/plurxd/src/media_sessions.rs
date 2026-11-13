@@ -1513,9 +1513,54 @@ impl ReleaseSettlement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CandidateCatalogContext {
+    /// Descriptive inputs accepted before Copy/Encode normalization. They
+    /// retain discovery provenance, never an executable or admission grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
     pub caps: plurx_core::playback::DeviceCaps,
     pub candidate: plurx_core::playback::candidate::QualityCandidate,
     pub binding: crate::media_pool::PlanningBinding,
+}
+
+impl CandidateCatalogContext {
+    /// Recover the exact discovery scope without treating a transformed
+    /// transport or decoder-only snapshot as the original client claim.
+    pub(crate) fn validated_catalog_query(
+        &self,
+        request: &SessionRequest,
+        source_size: i64,
+        source_mtime: i64,
+    ) -> Option<crate::media_pool::QualityCatalogRequest> {
+        let query = self.catalog_query.clone().or_else(|| {
+            // Older ordinary rows can reconstruct their own delivery. A
+            // processed row lost its original Copy scope when normalized;
+            // missing provenance cannot be guessed from that Encode carrier.
+            (!self.candidate.processed_dv).then(|| crate::media_pool::QualityCatalogRequest {
+                file_id: request.file_id,
+                source_size,
+                source_mtime,
+                caps: self.caps.clone(),
+                audio_index: request.audio_index,
+                audio_offset_ms: request.audio_offset_ms,
+                audio_claim: request.audio_claim.clone(),
+                audio_delivery: request.audio_delivery.clone(),
+                subtitle_burn: request.subtitle_burn,
+                presentation: request.presentation,
+                copy_contract: request.kind.copy_contract(),
+            })
+        })?;
+        query.validate().ok()?;
+        (query.file_id == request.file_id
+            && query.source_size == source_size
+            && query.source_mtime == source_mtime
+            && query.audio_index == request.audio_index
+            && query.audio_offset_ms == request.audio_offset_ms
+            && query.subtitle_burn == request.subtitle_burn
+            && query.presentation == request.presentation
+            && query.audio_claim == request.audio_claim
+            && serde_json::to_value(&query.caps).ok()? == serde_json::to_value(&self.caps).ok()?)
+        .then_some(query)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1673,6 +1718,9 @@ fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
             request.candidate_id == Some(context.candidate.id) && context.candidate.identity_matches()
                 && context.caps.v == 2 && context.caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
                 && context.caps.validate_audio_sinks().is_ok() && context.caps.validate_progressive_hevc_sample_entries().is_ok()
+                && context.catalog_query.as_ref().is_none_or(|_| context.validated_catalog_query(
+                    &request.request, request.source_size, request.source_mtime,
+                ).is_some())
                 && context.binding.generation >= 0 && context.binding.source_digest.len() == 64
                 && context.binding.source_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })

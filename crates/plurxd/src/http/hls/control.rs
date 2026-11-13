@@ -2108,34 +2108,31 @@ async fn candidate_snapshot_current(
     {
         return false;
     }
-    let Some(snapshot) = latest.decoder_caps.as_ref() else {
+    if latest.decoder_caps.is_none() {
+        return false;
+    }
+    let Some(catalog) = recipe.candidate_catalog.as_ref() else {
         return false;
     };
+    if recipe.candidate_id != Some(catalog.candidate.id) || !catalog.candidate.identity_matches() {
+        return false;
+    }
     let Ok(Some(file)) = state.store.get_file(recipe.request.file_id).await else {
         return false;
     };
-    let candidates = state
-        .media_pool
-        .quality_candidates(
-            state,
-            crate::media_pool::QualityCatalogRequest {
-                audio_claim: recipe.request.audio_claim.clone(),
-                audio_delivery: recipe.request.audio_delivery.clone(),
-                copy_contract: recipe.request.kind.copy_contract(),
-                file_id: file.id,
-                source_size: file.size,
-                source_mtime: file.mtime,
-                caps: snapshot.device_caps(),
-                audio_index: recipe.request.audio_index,
-                audio_offset_ms: recipe.request.audio_offset_ms,
-                subtitle_burn: recipe.request.subtitle_burn,
-                presentation: recipe.request.presentation,
-            },
-        )
-        .await;
+    if recipe.source_size != file.size || recipe.source_mtime != file.mtime {
+        return false;
+    }
+    let Some(query) = catalog.validated_catalog_query(&recipe.request, file.size, file.mtime)
+    else {
+        return false;
+    };
+    let candidates = state.media_pool.quality_candidates(state, query).await;
     candidates.iter().any(|entry| {
         entry.node_id == route.owner_node_id
             && Some(entry.candidate.id) == recipe.candidate_id
+            && entry.candidate.recipe_digest == catalog.candidate.recipe_digest
+            && entry.candidate.processed_dv == catalog.candidate.processed_dv
             && entry.candidate.decoder_compatible
     })
 }

@@ -3370,6 +3370,13 @@ Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
 (run by `make paperwork`) refuses a change to a strict media-pool envelope
 without a `PROTOCOL_VERSION` bump and a dated line here naming it:
 
+- 2026-11-13: protocol 10 — retain original catalog-query provenance in
+  `CandidateCatalogContext`, so prepared commit checks use full capability and
+  Copy-origin facts after Encode normalization. The query is descriptive and
+  source/track/capability validated; it grants no execution authority. Keep an
+  eligible owner in each protocol cohort and drain old ingress and sessions
+  before the last old node. Old processed rows without provenance cannot
+  commit from a guessed query; keep or reopen ordinary playback instead.
 - 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
   `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
 
