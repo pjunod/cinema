@@ -840,10 +840,37 @@ def nextest_command(archive, filters, extra):
     return command
 
 
+# The fleet's general-job budget (docs/ci/RUNNER-DISK.md). Not every general
+# runner applies a container's --cpus (a 2026-11-12 probe on media1 saw
+# memory.max but no cpu.max), so the shard enforces it itself.
+SHARD_CPUS = 3
+
+
+def bound_cpus(limit=SHARD_CPUS):
+    """Pin this process (and so nextest and every test) to at most `limit` CPUs.
+
+    A cgroup cpu.max quota, when the runner applies one, already bounds the
+    job; CPU affinity is the bound a container cannot escape when it does not.
+    """
+    allowed = sorted(os.sched_getaffinity(0))
+    quota = None
+    try:
+        text = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if text and text[0] != "max":
+            quota = int(text[0]) / int(text[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    if len(allowed) > limit:
+        os.sched_setaffinity(0, allowed[:limit])
+    print(f"shard CPUs: affinity {len(allowed)} -> {len(os.sched_getaffinity(0))}, "
+          f"cgroup quota {quota if quota is not None else 'none'}")
+
+
 def run_shard(plan_path, archive, index, threads):
     plan = read_json(plan_path)
     count = plan["shards"]
     require(1 <= index <= count, f"shard {index} is outside 1..{count}")
+    bound_cpus()
     outcomes = {}
     runs = []
     if plan["filters"]:
