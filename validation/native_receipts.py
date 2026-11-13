@@ -73,11 +73,11 @@ APPLE_EXTERNAL_INPUTS = [
     'tests/playback/dvr-visibility-cases.json', 'tests/sharing/protocol-cases.json',
 ]
 BUILD_SPECS = {
-    # Reviewed against main de5928d05: the Docker media runtime changes are
-    # preserved; Cinema adds only Linux Debian frontend comments/help.
-    # Apple/macOS recipes, flags and external inputs are unchanged.
+    # Reviewed for PR #1552 (Intel Macs dropped): desktop-macos-build builds the
+    # tray for arm64 only, and apple-build's simulator builds pass ARCHS=arm64
+    # (#1545). No other Apple/macOS recipe, flag or external input changes.
     # Pin these exact bytes; no old-to-new receipt adoption is authorized.
-    'Makefile': '1d8ba9f31adfe9a8f557e41aecbdded4de4b5cd7b8de017381c04b9ad8956305',
+    'Makefile': '5e174fbfe3ffe8e92997eb1904f4f3d4511257752a95c720d31df999439ce2e2',
     # Reviewed 0.8.0 build 298: only CURRENT_PROJECT_VERSION differs from the
     # reviewed build 297 bytes. 297 was set inside a merge commit (8164f7380),
     # which the release guard does not read as a build-number update. Pin this
@@ -86,7 +86,8 @@ BUILD_SPECS = {
     'clients/apple/project.yml': 'a17751186292399825cf45355c88ea9f66618553afed3869b0233f2266570a65',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
-    'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
+    # PR #1552: the tray build accepts --arch arm64 only (Intel Macs dropped).
+    'clients/server-tray/macos/build': 'c39dcb201d45bbace9cd3bb59dd4ea47620c031b6f4468472978bf3be4fd48ea',
 }
 FAMILY_SPECS = {
     'tv_navigation': ['Makefile', 'clients/apple/project.yml', 'scripts/apple-tv-navigation-test'],

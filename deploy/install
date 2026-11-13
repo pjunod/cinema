@@ -236,7 +236,7 @@ detect_platform() {
 [ "$mode" = auto ] && mode=$(detect_platform)
 # Refuse an Intel Mac before anything is changed: the release and every
 # bundled tool are Apple Silicon only.
-if [ "$mode" = macos ] && [ "$(uname -m)" != arm64 ]; then
+if [ "$mode" = macos ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" != arm64 ]; then
   die "Intel Macs are not supported: Cinema on macOS needs Apple Silicon (this Mac is $(uname -m))"
 fi
 
