@@ -2203,6 +2203,178 @@ async fn request_row(
     Ok(result)
 }
 
+/// The ask a claim records in its own transaction (D3c): the selection upsert
+/// of `record_desired_selection`, with an added predicate tying it to **this
+/// attempt's** claim row. The incarnation is a fresh UUID, so no earlier
+/// attempt matches, and a refused, joined or overloaded claim (no row with this
+/// incarnation, or one no longer `starting`) upserts nothing. A statement
+/// that *errors* rolls the whole replicated transaction back (hiqlite's
+/// writer), but one that matches no row is a success that leaves its sibling
+/// committed, so the predicate is what keeps the ask from landing without its
+/// claim. A second predicate on the conflict arm keeps an older arrival from
+/// replacing a newer ask (D3 review S2).
+struct FoldedSelection<'a> {
+    user_id: i64,
+    request_id: &'a str,
+    incarnation_id: &'a str,
+    playback_id: &'a str,
+    write: &'a crate::domain::DesiredSelectionWrite<'a>,
+    now_ms: i64,
+}
+
+impl FoldedSelection<'_> {
+    async fn statement(
+        &self,
+        store: &HiqliteAuthStore,
+    ) -> Result<(String, hiqlite::Params), StoreError> {
+        let layout = LocalSessionSql::load(store).await?;
+        let extra_columns = layout.insert_columns();
+        let extra_values = layout.insert_values(1);
+        let owner_column = layout.column();
+        let owner_exists = layout.existing_user(1);
+        let claim_owner = layout.equals(1);
+        let sql = format!("INSERT INTO media_playback_desired
+                 (user_id, playback_id, revision, digest, canonical_form, updated_at_ms{extra_columns})
+             SELECT $1, $2, 1, $3, $4, $5{extra_values}
+              WHERE EXISTS (SELECT 1 FROM media_session_requests
+                             WHERE {claim_owner} AND request_id = $6 AND incarnation_id = $7
+                               AND state = 'starting' AND claim_expires_at_ms > $8){owner_exists}
+             ON CONFLICT({owner_column}, playback_id) DO UPDATE SET
+                 revision = CASE
+                     WHEN media_playback_desired.digest = excluded.digest
+                         THEN media_playback_desired.revision
+                     ELSE media_playback_desired.revision + 1
+                 END,
+                 digest = excluded.digest,
+                 canonical_form = excluded.canonical_form,
+                 updated_at_ms = CASE
+                     WHEN media_playback_desired.digest = excluded.digest
+                         THEN media_playback_desired.updated_at_ms
+                     ELSE excluded.updated_at_ms
+                 END
+              WHERE media_playback_desired.updated_at_ms <= excluded.updated_at_ms");
+        validate_sql(&sql)?;
+        Ok((
+            sql,
+            params!(
+                self.user_id,
+                self.playback_id,
+                self.write.digest,
+                self.write.canonical_form,
+                self.write.arrived_at_ms,
+                self.request_id,
+                self.incarnation_id,
+                self.now_ms
+            ),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn claim_new_request(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    request_id: &str,
+    fingerprint: &str,
+    playback_id: &str,
+    incarnation_id: &str,
+    now_ms: i64,
+    claim_expires_at_ms: i64,
+    selection: Option<&FoldedSelection<'_>>,
+) -> Result<MediaSessionRequestClaim, StoreError> {
+    let ownership = LocalSessionSql::load(store).await?;
+    let owner = ownership.equals(1);
+    let owner_column = ownership.column();
+    let principal_columns = ownership.insert_columns();
+    let principal_values = ownership.insert_values(1);
+    let existing_user = ownership.existing_user(1);
+    let insert_sql = format!(
+        "INSERT INTO media_session_requests
+                (user_id, request_id, request_fingerprint, playback_id, state,
+                 claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
+                 updated_at_ms{principal_columns})
+             SELECT $1, $2, $3, $4, 'starting', $5, $6, NULL, NULL, $7{principal_values}
+              WHERE (SELECT COUNT(*) FROM media_session_requests
+                      WHERE {owner} AND state = 'starting'
+                        AND claim_expires_at_ms > $7) < $8
+                AND (SELECT COUNT(*) FROM media_sessions
+                      WHERE {owner} AND state IN ('starting', 'active')
+                        AND lease_expires_at_ms > $7
+                        AND incarnation_id != COALESCE((
+                          SELECT current_incarnation_id FROM media_playback_pointers
+                           WHERE {owner} AND playback_id = $4), '')) < $9
+                AND (SELECT COUNT(*) FROM media_session_requests
+                      WHERE {owner}) < $10
+                AND (SELECT COUNT(*) FROM media_sessions
+                      WHERE {owner}) < $11
+             {existing_user}
+             ON CONFLICT({owner_column}, request_id) DO NOTHING"
+    );
+    let insert_params = params!(
+        user_id,
+        request_id,
+        fingerprint,
+        playback_id,
+        claim_expires_at_ms,
+        incarnation_id,
+        now_ms,
+        MAX_IN_FLIGHT_PER_USER,
+        MAX_CURRENT_PER_USER,
+        MAX_REQUEST_ROWS_PER_USER,
+        MAX_SESSION_ROWS_PER_USER
+    );
+    let inserted = if let Some(selection) = selection {
+        // One replicated transaction: the claim, then the ask under a
+        // predicate tying it to this claim row (D3c).
+        let counts = store
+            .session_client()
+            .txn(
+                "claim_media_session_request",
+                [
+                    (insert_sql, insert_params),
+                    selection.statement(store).await?,
+                ],
+            )
+            .await?;
+        let [claimed, selected] = <[_; 2]>::try_from(counts)
+            .map_err(|_| StoreError::Task("incomplete folded selection transaction".into()))?;
+        let claimed = claimed.map_err(database_error)?;
+        // Zero rows is an older arrival that did not replace a newer ask; the
+        // read-back after the claim answers with the row that stands.
+        selected.map_err(database_error)?;
+        claimed
+    } else {
+        store
+            .session_client()
+            .execute("claim_media_session_request", insert_sql, insert_params)
+            .await?
+    };
+    if inserted == 1 {
+        return Ok(MediaSessionRequestClaim::Acquired {
+            incarnation_id: incarnation_id.to_owned(),
+        });
+    }
+    if let Some(row) =
+        request_row("claim_media_session_request", store, user_id, request_id).await?
+    {
+        return claim_existing_or_reacquire(
+            "claim_media_session_request",
+            store,
+            row,
+            user_id,
+            request_id,
+            fingerprint,
+            playback_id,
+            incarnation_id,
+            now_ms,
+            claim_expires_at_ms,
+            selection,
+        )
+        .await;
+    }
+    Ok(MediaSessionRequestClaim::Overloaded)
+}
+
 async fn claim_from_row(
     method: &'static str,
     store: &HiqliteAuthStore,
@@ -2243,6 +2415,7 @@ async fn claim_existing_or_reacquire(
     incarnation_id: &str,
     now_ms: i64,
     claim_expires_at_ms: i64,
+    selection: Option<&FoldedSelection<'_>>,
 ) -> Result<MediaSessionRequestClaim, StoreError> {
     if row.request_fingerprint != fingerprint || row.playback_id != playback_id {
         return Ok(MediaSessionRequestClaim::Conflict);
@@ -2251,10 +2424,7 @@ async fn claim_existing_or_reacquire(
         let ownership = LocalSessionSql::load(store).await?;
         let owner = ownership.equals(4);
         let existing_user = ownership.existing_user(4);
-        let reacquired = store
-            .session_client()
-            .execute(method,
-                format!(
+        let reacquire_sql = format!(
                     "UPDATE media_session_requests
                     SET state = 'starting', claim_expires_at_ms = $1,
                         incarnation_id = $2, owner_node_id = NULL,
@@ -2275,22 +2445,44 @@ async fn claim_existing_or_reacquire(
                                WHERE {owner} AND playback_id = $7), '')) < $9
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE {owner}) < $10"
-                ),
-                params!(
-                    claim_expires_at_ms,
-                    incarnation_id,
-                    now_ms,
-                    user_id,
-                    request_id,
-                    fingerprint,
-                    playback_id,
-                    MAX_IN_FLIGHT_PER_USER,
-                    MAX_CURRENT_PER_USER,
-                    MAX_SESSION_ROWS_PER_USER
-                ),
-            )
-            .await?
-            == 1;
+                );
+        let reacquire_params = params!(
+            claim_expires_at_ms,
+            incarnation_id,
+            now_ms,
+            user_id,
+            request_id,
+            fingerprint,
+            playback_id,
+            MAX_IN_FLIGHT_PER_USER,
+            MAX_CURRENT_PER_USER,
+            MAX_SESSION_ROWS_PER_USER
+        );
+        let reacquired = if let Some(selection) = selection {
+            // One replicated transaction: the re-acquisition, then the ask
+            // under a predicate tying it to this re-acquisition.
+            let counts = store
+                .session_client()
+                .txn(
+                    method,
+                    [
+                        (reacquire_sql, reacquire_params),
+                        selection.statement(store).await?,
+                    ],
+                )
+                .await?;
+            let [claimed, selected] = <[_; 2]>::try_from(counts)
+                .map_err(|_| StoreError::Task("incomplete folded selection transaction".into()))?;
+            let claimed = claimed.map_err(database_error)? == 1;
+            selected.map_err(database_error)?;
+            claimed
+        } else {
+            store
+                .session_client()
+                .execute(method, reacquire_sql, reacquire_params)
+                .await?
+                == 1
+        };
         if reacquired {
             return Ok(MediaSessionRequestClaim::Acquired {
                 incarnation_id: incarnation_id.to_owned(),
@@ -3001,7 +3193,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         ))
     }
 
-    async fn claim_media_session_request(
+    async fn claim_media_session_request_recording(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
@@ -3010,7 +3202,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
-    ) -> Result<MediaSessionRequestClaim, StoreError> {
+        desired: Option<&crate::domain::DesiredSelectionWrite<'_>>,
+    ) -> Result<
+        (
+            MediaSessionRequestClaim,
+            Option<crate::domain::DesiredOwnership>,
+        ),
+        StoreError,
+    > {
         let user_id = crate::store::local_media_principal_id(principal)?;
         validate_claim(
             user_id,
@@ -3021,12 +3220,31 @@ impl MediaSessionStore for HiqliteAuthStore {
             now_ms,
             claim_expires_at_ms,
         )?;
+        if let Some(desired) = desired {
+            validate_desired_selection(
+                playback_id,
+                desired.digest,
+                desired.canonical_form,
+                now_ms,
+            )?;
+            if desired.arrived_at_ms <= 0 {
+                return Err(StoreError::Task("invalid desired selection".to_owned()));
+            }
+        }
+        let selection = desired.map(|write| FoldedSelection {
+            user_id,
+            request_id,
+            incarnation_id,
+            playback_id,
+            write,
+            now_ms,
+        });
         let fingerprint = request_fingerprint.to_ascii_lowercase();
         self.maintain_media_sessions(now_ms).await?;
-        if let Some(row) =
+        let claim = if let Some(row) =
             request_row("claim_media_session_request", self, user_id, request_id).await?
         {
-            return claim_existing_or_reacquire(
+            claim_existing_or_reacquire(
                 "claim_media_session_request",
                 self,
                 row,
@@ -3037,68 +3255,12 @@ impl MediaSessionStore for HiqliteAuthStore {
                 incarnation_id,
                 now_ms,
                 claim_expires_at_ms,
+                selection.as_ref(),
             )
-            .await;
-        }
-        let ownership = LocalSessionSql::load(self).await?;
-        let owner = ownership.equals(1);
-        let owner_column = ownership.column();
-        let principal_columns = ownership.insert_columns();
-        let principal_values = ownership.insert_values(1);
-        let existing_user = ownership.existing_user(1);
-        let inserted = self
-            .session_client()
-            .execute(
-                "claim_media_session_request",
-                format!(
-                    "INSERT INTO media_session_requests
-                    (user_id, request_id, request_fingerprint, playback_id, state,
-                     claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
-                     updated_at_ms{principal_columns})
-                 SELECT $1, $2, $3, $4, 'starting', $5, $6, NULL, NULL, $7{principal_values}
-                  WHERE (SELECT COUNT(*) FROM media_session_requests
-                          WHERE {owner} AND state = 'starting'
-                            AND claim_expires_at_ms > $7) < $8
-                    AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE {owner} AND state IN ('starting', 'active')
-                            AND lease_expires_at_ms > $7
-                            AND incarnation_id != COALESCE((
-                              SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE {owner} AND playback_id = $4), '')) < $9
-                    AND (SELECT COUNT(*) FROM media_session_requests
-                          WHERE {owner}) < $10
-                    AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE {owner}) < $11
-                 {existing_user}
-                 ON CONFLICT({owner_column}, request_id) DO NOTHING"
-                ),
-                params!(
-                    user_id,
-                    request_id,
-                    fingerprint.as_str(),
-                    playback_id,
-                    claim_expires_at_ms,
-                    incarnation_id,
-                    now_ms,
-                    MAX_IN_FLIGHT_PER_USER,
-                    MAX_CURRENT_PER_USER,
-                    MAX_REQUEST_ROWS_PER_USER,
-                    MAX_SESSION_ROWS_PER_USER
-                ),
-            )
-            .await?;
-        if inserted == 1 {
-            return Ok(MediaSessionRequestClaim::Acquired {
-                incarnation_id: incarnation_id.to_owned(),
-            });
-        }
-        if let Some(row) =
-            request_row("claim_media_session_request", self, user_id, request_id).await?
-        {
-            return claim_existing_or_reacquire(
-                "claim_media_session_request",
+            .await?
+        } else {
+            claim_new_request(
                 self,
-                row,
                 user_id,
                 request_id,
                 &fingerprint,
@@ -3106,10 +3268,21 @@ impl MediaSessionStore for HiqliteAuthStore {
                 incarnation_id,
                 now_ms,
                 claim_expires_at_ms,
+                selection.as_ref(),
             )
-            .await;
-        }
-        Ok(MediaSessionRequestClaim::Overloaded)
+            .await?
+        };
+        // The ask is read back only for a claim this call acquired; the
+        // statement wrote it under the claim's own predicate.
+        let recorded = match (&claim, selection.as_ref()) {
+            (MediaSessionRequestClaim::Acquired { .. }, Some(_)) => Some(
+                desired_row("claim_media_session_request", self, user_id, playback_id)
+                    .await?
+                    .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))?,
+            ),
+            _ => None,
+        };
+        Ok((claim, recorded))
     }
 
     async fn record_library_channel_session_recipe(

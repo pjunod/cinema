@@ -154,6 +154,286 @@ async fn an_ask_on_create_is_recorded_before_the_create_is_answered() {
     );
 }
 
+/// D3c: the ask rides in the claim, so a create refused before its claim
+/// records none (D3 contract §4.5, §12-6), where it used to record the ask on
+/// its way to the refusal. The refusal here is the HEVC copy-transport one,
+/// which stands before the claim.
+#[tokio::test]
+async fn a_create_refused_before_its_claim_records_no_ask() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::playback::DesiredQuality;
+    let state = resolver_state();
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Refused before claim".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "HEVC copy ingress".into(),
+            year: Some(2026),
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let user = state
+        .store
+        .create_user("no-ask-before-claim", "hash", false)
+        .await
+        .expect("user");
+    let file_id = state
+        .store
+        .upsert_file(
+            item,
+            "/media/refused-hvcc.mp4",
+            1_023,
+            1,
+            &ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mp4".into()),
+                video_codec: Some("hevc".into()),
+                video_codec_tag: Some("hvc1".into()),
+                field_order: None,
+                video_profile: Some("Main".into()),
+                width: Some(1920),
+                height: Some(1080),
+                bit_depth: Some(8),
+                raw_json: Some(
+                    r#"{"streams":[{"codec_type":"video","codec_name":"hevc","codec_tag_string":"hvc1","extradata_size":23}]}"#
+                        .to_owned(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let ask = envelope(1, DesiredQuality::Original);
+    let caps = caps_v2(
+        r#"{"v":2,
+                "video":[{"codec":"hevc","present":["sdr"],"max_height":2160}],
+                "audio":["aac"],"containers":["mp4"],
+                "transports":["progressive"],
+                "progressive_hevc_sample_entries":["hvc1"],
+                "display":{"hdr":false,"dolby_vision":false}}"#,
+    );
+    let playback = "no-ask-before-claim-player";
+    let error = match create(
+        crate::http::extract::AuthUser(user.clone()),
+        State(state.clone()),
+        AxPath(file_id),
+        HeaderMap::new(),
+        super::super::network::RemoteAddress(None),
+        Json(CreateSession {
+            playback_id: playback.into(),
+            request_id: Some("no-ask-before-claim".into()),
+            copy: Some(true),
+            caps: Some(caps),
+            intent: Some(ask),
+            ..bare_create()
+        }),
+    )
+    .await
+    {
+        Ok(_) => panic!("a client that omitted HLS cannot execute copy-HLS"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            ApiError::Typed {
+                code: "unsupported_hevc_delivery",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let recorded = state
+        .store
+        .desired_selection(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            playback,
+        )
+        .await
+        .expect("reading the desired row");
+    assert!(
+        recorded.is_none(),
+        "a create refused before its claim records no ask: {recorded:?}"
+    );
+}
+
+/// D3c: a claim the user's allowance refuses is not a viewer who asked: the
+/// ask rides in the claim, so an overloaded create records none.
+#[tokio::test]
+async fn an_overloaded_create_records_no_ask() {
+    use plurx_core::playback::DesiredQuality;
+    let state = resolver_state();
+    let now = unix_ms();
+    for n in 0..32 {
+        let claimed = state
+            .store
+            .claim_media_session_request(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                &format!("fill-{n}"),
+                &"c".repeat(64),
+                &format!("fill-playback-{n}"),
+                &uuid::Uuid::new_v4().to_string(),
+                now,
+                now + 60_000,
+            )
+            .await
+            .expect("fill the in-flight allowance");
+        assert!(matches!(
+            claimed,
+            plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+        ));
+    }
+    let answer = create_with(
+        &state,
+        CreateSession {
+            playback_id: "overloaded-player".into(),
+            intent: Some(envelope(1, DesiredQuality::Original)),
+            ..bare_create()
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            answer,
+            Err(ApiError::TypedRetry {
+                code: "media_session_overloaded",
+                ..
+            })
+        ),
+        "the claim is refused: {:?}",
+        answer.as_ref().err()
+    );
+    let recorded = state
+        .store
+        .desired_selection(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+            "overloaded-player",
+        )
+        .await
+        .expect("reading the desired row");
+    assert!(
+        recorded.is_none(),
+        "an overloaded claim records no ask: {recorded:?}"
+    );
+}
+
+/// D3 review B1/S3: a peer that is ahead answers `StaleSource` for the plan
+/// this node's view gave the create. The local catalog, built from that same
+/// plan, is complete and holds candidates, so only the refutation itself can
+/// stop the create from picking one and building at the superseded revision:
+/// the attempt ends before any pick, the view closes, and the create plans
+/// once more from Authority. Driven through the real `create`, with the peer's
+/// answer queued in place of the transport's.
+#[tokio::test]
+async fn a_peers_stale_answer_ends_a_view_plan_before_any_candidate_is_picked() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    let state = resolver_state();
+    state
+        .store
+        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
+        .await
+        .expect("candidate route on");
+    let library = state
+        .store
+        .create_library(&NewLibrary {
+            name: "Stale peer".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = state
+        .store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Stale peer".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let user = state
+        .store
+        .create_user("stale-peer", "hash", false)
+        .await
+        .expect("user");
+    let file_id = state
+        .store
+        .upsert_file(item, "/media/stale-peer.mkv", 4096, 1, &ProbeResult {
+            container: Some("mkv".into()),
+            video_codec: Some("h264".into()),
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            raw_json: Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"}]}).to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("file");
+    let caps = caps_v2(
+        r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#,
+    );
+    // The first fan-out: a peer whose view and Authority hold another
+    // revision. The second (the re-planned attempt): nothing more to say.
+    state.media_pool.inject_peer_answers_for_test(vec![
+        crate::media_pool::QualityCatalogResult::unavailable(
+            crate::media_pool::CatalogCause::StaleSource,
+        ),
+    ]);
+    state.media_pool.inject_peer_answers_for_test(Vec::new());
+    let replans = crate::http::hls::start_plan::stale_replans();
+    let _ = create(
+        crate::http::extract::AuthUser(user.clone()),
+        State(state.clone()),
+        AxPath(file_id),
+        HeaderMap::new(),
+        super::super::network::RemoteAddress(None),
+        Json(CreateSession {
+            playback_id: "stale-peer-player".into(),
+            request_id: Some("stale-peer-request".into()),
+            quality_auto: Some(true),
+            copy: Some(false),
+            caps: Some(caps),
+            ..bare_create()
+        }),
+    )
+    .await;
+    assert_eq!(
+        crate::http::hls::start_plan::stale_replans(),
+        replans + 1,
+        "the peer's refutation re-planned the create once"
+    );
+    assert_eq!(
+        state.media_pool.injected_peer_answers_left_for_test(),
+        0,
+        "both attempts ran their catalog fan-out"
+    );
+    assert!(
+        state
+            .applied
+            .floor_noted(plurx_core::store::AppliedTable::Settings),
+        "the view was closed"
+    );
+}
+
 /// The control protocol being off must not make the ask disappear.
 ///
 /// This is the configuration the handoff singles out. With the setting off
@@ -5998,7 +6278,7 @@ async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
         &state,
         &request,
         tokio::time::Instant::now(),
-        None,
+        crate::media_pool::CatalogSource::Quorum(None),
     )
     .await;
     assert!(!outcome.complete);
@@ -6011,7 +6291,7 @@ async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
         &state,
         &request,
         tokio::time::Instant::now() + Duration::from_secs(1),
-        None,
+        crate::media_pool::CatalogSource::Quorum(None),
     )
     .await;
     assert!(matches!(

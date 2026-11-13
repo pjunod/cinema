@@ -26,6 +26,10 @@ pub(crate) enum RemoteStartError {
     /// 503 every refusal of the class answers, so an older ingress reads it
     /// exactly as before; the body names the code for one that can tell.
     TerminalCapacity(&'static str),
+    /// This owner's plan at the request's binding differs even from
+    /// Authority (D3b): the 409 a changed source has always answered, with a
+    /// body naming the code so the ingress can close its own view.
+    PlanChanged,
 }
 
 impl From<StatusCode> for RemoteStartError {
@@ -62,6 +66,13 @@ impl IntoResponse for RemoteStartError {
                     .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
                 response
             }
+            Self::PlanChanged => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "code": crate::media_sessions::REMOTE_START_PLAN_CHANGED
+                })),
+            )
+                .into_response(),
             Self::TerminalCapacity(code) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({ "code": code })),
@@ -185,9 +196,56 @@ pub(crate) async fn start(
         .principal
         .local_user_id()
         .ok_or(StatusCode::FORBIDDEN)?;
-    if !state.media_pool.remote_placement_ready(&state).await {
+    // This owner's one plan for the start (D3b, contract §4.3): its own view
+    // at the binding the ingress planned at, Authority once on a mismatch,
+    // and Authority for a legacy route that carries no binding. Read first so
+    // placement answers from it; its refusals keep their order below.
+    // Bounded as the restore stage it replaced (review S4): the owner's
+    // snapshot read ran under `deadline.min(create_stage_deadline(2 s))`.
+    let plan = tokio::time::timeout_at(
+        start_deadline.min(crate::media_pool::create_stage_deadline(
+            std::time::Duration::from_secs(2),
+        )),
+        super::hls::start_plan::owner_plan(
+            &state.applied,
+            request.request.file_id,
+            request
+                .candidate_catalog
+                .as_ref()
+                .map(|catalog| &catalog.binding),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(super::hls::start_plan::OwnerPlanError::Store(
+            plurx_core::error::StoreError::Task(
+                "the owner's planning read exceeded its stage deadline".to_owned(),
+            ),
+        ))
+    });
+    if !state
+        .media_pool
+        .remote_placement_ready(&state, plan.as_ref().ok().and_then(Option::as_ref))
+        .await
+    {
         return Err(StatusCode::SERVICE_UNAVAILABLE.into());
     }
+    let plan = match plan {
+        Ok(plan) => plan,
+        // Authority holds another revision than the ingress planned at: the
+        // answer this route has always given a changed source.
+        Err(super::hls::start_plan::OwnerPlanError::Changed) => {
+            return Err(RemoteStartError::PlanChanged)
+        }
+        Err(super::hls::start_plan::OwnerPlanError::Store(error)) => {
+            tracing::warn!(target: "plurxd::http::hls",
+                incarnation_id = %request.incarnation_id,
+                %error,
+                "remote start could not read its planning inputs"
+            );
+            return Err(StatusCode::SERVICE_UNAVAILABLE.into());
+        }
+    };
     let user = state
         .store
         .get_user(user_id)
@@ -196,7 +254,7 @@ pub(crate) async fn start(
         .ok_or(StatusCode::NOT_FOUND)?;
     state
         .transcode
-        .restore_candidate_context_with_deadline(&mut request, start_deadline)
+        .restore_candidate_context_with_deadline(&mut request, start_deadline, plan.as_ref())
         .await
         .map_err(|error| {
             if error.is_incompatible() {
@@ -255,6 +313,7 @@ pub(crate) async fn start(
                     &user.username,
                     start_deadline,
                     admitted_serving_generation,
+                    plan.as_ref(),
                 )
                 .await;
             // The owner's own window, by Store method, keyed by the incarnation:

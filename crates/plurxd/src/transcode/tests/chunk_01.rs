@@ -2357,6 +2357,119 @@ fn snapshot_probe_request() -> SessionRequest {
     }
 }
 
+/// D3b, contract §4.4: once a create holds its plan, a planning setting
+/// saved before its worker runs reaches no planned helper. Every one answers
+/// the plan's revision; only an unplanned call (`None`, every non-create
+/// caller) reads the new value. The session is built from one revision.
+#[tokio::test]
+async fn a_planned_chain_answers_one_revision_while_a_setting_changes() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::store::SqliteStore;
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let library = store
+        .create_library(&NewLibrary {
+            name: "plan".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/plan".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "planned".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file = store
+        .upsert_file(
+            item,
+            "/plan/movie.mkv",
+            100,
+            42,
+            &ProbeResult {
+                video_codec: Some("h264".into()),
+                raw_json: Some(r#"{"streams":[]}"#.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    for (key, value) in [
+        (keys::VOD_PRESENTATION, "1"),
+        (keys::VOD_BLOCK_BUDGET_SECS, "8"),
+        (keys::SW_POOL_THREADS, "3"),
+        (keys::HLS_TYPELESS_SLIDING, "0"),
+        (keys::VOD_LIVE_RECOVERY, "1"),
+    ] {
+        store.put_setting(key, value).await.expect("seed");
+    }
+    let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
+    let plan = crate::http::hls::start_plan::ingress_plan(&applied, file)
+        .await
+        .expect("plan")
+        .expect("source");
+    // Saved after the plan, before the worker runs.
+    for (key, value) in [
+        (keys::VOD_BLOCK_BUDGET_SECS, "20"),
+        (keys::SW_POOL_THREADS, "5"),
+        (keys::HLS_TYPELESS_SLIDING, "1"),
+        (keys::VOD_LIVE_RECOVERY, "0"),
+    ] {
+        store.put_setting(key, value).await.expect("save");
+    }
+    let dir = crate::test_tempdir().expect("work");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        dir.path().to_owned(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let mut req = snapshot_probe_request();
+    req.file_id = file;
+    let planned = manager
+        .vod_settings_planned(&req, Some(&plan))
+        .await
+        .expect("planned settings")
+        .expect("VOD on");
+    let unplanned = manager
+        .vod_settings_planned(&req, None)
+        .await
+        .expect("read settings")
+        .expect("VOD on");
+    assert_eq!(planned.block_budget, Duration::from_secs(8));
+    assert!(planned.live_recovery);
+    assert_eq!(unplanned.block_budget, Duration::from_secs(20));
+    assert!(!unplanned.live_recovery);
+    assert_eq!(manager.software_budget_planned(Some(&plan)).await, 3);
+    assert_eq!(manager.software_budget_planned(None).await, 5);
+    assert!(!manager.cluster_playlist_is_typeless(Some(&plan)).await);
+    assert!(manager.cluster_playlist_is_typeless(None).await);
+    let rolling = manager
+        .rolling_start_inputs(file, None, Some(&plan))
+        .await
+        .expect("rolling inputs");
+    assert_eq!(
+        rolling.settings.get(keys::VOD_BLOCK_BUDGET_SECS).map(String::as_str),
+        Some("8")
+    );
+    assert_eq!(rolling.item_title.as_deref(), Some("planned"));
+    let rolling = manager
+        .rolling_start_inputs(file, None, None)
+        .await
+        .expect("rolling inputs");
+    assert_eq!(
+        rolling.settings.get(keys::VOD_BLOCK_BUDGET_SECS).map(String::as_str),
+        Some("20")
+    );
+}
+
 /// Ruling 4: an unset `cache.max_gb` is the 50 GB budget for output
 /// preparation and rolling retention, while VOD rendition admission keeps
 /// its own unset = closed rule.

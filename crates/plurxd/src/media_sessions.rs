@@ -1942,6 +1942,11 @@ pub(crate) enum RemoteStartFailure {
     Terminal(&'static str),
     /// No usable answer arrived; the worker may or may not hold a session.
     Transport(PeerTransportError),
+    /// The worker answered 409 naming `catalog_input_unavailable`: its own
+    /// plan at the request's binding differs from the ingress's, even from
+    /// Authority (D3b, `start_plan::owner_plan`). A bare 409 (an older
+    /// worker, or another conflict) stays a transport failure, as before.
+    PlanChanged,
 }
 
 /// Ask one worker to start, and when no usable answer arrived ask that same
@@ -1981,6 +1986,24 @@ impl From<PeerTransportError> for RemoteStartFailure {
         Self::Transport(error)
     }
 }
+
+/// Whether a worker's 409 start answer names the planning refusal (D3b).
+fn remote_start_plan_changed(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(|code| code == REMOTE_START_PLAN_CHANGED)
+        })
+        .unwrap_or(false)
+}
+
+/// The code a worker's 409 start answer carries when its plan at the
+/// request's binding differs (D3b). The body is advisory: an older ingress
+/// reads the bare status, as it always has.
+pub(crate) const REMOTE_START_PLAN_CHANGED: &str = "catalog_input_unavailable";
 
 /// A worker's 503 start answer: terminal when its body names a terminal
 /// capacity code, waitable otherwise — including the bodiless 503 an older
@@ -3916,6 +3939,11 @@ impl MediaSessionCoordinator {
         // fence or start infrastructure, each of which a retry can outlive.
         if response.status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             return Err(remote_start_refusal(&response.body));
+        }
+        if response.status == reqwest::StatusCode::CONFLICT
+            && remote_start_plan_changed(&response.body)
+        {
+            return Err(RemoteStartFailure::PlanChanged);
         }
         let started = decode_remote_start_response(response)?;
         if request.retained_output_receiver != Some(1) && started.info.retained_output.is_some() {
@@ -7268,7 +7296,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         deadline,
         state
             .transcode
-            .restore_candidate_context_with_deadline(&mut envelope, deadline),
+            .restore_candidate_context_with_deadline(&mut envelope, deadline, None),
     )
     .await
     .map_err(|_| "candidate takeover validation timed out".to_owned())?
