@@ -1,3 +1,11 @@
+plurx-player (0.5.1-1) stonking; urgency=medium
+
+  * Scope playback-control sequence numbers to the advertised session and
+    owner epoch, including seek, retry and next-episode replacement.
+  * Preserve the incumbent counter when a provisional quality change rolls back.
+
+ -- Codex Agent <codex-agent@invalid>  Fri, 13 Nov 2026 19:40:00 +0000
+
 plurx-player (0.5.0-1) stonking; urgency=medium
 
   * Use the system mpv by default and stop shipping a second renderer.
