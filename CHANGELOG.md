@@ -261,6 +261,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Optional, explicit Curator household login connections with independent local
+  accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
+  household-only grants on standalone and replicated storage. Cinema credentials,
+  administrator permissions and watch history stay in Cinema.
+
+
 - Each cluster node keeps a lock-free account of what its own replica has
   applied, and Settings → Developer shows an advisory Applied view card with
   the node's replica proof, image state and view reads. `/metrics` adds the

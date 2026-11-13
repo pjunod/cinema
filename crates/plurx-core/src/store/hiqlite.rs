@@ -5794,6 +5794,9 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM delegation_grants".to_owned(), params!()),
+            ("DELETE FROM delegation_codes".to_owned(), params!()),
+            ("DELETE FROM delegation_clients".to_owned(), params!()),
             ("DELETE FROM background_job_commands".to_owned(), params!()),
             ("DELETE FROM background_predictions".to_owned(), params!()),
             ("DELETE FROM background_embeddings".to_owned(), params!()),

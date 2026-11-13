@@ -93,10 +93,10 @@ pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+pub mod delegation;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_playback_handoffs;
 pub mod playback_handoffs;
-pub mod delegation;
 pub use delegation::DelegationStore;
 pub use playback_handoffs::{
     NewPlaybackHandoff, PlaybackHandoff, PlaybackHandoffRedeemOutcome, PlaybackHandoffRedemption,
@@ -6275,7 +6275,7 @@ impl<T> Store for T where
         + OfflinePackageStore
         + FileGrantStore
         + PlaybackHandoffStore
-    + DelegationStore
+        + DelegationStore
         + RemoteStore
         + InvitationStore
         + PlaybackTelemetryStore

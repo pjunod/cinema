@@ -171,7 +171,7 @@ function monarrCardHtml(){
     <div class="setfoot"><button class="primary sm" disabled onclick="saveMonarr(this)">Save</button>
       <button class="ghost sm" onclick="testMonarr()">Test connection</button>
       <span id="mnstat" class="muted" style="font-size:12px"></span><span class="setstate">Saved</span></div>
-    <div id="mnqueue" class="hint"></div>`,{id:"monarrcard"});
+    <div id="mnqueue" class="hint"></div><p><a href="#/curator-connections">Manage optional Curator sign-in connections</a> · separate from calendar and watch-state integration credentials.</p>`,{id:"monarrcard"});
 }
 async function testMonarr(){
   const el=document.getElementById("mnstat"), q=document.getElementById("mnqueue");

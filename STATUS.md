@@ -3,6 +3,14 @@
 **Updated:** 2026-11-11 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+## 2026-11-13 · Optional Curator household login
+
+Codex/root implemented independent account linking and household-only delegation,
+integrated current main and authored cross-store/router regressions. Final Astra
+review and runtime qualification are pending. [Canonical ledger](docs/features/CURATOR-LOGIN-STATUS.md).
+No live deployment.
+
+
 - **2026-11-13 · Linux player session control:** Owner Codex (Sol implementation). [Ledger](docs/clients/LINUX-PLAYER-CINEMA-UI.md#session-control-sequence-repair-051). Session replacement reused a run-wide counter despite the fresh-session sequence-1 contract, causing stale controls and lease expiry. Source repaired and independently reviewed; final affected validation recorded in the PR. DV reset interpretation, deployment and physical acceptance remain distinct.
 - **2026-11-12 · Fast-lane throughput:** [throughput](docs/ci/CI-THROUGHPUT.md), [Rust gate image](docs/ci/RUST-GATE-IMAGE.md). Owner Claude (claude-opus-5-5, session 01BCWLA2), PR #1550. A push cancels the PR's in-flight run; derivable paperwork (counters, Markdown host names, index rows) is committed by the lane; the Rust gate runs once in a pinned image at `-j4` (8.2 min on a lab1 guest, was 22-25). The high-CPU pool stays unused until its runners apply the job's CPU, PID and swap limits.
 - **2026-11-12 · Offload (cinema):** Owner Claude (Claude Sonnet 5.5 builds, Opus 5.5 orchestrates). Cinema half of Offload on `claude/offload`, on top of the merged `removed_paths` (#1546): `offloaded_at` on items kept by every prune, `offloaded_paths` on `/api/v1/scan`, placement by ids, Get it back and its status read, `presence` library filter, web UI, Apple and Android clients. [Contract](docs/features/PIPELINE-CONTRACT-OFFLOAD.md). Focused plurx-core, plurxd and web tests, clippy, paperwork and the Python validation suites pass on the Linux build host. Swift and Android are compiled and tested only by the fast lane (no Xcode or accepted Android SDK on the build hosts). Curator 0.49.0 sends offload only to a cinema advertising `offload`; deploy every cinema node first.

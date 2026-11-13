@@ -128,6 +128,8 @@ mod jellyfin_play;
 mod library_schedule;
 #[path = "store_contract/offload.rs"]
 mod offload;
+#[path = "store_contract/delegation.rs"]
+mod delegation;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]

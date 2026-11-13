@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [CURATOR-LOGIN-STATUS.md](CURATOR-LOGIN-STATUS.md) | Optional explicit household login into independent Curator accounts; authority, setup, migration, review and qualification. | open |
 | [PROJECT-BACKLOG.md](PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
 | [PIPELINE-CONTRACT.md](PIPELINE-CONTRACT.md) | What plurx promises Curator at the scan seam, and what it gets back. | built |
 | [PIPELINE-CONTRACT-REMOVED-PATHS.md](PIPELINE-CONTRACT-REMOVED-PATHS.md) | The scan request's removed-paths and probe-only detail: states, retained codes, retry rules, unreadable roots, mixed clusters. | built |

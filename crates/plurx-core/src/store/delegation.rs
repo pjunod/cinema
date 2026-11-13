@@ -212,7 +212,7 @@ impl<T: Backend> DelegationStore for T {
         let fence = source_fence("$9", "$10");
         let sql=format!("INSERT INTO delegation_codes(code_hash,client_id,client_generation,user_id,subject,source_hash,challenge,redirect,expires_at) SELECT $1,id,generation,$2,$3,$4,$5,redirect,$6 FROM delegation_clients WHERE id=$7 AND active=1 AND $8='household-requests' AND {fence}");
         let result = self
-            .sharing_txn(vec![(
+            .sharing_txn(vec![("DELETE FROM delegation_grants WHERE grant_hash IN(SELECT grant_hash FROM delegation_grants WHERE expires_at<=$1 LIMIT 64)".into(),vec![clock.into()]),("DELETE FROM delegation_codes WHERE code_hash IN(SELECT code_hash FROM delegation_codes WHERE expires_at<=$1 LIMIT 64)".into(),vec![clock.into()]),(
                 sql,
                 vec![
                     c.code_hash.into(),
@@ -228,7 +228,7 @@ impl<T: Backend> DelegationStore for T {
                 ],
             )])
             .await?;
-        Ok(result[0] == 1)
+        Ok(result.last() == Some(&1))
     }
     async fn delegation_redeem(
         &self,
@@ -365,4 +365,66 @@ pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreErro
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{JellyfinEntityKind, JellyfinIdentityStore, SqliteStore, UserStore};
+    #[tokio::test]
+    async fn delegation_idle_expiry_and_partial_schema_fail_closed() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("cinema.db");
+        let store = SqliteStore::open(&path).expect("store");
+        let user = store
+            .create_user("person", "password", false)
+            .await
+            .expect("user");
+        store
+            .create_token("source", user.id, None)
+            .await
+            .expect("source");
+        let subject = store
+            .jellyfin_entity_ids(JellyfinEntityKind::User, &[user.id])
+            .await
+            .expect("subject")[0]
+            .wire_id
+            .clone();
+        let conn = rusqlite::Connection::open(path).expect("connection");
+        let clock = now().expect("clock");
+        conn.execute(
+            "UPDATE tokens SET last_seen_at=?1 WHERE token_hash='source'",
+            [clock - 172800],
+        )
+        .expect("old activity");
+        for (key, value) in [
+            (
+                super::super::keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                "true".to_owned(),
+            ),
+            (super::super::keys::AUTH_TOKEN_IDLE_DAYS, "1".to_owned()),
+            (
+                super::super::keys::AUTH_TOKEN_EXPIRY_SINCE,
+                (clock - 259200).to_string(),
+            ),
+        ] {
+            conn.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",rusqlite::params![key,value]).expect("policy");
+        }
+        assert!(source_proof(&store, "source", user.id, &subject)
+            .await
+            .expect("idle proof")
+            .is_none());
+        let last: i64 = conn
+            .query_row(
+                "SELECT last_seen_at FROM tokens WHERE token_hash='source'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("activity");
+        assert_eq!(last, clock - 172800);
+        verify_sqlite(&conn).expect("installed");
+        conn.execute_batch("DROP INDEX delegation_codes_expiry")
+            .expect("partial fixture");
+        assert!(verify_sqlite(&conn).is_err());
+    }
 }
