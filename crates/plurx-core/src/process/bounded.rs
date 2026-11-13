@@ -296,7 +296,10 @@ pub async fn output_command_bundle_env_to_file(
         let limit = max_stdout_bytes as libc::rlim_t;
         unsafe {
             command.pre_exec(move || {
-                let bounds = libc::rlimit { rlim_cur: limit, rlim_max: limit };
+                let bounds = libc::rlimit {
+                    rlim_cur: limit,
+                    rlim_max: limit,
+                };
                 if libc::setrlimit(libc::RLIMIT_FSIZE, &bounds) == 0 {
                     Ok(())
                 } else {
@@ -308,7 +311,10 @@ pub async fn output_command_bundle_env_to_file(
     #[cfg(not(unix))]
     {
         let _ = max_stdout_bytes;
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "file-backed helper output needs Unix file limits"));
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file-backed helper output needs Unix file limits",
+        ));
     }
     output_command_environment(
         command,
@@ -594,7 +600,6 @@ mod tests {
 
     const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
 
-
     #[cfg(unix)]
     #[tokio::test]
     async fn file_output_is_kernel_bounded_and_owned_until_reaped() {
@@ -614,7 +619,10 @@ mod tests {
         )
         .await
         .expect("file limit still reaps the owned child");
-        assert!(!output.status.success(), "the writer must observe its file limit");
+        assert!(
+            !output.status.success(),
+            "the writer must observe its file limit"
+        );
         assert!(output.stdout.is_empty());
         assert_eq!(std::fs::read(path).expect("saved prefix"), vec![0; 17]);
     }

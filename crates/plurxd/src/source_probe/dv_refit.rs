@@ -199,7 +199,10 @@ impl Spool {
             .take(MAX_SPOOL_BYTES + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_SPOOL_BYTES {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "F+ spool exceeds its bound"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "F+ spool exceeds its bound",
+            ));
         }
         Ok(bytes)
     }
