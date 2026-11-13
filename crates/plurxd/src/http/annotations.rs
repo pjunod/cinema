@@ -401,6 +401,7 @@ pub async fn list_items(
             break;
         }
     }
+    super::browse::flag_offloaded_containers(&state, &mut visible).await?;
     Ok(Json(ListResponse { items: visible }))
 }
 

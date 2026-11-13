@@ -197,6 +197,7 @@ what separates a key from a login token, whichever header carries it.
 | `expected_files` | no | `[{"path","bytes","mtime_ns"}]`, each path absolute. Every in-scope file is probed whatever plurx's size+mtime cache says, and reported in `files`; outside paths and paths below a symlink are skipped without probing their targets |
 | `removed_paths` | no | Paths gone under `path`; probe-only (§1.10) |
 | `probe_only` | no | Default `false`; walk nothing (§1.10) |
+| `offloaded_paths` | no | Deleted to free disk; item kept (§1.11) |
 | `wait_ms` | no | Hold the response up to this long for the result. Default `0` (answer at once) |
 | `hint` | no | `movie` · `episode` · `season` · `book`. Advisory: the library's kind decides how a file is parsed; the hint only picks which item an id applies to |
 | `ids` | no | `{"tmdb","imdb"}` for the item itself |
@@ -423,6 +424,10 @@ Send it only when the connection test's `features` lists `removed_paths`, after
 upgrading every cinema node. Detail:
 [PIPELINE-CONTRACT-REMOVED-PATHS.md](features/PIPELINE-CONTRACT-REMOVED-PATHS.md),
 [API.md](API.md) §6.3.
+
+### 1.11 Offload and Get it back
+
+`offloaded_paths` and Get it back: [PIPELINE-CONTRACT-OFFLOAD.md](features/PIPELINE-CONTRACT-OFFLOAD.md).
 
 ---
 

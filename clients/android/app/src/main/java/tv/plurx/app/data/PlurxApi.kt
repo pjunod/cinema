@@ -187,7 +187,17 @@ interface PlurxApi {
         @Query("limit") limit: Int = 200,
         @Query("offset") offset: Int = 0,
         @Query("sort") sort: String = "title",
+        /** `disk` (the server's default), `offloaded` or `everything`; null leaves it to the server. */
+        @Query("presence") presence: String? = null,
     ): Page
+
+    /** Admin: ask Curator to download an offloaded title again. */
+    @POST("items/{id}/get-it-back")
+    suspend fun getItBack(@Path("id") id: Long): Response<OffloadAnswer>
+
+    /** What Curator reports for an offloaded title right now (never stored). */
+    @GET("items/{id}/offload-status")
+    suspend fun offloadStatus(@Path("id") id: Long): OffloadAnswer
 
     @GET("hubs")
     suspend fun hubs(): Hubs

@@ -167,7 +167,7 @@ final class TVNavigationTests: TVNavigationTestCase {
             let index = (groupIndex * itemCount + 25) / 26
             let item = app.buttons["item:\(index + 1)"]
             assertFocus(item, in: app, context: "Jump \(letter) focuses first item")
-            let tools = ["view", "sort", "filter", "jump"].map { app.buttons["library:" + $0] }
+            let tools = ["view", "sort", "filter", "files", "jump"].map { app.buttons["library:" + $0] }
             // Leave the jump target so the bookmark is a title the viewer chose.
             remote.press(.right)
             let focusedItem = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch

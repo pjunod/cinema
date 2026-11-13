@@ -17,7 +17,7 @@ mod probe_batch;
 pub mod recordings;
 pub mod removed;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -878,6 +878,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
         Some(&mut placed),
         None,
         None,
+        &HashMap::new(),
     )
     .await?;
     observe_scan_phase(&SCAN_PHASE_METRICS.process, process_started.elapsed());
@@ -932,7 +933,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
                 let current = remove_superseded(store, library, &superseded, &mut report).await?;
                 let gone: &[i64] = if current { &gone } else { &[] };
                 match store
-                    .reconcile_library(library.id, &fingerprint, gone, prune_limit)
+                    .reconcile_library(library.id, &fingerprint, gone, prune_limit, &[], 0)
                     .await?
                 {
                     ReconcileOutcome::Applied {
@@ -1295,6 +1296,30 @@ pub struct TargetedOptions {
     /// canonical files and walk nothing. Each must be under the target; one
     /// that is not, or is not a file, is left out.
     pub only: Option<Vec<PathBuf>>,
+    /// The external ids the notifying application sent, keyed by the
+    /// canonical path of each file *that request named* in `expected_files`
+    /// (never a folder's other files). A file with no record yet is placed on
+    /// the *offloaded* item carrying them first, and only then by the title
+    /// and folder lookups: a re-acquired title keeps its item and watch
+    /// history whatever its release is named.
+    pub offload_hints: HashMap<PathBuf, OffloadHint>,
+}
+
+/// The offloaded item a hint resolved to earlier in one pass, keyed by the
+/// hint and, for an episode, its season and episode. A file attaching clears
+/// the offload, so a second part of the same title must not look it up again.
+type ResolvedOffloads = HashMap<(OffloadHint, Option<(i32, i32)>), i64>;
+
+/// External ids for finding an offloaded item (see
+/// [`TargetedOptions::offload_hint`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct OffloadHint {
+    /// The movie's own ids.
+    pub tmdb: Option<i64>,
+    pub imdb: Option<String>,
+    /// The SHOW's TMDB id, for an episode, with its season and episode taken
+    /// from the file name.
+    pub series_tmdb: Option<i64>,
 }
 
 /// What a targeted scan observed per file but does not keep in its durable
@@ -1466,6 +1491,7 @@ pub async fn scan_path_targeted(
         Some(&mut items),
         Some(&force_probe),
         Some(&mut detail.skipped),
+        &options.offload_hints,
     )
     .await?;
     observe_scan_phase(&SCAN_PHASE_METRICS.process, process_started.elapsed());
@@ -1538,7 +1564,9 @@ async fn record_candidates(
     placed_out: Option<&mut Vec<PlacedFile>>,
     force_probe: Option<&HashSet<String>>,
     mut skipped_out: Option<&mut BTreeMap<String, String>>,
+    offload_hints: &HashMap<PathBuf, OffloadHint>,
 ) -> Result<BTreeMap<String, SkipGroup>, StoreError> {
+    let mut resolved_offloads = ResolvedOffloads::new();
     let mut placed_sink = placed_out;
     let mut reported_duplicate_directories = HashSet::new();
     // Skips are informational, not errors — kept apart so a library full of
@@ -1679,7 +1707,15 @@ async fn record_candidates(
                 },
                 duplicate: None,
             },
-            None => match place_item(store, library, &path).await? {
+            None => match place_item(
+                store,
+                library,
+                &path,
+                offload_hints.get(&path),
+                &mut resolved_offloads,
+            )
+            .await?
+            {
                 Placement::Placed(placed) => placed,
                 Placement::Skipped(why) => {
                     report.skipped += 1;
@@ -1993,10 +2029,25 @@ async fn place_item(
     store: &PublicationStore<'_>,
     library: &Library,
     path: &Path,
+    offload_hint: Option<&OffloadHint>,
+    resolved: &mut ResolvedOffloads,
 ) -> Result<Placement, StoreError> {
     match library.kind {
         LibraryKind::Movies => {
             let parsed = parse::parse_movie(path);
+            if let Some(hint) = offload_hint.filter(|h| h.tmdb.is_some() || h.imdb.is_some()) {
+                let key = (hint.clone(), None);
+                if let Some(id) = resolved.get(&key) {
+                    return Ok(placed(*id, false));
+                }
+                if let Some(offloaded) = store
+                    .find_offloaded_movie(library.id, hint.tmdb, hint.imdb.as_deref())
+                    .await?
+                {
+                    resolved.insert(key, offloaded.id);
+                    return Ok(placed(offloaded.id, false));
+                }
+            }
             if let Some(directory) =
                 usable_source_directory(library, parsed.source_directory.as_deref())
             {
@@ -2105,6 +2156,25 @@ async fn place_item(
                     ));
                 }
             };
+            if let Some((hint, series)) =
+                offload_hint.and_then(|hint| hint.series_tmdb.map(|series| (hint, series)))
+            {
+                let key = (hint.clone(), Some((parsed.season, parsed.episode)));
+                let found = match resolved.get(&key) {
+                    Some(id) => Some(*id),
+                    None => store
+                        .find_offloaded_episode(library.id, series, parsed.season, parsed.episode)
+                        .await?
+                        .map(|item| item.id),
+                };
+                if let Some(id) = found {
+                    resolved.insert(key, id);
+                    return Ok(Placement::Placed(PlacedItem {
+                        placed: home::Placed { id, created: false },
+                        duplicate: None,
+                    }));
+                }
+            }
             let (show, duplicate) = find_or_create_show(store, library, &parsed).await?;
             let season = find_or_create_season(store, library, show.id, parsed.season).await?;
             if let Some(existing) = store.find_episode(season, parsed.episode).await? {

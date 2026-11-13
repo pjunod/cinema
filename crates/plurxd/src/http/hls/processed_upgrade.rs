@@ -4,11 +4,13 @@
 //! viewer's first frame. A create resolves the ordinary plan only; when that
 //! plan could be processed it leaves an [`UpgradeIntent`] here, on the node
 //! that owns the session, and so does the activation of a locally owned
-//! ordinary prepared successor. The first `ttff` beacon naming the session
-//! (or, for a prepared successor, its commit, which the client sends only
-//! after showing the successor's frame) takes the intent and runs one bounded
-//! trial
-//! ([`crate::transcode::TranscodeManager::prepare_processed_upgrade`]). A
+//! ordinary prepared successor. The first proof that the viewer is presenting
+//! the session takes the intent and runs one bounded trial: its `ttff`
+//! beacon, an accepted rendering control exchange from its own generation
+//! (the only proof for a resume or a stall recovery, which send no `ttff`),
+//! or, for a prepared successor, its commit, which the client sends only
+//! after showing the successor's frame. The trial is
+//! [`crate::transcode::TranscodeManager::prepare_processed_upgrade`]. A
 //! verified first window is staged as an M6 prepared successor
 //! ([`super::preparation::stage_prepared_successor_as`]) and the control
 //! exchange offers it like any other. Every refusal leaves the ordinary
@@ -196,11 +198,40 @@ pub(in crate::http) fn take_on_first_frame(
     user_id: i64,
     session_id: &str,
 ) -> Option<(Box<UpgradeIntent>, UpgradeRun)> {
+    take_waiting(user_id, session_id, None)
+}
+
+/// A rendering control exchange for `incarnation_id` was accepted on this
+/// node: the viewer is presenting that session's frames. Like
+/// [`take_on_first_frame`], but fenced to the generation the exchange named,
+/// so a stale exchange cannot start the upgrade of a later incarnation.
+pub(in crate::http) fn take_on_rendering(
+    user_id: i64,
+    session_id: &str,
+    incarnation_id: &str,
+) -> Option<(Box<UpgradeIntent>, UpgradeRun)> {
+    // Another preparation holds the playback's slot: leave the upgrade
+    // waiting for a later exchange rather than spend it against that slot.
+    if matches!(lock().get(session_id), Some(Entry::Waiting { intent, .. })
+        if super::preparation::preparation_slot_held(&intent.playback_id))
+    {
+        return None;
+    }
+    take_waiting(user_id, session_id, Some(incarnation_id))
+}
+
+fn take_waiting(
+    user_id: i64,
+    session_id: &str,
+    incarnation_id: Option<&str>,
+) -> Option<(Box<UpgradeIntent>, UpgradeRun)> {
     let mut entries = lock();
     let Some(Entry::Waiting { intent, registered }) = entries.get(session_id) else {
         return None;
     };
-    if intent.user_id != user_id {
+    if intent.user_id != user_id
+        || incarnation_id.is_some_and(|incarnation| incarnation != intent.incarnation_id)
+    {
         return None;
     }
     if registered.elapsed() >= FIRST_FRAME_WINDOW {
@@ -250,6 +281,30 @@ pub(in crate::http) struct UpgradeRun {
 impl UpgradeRun {
     pub(in crate::http) fn cancelled(&self) -> &tokio_util::sync::CancellationToken {
         &self.cancelled
+    }
+
+    /// Whether `outcome` only lost the playback's preparation slot to another
+    /// preparation: the run itself (its session's release or supersession)
+    /// was not cancelled, so the session may still be upgraded.
+    fn displaced(&self, outcome: &str) -> bool {
+        (outcome == "cancelled" || outcome == SLOT_HELD) && !self.cancelled.is_cancelled()
+    }
+
+    /// Put the upgrade back to wait for the session's next rendering exchange,
+    /// if the entry is still this run's.
+    fn wait_again(&self, intent: Box<UpgradeIntent>) {
+        let mut entries = lock();
+        if matches!(entries.get(&self.session_id),
+            Some(Entry::Running { claim, report: None, .. }) if *claim == self.claim)
+        {
+            entries.insert(
+                self.session_id.clone(),
+                Entry::Waiting {
+                    intent,
+                    registered: std::time::Instant::now(),
+                },
+            );
+        }
     }
 
     fn skipped(&self, reason: &str) {
@@ -368,6 +423,28 @@ pub(in crate::http) fn note_first_frame(state: &AppState, user_id: i64, session_
     start_upgrade(state, intent, run);
 }
 
+/// The control-exchange seam: an accepted exchange from the session's own
+/// generation, with active demand and a rendering picture, proves the viewer
+/// is presenting this session. The `ttff` beacon is a start measurement and
+/// is never sent for a resume, a seek, or a stall recovery, so a session that
+/// began any of those ways would otherwise never be offered its upgrade.
+pub(in crate::http) fn note_rendering(state: &AppState, route: &MediaSessionRoute) {
+    if route.owner_node_id != state.node_id || route.state != "active" {
+        return;
+    }
+    // A viewer still waiting on its title's measurement keeps that scan's
+    // live demand while it is watching.
+    qualification::hold_viewer_demand(state, &route.session_id, &route.incarnation_id);
+    let Some(user_id) = route.principal.local_user_id() else {
+        return;
+    };
+    let Some((intent, run)) = take_on_rendering(user_id, &route.session_id, &route.incarnation_id)
+    else {
+        return;
+    };
+    start_upgrade(state, intent, run);
+}
+
 /// A prepared successor this node owns was committed for `user_id`: the
 /// client commits only after it has shown the successor's own frame, so the
 /// commit is that session's first presented frame, and the upgrade the
@@ -400,11 +477,19 @@ fn start_upgrade_claim(
     crate::playback_control::record_processed_upgrade("scheduled");
     let state = state.clone();
     tokio::spawn(async move {
-        let outcome = run_upgrade(&state, &intent, &run, pending).await;
+        let mut outcome = run_upgrade(&state, &intent, &run, pending).await;
+        if run.displaced(outcome) {
+            outcome = "displaced";
+            run.wait_again(intent);
+        }
         crate::playback_control::record_processed_upgrade(outcome);
         drop(run);
     });
 }
+
+/// The run found another preparation holding the playback's slot before it
+/// claimed it; [`start_upgrade_claim`] puts the upgrade back to wait.
+const SLOT_HELD: &str = "slot_held";
 
 /// What the trial step answers; see [`run_upgrade_with`].
 pub(in crate::http) type TrialOutcome =
@@ -558,8 +643,8 @@ where
             return "cancelled";
         }
         tracing::info!(target: "plurxd::http::hls", session = %session,
-            "processed upgrade skipped: a viewer-directed preparation holds the playback's slot");
-        return "not_applicable";
+            "processed upgrade waits: another preparation holds the playback's slot");
+        return SLOT_HELD;
     };
     if pending.cancelled() {
         return "cancelled";
@@ -662,6 +747,11 @@ where
         Err(reason) => {
             if let Some(wait) = crate::transcode::pending_fel_qualification(&reason) {
                 if qualification::retain(intent, run, wait) {
+                    qualification::hold_viewer_demand(
+                        state,
+                        &intent.session_id,
+                        &intent.incarnation_id,
+                    );
                     return "qualification_pending";
                 }
                 if run.cancelled().is_cancelled() {

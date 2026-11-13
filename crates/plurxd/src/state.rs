@@ -1375,9 +1375,10 @@ impl AppState {
             serving.clone(),
         );
         let media_pool = crate::media_pool::MediaPool::new(membership.clone());
-        let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_applied_view(
             membership.clone(),
             Arc::clone(&store),
+            Arc::new(applied.clone()),
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
@@ -5735,7 +5736,11 @@ impl JobManager {
         } else {
             req.path.clone()
         };
-        let removed = library_work::probe_removed_paths(&library, &scope, targeted.removed).await?;
+        let mut removed =
+            library_work::probe_removed_paths(&library, &scope, targeted.removed, false).await?;
+        removed.extend(
+            library_work::probe_removed_paths(&library, &scope, targeted.offloaded, true).await?,
+        );
         // Files the caller says it just placed are probed whatever their
         // size and whole-second mtime say (contract v2 §5.1).
         let force_probe = library_work::canonical_expected(expected, &library, &scope).await;
@@ -5755,6 +5760,16 @@ impl JobManager {
                     .probe_only
                     .then(|| canonical.iter().cloned().collect()),
                 force_probe: canonical,
+                offload_hints: targeted
+                    .offload_hints
+                    .iter()
+                    .filter_map(|(raw, hint)| match force_probe.get(raw) {
+                        Some(library_work::ExpectedPath::Canonical(path)) => {
+                            Some((path.clone(), hint.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
             },
         )
         .await?;
