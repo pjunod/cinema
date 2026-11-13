@@ -6342,6 +6342,7 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
                 generation: 1,
                 source_digest: "0".repeat(64),
             },
+            catalog_query: None,
         }),
         candidate_id: Some(candidate.id),
         presentation_target: None,
@@ -6980,5 +6981,43 @@ mod delivered_plan_note_tests {
             delivered_plan_notes(notes.clone(), &processed),
             vec![notes[0].clone(), explanation]
         );
+    }
+}
+
+/// Same carrier shape as an Android processed-session recovery: a fresh Auto
+/// plan may see an ordinary Copy row, but this request can execute Encode.
+#[tokio::test]
+async fn auto_transcode_selects_an_executable_route_before_normalization() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::playback::candidate::CandidateRoute;
+    let state = resolver_state();
+    let source_dir = crate::test_tempdir().expect("source dir");
+    let source_path = source_dir.path().join("auto-carrier.mkv");
+    std::fs::write(&source_path, [0_u8; 4096]).expect("source bytes for descriptor identity");
+    let source_mtime = std::fs::metadata(&source_path).expect("source metadata")
+        .modified().expect("source mtime").duration_since(std::time::UNIX_EPOCH)
+        .expect("source epoch").as_secs() as i64;
+    state.store.put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO,"1").await.expect("Auto policy");
+    let library = state.store.create_library(&NewLibrary { name:"Auto carrier".into(),kind:LibraryKind::Movies,paths:vec![],anime:false }).await.expect("library");
+    let item = state.store.insert_item(&NewItem { library_id:library.id,kind:ItemKind::Movie,parent_id:None,title:"Auto carrier".into(),year:None,season_number:None,episode_number:None }).await.expect("item");
+    let id = state.store.upsert_file(item,source_path.to_str().expect("source path"),4096,source_mtime,&ProbeResult {
+        container:Some("mkv".into()),video_codec:Some("h264".into()),width:Some(1920),height:Some(1080),bit_depth:Some(8),
+        audio_streams:vec![plurx_core::domain::AudioStream { index:1,codec:"aac".into(),channels:Some(2),sample_rate:Some(48000),channel_layout:Some("stereo".into()),language:None,title:None,default:true }],
+        raw_json:Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","sample_rate":"48000"}]}).to_string()),..Default::default()
+    }).await.expect("file");
+    let source = state.store.get_file(id).await.expect("source read").expect("source");
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","profiles":["high"],"present":["sdr"],"max_width":3840,"max_height":2160,"max_frame_rate":{"numerator":60,"denominator":1}}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
+    for copy in [None,Some(false),Some(true)] {
+        let result = resolve_plan(PlanInputs { snapshot:None,state:&state,user_id:1,file_id:id,source:Some(&source),network_prior:None,network_identity:None,incumbent_receipt:None },None,
+            CreateSession { playback_id:"auto-carrier".into(),quality_auto:Some(true),copy,caps:Some(caps.clone()),..bare_create() }).await.expect("selection chooses a carrier it can execute");
+        if copy==Some(true) {
+            assert!(matches!(result.request.kind,crate::transcode::SessionKind::Copy { .. }),"explicit Copy remains Copy");
+        } else {
+            let catalog = result.quality_catalog.as_ref().expect("negotiated catalog");
+            assert!(catalog.candidates.iter().any(|entry|entry.candidate.route==CandidateRoute::Remux),"fixture offers an ordinary Copy row");
+            assert!(catalog.candidates.iter().any(|entry|entry.candidate.route==CandidateRoute::Encode),"fixture also offers Encode");
+            assert_eq!(result.candidate_route,Some(CandidateRoute::Encode));
+            assert!(matches!(result.request.kind,crate::transcode::SessionKind::Transcode { .. }));
+        }
     }
 }

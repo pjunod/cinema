@@ -1456,6 +1456,7 @@ fn auto_candidate_parser_floor_remote_context_is_retained_but_not_executed() {
             generation: 1,
             source_digest: "0".repeat(64),
         },
+        catalog_query: None,
     });
     request.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
         width_px: 2400,
@@ -4473,5 +4474,154 @@ async fn skipped_processing_owner_reason_survives_relay_only_for_its_generation(
         let parsed: crate::playback_control::ControlResponseV1 =
             serde_json::from_slice(&bytes).expect("strict legacy body");
         assert_eq!(parsed, expected);
+    }
+}
+
+/// A transformed Encode request cannot reconstruct its original Copy query.
+/// Retain that descriptive scope through the same strict worker/durable wire.
+fn processed_catalog_provenance_fixture() -> RemoteStartRequest {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let mut request = valid_start_request();
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"present":["sdr","pq"],"max_height":2160}],
+        "audio":["aac","eac3"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}],
+        "containers":["mp4","mkv"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"]
+    })).expect("full capabilities");
+    request.request.hdr10 = true;
+    request.request.audio_claim =
+        plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+    request.decoder_caps = Some(
+        crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"),
+    );
+    let digest = [0x71; 32];
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest(digest),
+        recipe_digest: digest,
+        route: CandidateRoute::Encode,
+        planned_codec: Some("hevc".into()),
+        processed_dv: true,
+        normalized_geometry: true,
+        width: 1280,
+        height: 720,
+        target_height: 720,
+        average_bps: None,
+        peak_bps: None,
+        grade: plurx_core::transcode::OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    };
+    let query = crate::media_pool::QualityCatalogRequest {
+        file_id: request.request.file_id,
+        source_size: request.source_size,
+        source_mtime: request.source_mtime,
+        caps: caps.clone(),
+        audio_index: request.request.audio_index,
+        audio_offset_ms: request.request.audio_offset_ms,
+        subtitle_burn: request.request.subtitle_burn,
+        presentation: request.request.presentation,
+        audio_claim: request.request.audio_claim.clone(),
+        audio_delivery: None,
+        copy_contract: Some((false, true, true)),
+    };
+    request.candidate_id = Some(candidate.id);
+    request.candidate_catalog = Some(CandidateCatalogContext {
+        caps,
+        candidate,
+        binding: crate::media_pool::PlanningBinding {
+            generation: 1,
+            source_digest: "0".repeat(64),
+        },
+        catalog_query: Some(query),
+    });
+    request
+}
+
+#[test]
+fn processed_catalog_provenance_survives_the_worker_and_durable_wire() {
+    let request = processed_catalog_provenance_fixture();
+    assert!(request.is_valid());
+    assert!(matches!(
+        request.request.kind,
+        SessionKind::Transcode { .. }
+    ));
+    let wire = serde_json::to_value(&request).expect("strict envelope");
+    let restored: RemoteStartRequest = serde_json::from_value(wire).expect("wire roundtrip");
+    assert!(restored.is_valid());
+    let context = restored
+        .candidate_catalog
+        .as_ref()
+        .expect("catalog context");
+    let query = context
+        .validated_catalog_query(
+            &restored.request,
+            restored.source_size,
+            restored.source_mtime,
+        )
+        .expect("original query");
+    assert_eq!(query.copy_contract, Some((false, true, true)));
+    assert_eq!(query.caps.audio, vec!["aac".to_owned(), "eac3".to_owned()]);
+    assert_eq!(
+        query.caps.hls_hevc_sample_entries,
+        Some(vec!["hvc1".to_owned()])
+    );
+    assert_eq!(query.caps.audio_sinks.len(), 2);
+    // Removing descriptive provenance grants no authority to guess a
+    // processed query from its transformed carrier.
+    let mut missing = restored.clone();
+    missing
+        .candidate_catalog
+        .as_mut()
+        .expect("catalog")
+        .catalog_query = None;
+    assert!(missing
+        .candidate_catalog
+        .as_ref()
+        .expect("catalog")
+        .validated_catalog_query(&missing.request, missing.source_size, missing.source_mtime)
+        .is_none());
+}
+
+#[test]
+fn catalog_provenance_cannot_change_source_tracks_or_capabilities() {
+    let request = processed_catalog_provenance_fixture();
+    for mutation in [
+        "file",
+        "size",
+        "mtime",
+        "track",
+        "offset",
+        "subtitle",
+        "presentation",
+        "caps",
+        "claim",
+        "copy_contract",
+    ] {
+        let mut changed = request.clone();
+        let query = changed
+            .candidate_catalog
+            .as_mut()
+            .expect("catalog")
+            .catalog_query
+            .as_mut()
+            .expect("query");
+        match mutation {
+            "file" => query.file_id += 1,
+            "size" => query.source_size += 1,
+            "mtime" => query.source_mtime += 1,
+            "track" => query.audio_index = Some(2),
+            "offset" => query.audio_offset_ms = 175,
+            "subtitle" => query.subtitle_burn = Some(3),
+            "presentation" => query.presentation = crate::transcode::Presentation::Live,
+            "caps" => query.caps.hls_hevc_sample_entries = None,
+            "claim" => query.audio_claim = None,
+            "copy_contract" => query.copy_contract = Some((false, false, true)),
+            _ => unreachable!(),
+        }
+        assert!(
+            !changed.is_valid(),
+            "mismatched {mutation} is not accepted as catalog provenance"
+        );
     }
 }

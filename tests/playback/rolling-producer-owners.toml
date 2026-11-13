@@ -2070,7 +2070,12 @@ pattern = "media_session_route_for_playback"
 # neither publish nor mutate the pointer and grant no recovery authority.
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 28
+# 28 -> 29: `a_processed_successor_commits_with_its_original_copy_catalog_provenance`
+# reads the current route after the accepted commit and checks its incarnation,
+# active state, and usable control response. This is a test-only observation of
+# the Store-published successor; it does not make a read-then-act decision or
+# change the Store CAS as the sole pointer authority.
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
