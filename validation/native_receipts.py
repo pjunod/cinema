@@ -78,7 +78,10 @@ BUILD_SPECS = {
     # `apple-tv-navigation-test`, the desktop recipes, their flags and external
     # inputs are unchanged. Pin these exact bytes; no old-to-new receipt
     # adoption is authorized.
-    'Makefile': '2bc2f5446114f87797e09a87c0555099a8b0355779f4477ce8405a22666c2a82',
+    # Reviewed offload: one added `node --test tests/web/offload.test.js` line in
+    # `web-unit-check`. The Apple and desktop recipes, their flags and external
+    # inputs are exactly the bytes reviewed above.
+    'Makefile': '05c65563d6663d77ce2daa1bdd57eb27c510c070dfdf141cb685bd0beeabf581',
     # Reviewed 0.8.0 build 299 (offload client sources): only
     # CURRENT_PROJECT_VERSION differs from the reviewed build 298 bytes
     # (`make apple-build-bump`; no resources or scripts added). Build 298 had
