@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · PR #1570 fast lane passed; Linux startup guard rollout pending; the lab4 exact-owner recovery completed 2026-11-13 · **Updated:** 2026-11-13
+**Status:** open · reviewed PR #1570 guard incorporated into the playback scheduling batch; combined qualification and rollout pending; the lab4 exact-owner recovery completed 2026-11-13 · **Updated:** 2026-11-13
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document

@@ -8,6 +8,11 @@ landing state are recorded on the PR. The [root-cause analysis](SHARED-LIBRARY-P
 owns the design and accepted decisions; [playback-start](PLAYBACK-START-PLAN.md)
 owns A1.
 
+The reviewed startup guard from #1570 is incorporated into
+`codex/twilight-title-admission` for one combined qualification and rollout.
+Codex owns that integration; #1570 will close after the combined landing.
+Runtime evidence above remains bound to the already deployed revision.
+
 ## Delivered scope
 
 The batch repairs NULL-principal consumers, committed membership bootstrap,
