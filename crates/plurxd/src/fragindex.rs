@@ -3815,3 +3815,7 @@ mod equality_tests;
 /// future is dropped.
 #[cfg(test)]
 mod ride_along_tests;
+
+#[cfg(test)]
+#[path = "fragindex/refit_acceptance_tests.rs"]
+mod refit_acceptance_tests;

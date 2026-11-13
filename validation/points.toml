@@ -1117,6 +1117,7 @@ paths = [
   "crates/plurxd/src/fragindex/equality_tests.rs",
   "crates/plurxd/src/fragindex/ride_along_tests.rs",
   "crates/plurxd/src/fragindex/tests.rs",
+  "crates/plurxd/src/fragindex/refit_acceptance_tests.rs",
   "crates/plurxd/src/http/stream/tests.rs",
   "crates/plurxd/src/subtitle_ride_along/testing.rs",
   "crates/plurxd/src/subtitle_ride_along/tests.rs",
