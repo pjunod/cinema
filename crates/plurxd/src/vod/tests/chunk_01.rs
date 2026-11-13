@@ -447,6 +447,7 @@ pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
 
 fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
     SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,

@@ -999,7 +999,9 @@ pub(crate) async fn held_source_packet_probe_json(
         &request.stream_index.to_string(),
         "-show_packets",
         "-show_entries",
-        "packet=stream_index,pts,dts,duration",
+        // flags and the stream time base let one probe also name the first
+        // keyframe exactly (crate::dv_refit_serving::source_keyframe).
+        "packet=stream_index,pts,dts,duration,flags:stream=time_base",
     ]);
     let interval = match (request.start_seconds, request.packet_limit) {
         (None, Some(limit)) => Some(format!("%+#{limit}")),

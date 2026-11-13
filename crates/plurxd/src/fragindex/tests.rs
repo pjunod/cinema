@@ -801,7 +801,7 @@ async fn a_shared_pass_builds_exactly_what_each_identity_builds_alone() {
         ("H.264", h264, 1),
         ("truncated", p7(&truncated_path), 0),
     ] {
-        let videos = video_identities(&file, None, have_dovi, true);
+        let videos = video_identities(&file, None, have_dovi, true, None);
         let source = std::fs::File::open(&file.path).expect("fixture");
         let mut alone = Vec::with_capacity(videos.len());
         for video in &videos {
@@ -827,6 +827,7 @@ async fn a_shared_pass_builds_exactly_what_each_identity_builds_alone() {
             None,
             None,
             None,
+            &crate::dv_refit_serving::RefitTables::none(),
         )
         .await;
         assert_eq!(shared.len(), videos.len(), "{name}");
@@ -919,6 +920,7 @@ async fn real_source_shared_read_differential() {
         raw.as_deref(),
         crate::ffmpeg::has_dovi_rpu().await,
         true,
+        None,
     );
     let source = std::fs::File::open(&path).expect("source");
     let temp = crate::test_tempdir().expect("tempdir");
@@ -952,6 +954,7 @@ async fn real_source_shared_read_differential() {
         None,
         None,
         None,
+        &crate::dv_refit_serving::RefitTables::none(),
     )
     .await;
     let (cpu_after, rss) = children();
@@ -999,7 +1002,7 @@ async fn a_shared_pass_that_runs_out_of_budget_fails_every_identity() {
     // The budget is independent of the optional dovi_rpu filter. The CI
     // FFmpeg 6 build has filter_units but not dovi_rpu; claiming the latter
     // makes the child exit before the paced input can reach its deadline.
-    let videos = video_identities(&file, None, false, false);
+    let videos = video_identities(&file, None, false, false, None);
     assert_eq!(videos.len(), 2);
     let mut pass = shared_index_pass(
         &file,
@@ -1081,7 +1084,7 @@ fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
 }
 
 fn fingerprints_of(file: &MediaFile, have_dovi: bool) -> Vec<String> {
-    video_identities(file, None, have_dovi, false)
+    video_identities(file, None, have_dovi, false, None)
         .into_iter()
         .map(|video| identity_for(file, video).argv_fingerprint)
         .collect()
@@ -1090,9 +1093,9 @@ fn fingerprints_of(file: &MediaFile, have_dovi: bool) -> Vec<String> {
 #[test]
 fn a_plain_file_has_one_pipeline_to_index() {
     let file = hevc_file(None, None);
-    assert_eq!(video_identities(&file, None, true, false).len(), 1);
+    assert_eq!(video_identities(&file, None, true, false, None).len(), 1);
     assert!(
-        !video_identities(&file, None, true, false)[0].preserves_dolby_vision(),
+        !video_identities(&file, None, true, false, None)[0].preserves_dolby_vision(),
         "the stripped identity stays first, so a fully indexed library \
              does not re-order its work to adopt the identity set"
     );
@@ -1104,7 +1107,7 @@ fn a_dolby_vision_file_is_indexed_for_both_the_strip_and_the_envelope() {
         Some("dolby_vision"),
         Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
     );
-    let videos = video_identities(&file, None, true, false);
+    let videos = video_identities(&file, None, true, false, None);
     assert_eq!(videos.len(), 2);
     assert!(!videos[0].preserves_dolby_vision());
     assert!(videos[1].preserves_dolby_vision());
@@ -1135,7 +1138,7 @@ fn the_converting_identity_is_indexed_only_when_it_can_be_served() {
     p7.dolby_vision.level = Some(6);
     p7.dolby_vision.bl_compat_id = Some(1);
 
-    let converting = video_identities(&p7, None, true, true);
+    let converting = video_identities(&p7, None, true, true, None);
     assert_eq!(converting.len(), 3, "strip, preserve, convert");
     assert!(converting[2].converts_dolby_vision());
     assert!(
@@ -1154,7 +1157,7 @@ fn the_converting_identity_is_indexed_only_when_it_can_be_served() {
     assert_eq!(fingerprints.len(), 3);
 
     // The node switch stands it down.
-    assert_eq!(video_identities(&p7, None, true, false).len(), 2);
+    assert_eq!(video_identities(&p7, None, true, false, None).len(), 2);
 
     // …and so does a file the conversion cannot describe. A Profile 8
     // source is already what the conversion produces; a row with no
@@ -1164,12 +1167,15 @@ fn the_converting_identity_is_indexed_only_when_it_can_be_served() {
         file.dolby_vision.profile = Some(8);
         file
     };
-    assert_eq!(video_identities(&p8, None, true, true).len(), 2);
+    assert_eq!(video_identities(&p8, None, true, true, None).len(), 2);
     let label_only = hevc_file(
         Some("dolby_vision"),
         Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
     );
-    assert_eq!(video_identities(&label_only, None, true, true).len(), 2);
+    assert_eq!(
+        video_identities(&label_only, None, true, true, None).len(),
+        2
+    );
 }
 
 /// A transform implemented after FFmpeg must move the index identity even
@@ -1273,7 +1279,7 @@ fn profile_five_keeps_its_stripping_identity_too() {
     // that copy is indexed today. The plan's M1 acceptance check expects
     // one row here; dropping the second would regress a live path.
     let file = hevc_file(Some("dolby_vision"), Some("Dolby Vision · Profile 5"));
-    assert_eq!(video_identities(&file, None, true, false).len(), 2);
+    assert_eq!(video_identities(&file, None, true, false, None).len(), 2);
 }
 
 #[test]
@@ -1424,7 +1430,7 @@ fn every_index_pass_agrees_with_the_argv_it_carries() {
                 // `hevc_copy_bsf_for_copy` — the one place the two
                 // builders could most plausibly disagree.
                 for probe in [None, Some(MINIMAL_HVCC_PROBE)] {
-                    for video in video_identities(&file, probe, have_dovi, convert) {
+                    for video in video_identities(&file, probe, have_dovi, convert, None) {
                         let pass = index_pass(
                             &file,
                             video,
@@ -2213,7 +2219,7 @@ exec /bin/sleep 60
             .await
             .expect("bundle")
             .expect("bundle installed");
-        let videos = video_identities(&file, None, true, false);
+        let videos = video_identities(&file, None, true, false, None);
         let cache = crate::test_tempdir().expect("cache");
         let started = Instant::now();
         let builds = build_riding_shared(
@@ -2223,6 +2229,7 @@ exec /bin/sleep 60
             Duration::from_secs(7200),
             None,
             None,
+            &crate::dv_refit_serving::RefitTables::none(),
         )
         .await;
         let lead = builds.into_iter().next().expect("lead");

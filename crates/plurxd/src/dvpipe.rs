@@ -167,9 +167,6 @@ impl Converter {
     /// Refuses a clock that does not describe this init's video track or the
     /// table's time base: a mismatch would place every sample in the wrong
     /// scene and nothing downstream could tell.
-    // Called by the session wiring (FEL-RPU-REFIT-BUILD.md §3.5, milestone 4
-    // part 2); until then only the tests here reach it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_refit(
         mut self,
         table: Arc<ServedCurveTable>,
@@ -209,6 +206,23 @@ impl Converter {
     /// to be Profile 7 producing none at all is a reason to refuse is the
     /// caller's judgement, made with the file's stored facts.
     pub fn convert(&mut self, fragment: &mut Fragment) -> Result<bool, Refused> {
+        self.convert_placed(fragment, 0)
+    }
+
+    /// Whether this conversion writes F+ curves.
+    pub fn refits(&self) -> bool {
+        self.refit.is_some()
+    }
+
+    /// [`Converter::convert`] for a fragment whose track ticks sit `offset`
+    /// ticks before the clock's: a VOD generation's fragment, rebased to zero
+    /// by its own muxer, placed by the index row it landed on (its row's
+    /// `dts` less its own `tfdt`). Without F+ curves the offset is unused.
+    pub fn convert_placed(
+        &mut self,
+        fragment: &mut Fragment,
+        offset: i128,
+    ) -> Result<bool, Refused> {
         let width = self.nal_length_size;
         let mut batch = Converted::default();
         let mut scratch = Vec::new();
@@ -222,7 +236,7 @@ impl Converter {
                     Some(refit) => {
                         let pts = refit
                             .clock
-                            .source_pts(time.presentation())
+                            .source_pts(time.presentation() + offset)
                             .map_err(|error| Fmp4Error::Unsupported(error.to_string()))?;
                         refit.table.curves_at(pts)
                     }

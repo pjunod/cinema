@@ -37,6 +37,7 @@ mod desktop_control;
 mod diagnostics;
 mod diagnostics_delivery;
 mod dv_disk;
+mod dv_refit_serving;
 #[cfg(unix)]
 mod dv_segment;
 mod dvpipe;

@@ -1139,14 +1139,29 @@ pub fn match_landing(
     observed: &[u32],
     target: usize,
 ) -> Result<usize, LandingError> {
+    match_landing_placed(index, observed.len(), target, &mut |start| {
+        reproduces(index, start, observed)
+    })
+}
+
+/// [`match_landing`] for a generation whose fragments weigh differently
+/// depending on where they land: `reproduces(start)` answers whether the
+/// `observed` buffered fragments, placed at index row `start`, weigh what
+/// the rows from `start` say. An F+ conversion is the case: its RPUs carry
+/// the curves of the scene each sample presents in, so its sizes depend on
+/// the landing (FEL-RPU-REFIT-BUILD.md §3.5).
+pub fn match_landing_placed(
+    index: &FragmentIndex,
+    observed: usize,
+    target: usize,
+    reproduces: &mut dyn FnMut(usize) -> bool,
+) -> Result<usize, LandingError> {
     let last_start = last_landing_start(index, observed)?;
-    let probe = observed;
     let rows = &index.rows;
-    let matches_at = |start: usize| reproduces(index, start, probe);
 
     let mut found: Option<usize> = None;
     for start in 0..=last_start.min(target) {
-        if !matches_at(start) {
+        if !reproduces(start) {
             continue;
         }
         // Every possible landing counts toward ambiguity, including ones the
@@ -1158,13 +1173,13 @@ pub fn match_landing(
                 return Err(LandingError::Ambiguous {
                     first,
                     second: start,
-                    compared: probe.len(),
+                    compared: observed,
                 })
             }
         }
     }
     let Some(start) = found else {
-        let past = (target.saturating_add(1)..=last_start).find(|&start| matches_at(start));
+        let past = (target.saturating_add(1)..=last_start).find(|&start| reproduces(start));
         return Err(match past {
             Some(row) => LandingError::PastTarget { row, target },
             None => LandingError::NoMatch,
@@ -1173,7 +1188,7 @@ pub fn match_landing(
     // A probe shorter than the window is only believable when the generation
     // genuinely ran out of fragments — that is, when the match lands exactly
     // at the end of the index. Anywhere else it should have produced more.
-    if probe.len() < LANDING_WINDOW && start + probe.len() != rows.len() {
+    if observed < LANDING_WINDOW && start + observed != rows.len() {
         return Err(LandingError::NoMatch);
     }
     Ok(start)
@@ -1209,6 +1224,26 @@ pub fn match_landing_at(
     landed_ticks: u64,
     tolerance_ticks: u64,
 ) -> Result<usize, LandingError> {
+    match_landing_placed_at(
+        index,
+        observed.len(),
+        target,
+        landed_ticks,
+        tolerance_ticks,
+        &mut |start| reproduces(index, start, observed),
+    )
+}
+
+/// [`match_landing_at`] with placement-dependent weights, as
+/// [`match_landing_placed`].
+pub fn match_landing_placed_at(
+    index: &FragmentIndex,
+    observed: usize,
+    target: usize,
+    landed_ticks: u64,
+    tolerance_ticks: u64,
+    reproduces: &mut dyn FnMut(usize) -> bool,
+) -> Result<usize, LandingError> {
     let last_start = last_landing_start(index, observed)?;
     let rows = &index.rows;
     let after = rows.partition_point(|row| row.dts <= landed_ticks);
@@ -1230,12 +1265,12 @@ pub fn match_landing_at(
     if row > target {
         return Err(LandingError::PastTarget { row, target });
     }
-    if row > last_start || !reproduces(index, row, observed) {
+    if row > last_start || !reproduces(row) {
         return Err(LandingError::TimeContradicts { row });
     }
     // The same tail rule as `match_landing`: a short probe is evidence only
     // where the stream genuinely ran out.
-    if observed.len() < LANDING_WINDOW && row + observed.len() != rows.len() {
+    if observed < LANDING_WINDOW && row + observed != rows.len() {
         return Err(LandingError::NoMatch);
     }
     Ok(row)
@@ -1244,24 +1279,22 @@ pub fn match_landing_at(
 /// What every landing question checks first: a non-empty probe and an index
 /// long enough to hold it. Returns the last row a probe this long can start
 /// at.
-fn last_landing_start(index: &FragmentIndex, observed: &[u32]) -> Result<usize, LandingError> {
-    if observed.is_empty() {
+fn last_landing_start(index: &FragmentIndex, observed: usize) -> Result<usize, LandingError> {
+    if observed == 0 {
         return Err(LandingError::TooShort {
             observed: 0,
             needed: 1,
         });
     }
     let rows = &index.rows;
-    if rows.len() < observed.len().min(LANDING_WINDOW) {
+    if rows.len() < observed.min(LANDING_WINDOW) {
         return Err(LandingError::TooShort {
             observed: rows.len(),
-            needed: observed.len().min(LANDING_WINDOW),
+            needed: observed.min(LANDING_WINDOW),
         });
     }
     // More fragments than the index has rows: no landing reproduces it.
-    rows.len()
-        .checked_sub(observed.len())
-        .ok_or(LandingError::NoMatch)
+    rows.len().checked_sub(observed).ok_or(LandingError::NoMatch)
 }
 
 /// Whether the rows from `start` weigh exactly what was observed, fragment

@@ -332,6 +332,7 @@ async fn prepared_copy_consumer(control: u8) {
     let source = crate::fragment_index_cluster::open_source_fence(&file, None).await.expect("source proof");
     let object = source.object_version().to_owned();
     let intent = CopyOutputIntent {
+        dv_refit_digest: None,
         target_node_id: "test-local".into(), audio_index: None, audio_offset_ms: 0, audio_claim: None,
         audio_delivery: plurx_core::playback::audio::AudioDelivery {
             action: plurx_core::playback::audio::AudioAction::None, downmix: None, reason: "no_audio".into(),
@@ -581,6 +582,7 @@ async fn prepared_copy_consumer(control: u8) {
 async fn d2_queue_copy_row(store: &Arc<dyn Store>, file: &MediaFile, target: &str, tag: &str) -> String {
     use plurx_core::store::background_jobs::*;
     let intent = CopyOutputIntent {
+        dv_refit_digest: None,
         target_node_id: target.into(), audio_index: None, audio_offset_ms: 0, audio_claim: None,
         audio_delivery: plurx_core::playback::audio::AudioDelivery {
             action: plurx_core::playback::audio::AudioAction::None, downmix: None, reason: "no_audio".into(),

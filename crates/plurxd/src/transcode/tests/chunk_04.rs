@@ -1114,6 +1114,7 @@
         previous_session_id: &str,
     ) -> SessionRequest {
         SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,

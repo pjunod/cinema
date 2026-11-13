@@ -130,3 +130,33 @@ fn written_curves_read_back_what_apply_to_rpu_wrote() {
         servable(&lifted(4.0)).expect("other").curves()
     ));
 }
+
+#[test]
+fn the_first_keyframe_is_read_from_a_packet_probe_in_demux_order() {
+    let document = serde_json::json!({
+        "packets": [
+            {"stream_index": 0, "pts": "40", "dts": "-1", "flags": "__"},
+            {"stream_index": 0, "pts": 83, "dts": 42, "flags": "K__"},
+            {"stream_index": 0, "pts": 125, "dts": 0, "flags": "K__"}
+        ],
+        "streams": [{"time_base": "1/1000"}]
+    });
+    let keyframe = SourceKeyframe::from_ffprobe(&document).expect("a keyframe");
+    assert_eq!(
+        keyframe,
+        SourceKeyframe {
+            dts: 42,
+            pts: 83,
+            time_base: (1, 1000)
+        }
+    );
+    let clock = keyframe.clock(16_000, 0);
+    assert_eq!(clock.source_pts(16 * 41), Ok(83), "the keyframe presents at its pts");
+    let no_base = serde_json::json!({"packets": document["packets"].clone()});
+    assert!(SourceKeyframe::from_ffprobe(&no_base).is_err());
+    let no_key = serde_json::json!({
+        "packets": [{"pts": 1, "dts": 1, "flags": "__"}],
+        "streams": [{"time_base": "1/1000"}]
+    });
+    assert!(SourceKeyframe::from_ffprobe(&no_key).is_err());
+}

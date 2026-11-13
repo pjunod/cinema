@@ -759,6 +759,11 @@ pub struct SessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) dv_processing_destination:
         Option<plurx_core::transcode::dv_processing::DvDestination>,
+    /// The F+ curve digest this session pinned when it was created
+    /// (FEL-RPU-REFIT-BUILD.md §3.5): set only for a converting copy of a
+    /// fitted title whose platform's enable is on, never by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dv_refit: Option<String>,
     /// Which presentation this durable request names. `Live` remains the
     /// serde default solely so recipes written by an older binary retain
     /// their identity and can be refused rather than misread as VOD. Public

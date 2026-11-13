@@ -265,11 +265,16 @@ pub async fn status(
             "This codec uses another playback route; a VOD copy index is not applicable",
         )
     } else {
+        let convert = state.transcode.dv_convert_enabled().await;
+        let refit = crate::dv_refit_serving::index_digest(state.store.as_ref(), &file, convert)
+            .await
+            .map_err(plurx_core::error::StoreError::Task)?;
         let identities = crate::fragindex::video_identities(
             &file,
             probe.as_deref(),
             crate::ffmpeg::has_dovi_rpu().await,
-            state.transcode.dv_convert_enabled().await,
+            convert,
+            refit,
         );
         let mut ready = 0;
         let mut refused = Vec::new();

@@ -42,6 +42,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         MediaSessionRequestClaim::Acquired { .. }
     ));
     let request = crate::transcode::SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
@@ -208,6 +209,7 @@ async fn started_session_cleanup_shipped_shape() {
     let dir = crate::test_tempdir().expect("state dir");
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,

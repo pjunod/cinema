@@ -363,6 +363,7 @@ impl TranscodeManager {
         };
         let file = &resolved_file;
         let mut request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
@@ -571,7 +572,13 @@ impl TranscodeManager {
             crate::ffmpeg::has_dovi_rpu().await,
             preserve_dolby_vision,
         )
-        .with_dolby_vision_conversion(convert_dolby_vision);
+        .with_dolby_vision_conversion(convert_dolby_vision)
+        .with_dolby_vision_refit(
+            request
+                .dv_refit
+                .as_deref()
+                .and_then(crate::dv_refit_serving::digest_bytes),
+        );
         let identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
         let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
         let engine = crate::ffmpeg::EncodedEngine::capture(None).await?;
@@ -621,6 +628,9 @@ impl TranscodeManager {
             aac,
             preserve_dolby_vision,
             convert_dolby_vision,
+            dv_refit_digest: video
+                .dolby_vision_refit()
+                .map(crate::dv_refit_serving::digest_hex),
             grade: super::manager_candidates::copy_candidate_grade(file),
             hdr10_requested: request.hdr10,
             normalized_geometry: context.is_some(),
@@ -802,7 +812,13 @@ impl TranscodeManager {
             crate::ffmpeg::has_dovi_rpu().await,
             intent.preserve_dolby_vision,
         )
-        .with_dolby_vision_conversion(intent.convert_dolby_vision);
+        .with_dolby_vision_conversion(intent.convert_dolby_vision)
+        .with_dolby_vision_refit(
+            intent
+                .dv_refit_digest
+                .as_deref()
+                .and_then(crate::dv_refit_serving::digest_bytes),
+        );
         if crate::fragindex::identity_for(file, video).argv_fingerprint != intent.video_identity {
             if !manual {
                 return Ok(Self::stop_unverifiable_candidate(&fence).await?);
@@ -827,6 +843,7 @@ impl TranscodeManager {
             (intent.width, intent.height),
         );
         let mut request = SessionRequest {
+            dv_refit: intent.dv_refit_digest.clone(),
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,

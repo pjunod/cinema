@@ -492,6 +492,7 @@ mod tests {
             height: 1080,
             video_identity: "a".repeat(64),
             pipeline_identity: "b".repeat(64),
+            dv_refit_digest: None,
         };
         let id = uuid::Uuid::new_v4().to_string();
         let request = EnqueueJob {

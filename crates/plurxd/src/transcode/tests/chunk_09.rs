@@ -2106,6 +2106,7 @@ fn actual_audio_delivery_changes_manifest_codec_and_rung_budget() {
 fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
     use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
     let mut request = SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
@@ -2247,6 +2248,7 @@ async fn candidate_catalog_and_execution_share_typed_audio_recipe_identity() {
         }],
     };
     let mut request = SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
@@ -2467,6 +2469,7 @@ async fn retained_audio_consumer_case(encoded: bool) {
         reason: "retained actual producer".into(),
     };
     let mut request = SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,

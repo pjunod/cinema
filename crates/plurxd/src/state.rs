@@ -3703,12 +3703,31 @@ async fn fragment_index_video_identities(
     convert: bool,
 ) -> Result<Vec<plurx_core::transcode::CopyVideoOptions>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
     Ok(crate::fragindex::video_identities(
         file,
         probe_json.as_deref(),
         have_dovi,
         convert,
+        refit,
     ))
+}
+
+/// The F+ tables `videos` name, for an index pass. A read failure is logged
+/// and leaves them out, and the pass then refuses those identities alone.
+async fn fragment_index_refit_tables(
+    store: &dyn Store,
+    file: &MediaFile,
+    videos: &[plurx_core::transcode::CopyVideoOptions],
+) -> crate::dv_refit_serving::RefitTables {
+    crate::dv_refit_serving::RefitTables::for_videos(store, file, videos)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(file_id = file.id, %error, "reading F+ curve tables for an index pass");
+            crate::dv_refit_serving::RefitTables::none()
+        })
 }
 
 /// The one pipeline a caller that can only carry one should work on.
@@ -3735,8 +3754,11 @@ pub(crate) async fn fragment_index_video_identity_options(
     convert: bool,
 ) -> Result<Vec<(plurx_core::transcode::CopyVideoOptions, String)>, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
+    let refit = crate::dv_refit_serving::index_digest(store, file, convert)
+        .await
+        .map_err(StoreError::Task)?;
     Ok(
-        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert)
+        crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi, convert, refit)
             .into_iter()
             .map(|video| {
                 let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
@@ -8875,6 +8897,7 @@ impl JobManager {
             // at the top of the file loop instead, which costs at most one
             // file's worth of overshoot per pass and buys the invariant that
             // makes the cursor safe.
+            let refits = fragment_index_refit_tables(self.store.as_ref(), &file, &videos).await;
             // Which of the file's identities still need a pass. Same checks,
             // same order as when each had a pass of its own.
             let mut missing = Vec::with_capacity(videos.len());
@@ -9023,6 +9046,7 @@ impl JobManager {
                         .unwrap_or_else(|| index_file_budget(file.duration_ms, file.size, None)),
                     ride_along.as_ref(),
                     Some(reporter),
+                    &refits,
                 ),
             )
             .await
@@ -9069,6 +9093,7 @@ impl JobManager {
                             index_file_budget(file.duration_ms, file.size, previous.as_ref()),
                             None,
                             Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                            &refits,
                         ),
                     )
                     .await
@@ -11678,6 +11703,7 @@ impl JobManager {
                 return false;
             }
         };
+        let refits = fragment_index_refit_tables(self.store.as_ref(), &file, &videos).await;
         let object_version = match crate::fragment_index_cluster::inspect_copy_source(&file).await {
             Ok(version) => version,
             Err(error) => {
@@ -11929,6 +11955,7 @@ impl JobManager {
                         report_progress,
                         ride_along.as_ref(),
                         &cancel,
+                        &refits,
                     )
                     .await,
                 )

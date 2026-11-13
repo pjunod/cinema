@@ -1339,6 +1339,7 @@ impl TranscodeManager {
                 CandidateRoute::Original => continue,
             };
             let request = SessionRequest {
+                dv_refit: None,
                 source_telemetry: None,
                 dv_processing_destination: None,
                 sdr_master_codecs: None,
@@ -4655,6 +4656,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             assert!(!TranscodeManager::vod_reorder_from_snapshot(&snapshot));
         }
         let request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
@@ -4872,6 +4874,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
                     aac: false,
                     preserve_dolby_vision: false,
                     convert_dolby_vision: false,
+                    dv_refit_digest: None,
                     grade: OutputGrade::Sdr,
                     hdr10_requested: false,
                     normalized_geometry: true,
@@ -5602,6 +5605,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
         context.planning_binding =
             Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
         let mut request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,

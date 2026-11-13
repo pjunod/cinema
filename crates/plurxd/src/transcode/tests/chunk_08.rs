@@ -16,6 +16,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
@@ -196,6 +197,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
@@ -281,6 +283,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
@@ -352,6 +355,7 @@ quality_catalog: None,
             Pipeline::Cpu,
         );
         let original = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
@@ -2875,6 +2879,7 @@ scope = "test"
     #[test]
     fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
         let mut request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,

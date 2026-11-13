@@ -466,6 +466,9 @@ pub struct CopyVideoOptions {
     promote_hevc_parameter_sets: bool,
     dv_convert: bool,
     retain_hevc_parameter_sets: bool,
+    /// The F+ curve digest a converting copy writes (FEL-RPU-REFIT-BUILD.md
+    /// §3.5). It moves the output identity, never the argv.
+    dv_refit: Option<[u8; 32]>,
 }
 
 impl CopyVideoOptions {
@@ -476,6 +479,7 @@ impl CopyVideoOptions {
             promote_hevc_parameter_sets: false,
             dv_convert: false,
             retain_hevc_parameter_sets: false,
+            dv_refit: None,
         }
     }
 
@@ -538,6 +542,22 @@ impl CopyVideoOptions {
     /// Whether this copy converts Profile 7 to Profile 8.1.
     pub const fn converts_dolby_vision(self) -> bool {
         self.dv_convert
+    }
+
+    /// Write the F+ curves named by `digest` into the converted RPUs. Only a
+    /// converting copy carries curves; on any other copy this is `None`.
+    pub const fn with_dolby_vision_refit(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.dv_refit = digest;
+        self
+    }
+
+    /// The pinned F+ curve digest, when this converting copy writes curves.
+    pub const fn dolby_vision_refit(self) -> Option<[u8; 32]> {
+        if self.dv_convert {
+            self.dv_refit
+        } else {
+            None
+        }
     }
 
     pub fn from_probe(

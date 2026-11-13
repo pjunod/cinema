@@ -14,6 +14,7 @@
     #[test]
     fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces() {
         let copy = |convert: bool| SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,

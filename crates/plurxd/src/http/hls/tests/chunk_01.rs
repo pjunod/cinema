@@ -1019,6 +1019,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                dv_refit: None,
                 source_telemetry: None,
                 dv_processing_destination: None,
         sdr_master_codecs: None,
@@ -2207,6 +2208,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                dv_refit: None,
                 source_telemetry: None,
                 dv_processing_destination: None,
         sdr_master_codecs: None,
@@ -2489,6 +2491,7 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    dv_refit: None,
                     source_telemetry: None,
                     dv_processing_destination: None,
         sdr_master_codecs: None,

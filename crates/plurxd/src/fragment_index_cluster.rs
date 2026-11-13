@@ -1460,7 +1460,7 @@ pub(crate) fn pipeline_digest(
         file,
         engine_sha256,
         video,
-        crate::fragindex::output_transform_identity(file, video),
+        crate::fragindex::output_transform_identity(file, video).as_deref(),
     )
 }
 

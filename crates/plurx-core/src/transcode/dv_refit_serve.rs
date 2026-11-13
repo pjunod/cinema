@@ -42,6 +42,8 @@ pub enum ServeError {
     NonIntegral(i128),
     #[error("presentation time {0} overflows the source clock")]
     Overflow(i128),
+    #[error("the source's first keyframe cannot be read: {0}")]
+    Keyframe(&'static str),
 }
 
 /// `num/den`, both positive.
@@ -169,6 +171,70 @@ impl SourceClock {
             .checked_add(offset / divisor)
             .and_then(|pts| i64::try_from(pts).ok())
             .ok_or(ServeError::Overflow(presentation))
+    }
+}
+
+/// The first video keyframe of a source, as the demuxer reports it: what a
+/// copy's timeline is anchored to. A copy pipe drops the packets before the
+/// first keyframe and shifts every timestamp by one offset, so that packet's
+/// decode time is the first output sample's decode time; the pair places
+/// the whole track in the source (see [`SourceKeyframe::clock`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceKeyframe {
+    pub dts: i64,
+    pub pts: i64,
+    pub time_base: (u32, u32),
+}
+
+impl SourceKeyframe {
+    /// The clock of a track whose first sample (this keyframe) decodes at
+    /// `first_decode` track ticks.
+    pub fn clock(&self, track_timescale: u32, first_decode: i128) -> SourceClock {
+        SourceClock {
+            track_timescale,
+            track_ticks: first_decode,
+            source_pts: self.dts,
+            source_time_base: self.time_base,
+        }
+    }
+
+    /// Reads the first keyframe out of an ffprobe packet document of one
+    /// stream (`-show_entries packet=pts,dts,flags:stream=time_base`),
+    /// packets in demux order. Refused when the stream's time base, or the
+    /// keyframe's dts or pts, is missing.
+    pub fn from_ffprobe(document: &serde_json::Value) -> Result<Self, ServeError> {
+        let refused = |why: &'static str| ServeError::Keyframe(why);
+        let time_base = document
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|streams| streams.first())
+            .and_then(|stream| stream.get("time_base"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_time_base)
+            .ok_or(refused("the stream reports no time base"))?;
+        let integer = |value: Option<&serde_json::Value>| {
+            let value = value?;
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        };
+        let keyframe = document
+            .get("packets")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(refused("the probe returned no packets"))?
+            .iter()
+            .find(|packet| {
+                packet
+                    .get("flags")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|flags| flags.starts_with('K'))
+            })
+            .ok_or(refused("the probed prefix holds no keyframe"))?;
+        Ok(Self {
+            dts: integer(keyframe.get("dts")).ok_or(refused("the keyframe has no dts"))?,
+            pts: integer(keyframe.get("pts")).ok_or(refused("the keyframe has no pts"))?,
+            time_base,
+        })
     }
 }
 

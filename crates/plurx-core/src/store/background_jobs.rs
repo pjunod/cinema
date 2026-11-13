@@ -875,6 +875,10 @@ pub struct CopyOutputIntent {
     pub height: u32,
     pub video_identity: String,
     pub pipeline_identity: String,
+    /// The F+ curve digest the session pinned (FEL-RPU-REFIT-BUILD.md §3.5);
+    /// absent for every copy that writes identity curves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv_refit_digest: Option<String>,
 }
 
 impl CopyOutputIntent {
@@ -888,6 +892,10 @@ impl CopyOutputIntent {
                 .is_none_or(|claim| claim.valid_snapshot())
             && self.audio_delivery.valid_snapshot()
             && (!self.convert_dolby_vision || self.preserve_dolby_vision)
+            && self
+                .dv_refit_digest
+                .as_deref()
+                .is_none_or(|refit| self.convert_dolby_vision && digest(refit))
             && (1..=16_384).contains(&self.width)
             && (1..=16_384).contains(&self.height)
             // segplan::argv_fingerprint is a 16-hex FNV identity, not SHA256.

@@ -695,6 +695,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            dv_refit: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,

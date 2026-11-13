@@ -4060,7 +4060,7 @@ pub(crate) mod tests {
             .await
             .expect("file read")
             .expect("file");
-        let video = crate::fragindex::video_identities(&file, None, false, false)[0];
+        let video = crate::fragindex::video_identities(&file, None, false, false, None)[0];
         *pipeline_digest =
             crate::fragment_index_cluster::pipeline_digest(&file, &"a".repeat(64), video);
         *cache_key = plurx_core::store::cluster_fragment_index_key(

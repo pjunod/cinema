@@ -169,7 +169,18 @@ pub(crate) async fn vod_index_coverage(
     for (file, raw_probe) in files.iter().zip(probes) {
         let start = wanted.len();
         let videos = if crate::copyseg::supports(file.video_codec.as_deref()) {
-            crate::fragindex::video_identities(file, raw_probe.as_deref(), have_dovi, convert)
+            // Only a Profile 7 title a platform's F+ enable covers reads its
+            // curve table here; every other file answers without a read.
+            let refit = crate::dv_refit_serving::index_digest(state.store.as_ref(), file, convert)
+                .await
+                .map_err(plurx_core::error::StoreError::Task)?;
+            crate::fragindex::video_identities(
+                file,
+                raw_probe.as_deref(),
+                have_dovi,
+                convert,
+                refit,
+            )
         } else {
             Vec::new()
         };
@@ -1153,6 +1164,7 @@ mod tests {
             raw.as_deref(),
             crate::ffmpeg::has_dovi_rpu().await,
             true,
+            None,
         );
         for video in videos.into_iter().take(identities) {
             let index = FragmentIndex::new(
@@ -1216,6 +1228,7 @@ mod tests {
             raw.as_deref(),
             crate::ffmpeg::has_dovi_rpu().await,
             true,
+            None,
         )[0];
         let counter = plurx_core::store::fragment_index_unpack_counter(
             &page.root.path().join("catalogue.db"),
@@ -1292,6 +1305,7 @@ mod tests {
             raw.as_deref(),
             crate::ffmpeg::has_dovi_rpu().await,
             true,
+            None,
         )[0];
         let source_sha256 = "b".repeat(64);
         let object_version = crate::fragment_index_cluster::inspect_copy_source(file)
@@ -1453,7 +1467,8 @@ mod tests {
                 file,
                 raw.as_deref(),
                 crate::ffmpeg::has_dovi_rpu().await,
-                true
+                true,
+                None
             )
             .len(),
             3
@@ -1540,6 +1555,7 @@ mod tests {
             raw.as_deref(),
             report.have_dovi,
             report.convert,
+            None,
         )
         .len();
         assert_eq!(per_file, 3, "P7 with conversion has three copy identities");

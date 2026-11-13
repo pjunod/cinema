@@ -3085,6 +3085,7 @@ mod principal_demand_tests {
             None,
         );
         let request = SessionRequest {
+            dv_refit: None,
             source_telemetry: None,
             quality_catalog: None,
             candidate_context: None,

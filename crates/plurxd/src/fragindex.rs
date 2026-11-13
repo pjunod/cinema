@@ -785,12 +785,24 @@ pub enum DolbyVisionPass {
     /// are rewritten after the muxer, so the record ffmpeg copied out of the
     /// source container describes a stream that no longer exists.
     Rewrite(Box<plurx_core::fmp4::DolbyVisionRecord>),
+    /// [`DolbyVisionPass::Rewrite`], with each RPU also carrying its scene's
+    /// F+ curves (FEL-RPU-REFIT-BUILD.md §3.5).
+    RewriteWithCurves(Box<plurx_core::fmp4::DolbyVisionRecord>, Arc<IndexRefit>),
     /// Delete it. The strip on an ffmpeg without `dovi_rpu`: `filter_units`
     /// removed the RPU and enhancement-layer NAL units by type, and the DOVI
     /// side data the muxer wrote the record from survived, so the output
     /// declares Profile 7 with an enhancement layer over a stream that has
     /// neither.
     Remove,
+}
+
+/// What an F+ index pass writes into each RPU, and where its timeline sits
+/// in the source: the pinned table, and the source's first video keyframe,
+/// which is the index's first sample (the pipe drops the packets before it).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexRefit {
+    pub(crate) table: Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>,
+    pub(crate) keyframe: plurx_core::transcode::dv_refit_serve::SourceKeyframe,
 }
 
 async fn index_stream_with_progress<R: AsyncRead + Unpin>(
@@ -800,7 +812,14 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
 ) -> IndexOutcome {
-    let convert = matches!(dolby_vision, DolbyVisionPass::Rewrite(_));
+    let convert = matches!(
+        dolby_vision,
+        DolbyVisionPass::Rewrite(_) | DolbyVisionPass::RewriteWithCurves(..)
+    );
+    let refit = match &dolby_vision {
+        DolbyVisionPass::RewriteWithCurves(_, refit) => Some(refit.clone()),
+        _ => None,
+    };
     // A converting identity's index has to describe the CONVERTED bytes. An
     // index is a list of the producer's own output byte counts and the landing
     // matcher compares them, so an index built from the unconverted stream
@@ -903,7 +922,29 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     let mut fragment = fragment;
                     if convert {
                         if converter.is_none() {
-                            match crate::dvpipe::Converter::for_init(init) {
+                            let ready =
+                                crate::dvpipe::Converter::for_init(init).and_then(|ready| {
+                                    let Some(refit) = &refit else {
+                                        return Ok(ready);
+                                    };
+                                    // The first fragment's first sample is the
+                                    // source's first keyframe: its decode time
+                                    // anchors the track in the source.
+                                    let video = init.video().expect("checked at the init");
+                                    let first = fragment
+                                        .track(video.id)
+                                        .map(|track| i128::from(track.base_decode_time))
+                                        .ok_or_else(|| {
+                                            crate::dvpipe::Refused(
+                                                "the first fragment carries no video".into(),
+                                            )
+                                        })?;
+                                    ready.with_refit(
+                                        refit.table.clone(),
+                                        refit.keyframe.clock(video.timescale, first),
+                                    )
+                                });
+                            match ready {
                                 Ok(ready) => converter = Some(ready),
                                 Err(refused) => {
                                     return IndexOutcome::Unsupported(format!(
@@ -1117,7 +1158,9 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     // are produced by the same function from the same facts.
     match dolby_vision {
         DolbyVisionPass::Untouched => {}
-        DolbyVisionPass::Rewrite(record) => promotion.dolby_vision = Some(*record),
+        DolbyVisionPass::Rewrite(record) | DolbyVisionPass::RewriteWithCurves(record, _) => {
+            promotion.dolby_vision = Some(*record)
+        }
         DolbyVisionPass::Remove => promotion.strip_dolby_vision = true,
     }
     let Some(mut served_init) = init.clone() else {
@@ -1187,12 +1230,26 @@ pub(crate) fn converted_dolby_vision_record(
 /// artifacts retain their existing identities.
 pub(crate) const DV_CONVERSION_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v1";
 
+/// The transform of a converting copy that also writes F+ curves
+/// (FEL-RPU-REFIT-BUILD.md §3.5). Only a fitted title's v2 copies carry it,
+/// always with the curve digest, so a title without curves keeps its v1
+/// indexes and a refit invalidates the v2 ones.
+pub(crate) const DV_REFIT_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v2";
+
 pub(crate) fn output_transform_identity(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
-) -> Option<&'static str> {
-    (video.converts_dolby_vision() && file.hdr.as_deref() == Some("dolby_vision"))
-        .then_some(DV_CONVERSION_TRANSFORM_REVISION)
+) -> Option<String> {
+    if !(video.converts_dolby_vision() && file.hdr.as_deref() == Some("dolby_vision")) {
+        return None;
+    }
+    Some(match video.dolby_vision_refit() {
+        None => DV_CONVERSION_TRANSFORM_REVISION.to_owned(),
+        Some(digest) => format!(
+            "{DV_REFIT_TRANSFORM_REVISION}+{}",
+            crate::dv_refit_serving::digest_hex(digest)
+        ),
+    })
 }
 
 fn identity_for_transform(
@@ -1230,7 +1287,11 @@ fn identity_for_transform(
 
 /// The identity a file's index is keyed by, for this build of ffmpeg.
 pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> SourceIdentity {
-    identity_for_transform(file, video, output_transform_identity(file, video))
+    identity_for_transform(
+        file,
+        video,
+        output_transform_identity(file, video).as_deref(),
+    )
 }
 
 /// Every copy-video pipeline a real client can ask this file for, in the order
@@ -1270,11 +1331,17 @@ pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> Sou
 /// conversion off (`PLURX_DV_CONVERT=0`) has no converting sessions to serve,
 /// and indexing for them would spend a third full pass over every Profile 7
 /// remux in the library on a stream nothing can ask for.
+///
+/// **A fitted title's F+ conversion is the fourth**, built when `refit`
+/// names the title's current curve digest (any platform's enable is on and
+/// the title has a fitted table): sessions on an enabled platform look up
+/// that identity, and sessions on the others keep the plain conversion.
 pub fn video_identities(
     file: &MediaFile,
     probe_json: Option<&str>,
     have_dovi: bool,
     convert: bool,
+    refit: Option<[u8; 32]>,
 ) -> Vec<transcode::CopyVideoOptions> {
     let preserve_choices: &[bool] = if plurx_core::playback::is_dolby_vision(file) {
         &[false, true]
@@ -1294,6 +1361,12 @@ pub fn video_identities(
             .with_dolby_vision_conversion(true);
         if seen.insert(identity_for(file, video).argv_fingerprint) {
             identities.push(video);
+        }
+        if let Some(digest) = refit {
+            let fitted = video.with_dolby_vision_refit(Some(digest));
+            if seen.insert(identity_for(file, fitted).argv_fingerprint) {
+                identities.push(fitted);
+            }
         }
     }
     identities
@@ -1581,9 +1654,35 @@ struct IndexOutput {
 
 impl IndexOutput {
     fn new(file: &MediaFile, video: transcode::CopyVideoOptions) -> Result<Self, String> {
+        Self::with_refit(file, video, None)
+    }
+
+    /// An output whose identity writes F+ curves needs `refit`: the table its
+    /// digest names and the source's first keyframe. Without them it is
+    /// refused rather than indexed with identity curves under a v2 identity.
+    fn with_refit(
+        file: &MediaFile,
+        video: transcode::CopyVideoOptions,
+        refit: Option<Arc<IndexRefit>>,
+    ) -> Result<Self, String> {
+        let dolby_vision = match (
+            dolby_vision_pass_for(file, video)?,
+            video.dolby_vision_refit(),
+        ) {
+            (pass, None) => pass,
+            (DolbyVisionPass::Rewrite(record), Some(digest)) => {
+                let refit = refit
+                    .ok_or("this identity writes F+ curves and its curve table is not available")?;
+                if crate::dv_refit_serving::digest_bytes(refit.table.digest()) != Some(digest) {
+                    return Err("the F+ curve table is not the one this identity names".into());
+                }
+                DolbyVisionPass::RewriteWithCurves(record, refit)
+            }
+            (_, Some(_)) => return Err("only a converting copy writes F+ curves".into()),
+        };
         Ok(Self {
             video,
-            dolby_vision: dolby_vision_pass_for(file, video)?,
+            dolby_vision,
         })
     }
 }
@@ -2175,9 +2274,17 @@ pub async fn build(
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    build_riding(file, video, runtime_cache, budget, None, None)
-        .await
-        .outcome
+    build_riding(
+        file,
+        video,
+        runtime_cache,
+        budget,
+        None,
+        None,
+        &crate::dv_refit_serving::RefitTables::none(),
+    )
+    .await
+    .outcome
 }
 
 /// [`build`], also keeping the file's PGS tracks when `ride_along` allows.
@@ -2193,9 +2300,19 @@ pub(crate) async fn build_riding(
     budget: Duration,
     ride_along: Option<&RideAlongGate>,
     progress: Option<SharedIndexProgress>,
+    refits: &crate::dv_refit_serving::RefitTables,
 ) -> IndexBuild {
     first_build(
-        build_riding_shared(file, &[video], runtime_cache, budget, ride_along, progress).await,
+        build_riding_shared(
+            file,
+            &[video],
+            runtime_cache,
+            budget,
+            ride_along,
+            progress,
+            refits,
+        )
+        .await,
     )
 }
 
@@ -2209,6 +2326,7 @@ pub(crate) async fn build_riding_shared(
     budget: Duration,
     ride_along: Option<&RideAlongGate>,
     progress: Option<SharedIndexProgress>,
+    refits: &crate::dv_refit_serving::RefitTables,
 ) -> Vec<IndexBuild> {
     let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
         Ok(source) => source,
@@ -2234,6 +2352,7 @@ pub(crate) async fn build_riding_shared(
         progress,
         ride_along,
         None,
+        refits,
     )
     .await;
     let unchanged = source.unchanged();
@@ -2318,6 +2437,7 @@ pub(crate) async fn build_shared_from_attested_file_with_progress<F>(
     progress: F,
     ride_along: Option<&RideAlongGate>,
     cancel: &tokio_util::sync::CancellationToken,
+    refits: &crate::dv_refit_serving::RefitTables,
 ) -> Vec<IndexBuild>
 where
     F: Fn(&PassProgress) + Send + Sync + 'static,
@@ -2332,6 +2452,7 @@ where
         Some(Arc::new(progress)),
         ride_along,
         Some(cancel),
+        refits,
     )
     .await
 }
@@ -2361,6 +2482,7 @@ async fn build_attested(
             progress,
             ride_along,
             cancel,
+            &crate::dv_refit_serving::RefitTables::none(),
         )
         .await,
     )
@@ -2398,6 +2520,7 @@ pub(crate) async fn build_shared_attested(
     progress: Option<SharedIndexProgress>,
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    refits: &crate::dv_refit_serving::RefitTables,
 ) -> Vec<IndexBuild> {
     build_attested_pass(
         file,
@@ -2409,6 +2532,7 @@ pub(crate) async fn build_shared_attested(
         progress,
         ride_along,
         cancel,
+        refits,
     )
     .await
 }
@@ -2428,6 +2552,7 @@ pub(crate) async fn build_shared_attested(
     progress: Option<SharedIndexProgress>,
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    refits: &crate::dv_refit_serving::RefitTables,
 ) -> Vec<IndexBuild> {
     let mut builds = Vec::with_capacity(videos.len());
     for (at, video) in videos.iter().enumerate() {
@@ -2442,6 +2567,7 @@ pub(crate) async fn build_shared_attested(
                 progress.clone(),
                 ride_along.filter(|_| at == 0),
                 cancel,
+                refits,
             )
             .await,
         );
@@ -2464,6 +2590,7 @@ async fn build_attested_pass(
     progress: Option<SharedIndexProgress>,
     ride_along: Option<&RideAlongGate>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    refits: &crate::dv_refit_serving::RefitTables,
 ) -> Vec<IndexBuild> {
     let refuse_all = |outcome: IndexOutcome| {
         videos
@@ -2495,8 +2622,45 @@ async fn build_attested_pass(
     let mut builds: Vec<Option<IndexBuild>> = videos.iter().map(|_| None).collect();
     let mut outputs = Vec::with_capacity(videos.len());
     let mut slots = Vec::with_capacity(videos.len());
+    // An F+ identity places its samples by the source's first keyframe,
+    // read once for the pass from the descriptor the pass reads.
+    let keyframe = if videos
+        .iter()
+        .any(|video| video.dolby_vision_refit().is_some())
+    {
+        Some(
+            crate::dv_refit_serving::source_keyframe(
+                source,
+                probed.expectation.stream_index,
+                PACKET_PROBE_WALL_BUDGET.min(budget),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     for (slot, video) in videos.iter().enumerate() {
-        match IndexOutput::new(file, *video) {
+        let refit = match (video.dolby_vision_refit(), &keyframe) {
+            (Some(digest), Some(Ok(keyframe))) => refits.get(digest).map(|table| {
+                Arc::new(IndexRefit {
+                    table,
+                    keyframe: *keyframe,
+                })
+            }),
+            (Some(_), Some(Err(reason))) => {
+                builds[slot] = Some(IndexBuild::plain(IndexOutcome::Failed(Box::new(
+                    IndexFailure::new(
+                        IndexFailureCode::IndexSourceIo,
+                        format!("the F+ keyframe anchor could not be read: {reason}"),
+                        0,
+                    )
+                    .transient(true),
+                ))));
+                continue;
+            }
+            _ => None,
+        };
+        match IndexOutput::with_refit(file, *video, refit) {
             Ok(output) => {
                 outputs.push(output);
                 slots.push(slot);

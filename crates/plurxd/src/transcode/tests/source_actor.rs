@@ -1026,6 +1026,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         continuous_media: None,
         dv_processing_destination: None,

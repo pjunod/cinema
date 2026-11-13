@@ -1654,6 +1654,7 @@ printf '%s\n' '{}'
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let request = SessionRequest {
+        dv_refit: None,
         source_telemetry: None,
         continuous_media: None,
         quality_catalog: None,
