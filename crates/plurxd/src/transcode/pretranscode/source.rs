@@ -643,6 +643,10 @@ pub struct PretranscodeFence {
 pub(crate) struct FragmentAdmission {
     /// Bounded qualification for an active playback successor, not maintenance.
     pub(super) playback_qualification: bool,
+    /// Maintenance work yields to explicit playback-qualification demand.
+    /// Captions and playback qualification share the lane but do not yield to
+    /// this maintenance-only signal.
+    pub(super) maintenance: bool,
     pub(super) threads: usize,
     /// A second bundle the same background job admitted for a heavier step
     /// (the FEL qualification's GPU graph inside a title scan). It is the
@@ -671,6 +675,7 @@ impl FragmentAdmission {
         Self {
             threads: 1,
             playback_qualification: false,
+            maintenance: false,
             extension: std::sync::Mutex::new(None),
             _permit: None,
             _heavy: None,

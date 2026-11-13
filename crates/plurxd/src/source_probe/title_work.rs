@@ -197,6 +197,30 @@ impl TitleTask {
                 };
                 admission
             };
+            // Heavy-lane handoff may await a maintenance child's teardown.
+            // Never claim a live turn using interest that expired meanwhile.
+            if let Some(recipe) = playback_recipe.as_ref() {
+                let current = state
+                    .store
+                    .dv_title_playback_demands(0, now_ms(), Some(file.id))
+                    .await?;
+                let mut still_requested = false;
+                for latest in current {
+                    if latest.probe_revision == demand.probe_revision
+                        && latest.scanner_digest.as_deref() == Some(scanner.as_str())
+                        && latest.playback_recipes.contains(recipe)
+                        && eligible_file(state, &latest, &tools.backend_digest())
+                            .await?
+                            .is_some()
+                    {
+                        still_requested = true;
+                        break;
+                    }
+                }
+                if !still_requested {
+                    continue;
+                }
+            }
             let Some(revision) = state
                 .store
                 .bind_dv_title_demand(demand.probe_revision, &scanner)

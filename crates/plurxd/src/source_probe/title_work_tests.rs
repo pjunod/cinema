@@ -1030,3 +1030,143 @@ async fn live_title_admission_uses_spare_capacity_and_yields_to_waiting_viewers(
     drop(viewer);
     assert_eq!(manager.test_software_threads_in_use(), 0);
 }
+
+#[tokio::test]
+async fn playback_qualification_reclaims_local_index_heavy_turn_without_encoder_waiter() {
+    let dir = crate::test_tempdir().expect("scratch");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "4")
+        .await
+        .expect("budget");
+    let manager = Arc::new(crate::transcode::TranscodeManager::new(
+        store,
+        dir.path().into(),
+        plurx_core::transcode::EncoderCaps::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    ));
+    let admission = manager
+        .admit_fragment()
+        .await
+        .expect("ordinary local-index admission");
+    let mut waiters = manager.subscribe_playback_qualification_waiters();
+    let qualification = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.admit_dv_title(true).await }
+    });
+
+    tokio::time::timeout(
+        crate::admission::QUEUE_WAIT,
+        waiters.wait_for(|count| *count == 1),
+    )
+    .await
+    .expect("qualification wait is bounded")
+    .expect("qualification waiter counter remains open");
+    assert!(!qualification.is_finished());
+    let index = crate::state::local_index_until_foreground(
+        manager.as_ref(),
+        &admission,
+        std::future::pending::<()>(),
+    )
+    .await;
+    assert!(
+        index.is_none(),
+        "pending qualification reclaims maintenance"
+    );
+    drop(admission);
+    assert_eq!(manager.test_software_threads_in_use(), 0);
+
+    let qualified = tokio::time::timeout(crate::admission::QUEUE_WAIT, qualification)
+        .await
+        .expect("qualification receives the released heavy turn")
+        .expect("qualification task completed")
+        .expect("qualification fits after maintenance yields");
+    assert_eq!(manager.test_software_threads_in_use(), 1);
+    drop(qualified);
+}
+
+#[tokio::test]
+async fn qualification_pressure_does_not_preempt_speech_and_cleans_up_on_cancel() {
+    let dir = crate::test_tempdir().expect("scratch");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "4")
+        .await
+        .expect("budget");
+    let manager = Arc::new(crate::transcode::TranscodeManager::new(
+        store,
+        dir.path().into(),
+        plurx_core::transcode::EncoderCaps::default(),
+        plurx_core::transcode::Pipeline::Cpu,
+    ));
+    let speech = manager
+        .admit_speech()
+        .await
+        .expect("caption speech admission");
+    let mut waiters = manager.subscribe_playback_qualification_waiters();
+    let qualification = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.admit_dv_title(true).await }
+    });
+
+    tokio::time::timeout(
+        crate::admission::QUEUE_WAIT,
+        waiters.wait_for(|count| *count == 1),
+    )
+    .await
+    .expect("qualification wait is bounded")
+    .expect("qualification waiter counter remains open");
+    assert!(manager.fragment_worker_idle(&speech));
+    assert!(manager.speech_capacity_available(&speech));
+
+    qualification.abort();
+    assert!(qualification
+        .await
+        .expect_err("waiter was cancelled")
+        .is_cancelled());
+    tokio::time::timeout(
+        crate::admission::QUEUE_WAIT,
+        waiters.wait_for(|count| *count == 0),
+    )
+    .await
+    .expect("cancelled waiter removes its pressure")
+    .expect("qualification waiter counter remains open");
+    drop(speech);
+
+    let held_qualification = manager
+        .admit_dv_title(true)
+        .await
+        .expect("first playback qualification holds the heavy lane");
+    let mut peer_waiters = manager.subscribe_playback_qualification_waiters();
+    let peer_qualification = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.admit_dv_title(true).await }
+    });
+    tokio::time::timeout(
+        crate::admission::QUEUE_WAIT,
+        peer_waiters.wait_for(|count| *count == 1),
+    )
+    .await
+    .expect("peer qualification wait is bounded")
+    .expect("qualification waiter counter remains open");
+    assert!(manager.fragment_worker_idle(&held_qualification));
+    peer_qualification.abort();
+    assert!(peer_qualification
+        .await
+        .expect_err("peer waiter was cancelled")
+        .is_cancelled());
+    tokio::time::timeout(
+        crate::admission::QUEUE_WAIT,
+        peer_waiters.wait_for(|count| *count == 0),
+    )
+    .await
+    .expect("cancelled peer removes its pressure")
+    .expect("qualification waiter counter remains open");
+    drop(held_qualification);
+
+    let maintenance = manager
+        .admit_fragment()
+        .await
+        .expect("maintenance can resume after pressure and holder clear");
+    drop(maintenance);
+}

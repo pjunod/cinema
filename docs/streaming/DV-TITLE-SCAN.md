@@ -93,6 +93,13 @@ foreground sharing permission, physical pause and freshness fences. Expired
 playback interest returns the task to maintenance. Ordinary complete-title
 scans retain their idle-node admission and index-read reuse.
 
+A pending qualification posts a distinct bounded heavy-lane request. Ordinary
+indexing and maintenance yield through their existing cancellation paths even
+when native/copy playback holds no encoder permit. This signal does not preempt
+a running qualification or speech task. Cancellation removes the request, and
+dispatch revalidates the exact viewer interest after the handoff before claiming
+work. No CPU, GPU or source capacity is discounted while the prior owner exits.
+
 SQLite migration 132 and the matching replicated-store extension upgrade install
 version 2 of the title outbox. A successful aggregate publication keeps demand
 open when exact current recipes remain pending, and preserves those recipe

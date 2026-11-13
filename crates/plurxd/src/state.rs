@@ -2566,9 +2566,10 @@ fn measured_index_budget_secs(
 /// so the pool is never idle while it runs: what preempts it is foreground
 /// demand beyond that admission's own claim, not the claim itself.
 ///
-/// Known limit: only work that holds an admission is visible here. A
-/// copy-mode or VOD viewer reading the source without one does not preempt
-/// the read, and a preempted read starts over from the beginning next time.
+/// A pending playback qualification also marks maintenance pressure so this
+/// read yields even when native copy playback has no encoder permit. Bare
+/// copy or VOD playback that requests no qualification remains invisible, and
+/// a preempted read starts over from the beginning next time.
 pub(crate) async fn local_index_until_foreground<T>(
     transcode: &TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
