@@ -16,18 +16,26 @@ line, a functionality point, a doc split) and is left to the author, with the
 fix printed by paperwork.
 
     scripts/paperwork-fix                  # fix the working tree; never commits
-    scripts/paperwork-fix --ci ...         # the fast lane: commit the fix and push it
+    scripts/paperwork-fix --ci ...         # the fast lane: commit the fix
+    scripts/paperwork-fix --push ...       # the fast lane: push that commit to the PR branch
 
 In --ci mode the commit is refused unless every changed file is bookkeeping:
 Markdown, or a release file whose changed lines differ only in numbers. No
 file is added or deleted. A head commit that is already a paperwork fix is
 never fixed again, so a fix that does not converge fails instead of looping.
-docs/ci/PAPERWORK.md is the reference.
+
+--push pushes only a fix commit whose parent is the checked pull request head,
+only to an ordinary branch that is neither the base nor main, and leased to
+that head: if the branch moved at all meanwhile (a new commit, or a force-push
+that dropped one), the push is refused rather than putting a dropped commit
+back. The token goes to git through the environment, never the command line,
+and repository hooks do not run. docs/ci/PAPERWORK.md is the reference.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import os
 import re
@@ -248,15 +256,83 @@ def ci(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- the push ------------------------------------------------------------------
+
+PROTECTED_REFS = ("main",)
+
+
+def push_refusal(head_ref: str, head_sha: str, base_ref: str) -> str | None:
+    """Why HEAD may not be pushed to `head_ref`, or None when it may."""
+    if not head_ref or head_ref.startswith("refs/") or head_ref in PROTECTED_REFS or head_ref == base_ref:
+        return f"{head_ref!r} is not a pull request work branch"
+    valid = subprocess.run(["git", "check-ref-format", "--branch", head_ref], cwd=ROOT,
+                           capture_output=True, text=True)
+    if valid.returncode != 0:
+        return f"{head_ref!r} is not a valid branch name"
+    if not head_is_fix():
+        return "HEAD is not a paperwork fix commit"
+    parents = git("rev-list", "--parents", "-n", "1", "HEAD").split()[1:]
+    if parents != [head_sha]:
+        return f"the fix commit's parent is not the pull request head {head_sha}"
+    return None
+
+
+def basic_auth(token: str) -> str:
+    return base64.b64encode(f"x-access-token:{token}".encode()).decode()
+
+
+def push_command(head_ref: str, head_sha: str, token: str) -> tuple[list[str], dict[str, str]]:
+    """The leased push, and the environment that carries its credential."""
+    auth = basic_auth(token)
+    environment = dict(os.environ)
+    count = int(environment.get("GIT_CONFIG_COUNT", "0") or 0)
+    for key, value in (("http.extraheader", f"AUTHORIZATION: basic {auth}"), ("core.hooksPath", os.devnull)):
+        environment[f"GIT_CONFIG_KEY_{count}"] = key
+        environment[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    environment["GIT_CONFIG_COUNT"] = str(count)
+    command = ["git", "push", "--no-verify", f"--force-with-lease=refs/heads/{head_ref}:{head_sha}",
+               "origin", f"HEAD:refs/heads/{head_ref}"]
+    return command, environment
+
+
+def push(args: argparse.Namespace) -> int:
+    refusal = push_refusal(args.head_ref, args.head_sha, args.base_ref)
+    if refusal:
+        print(f"paperwork-fix: not pushing: {refusal}")
+        return 1
+    token = os.environ.get("PAPERWORK_PUSH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    if not token:
+        print("paperwork-fix: not pushing: no PAPERWORK_PUSH_TOKEN or GITHUB_TOKEN")
+        return 1
+    command, environment = push_command(args.head_ref, args.head_sha, token)
+    # The runner masks the secret, not its encoded form.
+    print("::add-mask::" + basic_auth(token))
+    result = subprocess.run(command, cwd=ROOT, env=environment)
+    if result.returncode != 0:
+        print(f"paperwork-fix: the push was refused; {args.head_ref} moved since {args.head_sha} "
+              "(a newer push owns the branch and its run)")
+        return 1
+    print(f"paperwork-fix: pushed {git('rev-parse', 'HEAD').strip()} to {args.head_ref}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--base", help="branch point (default: merge base with --merge-target)")
     parser.add_argument("--merge-target", default="origin/main")
     parser.add_argument("--counter-target", help="branch whose release counters to exceed (default: --merge-target)")
     parser.add_argument("--ci", action="store_true", help="commit the fix (fast lane only)")
-    parser.add_argument("--head-sha", help="--ci: the pull request head the checkout must be")
+    parser.add_argument("--push", action="store_true", help="push the fix commit to --head-ref (fast lane only)")
+    parser.add_argument("--head-sha", help="--ci/--push: the pull request head the checkout must be")
+    parser.add_argument("--head-ref", default="", help="--push: the pull request branch")
+    parser.add_argument("--base-ref", default="", help="--push: the pull request base branch, never pushed to")
     parser.add_argument("--run-url", default="", help="--ci: recorded in the commit trailer")
     args = parser.parse_args(argv)
+    if args.push:
+        if not args.head_sha:
+            parser.error("--push needs --head-sha")
+        return push(args)
     if args.base is None:
         args.base = git("merge-base", "HEAD", args.merge_target).strip()
     if args.ci:
