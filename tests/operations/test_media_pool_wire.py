@@ -544,10 +544,11 @@ def protocol_version(source: str) -> int | None:
 
 
 def rollout_notes(operations: str) -> str:
-    start = operations.find(ROLLING_HEADING)
-    if start < 0:
+    heading = re.search(r"(?m)^" + re.escape(ROLLING_HEADING) + r"[ \t]*$", operations)
+    if heading is None:
         return ""
-    end = operations.find("\n## ", start + len(ROLLING_HEADING))
+    start = heading.start()
+    end = operations.find("\n## ", heading.end())
     return operations[start : end if end >= 0 else len(operations)]
 
 
@@ -713,6 +714,12 @@ class RuleTests(unittest.TestCase):
             "pub node_id: String,", "pub node_id: String,\n    #[serde(default)]\n    pub scratch: bool,"
         )
         self.assertEqual(self.both(LENIENT_SNAPSHOT, head), [])
+
+    def test_rollout_notes_ignore_a_router_mention_before_the_heading(self):
+        document = 'See `## Rolling upgrades`.\n\n## Another section\nReference.\n\n## Rolling upgrades\n- 2026-11-13: protocol 10 adds a pinned digest.\n\n## Configuration\n'
+        notes = rollout_notes(document)
+        self.assertTrue(has_dated_note(notes, 10))
+        self.assertNotIn('Configuration', notes)
 
     def test_a_strict_field_needs_a_bump_and_a_dated_note(self):
         head = STRICT_SNAPSHOT.replace(
