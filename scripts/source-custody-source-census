@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Census one dead owner's exact source on its Linux host; never stops anything.
 
-Run as root on the custody's owner host. It reads the worker's poisoned v2
-witness, then twice (>= 3 s apart) records the kernel's open counts for the
+Run as root on the custody's owner host. The owner is a durable job's custody
+(`background-<uuid>` witness) or a playback source owner that died with its
+daemon (`foreground-<owner id>` witness, the id shown on Activity). It reads
+the worker's poisoned v2 witness, then twice (>= 3 s apart) records the kernel's open counts for the
 exact source inode on every NFS/local superblock that reaches it, plus anchor
 locks, NFS silly-renames and argv references. Every open file description is
 counted, including inherited, mmapped and SCM_RIGHTS in-flight descriptors.
@@ -337,6 +339,43 @@ def census(source: Path, anchor: Path, daemon=None, lease_expires_ms=None, roots
     return st, observed
 
 
+def witness_owner(witnesses: Path, custody: str):
+    """The poisoned witness naming `custody` and the owner the proof must carry.
+
+    Returns (family, evidence, owner, lease_expires_ms). A job witness is
+    `background-<custody id>`; a playback witness is `foreground-<owner id>`.
+    """
+    families = [f for f in ("background", "foreground") if (witnesses / f"{f}-{custody}.json").exists()]
+    require(len(families) == 1, "no single poisoned witness names this custody")
+    family = families[0]
+    evidence = json.loads((witnesses / f"{family}-{custody}.json").read_text())
+    require(evidence.get("version") == 2 and evidence.get("reader_model") == "daemon_mediated_v1",
+            "unsupported witness")
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    require(evidence["kernel_instance"] == f"linux:{boot}", "witness is from another kernel boot")
+    token = evidence["record"]["token"]
+    require(evidence["record"].get("kind") == family, "witness record is another custody family")
+    if family == "background":
+        require(token["custody_id"] == custody and token["owner"]["kind"] == "job",
+                "witness owner is not this custody's job")
+        job = token["owner"]["token"]
+        lease = job["lease_expires_ms"]
+        owner = {"custody_id": custody, "job_id": job["job_id"], "node_id": job["node_id"],
+                 "boot_id": job["boot_id"], "claim_id": job["claim_id"], "fence": job["fence"]}
+    else:
+        playback = token["owner"]
+        require(playback["owner_id"] == custody, "witness owner is not this playback owner")
+        # The witness keeps the activation-time lease; the daemon checks the
+        # Store's renewed lease itself. This is only a necessary condition.
+        lease = token["lease_expires_at_ms"]
+        owner = {"custody_id": custody, "lifetime_id": playback["lifetime_id"],
+                 "session_incarnation": playback["session_incarnation"],
+                 "producer_attempt": playback["producer_attempt"],
+                 "node_id": playback["node_id"], "boot_id": playback["boot_id"],
+                 "fence": token["fence"]}
+    return family, evidence, owner, lease
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--custody", required=True)
@@ -352,17 +391,9 @@ def main():
     require(os.geteuid() == 0, "run as root on the owner host")
     require(str(uuid.UUID(args.custody)) == args.custody, "custody must be a canonical UUID")
     witnesses = args.data_dir / "source-custody-recovery" / "v2"
-    evidence = json.loads((witnesses / f"background-{args.custody}.json").read_text())
-    require(evidence.get("version") == 2 and evidence.get("reader_model") == "daemon_mediated_v1",
-            "unsupported witness")
-    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    require(evidence["kernel_instance"] == f"linux:{boot}", "witness is from another kernel boot")
-    token = evidence["record"]["token"]
-    require(token["custody_id"] == args.custody and token["owner"]["kind"] == "job",
-            "witness owner is not this custody's job")
-    job = token["owner"]["token"]
-    require(job["lease_expires_ms"] < time.time() * 1000, "owner lease has not expired")
-    anchor = witnesses / f"background-{args.custody}.anchor"
+    family, evidence, owner, lease = witness_owner(witnesses, args.custody)
+    require(lease < time.time() * 1000, "owner lease has not expired")
+    anchor = witnesses / f"{family}-{args.custody}.anchor"
     anchor_st = os.stat(anchor, follow_symlinks=False)
     # Poisoning rewrites the anchor, so its ctime differs from the witness;
     # the inode is the identity. The daemon requires this ctime unchanged.
@@ -371,18 +402,19 @@ def main():
             and anchor_st.st_ino == evidence["anchor_inode"], "anchor is not the witness's inode")
     # The inode the owner actually opened, recorded at enrollment. A replaced
     # path with matching size and mtime is not the source the owner read.
-    opened = witnesses / f"background-{args.custody}.source"
+    opened = witnesses / f"{family}-{args.custody}.source"
     if opened.exists():
         device, inode = map(int, opened.read_text().split())
         current = os.stat(args.source)
         require((current.st_dev, current.st_ino) == (device, inode),
                 "source path no longer names the inode the owner opened")
     # Teardown evidence is what the daemon needs when the owner's job row,
-    # and with it the exact source binding, is gone.
-    daemon = daemon_pid(args.daemon_pid)
-    first_st, first = census(args.source, anchor, daemon, job["lease_expires_ms"], args.library_root)
+    # and with it the exact source binding, is gone. A playback owner always
+    # keeps its exact binding in its own registration, so it has none.
+    daemon = daemon_pid(args.daemon_pid) if family == "background" else None
+    first_st, first = census(args.source, anchor, daemon, lease, args.library_root)
     time.sleep(GAP_SECONDS)
-    second_st, second = census(args.source, anchor, daemon, job["lease_expires_ms"], args.library_root)
+    second_st, second = census(args.source, anchor, daemon, lease, args.library_root)
     require(os.stat(anchor).st_ctime_ns == anchor_st.st_ctime_ns, "anchor changed during the census")
     for a, b in zip(first["superblocks"], second["superblocks"]):
         require((a["device"], a["inode"]) == (b["device"], b["inode"]), "superblock set changed")
@@ -391,8 +423,7 @@ def main():
             == (second_st.st_ino, second_st.st_size, second_st.st_mtime_ns), "source changed")
     proof = {
         "version": 1, "model": MODEL, "kernel_instance": evidence["kernel_instance"],
-        "owner": {"custody_id": args.custody, "job_id": job["job_id"], "node_id": job["node_id"],
-                  "boot_id": job["boot_id"], "claim_id": job["claim_id"], "fence": job["fence"]},
+        "owner": owner,
         "anchor": {"device": anchor_st.st_dev, "inode": anchor_st.st_ino,
                    "ctime": [anchor_st.st_ctime_ns // 10**9, anchor_st.st_ctime_ns % 10**9]},
         "source": {"path": str(args.source), "inode": second_st.st_ino, "size": second_st.st_size,
@@ -401,7 +432,7 @@ def main():
     }
     quiet = all(sb["readers"] == 0 and sb["writers"] == 0 for p in proof["passes"] for sb in p["superblocks"]) \
         and all(p[k] == 0 for p in proof["passes"] for k in ("anchor_locks", "silly_renames", "path_references"))
-    torn_down = all(all(p["owner_teardown"][k] == 0 for k in (
+    torn_down = daemon is not None and all(all(p["owner_teardown"][k] == 0 for k in (
         "preexisting", "other_daemons", "foreign_storage_holders", "foreign_media_tools", "unreadable"))
         for p in proof["passes"])
     print(json.dumps({"quiescent": quiet, "owner_teardown": torn_down, "proof": proof}, indent=1))

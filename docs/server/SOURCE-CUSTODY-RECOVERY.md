@@ -239,6 +239,36 @@ sudo rm /run/plurx-physical-stop/source-census-v1/<uuid>.json
 
 The container needs the existing read-only bind of `/run/plurx-physical-stop`.
 
+**A dead playback owner.** Playback launches an unmediated FFmpeg on the
+source, so every foreground witness is poisoned too. When the daemon
+restarts while a stream reads, its `foreground_source_owners` row keeps
+custody (not quiescent), which blocks every background read and analysis
+claim that shares its storage domain. The same helper takes the playback
+owner's id, as Activity lists it; the witness is
+`foreground-<owner id>.json`. The proof's `owner` then carries the exact
+registration (`lifetime_id`, `session_incarnation`, `producer_attempt`,
+`node_id`, `boot_id`, `fence`) and no teardown view. The daemon requires:
+
+- the poisoned v2 foreground witness for that owner, from this kernel and node;
+- the Store row's **renewed** lease, not the witness's activation-time copy,
+  ended before the census's first pass and before this daemon process
+  started, so an earlier process held it;
+- the owner's registration binding: the file row's size, mtime and path
+  generation unchanged, matching the census and the daemon's own `stat`;
+- the unchanged, unlocked anchor, as for a job.
+
+It then marks the exact owner settled, releases its row and clears only its
+witness. A playback owner whose file row is gone refuses; there is no
+teardown fallback. This is the stopgap for owners already stuck: the
+root-cause work keeps playback witnesses unpoisoned, so a restart settles
+through the ordinary v2 replay with no host step.
+
+```bash
+# On the owner host, as root, with the owner id from Activity.
+sudo scripts/source-custody-source-census --custody <owner id> --source <host path>
+sudo scripts/source-custody-source-census --custody <owner id> --source <host path> --publish
+```
+
 ## 2. The journal never impersonates an activation or completed join
 
 [Recovery replay](../../crates/plurxd/src/source_custody/recovery.rs) uses

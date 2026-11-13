@@ -823,12 +823,6 @@ impl SourceIdentity {
         incarnation: uuid::Uuid,
         policy: ForegroundSourcePolicy,
     ) -> SourceRequest {
-        use sha2::{Digest, Sha256};
-        let mut identity = Sha256::new();
-        identity.update(file.id.to_le_bytes());
-        identity.update(file.size.to_le_bytes());
-        identity.update(file.mtime.to_le_bytes());
-        identity.update(file.path.as_os_str().to_string_lossy().as_bytes());
         SourceRequest {
             file: file.clone(),
             store,
@@ -842,11 +836,23 @@ impl SourceIdentity {
                 file_id: file.id,
                 source_size: file.size,
                 source_mtime: file.mtime,
-                source_generation: hex::encode(identity.finalize()),
+                source_generation: source_generation(file),
                 policy,
             },
         }
     }
+}
+
+/// The exact source a foreground owner binds: file row identity, size,
+/// mtime and path. Registration and dead-owner recovery derive it here alone.
+pub(crate) fn source_generation(file: &MediaFile) -> String {
+    use sha2::{Digest, Sha256};
+    let mut identity = Sha256::new();
+    identity.update(file.id.to_le_bytes());
+    identity.update(file.size.to_le_bytes());
+    identity.update(file.mtime.to_le_bytes());
+    identity.update(file.path.as_os_str().to_string_lossy().as_bytes());
+    hex::encode(identity.finalize())
 }
 
 pub(crate) struct SourceCustody {

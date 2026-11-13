@@ -646,6 +646,24 @@ pub(super) async fn replay_at(
     }
 }
 
+/// Which custody family a host census names; the witness files carry it.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CensusFamily {
+    Background,
+    Foreground,
+}
+
+#[cfg(target_os = "linux")]
+impl CensusFamily {
+    pub(super) fn prefix(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Foreground => "foreground",
+        }
+    }
+}
+
 /// The worker-written witness fields a host census must match. Only a
 /// witness the ordinary replay refuses (a poisoned anchor) needs one.
 #[cfg(target_os = "linux")]
@@ -663,9 +681,11 @@ pub(super) struct CensusWitness {
 #[cfg(target_os = "linux")]
 pub(super) fn census_witness(
     directory: &Path,
+    family: CensusFamily,
     custody_id: &str,
 ) -> Result<Option<CensusWitness>, String> {
-    let path = directory.join(format!("background-{custody_id}.json"));
+    let family = family.prefix();
+    let path = directory.join(format!("{family}-{custody_id}.json"));
     if !path.try_exists().map_err(|error| error.to_string())? {
         return Ok(None);
     }
@@ -673,7 +693,7 @@ pub(super) fn census_witness(
     if evidence.version != 2 || evidence.reader_model != "daemon_mediated_v1" {
         return Err("unsupported reader witness for a host source census".into());
     }
-    let sidecar = directory.join(format!("background-{custody_id}.source"));
+    let sidecar = directory.join(format!("{family}-{custody_id}.source"));
     let source = match read_private_text(&sidecar, 64) {
         Ok(text) => {
             let mut parts = text.split_whitespace().map(str::parse::<u64>);

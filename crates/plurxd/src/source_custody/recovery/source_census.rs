@@ -16,7 +16,7 @@
 use super::{clear_at, physical_stop, reader, settle_records, verify_directory, Record};
 use plurx_core::store::{
     background_jobs::{JobPayload, JobToken},
-    background_jobs_resources::BackgroundSourceOwner,
+    background_jobs_resources::{BackgroundSourceOwner, ForegroundSourceToken},
     Store,
 };
 use serde::Deserialize;
@@ -49,9 +49,34 @@ pub(super) struct Proof {
     passes: [Pass; 2],
 }
 
+/// The dead owner a census names: a durable job's custody or a playback
+/// (foreground) source owner. The shapes are disjoint, so the helper's JSON
+/// names exactly one.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum Owner {
+    Job(JobOwner),
+    Foreground(ForegroundOwner),
+}
+
+impl Owner {
+    fn custody_id(&self) -> &str {
+        match self {
+            Self::Job(owner) => &owner.custody_id,
+            Self::Foreground(owner) => &owner.custody_id,
+        }
+    }
+    fn fence(&self) -> i64 {
+        match self {
+            Self::Job(owner) => owner.fence,
+            Self::Foreground(owner) => owner.fence,
+        }
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
-struct Owner {
+struct JobOwner {
     custody_id: String,
     job_id: String,
     node_id: String,
@@ -60,7 +85,33 @@ struct Owner {
     fence: i64,
 }
 
-impl Owner {
+/// A playback source owner. Its custody is named by the owner id; the
+/// remaining fields are the exact registration identity.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+struct ForegroundOwner {
+    custody_id: String,
+    lifetime_id: String,
+    session_incarnation: String,
+    producer_attempt: String,
+    node_id: String,
+    boot_id: String,
+    fence: i64,
+}
+
+impl ForegroundOwner {
+    fn matches(&self, token: &ForegroundSourceToken) -> bool {
+        self.custody_id == token.owner.owner_id
+            && self.lifetime_id == token.owner.lifetime_id
+            && self.session_incarnation == token.owner.session_incarnation
+            && self.producer_attempt == token.owner.producer_attempt
+            && self.node_id == token.owner.node_id
+            && self.boot_id == token.owner.boot_id
+            && self.fence == token.fence
+    }
+}
+
+impl JobOwner {
     fn matches(&self, token: &JobToken) -> bool {
         token.validate().is_ok()
             && self.job_id == token.job_id
@@ -156,9 +207,9 @@ impl Proof {
         let [first, second] = &self.passes;
         self.version == 1
             && self.model == MODEL
-            && uuid::Uuid::parse_str(&self.owner.custody_id)
-                .is_ok_and(|id| !id.is_nil() && id.to_string() == self.owner.custody_id)
-            && self.owner.fence > 0
+            && uuid::Uuid::parse_str(self.owner.custody_id())
+                .is_ok_and(|id| !id.is_nil() && id.to_string() == self.owner.custody_id())
+            && self.owner.fence() > 0
             && self.source.inode != 0
             && self.source.size >= 0
             && second.at_ms - first.at_ms >= MIN_PASS_GAP_MS
@@ -347,7 +398,7 @@ fn read_proofs() -> io::Result<Vec<Proof>> {
         match physical_stop::read_admin_file(&directory, &name)
             .and_then(|bytes| serde_json::from_slice::<Proof>(&bytes).map_err(io::Error::other))
         {
-            Ok(proof) if proof.owner.custody_id == stem => proofs.push(proof),
+            Ok(proof) if proof.owner.custody_id() == stem => proofs.push(proof),
             Ok(_) => tracing::warn!(stem, "host source census names another custody"),
             Err(error) => tracing::warn!(%error, stem, "host source census refused"),
         }
@@ -396,7 +447,7 @@ pub(super) async fn replay(
         )
         .await;
         if let Err(error) = applied {
-            tracing::warn!(custody_id = %proof.owner.custody_id, %error,
+            tracing::warn!(custody_id = %proof.owner.custody_id(), %error,
                 "host source census refused; custody stays charged");
             result = Err(error);
         }
@@ -516,7 +567,18 @@ pub(super) async fn apply(
     if !proof.shape_verified(context.now_ms) || proof.kernel_instance != context.kernel {
         return Err("host source census is stale, partial or nonzero".into());
     }
-    let Some(witness) = reader::census_witness(witnesses, &proof.owner.custody_id)? else {
+    let owner = match &proof.owner {
+        Owner::Job(owner) => owner,
+        Owner::Foreground(owner) => {
+            return apply_foreground(store, witnesses, legacy, node, context, proof, owner).await
+        }
+    };
+    let Some(witness) = reader::census_witness(
+        witnesses,
+        reader::CensusFamily::Background,
+        &owner.custody_id,
+    )?
+    else {
         // Already settled and cleaned; the operator removes host evidence.
         return Ok(());
     };
@@ -532,48 +594,14 @@ pub(super) async fn apply(
     // excludes that process still running.
     if witness.kernel_instance != context.kernel
         || witness.node_id != node
-        || token.custody_id != proof.owner.custody_id
-        || !proof.owner.matches(original)
+        || token.custody_id != owner.custody_id
+        || !owner.matches(original)
         || original.lease_expires_ms >= proof.passes[0].at_ms
         || original.lease_expires_ms >= context.process_started_ms
     {
         return Err("host source census and the exact dead-owner witness differ".into());
     }
-    // Poisoning rewrites the anchor, so its ctime no longer matches the
-    // witness; the witness's inode is the identity. The ctime the census saw
-    // must still hold, so nothing touched the anchor since.
-    if witness.anchor_ctime.is_none()
-        || proof.anchor.device != witness.anchor_device
-        || proof.anchor.inode != witness.anchor_inode
-    {
-        return Err("host source census names another anchor".into());
-    }
-    let expected = &proof.anchor;
-    // The daemon's own observation: the unchanged anchor inode, no other
-    // open file description holding its lock. Held through settlement.
-    let anchor = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(witnesses.join(format!("background-{}.anchor", token.custody_id)))
-        .map_err(|e| e.to_string())?;
-    let metadata = anchor.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.dev() != expected.device
-        || metadata.ino() != expected.inode
-        || reader::anchor_ctime(&metadata) != expected.ctime
-        || !reader::local_filesystem(&anchor)
-    {
-        return Err("reader anchor changed since the witness".into());
-    }
-    match anchor.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            return Err("a reader still holds the anchor lock".into())
-        }
-        Err(error) => return Err(error.to_string()),
-    }
+    let anchor = held_anchor(witnesses, reader::CensusFamily::Background, &witness, proof)?;
     if let Some(current) = store
         .resolve_background_source_custody(token.clone())
         .await
@@ -581,7 +609,7 @@ pub(super) async fn apply(
     {
         if current.custody_id != token.custody_id
             || !matches!(&current.owner, BackgroundSourceOwner::Job { token: held }
-                if proof.owner.matches(held) && held.lease_expires_ms < proof.passes[0].at_ms)
+                if owner.matches(held) && held.lease_expires_ms < proof.passes[0].at_ms)
         {
             return Err("authoritative custody differs from the census owner".into());
         }
@@ -604,11 +632,18 @@ pub(super) async fn apply(
                 return Err("census source is not the inode the owner opened".into());
             }
             settle_released(store, token, &witness).await?;
-            return finish(legacy, witnesses, &witness, anchor, token, proof);
+            return finish(
+                legacy,
+                witnesses,
+                &witness,
+                anchor,
+                &token.custody_id,
+                proof,
+            );
         };
         if job.id != original.job_id
             || job.token.as_ref().is_some_and(|live| {
-                proof.owner.matches(live) && live.lease_expires_ms >= proof.passes[0].at_ms
+                owner.matches(live) && live.lease_expires_ms >= proof.passes[0].at_ms
             })
         {
             return Err("census job still holds the owner's unexpired claim".into());
@@ -647,7 +682,160 @@ pub(super) async fn apply(
         }
         settle_released(store, token, &witness).await?;
     }
-    finish(legacy, witnesses, &witness, anchor, token, proof)
+    finish(
+        legacy,
+        witnesses,
+        &witness,
+        anchor,
+        &token.custody_id,
+        proof,
+    )
+}
+
+/// The anchor the census observed, as the daemon itself sees it: the
+/// witness's inode, unchanged since the census (poisoning rewrote it, so the
+/// witness's own ctime no longer matches), and no other open file
+/// description holding its lock. The returned descriptor holds the lock
+/// through settlement.
+fn held_anchor(
+    witnesses: &Path,
+    family: reader::CensusFamily,
+    witness: &reader::CensusWitness,
+    proof: &Proof,
+) -> Result<std::fs::File, String> {
+    if witness.anchor_ctime.is_none()
+        || proof.anchor.device != witness.anchor_device
+        || proof.anchor.inode != witness.anchor_inode
+    {
+        return Err("host source census names another anchor".into());
+    }
+    let expected = &proof.anchor;
+    let anchor = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(witnesses.join(format!(
+            "{}-{}.anchor",
+            family.prefix(),
+            proof.owner.custody_id()
+        )))
+        .map_err(|e| e.to_string())?;
+    let metadata = anchor.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.dev() != expected.device
+        || metadata.ino() != expected.inode
+        || reader::anchor_ctime(&metadata) != expected.ctime
+        || !reader::local_filesystem(&anchor)
+    {
+        return Err("reader anchor changed since the witness".into());
+    }
+    match anchor.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err("a reader still holds the anchor lock".into())
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(anchor)
+}
+
+/// A playback owner died with its daemon, after an unmediated FFmpeg launch
+/// poisoned its witness. Its authority is the Store row's renewed lease, not
+/// the witness's activation-time copy: that lease must have ended before the
+/// census's first pass and before this daemon process started, so it was
+/// issued to an earlier process, which the data-directory lock this process
+/// holds excludes. The exact source is the owner's own registration binding
+/// (file row, size, mtime and path generation), checked against the Store,
+/// the census and this daemon's own `stat`. There is no teardown fallback:
+/// a foreground owner without its file row refuses.
+async fn apply_foreground(
+    store: &Arc<dyn Store>,
+    witnesses: &Path,
+    legacy: &Path,
+    node: &str,
+    context: &Context<'_>,
+    proof: &Proof,
+    owner: &ForegroundOwner,
+) -> Result<(), String> {
+    let Some(witness) = reader::census_witness(
+        witnesses,
+        reader::CensusFamily::Foreground,
+        &owner.custody_id,
+    )?
+    else {
+        // Already settled and cleaned; the operator removes host evidence.
+        return Ok(());
+    };
+    verify_directory(witnesses)?;
+    let Record::Foreground { token } = &witness.record else {
+        return Err("host source census needs a foreground witness".into());
+    };
+    if witness.kernel_instance != context.kernel
+        || witness.node_id != node
+        || token.owner.node_id != node
+        || !owner.matches(token)
+    {
+        return Err("host source census and the exact dead-owner witness differ".into());
+    }
+    let anchor = held_anchor(witnesses, reader::CensusFamily::Foreground, &witness, proof)?;
+    if let Some(current) = store
+        .resolve_foreground_source(token.clone())
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        if current.owner != token.owner
+            || current.fence != token.fence
+            || current.lease_expires_at_ms >= proof.passes[0].at_ms
+            || current.lease_expires_at_ms >= context.process_started_ms
+        {
+            return Err("authoritative playback owner may still be live".into());
+        }
+        let file = store
+            .get_file(token.owner.file_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("census source file row unavailable")?;
+        let seen = std::fs::metadata(&file.path).map_err(|e| e.to_string())?;
+        if witness.source.is_some_and(|(device, inode)| {
+            seen.dev() != device
+                || seen.ino() != inode
+                || inode != proof.source.inode
+                || !proof.census_devices().any(|counted| counted == device)
+        }) {
+            return Err("census source is not the inode the owner opened".into());
+        }
+        let (size, mtime) = (token.owner.source_size, token.owner.source_mtime);
+        if crate::source_custody::source_generation(&file) != token.owner.source_generation
+            || file.size != size
+            || file.mtime != mtime
+            || proof.source.size != size
+            || proof.source.mtime != mtime
+            || seen.len() as i64 != size
+            || seen.mtime() != mtime
+            || seen.ino() != proof.source.inode
+            || !proof.census_devices().any(|device| device == seen.dev())
+        {
+            return Err("census source differs from the owner's exact source".into());
+        }
+        settle_records(store, std::slice::from_ref(&witness.record)).await?;
+        if store
+            .resolve_foreground_source(token.clone())
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Err("census settlement awaits exact release acknowledgement".into());
+        }
+    }
+    finish(
+        legacy,
+        witnesses,
+        &witness,
+        anchor,
+        &owner.custody_id,
+        proof,
+    )
 }
 
 async fn settle_released(
@@ -672,13 +860,13 @@ fn finish(
     witnesses: &Path,
     witness: &reader::CensusWitness,
     anchor: std::fs::File,
-    token: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    custody_id: &str,
     proof: &Proof,
 ) -> Result<(), String> {
     clear_at(legacy, &witness.record)?;
     reader::complete_at(witnesses, &witness.record)?;
     drop(anchor);
-    tracing::info!(custody_id = %token.custody_id, source = %proof.source.path,
+    tracing::info!(custody_id = %custody_id, source = %proof.source.path,
         "released dead-owner source custody after host source-open census");
     Ok(())
 }

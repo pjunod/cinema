@@ -856,6 +856,7 @@ paths = [
   "scripts/source-custody-source-census",
   "tests/operations/test_source_custody_reader_stop.py",
   "tests/operations/test_source_custody_recovery.py",
+  "tests/operations/test_source_custody_source_census.py",
   "crates/plurxd/src/fragment_index_cluster/source_digest.rs",
   "crates/plurxd/src/library_work.rs",
   "crates/plurxd/src/library_work/**",
