@@ -387,7 +387,50 @@ function processedDvUpgradeCard(readiness){
     <p class="hint">Advisory: the upgrade runs whether or not these rows are met.</p>
     ${devGraduation("each platform has recorded twenty measured switches with complete ±2 s frame samples, independently observed audio continuity and no reopen.","this card goes; the upgrade is simply how Dolby Vision processing plays.")}`,{id:"processed-dv-upgrade-card"});
 }
-function developerPanel(settings,readiness,httpsCard=""){
+function sourceRecoveryCard(value,error=""){
+  const node=value&&value.node_name?String(value.node_name):"Node status unavailable";
+  const unavailable=error||(value&&value.error)||(!value?"Waiting for this node's recovery status.":"");
+  const count=(number)=>number!==null&&number!==undefined&&number!==""&&Number.isFinite(Number(number))?String(Number(number)):"Unknown";
+  const yn=(answer)=>answer===true?"Yes":answer===false?"No":"Unknown";
+  const launches=value&&value.launches||{};
+  const latest=launches.latest_unknown;
+  const poisoned=value&&value.poisoned;
+  const poisonCount=poisoned&&poisoned.total;
+  const poisonUnavailable=!value||!!value.error||poisoned===null||poisoned===undefined||poisonCount===null||poisonCount===undefined||!Number.isFinite(Number(poisonCount));
+  const witnesses=poisoned&&Array.isArray(poisoned.witnesses)?poisoned.witnesses:[];
+  const witnessRows=witnesses.slice(0,32).map(row=>`<li>${esc(row.family||"Unknown family")} · ${esc(row.owner_id||"Unknown owner")} · ${esc(row.purpose||"Unknown purpose")} · boot tick ${esc(String(row.boot_tick??"unknown"))}</li>`).join("");
+  return setCard(`${cardHead("Playback restart recovery",`This node: ${esc(node)}`,'<span class="pill">read-only</span>')}
+    ${unavailable?`<p class="hint" role="status">${esc(unavailable)}</p>`:""}
+    ${!value?'<p class="hint">Poisoned witness status is unavailable; no zero-count or healthy-state conclusion can be drawn.</p>':""}
+    ${value?`<div class="setfields">
+      <div><b>Reader recovery support</b><br>${value.supported===true?"Supported":"Not supported"} (advisory; never gates playback)</div>
+      <div><b>Authoritative backend</b><br>${yn(value.authoritative_backend)}</div>
+      <div><b>Kernel available</b><br>${yn(value.kernel_available)}</div>
+      <div><b>Local filesystem</b><br>${yn(value.local_filesystem)}</div>
+      <div><b>Daemon is init or subreaper</b><br>${yn(value.daemon_init_or_subreaper)}</div>
+    </div>
+    <div class="setfields">
+      <div><b>Verified attempts since process start</b><br>${count(launches.verified)}</div>
+      <div><b>Verified no-source attempts</b><br>${count(launches.no_source)}</div>
+      <div><b>Verified metadata-only attempts</b><br>${count(launches.metadata_only)}</div>
+      <div><b>Verified brokered attempts</b><br>${count(launches.brokered)}</div>
+      <div><b>Unknown attempts since process start</b><br>${count(launches.unknown)}</div>
+      <div><b>Explicitly unverified attempts</b><br>${count(launches.unverified)} · subset of unknown.</div>
+    </div>
+    ${latest?`<p>Latest unknown launch: ${esc(latest.purpose)} · ${Number.isFinite(Number(latest.observed_at_ms))?esc(new Date(Number(latest.observed_at_ms)).toLocaleString()):"time unavailable"}</p>`:""}
+    ${poisonUnavailable?'<p class="hint">Poisoned witness status is unavailable; no zero-count or healthy-state conclusion can be drawn.</p>':`<p><b>Poisoned witnesses:</b> ${count(poisonCount)}</p>${Number(poisonCount)>0?`<ul>${witnessRows}</ul>${Number(poisonCount)>32?`<p class="hint">Showing up to the first 32 witnesses.</p>`:""}<p class="hint">Poisoned witnesses await verified owner-stop proof, namespace teardown, or reboot. Confined-reader recovery is future work; this status does not make a playback census safe.</p>`:"<p class=\"hint\">No poisoned witnesses are currently reported.</p>"}`}`:""}
+    <p class="hint">Verified counts mean the final program, arguments, working directory and inherited descriptors passed the launch access check. Unknown includes undeclared and failed declarations; explicitly unverified is a subset of unknown. This read-only status never gates playback.</p>
+    ${devGraduation("source access declarations are implemented and native Linux/macOS crash recovery and performance qualification are accepted.","this card goes; playback restart recovery is simply part of how plurx works.")}
+    <button type="button" class="ghost sm" onclick="reloadSourceRecovery(this)">${unavailable?"Retry":"Refresh this node"}</button>`);
+}
+function sourceRecoveryMount(value,error=""){
+  return `<div id="settings-source-recovery">${sourceRecoveryCard(value,error)}</div>`;
+}
+function applySourceRecovery(value,error=""){
+  const mount=document.getElementById("settings-source-recovery");
+  if(mount)mount.innerHTML=sourceRecoveryCard(value,error);
+}
+function developerPanel(settings,readiness,httpsCard="",sourceRecoveryHtml=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
   // lives in its own section; the links below are the way back to them.
@@ -398,7 +441,7 @@ function developerPanel(settings,readiness,httpsCard=""){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${httpsCard}${diagnosticDeveloperCard()}
+      ${destinations}${httpsCard}${sourceRecoveryHtml}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}

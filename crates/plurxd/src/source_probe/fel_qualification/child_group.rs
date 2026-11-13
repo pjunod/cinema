@@ -19,6 +19,22 @@ impl Group {
         cancel: &CancellationToken,
         work: ChildWork,
     ) -> Result<Self, String> {
+        Self::start_inner(command, cancel, work, None).await
+    }
+    pub(super) async fn start_with_manifest(
+        command: &mut Command,
+        cancel: &CancellationToken,
+        work: ChildWork,
+        manifest: std::sync::Arc<crate::producer_spawn::DescriptorManifest>,
+    ) -> Result<Self, String> {
+        Self::start_inner(command, cancel, work, Some(manifest)).await
+    }
+    async fn start_inner(
+        command: &mut Command,
+        cancel: &CancellationToken,
+        work: ChildWork,
+        manifest: Option<std::sync::Arc<crate::producer_spawn::DescriptorManifest>>,
+    ) -> Result<Self, String> {
         // One enlistment owns both pipe partners. A second enlistment between
         // spawns could wait for a pause that the first unmonitored child cannot acknowledge.
         let guard = match source_pause_controller() {
@@ -26,8 +42,13 @@ impl Group {
             None => None,
         };
         command.process_group(0);
-        let (child, job) =
-            plurx_core::process::spawn_job_owned(command, work).map_err(|e| e.to_string())?;
+        let (child, job) = match manifest {
+            Some(manifest) => crate::producer_spawn::with_manifest(&manifest, command, |command| {
+                plurx_core::process::spawn_job_owned(command, work)
+            }),
+            None => plurx_core::process::spawn_job_owned(command, work),
+        }
+        .map_err(|e| e.to_string())?;
         let id = i32::try_from(child.id().ok_or("qualification child has no PID")?)
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -37,10 +58,32 @@ impl Group {
             jobs: vec![job],
         })
     }
+    #[cfg(test)]
     pub(super) fn add(&mut self, command: &mut Command, work: ChildWork) -> Result<(), String> {
+        self.add_inner(command, work, None)
+    }
+    pub(super) fn add_with_manifest(
+        &mut self,
+        command: &mut Command,
+        work: ChildWork,
+        manifest: &std::sync::Arc<crate::producer_spawn::DescriptorManifest>,
+    ) -> Result<(), String> {
+        self.add_inner(command, work, Some(manifest))
+    }
+    fn add_inner(
+        &mut self,
+        command: &mut Command,
+        work: ChildWork,
+        manifest: Option<&std::sync::Arc<crate::producer_spawn::DescriptorManifest>>,
+    ) -> Result<(), String> {
         command.process_group(self.id);
-        let (child, job) =
-            plurx_core::process::spawn_job_owned(command, work).map_err(|e| e.to_string())?;
+        let (child, job) = match manifest {
+            Some(manifest) => crate::producer_spawn::with_manifest(manifest, command, |command| {
+                plurx_core::process::spawn_job_owned(command, work)
+            }),
+            None => plurx_core::process::spawn_job_owned(command, work),
+        }
+        .map_err(|e| e.to_string())?;
         let pid = child.id().ok_or("qualification partner has no PID")? as i32;
         self.children.push(child);
         self.jobs.push(job);

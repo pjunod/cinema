@@ -1787,12 +1787,26 @@ pub fn parse_video_decoder_list(output: &str) -> Vec<String> {
 pub async fn detect_video_decoders(ffmpeg_bin: &str) -> Vec<String> {
     let mut command = tokio::process::Command::new(ffmpeg_bin);
     command.args(["-hide_banner", "-decoders"]);
-    match crate::process::output_job_owned(
+    crate::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
+    let output = match crate::process::source_lifetime::prepare_stdio(
         &mut command,
-        crate::process::ChildWork::background("ffmpeg decoder list"),
-    )
-    .await
-    {
+        crate::process::source_lifetime::StdioFacts::CAPTURED,
+    ) {
+        Ok(manifest) => {
+            crate::process::source_lifetime::no_source(
+                crate::process::source_lifetime::with_descriptors_async(
+                    manifest,
+                    crate::process::output_job_owned(
+                        &mut command,
+                        crate::process::ChildWork::background("ffmpeg decoder list"),
+                    ),
+                ),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    match output {
         Ok(output) if output.status.success() => {
             parse_video_decoder_list(&String::from_utf8_lossy(&output.stdout))
         }
@@ -2315,11 +2329,25 @@ where
 pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
     let mut command = tokio::process::Command::new(ffmpeg_bin);
     command.args(["-hide_banner", "-encoders"]);
-    let output = crate::process::output_job_owned(
+    crate::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
+    let output = match crate::process::source_lifetime::prepare_stdio(
         &mut command,
-        crate::process::ChildWork::background("ffmpeg encoder list"),
-    )
-    .await;
+        crate::process::source_lifetime::StdioFacts::CAPTURED,
+    ) {
+        Ok(manifest) => {
+            crate::process::source_lifetime::no_source(
+                crate::process::source_lifetime::with_descriptors_async(
+                    manifest,
+                    crate::process::output_job_owned(
+                        &mut command,
+                        crate::process::ChildWork::background("ffmpeg encoder list"),
+                    ),
+                ),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     let devices = graphics_devices();
     let compiled = match output {
         Ok(out) => parse_encoder_list(&String::from_utf8_lossy(&out.stdout)),

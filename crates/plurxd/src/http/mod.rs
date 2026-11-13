@@ -633,6 +633,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/subtitle-transcription/jobs/{id}"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
+        | "/api/v1/developer/source-recovery"
         | "/api/v1/developer/macos-video-processing/reprobe"
         | "/api/v1/system/video-processing/reprobe"
         | "/api/v1/scan"
@@ -1672,6 +1673,10 @@ pub fn router(state: AppState) -> Router {
         // process can currently observe. Nothing reads it to decide
         // whether a switch may be flipped.
         .route("/developer/readiness", get(developer::readiness))
+        .route(
+            "/developer/source-recovery",
+            get(developer::source_recovery),
+        )
         .route(
             "/developer/macos-video-processing/reprobe",
             post(developer::reprobe_macos_video),
