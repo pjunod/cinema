@@ -1483,6 +1483,9 @@ async fn a_processed_successor_commits_with_its_original_copy_catalog_provenance
             ..Default::default()
         }).await.expect("source DV metadata");
     fixture.store.put_setting(keys::DV_HDR_PROCESSING, "1").await.expect("processing enabled");
+    // Decoder snapshots belong to the negotiated route-v1 owner. Enable
+    // that existing protocol before freezing the candidate planning binding.
+    fixture.store.put_setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1").await.expect("candidate-route owner");
     let snapshot = fixture.store.playback_planning_snapshot(fixture.file_id(), &crate::transcode::QUALITY_PLANNING_KEYS)
         .await.expect("planning read").expect("planning snapshot");
     let source = &snapshot.file;
