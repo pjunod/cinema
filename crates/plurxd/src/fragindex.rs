@@ -941,7 +941,7 @@ fn filtered_packet_hash(raw: &[u8], pts: i64, time_base: (u32, u32)) -> Result<[
 // Erase the bounded child-probe future here: its Send proof is checked at
 // this leaf rather than expanded through every source-publication worker.
 fn held_filtered_packet_hash<'a>(
-    source: &'a std::fs::File,
+    held: (&'a std::fs::File, &'a str, &'a Path, &'a Path),
     stream: u32,
     pts: i64,
     time_base: (u32, u32),
@@ -950,38 +950,75 @@ fn held_filtered_packet_hash<'a>(
     retain_parameter_sets: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<[u8; 32], String>> + Send + 'a>> {
     Box::pin(async move {
+        let (source, object_version, path, runtime_cache) = held;
         let mut view = source;
         view.seek(SeekFrom::Start(0))
             .map_err(|error| error.to_string())?;
+        let input = match crate::background_jobs::source_budget() {
+            Some(budget) => Some(
+                crate::source_input::SourceInput::open_background_held(
+                    crate::fragment_index_cluster::SourceFence::clone_held(source, object_version)?,
+                    crate::http::stream::file_content_type(path),
+                    budget,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let mut command = tokio::process::Command::new(ffmpeg_bin());
+        command.current_dir(runtime_cache);
         #[cfg(unix)]
         {
             command.args(filtered_packet_hash_args(
-                "/dev/fd/3",
+                input.as_ref().map_or("/dev/fd/3", |input| input.url()),
                 stream,
                 retain_parameter_sets,
             ));
-            crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
         }
         #[cfg(windows)]
         {
-            let path = crate::ffmpeg::windows_source_path(source)?;
-            crate::ffmpeg::verify_windows_source_path(source, &path)?;
+            let input_url = if let Some(input) = &input {
+                input.url().to_owned()
+            } else {
+                let path = crate::ffmpeg::windows_source_path(source)?;
+                crate::ffmpeg::verify_windows_source_path(source, &path)?;
+                path.to_string_lossy().into_owned()
+            };
             command.args(filtered_packet_hash_args(
-                &path.to_string_lossy(),
+                &input_url,
                 stream,
                 retain_parameter_sets,
             ));
         }
-        let result = crate::ffmpeg::bounded_command_output_cancellable(
+        #[cfg(unix)]
+        let descriptors = crate::producer_spawn::Descriptors::from_files(
+            input.is_none().then_some(source),
+            None,
+            None,
+            false,
+        );
+        #[cfg(not(unix))]
+        let descriptors = crate::producer_spawn::Descriptors::default();
+        let result = crate::ffmpeg::bounded_command_output_descriptors_cancellable(
             command,
             budget.min(Duration::from_secs(30)),
             64 * 1024,
             "F+ first packet identity",
             cancel,
             crate::process_control::ChildWork::realtime("F+ first packet identity"),
-        )
-        .await;
+            descriptors,
+        );
+        let result = if input.is_some() {
+            plurx_core::process::source_lifetime::mediated(result).await
+        } else {
+            result.await
+        };
+        if let Some(input) = input {
+            input
+                .close_and_wait()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         view.seek(SeekFrom::Start(0))
             .map_err(|error| error.to_string())?;
         filtered_packet_hash(&result?.stdout, pts, time_base)
@@ -3031,7 +3068,7 @@ async fn build_attested_pass(
                                 origin.as_mut().filter(|origin| origin.first_dts.is_none())
                             {
                                 match held_filtered_packet_hash(
-                                    source,
+                                    (source, source_object_version, &file.path, runtime_cache),
                                     probed.expectation.stream_index,
                                     pending.first_pts,
                                     (pending.time_base_num, pending.time_base_den),

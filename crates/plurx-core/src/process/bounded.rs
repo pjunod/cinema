@@ -185,6 +185,7 @@ pub async fn output_command(
         None,
         &[],
         None,
+        None,
     )
     .await
 }
@@ -212,6 +213,7 @@ pub async fn output_command_clean_env(
         None,
         &[],
         None,
+        None,
     )
     .await
 }
@@ -233,6 +235,7 @@ pub async fn output_command_inherited_env(
         Environment::Inherited,
         None,
         &[],
+        None,
         None,
     )
     .await
@@ -263,6 +266,7 @@ pub async fn output_command_bundle_env(
         None,
         bundle_env,
         None,
+        None,
     )
     .await
 }
@@ -272,6 +276,12 @@ pub async fn output_command_bundle_env(
 /// run printed survives its interruption. The returned output's `stdout` is
 /// empty; `max_stderr_bytes` bounds stderr and `max_stdout_bytes` bounds
 /// the child's regular-file writes. Exceeding it terminates the writer.
+/// A supplied manifest must come from the audited descriptor builder, including
+/// its installed file-stdio mappings; it is bound after final configuration.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "file-backed output retains its final descriptor manifest through the bounded owner"
+)]
 pub async fn output_command_bundle_env_to_file(
     command: &mut Command,
     wall_time: Duration,
@@ -280,6 +290,7 @@ pub async fn output_command_bundle_env_to_file(
     work: super::ChildWork,
     bundle_env: &[(String, std::ffi::OsString)],
     stdout: std::fs::File,
+    manifest: Option<std::sync::Arc<super::source_lifetime::DescriptorManifest>>,
 ) -> io::Result<Output> {
     if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
         return Err(io::Error::new(
@@ -325,6 +336,7 @@ pub async fn output_command_bundle_env_to_file(
         None,
         bundle_env,
         Some(stdout),
+        manifest,
     )
     .await
 }
@@ -355,6 +367,7 @@ pub async fn output_command_clean_env_selected_stderr(
         Some(select),
         &[],
         None,
+        None,
     )
     .await
 }
@@ -379,6 +392,7 @@ async fn output_command_environment(
     stderr_selector: Option<fn(&[u8]) -> bool>,
     bundle_env: &[(String, std::ffi::OsString)],
     stdout_file: Option<std::fs::File>,
+    manifest: Option<std::sync::Arc<super::source_lifetime::DescriptorManifest>>,
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
@@ -430,7 +444,14 @@ async fn output_command_environment(
         Some(controller) => Some(controller.enlist(&cancellation).await?),
         None => None,
     };
-    let (mut child, job) = super::spawn_job_owned(command, work)?;
+    let (mut child, job) = if let Some(manifest) = manifest {
+        manifest.bind(command.as_std())?;
+        super::source_lifetime::with_descriptors(manifest, || {
+            super::spawn_job_owned(command, work)
+        })?
+    } else {
+        super::spawn_job_owned(command, work)?
+    };
     let stdout = child.stdout.take();
     if stdout.is_none() && !stdout_to_file {
         return Err(io::Error::other("probe stdout was not piped"));
@@ -616,6 +637,7 @@ mod tests {
             TEST_WORK,
             &[],
             file,
+            None,
         )
         .await
         .expect("file limit still reaps the owned child");

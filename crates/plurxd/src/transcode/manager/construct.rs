@@ -1491,6 +1491,14 @@ impl TranscodeManager {
         }
     }
 
+    /// Observe current pressure as well as future changes, so admission cannot
+    /// lose a registration made before this future receives its first poll.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn playback_qualification_requested(&self) {
+        let mut waiters = self.playback_qualification_waiters.subscribe();
+        let _ = waiters.wait_for(|count| *count > 0).await;
+    }
+
     /// The title scanner has one software decoder thread and never uses a GPU.
     #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_title(
@@ -1558,7 +1566,8 @@ impl TranscodeManager {
     /// measured (`threads`), on the one heavy lane. It coexists with live
     /// sessions: it is admitted while the reservation fits beside them and
     /// no viewer waits, and it yields only when a viewer waits for capacity
-    /// or an offline download does (decision F), not whenever one plays.
+    /// or an offline download does (decision F), or exact playback qualification
+    /// needs the lane; an existing playing session alone does not preempt it.
     pub(crate) async fn admit_dv_refit(&self, threads: usize) -> Option<FragmentAdmission> {
         if *self.playback_qualification_waiters.borrow() > 0
             || self.admissions.live_is_waiting()

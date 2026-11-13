@@ -3566,13 +3566,55 @@ pub(crate) async fn bounded_command_output_cancellable(
     outcome.output
 }
 
+/// Captured probe with explicit source descriptors supplied to the common
+/// audited builder; legacy inheritance hooks cannot be combined with this API.
+pub(crate) async fn bounded_command_output_descriptors_cancellable(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+    descriptors: crate::producer_spawn::Descriptors,
+) -> Result<BoundedOutput, String> {
+    let outcome = bounded_command_capture_descriptors_cancellable(
+        command,
+        timeout,
+        max_bytes,
+        label,
+        cancel,
+        work,
+        Some(descriptors),
+    )
+    .await?;
+    if !outcome.status.success() {
+        return Err(format!("{label} exited {}", outcome.status));
+    }
+    outcome.output
+}
+
 pub(crate) async fn bounded_command_capture_cancellable(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<BoundedCommandOutcome, String> {
+    bounded_command_capture_descriptors_cancellable(
+        command, timeout, max_bytes, label, cancel, work, None,
+    )
+    .await
+}
+
+async fn bounded_command_capture_descriptors_cancellable(
     mut command: tokio::process::Command,
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
+    descriptors: Option<crate::producer_spawn::Descriptors>,
 ) -> Result<BoundedCommandOutcome, String> {
     if cancel.is_some_and(|token| token.is_cancelled()) {
         return Err(format!("{label} cancelled"));
@@ -3584,12 +3626,16 @@ pub(crate) async fn bounded_command_capture_cancellable(
         .kill_on_drop(true);
     // A legacy tagged hook may install additional original descriptors; an
     // empty plan must never hide it. Untagged bounded helpers own only stdio.
-    let manifest = if plurx_core::process::source_lifetime::has_descriptor_handoff(command.as_std())
-    {
+    let legacy = plurx_core::process::source_lifetime::has_descriptor_handoff(command.as_std());
+    if legacy && descriptors.is_some() {
+        return Err("explicit probe descriptors cannot hide a legacy handoff".into());
+    }
+    let manifest = if legacy {
         None
     } else {
         Some(
-            crate::producer_spawn::Descriptors::default()
+            descriptors
+                .unwrap_or_default()
                 .prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED)
                 .map_err(|error| error.to_string())?,
         )

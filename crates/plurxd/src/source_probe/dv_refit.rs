@@ -420,7 +420,11 @@ pub(super) async fn spawn(
     index: u8,
     resume: Option<ResumePoint>,
     stdout: std::fs::File,
-    setup: impl FnOnce(&mut tokio::process::Command),
+    setup: impl FnOnce(
+        &mut tokio::process::Command,
+        &std::fs::File,
+    )
+        -> std::io::Result<std::sync::Arc<crate::producer_spawn::DescriptorManifest>>,
 ) -> Result<plurx_core::process::bounded::Output, std::io::Error> {
     let mut command = tokio::process::Command::new(program);
     command.args([
@@ -437,7 +441,7 @@ pub(super) async fn spawn(
             &at.first_pts.to_string(),
         ]);
     }
-    setup(&mut command);
+    let manifest = setup(&mut command, &stdout)?;
     plurx_core::process::bounded::output_command_bundle_env_to_file(
         &mut command,
         WALL_TIME,
@@ -446,6 +450,7 @@ pub(super) async fn spawn(
         plurx_core::process::ChildWork::background(ACTIVITY),
         environment,
         stdout,
+        Some(manifest),
     )
     .await
 }
@@ -557,7 +562,6 @@ pub(super) async fn run(
     tools: &ToolSet,
     spool: &Spool,
 ) -> Result<HelperRun, RunError> {
-    use std::os::fd::AsRawFd;
     let transient = RunError::Transient;
     if let Some(bytes) = spool.complete().await {
         match off_runtime(move || dv_refit_title::parse(&bytes)).await {
@@ -579,6 +583,23 @@ pub(super) async fn run(
     let scenes: Vec<RefitScene> = kept.iter().map(|(_, s)| s.clone()).collect();
     let resume = dv_refit_title::resume_point(&scenes);
     let stdout = spool.open_run().await.map_err(transient)?;
+    // The spool is a freshly created file inside the daemon-owned cache. Keep
+    // its exact registration alive through every child write and the reap.
+    let _stdout_registration = if plurx_core::process::source_lifetime::daemon_roots_configured()
+        .map_err(|error| transient(error.to_string()))?
+    {
+        Some(
+            plurx_core::process::source_lifetime::register_daemon_file(
+                &stdout,
+                &spool.path(".run"),
+            )
+            .map_err(|error| transient(error.to_string()))?,
+        )
+    } else {
+        // No roots grants no verification. Configured registration failures
+        // remain fatal, and every launch still passes the unchanged policy.
+        None
+    };
     let input = match crate::background_jobs::source_budget() {
         Some(budget) => Some(
             crate::source_input::SourceInput::open_background_held(
@@ -596,7 +617,6 @@ pub(super) async fn run(
         None => None,
     };
     let descriptor = "/proc/self/fd/3";
-    let held = source.handle.as_raw_fd();
     let direct = input.is_none();
     let output = spawn(
         &tools.renderer,
@@ -605,10 +625,17 @@ pub(super) async fn run(
         index,
         resume.map(|(_, at)| at),
         stdout,
-        |command| {
-            if direct {
-                crate::ffmpeg::inherit_raw_file_descriptors_with_cwd(command, &[(held, 3)], None);
-            }
+        |command, stdout| {
+            command.current_dir(&spool.root);
+            use crate::producer_spawn::{ChildStdio, ChildStdios, Descriptors};
+            Descriptors::from_files(direct.then_some(&source.handle), None, None, false).prepare(
+                command,
+                ChildStdios {
+                    stdin: ChildStdio::Null,
+                    stdout: ChildStdio::File(stdout),
+                    stderr: ChildStdio::Piped,
+                },
+            )
         },
     );
     let output = if input.is_some() {
@@ -646,6 +673,80 @@ pub(super) async fn run(
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+
+    /// Run policy configuration in its own test process. This exercises the
+    /// actual file-output launcher without changing the global policy of peers.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn managed_refit_spool_launch_keeps_its_manifest_and_file_output() {
+        const CHILD: &str = "PLURX_REFIT_MANIFEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = tokio::process::Command::new(std::env::current_exe().expect("test image"))
+                .args(["--exact", "source_probe::dv_refit::tests::managed_refit_spool_launch_keeps_its_manifest_and_file_output", "--nocapture"])
+                .env(CHILD, "1").kill_on_drop(true).output().await.expect("isolated policy test");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use plurx_core::process::source_lifetime as lifetime;
+        use std::os::unix::fs::PermissionsExt;
+        static OBSERVED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn observe(value: &lifetime::LaunchObservation) -> std::io::Result<()> {
+            assert_eq!(value.reason, Some("broker_confinement_unqualified"));
+            assert!(
+                !value.verified,
+                "the manifest must not grant broker confinement"
+            );
+            OBSERVED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        let root = crate::test_tempdir().expect("owned spool fixture");
+        let tools = root.path().join("tools");
+        std::fs::create_dir(&tools).expect("tool root");
+        let helper = tools.join("segment_decode_render");
+        std::fs::write(&helper, "#!/bin/sh\nprintf 'manifest-owned-spool'\n").expect("helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        lifetime::set_daemon_roots(&[root.path().to_owned()], &[tools]).expect("roots");
+        lifetime::install_observer(observe).expect("observer");
+        let path = root.path().join("stdout.run");
+        let stdout = std::fs::File::create(&path).expect("spool");
+        let _asset =
+            lifetime::register_daemon_file(&stdout, &path).expect("exact spool registration");
+        let url = "http://127.0.0.1:32123/source";
+        let _broker = lifetime::register_broker(url).expect("broker registration");
+        let output = lifetime::mediated(spawn(
+            &helper,
+            &[],
+            url,
+            0,
+            None,
+            stdout,
+            |command, stdout| {
+                command.current_dir(root.path());
+                crate::producer_spawn::Descriptors::default().prepare(
+                    command,
+                    crate::producer_spawn::ChildStdios {
+                        stdin: crate::producer_spawn::ChildStdio::Null,
+                        stdout: crate::producer_spawn::ChildStdio::File(stdout),
+                        stderr: crate::producer_spawn::ChildStdio::Piped,
+                    },
+                )
+            },
+        ))
+        .await
+        .expect("managed bounded helper");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            std::fs::read(path).expect("settled output"),
+            b"manifest-owned-spool"
+        );
+        assert_eq!(OBSERVED.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     fn output(
         status: i32,

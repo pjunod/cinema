@@ -237,7 +237,7 @@
         "table": "39 bounded process cancellation",
         "source": "crates/plurx-core/src/process/bounded.rs",
         "anchor": "pub async fn cancellable<T>(",
-        "sha256": "e44fdd5b4148d24e6d6d892e5d3a9cfa7b1de1dc5d1bf120f75f6814c7c4441b"
+        "sha256": "c12fee79694e8f75f9f1e105972a3a4c727b9b6c30056ca8279c6533b90a2633"
       },
       {
         "table": "40 provider item deadline",
@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "d4b8f28c1ce980da700fc463e27a2577b981ae4686d6997cef5409ebca9330d4"
+        "sha256": "6213e7d1e4362b8707b2a701c6c3b51e8740cc746f15c76f49f725238a36e919"
       },
       {
         "table": "42 daemon schedule loop no token",

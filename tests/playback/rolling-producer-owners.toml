@@ -3998,7 +3998,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # try-acquired owned semaphore permit remains in the closure through completion
 # even after request cancellation; contention returns unavailable, never queues.
 # F+ integration retains both reviewed source additions.
-expected_occurrences = 1163
+# Twilight integration: +1 joined foreground-admission test task and +4 title-lane fixture
+# tasks. Each fixture retains and awaits its handles; cancellation checks retain the exact
+# shared permit until completion.
+expected_occurrences = 1168
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4253,7 +4256,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 98
+# Twilight integration: +1 test-owned sleep child in the heavy-lane reclamation fixture; its
+# owner signals, waits and positively reaps it before releasing the lane.
+expected_occurrences = 99
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4279,7 +4284,9 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # PR1491: +3 closure calls, not task calls: producer_spawn.rs calls its
 # `spawn` builder argument twice (mediated and direct), and reader.rs's
 # declared_background_spawn calls `spawn()` after recording the escape tick.
-expected_occurrences = 25
+# F+ descriptor integration: +1 call to the existing dv_refit::spawn wrapper in the isolated
+# configured-policy regression, not a new task or process owner.
+expected_occurrences = 26
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5910,7 +5917,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # drops the joined observation futures; it proves no terminal mutation, child
 # reap or resource settlement. No production timer, task or process is added.
 # F+ integration retains both reviewed source additions.
-expected_occurrences = 2220
+# Twilight/F+ integration: +1 bounded production qualification-admission timeout, +1 admission
+# fixture timeout, +8 title-lane fixture timeouts and +1 deterministic F+ handoff timeout.
+# Expiry proves no physical settlement; tests still join/reap their owners.
+expected_occurrences = 2231
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6429,7 +6439,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
 # F+ integration retains both reviewed source additions.
-expected_occurrences = 358
+# Integration: +1 test-owned sleep child for title-lane reclamation and +1 isolated test-
+# executable policy subprocess for F+ spool manifests. Both are retained and awaited.
+expected_occurrences = 360
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7149,7 +7161,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in the process-free release-interleaving fixture and one in the privacy
 # observer fixture. Both inspect returned values; neither launches a process.
 # F+ integration retains both reviewed source additions.
-expected_occurrences = 932
+# Integration: the two new test-owned command constructors above contribute their output/spawn
+# shapes. The existing bounded helper owner remains the production launch boundary.
+expected_occurrences = 934
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7463,7 +7477,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Reader B0/B1: +1 explicit wait for the verified native true fixture. The
 # fixture retains ChildJob through the positive physical join. The output-pipe
 # collision fixture now calls status instead of output (net zero lifecycle).
-expected_occurrences = 390
+# Twilight integration: +3 test-only lifecycle shapes on the owned sleep child. Its fixture
+# requires completed kill/wait before the successor obtains the heavy permit.
+expected_occurrences = 393
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7705,7 +7721,10 @@ pattern = "kill_on_drop\\s*\\("
 # Reader B0/B1: -1 former reader-fixture kill_on_drop configuration. Its
 # isolated real no-source true helper uses the production ChildJob and awaits
 # actual exit; no production kill-on-drop guarantee is removed.
-expected_occurrences = 126
+# Integration: +2 test-only backstops for the owned sleep child and isolated F+ policy
+# subprocess; their normal paths explicitly await completion, rather than treating drop as
+# proof of reap.
+expected_occurrences = 128
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

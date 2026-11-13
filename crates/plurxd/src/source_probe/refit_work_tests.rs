@@ -140,7 +140,16 @@ async fn run_fake(dir: &Path, script: &Path) -> Result<HelperRun, RunError> {
             0,
             None,
             stdout,
-            |_| {},
+            |command, stdout| {
+                crate::producer_spawn::Descriptors::default().prepare(
+                    command,
+                    crate::producer_spawn::ChildStdios {
+                        stdin: crate::producer_spawn::ChildStdio::Null,
+                        stdout: crate::producer_spawn::ChildStdio::File(stdout),
+                        stderr: crate::producer_spawn::ChildStdio::Piped,
+                    },
+                )
+            },
         )
         .await;
         if !matches!(&output, Err(e) if e.raw_os_error() == Some(libc::ETXTBSY)) {

@@ -8,7 +8,8 @@
 //! pending disk conversion requires a fit before discarding a FEL,
 //! (`playback.dolby_vision_refit_*`, Settings → Developer). It coexists with
 //! live sessions on an explicit thread reservation and yields only when a
-//! viewer waits for capacity, or to an ordinary media probe; a yield keeps
+//! viewer waits for capacity, or to an ordinary media probe or exact playback
+//! qualification; a yield keeps
 //! the helper's whole scene lines in the node-local spool and the next
 //! attempt resumes there. It is listed, cancellable and retryable from the
 //! background-jobs page; a failed or cancelled identity is not demanded
@@ -353,6 +354,21 @@ impl RefitTask {
             }));
         }
         Ok(None)
+    }
+
+    #[cfg(test)]
+    pub(super) fn owned_lane_fixture(
+        work: Pin<Box<dyn Future<Output = bool> + Send>>,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            work,
+            cancel,
+            job_id: String::new(),
+            file_id: 0,
+            probe_pipeline: String::new(),
+            probe_after: None,
+        }
     }
 
     pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {

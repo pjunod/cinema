@@ -903,8 +903,12 @@ fn validated_title_rewind(connection: &rusqlite::Connection, version: i64) -> (S
         version, 114,
         "only the current title fixture may be rewound"
     );
-    let marker_version: i64 = connection.query_row(
-        "SELECT version FROM dv_title_jobs_schema WHERE singleton=1", [], |row| row.get(0))
+    let marker_version: i64 = connection
+        .query_row(
+            "SELECT version FROM dv_title_jobs_schema WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
         .expect("published title marker version");
     require_fixture_marker(connection, "dv_title_jobs_schema", marker_version);
     let marker: i64 = connection

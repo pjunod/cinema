@@ -67,6 +67,15 @@ fn canonical_roots(paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
 
 /// Configure once during real daemon startup, not for each AppState. Tests
 /// without a configured process registry remain conservative and unverified.
+/// Configuration is immutable once installed. Absence grants no verification;
+/// callers may avoid asset registration only in that conservative mode.
+pub fn daemon_roots_configured() -> io::Result<bool> {
+    STATE
+        .lock()
+        .map(|state| state.roots.is_some())
+        .map_err(|_| io::Error::other("reader policy registry poisoned"))
+}
+
 pub fn set_daemon_roots(owned: &[PathBuf], tools: &[PathBuf]) -> io::Result<()> {
     let roots = Roots {
         owned: canonical_roots(owned)?,

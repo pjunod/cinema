@@ -257,7 +257,10 @@ review of PR #1565):
   at 1.0 core, 2 threads 21.9 s at 2.2 cores, 3 threads 16 s at 3.2 cores, 4
   threads no faster). It is admitted beside live sessions when that fits the
   software budget and no viewer waits, and yields only when a viewer or an
-  offline download waits for capacity, or to a media probe. A yield keeps the
+  offline download waits for capacity, to a media probe, or to exact playback
+  qualification demand. The scheduler keeps polling the current fit while
+  qualification awaits its lane, then cancels and reaps the fit before the
+  successor acquires it. A yield keeps the
   spool and requeues the same identity; a yield that kept no new scene counts
   toward a bound of 8 in a row, after which it settles as a retry.
 - **Classification.** The helper exits 3 for a content refusal (not FEL, a

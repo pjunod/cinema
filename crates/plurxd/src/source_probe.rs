@@ -98,6 +98,38 @@ async fn snapshot(path: &Path) -> Option<(i64, i64)> {
     .ok()?;
     Some((size, mtime))
 }
+/// Keep the current lane owner polled while a higher-priority admission waits.
+/// Pressure retires that owner before the pending admission can acquire its lane.
+#[cfg(target_os = "linux")]
+async fn drive_playback_admission<T>(
+    admission: impl std::future::Future<Output = T>,
+    pressure: impl std::future::Future<Output = ()>,
+    refit: &mut Option<refit_work::RefitTask>,
+    shutdown: &CancellationToken,
+) -> Option<T> {
+    tokio::pin!(admission, pressure);
+    loop {
+        let has_refit = refit.is_some();
+        let fit = async {
+            match refit.as_mut() {
+                Some(work) => work.work.as_mut().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            result = &mut admission => return Some(result),
+            _ = fit => { refit.take(); }
+            () = &mut pressure, if has_refit => {
+                if let Some(work) = refit.take() { work.stop().await; }
+            }
+            () = shutdown.cancelled() => {
+                if let Some(work) = refit.take() { work.stop().await; }
+                return None;
+            }
+        }
+    }
+}
+
 pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
@@ -147,17 +179,20 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         // probe pagination, including when that pagination has more pages.
         #[cfg(target_os = "linux")]
         if title.is_none() && !shutdown.is_cancelled() {
-            match title_work::TitleTask::start(
+            let requested = state.transcode.playback_qualification_requested();
+            let admission = title_work::TitleTask::start(
                 &state,
                 &boot,
                 &mut title_after,
                 &mut live_title_after,
                 true,
-            )
-            .await
-            {
-                Ok(work) => title = work,
-                Err(error) => tracing::warn!(%error,"playback qualification demand unavailable"),
+            );
+            match drive_playback_admission(admission, requested, &mut refit, &shutdown).await {
+                Some(Ok(work)) => title = work,
+                Some(Err(error)) => {
+                    tracing::warn!(%error,"playback qualification demand unavailable")
+                }
+                None => continue,
             }
         }
         #[cfg(target_os = "linux")]
@@ -847,6 +882,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn playback_admission_reaps_the_fit_that_owns_its_lane() {
+        let lane = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&lane).acquire_owned().await.expect("fit lane");
+        let cancel = CancellationToken::new();
+        let stopped = cancel.clone();
+        let (reaped, observed) = tokio::sync::oneshot::channel();
+        let fit = async move {
+            stopped.cancelled().await;
+            drop(held);
+            reaped.send(()).expect("reap observed");
+            true
+        };
+        let mut refit = Some(refit_work::RefitTask::owned_lane_fixture(
+            Box::pin(fit),
+            cancel,
+        ));
+        let (waiters, mut pressure) = tokio::sync::watch::channel(0usize);
+        let admission = async {
+            waiters.send_replace(1);
+            lane.acquire_owned()
+                .await
+                .expect("qualified successor lane")
+        };
+        let requested = async {
+            pressure.wait_for(|n| *n > 0).await.expect("pressure");
+        };
+        let shutdown = CancellationToken::new();
+        let admitted = tokio::time::timeout(
+            Duration::from_secs(1),
+            drive_playback_admission(admission, requested, &mut refit, &shutdown),
+        )
+        .await
+        .expect("admission cannot wait behind an unpolled fit")
+        .expect("not shut down");
+        observed
+            .await
+            .expect("fit physically completed before successor");
+        assert!(refit.is_none());
+        drop(admitted);
+    }
+
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
 
