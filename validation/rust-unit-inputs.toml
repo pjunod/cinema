@@ -113,6 +113,14 @@ reason = "Walks its own src/store; the `.pop()` is its work queue, not a path."
 
 [[dynamic]]
 crate = "plurx-core"
+file = "crates/plurx-core/src/store/hiqlite_sessions/tests.rs"
+function = "walk"
+reads = ["crates/*/src/**"]
+tests = ["store::hiqlite_sessions::tests::the_assumed_layout_hook_has_no_caller_outside_the_store_contract"]
+reason = "The outer test walks every crate src tree; the scanner sees its preceding nested walk helper."
+
+[[dynamic]]
+crate = "plurx-core"
 file = "crates/plurx-core/src/testfixtures.rs"
 function = "fixture_dir"
 reads = []
