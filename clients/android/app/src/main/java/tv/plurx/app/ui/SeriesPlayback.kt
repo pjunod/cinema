@@ -3,7 +3,7 @@ package tv.plurx.app.ui
 import tv.plurx.app.data.Item
 
 internal fun orderedEpisodeCandidates(items: List<Item>): List<Item> {
-    val episodes = items.filter { it.kind == "episode" }
+    val episodes = items.filter { it.kind == "episode" && !it.offloaded }
     val inProgress = episodes.filter {
         it.watch?.watched != true && (it.watch?.position_ms ?: 0L) > 3_000L
     }
@@ -15,7 +15,7 @@ internal fun orderedEpisodeCandidates(items: List<Item>): List<Item> {
 }
 
 internal fun orderedSeasonCandidates(items: List<Item>): List<Item> {
-    val seasons = items.filter { it.kind == "season" }
+    val seasons = items.filter { it.kind == "season" && !it.offloaded }
     val inProgress = seasons.filter {
         val rollup = it.rollup
         rollup != null && rollup.leaves > 0 && rollup.watched in 1 until rollup.leaves

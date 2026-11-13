@@ -39,6 +39,8 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/library_schedule.rs"]
 mod library_schedule;
+#[path = "store_contract/offload.rs"]
+mod offload;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -9318,6 +9320,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "fenced-root",
                 &[baseline_file],
                 1,
+                &[],
+                0,
                 &first,
                 &stale_replacement,
             ),
@@ -9606,6 +9610,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 .reconcile_library_fenced(
                     library.id,
                     "fenced-root",
+                    &[],
+                    0,
                     &[],
                     0,
                     &successor_current,
@@ -32582,7 +32588,7 @@ async fn media_contract_runs_through_dyn_store() {
         );
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "stale-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "stale-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("reject root"),
             ReconcileOutcome::RefusedRoot { .. }
@@ -32594,7 +32600,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert_eq!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 0)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 0, &[], 0)
                 .await
                 .expect("reject bound"),
             ReconcileOutcome::RefusedPrune {
@@ -32609,7 +32615,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("bounded reconcile"),
             ReconcileOutcome::Applied {
@@ -33132,7 +33138,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
         );
         assert_eq!(
             store
-                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1)
+                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1, &[], 0)
                 .await
                 .expect("reconcile verified conversion"),
             ReconcileOutcome::Applied {

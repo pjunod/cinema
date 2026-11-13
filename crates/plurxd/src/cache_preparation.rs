@@ -68,10 +68,13 @@ impl JobManager {
                             if next_item_id.is_some() {
                                 Vec::new()
                             } else {
+                                // An offloaded next episode has no file to
+                                // prepare; Get it back is the only way forward.
                                 rails
                                     .next_up
                                     .into_iter()
                                     .map(|row| row.item)
+                                    .filter(|item| item.offloaded_at.is_none())
                                     .collect::<Vec<_>>()
                             },
                         ),
