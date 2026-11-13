@@ -4,11 +4,13 @@
 //! viewer's first frame. A create resolves the ordinary plan only; when that
 //! plan could be processed it leaves an [`UpgradeIntent`] here, on the node
 //! that owns the session, and so does the activation of a locally owned
-//! ordinary prepared successor. The first `ttff` beacon naming the session
-//! (or, for a prepared successor, its commit, which the client sends only
-//! after showing the successor's frame) takes the intent and runs one bounded
-//! trial
-//! ([`crate::transcode::TranscodeManager::prepare_processed_upgrade`]). A
+//! ordinary prepared successor. The first proof that the viewer is presenting
+//! the session takes the intent and runs one bounded trial: its `ttff`
+//! beacon, an accepted rendering control exchange from its own generation
+//! (the only proof for a resume or a stall recovery, which send no `ttff`),
+//! or, for a prepared successor, its commit, which the client sends only
+//! after showing the successor's frame. The trial is
+//! [`crate::transcode::TranscodeManager::prepare_processed_upgrade`]. A
 //! verified first window is staged as an M6 prepared successor
 //! ([`super::preparation::stage_prepared_successor_as`]) and the control
 //! exchange offers it like any other. Every refusal leaves the ordinary
@@ -196,11 +198,33 @@ pub(in crate::http) fn take_on_first_frame(
     user_id: i64,
     session_id: &str,
 ) -> Option<(Box<UpgradeIntent>, UpgradeRun)> {
+    take_waiting(user_id, session_id, None)
+}
+
+/// A rendering control exchange for `incarnation_id` was accepted on this
+/// node: the viewer is presenting that session's frames. Like
+/// [`take_on_first_frame`], but fenced to the generation the exchange named,
+/// so a stale exchange cannot start the upgrade of a later incarnation.
+pub(in crate::http) fn take_on_rendering(
+    user_id: i64,
+    session_id: &str,
+    incarnation_id: &str,
+) -> Option<(Box<UpgradeIntent>, UpgradeRun)> {
+    take_waiting(user_id, session_id, Some(incarnation_id))
+}
+
+fn take_waiting(
+    user_id: i64,
+    session_id: &str,
+    incarnation_id: Option<&str>,
+) -> Option<(Box<UpgradeIntent>, UpgradeRun)> {
     let mut entries = lock();
     let Some(Entry::Waiting { intent, registered }) = entries.get(session_id) else {
         return None;
     };
-    if intent.user_id != user_id {
+    if intent.user_id != user_id
+        || incarnation_id.is_some_and(|incarnation| incarnation != intent.incarnation_id)
+    {
         return None;
     }
     if registered.elapsed() >= FIRST_FRAME_WINDOW {
@@ -363,6 +387,25 @@ pub(in crate::http) fn is_running(session_id: &str) -> bool {
 /// that session's upgrade, if one is waiting.
 pub(in crate::http) fn note_first_frame(state: &AppState, user_id: i64, session_id: &str) {
     let Some((intent, run)) = take_on_first_frame(user_id, session_id) else {
+        return;
+    };
+    start_upgrade(state, intent, run);
+}
+
+/// The control-exchange seam: an accepted exchange from the session's own
+/// generation, with active demand and a rendering picture, proves the viewer
+/// is presenting this session. The `ttff` beacon is a start measurement and
+/// is never sent for a resume, a seek, or a stall recovery, so a session that
+/// began any of those ways would otherwise never be offered its upgrade.
+pub(in crate::http) fn note_rendering(state: &AppState, route: &MediaSessionRoute) {
+    if route.owner_node_id != state.node_id || route.state != "active" {
+        return;
+    }
+    let Some(user_id) = route.principal.local_user_id() else {
+        return;
+    };
+    let Some((intent, run)) = take_on_rendering(user_id, &route.session_id, &route.incarnation_id)
+    else {
         return;
     };
     start_upgrade(state, intent, run);
