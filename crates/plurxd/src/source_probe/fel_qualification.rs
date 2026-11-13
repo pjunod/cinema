@@ -2738,8 +2738,54 @@ mod tests {
             SourcePausePhase,
         };
         use std::os::unix::fs::PermissionsExt;
+        const ISOLATED_ROOT: &str = "PLURX_FEL_BROKER_FIXTURE_ROOT";
+        let Some(root) = std::env::var_os(ISOLATED_ROOT) else {
+            // Reader roots are immutable process state. Configure production
+            // registration only inside this isolated test image.
+            let root = crate::test_tempdir().expect("isolated source-broker root");
+            let mut command =
+                tokio::process::Command::new(std::env::current_exe().expect("test image"));
+            command.args([
+                "--exact",
+                "source_probe::fel_qualification::tests::qualification_broker_pauses_pipe_partners_and_reaps_before_close",
+                "--nocapture",
+            ]).env_clear().env(ISOLATED_ROOT, root.path()).current_dir(root.path());
+            for name in ["TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+            let output = plurx_core::process::source_lifetime::mediated(
+                plurx_core::process::bounded::output_command_inherited_env(
+                    &mut command,
+                    Duration::from_secs(45),
+                    64 * 1024,
+                    ChildWork::background("isolated FEL broker fixture"),
+                ),
+            )
+            .await
+            .expect("bounded isolated source-broker test");
+            assert!(
+                output.status.success(),
+                "isolated source-broker fixture failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let fixture_root = std::path::PathBuf::from(root)
+            .canonicalize()
+            .expect("isolated root");
+        plurx_core::process::source_lifetime::set_daemon_roots(
+            std::slice::from_ref(&fixture_root),
+            std::slice::from_ref(&fixture_root),
+        )
+        .expect("isolated immutable reader and script roots");
         for cancelled in [false, true] {
-            let dir = tempfile::tempdir().expect("create source-broker fixture");
+            let dir = tempfile::Builder::new()
+                .prefix("broker-")
+                .tempdir_in(&fixture_root)
+                .expect("create source-broker fixture");
             let helper = dir.path().join("helper.py");
             let consumer = dir.path().join("consumer.py");
             std::fs::write(
@@ -2805,7 +2851,7 @@ while True:
             let worker_cancel = cancel.clone();
             let root = dir.path().to_path_buf();
             let (send, recv) = tokio::sync::oneshot::channel();
-            let task = tokio::spawn(async move {
+            let mut task = tokio::spawn(async move {
                 pausable(worker_controller, async move {
                     let (input, source) =
                         crate::source_input::SourceInput::qualification_fixture(b"fixture source")
@@ -2854,15 +2900,41 @@ while True:
                 .await
             });
             let url = recv.await.expect("receive fixture broker URL");
-            tokio::time::timeout(Duration::from_secs(5), async {
+            let diagnostics = || {
+                format!(
+                    "helper_pid={} reads={} consumer_pid={} helper_stderr={}",
+                    dir.path().join("helper.pid").exists(),
+                    dir.path().join("reads").exists(),
+                    dir.path().join("consumer.pid").exists(),
+                    std::fs::read_to_string(dir.path().join("fel-pq-bilinear-rgb48-v1.log"))
+                        .unwrap_or_else(|error| format!("unavailable: {error}")),
+                )
+            };
+            let started = tokio::time::timeout(Duration::from_secs(5), async {
                 while !dir.path().join("reads").exists()
                     || !dir.path().join("consumer.pid").exists()
                 {
+                    if task.is_finished() {
+                        let result = (&mut task).await.map(|result| result.map(|_| ()));
+                        panic!(
+                            "source-broker setup exited early: {result:?}; {}",
+                            diagnostics()
+                        );
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
-            .await
-            .expect("wait for both children to start");
+            .await;
+            if started.is_err() {
+                cancel.cancel();
+                let result = tokio::time::timeout(Duration::from_secs(5), &mut task)
+                    .await
+                    .map(|joined| joined.map(|result| result.map(|_| ())));
+                panic!(
+                    "source-broker children did not start; cleanup={result:?}; {}",
+                    diagnostics()
+                );
+            }
             let pid: i32 = std::fs::read_to_string(dir.path().join("helper.pid"))
                 .expect("read helper PID")
                 .parse()
