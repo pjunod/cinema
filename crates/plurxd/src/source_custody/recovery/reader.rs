@@ -24,7 +24,60 @@ struct Evidence {
     // Older evidence can still be removed following an acknowledged join.
     #[serde(default)]
     anchor_ctime: Option<(i64, i64)>,
+    /// The writing daemon's PID namespace; absent in older evidence.
+    #[serde(default)]
+    daemon_namespace: Option<DaemonNamespace>,
     record: Record,
+}
+
+/// The PID namespace of the daemon that wrote a witness, and whether that
+/// daemon was the namespace's init (PID 1).
+///
+/// When a namespace's init exits, the kernel kills every process left in the
+/// namespace and the init's exit completes only once they are all reaped. A
+/// process cannot leave its PID namespace, so every child the daemon ever
+/// launched, mediated or not, dies with it. A container runtime starts the
+/// replacement daemon in a new namespace only after the old init has exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct DaemonNamespace {
+    pub(super) pid_namespace: u64,
+    pub(super) init: bool,
+}
+
+pub(super) fn daemon_namespace() -> Option<DaemonNamespace> {
+    #[cfg(target_os = "linux")]
+    {
+        let link = std::fs::read_link("/proc/self/ns/pid").ok()?;
+        let pid_namespace = link
+            .to_str()?
+            .strip_prefix("pid:[")?
+            .strip_suffix(']')?
+            .parse()
+            .ok()?;
+        Some(DaemonNamespace {
+            pid_namespace,
+            init: std::process::id() == 1,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+/// Whether the namespace that wrote a witness has been torn down: its writer
+/// was that namespace's init, and this daemon is the init of another one.
+/// With the anchor lock free as well (only the writing daemon held it, and
+/// close-on-exec keeps it from children), no process from the writer's
+/// namespace remains, even one launched unmediated. A same-namespace or
+/// non-init daemon proves nothing, and older evidence keeps needing a reboot.
+fn namespace_torn_down(
+    written: Option<&DaemonNamespace>,
+    current: Option<&DaemonNamespace>,
+) -> bool {
+    matches!(
+        (written, current),
+        (Some(written), Some(current))
+            if written.init && current.init && written.pid_namespace != current.pid_namespace
+    )
 }
 
 pub(crate) struct Witness {
@@ -246,6 +299,7 @@ pub(super) fn prepare_at(
             anchor_device: metadata.dev(),
             anchor_inode: metadata.ino(),
             anchor_ctime: Some(anchor_ctime(&metadata)),
+            daemon_namespace: daemon_namespace(),
             record: record.clone(),
         };
         let bytes = serde_json::to_vec(&evidence).map_err(|error| error.to_string())?;
@@ -510,9 +564,20 @@ pub(super) async fn replay_at(
     legacy: &Path,
     node: &str,
 ) -> Result<(), String> {
+    replay_at_in(store, directory, legacy, node, daemon_namespace()).await
+}
+
+/// [`replay_at`] as the daemon in `current`'s PID namespace.
+pub(super) async fn replay_at_in(
+    store: &Arc<dyn Store>,
+    directory: &Path,
+    legacy: &Path,
+    node: &str,
+    current: Option<DaemonNamespace>,
+) -> Result<(), String> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (store, directory, legacy, node);
+        let _ = (store, directory, legacy, node, current);
         Ok(())
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -574,9 +639,12 @@ pub(super) async fn replay_at(
             {
                 continue;
             }
+            let torn_down =
+                namespace_torn_down(evidence.daemon_namespace.as_ref(), current.as_ref());
             let disqualified = directory.join(format!("{name}.unmediated"));
             match disqualified.symlink_metadata() {
-                Ok(_) => continue,
+                Ok(_) if !torn_down => continue,
+                Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.to_string()),
             }
@@ -611,36 +679,47 @@ pub(super) async fn replay_at(
                     continue;
                 }
             }
-            let Some(original_ctime) = evidence.anchor_ctime else {
-                continue;
-            };
-            if anchor_ctime(&anchor.metadata().map_err(|error| error.to_string())?)
-                != original_ctime
-            {
-                continue;
-            }
-            let mut nonce = String::new();
-            anchor
-                .read_to_string(&mut nonce)
-                .map_err(|error| error.to_string())?;
-            if nonce != evidence.anchor_nonce
-                || anchor_ctime(&anchor.metadata().map_err(|error| error.to_string())?)
+            // An unmediated launch rewrote the anchor to invalidate it: no
+            // free lock can then show that its children have exited. Only
+            // the teardown of the writer's whole namespace still can.
+            if !torn_down {
+                let Some(original_ctime) = evidence.anchor_ctime else {
+                    continue;
+                };
+                if anchor_ctime(&anchor.metadata().map_err(|error| error.to_string())?)
                     != original_ctime
-            {
-                continue;
-            }
-            // The existing inode stays locked through exact-owner settlement,
-            // release acknowledgement, and durable evidence cleanup.
-            if disqualified.symlink_metadata().is_ok() {
-                continue;
+                {
+                    continue;
+                }
+                let mut nonce = String::new();
+                anchor
+                    .read_to_string(&mut nonce)
+                    .map_err(|error| error.to_string())?;
+                if nonce != evidence.anchor_nonce
+                    || anchor_ctime(&anchor.metadata().map_err(|error| error.to_string())?)
+                        != original_ctime
+                {
+                    continue;
+                }
+                // The existing inode stays locked through exact-owner settlement,
+                // release acknowledgement, and durable evidence cleanup.
+                if disqualified.symlink_metadata().is_ok() {
+                    continue;
+                }
             }
             settle_records(store, std::slice::from_ref(&evidence.record)).await?;
             clear_at(legacy, &evidence.record)?;
             complete_at(directory, &evidence.record)?;
             drop(anchor);
-            tracing::info!(
-                "source custody recovered after verified mediated-reader lifetime ended"
-            );
+            if torn_down {
+                tracing::info!(
+                    "source custody recovered after its daemon's PID namespace was torn down"
+                );
+            } else {
+                tracing::info!(
+                    "source custody recovered after verified mediated-reader lifetime ended"
+                );
+            }
         }
         Ok(())
     }

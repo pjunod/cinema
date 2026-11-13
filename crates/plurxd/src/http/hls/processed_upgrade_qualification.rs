@@ -19,6 +19,57 @@ pub(super) struct AwaitingQualification {
     presented_at: std::time::Instant,
     selection: Option<ClientSelection>,
     checking: Option<u64>,
+    /// When this viewer's live demand on its title's scan was last renewed.
+    demand_renewed: Option<std::time::Instant>,
+}
+
+/// How long a waiting viewer's live demand on its title's scan lasts, and how
+/// often its rendering exchanges renew it. Background source readers take
+/// turns one at a time and only playback demand may read beside them, so a
+/// viewer that is not counted waits for every library and subtitle job ahead
+/// of its title. The demand does not lift the cap on concurrent readers or the
+/// viewer's own playback priority; upkeep cancels it once renewals stop.
+const VIEWER_DEMAND_MS: i64 = 90_000;
+const VIEWER_RENEWAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hold (or renew) the live demand of `session_id`, awaiting its title's FEL
+/// measurement as `generation`, on that title's scan.
+pub(in crate::http::hls) fn hold_viewer_demand(
+    state: &AppState,
+    session_id: &str,
+    generation: &str,
+) {
+    let file_id = {
+        let mut entries = lock();
+        match entries.get_mut(session_id) {
+            Some(Entry::AwaitingQualification(wait))
+                if wait.report.generation == generation
+                    && wait
+                        .demand_renewed
+                        .is_none_or(|renewed| renewed.elapsed() >= VIEWER_RENEWAL) =>
+            {
+                wait.demand_renewed = Some(std::time::Instant::now());
+                wait.wait.file_id
+            }
+            _ => return,
+        }
+    };
+    let state = state.clone();
+    let viewer = session_id.to_owned();
+    tokio::spawn(async move {
+        let now = crate::media_sessions::unix_ms();
+        match state
+            .store
+            .attach_dv_title_viewer(file_id, &viewer, now.saturating_add(VIEWER_DEMAND_MS), now)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(target: "plurxd::http::hls", file_id,
+                "no title scan is queued yet for a waiting viewer; the next exchange retries"),
+            Err(error) => tracing::warn!(target: "plurxd::http::hls", file_id, %error,
+                "a waiting viewer's demand on its title scan was not recorded"),
+        }
+    });
 }
 
 pub(super) fn retain(
@@ -49,6 +100,7 @@ pub(super) fn retain(
             presented_at: run.presented_at,
             selection: None,
             checking: None,
+            demand_renewed: None,
         })),
     );
     true

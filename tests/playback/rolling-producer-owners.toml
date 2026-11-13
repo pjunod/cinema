@@ -3930,6 +3930,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # source in `working` has exactly one), bounded by MAX_PENDING_SOURCES, which
 # ends when publish_source returns. Its supervisor task awaits that unit's
 # JoinHandle and always returns the key, a panic included, then ends.
+# #1546 (removed_paths / probe-only scans), +4 joined blocking workers, no
+# detached task: scan/removed.rs probes a removed path's chain and fingerprints
+# the library root on two spawn_blocking calls, each awaited in place;
+# library_work.rs probe_removed_paths runs its no-follow probes on one awaited
+# spawn_blocking; state.rs run_targeted scopes a probe-only group to the nearest
+# existing folder on one awaited spawn_blocking. Each JoinHandle is awaited by
+# the request's own future, so cancellation and panics surface as task errors.
+# #1566, +1 detached bounded store write: processed_upgrade_qualification.rs
+# `hold_viewer_demand` records a waiting viewer's live demand on its title scan
+# in one spawned task that makes a single store call and logs its outcome. It
+# holds no lock, resource or source, is throttled to one per viewer per 30 s by
+# the registry entry, and a lost write only delays that viewer's next renewal.
 # 1142 -> 1145 with the E1c review: three test-only `tokio::spawn`s in
 # route_view_tests.rs hold a lookup mid-read (cancel, publication race,
 # proof loss); each is joined or aborted by its test.
@@ -3937,7 +3949,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # D3a: -1 (1147 -> 1146), the owner start's `tokio::spawn` becomes
 # `spawn_in_http_store_scope`, which carries the request's Store-operation
 # counts into the same awaited task (counted under process-capable-launch-method).
-expected_occurrences = 1146
+# Merged main again: 1144 base, +4 main (#1546), +2 this branch.
+# Merged main into E1c: 1148 base, +1 main, +2 E1c.
+expected_occurrences = 1151
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5799,6 +5813,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Local playback demand (item 6, first step) adds no task, timer or process: a
 # local start's demand is one more message in the copy-analysis inbox, and the
 # build it leads to is the existing source unit and its Analysis phases.
+# #1546, +1 test-only: http/tests.rs polls for the library's own scan to drain
+# with a 25 ms tokio::time::sleep inside a bounded loop that asserts it drained.
+# No production timer.
 # 2202 -> 2205 with E1c (route view): `raw_route_before` bounds its view read
 # and its quorum read (alternative arms) by the lookup's existing request
 # deadline, one `timeout_at` more than the single Store read had (+1); two
@@ -5808,12 +5825,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # route_view_tests.rs are gone; those cases run on a paused clock.
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
 # Merged main into E1c: 2202 base, +0 main, +1 E1c.
+# Merged main again: +1 main (#1546 test poll) = 2204.
 # D3b review S4: +1, `tokio::time::timeout_at` around the remote owner's
 # `start_plan::owner_plan` in `internal_media_sessions::start`, bounded by
 # `start_deadline.min(create_stage_deadline(2 s))` -- the restore stage's own
 # bound, which the owner's planning read ran under before D3b. An awaited
 # request-path deadline: no task, no producer, no process; a timeout answers 503.
-expected_occurrences = 2204
+# Merged main into D3b: 2203 base, +1 main, +1 D3b = 2205.
+expected_occurrences = 2205
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6318,7 +6337,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # this_daemon_accepts_the_pinned_media_runtimes_dv_helpers: python3 runs the
 # bundle installer's --identity once; the synchronous output() joins and reaps it
 # before the assertion. No production producer.
-expected_occurrences = 341
+# #1546, +1 test-only (341 -> 342): http/tests.rs makes one real Matroska
+# fixture with ffmpeg via testfixtures::run, which waits for and reaps the child
+# before the test continues. No production producer.
+expected_occurrences = 342
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
