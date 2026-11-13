@@ -831,21 +831,32 @@ fn cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u8; 32], S
     let mut count = 0usize;
     let mut hash = Sha256::new();
     while pos < sample.len() {
-        let prefix_end = pos.checked_add(width).filter(|end| *end <= sample.len())
+        let prefix_end = pos
+            .checked_add(width)
+            .filter(|end| *end <= sample.len())
             .ok_or("F+ packet identity has a truncated NAL prefix")?;
         let mut length = 0usize;
         for byte in &sample[pos..prefix_end] {
-            length = length.checked_mul(256).and_then(|n| n.checked_add(usize::from(*byte)))
+            length = length
+                .checked_mul(256)
+                .and_then(|n| n.checked_add(usize::from(*byte)))
                 .ok_or("F+ packet identity NAL length overflows")?;
         }
-        let end = prefix_end.checked_add(length).filter(|end| *end <= sample.len())
+        let end = prefix_end
+            .checked_add(length)
+            .filter(|end| *end <= sample.len())
             .ok_or("F+ packet identity NAL runs past its sample")?;
         let nal = &sample[prefix_end..end];
         if nal.len() < 2 || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) {
-            return Err("F+ packet identity has a truncated header or an unescaped Annex-B delimiter".into());
+            return Err(
+                "F+ packet identity has a truncated header or an unescaped Annex-B delimiter"
+                    .into(),
+            );
         }
         let kind = (nal[0] >> 1) & 63;
-        if count == 0 || matches!(kind, 32..=34) { hash.update([0]); }
+        if count == 0 || matches!(kind, 32..=34) {
+            hash.update([0]);
+        }
         hash.update([0, 0, 1]);
         hash.update(nal);
         count += 1;
