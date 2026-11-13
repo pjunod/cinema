@@ -1231,7 +1231,12 @@ async fn disabling_all_platforms_yields_active_catalogue_work_until_reenabled() 
         probe_after: None,
     };
     assert!(task.should_yield(&state).await.expect("disabled"));
-    fx.store.put_setting(plurx_core::store::keys::DV_REFIT_PLATFORMS[0], "1")
-        .await.expect("enable");
-    assert!(!task.should_yield(&state).await.expect("enabled without preempting probes"));
+    fx.store
+        .put_setting(plurx_core::store::keys::DV_REFIT_PLATFORMS[0], "1")
+        .await
+        .expect("enable");
+    assert!(!task
+        .should_yield(&state)
+        .await
+        .expect("enabled without preempting probes"));
 }

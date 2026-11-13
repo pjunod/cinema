@@ -120,9 +120,9 @@ pub(super) fn enqueue_request(source: &RefitSource, now: i64) -> EnqueueJob {
 pub(crate) async fn enabled(state: &AppState) -> Result<bool, StoreError> {
     let keys = plurx_core::store::keys::DV_REFIT_PLATFORMS;
     let settings = state.store.get_settings(&keys).await?;
-    Ok(keys.iter().any(|key| {
-        plurx_core::store::stored_switch(settings.get(*key).map(String::as_str), false)
-    }))
+    Ok(keys
+        .iter()
+        .any(|key| plurx_core::store::stored_switch(settings.get(*key).map(String::as_str), false)))
 }
 
 /// The demand's source for the stream its probe selects, or `None` when the
@@ -340,10 +340,18 @@ impl RefitTask {
 
     pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {
         if !enabled(state).await? {
-            let disk_needs_fit = state.store.dv_conversion(self.file_id).await?
-                .is_some_and(|row| matches!(row.state,
-                    plurx_core::store::DvConversionState::Queued
-                    | plurx_core::store::DvConversionState::Running));
+            let disk_needs_fit =
+                state
+                    .store
+                    .dv_conversion(self.file_id)
+                    .await?
+                    .is_some_and(|row| {
+                        matches!(
+                            row.state,
+                            plurx_core::store::DvConversionState::Queued
+                                | plurx_core::store::DvConversionState::Running
+                        )
+                    });
             if !disk_needs_fit {
                 // Existing stop/execute ownership reaps and yields with the
                 // spool intact. Re-enabling can resume the same identity.
