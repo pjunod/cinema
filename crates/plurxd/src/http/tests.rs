@@ -21926,6 +21926,70 @@ async fn an_unmounted_root_is_a_503_path_unreadable_and_an_outside_path_is_a_422
     );
 }
 
+/// Regression: a `library-targeted-v1` job holds no `source_io` custody, so a
+/// targeted probe that really reads bytes (a real, ffprobe-readable file —
+/// not a few placeholder bytes) must read them directly. Routed through the
+/// byte service it waits for a grant nothing can give, and the request never
+/// leaves `202`.
+#[tokio::test]
+async fn a_targeted_scan_of_a_readable_media_file_answers_200_placed_within_wait_ms() {
+    plurx_core::testfixtures::require_ffmpeg();
+    let (app, state) = test_app_with_state();
+    let _worker = scan_worker(&state);
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let root = dir.path().canonicalize().expect("canonical");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    v2_library(&app, &admin, &root).await;
+    scan_and_settle(&app, &key, json!({ "path": root })).await;
+
+    // A new, genuinely probeable file lands after the initial scan.
+    let folder = root.join("Dune (2021)");
+    std::fs::create_dir_all(&folder).expect("mkdir");
+    let file = folder.join("Dune (2021).mkv");
+    plurx_core::testfixtures::run(
+        std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=64x64:rate=5:duration=1")
+            .args(["-c:v", "mpeg4", "-f", "matroska"])
+            .arg(&file),
+    );
+    let meta = std::fs::metadata(&file).expect("stat");
+    let mtime_ns = i64::try_from(
+        meta.modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_nanos(),
+    )
+    .expect("fits");
+
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({
+                "path": folder,
+                "request_key": "op/60/d0/1",
+                "wait_ms": 20_000,
+                "expected_files": [{ "path": file, "bytes": meta.len(), "mtime_ns": mtime_ns }],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the probe read the file inside wait_ms: {body}"
+    );
+    let files = body["files"].as_array().expect("per-file report");
+    assert_eq!(files.len(), 1, "{body}");
+    assert_eq!(files[0]["state"], "placed", "{body}");
+    assert_eq!(files[0]["path"], file.display().to_string());
+}
+
 /// Contract v2 §4.2/§5.1: with `wait_ms` the answer is a `200` carrying the
 /// per-file report when the worker finishes in time. The expected file is a
 /// same-path replacement with equal size and the same whole-second mtime —
@@ -22257,6 +22321,410 @@ async fn probe_paths_report_visible_missing_and_outside_without_scanning() {
     let (status, body) = call(&app, post("/api/v1/scan", Some(&key), json!({}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "path_required");
+}
+
+// ---- contract amendment `removed_paths`: forgetting files that left a folder ----
+
+/// A movies library under `root`, indexed by a full scan so its root
+/// identity is recorded (removal is checked against it, as reconcile is),
+/// with the worker idle afterwards.
+async fn indexed_movies(app: &Router, state: &AppState, admin: &str, root: &std::path::Path) {
+    use plurx_core::store::background_jobs_library::LibraryWorkQuery;
+    v2_library(app, admin, root).await;
+    let library = state
+        .store
+        .list_libraries()
+        .await
+        .expect("libraries")
+        .into_iter()
+        .find(|library| library.paths.iter().any(|path| path == root))
+        .expect("library");
+    let mut drained = false;
+    for _ in 0..600 {
+        let pending = state
+            .store
+            .library_work_requests(LibraryWorkQuery {
+                pending_only: true,
+                limit: 16,
+                ..Default::default()
+            })
+            .await
+            .expect("pending");
+        if pending.is_empty() {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(drained, "the library's own scan never finished");
+    let report = plurx_core::scan::scan_library(state.store.as_ref(), &library)
+        .await
+        .expect("full scan");
+    // The fixtures are one-byte placeholders, so a host with a real ffprobe
+    // reports each as degraded (catalogued, no media details). That is the
+    // only error this scan may have: nothing unreadable, nothing else wrong.
+    assert_eq!(report.unreadable, 0, "{report:?}");
+    assert_eq!(report.errors, report.degraded, "{report:?}");
+}
+
+/// Full-scan requests admitted at or after `since_ms`.
+async fn full_scan_requests(state: &AppState, since_ms: i64) -> usize {
+    use plurx_core::store::background_jobs_library::{LibraryWorkInput, LibraryWorkQuery};
+    state
+        .store
+        .library_work_requests(LibraryWorkQuery {
+            limit: 256,
+            ..Default::default()
+        })
+        .await
+        .expect("requests")
+        .into_iter()
+        .filter(|request| {
+            request.created_at_ms >= since_ms
+                && matches!(request.input, LibraryWorkInput::Full { .. })
+        })
+        .count()
+}
+
+fn media(dir: &std::path::Path, folder: &str, file: &str) -> std::path::PathBuf {
+    let folder = dir.join(folder);
+    std::fs::create_dir_all(&folder).expect("mkdir");
+    let file = folder.join(file);
+    std::fs::write(&file, b"x").expect("write");
+    file
+}
+
+/// Contract amendment `removed_paths` §4.2: a moved movie's old file is
+/// `gone` with the item that held it — removed, because that was its last
+/// file — an emptied-and-removed folder is `gone` for what it held, a path
+/// plurx never had is `unknown`, and one still on disk is `present` and
+/// kept. The request is probe-only: with the library root as its common
+/// parent, a new unrelated folder under it is not indexed (nothing walked
+/// the root), and no full scan is admitted. The stored record carries the
+/// same report.
+#[tokio::test]
+async fn removed_paths_report_gone_unknown_and_present_and_delete_an_item_left_without_files() {
+    let (app, state) = test_app_with_state();
+    let _worker = scan_worker(&state);
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let root = dir.path().canonicalize().expect("canonical").join("movies");
+    let old_dune = media(&root, "Dune (1984)", "Dune.1984.mkv");
+    let heat = media(&root, "Heat (1995)", "Heat.1995.mkv");
+    let ran = media(&root, "Ran (1985)", "Ran.1985.mkv");
+    indexed_movies(&app, &state, &admin, &root).await;
+    let file_item = |path: std::path::PathBuf| {
+        let store = state.store.clone();
+        async move {
+            store
+                .get_file_by_path(&path.to_string_lossy())
+                .await
+                .expect("file lookup")
+                .map(|file| file.item_id)
+        }
+    };
+    let dune_item = file_item(old_dune.clone()).await.expect("old Dune indexed");
+    let ran_item = file_item(ran.clone()).await.expect("Ran indexed");
+    let heat_item = file_item(heat.clone()).await.expect("Heat indexed");
+    let since_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("fits");
+
+    // The Re-match: Dune moves to a new folder, Ran's folder goes entirely,
+    // and an unrelated folder appears that only a walk would find.
+    let new_dune = root.join("Dune (2021)").join("Dune.2021.mkv");
+    std::fs::create_dir_all(new_dune.parent().expect("parent")).expect("mkdir");
+    std::fs::rename(&old_dune, &new_dune).expect("move");
+    std::fs::remove_dir(old_dune.parent().expect("parent")).expect("rmdir");
+    std::fs::remove_dir_all(ran.parent().expect("parent")).expect("rm Ran");
+    let brazil = media(&root, "Brazil (1985)", "Brazil.1985.mkv");
+    let never = root.join("Never (2000)").join("Never.2000.mkv");
+    let meta = std::fs::metadata(&new_dune).expect("stat");
+    let mtime_ns = i64::try_from(
+        meta.modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_nanos(),
+    )
+    .expect("fits");
+
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({
+                "path": root,
+                "request_key": "op/41/d0/1",
+                "wait_ms": 15_000,
+                "expected_files": [{ "path": new_dune, "bytes": 1, "mtime_ns": mtime_ns }],
+                "removed_paths": [old_dune, ran.parent().expect("folder"), never, heat],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "scanned", "{body}");
+    let files = body["files"].as_array().expect("files").clone();
+    assert_eq!(files.len(), 5, "{body}");
+    assert_eq!(files[0]["state"], "placed", "{body}");
+    assert_eq!(files[0]["path"], new_dune.display().to_string());
+    assert_eq!(
+        files[1],
+        json!({"state": "gone", "path": old_dune, "item_id": dune_item, "item_ids": [dune_item],
+            "item_removed": true}),
+        "{body}"
+    );
+    assert_eq!(
+        files[2],
+        json!({"state": "gone", "path": ran.parent().expect("folder"), "item_id": ran_item,
+            "item_ids": [ran_item], "item_removed": true}),
+        "a removed folder takes what was catalogued below it: {body}"
+    );
+    assert_eq!(
+        files[3],
+        json!({"state": "unknown", "path": never}),
+        "{body}"
+    );
+    assert_eq!(
+        files[4],
+        json!({"state": "present", "path": heat, "reason": "exists"}),
+        "{body}"
+    );
+    assert_eq!(body["report"]["removed_files"], 2, "{body}");
+
+    assert!(state
+        .store
+        .get_item(dune_item)
+        .await
+        .expect("item")
+        .is_none());
+    assert!(state
+        .store
+        .get_item(ran_item)
+        .await
+        .expect("item")
+        .is_none());
+    assert!(
+        state
+            .store
+            .get_item(heat_item)
+            .await
+            .expect("item")
+            .is_some(),
+        "a present removed path removes nothing"
+    );
+    assert!(
+        file_item(new_dune.clone()).await.is_some(),
+        "the new copy is indexed"
+    );
+    assert!(
+        file_item(brazil).await.is_none(),
+        "probe-only: the common parent was not walked"
+    );
+    assert_eq!(
+        full_scan_requests(&state, since_ms).await,
+        0,
+        "a removal never becomes a full scan"
+    );
+
+    let id = body["request_id"].as_str().expect("request id");
+    let (status, record) = call(
+        &app,
+        get(&format!("/api/v1/scan/requests/{id}"), Some(&key)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    assert_eq!(
+        record["files"],
+        json!(files),
+        "the stored record carries the report"
+    );
+}
+
+/// Contract amendment `removed_paths`: a removed path whose folder no longer
+/// exists — even when that folder is the request's own `path` — is the
+/// expected case and reported `gone`, never `503 path_unreadable`. An empty
+/// mount point, which is how an unmounted share looks, is `path_unreadable`
+/// and removes nothing. A removed path outside `path` is refused, and the
+/// connection test advertises the feature.
+#[tokio::test]
+async fn a_removed_path_whose_folder_is_gone_is_not_path_unreadable_and_an_unmounted_root_removes_nothing(
+) {
+    let (app, state) = test_app_with_state();
+    let _worker = scan_worker(&state);
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let root = dir.path().canonicalize().expect("canonical").join("movies");
+    let dune = media(&root, "Dune (1984)", "Dune.1984.mkv");
+    let heat = media(&root, "Heat (1995)", "Heat.1995.mkv");
+    indexed_movies(&app, &state, &admin, &root).await;
+    let heat_item = state
+        .store
+        .get_file_by_path(&heat.to_string_lossy())
+        .await
+        .expect("lookup")
+        .expect("Heat indexed")
+        .item_id;
+
+    let (status, body) = call(
+        &app,
+        post("/api/v1/scan", Some(&key), json!({ "probe_paths": [root] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["features"],
+        json!(["removed_paths", "probe_only"]),
+        "{body}"
+    );
+
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "path": root.join("Dune (1984)"), "removed_paths": [heat] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "outside `path`: {body}");
+
+    let folder = dune.parent().expect("folder").to_path_buf();
+    std::fs::remove_dir_all(&folder).expect("rm Dune");
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "path": folder, "wait_ms": 15_000, "removed_paths": [dune] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "not path_unreadable: {body}");
+    assert_eq!(body["files"][0]["state"], "gone", "{body}");
+    assert_eq!(body["files"][0]["item_removed"], true, "{body}");
+
+    // Unmount: the share is gone and an empty mount point stands in for it.
+    let away = dir.path().join("movies-unmounted");
+    std::fs::rename(&root, &away).expect("unmount");
+    std::fs::create_dir_all(&root).expect("empty mount point");
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "path": root, "wait_ms": 15_000, "removed_paths": [heat] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "path_unreadable", "{body}");
+    assert!(
+        state
+            .store
+            .get_item(heat_item)
+            .await
+            .expect("item")
+            .is_some(),
+        "an unmounted share never reads as everything gone"
+    );
+}
+
+/// The explicit `probe_only` flag: a request that sends it records exactly
+/// its expected files and walks nothing, even at a library root, while a
+/// same-path request that did not send it still gets its walk — they never
+/// share a pass, so neither flips the other's mode. Neither is a full scan.
+#[tokio::test]
+async fn probe_only_requests_never_walk_and_never_share_a_pass_with_a_walking_request() {
+    let (app, state) = test_app_with_state();
+    let _worker = scan_worker(&state);
+    let admin = setup_admin(&app).await;
+    let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+    let dir = crate::test_tempdir().expect("tmp");
+    let root = dir.path().canonicalize().expect("canonical").join("movies");
+    media(&root, "Heat (1995)", "Heat.1995.mkv");
+    indexed_movies(&app, &state, &admin, &root).await;
+    let since_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("fits");
+    let dune = media(&root, "Dune (2021)", "Dune.2021.mkv");
+    let brazil = media(&root, "Brazil (1985)", "Brazil.1985.mkv");
+    let mtime_ns = i64::try_from(
+        std::fs::metadata(&dune)
+            .expect("stat")
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_nanos(),
+    )
+    .expect("fits");
+    let probe = post(
+        "/api/v1/scan",
+        Some(&key),
+        json!({
+            "path": root, "wait_ms": 15_000, "probe_only": true,
+            "request_key": "op/52/a/1",
+            "expected_files": [{ "path": dune, "bytes": 1, "mtime_ns": mtime_ns }],
+        }),
+    );
+    let walk = post(
+        "/api/v1/scan",
+        Some(&key),
+        json!({ "path": root, "wait_ms": 15_000, "request_key": "op/52/b/1" }),
+    );
+    let ((probe_status, probe_body), (walk_status, walk_body)) =
+        tokio::join!(call(&app, probe), call(&app, walk));
+    assert_eq!(probe_status, StatusCode::OK, "{probe_body}");
+    assert_eq!(walk_status, StatusCode::OK, "{walk_body}");
+    assert_eq!(probe_body["files"][0]["state"], "placed", "{probe_body}");
+    // The walking request found Brazil; the probe-only one did not need to,
+    // and its own pass never looked.
+    assert!(
+        state
+            .store
+            .get_file_by_path(&brazil.to_string_lossy())
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the request that sent no `probe_only` walked the root"
+    );
+    assert_eq!(full_scan_requests(&state, since_ms).await, 0);
+
+    // Alone, the probe-only request leaves an unseen sibling alone.
+    let ran = media(&root, "Ran (1985)", "Ran.1985.mkv");
+    let (status, body) = call(
+        &app,
+        post(
+            "/api/v1/scan",
+            Some(&key),
+            json!({ "path": root, "wait_ms": 15_000, "probe_only": true,
+                "request_key": "op/52/c/1" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        state
+            .store
+            .get_file_by_path(&ran.to_string_lossy())
+            .await
+            .expect("lookup")
+            .is_none(),
+        "probe-only at a library root indexes no sibling"
+    );
 }
 
 /// Contract v2 §5.2: a library created now reconciles every six hours unless
