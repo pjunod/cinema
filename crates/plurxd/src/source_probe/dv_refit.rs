@@ -38,7 +38,7 @@ const MAX_STDERR_BYTES: usize = 16 * 1024;
 /// allocation, a decoder error, bad arguments) exits 1.
 pub(super) const EXIT_CONTENT_REFUSAL: i32 = 3;
 /// Frame threads per layer the helper decodes with (`--threads`). Measured
-/// over the 311-frame Michael5400 window on nuc3 with other work running:
+/// over the 311-frame Michael5400 window on lab3 with other work running:
 /// 1 thread 39 s at 1.0 core, 2 threads 21.9 s at 2.2 cores, 3 threads 16 s
 /// at 3.2 cores, 4 threads 16.5 s at 3.1 cores (composition on the main
 /// thread bounds it). Two buys most of the speed for the least CPU.

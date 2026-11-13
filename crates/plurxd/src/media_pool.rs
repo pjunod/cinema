@@ -34,7 +34,7 @@ pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
 /// workers, so a one-node-at-a-time rollout places locally across the version
 /// line instead of failing mid-start. Old ingress and sessions must be drained
 /// on rollout.
-pub(crate) const PROTOCOL_VERSION: i64 = 9;
+pub(crate) const PROTOCOL_VERSION: i64 = 10;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);

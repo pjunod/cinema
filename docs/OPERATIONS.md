@@ -3370,6 +3370,10 @@ Protocol changes, newest first. `tests/operations/test_media_pool_wire.py`
 (run by `make paperwork`) refuses a change to a strict media-pool envelope
 without a `PROTOCOL_VERSION` bump and a dated line here naming it:
 
+- 2026-11-13: protocol 10 — a server-selected F+ curve digest on the strict
+  `SessionRequest` media-worker envelope. Roll out as separate placement
+  cohorts using the procedure above; clients send no new platform signal.
+
 - 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
   `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
 

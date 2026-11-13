@@ -1,7 +1,7 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** milestones 1–2 merged; 3–6 built in the PR #1565 candidate,
-awaiting final review and qualification; 7 remains a follow-up after served
+**Status:** open — milestones 1–2 merged; 3–6 implemented in PR #1565,
+final review repaired, qualification pending; 7 remains a follow-up after served
 F+ scores · **Updated:** 2026-11-13 · **Written:** 2026-11-12 ·
 **Owner:** Codex (continuing Claude) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
