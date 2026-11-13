@@ -19,6 +19,7 @@ mod dolby;
 pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dv_refit;
+pub mod dv_refit_serve;
 pub mod dv_refit_title;
 pub mod dvconvert;
 mod encoder;
