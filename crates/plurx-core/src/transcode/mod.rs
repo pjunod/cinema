@@ -19,6 +19,7 @@ mod dolby;
 pub mod dv_fel_qualification;
 pub mod dv_processing;
 pub mod dv_refit;
+pub mod dv_refit_serve;
 pub mod dv_refit_title;
 pub mod dvconvert;
 mod encoder;
@@ -464,6 +465,7 @@ pub struct CopyVideoOptions {
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
     dv_convert: bool,
+    dv_refit_digest: Option<[u8; 32]>,
     retain_hevc_parameter_sets: bool,
 }
 
@@ -474,6 +476,7 @@ impl CopyVideoOptions {
             preserve_dolby_vision,
             promote_hevc_parameter_sets: false,
             dv_convert: false,
+            dv_refit_digest: None,
             retain_hevc_parameter_sets: false,
         }
     }
@@ -528,6 +531,9 @@ impl CopyVideoOptions {
     /// filter, so the invariant lives here and not in each caller (plan §4.8).
     pub const fn with_dolby_vision_conversion(mut self, convert: bool) -> Self {
         self.dv_convert = convert;
+        if !convert {
+            self.dv_refit_digest = None;
+        }
         if convert {
             self.preserve_dolby_vision = true;
         }
@@ -537,6 +543,16 @@ impl CopyVideoOptions {
     /// Whether this copy converts Profile 7 to Profile 8.1.
     pub const fn converts_dolby_vision(self) -> bool {
         self.dv_convert
+    }
+
+    /// A fitted table is an output-affecting part of a converting copy.
+    pub const fn with_dolby_vision_refit(mut self, digest: Option<[u8; 32]>) -> Self {
+        self.dv_refit_digest = if self.dv_convert { digest } else { None };
+        self
+    }
+
+    pub const fn dolby_vision_refit(self) -> Option<[u8; 32]> {
+        self.dv_refit_digest
     }
 
     pub fn from_probe(

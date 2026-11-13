@@ -542,6 +542,7 @@ fn android_dv_delivery_native_progressive_mux_retains_record_and_rpus() {
                             plurx_core::transcode::dvconvert::convert_length_prefixed(
                                 sample,
                                 nal_length_size,
+                                None,
                                 &mut converted,
                             )
                             .expect("convert fixture RPUs to P8.1");

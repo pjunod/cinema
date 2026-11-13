@@ -1319,6 +1319,20 @@ async fn run_generation(
             None => return (None, None),
         }
     };
+    let dv_refit = match rendition.recipe.video.dolby_vision_refit() {
+        Some(digest) => match crate::dv_refit_serving::pinned_table(
+            shared.store.as_ref(), &rendition.recipe.file, digest,
+        ).await {
+            Ok(Some(table)) => Some(table),
+            Ok(None) => return (Some(Outcome::Failed(Failure::Stream(
+                "the rendition's pinned F+ curve table is no longer kept; it needs a new generation identity".into()
+            ))), None),
+            Err(error) => return (Some(Outcome::Failed(Failure::Stream(
+                format!("reading the rendition's F+ curve table: {error}")
+            ))), None),
+        },
+        None => None,
+    };
     let generation = Generation {
         plan: rendition.plan.clone(),
         index: rendition.index.clone(),
@@ -1369,6 +1383,7 @@ async fn run_generation(
         // generation is matched against was built with — they share one
         // `CopyVideoOptions`, so they cannot disagree.
         convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
+        dv_refit,
         retain_hevc_parameter_sets: rendition.recipe.video.retains_hevc_parameter_sets(),
     };
     let sink = RenditionSink {

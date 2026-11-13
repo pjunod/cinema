@@ -1467,6 +1467,40 @@ pub fn rewrite_video_samples<F>(
 where
     F: FnMut(&[u8]) -> Result<Vec<u8>, Fmp4Error>,
 {
+    rewrite_timed_video_samples(fragment, tracks, video_track, |sample, _| rewrite(sample))
+}
+
+/// When one video sample presents, in its track's timescale: the fragment's
+/// `tfdt`, plus the durations of the samples before it in the fragment's
+/// runs, plus its own composition offset. Nothing else contributes, so a
+/// caller that knows where the track's timeline sits in the source can place
+/// the sample exactly, whatever window or seek the fragment came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleTime {
+    /// Decode time: `tfdt` plus the preceding samples' durations.
+    pub decode: u64,
+    /// Composition offset (pts − dts), as the `trun` carries it.
+    pub cto: i64,
+}
+
+impl SampleTime {
+    /// Presentation time, `decode + cto`, in track ticks.
+    pub fn presentation(self) -> i128 {
+        i128::from(self.decode) + i128::from(self.cto)
+    }
+}
+
+/// [`rewrite_video_samples`], handing `rewrite` each sample's [`SampleTime`]
+/// beside its bytes. Same contract: every size fixed, all or nothing.
+pub fn rewrite_timed_video_samples<F>(
+    fragment: &mut Fragment,
+    tracks: &[Track],
+    video_track: u32,
+    mut rewrite: F,
+) -> Result<bool, Fmp4Error>
+where
+    F: FnMut(&[u8], SampleTime) -> Result<Vec<u8>, Fmp4Error>,
+{
     let has_default_sizes = fragment
         .track(video_track)
         .is_some_and(|track| track.samples().any(|sample| sample.size_at.is_none()));
@@ -1494,7 +1528,7 @@ fn rewrite_video_samples_explicit<F>(
     rewrite: &mut F,
 ) -> Result<bool, Fmp4Error>
 where
-    F: FnMut(&[u8]) -> Result<Vec<u8>, Fmp4Error>,
+    F: FnMut(&[u8], SampleTime) -> Result<Vec<u8>, Fmp4Error>,
 {
     // Collect the edits before applying any, so a refusal partway through
     // leaves the fragment exactly as it was. A half-rewritten fragment is a
@@ -1510,9 +1544,19 @@ where
         if track.track_id != video_track {
             continue;
         }
+        let mut decode = track.base_decode_time;
         for run in &track.runs {
             let mut at = run.data_offset;
             for sample in &run.samples {
+                let time = SampleTime {
+                    decode,
+                    cto: sample.cto,
+                };
+                decode = decode
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or_else(|| {
+                        Fmp4Error::Unsupported("a video sample's decode time overflows".into())
+                    })?;
                 let size = sample.size as usize;
                 let end = at
                     .checked_add(size)
@@ -1527,7 +1571,7 @@ where
                         "a video sample size was not materialized before rewrite".into(),
                     ));
                 };
-                let replacement = rewrite(&fragment.bytes[at..end])?;
+                let replacement = rewrite(&fragment.bytes[at..end], time)?;
                 // Recorded whenever the bytes differ at all, not only when the
                 // length does: a same-length rewrite still has to be written,
                 // and answering "nothing changed" for one would leave the

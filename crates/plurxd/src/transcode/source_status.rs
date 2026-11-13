@@ -437,6 +437,7 @@ impl SourceGrowingBacking {
         });
         let complete = files.complete();
         Ok(crate::vodserve::VodSessionInfo {
+            dv_refit_digest: None,
             stream_format: None,
             active_encode_milli_realtime: None,
             active_encode_age_ms: None,

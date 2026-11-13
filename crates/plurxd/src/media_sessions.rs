@@ -1734,6 +1734,10 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 
 fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
     request.dv_processing_route().is_ok() && request
+        .dv_refit_digest.as_deref().is_none_or(|digest|
+            matches!(request.kind, SessionKind::Copy { convert_dolby_vision: true, .. })
+                && crate::dv_refit_serving::digest_bytes(digest).is_some())
+        && request
         .continuous_media
         .as_ref()
         .is_none_or(|media| media.valid_for(request))
@@ -7091,6 +7095,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         request: SessionRequest {
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,

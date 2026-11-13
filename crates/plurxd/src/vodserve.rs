@@ -531,6 +531,8 @@ impl<T> VodPublication<T> {
 /// numbers would make the player diagnose the wrong system.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VodSessionInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_digest: Option<String>,
     /// Optional facts from this attached rendition's immutable recipe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_format: Option<StreamFormat>,
@@ -738,6 +740,7 @@ impl VodActivityObservation {
 /// lock for every open activity page.
 #[derive(Debug, Clone)]
 pub struct VodDeliveryInfo {
+    pub dv_refit_digest: Option<String>,
     pub observation: Option<VodActivityObservation>,
     pub id: String,
     pub method: crate::delivery::Method,
@@ -766,6 +769,7 @@ pub struct VodDeliveryInfo {
 pub struct VodStart {
     pub session_id: String,
     pub duration_ms: i64,
+    pub dv_refit_digest: Option<String>,
 }
 
 /// Actual init-verified media and exact catalog provenance for one parent.

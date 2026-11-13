@@ -29,6 +29,7 @@ bump may break compatibility and a **patch** bump never does.
   `--resume FIRST FIRST_PTS`, reports each scene's RPU scene lengths, exits 3
   for a refusal of the title's content (1 for any other failure), and logs
   nothing from libav.
+- The Profile 7 → 8.1 copy converter can write F+ curves into each converted RPU, choosing the scene from the sample’s presentation time (FEL-RPU-REFIT-BUILD.md milestone 4, part 1). No session uses it yet.
 
 ### Fixed
 

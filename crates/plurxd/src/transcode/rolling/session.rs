@@ -2910,6 +2910,7 @@ pub(super) async fn session_info(
     };
     SessionInfo {
         vod_observation: None,
+        dv_refit_digest: None,
         id: id.to_owned(),
         presentation: "live-recovery",
         file_id: s.file_id,
@@ -3042,6 +3043,7 @@ pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) 
     let observation = info.observation.as_ref();
     SessionInfo {
         vod_observation: info.observation.clone(),
+        dv_refit_digest: info.dv_refit_digest,
         id: info.id,
         presentation: "vod",
         file_id: info.file_id,
