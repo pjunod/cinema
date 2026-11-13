@@ -709,9 +709,9 @@ fn clock_fixture() -> (Init, Fragment, [u8; 32]) {
     track.runs[0].samples[0].cto = 83;
     let run = &track.runs[0];
     let sample = &run.samples[0];
-    let hash =
-        Sha256::digest(&fragment.bytes[run.data_offset..run.data_offset + sample.size as usize])
-            .into();
+    let hash = cbs_annex_b_sample_hash(
+        &fragment.bytes[run.data_offset..run.data_offset + sample.size as usize],
+        init.video().expect("video").nal_length_size).expect("canonical first packet");
     (init, fragment, hash)
 }
 
@@ -869,4 +869,47 @@ async fn missing_dts_probe_matches_each_outputs_parameter_set_retention() {
         wrong.resolve(&cases[1].1, &cases[1].2).is_err(),
         "stripped packet cannot qualify retained headers"
     );
+}
+
+
+fn framed_nals(width: u8, nals: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for nal in nals {
+        let length = u32::try_from(nal.len()).expect("small test NAL").to_be_bytes();
+        out.extend_from_slice(&length[4 - usize::from(width)..]);
+        out.extend_from_slice(nal);
+    }
+    out
+}
+
+#[test]
+fn cbs_packet_identity_restores_only_verified_delimiters() {
+    let aud: &[u8] = &[0x46, 1, 0x10];
+    let vps: &[u8] = &[0x40, 1, 0x80];
+    let slice: &[u8] = &[0x28, 1, 0, 0, 3, 1, 0x80];
+    let rpu: &[u8] = &[0x7c, 1, 0x80];
+    let nals = [aud, vps, slice, rpu];
+    let mut expected = Vec::new();
+    for (prefix, nal) in [(&[0, 0, 0, 1][..], aud), (&[0, 0, 0, 1][..], vps),
+        (&[0, 0, 1][..], slice), (&[0, 0, 1][..], rpu)] {
+        expected.extend_from_slice(prefix); expected.extend_from_slice(nal);
+    }
+    let expected: [u8; 32] = Sha256::digest(expected).into();
+    for width in [1, 2, 4] {
+        assert_eq!(cbs_annex_b_sample_hash(&framed_nals(width, &nals), width).expect("strict framing"), expected);
+    }
+    let changed_rpu: &[u8] = &[0x7c, 1, 0x81];
+    for different in [[aud, vps, slice, changed_rpu], [aud, vps, rpu, slice]] {
+        assert_ne!(cbs_annex_b_sample_hash(&framed_nals(4, &different), 4).expect("different valid packet"), expected);
+    }
+    assert_ne!(cbs_annex_b_sample_hash(&framed_nals(4, &[aud, slice, rpu]), 4).expect("stripped policy"), expected);
+}
+
+#[test]
+fn cbs_packet_identity_rejects_ambiguous_or_incomplete_framing() {
+    for width in [0, 3, 5] { assert!(cbs_annex_b_sample_hash(&[0; 8], width).is_err()); }
+    for malformed in [vec![], vec![0, 0, 0], vec![0, 0, 0, 0], vec![0, 0, 0, 5, 0x46, 1],
+        vec![0, 0, 0, 1, 0x46], framed_nals(4, &[&[0x28, 1, 0, 0, 1, 0x80]])] {
+        assert!(cbs_annex_b_sample_hash(&malformed, 4).is_err());
+    }
 }

@@ -814,6 +814,46 @@ struct RefitPacketOrigin {
     first_sample_sha256: Option<[u8; 32]>,
 }
 
+/// Restore only the Annex-B delimiters emitted by FFmpeg's filter_units CBS
+/// writer. The packet probe hashes that representation, while the MP4 muxer
+/// replaces delimiters with hvcC length prefixes. Preserve every EBSP byte
+/// and NAL order; never unescape or re-encode an already-written NAL.
+/// FFmpeg n8.0.1 libavcodec/cbs_h2645.c, unit_requires_zero_byte and
+/// assemble_fragment (1686–1756); also unchanged in n7.1.1 and n5.1.6.
+fn cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u8; 32], String> {
+    let width = usize::from(length_size);
+    if !matches!(width, 1 | 2 | 4) || sample.is_empty() {
+        return Err("F+ packet identity has invalid HEVC sample framing".into());
+    }
+    // Match the checked prefix/extent walk in fmp4's private
+    // visit_length_prefixed_hevc_nals, additionally requiring a full header.
+    let mut pos = 0usize;
+    let mut count = 0usize;
+    let mut hash = Sha256::new();
+    while pos < sample.len() {
+        let prefix_end = pos.checked_add(width).filter(|end| *end <= sample.len())
+            .ok_or("F+ packet identity has a truncated NAL prefix")?;
+        let mut length = 0usize;
+        for byte in &sample[pos..prefix_end] {
+            length = length.checked_mul(256).and_then(|n| n.checked_add(usize::from(*byte)))
+                .ok_or("F+ packet identity NAL length overflows")?;
+        }
+        let end = prefix_end.checked_add(length).filter(|end| *end <= sample.len())
+            .ok_or("F+ packet identity NAL runs past its sample")?;
+        let nal = &sample[prefix_end..end];
+        if nal.len() < 2 || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) {
+            return Err("F+ packet identity has a truncated header or an unescaped Annex-B delimiter".into());
+        }
+        let kind = (nal[0] >> 1) & 63;
+        if count == 0 || matches!(kind, 32..=34) { hash.update([0]); }
+        hash.update([0, 0, 1]);
+        hash.update(nal);
+        count += 1;
+        pos = end;
+    }
+    Ok(hash.finalize().into())
+}
+
 impl RefitPacketOrigin {
     fn resolve(
         self,
@@ -841,7 +881,7 @@ impl RefitPacketOrigin {
                 .bytes
                 .get(run.data_offset..end)
                 .ok_or("F+ first sample extent is invalid")?;
-            let actual: [u8; 32] = Sha256::digest(bytes).into();
+            let actual = cbs_annex_b_sample_hash(bytes, video.nal_length_size)?;
             if actual != expected {
                 return Err(
                     "F+ first emitted sample differs from the independently probed source packet"
