@@ -1843,25 +1843,28 @@ impl FencedPublicationStore for HiqliteAuthStore {
             ),
             (
                 // Same transaction as the delete above and the prune below.
+                // hiqlite wants placeholders to first appear in order, so the
+                // mark ($1) and the keep list ($2, in the shared predicate)
+                // come before the library.
                 format!(
-                    "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $8)
-                     WHERE library_id = $1
-                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $1)
-                       AND {}
-                       AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $3
-                         AND owner_node_id = $4 AND fence = $5 AND revision = $6
-                         AND expires_at_ms = $7)",
+                    "UPDATE items SET offloaded_at = COALESCE(offloaded_at, $1)
+                     WHERE {}
+                       AND library_id = $3
+                       AND EXISTS (SELECT 1 FROM scan_reconcile_guards WHERE library_id = $3)
+                       AND EXISTS (SELECT 1 FROM job_leases WHERE resource = $4
+                         AND owner_node_id = $5 AND fence = $6 AND revision = $7
+                         AND expires_at_ms = $8)",
                     crate::store::offload::MARK_KEPT_PREDICATE
                 ),
                 params!(
-                    library_id,
+                    offloaded_at,
                     keep_json.as_str(),
+                    library_id,
                     lease.resource.as_str(),
                     lease.owner_node_id.as_str(),
                     lease_i64("fence", lease.fence)?,
                     lease_i64("revision", lease.revision)?,
-                    lease.expires_at_unix_ms,
-                    offloaded_at
+                    lease.expires_at_unix_ms
                 ),
             ),
             (
