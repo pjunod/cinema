@@ -4798,7 +4798,7 @@ impl JobManager {
             TitleConstant::Consistent(TitleElKind::Mel) => Ok(None),
             TitleConstant::Consistent(TitleElKind::Fel) => {
                 if self.store.dv_refit_curves(file_id).await?.is_some() {
-                    Ok(None)
+                    Ok(Some("Waiting for conversion slot and current F+ fit verification"))
                 } else {
                     Ok(Some(
                         "Waiting for F+ fit or recorded content refusal before EL discard",
@@ -4860,16 +4860,12 @@ impl JobManager {
             .and_then(serde_json::Value::as_u64)
             .and_then(|index| i64::try_from(index).ok())
             .ok_or("waiting for selected FEL video stream")?;
-        let tools = crate::vodencode::dv_runtime::ToolSet::capture()
-            .await
-            .map_err(|e| format!("waiting for F+ helper: {e}"))?
-            .ok_or("waiting for F+ helper installation")?;
-        let table = self
-            .store
-            .dv_refit_curves(file.id)
-            .await
+        let table = self.store.dv_refit_curves(file.id).await
             .map_err(|e| format!("reading F+ curves for disk conversion: {e}"))?
             .ok_or("waiting for a current F+ fit or recorded content refusal")?;
+        let tools = crate::vodencode::dv_runtime::ToolSet::capture().await
+            .map_err(|e| format!("waiting for F+ helper: {e}"))?
+            .ok_or("waiting for F+ helper installation")?;
         if table.superseded_at_ms.is_some()
             || table.title.source_size != file.size
             || table.title.source_mtime != file.mtime
