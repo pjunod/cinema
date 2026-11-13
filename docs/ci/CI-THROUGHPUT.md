@@ -113,3 +113,14 @@ Pinned image, cgroup-sized parallelism and a single type-check; it stays on
 the nonvoter compile pool because the idle high-CPU runners do not apply the
 job's CPU, PID and swap limits. Details and timings:
 [RUST-GATE-IMAGE.md](RUST-GATE-IMAGE.md).
+
+## Native build-counter boundary
+
+The Apple project’s generated numeric `CURRENT_PROJECT_VERSION` may advance
+without changing its reviewed input closure. The boundary validates the exact
+reviewed project shape with only that positive integer normalized. Full source
+fingerprints and case-input comparisons still include the actual Git blob;
+no pass transfers between different build numbers. Added resources, scripts,
+paths or other project edits still require a new independent boundary review.
+This avoids stale-pin failures after ordinary mobile counter bumps without
+weakening receipt provenance.
