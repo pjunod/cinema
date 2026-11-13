@@ -291,8 +291,8 @@ Offline, the worst departures were 33 (luma) and 80 (chroma) codes. The
 limits are 8× and 6× that: wide enough not to bite on real content, tight
 enough to stop a pathological scene.
 
-The job also records each scene's code-domain gain (mean |composed − served|
-for identity against F+, on its own lattice), and the title total is shown
+The job also records each scene's held-out squared code-error reduction
+for F+ relative to identity on its lattice, and the title total is shown
 in the UI. A title whose total gain is below 5% keeps identity curves
 everywhere, because a negligible gain is not worth new bytes in every cache.
 

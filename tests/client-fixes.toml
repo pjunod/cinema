@@ -1,6 +1,41 @@
 version = 1
 enforce_after = "e8a910f"
 
+
+# F+ client contracts. Execution receipts remain separate from these anchors.
+[[fixes]]
+id = "dv-refit.apple-error-metric-explanation"
+commits = ["6360b17c6eadee4ad3a8b8118804fec073762436"]
+source = "clients/apple/Sources/PlaybackInfoPanel.swift"
+source_anchor = 'case "dv_refit": return "Held-out squared code error removed'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDistinct()"
+
+[[fixes]]
+id = "dv-refit.web-generation-report"
+commits = ["884cee3152a19d19162ecbb8d7e45a678a0154d9"]
+source = "crates/plurxd/src/web/player/stats.js"
+source_anchor = "function statsRefitCurves(player)"
+test = "tests/playback/web-policy.test.js"
+test_anchor = "F+ playback info follows the attached generation and preserves identity reasons"
+
+[[fixes]]
+id = "dv-refit.apple-generation-report"
+commits = []
+supplements = "dv-refit.web-generation-report"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "struct DolbyVisionRefitPlaybackReport: Codable"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDistinct()"
+
+[[fixes]]
+id = "dv-refit.web-advisory-platform-choices"
+commits = ["b1b8f83955256ece94461df2bf847a2dbe136dba"]
+source = "crates/plurxd/src/web/pages/settings-developer.js"
+source_anchor = "function dolbyVisionRefitCard(settings,readiness)"
+test = "tests/web/settings-sections.test.js"
+test_anchor = "F+ curve switches are four independent, advisory, default-off choices"
+
 # PR #1378: native media-wait retirement matches the existing shared fixture.
 [[fixes]]
 id = "apple.media-wait-intent-retirement-parity"

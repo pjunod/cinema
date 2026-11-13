@@ -8897,6 +8897,8 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testRefitPlaybackReportKeepsFittedGainAndIdentityReasonDistinct() throws {
+        XCTAssertEqual(playbackInfoExplanation("dv_refit"),
+            "Held-out squared code error removed by the served mapping, relative to identity curves. A display may ignore this mapping.")
         let decoder = JSONDecoder()
         let fitted = try decoder.decode(DolbyVisionRefitPlaybackReport.self,
             from: Data(#"{"state":"fitted","gain":0.542}"#.utf8))
