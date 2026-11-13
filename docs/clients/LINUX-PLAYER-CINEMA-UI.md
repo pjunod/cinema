@@ -11,6 +11,36 @@ contract) and [the launcher README](../../clients/linux-player/README.md)
 package qualification, installation and physical acceptance. It does not
 qualify a different Dolby Vision processor or change the display stack.
 
+## Session control sequence repair (0.5.1)
+
+**Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source
+implemented and independently reviewed; final affected validation is recorded
+in the pull request.
+Deployment and physical acceptance remain owner-controlled.
+
+Seeking outside the produced range creates a new server session, whose first
+control exchange must use sequence 1. The frontend previously retained its
+run-wide sequence counter, so the replacement's controls were refused as stale
+until its lease expired. Quality replacement and retry shared the same ownership mismatch; next
+episode already constructs a fresh controller. The counter now belongs to the advertised
+session ID, generation and owner epoch. A provisional quality change retains
+the incumbent counter so rollback continues monotonically on that session.
+Server generation, client-instance and sequence fences retain their contract.
+
+Regression coverage exercises seek recreation, retry, next episode and quality
+rollback after candidate controls. A failed first heartbeat before server
+acceptance remains a separate transport/replay concern; this repair does not
+change retransmission policy.
+
+The inherited Dolby Vision report is separate: initial native mapping, then a
+reset diagnostic, followed by a seek and stale controls. The private provider
+uses that diagnostic for both missing RPU and explicit stream resets; successful
+mapping at the same target need not repeat its first-success message. It alone
+cannot establish sustained HDR10 fallback or a changed server recipe. A fresh
+owner-started run on November 13 reported active native DV beyond the inherited
+6–24 second window. Sustained playback and physical picture acceptance remain
+open; no causal claim about previous tests or calibrated panel accuracy follows.
+
 ## System renderer consolidation (0.5.0)
 
 The launcher now selects an explicit `--mpv` override, then
