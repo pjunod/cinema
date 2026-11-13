@@ -1411,6 +1411,7 @@ async fn client_event_joins_and_persists_every_live_session_measurement() {
     let info = crate::transcode::SessionInfo {
         vod_observation: None,
         dv_refit_digest: None,
+        dv_refit_identity_reason: None,
         id: "session-a".into(),
         presentation: "live-recovery",
         file_id: 42,

@@ -152,9 +152,12 @@ impl VodServe {
                     };
                     Some((
                         VodDeliveryInfo {
-                            dv_refit_digest: session.rendition.as_ref().and_then(|rendition| {
-                                rendition.recipe.video.dolby_vision_refit().map(hex::encode)
-                            }),
+                            dv_refit_digest: session.rendition.as_ref().and_then(|rendition|
+                                rendition.recipe.video.dolby_vision_refit().map(hex::encode)),
+                            dv_refit_identity_reason: session.rendition.as_ref().and_then(|rendition|
+                                (rendition.recipe.video.converts_dolby_vision()
+                                    && rendition.recipe.video.dolby_vision_refit().is_none())
+                                    .then(|| "No F+ curve table is pinned to this rendition".to_owned())),
                             observation: Some(observation),
                             id: id.clone(),
                             method: match session.kind {

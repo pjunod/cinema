@@ -533,6 +533,8 @@ impl<T> VodPublication<T> {
 pub struct VodSessionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dv_refit_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_refit_identity_reason: Option<String>,
     /// Optional facts from this attached rendition's immutable recipe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_format: Option<StreamFormat>,
@@ -741,6 +743,7 @@ impl VodActivityObservation {
 #[derive(Debug, Clone)]
 pub struct VodDeliveryInfo {
     pub dv_refit_digest: Option<String>,
+    pub dv_refit_identity_reason: Option<String>,
     pub observation: Option<VodActivityObservation>,
     pub id: String,
     pub method: crate::delivery::Method,
