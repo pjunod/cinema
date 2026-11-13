@@ -409,6 +409,7 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
         "background_job_domain_leases",
         "background_provider_budgets",
         "background_storage_domains",
+        "background_storage_domain_pending",
     ] {
         assert!(names.contains(&name));
     }
@@ -1056,6 +1057,7 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_job_domain_leases" => 72,
                 "background_library_requests" => 73,
                 "background_storage_domains" => 74,
+                "background_storage_domain_pending" => 131,
                 "background_provider_budgets" => 75,
                 "background_artwork_locations" => 77,
                 "background_transcode_artifacts" => 78,

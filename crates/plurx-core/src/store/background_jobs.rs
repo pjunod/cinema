@@ -2625,11 +2625,20 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn storage_domains(
         &self,
     ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError>;
-    async fn replace_storage_domains(
+    async fn save_storage_domains(
         &self,
         mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        saved_by: Option<i64>,
         now_ms: i64,
-    ) -> Result<bool, StoreError>;
+    ) -> Result<Option<i64>, StoreError>;
+    async fn apply_pending_storage_domains(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainApply, StoreError>;
+    async fn storage_domain_state(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainState, StoreError>;
     async fn advertise_library_turn(
         &self,
         job_id: &str,
@@ -3740,12 +3749,25 @@ LIMIT 1
     ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError> {
         super::background_jobs_resources::list(self).await
     }
-    async fn replace_storage_domains(
+    async fn save_storage_domains(
         &self,
         mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        saved_by: Option<i64>,
         now_ms: i64,
-    ) -> Result<bool, StoreError> {
-        super::background_jobs_resources::replace(self, mappings, now_ms).await
+    ) -> Result<Option<i64>, StoreError> {
+        super::storage_domain_pending_api::save(self, mappings, saved_by, now_ms).await
+    }
+    async fn apply_pending_storage_domains(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainApply, StoreError> {
+        super::storage_domain_pending_api::apply(self, now_ms).await
+    }
+    async fn storage_domain_state(
+        &self,
+        now_ms: i64,
+    ) -> Result<super::background_jobs_resources::StorageDomainState, StoreError> {
+        super::storage_domain_pending_api::state(self, now_ms).await
     }
     async fn advertise_library_turn(
         &self,
