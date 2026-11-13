@@ -46,19 +46,19 @@ pub enum StorageDomainApply {
 // jobs additionally need exact required keys to remain unchanged for renew and
 // claim acknowledgement, including SQL sent by older nodes.
 const WAITING: &str = r#"
-WITH now AS (SELECT json_extract($1, '$.now_ms') AS ms),
-live AS (SELECT h.* FROM background_storage_domain_holders h, now
-    WHERE h.expires_at_ms > now.ms OR h.custody_held = 1),
+WITH clock AS (SELECT json_extract($1, '$.now_ms') AS ms),
+live AS (SELECT h.* FROM background_storage_domain_holders h, clock
+    WHERE h.expires_at_ms > clock.ms OR h.custody_held = 1),
 readers AS (
   SELECT h.holder_kind, h.work_id, h.fence, h.node_id, h.resource_key,
     NULL AS library_id, 'old_domain_reader' AS reason,
-    CASE WHEN h.expires_at_ms <= now.ms THEN 1 ELSE 0 END AS stuck
-  FROM live h JOIN background_storage_domain_disturbed d ON d.resource_key = h.resource_key, now
+    CASE WHEN h.expires_at_ms <= clock.ms THEN 1 ELSE 0 END AS stuck
+  FROM live h JOIN background_storage_domain_disturbed d ON d.resource_key = h.resource_key, clock
   WHERE NOT EXISTS (SELECT 1 FROM live b WHERE b.holder_kind = h.holder_kind
     AND b.work_id = h.work_id AND b.fence = h.fence AND b.resource_key = 'source_io')),
 jobs AS (
   SELECT 'job', j.job_id, j.fence, j.node_id, NULL, j.library_id, 'library_job', 0
-  FROM background_storage_domain_affected_jobs j, now WHERE j.lease_expires_ms > now.ms)
+  FROM background_storage_domain_affected_jobs j, clock WHERE j.lease_expires_ms > clock.ms)
 SELECT * FROM readers UNION ALL SELECT * FROM jobs
 "#;
 
@@ -138,8 +138,8 @@ pub(super) async fn apply<T: QueueSql>(
     // tick; the replicated command below still checks the latest revision and
     // every blocker atomically when a pending revision is observed.
     let pending = store.queue_sql(
-        "SELECT 'true' AS result_json FROM background_storage_domain_pending WHERE singleton=1 AND state='pending'".into(),
-        "{}".into(), false, false,
+        "SELECT 'true' AS result_json FROM background_storage_domain_pending WHERE singleton=json_extract($1,'$.singleton') AND state='pending'".into(),
+        "{\"singleton\":1}".into(), false, false,
     ).await?;
     if pending.is_empty() {
         return Ok(StorageDomainApply::NothingPending);

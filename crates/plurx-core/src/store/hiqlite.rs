@@ -2179,6 +2179,7 @@ impl HiqliteAuthStore {
         store.install_dispatch_turns(None).await?;
         store.install_scan_request_v2_schema(None).await?;
         store.install_custody_retention_schema(None).await?;
+        store.install_offloaded_schema(None).await?;
         store.install_storage_domain_pending_schema(None).await?;
         Ok(store)
     }
@@ -2384,6 +2385,7 @@ impl HiqliteAuthStore {
                     self.install_dispatch_turns(admission).await?;
                     self.install_scan_request_v2_schema(admission).await?;
                     self.install_custody_retention_schema(admission).await?;
+                    self.install_offloaded_schema(admission).await?;
                     return self.install_storage_domain_pending_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
@@ -4831,6 +4833,50 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "custody retention schema install did not settle".into(),
+        ))
+    }
+
+    /// `items.offloaded_at` and the triggers that clear it when a file
+    /// attaches. A column cannot be `IF NOT EXISTS`, so presence is read
+    /// first; a racing node's duplicate `ADD COLUMN` fails and is settled by
+    /// reading again. Older nodes name the columns they select and never see
+    /// it.
+    async fn install_offloaded_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        async fn column_present(store: &HiqliteAuthStore) -> Result<bool, StoreError> {
+            let rows = store
+                .client()
+                // authority: the committed shape decides whether the column is added.
+                .query_consistent_map::<CountRow, _>(
+                    "offloaded_column_present",
+                    super::offload::COLUMN_PRESENT_SQL,
+                    params!(),
+                )
+                .await?;
+            Ok(rows.first().is_some_and(|row| row.count == 1))
+        }
+        admit_schema_migration(admission)?;
+        let mut statements: Vec<(&'static str, hiqlite::Params)> = Vec::new();
+        if !column_present(self).await? {
+            statements.push((super::offload::COLUMN_SQL, params!()));
+        }
+        statements.extend(super::offload::TRIGGER_SQL.map(|sql| (sql, params!())));
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if column_present(self).await? {
+            // The triggers are idempotent; run them again if the transaction
+            // that lost a race for the column did not carry them.
+            if result.is_err() {
+                let triggers = super::offload::TRIGGER_SQL.map(|sql| (sql, params!()));
+                self.schema_migration_transaction(triggers).await?;
+            }
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "offloaded schema install did not settle".into(),
         ))
     }
 

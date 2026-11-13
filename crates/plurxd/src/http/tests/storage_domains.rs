@@ -77,7 +77,7 @@ async fn storage_domains_save_reports_pending_readers_and_rejects_stale_roots_as
         .register_foreground_source(
             ForegroundSourceOwner { file_id, ..owner },
             now,
-            now + 60_000,
+            now + 20_000,
         )
         .await
         .expect("registration")

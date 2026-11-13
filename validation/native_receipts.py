@@ -78,13 +78,20 @@ BUILD_SPECS = {
     # `apple-tv-navigation-test`, the desktop recipes, their flags and external
     # inputs are unchanged. Pin these exact bytes; no old-to-new receipt
     # adoption is authorized.
-    'Makefile': '2bc2f5446114f87797e09a87c0555099a8b0355779f4477ce8405a22666c2a82',
-    # Reviewed 0.8.0 build 298: only CURRENT_PROJECT_VERSION differs from the
-    # reviewed build 297 bytes. 297 was set inside a merge commit (8164f7380),
-    # which the release guard does not read as a build-number update. Pin this
-    # exact spec; build-297 case receipts do not transfer, and added resources
-    # or scripts still change its digest.
-    'clients/apple/project.yml': 'a17751186292399825cf45355c88ea9f66618553afed3869b0233f2266570a65',
+    # Reviewed offload: one added `node --test tests/web/offload.test.js` line in
+    # `web-unit-check`. The Apple and desktop recipes, their flags and external
+    # inputs are exactly the bytes reviewed above.
+    # #1550 adds only fast-rust-gate/paperwork-fix; combined with offload's
+    # web test registration, the Apple/desktop recipes remain unchanged.
+    'Makefile': '56789128874521eed5ac91a7321f5a954e657de9fcbc9f1d6ae3152b85a05213',
+    # Reviewed 0.8.0 build 299 (offload client sources): only
+    # CURRENT_PROJECT_VERSION differs from the reviewed build 298 bytes
+    # (`make apple-build-bump`; no resources or scripts added). Build 298 had
+    # differed from build 297 the same way; 297 was set inside a merge commit
+    # (8164f7380), which the release guard does not read as a build-number
+    # update. Pin this exact spec; earlier-build case receipts do not
+    # transfer, and added resources or scripts still change its digest.
+    'clients/apple/project.yml': '83c6bd08bb59a8e6f28dbd036c4a36320aec52c90b2648e50dc95e501f486b2e',
     'scripts/apple-tv-navigation-test': 'c758a25eb73a8991508d5ed165e615dd12c49b5e8edbb990f97826ddc1dc0b4e',
     'clients/server-tray/macos/Package.swift': '8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322',
     'clients/server-tray/macos/build': 'b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0',
@@ -116,11 +123,27 @@ def producer(commit, current):
     # native origin evidence; producer output must still be an original pass.
 
 
+# The reviewed input closure is unchanged by the generated positive integer
+# build counter. Actual input fingerprints and case compatibility still use
+# complete Git blobs, so this does not transfer passes between build numbers.
+APPLE_PROJECT_SHAPE = "d5eda692d7c4691cc20926ec85c87ec65cbc60122c6b638853d6cbd57b645c5b"
+APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
+
+
+def reviewed_build_spec(path, data):
+    if hashlib.sha256(data).hexdigest() == BUILD_SPECS[path]:
+        return True
+    if path != 'clients/apple/project.yml':
+        return False
+    normalized, count = APPLE_BUILD_COUNTER.subn(rb'\g<1>0\g<2>', data)
+    return count == 1 and hashlib.sha256(normalized).hexdigest() == APPLE_PROJECT_SHAPE
+
+
 def build_specs(commit, family):
     """Only the reviewed deterministic producers define this input closure."""
     for path in FAMILY_SPECS[family]:
         data = subprocess.check_output(['git', 'show', commit + ':' + path], timeout=10)
-        require(hashlib.sha256(data).hexdigest() == BUILD_SPECS[path],
+        require(reviewed_build_spec(path, data),
                 'Unreviewed native build specification: ' + path)
 
 
@@ -473,10 +496,11 @@ def case_input_compatibility(commit, current):
     # Every build specification retains its independently reviewed boundary.
     for source in (commit, current):
         for path in FAMILY_SPECS['tv_navigation']:
-            digest = hashlib.sha256(subprocess.check_output(
-                ['git', 'show', source + ':' + path], timeout=10)).hexdigest()
-            accepted = (BUILD_SPECS[path], CASE_RUNNER_SHA256) if path == 'scripts/apple-tv-navigation-test' else (BUILD_SPECS[path],)
-            require(digest in accepted, 'Unreviewed native build specification: ' + path)
+            data = subprocess.check_output(['git', 'show', source + ':' + path], timeout=10)
+            case_runner = (path == 'scripts/apple-tv-navigation-test'
+                           and hashlib.sha256(data).hexdigest() == CASE_RUNNER_SHA256)
+            require(case_runner or reviewed_build_spec(path, data),
+                    'Unreviewed native build specification: ' + path)
     return TRANSITION_INVALIDATES if changed_fixture else set()
 
 

@@ -731,6 +731,7 @@ const TABLES: &[TablePlan] = &[
             "book_work_id",
             "book_edition_id",
             "book_metadata_source",
+            "offloaded_at",
         ],
         order_by: "id",
         minimum_schema: 13,
@@ -3597,6 +3598,9 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                         "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
                     )
                     && schema_version < 21)
+                || (table.name == "items"
+                    && *column == "offloaded_at"
+                    && schema_version < super::offload::SQLITE_INTRODUCED_SCHEMA)
                 || (table.name == "offline_packages"
                     && *column == "audio_recipe"
                     && schema_version < super::sqlite::OFFLINE_AUDIO_RECIPE_SCHEMA)

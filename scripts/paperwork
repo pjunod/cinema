@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 # (unittest module under tests/operations, what it guards, how to fix it)
 TEST_RULES: tuple[tuple[str, str, str], ...] = (
@@ -192,7 +193,9 @@ def check_regression_fields(base: str, body: str | None, title: str) -> Result:
     hint = (
         "put one `Regression-Test: <path>::<test name>` line per fixed behavior in the pull "
         "request description; whoever merges copies them into the landing commit "
-        "(`python3 -m validation.regression_field --body-file <description> --landing-lines`)"
+        "(`python3 -m validation.regression_field --body-file <description> --landing-lines`). "
+        "Check it with `scripts/paperwork --body-file <description>`. Editing the description "
+        "does not start the lane: push afterwards (`git commit --allow-empty -m 'chore: rerun lane'`)"
     )
     name = "Regression-Test fields for fix(/perf( commits"
     if body is None:
@@ -330,7 +333,11 @@ def main(argv: list[str] | None = None) -> int:
         help="branch whose release counters a client change must exceed (default: --merge-target)",
     )
     parser.add_argument("--body-file", type=Path, help="pull request description to check")
-    parser.add_argument("--body-env", action="store_true", help="read the description from $PR_BODY")
+    parser.add_argument(
+        "--body-env",
+        action="store_true",
+        help="read the description from $PR_BODY, else from the CI event payload ($GITHUB_EVENT_PATH)",
+    )
     parser.add_argument("--hook", action="store_true", help="pre-push mode: environment problems warn instead of failing")
     parser.add_argument("--list", action="store_true", help="list the checks and their fixes")
     args = parser.parse_args(argv)
@@ -359,8 +366,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.body_file:
         body = args.body_file.read_text(encoding="utf-8")
     elif args.body_env:
-        body = os.environ.get("PR_BODY", "")
-    title = os.environ.get("PR_TITLE", "")
+        from validation import pr_event  # noqa: PLC0415
+
+        body = pr_event.body() or ""
+    from validation import pr_event  # noqa: PLC0415
+
+    title = pr_event.title() or ""
 
     started = time.monotonic()
     paths = changed_paths(base)

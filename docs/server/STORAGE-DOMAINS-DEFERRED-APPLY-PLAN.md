@@ -148,7 +148,7 @@ New module `crates/plurx-core/src/store/storage_domain_pending.rs` with
 `storage_domain_pending.sql`, modelled on `custody_retention.rs`
 (`SCHEMA`, `SHAPE_SQL`, `MARKER_SQL`, `statements()`, `version()` with a
 LazyLock shape built from a freshly migrated SQLite catalogue) and
-`pub const SQLITE_INTRODUCED_SCHEMA: i64 = 130;`.
+`pub const SQLITE_INTRODUCED_SCHEMA: i64 = 131;`.
 
 ```sql
 -- Desired storage identities. Saving never depends on runtime state; the
@@ -268,10 +268,10 @@ pending rows whose root still exists, so stale rows do not survive it.
 ### 4.2 SQLite
 
 Append `super::storage_domain_pending::SCHEMA` to `MIGRATIONS` in
-`crates/plurx-core/src/store/sqlite/mod.rs` after v129
-`custody_retention::SCHEMA` (≈1346–1347) as **v130** with the comment
-`// v130: storage-domain changes are saved at once and applied when safe.`
-v130 is free on `main`. Add
+`crates/plurx-core/src/store/sqlite/mod.rs` after v130
+`offload::SQLITE_MIGRATION` (≈1346–1347) as **v131** with the comment
+`// v131: storage-domain changes are saved at once and applied when safe.`
+Current main uses v130 for offload; v131 follows it. Add
 `"CREATE TABLE IF NOT EXISTS background_storage_domain_pending"` to the
 recognised-statement list in `crates/plurx-core/src/store/sqlite/dv_conversion.rs`
 beside `background_custody_retention_schema` (≈1766).
@@ -292,7 +292,7 @@ Call it after `install_custody_retention_schema` in the bootstrap list
 A partial shape is refused, as for every extension.
 
 Also add the table to `hiqlite_import.rs` `TablePlan` beside
-`background_storage_domains` (≈1828, `minimum_schema` 130) and the
+`background_storage_domains` (≈1828, `minimum_schema` 131) and the
 table-to-schema map in `hiqlite_import/tests.rs` (≈1056); `hiqlite_durable.rs`
 `DurableDump` (≈416, ≈472); `validation_reset_contract_state` beside
 `DELETE FROM background_storage_domains` (≈5471); the table list in

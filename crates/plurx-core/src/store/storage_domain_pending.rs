@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use crate::error::StoreError;
 
-pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = 130;
+pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = 131;
 pub(crate) const SCHEMA: &str = include_str!("storage_domain_pending.sql");
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN \
     ('background_storage_domain_pending','background_storage_domains_live',\

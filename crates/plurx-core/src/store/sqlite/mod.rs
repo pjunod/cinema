@@ -110,6 +110,13 @@ const _: () = assert!(
 );
 const _: () = assert!(
     migration_is(
+        super::offload::SQLITE_INTRODUCED_SCHEMA,
+        super::offload::SQLITE_MIGRATION
+    ),
+    "offload::SQLITE_INTRODUCED_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(
         super::background_jobs::ENCODED_OUTPUT_SQLITE_SCHEMA,
         super::background_jobs::ENCODED_OUTPUT_SCHEMA
     ),
@@ -1352,7 +1359,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_managed_schema::PUBLISH_MIGRATION,
     // v129: retention keeps a job that still owns charged source custody.
     super::custody_retention::SCHEMA,
-    // v130: storage-domain changes are saved at once and applied when safe.
+    // v130: offloaded titles keep their item; a file attaching ends the offload.
+    super::offload::SQLITE_MIGRATION,
+    // v131: storage-domain changes are saved at once and applied when safe.
     super::storage_domain_pending::SCHEMA,
 ];
 
@@ -1369,7 +1378,7 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
      tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, \
      poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, \
      artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, \
-     book_metadata_source";
+     book_metadata_source, offloaded_at";
 
 /// How many columns [`ITEM_COLS`] selects — the offset of the first column a
 /// query appends after it. Keep in step with [`ITEM_COLS`].
@@ -1380,7 +1389,7 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
 /// makes all four read the *new* column as if it were their first appended
 /// one — no error, no type failure when both are TEXT, just a show title that
 /// is quietly a JSON array of genres. Add and bump together, always.
-const ITEM_COL_COUNT: usize = 28;
+const ITEM_COL_COUNT: usize = 29;
 
 /// `ITEM_COLS` qualified with a table alias (e.g. `i.id, i.library_id, ...`).
 fn item_cols(alias: &str) -> String {
@@ -1437,6 +1446,7 @@ fn item_from_row(row: &Row<'_>, base: usize) -> rusqlite::Result<Item> {
         book_work_id: row.get(base + 25)?,
         book_edition_id: row.get(base + 26)?,
         book_metadata_source: row.get(base + 27)?,
+        offloaded_at: row.get(base + 28)?,
     })
 }
 

@@ -124,6 +124,8 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/library_schedule.rs"]
 mod library_schedule;
+#[path = "store_contract/offload.rs"]
+mod offload;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]
@@ -9407,6 +9409,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "fenced-root",
                 &[baseline_file],
                 1,
+                &[],
+                0,
                 &first,
                 &stale_replacement,
             ),
@@ -9695,6 +9699,8 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 .reconcile_library_fenced(
                     library.id,
                     "fenced-root",
+                    &[],
+                    0,
                     &[],
                     0,
                     &successor_current,
@@ -21224,6 +21230,39 @@ async fn sqlite_import_verification_refusals_have_teeth() {
         .contains("table settings failed SQLite-to-Hiqlite parity"));
 }
 
+// Interface inventory, not execution evidence: these methods already exist on
+// main but were omitted from the previous name list. Their tests/receipts must
+// establish behavior independently; listing a method never proves a test ran.
+const RECENT_SOURCE_METHODS: &[&str] = &[
+    "analysis_coordination",
+    "analysis_source_phase_current",
+    "attach_dv_title_viewer",
+    "begin_analysis_source_phase",
+    "claim_analysis_coordination",
+    "claim_analysis_source_phase_service",
+    "copy_index_source_attestation",
+    "copy_index_v3_head",
+    "copy_index_v3_healthy_heads",
+    "copy_index_v3_last_blob_holder",
+    "copy_index_v3_locations",
+    "copy_index_v3_quarantine_code",
+    "copy_index_v3_variant",
+    "ensure_copy_index_v3_head",
+    "establish_analysis_coordination",
+    "finish_analysis_source_phase",
+    "forget_copy_index_v3_blob_holder",
+    "forget_copy_index_v3_location",
+    "library_file_paths_under",
+    "predecessor_analysis_coordination_with_prefix",
+    "publish_copy_index_v3",
+    "put_copy_index_v3_location",
+    "quarantine_copy_index_v3_head",
+    "record_copy_index_source_attestation",
+    "retire_analysis_coordination_claim",
+    "retire_queued_analysis_coordination",
+    "retire_stranded_analysis_coordination",
+];
+
 #[test]
 fn contract_inventory_matches_every_store_method() {
     let store_source = include_str!("../src/store/mod.rs")
@@ -21276,6 +21315,7 @@ fn contract_inventory_matches_every_store_method() {
         MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
         METRICS_METHODS,
+        RECENT_SOURCE_METHODS,
     ]
     .into_iter()
     .flatten()
@@ -21431,7 +21471,9 @@ fn contract_inventory_matches_every_store_method() {
     // main declared (551) without naming them here; named above.
     // +1: request_dv_fel_variant is named in BACKGROUND_JOB_METHODS and
     // exercised by the source-fenced DV title-job contracts.
-    assert_eq!(declared.len(), 562, "review the Store method count");
+    // Current main declares 590 distinct methods; save/apply/state replace
+    // one storage-domain method, adding two names without hiding existing APIs.
+    assert_eq!(declared.len(), 592, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -32920,7 +32962,7 @@ async fn media_contract_runs_through_dyn_store() {
         );
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "stale-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "stale-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("reject root"),
             ReconcileOutcome::RefusedRoot { .. }
@@ -32932,7 +32974,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert_eq!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 0)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 0, &[], 0)
                 .await
                 .expect("reject bound"),
             ReconcileOutcome::RefusedPrune {
@@ -32947,7 +32989,7 @@ async fn media_contract_runs_through_dyn_store() {
             .is_some());
         assert!(matches!(
             store
-                .reconcile_library(movies.id, "contract-root", &[empty_file], 1)
+                .reconcile_library(movies.id, "contract-root", &[empty_file], 1, &[], 0)
                 .await
                 .expect("bounded reconcile"),
             ReconcileOutcome::Applied {
@@ -33470,7 +33512,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
         );
         assert_eq!(
             store
-                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1)
+                .reconcile_library(library.id, "dv-contract-root", &[p7_second], 1, &[], 0)
                 .await
                 .expect("reconcile verified conversion"),
             ReconcileOutcome::Applied {

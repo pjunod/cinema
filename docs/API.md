@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-12, plurx has 412 routes declared by the ordinary listener's
+As of 2026-11-12, plurx has 414 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 412 routes across the registered routers.
+plurx has 414 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -1007,6 +1007,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | `limit` | `60` | clamped to `1..=200` |
 | `facts` | absent | only the literal `1` turns on the per-item `media` block |
 | `genre` | absent | trimmed; matched `COLLATE NOCASE` against the stored genres array. An unknown genre is an empty page, not an error |
+| `presence` | `disk` | `disk` (what plays now) · `offloaded` · `everything`; anything else is `400`. Offload (INTEGRATION §1.11) keeps a title whose files Curator deleted, flagged `offloaded: true` on its item (a show or season is flagged only when every leaf is) with `rollup.offloaded` counting a partial offload. A show with some offloaded episodes is listed under both `disk` and `offloaded`. Search ignores `presence` and always includes offloaded titles, flagged; Continue Watching and the Plex/Jellyfin surfaces never list them; Next Up stops at an offloaded next episode and returns it flagged |
 
 The response is `{items, total, offset, limit}`, where `offset` and `limit`
 echo the *clamped* values and `total` is computed with the same genre clause
@@ -1197,6 +1198,15 @@ placed or removed. [INTEGRATION.md](INTEGRATION.md) §1.10 has the wire, how
 Curator reads each state, and the mixed-cluster deploy order (every cinema node
 before Curator sends `removed_paths`).
 
+**Offloaded paths.** `offloaded_paths` is `removed_paths` for Offload: Curator
+deleted the files to free disk and wants the title kept. The request is
+probe-only and each path is reported like a removed path, except that a path
+whose files were removed is `offloaded {item_id, item_ids, offloaded_items}` and
+its items stay, flagged `offloaded` once they have no files left. `retained.code`
+adds `root_empty` (not retryable): the folder was emptied by the offload and
+sits on its parent's filesystem. The connection test's `features` lists
+`offload`. [INTEGRATION.md](INTEGRATION.md) §1.11 has the deploy order.
+
 **Containment is lexical first.** The request path, with `.` and `..` resolved
 and no symlink followed, is matched component-wise against every configured
 root, **longest root wins** — so `/media` and `/media/kids` resolve to the more
@@ -1217,7 +1227,7 @@ mount point, `ENOTCONN`, `EIO`, or the path missing beneath it — is a transien
 |---|---|
 | 200 `{"status":"scanned", "request_id", "report", "items", "files", …}` | The request finished — within `wait_ms`, or before the handler re-read it, or it is a replay of a finished `request_key` |
 | 202 `{"status":"queued", "request_id", …}` | Durably accepted for an eligible cluster worker. Requests survive process restart; same-path requests share a scan while retaining each caller’s hints and result |
-| 200 `{"features", "roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see, and in `features` the optional contract features this build implements (`["removed_paths", "probe_only"]`). Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
+| 200 `{"features", "roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see, and in `features` the optional contract features this build implements (`["removed_paths", "probe_only", "offload"]`). Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
 | 400 | Relative path, a `removed_paths` entry that is relative, not under `path`, or over the limits, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, `{"code":"path_required"}` (neither `path` nor `probe_paths`), or `{"code":"probe_paths_with_path"}` (both) |
 | 500 `{"code":"scan_failed", "status":"failed", "request_id", "error"}` | The request (or the finished request a replayed `request_key` names) failed for a reason other than an unreadable root; the same `request_id` the record carries |
 | 500 `{"code":"cancelled", "status":"failed", "request_id", "error"}` | The same failed shape for a request whose job was cancelled (Activity's Cancel); send a new attempt |
@@ -2813,6 +2823,8 @@ valid URL, the only way forward is to release and start over.
 | GET | `/api/v1/items/{id}/reading-state?file_id=` | bearer | `{state, stale}` |
 | PUT | `/api/v1/items/{id}/reading-state` | bearer | Saves a revision-bound locator; body ≤ 64 KiB |
 | DELETE | `/api/v1/items/{id}/reading-state?file_id=` | bearer | Clears it. 204 |
+| POST | `/api/v1/items/{id}/get-it-back` | admin | Ask Curator to download an offloaded movie, episode, season or show again (synchronous `reacquire` webhook). 200 `{matched, state, message}`; 409 `not_offloaded` / `no_external_ids` / `curator_not_configured`; 502 `curator_unreachable` / `curator_too_old` / `curator_refused_key` |
+| GET | `/api/v1/items/{id}/offload-status` | bearer | Curator's current state for an offloaded title, read through and never stored (`reacquire_status` webhook). Same answer and errors as `get-it-back`; `state` also `offloading`, `offloaded`, and an unknown state is relayed as text |
 | GET | `/api/v1/items/{id}/annotations` | bearer | `{ratings, watchlist, favorite}`. `ratings` holds `{source, value, scale, votes?}` per source with a score (`imdb` /10, `rotten_tomatoes`, `metacritic`, `tmdb` /100), in that order, movies and shows only. It is fetched from TMDB and OMDb on first read and kept 14 days. `watchlist` is false once a listed movie is watched (or every episode of a listed show is) |
 | PUT / DELETE | `/api/v1/items/{id}/watchlist` | bearer | Put a movie or show on, or take it off, the reader's watchlist. 204; 400 for other kinds |
 | PUT / DELETE | `/api/v1/items/{id}/favorite` | bearer | The same for the reader's favorites |
