@@ -345,7 +345,7 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "c364421f3298c5243e93bab48631ccbc1941434bee0b672528eb9d54065587fc"
+        "sha256": "8203698cae8cc4e63b8116e900dc0570de4f65c388412c8ced81aeb3402174d2"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
