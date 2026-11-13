@@ -69,3 +69,4 @@ pub mod testfixtures;
 pub mod tracks;
 pub mod trakt;
 pub mod transcode;
+// CI measurement marker: transient core-input delta; final tree restores the production source exactly.
