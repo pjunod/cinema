@@ -968,11 +968,13 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
     dir.create().await.expect("create rendition dir");
     let plan_len = plan.len();
     Arc::new(Rendition {
+        refit_keyframe: tokio::sync::OnceCell::new(),
         ephemeral_processing: false,
         _processed_instance_allowance: None,
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
+            refit: None,
             source_telemetry:false,
             retained_logical: None,
             measured_candidate: None,

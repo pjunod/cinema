@@ -992,6 +992,7 @@ impl Shared {
         };
         let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
+            refit_keyframe: tokio::sync::OnceCell::new(),
             ephemeral_processing,
             _processed_instance_allowance: processed_instance_allowance,
             key: key.to_string(),

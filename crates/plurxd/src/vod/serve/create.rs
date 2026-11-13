@@ -682,6 +682,18 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        // The F+ curves the session pinned at create, loaded by digest.
+        let (video, refit) = if prepared.encoding.is_none() {
+            crate::dv_refit_serving::rendition_refit(
+                self.shared.store.as_ref(),
+                file,
+                video,
+                req.dv_refit.as_deref(),
+            )
+            .await
+        } else {
+            (video, None)
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -707,6 +719,7 @@ impl VodServe {
                 audio_index: req.audio_index,
                 transcode_audio: aac,
                 audio_delivery: req.audio_delivery.clone(),
+                refit: refit.clone(),
             };
             self.demand_copy_index(file, own, recipe, viewer);
         }
@@ -943,6 +956,7 @@ impl VodServe {
             cluster_cache_key,
             copy_index_init_contract,
             encoding: prepared.encoding.take(),
+            refit,
         };
         Ok(PreparedVodRecipe {
             identity,
@@ -2916,6 +2930,7 @@ impl VodServe {
             ));
         }
         let recipe = Recipe {
+            refit: None,
             source_telemetry: req.source_telemetry
                 == Some(crate::transcode::SourceTelemetry::FilmV1),
             measured_candidate: None,

@@ -508,6 +508,8 @@ impl TranscodeManager {
                 video,
                 &census.raw_canonical_init,
                 &census.raw_canonical_fragment,
+                // A shared Source copy writes identity curves (v1).
+                None,
             )
             .map_err(|_| SourceWorkerError::Unsupported)?,
         );
@@ -559,6 +561,7 @@ impl TranscodeManager {
         // The one recipe of this range. An Analysis gap fill of the same
         // source repeats it, so its rows are comparable with these.
         let recipe = crate::copy_analysis::CopyRecipe {
+            refit: None,
             video,
             audio_index: prepared.request().audio_index,
             transcode_audio: aac,

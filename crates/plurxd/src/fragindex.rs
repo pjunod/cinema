@@ -297,6 +297,26 @@ fn rational_diff_exceeds_two_seconds(left: (u64, u64), right: (u64, u64)) -> boo
     }
 }
 
+/// The absolute stream index the index pipe maps (its first video stream),
+/// when the probe names one that is not an attached picture.
+pub(crate) fn selected_video_stream(raw: &str) -> Option<u32> {
+    let document: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let stream = document.get("streams")?.as_array()?.iter().find(|stream| {
+        stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+    })?;
+    if stream
+        .pointer("/disposition/attached_pic")
+        .and_then(serde_json::Value::as_i64)
+        == Some(1)
+    {
+        return None;
+    }
+    stream
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
 fn completion_expectation_from_probe(
     raw: &str,
     source_object_version: &str,

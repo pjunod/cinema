@@ -38,8 +38,8 @@
 
 use plurx_core::fmp4::{CutPolicy, Fragment, FragmentReader, Init, Published, Segmenter, Unit};
 use plurx_core::segplan::{
-    entry_row, match_landing, match_landing_at, FragmentIndex, LandingError, PlanEntryKind,
-    SegmentPlan, LANDING_WINDOW,
+    entry_row, match_landing, match_landing_at, match_landing_placed, match_landing_placed_at,
+    FragmentIndex, LandingError, PlanEntryKind, SegmentPlan, LANDING_WINDOW,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -204,6 +204,12 @@ pub struct Generation {
     /// index built the other way describes media this generation never
     /// produces.
     pub convert_dolby_vision: bool,
+    /// The F+ curves this generation's conversion writes, pinned by its
+    /// session (FEL-RPU-REFIT-BUILD.md §3.5). Its RPU sizes then depend on
+    /// where each sample presents, so the landing is matched by converting
+    /// the buffered fragments once per candidate row, and every fragment is
+    /// converted only once its row is known.
+    pub refit: Option<GenerationRefit>,
     /// Keep the video samples' in-band HEVC parameter sets when merging.
     ///
     /// The recipe's own answer, for the same reason as
@@ -216,6 +222,14 @@ pub struct Generation {
     /// at or before this entry's start).
     pub start_entry: u32,
     pub policy: CutPolicy,
+}
+
+/// A generation's F+ curves and the anchor of its index's timeline: the
+/// index's first row decodes at the source's first video keyframe.
+#[derive(Debug, Clone)]
+pub struct GenerationRefit {
+    pub table: std::sync::Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>,
+    pub keyframe: plurx_core::transcode::dv_refit_serve::SourceKeyframe,
 }
 
 /// Where film-indexed segments go. Implemented by the rendition layer
@@ -273,6 +287,7 @@ where
         landing: Vec::new(),
         landing_bytes: 0,
         observed: Vec::new(),
+        placement_refusal: None,
         discard_remaining: 0,
         verify_row: None,
         segmenter: None,
@@ -366,6 +381,9 @@ struct GenerationRun<'a, S> {
     /// quantity [`match_landing`] compares (its tests say so: index
     /// `video_bytes`, never the wire length).
     observed: Vec<u32>,
+    /// Why a trial conversion at a candidate landing row refused, kept for
+    /// the failure should no row reproduce the bytes.
+    placement_refusal: Option<String>,
     /// Video-carrying fragments still to drop before the target entry
     /// begins. The landing can sit further before the target than the
     /// buffer that decided it reaches, so the discard outlives the buffer.
@@ -426,7 +444,9 @@ impl<S: Sink> GenerationRun<'_, S> {
                     );
                 }
                 if self.generation.convert_dolby_vision {
-                    match crate::dvpipe::Converter::for_init(&served) {
+                    let converter = crate::dvpipe::Converter::for_init(&served)
+                        .and_then(|converter| self.attach_refit(converter, &served));
+                    match converter {
                         Ok(converter) => self.converter = Some(converter),
                         Err(refused) => {
                             // Refuse before a single fragment is published.
@@ -494,7 +514,11 @@ impl<S: Sink> GenerationRun<'_, S> {
             }
             return Ok(());
         }
-        if let Some(converter) = self.converter.as_mut() {
+        if let Some(converter) = self
+            .converter
+            .as_mut()
+            .filter(|converter| !converter.refits())
+        {
             let before = converter.report().source_profile;
             if let Err(refused) = converter.convert(&mut fragment) {
                 return Err(Outcome::Failed(Failure::Stream(format!(
@@ -717,18 +741,49 @@ impl<S: Sink> GenerationRun<'_, S> {
             // Copy's demuxer may land before, but never after, the plan RAP,
             // so the target row bounds every possible landing.
             let readable = !at_end && self.landing_bytes < self.generation.policy.max_bytes;
-            let row = match match_landing(index, &self.observed, target) {
+            let trial_converter = self
+                .converter
+                .as_ref()
+                .filter(|converter| converter.refits())
+                .cloned();
+            let observed = self.observed.len();
+            let landing = &self.landing;
+            let video_id = self.video_id;
+            let refusal = &mut self.placement_refusal;
+            let mut reproduces = |start: usize| match &trial_converter {
+                Some(converter) => {
+                    reproduces_placed(converter, index, landing, video_id, start, refusal)
+                }
+                None => false,
+            };
+            let matched = if trial_converter.is_some() {
+                match_landing_placed(index, observed, target, &mut reproduces)
+            } else {
+                match_landing(index, &self.observed, target)
+            };
+            let row = match matched {
                 Ok(row) => row,
                 Err(ambiguous @ LandingError::Ambiguous { .. }) if self.landing_clock.is_some() => {
                     let clock = self.landing_clock.take().expect("checked by the guard");
                     let placed = match clock().await {
-                        Ok(time) => match_landing_at(
-                            index,
-                            &self.observed,
-                            target,
-                            time.ticks,
-                            time.frame_ticks,
-                        )
+                        Ok(time) => if trial_converter.is_some() {
+                            match_landing_placed_at(
+                                index,
+                                observed,
+                                target,
+                                time.ticks,
+                                time.frame_ticks,
+                                &mut reproduces,
+                            )
+                        } else {
+                            match_landing_at(
+                                index,
+                                &self.observed,
+                                target,
+                                time.ticks,
+                                time.frame_ticks,
+                            )
+                        }
                         .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
                         Err(why) => Err(TimeRefusal::Unmeasured(why)),
                     };
@@ -752,7 +807,13 @@ impl<S: Sink> GenerationRun<'_, S> {
                 Err(ambiguous @ LandingError::Ambiguous { .. }) => {
                     return Err(unplaced(&ambiguous, self.time_refusal.as_ref()))
                 }
-                Err(error) => return Err(landing_failed(error.to_string())),
+                Err(error) => {
+                    let why = match self.placement_refusal.as_deref() {
+                        Some(refused) => format!("{error} (an F+ conversion refused: {refused})"),
+                        None => error.to_string(),
+                    };
+                    return Err(landing_failed(why));
+                }
             };
             landed = Some(row);
             target - row
@@ -829,6 +890,30 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// including after earlier segments were published, drop it while the
     /// discard to the target entry is unfinished, and otherwise cut it.
     async fn feed_landed(&mut self, fragment: Fragment) -> Result<(), Outcome> {
+        let mut fragment = fragment;
+        if let (Some(converter), Some(row), Some(index)) = (
+            self.converter
+                .as_mut()
+                .filter(|converter| converter.refits()),
+            self.verify_row,
+            self.generation.index.as_ref(),
+        ) {
+            if let Some(video) = self
+                .video_id
+                .and_then(|id| fragment.track(id).map(|t| t.base_decode_time))
+            {
+                let offset = index
+                    .rows
+                    .get(row)
+                    .map(|row| i128::from(row.dts) - i128::from(video))
+                    .ok_or_else(|| landing_failed(format!("index row {row} is past the index")))?;
+                if let Err(refused) = converter.convert_placed(&mut fragment, offset) {
+                    return Err(Outcome::Failed(Failure::Stream(format!(
+                        "this stream cannot be converted: {refused}"
+                    ))));
+                }
+            }
+        }
         let video_bytes = self.video_bytes_of(&fragment);
         if let (Some(bytes), Some(row)) = (video_bytes, self.verify_row) {
             let expected = self
@@ -995,6 +1080,38 @@ impl<S: Sink> GenerationRun<'_, S> {
         }
     }
 
+    /// Give a converting generation its F+ curves, anchored on its index's
+    /// timeline: the index's first row decodes at the source's first video
+    /// keyframe, and a fragment landed on row *r* is shifted onto the index
+    /// by that row's `dts` ([`crate::dvpipe::Converter::convert_placed`]).
+    fn attach_refit(
+        &self,
+        converter: crate::dvpipe::Converter,
+        served: &Init,
+    ) -> Result<crate::dvpipe::Converter, crate::dvpipe::Refused> {
+        let Some(refit) = &self.generation.refit else {
+            return Ok(converter);
+        };
+        let Some(index) = &self.generation.index else {
+            return Err(crate::dvpipe::Refused(
+                "an F+ generation needs the index its landing is placed on".into(),
+            ));
+        };
+        let first = index
+            .rows
+            .first()
+            .ok_or_else(|| crate::dvpipe::Refused("an F+ generation's index has no rows".into()))?;
+        if served.video().map(|video| video.timescale) != Some(index.timescale) {
+            return Err(crate::dvpipe::Refused(
+                "the generation's video timescale is not its index's".into(),
+            ));
+        }
+        converter.with_refit(
+            refit.table.clone(),
+            refit.keyframe.clock(index.timescale, i128::from(first.dts)),
+        )
+    }
+
     /// The landing matcher's quantity for one fragment: summed video sample
     /// bytes, no container overhead — `None` for a fragment carrying no
     /// video, which says nothing about where in the film we are.
@@ -1023,6 +1140,47 @@ impl<S: Sink> GenerationRun<'_, S> {
             );
         }
     }
+}
+
+/// Whether the buffered fragments, landed at index row `start`, weigh what
+/// the rows from `start` say once each is converted with the F+ curves of
+/// where it would then present. Each candidate converts its own copies with
+/// a fresh copy of the converter, so a rejected candidate leaves no trace.
+fn reproduces_placed(
+    converter: &crate::dvpipe::Converter,
+    index: &FragmentIndex,
+    landing: &[Fragment],
+    video_id: Option<u32>,
+    start: usize,
+    refusal: &mut Option<String>,
+) -> bool {
+    let Some(video_id) = video_id else {
+        return false;
+    };
+    let mut trial = converter.clone();
+    let mut row = start;
+    for fragment in landing {
+        let Some(track) = fragment.track(video_id) else {
+            continue;
+        };
+        let Some(indexed) = index.rows.get(row) else {
+            return false;
+        };
+        let mut copy = fragment.clone();
+        let offset = i128::from(indexed.dts) - i128::from(track.base_decode_time);
+        if let Err(refused) = trial.convert_placed(&mut copy, offset) {
+            *refusal = Some(refused.to_string());
+            return false;
+        }
+        let bytes = copy
+            .track(video_id)
+            .map(|track| u32::try_from(track.byte_len()).unwrap_or(u32::MAX));
+        if bytes != Some(indexed.video_bytes) {
+            return false;
+        }
+        row += 1;
+    }
+    true
 }
 
 fn landing_failed(why: String) -> Outcome {
@@ -1112,6 +1270,7 @@ mod tests {
             InitIdentity::establish(&init, Default::default()).expect("encoded init identity");
         let grid = plurx_core::transcode::VodFrameGrid::new(24, 1).expect("video clock");
         let generation = Generation {
+            refit: None,
             plan: grid.plan(4_000, 0),
             index: None,
             landing_clock: None,
@@ -1251,6 +1410,7 @@ mod tests {
         let init = muxer_init(&feed);
         let grid = plurx_core::transcode::VodFrameGrid::new(24000, 1001).expect("grid");
         let generation = Generation {
+            refit: None,
             plan: grid.plan(125, 0),
             index: None,
             landing_clock: None,
@@ -1618,6 +1778,7 @@ mod tests {
 
     fn generation(film: &Film, start_entry: u32) -> Generation {
         Generation {
+            refit: None,
             convert_dolby_vision: false,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
@@ -2106,6 +2267,7 @@ mod tests {
         let identity = InitIdentity::establish(&init, film.index.promotion.clone())
             .expect("establishing identity");
         let generation = Generation {
+            refit: None,
             convert_dolby_vision: false,
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),

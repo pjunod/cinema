@@ -1294,7 +1294,9 @@ fn last_landing_start(index: &FragmentIndex, observed: usize) -> Result<usize, L
         });
     }
     // More fragments than the index has rows: no landing reproduces it.
-    rows.len().checked_sub(observed).ok_or(LandingError::NoMatch)
+    rows.len()
+        .checked_sub(observed)
+        .ok_or(LandingError::NoMatch)
 }
 
 /// Whether the rows from `start` weigh exactly what was observed, fragment

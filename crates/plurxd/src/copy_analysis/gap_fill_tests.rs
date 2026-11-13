@@ -157,6 +157,7 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
     let file = media_file(path);
     let cache = crate::test_tempdir().expect("runtime cache");
     let recipe = CopyRecipe {
+        refit: None,
         video: CopyVideoOptions::new(false, false),
         audio_index: None,
         transcode_audio: false,
@@ -209,6 +210,7 @@ async fn head_and_gap_equal_the_whole_title(stop: CancellationToken) -> Result<(
         recipe.video,
         &census.raw_canonical_init,
         &census.raw_canonical_fragment,
+        None,
     )
     .expect("head normalization contract")
     .init_contract_sha256()

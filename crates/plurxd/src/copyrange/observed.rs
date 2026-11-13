@@ -464,7 +464,7 @@ impl ObservedCopyMux {
             }
             let normalizers = self.normalizers.as_mut().ok_or("copy_init_missing")?;
             normalizers
-                .normalize_pair(&mut canonical, &mut av)
+                .normalize_pair(&mut canonical, &mut av, &clock)
                 .map_err(normalization_error)?;
             let av_video = normalizers.av_init().video().ok_or("copy_video_missing")?;
             let av_dts = av

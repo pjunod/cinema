@@ -2531,6 +2531,31 @@ async fn decision_for_file(
         decision.preserve_dolby_vision,
     )
     .with_dolby_vision_conversion(decision.convert_dolby_vision);
+    // The same F+ pin a session created now would take, so the index this
+    // answer looks up is the one that session would play.
+    let refit_enabled = match crate::dv_refit_serving::platform_of_caps(q.caps_v2.as_ref()) {
+        Some(platform) => plurx_core::store::stored_switch(
+            state
+                .applied
+                .setting(crate::dv_refit_serving::setting_key(platform))
+                .await?
+                .as_deref(),
+            false,
+        ),
+        None => false,
+    };
+    let refit = crate::dv_refit_serving::session_digest(
+        state.store.as_ref(),
+        &file,
+        decision.convert_dolby_vision,
+        refit_enabled,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(file_id = file.id, %error, "reading the F+ curve table for a decision");
+        None
+    });
+    let vod_video = vod_video.with_dolby_vision_refit(refit);
     let vod_identity = crate::fragindex::identity_for(&file, vod_video);
     let vod_indexed = state
         .store

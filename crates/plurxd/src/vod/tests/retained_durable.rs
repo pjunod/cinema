@@ -134,6 +134,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
     let serve = local_serve(base.path().to_owned(), store);
     let video = CopyVideoOptions::new(crate::ffmpeg::has_dovi_rpu().await, false);
     let recipe = Recipe {
+            refit: None,
             source_telemetry:false,
         retained_logical: None, measured_candidate: None, file: file.clone(),
         audio_index: None, aac: true, audio_delivery: None, video,
@@ -171,6 +172,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
     let cut = trailer.expect("real FFmpeg normal trailer");
     let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0 };
     let outcome = crate::vodgen::run(&output.stdout[..cut], crate::vodgen::Generation {
+        refit: None,
         plan: rendition.plan.clone(), index: Some(index), landing_clock: None, encoded_audio_anchor: None,
         encoded_frame_ticks: None,
         encoded_video_origin: None,

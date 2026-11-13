@@ -227,11 +227,13 @@ impl VodServe {
         dir.create().await.expect("create HTTP VOD test rendition");
         let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
+            refit_keyframe: tokio::sync::OnceCell::new(),
             ephemeral_processing: false,
             _processed_instance_allowance: None,
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                refit: None,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,

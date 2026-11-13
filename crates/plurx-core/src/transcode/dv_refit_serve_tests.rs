@@ -151,7 +151,11 @@ fn the_first_keyframe_is_read_from_a_packet_probe_in_demux_order() {
         }
     );
     let clock = keyframe.clock(16_000, 0);
-    assert_eq!(clock.source_pts(16 * 41), Ok(83), "the keyframe presents at its pts");
+    assert_eq!(
+        clock.source_pts(16 * 41),
+        Ok(83),
+        "the keyframe presents at its pts"
+    );
     let no_base = serde_json::json!({"packets": document["packets"].clone()});
     assert!(SourceKeyframe::from_ffprobe(&no_base).is_err());
     let no_key = serde_json::json!({

@@ -171,6 +171,58 @@ pub(crate) async fn session_digest(
         .and_then(|table| digest_bytes(table.digest())))
 }
 
+/// The copy options and pinned table a VOD rendition serves for a session
+/// that pinned `pinned` (its request's digest).
+///
+/// The pinned table is loaded by its digest. When the store no longer keeps
+/// it (superseded more than seven days ago, which takes a fit-version or
+/// helper change), the rendition re-pins to the current fit: this rendition
+/// is a new generation boundary for the session, and its identity names what
+/// it serves. A read failure serves identity curves under the v1 identity,
+/// which is always consistent.
+pub(crate) async fn rendition_refit(
+    store: &dyn Store,
+    file: &MediaFile,
+    video: CopyVideoOptions,
+    pinned: Option<&str>,
+) -> (CopyVideoOptions, Option<Arc<ServedCurveTable>>) {
+    let Some(digest) = pinned
+        .and_then(digest_bytes)
+        .filter(|_| video.converts_dolby_vision())
+    else {
+        return (video.with_dolby_vision_refit(None), None);
+    };
+    let table = match pinned_table(store, file, digest).await {
+        Ok(Some(table)) => Some(table),
+        Ok(None) => match current_table(store, file).await {
+            Ok(current) => {
+                tracing::info!(
+                    file_id = file.id,
+                    pinned = %digest_hex(digest),
+                    current = current.as_ref().map(|table| table.digest()),
+                    "the session's F+ curves are no longer kept; re-pinning at this rendition"
+                );
+                current
+            }
+            Err(error) => {
+                tracing::warn!(file_id = file.id, %error, "reading the current F+ curve table");
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(file_id = file.id, %error, "reading the pinned F+ curve table");
+            None
+        }
+    };
+    match table
+        .as_ref()
+        .and_then(|table| digest_bytes(table.digest()))
+    {
+        Some(digest) => (video.with_dolby_vision_refit(Some(digest)), table),
+        None => (video.with_dolby_vision_refit(None), None),
+    }
+}
+
 /// The tables an index pass's identities name, by digest.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RefitTables(Vec<Arc<ServedCurveTable>>);
@@ -227,6 +279,33 @@ pub(crate) async fn index_digest(
     Ok(current_table(store, file)
         .await?
         .and_then(|table| digest_bytes(table.digest())))
+}
+
+/// The F+ curve digest a session on `platform` pins, chosen once at create
+/// from the plan's conversion and the platform's enable. A read failure
+/// pins nothing, so the session serves identity curves under v1.
+pub(crate) async fn pin_for_session(
+    store: &dyn Store,
+    settings: &BTreeMap<String, String>,
+    file: &MediaFile,
+    request: &mut crate::transcode::SessionRequest,
+    platform: Option<ClientPlatform>,
+) {
+    let converts = matches!(
+        request.kind,
+        crate::transcode::SessionKind::Copy {
+            convert_dolby_vision: true,
+            ..
+        }
+    );
+    let enabled = platform.is_some_and(|platform| enabled_in(settings, platform));
+    request.dv_refit = match session_digest(store, file, converts, enabled).await {
+        Ok(digest) => digest.map(digest_hex),
+        Err(error) => {
+            tracing::warn!(file_id = file.id, %error, "reading the F+ curve table for a new session");
+            None
+        }
+    };
 }
 
 /// How many packets the keyframe probe reads: enough to pass any leading

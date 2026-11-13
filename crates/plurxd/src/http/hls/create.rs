@@ -2508,6 +2508,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
     let candidate_auto_policy = body.candidate_auto_policy();
+    let refit_platform = crate::dv_refit_serving::platform_of_caps(body.caps.as_ref());
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -2563,6 +2564,30 @@ async fn resolve_plan_for_principal_with_local_evidence(
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
+    // F+ (FEL-RPU-REFIT-BUILD.md §3.5): the curve digest this session pins,
+    // derived once here from the reconciled plan and the platform's enable,
+    // never from the body. A shared Source session copies without curves.
+    if let (plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. }, Some(file)) = (
+        principal,
+        source.or(snapshot.map(|snapshot| &snapshot.file)),
+    ) {
+        let settings = match snapshot {
+            Some(snapshot) => snapshot.settings.clone(),
+            None => state
+                .store
+                .get_settings(&crate::dv_refit_serving::REFIT_KEYS)
+                .await
+                .unwrap_or_default(),
+        };
+        crate::dv_refit_serving::pin_for_session(
+            state.store.as_ref(),
+            &settings,
+            file,
+            &mut request,
+            refit_platform,
+        )
+        .await;
+    }
     normalize_catalog_selection(&mut request, height, candidate_copy)?;
     reconcile_request_audio(source, &mut request);
     // Observational retained-output override follows the original intent hash

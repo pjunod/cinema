@@ -748,6 +748,7 @@ fn demand_for(origin: &str, file_id: i64) -> CopyIndexDemand {
         NAMESPACE.into(),
         source,
         CopyRecipe {
+            refit: None,
             video: plurx_core::transcode::CopyVideoOptions::new(false, false),
             audio_index: None,
             transcode_audio: false,
@@ -810,6 +811,7 @@ fn a_local_copy_authority_is_never_made_from_a_sharing_principal() {
             NAMESPACE.into(),
             source(),
             CopyRecipe {
+                refit: None,
                 video: plurx_core::transcode::CopyVideoOptions::new(false, false),
                 audio_index: None,
                 transcode_audio: false,

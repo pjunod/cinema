@@ -87,6 +87,8 @@ pub(crate) struct CopyRecipe {
     pub(crate) audio_index: Option<i64>,
     pub(crate) transcode_audio: bool,
     pub(crate) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    /// The F+ curves `video` writes, when its identity names them.
+    pub(crate) refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
 }
 impl CopyRecipe {
     /// Triple-output arguments: AV on stdout, canonical MP4 on descriptor 6

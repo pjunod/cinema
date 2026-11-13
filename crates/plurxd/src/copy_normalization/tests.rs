@@ -67,6 +67,7 @@ fn head_contract_reapplies_to_both_outputs_and_keeps_non_dolby_samples_unchanged
         CopyVideoOptions::new(false, false),
         &head_init,
         &head_fragment,
+        None,
     )
     .expect("head establishes its copy init contract");
     let before = head_fragment.clone();
@@ -87,7 +88,7 @@ fn head_contract_reapplies_to_both_outputs_and_keeps_non_dolby_samples_unchanged
     );
 
     outputs
-        .normalize_pair(&mut canonical_fragment, &mut av_fragment)
+        .normalize_pair(&mut canonical_fragment, &mut av_fragment, &unused_clock())
         .expect("an ordinary non-Dolby fragment keeps the head parameters");
     // Fragment equality covers the sample payload bytes, track decode times,
     // sample durations and composition offsets, not merely the byte length.
@@ -103,6 +104,7 @@ fn reconstructed_init_with_changed_video_timing_is_rejected_for_each_output() {
         CopyVideoOptions::new(false, false),
         &head_init,
         &head_fragment,
+        None,
     )
     .expect("head establishes its copy init contract");
 
@@ -127,5 +129,27 @@ fn reconstructed_init_with_changed_video_timing_is_rejected_for_each_output() {
             matches!(result, Err(CopyNormalizationError::ContractChanged)),
             "output side {changed_output} must not publish an init with changed video timing"
         );
+    }
+}
+
+/// A packet clock for a pair whose conversion writes no F+ curves, which
+/// never reads it.
+fn unused_clock() -> plurx_core::segplan::packet_clock::SourceFragmentClock {
+    plurx_core::segplan::packet_clock::SourceFragmentClock {
+        first_packet: plurx_core::segplan::packet_clock::SourcePacketObservation {
+            sequence: 0,
+            dts: 0,
+            pts: 0,
+            duration: 1,
+            size: 1,
+            checksum: 0,
+            flags: 1,
+            side_data_count: 0,
+            time_base_num: 1,
+            time_base_den: 1000,
+        },
+        canonical_dts: 0,
+        duration: 1,
+        next_packet_sequence: 1,
     }
 }

@@ -1269,6 +1269,54 @@ pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
     Err("the probe printed no video packet".to_owned())
 }
 
+/// The F+ curves and timeline anchor of a rendition that writes them, or
+/// `None` for every other rendition. Refused when the pinned table is not
+/// loaded or the source's first keyframe cannot be read: a generation never
+/// serves identity curves under a v2 identity.
+async fn generation_refit(
+    shared: &Shared,
+    rendition: &Rendition,
+) -> Result<Option<vodgen::GenerationRefit>, String> {
+    if rendition.recipe.video.dolby_vision_refit().is_none() {
+        return Ok(None);
+    }
+    let table = rendition
+        .recipe
+        .refit
+        .clone()
+        .ok_or("this F+ rendition's pinned curve table is not loaded")?;
+    let keyframe = *rendition
+        .refit_keyframe
+        .get_or_try_init(|| async {
+            let file = &rendition.recipe.file;
+            let probe = shared
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .map_err(|error| format!("reading the probe for the F+ anchor: {error}"))?;
+            let stream = probe
+                .as_deref()
+                .and_then(crate::fragindex::selected_video_stream)
+                .ok_or("the probe names no video stream for the F+ anchor")?;
+            let opened;
+            let handle = match rendition.source.as_ref() {
+                Some(source) => &source.handle,
+                None => {
+                    opened = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+                    &opened.handle
+                }
+            };
+            crate::dv_refit_serving::source_keyframe(
+                handle,
+                stream,
+                crate::transcode::MEDIA_ORIGIN_PROBE_TIMEOUT,
+            )
+            .await
+        })
+        .await?;
+    Ok(Some(vodgen::GenerationRefit { table, keyframe }))
+}
+
 /// Read one generation to its end: establish or verify the init identity,
 /// then let [`vodgen::run`] cut the plan's entries into the sink.
 async fn run_generation(
@@ -1317,6 +1365,17 @@ async fn run_generation(
             // reaching here without one is the pre-read having purged and
             // bailed, which returns above.
             None => return (None, None),
+        }
+    };
+    let refit = match generation_refit(&shared, &rendition).await {
+        Ok(refit) => refit,
+        Err(why) => {
+            return (
+                Some(Outcome::Failed(Failure::Stream(format!(
+                    "this F+ generation cannot be placed: {why}"
+                )))),
+                None,
+            )
         }
     };
     let generation = Generation {
@@ -1369,6 +1428,7 @@ async fn run_generation(
         // generation is matched against was built with — they share one
         // `CopyVideoOptions`, so they cannot disagree.
         convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
+        refit,
         retain_hevc_parameter_sets: rendition.recipe.video.retains_hevc_parameter_sets(),
     };
     let sink = RenditionSink {

@@ -502,6 +502,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .expect("audio admits without a video hardware slot");
     assert_eq!(encoding.admissions.software_in_use(), 3);
     let recipe = Recipe {
+        refit: None,
         source_telemetry: false,
         retained_logical: None,
         measured_candidate: None,
@@ -1503,6 +1504,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
             "candidate-cache",
             None,
             Recipe {
+                refit: None,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -1633,6 +1635,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
             "legacy-candidate-cache",
             None,
             Recipe {
+                refit: None,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -2617,6 +2620,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "held-admission",
             None,
             Recipe {
+                refit: None,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -2778,6 +2782,7 @@ async fn an_expired_deadline_without_an_encoder_permit_is_capacity_not_producer_
             "capacity-verdict",
             None,
             Recipe {
+                refit: None,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
@@ -2903,6 +2908,7 @@ async fn an_expired_verdict_waits_for_the_producer_state_instead_of_guessing() {
             "verdict-read",
             None,
             Recipe {
+                refit: None,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,

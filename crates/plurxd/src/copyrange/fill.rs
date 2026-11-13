@@ -182,6 +182,7 @@ where
             video,
             &census.raw_canonical_init,
             &census.raw_canonical_fragment,
+            fill.recipe.refit.clone(),
         )
         .map_err(|error| Failed(error.to_string()))?,
     );

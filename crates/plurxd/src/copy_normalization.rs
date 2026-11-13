@@ -1,5 +1,7 @@
 //! One head-established normalization contract for cold, indexed and missing
 //! range copies. It does not issue whole-source parameter-constancy proof.
+use std::sync::Arc;
+
 use plurx_core::{
     domain::MediaFile,
     fmp4::{self, Fragment, Init, PromotionInputs},
@@ -31,6 +33,9 @@ pub(crate) struct CopyNormalizationContract {
     raw_parameters: PromotionInputs,
     init_contract_sha256: String,
     convert: bool,
+    /// The F+ curves this copy writes; each fragment is anchored in the
+    /// source by its own packet clock.
+    refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
 }
 impl CopyNormalizationContract {
     /// The caller binds the bounded head census to the same held source object
@@ -41,7 +46,22 @@ impl CopyNormalizationContract {
         video: CopyVideoOptions,
         head_init: &Init,
         head_fragment: &Fragment,
+        refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
     ) -> Result<Self, CopyNormalizationError> {
+        let refit = match video.dolby_vision_refit() {
+            None => None,
+            Some(digest) => Some(
+                refit
+                    .filter(|table| {
+                        crate::dv_refit_serving::digest_bytes(table.digest()) == Some(digest)
+                    })
+                    .ok_or_else(|| {
+                        CopyNormalizationError::Conversion(
+                            "the F+ curve table this copy names is not available".into(),
+                        )
+                    })?,
+            ),
+        };
         let mut raw_parameters = PromotionInputs::from_fragment(head_fragment, head_init);
         let mut promotion = raw_parameters.clone();
         if video.converts_dolby_vision() {
@@ -62,6 +82,7 @@ impl CopyNormalizationContract {
             raw_parameters,
             init_contract_sha256,
             convert: video.converts_dolby_vision(),
+            refit,
         })
     }
 
@@ -96,10 +117,12 @@ impl CopyNormalizationContract {
             return Err(CopyNormalizationError::ContractChanged);
         }
         let converter = if self.convert {
-            Some(
-                crate::dvpipe::Converter::for_init(&served_init)
-                    .map_err(|error| CopyNormalizationError::Conversion(error.to_string()))?,
-            )
+            let converter = crate::dvpipe::Converter::for_init(&served_init)
+                .map_err(|error| CopyNormalizationError::Conversion(error.to_string()))?;
+            Some(match &self.refit {
+                Some(table) => converter.with_curves(table.clone()),
+                None => converter,
+            })
         } else {
             None
         };
@@ -151,16 +174,20 @@ impl CopyNormalizers {
     pub(crate) fn av_init(&self) -> &Init {
         &self.av.served_init
     }
+    /// `clock` is the canonical fragment's packet clock: its first packet is
+    /// both fragments' first video sample.
     pub(crate) fn normalize_pair(
         &mut self,
         canonical: &mut Fragment,
         av: &mut Fragment,
+        clock: &plurx_core::segplan::packet_clock::SourceFragmentClock,
     ) -> Result<(), CopyNormalizationError> {
         if self.failed {
             return Err(CopyNormalizationError::Failed);
         }
-        let result = normalize_fragment(&mut self.canonical, canonical, &self.raw_parameters)
-            .and_then(|()| normalize_fragment(&mut self.av, av, &self.raw_parameters));
+        let result =
+            normalize_fragment(&mut self.canonical, canonical, &self.raw_parameters, clock)
+                .and_then(|()| normalize_fragment(&mut self.av, av, &self.raw_parameters, clock));
         if result.is_err() {
             self.failed = true;
         }
@@ -171,6 +198,7 @@ fn normalize_fragment(
     pipe: &mut PipeNormalizer,
     fragment: &mut Fragment,
     expected: &PromotionInputs,
+    clock: &plurx_core::segplan::packet_clock::SourceFragmentClock,
 ) -> Result<(), CopyNormalizationError> {
     let mut observed = PromotionInputs::from_fragment(fragment, &pipe.raw_init);
     observed.hdr10_sei.clear();
@@ -178,9 +206,31 @@ fn normalize_fragment(
         return Err(CopyNormalizationError::ParameterSetsChanged);
     }
     if let Some(converter) = &mut pipe.converter {
-        converter
-            .convert(fragment)
-            .map_err(|error| CopyNormalizationError::Conversion(error.to_string()))?;
+        let converted = if converter.refits() {
+            // The fragment's first video sample is the clock's first packet,
+            // so that packet's source decode time anchors its samples.
+            let video = pipe
+                .served_init
+                .video()
+                .ok_or_else(|| CopyNormalizationError::Conversion("no video track".into()))?;
+            let first = fragment
+                .track(video.id)
+                .map(|track| i128::from(track.base_decode_time))
+                .ok_or_else(|| CopyNormalizationError::Conversion("no video traf".into()))?;
+            let packet = clock.first_packet;
+            converter.convert_anchored(
+                fragment,
+                plurx_core::transcode::dv_refit_serve::SourceClock {
+                    track_timescale: video.timescale,
+                    track_ticks: first,
+                    source_pts: packet.dts,
+                    source_time_base: (packet.time_base_num, packet.time_base_den),
+                },
+            )
+        } else {
+            converter.convert(fragment)
+        };
+        converted.map_err(|error| CopyNormalizationError::Conversion(error.to_string()))?;
     }
     Ok(())
 }

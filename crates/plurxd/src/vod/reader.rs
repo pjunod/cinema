@@ -25,6 +25,8 @@ pub(super) struct Recipe {
     pub(super) copy_index_init_contract: Option<String>,
     /// A frozen encoded strategy; None is the indexed compressed-copy path.
     pub(super) encoding: Option<Arc<crate::vodencode::Encoding>>,
+    /// The F+ curves the session pinned, when `video` writes them.
+    pub(super) refit: Option<Arc<plurx_core::transcode::dv_refit_serve::ServedCurveTable>>,
 }
 
 /// One attached reader, in plan indexes.

@@ -97,6 +97,10 @@ pub(super) struct Rendition {
     /// it ([`super::generation::LandingProbe`]). The held source cannot change
     /// under the rendition, so neither can this.
     pub(super) landing_origin: tokio::sync::OnceCell<f64>,
+    /// The source's first video keyframe, read once for an F+ rendition: the
+    /// anchor of its index's timeline in the source.
+    pub(super) refit_keyframe:
+        tokio::sync::OnceCell<plurx_core::transcode::dv_refit_serve::SourceKeyframe>,
     /// The capacity hold this rendition is under, if any, retained across the
     /// producer that was terminated for it.
     ///

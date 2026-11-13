@@ -110,7 +110,7 @@ impl std::fmt::Display for Refused {
 /// Holds the two facts a rewrite needs from the init — which track carries the
 /// video, and how wide its NAL length prefixes are — so a caller that has seen
 /// the init can convert every fragment after it without re-deriving them.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Converter {
     video_track: u32,
     nal_length_size: u8,
@@ -133,7 +133,30 @@ pub struct Converter {
 #[derive(Debug, Clone)]
 struct Refit {
     table: Arc<ServedCurveTable>,
-    clock: SourceClock,
+    /// `None` when every fragment brings its own anchor
+    /// ([`Converter::convert_anchored`]).
+    clock: Option<SourceClock>,
+}
+
+fn check_clock(
+    timescale: Option<u32>,
+    table: &ServedCurveTable,
+    clock: &SourceClock,
+) -> Result<(), Refused> {
+    if timescale != Some(clock.track_timescale) {
+        return Err(Refused(format!(
+            "the F+ clock is for a {}-tick track and the video track has {timescale:?}",
+            clock.track_timescale
+        )));
+    }
+    if clock.source_time_base != table.time_base() {
+        return Err(Refused(format!(
+            "the F+ clock maps to time base {:?} and the curve table is keyed in {:?}",
+            clock.source_time_base,
+            table.time_base()
+        )));
+    }
+    Ok(())
 }
 
 impl Converter {
@@ -172,26 +195,41 @@ impl Converter {
         table: Arc<ServedCurveTable>,
         clock: SourceClock,
     ) -> Result<Converter, Refused> {
-        let timescale = self
-            .tracks
+        let timescale = self.video_timescale();
+        check_clock(timescale, &table, &clock)?;
+        self.refit = Some(Refit {
+            table,
+            clock: Some(clock),
+        });
+        Ok(self)
+    }
+
+    /// Write `table`'s curves, with every fragment anchored by the clock its
+    /// caller hands [`Converter::convert_anchored`].
+    pub fn with_curves(mut self, table: Arc<ServedCurveTable>) -> Converter {
+        self.refit = Some(Refit { table, clock: None });
+        self
+    }
+
+    /// [`Converter::convert`] with this fragment's own anchor in the source.
+    pub fn convert_anchored(
+        &mut self,
+        fragment: &mut Fragment,
+        clock: SourceClock,
+    ) -> Result<bool, Refused> {
+        let refit = self
+            .refit
+            .as_ref()
+            .ok_or_else(|| Refused("only an F+ conversion takes an anchor".into()))?;
+        check_clock(self.video_timescale(), &refit.table, &clock)?;
+        self.convert_with(fragment, 0, Some(clock))
+    }
+
+    fn video_timescale(&self) -> Option<u32> {
+        self.tracks
             .iter()
             .find(|track| track.id == self.video_track)
-            .map(|track| track.timescale);
-        if timescale != Some(clock.track_timescale) {
-            return Err(Refused(format!(
-                "the F+ clock is for a {}-tick track and the video track has {timescale:?}",
-                clock.track_timescale
-            )));
-        }
-        if clock.source_time_base != table.time_base() {
-            return Err(Refused(format!(
-                "the F+ clock maps to time base {:?} and the curve table is keyed in {:?}",
-                clock.source_time_base,
-                table.time_base()
-            )));
-        }
-        self.refit = Some(Refit { table, clock });
-        Ok(self)
+            .map(|track| track.timescale)
     }
 
     /// What the conversion has seen so far.
@@ -223,7 +261,22 @@ impl Converter {
         fragment: &mut Fragment,
         offset: i128,
     ) -> Result<bool, Refused> {
+        self.convert_with(fragment, offset, None)
+    }
+
+    fn convert_with(
+        &mut self,
+        fragment: &mut Fragment,
+        offset: i128,
+        anchor: Option<SourceClock>,
+    ) -> Result<bool, Refused> {
         let width = self.nal_length_size;
+        let clock = match &self.refit {
+            Some(refit) => Some(anchor.or(refit.clock).ok_or_else(|| {
+                Refused("an F+ conversion needs its fragment's anchor in the source".into())
+            })?),
+            None => None,
+        };
         let mut batch = Converted::default();
         let mut scratch = Vec::new();
         let refit = self.refit.as_ref();
@@ -232,15 +285,14 @@ impl Converter {
             &self.tracks,
             self.video_track,
             |sample, time| {
-                let curves = match refit {
-                    Some(refit) => {
-                        let pts = refit
-                            .clock
+                let curves = match (refit, &clock) {
+                    (Some(refit), Some(clock)) => {
+                        let pts = clock
                             .source_pts(time.presentation() + offset)
                             .map_err(|error| Fmp4Error::Unsupported(error.to_string()))?;
                         refit.table.curves_at(pts)
                     }
-                    None => None,
+                    _ => None,
                 };
                 let seen = dvconvert::convert_length_prefixed(sample, width, curves, &mut scratch)
                     .map_err(|error| Fmp4Error::Unsupported(error.to_string()))?;
@@ -756,10 +808,10 @@ mod tests {
             table,
             // A source tick of 7 track ticks: the samples do not all land
             // on whole source ticks.
-            clock: SourceClock {
+            clock: Some(SourceClock {
                 source_time_base: (7, timescale),
                 ..coarse
-            },
+            }),
         });
         let refused = odd
             .convert(&mut fragment)

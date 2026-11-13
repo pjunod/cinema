@@ -710,23 +710,39 @@ async fn rebuild_demand(
     // for give the candidates; the one with that identity is the recipe.
     let probe = store.get_file_probe_json(file.id).await.map_err(failed)?;
     let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-    let Some(video) = [(false, false), (true, false), (false, true)]
-        .into_iter()
-        .map(|(preserve, convert)| {
-            plurx_core::transcode::CopyVideoOptions::from_probe(
-                &file,
-                probe.as_deref(),
-                have_dovi,
-                preserve,
-            )
-            .with_dolby_vision_conversion(convert)
-        })
-        .find(|video| {
-            crate::fragindex::identity_for(&file, *video).argv_fingerprint
-                == row.source.video_identity
-        })
-    else {
+    // A fitted title's F+ conversion is a fourth shape, named by the title's
+    // current curve digest (FEL-RPU-REFIT-BUILD.md §3.5).
+    let refit = crate::dv_refit_serving::index_digest(store.as_ref(), &file, true).await?;
+    let Some(video) = [
+        (false, false, None),
+        (true, false, None),
+        (false, true, None),
+        (false, true, refit),
+    ]
+    .into_iter()
+    .map(|(preserve, convert, digest)| {
+        plurx_core::transcode::CopyVideoOptions::from_probe(
+            &file,
+            probe.as_deref(),
+            have_dovi,
+            preserve,
+        )
+        .with_dolby_vision_conversion(convert)
+        .with_dolby_vision_refit(digest)
+    })
+    .find(|video| {
+        crate::fragindex::identity_for(&file, *video).argv_fingerprint == row.source.video_identity
+    }) else {
         return Ok(None);
+    };
+    let refit = match video.dolby_vision_refit() {
+        Some(digest) => {
+            match crate::dv_refit_serving::pinned_table(store.as_ref(), &file, digest).await? {
+                Some(table) => Some(table),
+                None => return Ok(None),
+            }
+        }
+        None => None,
     };
     // The user is attribution only. One who has since been removed is not
     // named; the build is still the title's.
@@ -798,6 +814,7 @@ async fn rebuild_demand(
             audio_index: None,
             transcode_audio,
             audio_delivery: None,
+            refit,
         },
         authority: CopyObservationAuthority::Local(authority),
         durable_request: Some(row.request_id),
