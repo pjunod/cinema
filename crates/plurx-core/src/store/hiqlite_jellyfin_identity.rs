@@ -39,7 +39,11 @@ impl JellyfinIdentityStore for HiqliteAuthStore {
         let found = self
             .client()
             // authority: allocation must see existing live mappings and retirements.
-            .query_consistent_map::<IdentityRow, _>(sql.clone(), args.clone())
+            .query_consistent_map::<IdentityRow, _>(
+                "jellyfin_entity_ids",
+                sql.clone(),
+                args.clone(),
+            )
             .await?;
         let missing = ids
             .iter()
@@ -62,7 +66,7 @@ impl JellyfinIdentityStore for HiqliteAuthStore {
         }
         for result in self
             .client()
-            .txn(statements)
+            .txn("jellyfin_entity_ids", statements)
             .await
             .map_err(database_error)?
         {
@@ -71,7 +75,7 @@ impl JellyfinIdentityStore for HiqliteAuthStore {
         Ok(self
             .client()
             // authority: read the committed winner after concurrent conditional allocation.
-            .query_consistent_map::<IdentityRow, _>(sql, args)
+            .query_consistent_map::<IdentityRow, _>("jellyfin_entity_ids", sql, args)
             .await?
             .into_iter()
             .map(|r| r.0)
@@ -83,6 +87,6 @@ impl JellyfinIdentityStore for HiqliteAuthStore {
         wire_id: &str,
     ) -> Result<Option<i64>, StoreError> {
         // authority: a retired wire ID must never resolve through a reused native integer.
-        Ok(self.client().query_consistent_map::<NativeRow,_>("SELECT native_id FROM jellyfin_entity_ids WHERE entity_kind=$1 AND wire_id=$2 AND retired=0", params!(kind.name(), wire_id)).await?.into_iter().next().map(|r| r.0))
+        Ok(self.client().query_consistent_map::<NativeRow,_>("jellyfin_resolve_entity", "SELECT native_id FROM jellyfin_entity_ids WHERE entity_kind=$1 AND wire_id=$2 AND retired=0", params!(kind.name(), wire_id)).await?.into_iter().next().map(|r| r.0))
     }
 }

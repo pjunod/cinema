@@ -32,16 +32,44 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A plurxd restart no longer fences every source-reading job in the cluster
+  until a host reboot. A restart during a read left that owner's custody
+  stranded. A new daemon now releases it when the old daemon's whole PID
+  namespace is proven torn down.
+- A play waiting on its title's FEL measurement now counts as playback demand
+  for that title's scan. The scan no longer queues behind every library and
+  subtitle job: it reads whenever the viewer's own playback and the reader cap
+  allow, and the upgrade lands in the same play once it is measured.
+- A processed upgrade that lost the playback's preparation slot to another
+  preparation now waits for the free slot instead of being dropped. The
+  processed-upgrade metric now reports waiting-on-measurement and displaced
+  outcomes, which it previously counted as cancelled.
+- A resumed play, or one restarted after a stall, is now offered its
+  processed Dolby Vision upgrade. The upgrade waited for the client's
+  first-frame beacon, which only a fresh start sends, so a play that resumed
+  or recovered once stayed on DYN. The session's own accepted rendering
+  control exchange now also starts it.
 - Job retention no longer deletes a settled job whose source custody is still
   charged. That job is the custody's only exact source binding, and a dead
   owner's custody could not be released once it was gone. The job is kept
   until the custody is released, then expires as usual (SQLite v129; a
   shape-verified hiqlite extension).
-- CM v2.9 display mapping restores no detail where the tone curve sits on its
-  top clip, as the licensed reference does. Pixels brighter than the shot's
-  clip point kept a detail term the reference drops (up to 33 dE ITP on
-  synthetic specks above the clip); frames with no pixel above the clip
-  render exactly as before.
+- CM v2.9 display mapping holds the picture to the display's range only once,
+  after the L2 trim and the detail pass, as the licensed reference does. The
+  tone curve was clamped to the target range before the trim, so pixels
+  brighter than the shot's L1 maximum lost their gradation under a darkening
+  trim (flat up to 2,280 16-bit codes below the reference), pixels darker than
+  the shot's L1 minimum were lifted to the display black the reference maps
+  under, and detail above the clip came out wrong (up to 33 dE ITP on
+  synthetic specks). Pixels inside the shot's own L1 range map as before.
+- CM v2.9 picks its L2 trim the way the licensed reference does when the RPU
+  has none for the display's peak: it interpolates between the nearest L2
+  targets below and above, including one at or above the mastering peak
+  (which was ignored, leaving such titles untrimmed below it), fades a trim
+  with nothing below it towards the mastering display's minimum instead of
+  absolute black, and applies an L2 authored for the mastering peak or above.
+  A title with no L2, or a display at or above the mastering peak with no L2
+  above it, still maps untrimmed.
 - The server image builds its Dolby Vision helper bundle from the same source
   tree as the server it ships with. The bundle had been taken from a separately
   published image, so helper changes never reached an image, and a server built
@@ -254,6 +282,40 @@ bump may break compatibility and a **patch** bump never does.
   other nodes see it within about a second. Planning, encoder admission,
   background workers, the save response, fences, auth, membership, ownership
   and pre-mutation reads stay quorum reads (playback-start E1b).
+- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
+  files left a folder (a Re-match). Such a request probes exactly its expected
+  and removed paths, walks nothing else and never becomes a full scan; each
+  removed path is reported `gone` (its file record removed, and the item too
+  when that was its last file), `unknown`, `present` or `retained`. A missing
+  removed path is not `path_unreadable`; an unreadable chain or an empty mount
+  point is, and removes nothing. The connection test advertises
+  `"features": ["removed_paths"]`.
+- Offload: when Curator deletes a title's files to free disk, plurx keeps the
+  item, its metadata and its watch history, greyed out with an Offloaded badge.
+  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
+  connection test lists `offload`), an item is flagged `offloaded` only when no
+  file is left, and no prune ever deletes one. Library lists take
+  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
+  in the web, Apple and Android clients); search always includes them, flagged.
+  An administrator's **Get it back** asks Curator for the title again
+  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
+  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
+  kept item by the request's ids and clear the flag. Deploy every cinema node
+  before Curator sends offload. [Contract](docs/INTEGRATION.md).
+- `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
+  say which media files left a folder (a Re-match). Such a request probes
+  exactly its expected and removed paths, walks nothing else, never becomes a
+  full scan and is a job of its own that no walking request joins. Each removed
+  path is reported `gone` (file records removed, `item_ids` listed, the items
+  too when that left them empty), `unknown`, `present` (with a `reason`:
+  `exists`, `symlink_in_chain`, `case_variant`, `reappeared_before_removal`),
+  `retained` (with a machine `code` and `retryable`) or `skipped`. Nothing is
+  removed while an expected file is not placed. A missing removed path is not
+  `path_unreadable`; an unreadable chain, an empty mount point or a nested
+  mount on another filesystem is, and removes nothing. The connection test
+  advertises `"features": ["removed_paths", "probe_only"]`. Deploy every cinema
+  node before Curator sends `removed_paths` (docs/INTEGRATION.md §1.10).
+
 - Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
   `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
   request and result), `wait_ms` (hold the answer up to 15 s for a `200` with

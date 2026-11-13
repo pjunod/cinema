@@ -19,6 +19,8 @@ import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.net.URI
 import tv.plurx.app.data.ItemAnnotations
+import tv.plurx.app.data.OffloadAnswer
+import tv.plurx.app.data.offloadAnswerOrThrow
 import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.withPeakFrom
 import tv.plurx.app.data.Caps
@@ -565,6 +567,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setAppearance(appearance: Appearance) = updatePreferences { copy(appearance = appearance) }
 
     fun setLibraryPresentation(value: tv.plurx.app.data.LibraryPresentation) = updatePreferences { copy(libraryPresentation = value) }
+    fun setLibraryPresence(value: tv.plurx.app.data.LibraryPresence) = updatePreferences { copy(libraryPresence = value) }
 
     fun setPosterSize(size: PosterSize) = updatePreferences { copy(posterSize = size) }
 
@@ -780,6 +783,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var activeLibraryPager: LibraryPager? = null
     private var activeLibraryPagerProfile: LibraryPagerProfile? = null
+    private var activeLibraryPresence = tv.plurx.app.data.LibraryPresence.Disk
 
     private fun invalidateLibraryPager() {
         activeLibraryPager?.invalidate()
@@ -787,10 +791,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         activeLibraryPagerProfile = null
     }
 
-    internal fun libraryPager(ids: List<Long>, sort: String): LibraryPager {
+    internal fun libraryPager(
+        ids: List<Long>,
+        sort: String,
+        presence: tv.plurx.app.data.LibraryPresence = tv.plurx.app.data.LibraryPresence.Disk,
+    ): LibraryPager {
         val profile = LibraryPagerProfile(Session.origin, serverInstanceId, currentUserId, Session.token)
         val active = activeLibraryPager
-        if (active != null && activeLibraryPagerProfile == profile && active.ids == ids && active.sort == sort) {
+        if (active != null && activeLibraryPagerProfile == profile && active.ids == ids && active.sort == sort && activeLibraryPresence == presence) {
             return active
         }
         invalidateLibraryPager()
@@ -799,8 +807,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return LibraryPager(ids, sort, viewModelScope) { id, offset, order ->
             if (activeLibraryPagerProfile != profile) throw CancellationException("Library profile changed")
             val source = boundApi ?: error("Sign in to load this library")
-            source.libraryItems(id, limit = 200, offset = offset, sort = order)
+            // The server's default is what is on disk, so only a different
+            // choice is sent: an older server never sees the parameter.
+            source.libraryItems(
+                id, limit = 200, offset = offset, sort = order,
+                presence = presence.storageValue.takeIf { presence != tv.plurx.app.data.LibraryPresence.Disk },
+            )
         }.also {
+            activeLibraryPresence = presence
             activeLibraryPager = it
             activeLibraryPagerProfile = profile
         }
@@ -880,6 +894,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun annotations(itemId: Long): ItemAnnotations = api().annotations(itemId)
+
+    /** Admin: ask Curator for an offloaded title back. Throws with the server's own sentence on a refusal. */
+    suspend fun getItBack(itemId: Long): OffloadAnswer = offloadAnswerOrThrow(api().getItBack(itemId))
+
+    suspend fun offloadStatus(itemId: Long): OffloadAnswer = api().offloadStatus(itemId)
 
     /** Re-read the reader's lists after a toggle so Home matches on return. */
     suspend fun refreshLists() {

@@ -207,9 +207,11 @@ fn pre_v21_item_projection_supplies_null_book_facts() {
         .expect("items table plan");
     let v20 = value_projection(table, 20, false);
     let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
-    assert!(v20.ends_with("artwork_error, genres, NULL, NULL, NULL, NULL"));
+    // Book facts (v21) and the offload mark (v130) are both absent from a v20
+    // source, so each crosses as NULL.
+    assert!(v20.ends_with("artwork_error, genres, NULL, NULL, NULL, NULL, NULL"));
     assert!(current.ends_with(
-        "artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source"
+        "artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source, offloaded_at"
     ));
 }
 

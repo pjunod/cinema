@@ -1285,6 +1285,10 @@ mod tests {
                 "DROP TRIGGER IF EXISTS playback_settings_insert;
              DROP TRIGGER IF EXISTS playback_settings_update;
              DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_insert;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_update;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_delete;
+             DROP TABLE IF EXISTS playback_input_keys_schema;
              DROP TABLE IF EXISTS playback_input_generation;
              ",
             )
@@ -1764,7 +1768,9 @@ mod tests {
             // v129: the shared queue helper drops every background_* object,
             // the replaced triggers and their marker among them.
             "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
-            // v130: the shared queue helper drops every background_* object,
+            // v130: offload's `items.offloaded_at` and its two clearing triggers.
+            "ADD COLUMN offloaded_at",
+            // v131: the shared queue helper drops every background_* object,
             // the F+ curve tables, their triggers and marker among them.
             "CREATE TABLE IF NOT EXISTS background_dv_refit_schema",
         ];

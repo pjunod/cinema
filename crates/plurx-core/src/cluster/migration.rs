@@ -5584,7 +5584,13 @@ pub mod status {
     const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
     const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
     const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
-    const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
+    /// How long one quorum confirmation proves this node's authority to serve
+    /// from its replica. The route cache of playback-start E1c holds a fact it
+    /// observed directly (a row it committed, or a quorum read) for the same
+    /// lease and no longer, so a node without a serving proof costs one quorum
+    /// read per session per lease (`docs/streaming/PLAYBACK-START-E1-BUILD.md`
+    /// §4.4): one time bound, the proof's own.
+    pub const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
     /// How many quorum confirmations of the current generation a node keeps,
     /// so a confirmation it catches up to after a newer one has landed still
     /// proves authority until its own lease ends (C1 of
@@ -6423,7 +6429,13 @@ pub mod status {
         /// - the apply-lag budget is not consulted, which is the entire point:
         ///   this proof is being retained *because* apply is behind, and the
         ///   bounded-replica read path — which does need freshness — is
-        ///   untouched and still refuses on lag;
+        ///   untouched and still refuses on lag. The applied views of
+        ///   playback-start E1 (`store/applied_view.rs`: settings and
+        ///   media-session routes, beside `CatalogueReader`) do read under
+        ///   this proof: their answer is as new as a commit index a quorum
+        ///   confirmed within one lease, the lag behind the newest watermark
+        ///   is not bounded, and a fact this process already holds is
+        ///   protected by the view's floor (`confirmed_since`), not by lag;
         /// - the committed index may have advanced past the captured one,
         ///   since a newer watermark arriving is the ordinary cause of this
         ///   path, but it may never have gone backwards.

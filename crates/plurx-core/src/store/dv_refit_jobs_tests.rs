@@ -22,7 +22,7 @@ fn refit_schema_installs_whole_and_refuses_a_partial_shape() {
 fn a_migrated_catalogue_carries_the_exact_extension() {
     let conn = rusqlite::Connection::open_in_memory().expect("catalogue");
     super::super::sqlite::SqliteStore::migrate(&conn).expect("migrate");
-    verify_sqlite(&conn).expect("v130 installs the F+ extension");
+    verify_sqlite(&conn).expect("v131 installs the F+ extension");
     assert_eq!(
         super::super::sqlite::MIGRATIONS[SQLITE_INTRODUCED_SCHEMA as usize - 1],
         SCHEMA

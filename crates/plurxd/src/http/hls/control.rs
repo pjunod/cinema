@@ -3205,6 +3205,12 @@ async fn control_local_with_observation(
     if result.disposition == crate::playback_control::ControlDisposition::Accepted
         && !durable_receipt_response
     {
+        if request.generation == route.incarnation_id
+            && request.demand == crate::playback_control::PlaybackDemand::Active
+            && request.render_state == crate::playback_control::RenderState::Rendering
+        {
+            super::processed_upgrade::note_rendering(state, route);
+        }
         super::processed_upgrade::note_accepted_control(
             state,
             route,

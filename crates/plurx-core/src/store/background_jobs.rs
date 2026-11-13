@@ -616,7 +616,7 @@ WHERE id = json_extract($1, '$.job_id')
           WHERE interest.job_id = background_jobs.id
             AND interest.state IN ('pending','awaiting_hydration')
             AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-            AND (interest.consumer_kind = 'playback_fragment'
+            AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
               OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
                   SELECT 1 FROM background_job_waiters viewer
                   WHERE viewer.job_id = interest.consumer_ref
@@ -648,7 +648,7 @@ WHERE id = json_extract($1, '$.job_id')
                 WHERE interest.job_id = held.job_id
                   AND interest.state IN ('pending','awaiting_hydration')
                   AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-                  AND (interest.consumer_kind = 'playback_fragment'
+                  AND (interest.consumer_kind IN ('playback_fragment','playback_qualification')
                     OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
                         SELECT 1 FROM background_job_waiters viewer
                         WHERE viewer.job_id = interest.consumer_ref
@@ -2528,6 +2528,15 @@ pub trait BackgroundJobStore: Send + Sync {
         file_id: i64,
         request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
     ) -> Result<bool, StoreError>;
+    /// Hold `viewer`'s bounded live demand on `file_id`'s title scan; see
+    /// `dv_title_jobs::attach_viewer`. False when no scan is queued or running.
+    async fn attach_dv_title_viewer(
+        &self,
+        file_id: i64,
+        viewer: &str,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn request_dv_fel_requalification(
         &self,
         file_id: i64,
@@ -3587,6 +3596,15 @@ LIMIT 1
         request: &crate::transcode::dv_fel_qualification::FelRecipeRequest,
     ) -> Result<bool, StoreError> {
         super::dv_title_jobs::request_fel_variant(self, file_id, request).await
+    }
+    async fn attach_dv_title_viewer(
+        &self,
+        file_id: i64,
+        viewer: &str,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::attach_viewer(self, file_id, viewer, deadline_ms, now_ms).await
     }
     async fn request_dv_fel_requalification(
         &self,
