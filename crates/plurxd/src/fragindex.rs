@@ -815,18 +815,38 @@ struct RefitPacketOrigin {
 }
 
 impl RefitPacketOrigin {
-    fn resolve(self, init: &Init, fragment: &fmp4::Fragment) -> Result<plurx_core::segplan::DvRefitOrigin, String> {
+    fn resolve(
+        self,
+        init: &Init,
+        fragment: &fmp4::Fragment,
+    ) -> Result<plurx_core::segplan::DvRefitOrigin, String> {
         let video = init.video().ok_or("F+ first packet has no video track")?;
-        let track = fragment.track(video.id).ok_or("F+ first packet has no video fragment")?;
-        let run = track.runs.first().ok_or("F+ first packet has no sample run")?;
+        let track = fragment
+            .track(video.id)
+            .ok_or("F+ first packet has no video fragment")?;
+        let run = track
+            .runs
+            .first()
+            .ok_or("F+ first packet has no sample run")?;
         let sample = run.samples.first().ok_or("F+ first packet has no sample")?;
         if self.first_dts.is_none() {
-            let expected = self.first_sample_sha256.ok_or("F+ missing-DTS packet has no independent identity")?;
-            let end = run.data_offset.checked_add(sample.size as usize).ok_or("F+ sample extent overflow")?;
-            let bytes = fragment.bytes.get(run.data_offset..end).ok_or("F+ first sample extent is invalid")?;
+            let expected = self
+                .first_sample_sha256
+                .ok_or("F+ missing-DTS packet has no independent identity")?;
+            let end = run
+                .data_offset
+                .checked_add(sample.size as usize)
+                .ok_or("F+ sample extent overflow")?;
+            let bytes = fragment
+                .bytes
+                .get(run.data_offset..end)
+                .ok_or("F+ first sample extent is invalid")?;
             let actual: [u8; 32] = Sha256::digest(bytes).into();
             if actual != expected {
-                return Err("F+ first emitted sample differs from the independently probed source packet".into());
+                return Err(
+                    "F+ first emitted sample differs from the independently probed source packet"
+                        .into(),
+                );
             }
         }
         let clock = plurx_core::transcode::dv_refit_serve::SourceClock {
@@ -835,58 +855,128 @@ impl RefitPacketOrigin {
             source_pts: self.first_pts,
             source_time_base: (self.time_base_num, self.time_base_den),
         };
-        let first_dts = clock.source_pts(i128::from(track.base_decode_time)).map_err(|error| error.to_string())?;
+        let first_dts = clock
+            .source_pts(i128::from(track.base_decode_time))
+            .map_err(|error| error.to_string())?;
         if self.first_dts.is_some_and(|known| known != first_dts) {
-            return Err("F+ source packet DTS/PTS disagree with the emitted composition offset".into());
+            return Err(
+                "F+ source packet DTS/PTS disagree with the emitted composition offset".into(),
+            );
         }
-        Ok(plurx_core::segplan::DvRefitOrigin { first_dts, first_pts: self.first_pts,
-            time_base_num: self.time_base_num, time_base_den: self.time_base_den })
+        Ok(plurx_core::segplan::DvRefitOrigin {
+            first_dts,
+            first_pts: self.first_pts,
+            time_base_num: self.time_base_num,
+            time_base_den: self.time_base_den,
+        })
     }
 }
 
 fn filtered_packet_hash_args(input: &str, stream: u32, retain_parameter_sets: bool) -> Vec<String> {
     let filter = transcode::hevc_copy_bsf_for_copy_retaining(
-        Some("dolby_vision"), false, true, true, retain_parameter_sets);
-    ["-hide_banner", "-loglevel", "error", "-copyts", "-i", input, "-map", &format!("0:{stream}"),
-        "-an", "-sn", "-c:v", "copy", "-bsf:v", filter.as_str(),
-        "-frames:v", "1", "-f", "framehash", "-hash", "sha256", "pipe:1"]
-        .map(str::to_owned).into()
+        Some("dolby_vision"),
+        false,
+        true,
+        true,
+        retain_parameter_sets,
+    );
+    [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-copyts",
+        "-i",
+        input,
+        "-map",
+        &format!("0:{stream}"),
+        "-an",
+        "-sn",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        filter.as_str(),
+        "-frames:v",
+        "1",
+        "-f",
+        "framehash",
+        "-hash",
+        "sha256",
+        "pipe:1",
+    ]
+    .map(str::to_owned)
+    .into()
 }
 
 fn filtered_packet_hash(raw: &[u8], pts: i64, time_base: (u32, u32)) -> Result<[u8; 32], String> {
     let text = std::str::from_utf8(raw).map_err(|error| error.to_string())?;
-    let base = text.lines().find_map(|line| line.strip_prefix("#tb 0:")).ok_or("F+ packet hash has no time base")?;
+    let base = text
+        .lines()
+        .find_map(|line| line.strip_prefix("#tb 0:"))
+        .ok_or("F+ packet hash has no time base")?;
     let observed = parse_time_base(base.trim()).ok_or("F+ packet hash time base is invalid")?;
     if observed != (u64::from(time_base.0), u64::from(time_base.1)) {
         return Err("F+ packet hash uses a different source time base".into());
     }
-    let packets: Vec<_> = text.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty()).collect();
-    if packets.len() != 1 { return Err("F+ packet hash did not identify exactly one source packet".into()); }
+    let packets: Vec<_> = text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    if packets.len() != 1 {
+        return Err("F+ packet hash did not identify exactly one source packet".into());
+    }
     let fields: Vec<_> = packets[0].split(',').map(str::trim).collect();
     if fields.len() != 6 || fields[2].parse::<i64>().ok() != Some(pts) {
         return Err("F+ packet hash does not identify the probed first source PTS".into());
     }
-    hex::decode(fields[5]).map_err(|error| error.to_string())?.try_into().map_err(|_| "F+ packet hash is not SHA256".into())
+    hex::decode(fields[5])
+        .map_err(|error| error.to_string())?
+        .try_into()
+        .map_err(|_| "F+ packet hash is not SHA256".into())
 }
 
-async fn held_filtered_packet_hash(source: &std::fs::File, stream: u32, pts: i64,
-    time_base: (u32, u32), budget: Duration, cancel: Option<&tokio_util::sync::CancellationToken>,
+async fn held_filtered_packet_hash(
+    source: &std::fs::File,
+    stream: u32,
+    pts: i64,
+    time_base: (u32, u32),
+    budget: Duration,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
     retain_parameter_sets: bool,
 ) -> Result<[u8; 32], String> {
     let mut view = source;
-    view.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    view.seek(SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     #[cfg(unix)]
-    { command.args(filtered_packet_hash_args("/dev/fd/3", stream, retain_parameter_sets));
-      crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]); }
+    {
+        command.args(filtered_packet_hash_args(
+            "/dev/fd/3",
+            stream,
+            retain_parameter_sets,
+        ));
+        crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
+    }
     #[cfg(windows)]
-    { let path = crate::ffmpeg::windows_source_path(source)?;
-      crate::ffmpeg::verify_windows_source_path(source, &path)?;
-      command.args(filtered_packet_hash_args(&path.to_string_lossy(), stream, retain_parameter_sets)); }
-    let result = crate::ffmpeg::bounded_command_output_cancellable(command,
-        budget.min(Duration::from_secs(30)), 64 * 1024, "F+ first packet identity", cancel,
-        crate::process_control::ChildWork::realtime("F+ first packet identity")).await;
-    view.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    {
+        let path = crate::ffmpeg::windows_source_path(source)?;
+        crate::ffmpeg::verify_windows_source_path(source, &path)?;
+        command.args(filtered_packet_hash_args(
+            &path.to_string_lossy(),
+            stream,
+            retain_parameter_sets,
+        ));
+    }
+    let result = crate::ffmpeg::bounded_command_output_cancellable(
+        command,
+        budget.min(Duration::from_secs(30)),
+        64 * 1024,
+        "F+ first packet identity",
+        cancel,
+        crate::process_control::ChildWork::realtime("F+ first packet identity"),
+    )
+    .await;
+    view.seek(SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
     filtered_packet_hash(&result?.stdout, pts, time_base)
 }
 
@@ -1012,7 +1102,9 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                                         };
                                         let origin = match origin.resolve(init, &fragment) {
                                             Ok(origin) => origin,
-                                            Err(reason) => return IndexOutcome::Unsupported(reason),
+                                            Err(reason) => {
+                                                return IndexOutcome::Unsupported(reason)
+                                            }
                                         };
                                         resolved_refit_origin = Some(origin);
                                         let Some(video) = init.video() else {
@@ -2082,8 +2174,13 @@ async fn probe_completion_expectation_inner(
                 0,
             ));
         };
-        Some(RefitPacketOrigin { first_dts, first_pts, time_base_num, time_base_den,
-            first_sample_sha256: None })
+        Some(RefitPacketOrigin {
+            first_dts,
+            first_pts,
+            time_base_num,
+            time_base_den,
+            first_sample_sha256: None,
+        })
     } else {
         None
     };
@@ -2901,23 +2998,36 @@ async fn build_attested_pass(
                     match crate::dv_refit_serving::pinned_table(store, file, digest).await {
                         Ok(Some(table)) => {
                             let mut origin = probed.dv_refit_origin;
-                            if let Some(pending) = origin.as_mut().filter(|origin| origin.first_dts.is_none()) {
-                                match held_filtered_packet_hash(source, probed.expectation.stream_index,
-                                    pending.first_pts, (pending.time_base_num, pending.time_base_den),
-                                    budget.saturating_sub(started.elapsed()), cancel,
-                                    video.retains_hevc_parameter_sets()).await {
+                            if let Some(pending) =
+                                origin.as_mut().filter(|origin| origin.first_dts.is_none())
+                            {
+                                match held_filtered_packet_hash(
+                                    source,
+                                    probed.expectation.stream_index,
+                                    pending.first_pts,
+                                    (pending.time_base_num, pending.time_base_den),
+                                    budget.saturating_sub(started.elapsed()),
+                                    cancel,
+                                    video.retains_hevc_parameter_sets(),
+                                )
+                                .await
+                                {
                                     Ok(hash) => pending.first_sample_sha256 = Some(hash),
                                     Err(reason) => {
-                                        builds[slot] = Some(IndexBuild::plain(IndexOutcome::Failed(Box::new(
-                                            IndexFailure::new(IndexFailureCode::IndexCompletionUnverified,
-                                                format!("F+ source packet identity: {reason}"), 0)))));
+                                        builds[slot] = Some(IndexBuild::plain(
+                                            IndexOutcome::Failed(Box::new(IndexFailure::new(
+                                                IndexFailureCode::IndexCompletionUnverified,
+                                                format!("F+ source packet identity: {reason}"),
+                                                0,
+                                            ))),
+                                        ));
                                         continue;
                                     }
                                 }
                             }
                             output.refit_origin = origin;
                             output.refit = Some(table);
-                        },
+                        }
                         Ok(None) => {
                             builds[slot] = Some(IndexBuild::plain(IndexOutcome::Unsupported(
                                 "the fitted index's curve digest is no longer kept".into(),
