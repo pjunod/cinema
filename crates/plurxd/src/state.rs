@@ -3743,17 +3743,19 @@ pub(crate) async fn fragment_index_video_identity_options(
     let refit = crate::dv_refit_serving::index_digest(store, file, convert)
         .await
         .map_err(StoreError::Task)?;
-    Ok(
-        crate::fragindex::video_identities_with_refit(
-            file, probe_json.as_deref(), have_dovi, convert, refit,
-        )
-            .into_iter()
-            .map(|video| {
-                let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
-                (video, fingerprint)
-            })
-            .collect(),
+    Ok(crate::fragindex::video_identities_with_refit(
+        file,
+        probe_json.as_deref(),
+        have_dovi,
+        convert,
+        refit,
     )
+    .into_iter()
+    .map(|video| {
+        let fingerprint = crate::fragindex::identity_for(file, video).argv_fingerprint;
+        (video, fingerprint)
+    })
+    .collect())
 }
 
 /// Which identity a request is asking for.

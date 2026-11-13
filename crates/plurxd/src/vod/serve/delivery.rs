@@ -152,8 +152,9 @@ impl VodServe {
                     };
                     Some((
                         VodDeliveryInfo {
-                            dv_refit_digest: session.rendition.as_ref().and_then(|rendition|
-                                rendition.recipe.video.dolby_vision_refit().map(hex::encode)),
+                            dv_refit_digest: session.rendition.as_ref().and_then(|rendition| {
+                                rendition.recipe.video.dolby_vision_refit().map(hex::encode)
+                            }),
                             observation: Some(observation),
                             id: id.clone(),
                             method: match session.kind {

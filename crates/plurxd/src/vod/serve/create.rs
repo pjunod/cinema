@@ -684,9 +684,17 @@ impl VodServe {
         );
         let video = if prepared.encoding.is_none() {
             crate::dv_refit_serving::rendition_refit(
-                self.shared.store.as_ref(), file, video, req.dv_refit_digest.as_deref(),
-            ).await.map_err(|error| format!("resolving fitted copy rendition: {error}"))?.0
-        } else { video };
+                self.shared.store.as_ref(),
+                file,
+                video,
+                req.dv_refit_digest.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("resolving fitted copy rendition: {error}"))?
+            .0
+        } else {
+            video
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
@@ -1975,7 +1983,12 @@ impl ReservedSourceVodRendition {
                     .encoding
                     .as_ref()
                     .and_then(|encoding| encoding.processed_fel()),
-                dv_refit_digest: self.rendition.recipe.video.dolby_vision_refit().map(hex::encode),
+                dv_refit_digest: self
+                    .rendition
+                    .recipe
+                    .video
+                    .dolby_vision_refit()
+                    .map(hex::encode),
                 degraded_processing: None,
                 processing_note: None,
                 session_id: session_id.into(),
@@ -2691,10 +2704,17 @@ impl VodServe {
         );
         let video = if prepared.encoding.is_none() {
             crate::dv_refit_serving::rendition_refit(
-                self.shared.store.as_ref(), file, video,
+                self.shared.store.as_ref(),
+                file,
+                video,
                 prepared.request.dv_refit_digest.as_deref(),
-            ).await.map_err(|error| format!("resolving fitted source copy rendition: {error}"))?.0
-        } else { video };
+            )
+            .await
+            .map_err(|error| format!("resolving fitted source copy rendition: {error}"))?
+            .0
+        } else {
+            video
+        };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),

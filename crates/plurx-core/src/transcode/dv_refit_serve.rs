@@ -76,7 +76,8 @@ impl ServedCurveTable {
         for (index, (first_pts, end, base, fitted)) in scenes.into_iter().enumerate() {
             match time_base {
                 None => {
-                    let parsed = parse_time_base(base).ok_or_else(|| ServeError::TimeBase(base.into()))?;
+                    let parsed =
+                        parse_time_base(base).ok_or_else(|| ServeError::TimeBase(base.into()))?;
                     time_base = Some((base, parsed));
                 }
                 Some((known, _)) if known != base => return Err(ServeError::MixedTimeBase),
@@ -90,7 +91,13 @@ impl ServedCurveTable {
             curves.push(fitted.cloned());
         }
         let (_, time_base) = time_base.ok_or(ServeError::Empty)?;
-        Ok(Self { digest: digest.into(), time_base, starts, end_pts, curves })
+        Ok(Self {
+            digest: digest.into(),
+            time_base,
+            starts,
+            end_pts,
+            curves,
+        })
     }
     /// Builds the table from stored scenes, in presentation order:
     /// `(first_pts, end_pts, time_base, curves)`. Stored curves are checked
@@ -197,15 +204,20 @@ impl SourceClock {
         };
         let offset = i128::from(landed.dts) - i128::from(first.dts);
         let denominator = i128::from(index.timescale) * i128::from(origin.time_base_num);
-        let numerator = offset.checked_mul(i128::from(origin.time_base_den))
+        let numerator = offset
+            .checked_mul(i128::from(origin.time_base_den))
             .ok_or(ServeError::Overflow(offset))?;
         if denominator == 0 || numerator % denominator != 0 {
             return Err(ServeError::NonIntegral(offset));
         }
-        let source_dts = i128::from(origin.first_dts).checked_add(numerator / denominator)
+        let source_dts = i128::from(origin.first_dts)
+            .checked_add(numerator / denominator)
             .and_then(|value| i64::try_from(value).ok())
             .ok_or(ServeError::Overflow(offset))?;
-        Ok(Self { source_pts: source_dts, ..clock })
+        Ok(Self {
+            source_pts: source_dts,
+            ..clock
+        })
     }
 
     /// The source pts of a sample presenting at `presentation` track ticks:

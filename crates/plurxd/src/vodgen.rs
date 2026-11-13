@@ -705,31 +705,54 @@ impl<S: Sink> GenerationRun<'_, S> {
         target: usize,
     ) -> Result<usize, Outcome> {
         let time = match self.landing_clock.take() {
-            Some(probe) => Some(probe().await.map_err(|why| landing_failed(
-                format!("fitted conversion could not measure its landing: {why}")))?),
+            Some(probe) => Some(probe().await.map_err(|why| {
+                landing_failed(format!(
+                    "fitted conversion could not measure its landing: {why}"
+                ))
+            })?),
             None if self.generation.start_entry == 0 => None,
-            None => return Err(landing_failed(
-                "fitted seek conversion needs an index landing clock".into())),
+            None => {
+                return Err(landing_failed(
+                    "fitted seek conversion needs an index landing clock".into(),
+                ))
+            }
         };
         let candidate = if let Some(time) = time {
             let after = index.rows.partition_point(|row| row.dts <= time.ticks);
-            [after.checked_sub(1), (after < index.rows.len()).then_some(after)]
-                .into_iter().flatten()
-                .min_by_key(|&row| index.rows[row].dts.abs_diff(time.ticks))
-                .ok_or_else(|| landing_failed("the fitted index has no landing row".into()))?
-        } else { 0 };
-        let init = self.served.as_ref().ok_or_else(||
-            landing_failed("fitted conversion has no served init".into()))?;
-        let video = init.video().ok_or_else(||
-            landing_failed("fitted conversion has no video track".into()))?;
-        let first_dts = self.landing.iter()
+            [
+                after.checked_sub(1),
+                (after < index.rows.len()).then_some(after),
+            ]
+            .into_iter()
+            .flatten()
+            .min_by_key(|&row| index.rows[row].dts.abs_diff(time.ticks))
+            .ok_or_else(|| landing_failed("the fitted index has no landing row".into()))?
+        } else {
+            0
+        };
+        let init = self
+            .served
+            .as_ref()
+            .ok_or_else(|| landing_failed("fitted conversion has no served init".into()))?;
+        let video = init
+            .video()
+            .ok_or_else(|| landing_failed("fitted conversion has no video track".into()))?;
+        let first_dts = self
+            .landing
+            .iter()
             .find_map(|fragment| fragment.track(video.id).map(|track| track.base_decode_time))
-            .ok_or_else(|| landing_failed("fitted conversion has no first video fragment".into()))?;
+            .ok_or_else(|| {
+                landing_failed("fitted conversion has no first video fragment".into())
+            })?;
         let clock = plurx_core::transcode::dv_refit_serve::SourceClock::for_index_landing(
             index, candidate, first_dts,
-        ).map_err(|error| landing_failed(format!("fitted landing clock: {error}")))?;
-        let table = self.generation.dv_refit.as_ref().ok_or_else(||
-            landing_failed("fitted conversion lost its pinned table".into()))?;
+        )
+        .map_err(|error| landing_failed(format!("fitted landing clock: {error}")))?;
+        let table = self
+            .generation
+            .dv_refit
+            .as_ref()
+            .ok_or_else(|| landing_failed("fitted conversion lost its pinned table".into()))?;
         let mut converter = crate::dvpipe::Converter::for_init(init)
             .and_then(|ready| ready.with_refit(std::sync::Arc::clone(table), clock))
             .map_err(|error| landing_failed(format!("fitted conversion: {error}")))?;
@@ -737,8 +760,9 @@ impl<S: Sink> GenerationRun<'_, S> {
         let mut observed = Vec::with_capacity(self.observed.len());
         for original in &self.landing {
             let mut fragment = original.clone();
-            converter.convert(&mut fragment).map_err(|error|
-                landing_failed(format!("fitted conversion: {error}")))?;
+            converter
+                .convert(&mut fragment)
+                .map_err(|error| landing_failed(format!("fitted conversion: {error}")))?;
             if let Some(bytes) = self.video_bytes_of(&fragment) {
                 observed.push(bytes);
             }
@@ -748,14 +772,23 @@ impl<S: Sink> GenerationRun<'_, S> {
             match_landing_at(index, &observed, target, time.ticks, time.frame_ticks)
                 .map_err(|error| landing_failed(format!("fitted landing: {error}")))?
         } else {
-            if index.rows.iter().take(observed.len()).map(|row| row.video_bytes)
-                .ne(observed.iter().copied()) {
-                return Err(landing_failed("fitted opening bytes disagree with index row zero".into()));
+            if index
+                .rows
+                .iter()
+                .take(observed.len())
+                .map(|row| row.video_bytes)
+                .ne(observed.iter().copied())
+            {
+                return Err(landing_failed(
+                    "fitted opening bytes disagree with index row zero".into(),
+                ));
             }
             0
         };
         if landed != candidate {
-            return Err(landing_failed("fitted landing candidate changed after conversion".into()));
+            return Err(landing_failed(
+                "fitted landing candidate changed after conversion".into(),
+            ));
         }
         self.landing = converted;
         self.observed = observed;
@@ -787,43 +820,47 @@ impl<S: Sink> GenerationRun<'_, S> {
             let row = if self.generation.dv_refit.is_some() {
                 let index = index.clone();
                 self.match_fitted_landing(&index, target).await?
-            } else { match match_landing(index, &self.observed, target) {
-                Ok(row) => row,
-                Err(ambiguous @ LandingError::Ambiguous { .. }) if self.landing_clock.is_some() => {
-                    let clock = self.landing_clock.take().expect("checked by the guard");
-                    let placed = match clock().await {
-                        Ok(time) => match_landing_at(
-                            index,
-                            &self.observed,
-                            target,
-                            time.ticks,
-                            time.frame_ticks,
-                        )
-                        .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
-                        Err(why) => Err(TimeRefusal::Unmeasured(why)),
-                    };
-                    match placed {
-                        Ok(row) => row,
-                        // The time is one more piece of evidence, not a
-                        // verdict on the rendition: a repeat the next
-                        // fragments settle still lands by its bytes.
-                        Err(refusal) if readable => {
-                            tracing::warn!(
-                                session = %crate::transcode::session_log_id(self.session_log),
-                                "{refusal}; reading further"
-                            );
-                            self.time_refusal = Some(refusal);
-                            return Ok(());
+            } else {
+                match match_landing(index, &self.observed, target) {
+                    Ok(row) => row,
+                    Err(ambiguous @ LandingError::Ambiguous { .. })
+                        if self.landing_clock.is_some() =>
+                    {
+                        let clock = self.landing_clock.take().expect("checked by the guard");
+                        let placed = match clock().await {
+                            Ok(time) => match_landing_at(
+                                index,
+                                &self.observed,
+                                target,
+                                time.ticks,
+                                time.frame_ticks,
+                            )
+                            .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
+                            Err(why) => Err(TimeRefusal::Unmeasured(why)),
+                        };
+                        match placed {
+                            Ok(row) => row,
+                            // The time is one more piece of evidence, not a
+                            // verdict on the rendition: a repeat the next
+                            // fragments settle still lands by its bytes.
+                            Err(refusal) if readable => {
+                                tracing::warn!(
+                                    session = %crate::transcode::session_log_id(self.session_log),
+                                    "{refusal}; reading further"
+                                );
+                                self.time_refusal = Some(refusal);
+                                return Ok(());
+                            }
+                            Err(refusal) => return Err(unplaced(&ambiguous, Some(&refusal))),
                         }
-                        Err(refusal) => return Err(unplaced(&ambiguous, Some(&refusal))),
                     }
+                    Err(LandingError::Ambiguous { .. }) if readable => return Ok(()),
+                    Err(ambiguous @ LandingError::Ambiguous { .. }) => {
+                        return Err(unplaced(&ambiguous, self.time_refusal.as_ref()))
+                    }
+                    Err(error) => return Err(landing_failed(error.to_string())),
                 }
-                Err(LandingError::Ambiguous { .. }) if readable => return Ok(()),
-                Err(ambiguous @ LandingError::Ambiguous { .. }) => {
-                    return Err(unplaced(&ambiguous, self.time_refusal.as_ref()))
-                }
-                Err(error) => return Err(landing_failed(error.to_string())),
-            }};
+            };
             landed = Some(row);
             target - row
         } else {
