@@ -3,8 +3,9 @@
 **Status:** open · **Owner:** Codex · **Updated:** 2026-11-13
 
 Companion to [the implementation plan](PLAYBACK-READER-WITNESS-PLAN.md).
-Work is integrated on `effort/source-reader-witness` in one batched task,
-authorized by the operator on 2026-11-13. Qualification precedes promotion.
+The independent attribution/no-input batch integrated through PR #1576 on
+`effort/source-reader-witness`. The operator authorized its scoped promotion
+through the fast lane on 2026-11-13. This does not qualify the whole project.
 
 | Phase | State | Evidence or next action |
 |---|---|---|
@@ -13,7 +14,7 @@ authorized by the operator on 2026-11-13. Qualification precedes promotion.
 | B2 source reads through the broker | Dependency open | Reconcile playback-start-phase2 and lent-input ownership before overlapping source-input work |
 | B3 residual raw lifetime lock | Conditional; unbuilt | Required where B2 leaves raw readers; inherits the exact owner lock and qualifies packaged children |
 | B4 native and fleet qualification | Open | Native Linux/macOS crash evidence and measured playback performance remain required |
-| Final review and gates | Review addressed; local focused checks pass | One final adversarial review and scoped disposition complete; effort and promotion gates pending |
+| Final review and gates | Effort gate passed; scoped fast lane authorized | PR #1576 records the green Effort development gate and one final review with scoped fix dispositions. Its linked promotion records the main fast lane; full project acceptance remains open. |
 
 ## Safety decisions
 
@@ -73,8 +74,8 @@ All-target compiler check passed before review. Focused native macOS evidence
 now passes: 56 core process cases cumulatively, 27 daemon witness/descriptor/broker cases,
 82 Settings cases cumulatively and both ownership inventory contracts. The
 five failing Settings cases and one inventory case were individually retried
-after correction; passing cases were retained. Compiler lint and CI gates
-remain pending. The Linux loader-isolation case still needs native execution.
+after correction; passing cases were retained. Tracked workspace lint and the Effort development gate pass. The scoped main
+fast lane is recorded by the promotion PR linked from #1576. The Linux loader-isolation case still needs native execution.
 No B2, B3 or full native/fleet acceptance is claimed.
 
 Verifier-root setup remains advisory: a startup qualification error logs a
