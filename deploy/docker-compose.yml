@@ -169,6 +169,15 @@ services:
       # it first, owned by the same uid the container runs as:
       #   sudo install -d -o $(id -u) -g $(id -g) /srv/plurx
       - ${PLURX_DATA:-/srv/plurx}:/var/lib/plurx
+      # Root-owned host proofs that a dead reader has stopped, read-only to
+      # the worker; it can never write or remove them. Empty unless an
+      # operator runs a recovery helper (docs/server/SOURCE-CUSTODY-RECOVERY.md).
+      - type: bind
+        source: /run/plurx-physical-stop
+        target: /run/plurx-physical-stop
+        read_only: true
+        bind:
+          create_host_path: true
       # Media mounts go in docker-compose.override.yml (see example file).
 
   # Keep only multicast discovery on the host network. The actual server stays
