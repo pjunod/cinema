@@ -109,6 +109,18 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(self.due_after({"crates/core/src/lib.rs": "pub fn core() { /* new */ }\n"}),
                          ["app", "core"])
 
+    def test_a_dependents_feature_manifest_rekeys_every_workspace_crate(self):
+        core = self.repo.root / "crates/core/Cargo.toml"
+        self.repo.write("crates/core/Cargo.toml", core.read_text() + "\n[features]\nobserved = []\n")
+        self.base = self.repo.commit("declare dependency feature")
+        app = (self.repo.root / "crates/app/Cargo.toml").read_text()
+        self.assertEqual(
+            self.due_after({"crates/app/Cargo.toml": app.replace(
+                "core = { workspace = true }", 'core = { workspace = true, features = ["observed"] }'
+            )}),
+            ["app", "core", "devonly", "leaf"],
+        )
+
     def test_an_unrelated_crate_change_selects_only_that_crate(self):
         self.assertEqual(self.due_after({"crates/app/src/lib.rs": "pub fn app() { /* new */ }\n"}), ["app"])
 
@@ -468,6 +480,18 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("RUST_UNITS_RESULT: ${{ needs.rust_units.result }}", lane)
         self.assertIn('"$RUST_UNITS_RESULT"', lane)
         self.assertIn(".github/workflows/main-fast-lane.yml", self.config.harness)
+
+    def test_archive_listing_uses_the_same_ci_profile_as_shards(self):
+        listing = self.workflow.split("      - name: Plan the shards\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("--profile ci", listing)
+        self.assertIn("--run-ignored all", listing)
+
+    def test_unit_selection_is_independent_of_the_compile_surface_scope(self):
+        lane = (ROOT / ".github/workflows/main-fast-lane.yml").read_text()
+        unit_job = lane.split("\n  rust_units:\n", 1)[1].split("\n  web_compile:", 1)[0]
+        self.assertIn("if: needs.scope.outputs.rust_units == 'true'", unit_job)
+        self.assertNotIn("needs.scope.outputs.rust ==", unit_job)
+        self.assertIn("rust_units: ${{ steps.scope.outputs.rust_units || 'true' }}", lane)
 
     def test_the_default_filter_covers_exactly_the_argv_detected_child_fixtures(self):
         children = set()

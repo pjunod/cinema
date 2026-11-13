@@ -21,13 +21,13 @@ authenticated is simply not adopted.
 
 | Trigger | What happens |
 |---|---|
-| Ready main-bound PR whose scope includes Rust | `main-fast-lane.yml` calls `rust-units.yml` after preflight; `Main promotion gate` requires its result. Drafts run none of it. |
+| Every ready main-bound PR | `main-fast-lane.yml` calls `rust-units.yml` after preflight; `Main promotion gate` requires its result. Drafts run none of it. |
 | `workflow_dispatch` of `rust-units.yml` on any branch | The same stage against `base` (default `origin/main`). Its receipts count for later PR runs. |
-| Docs-only or client-only PR | Nothing: `validation.ci_scope` says `rust=false`, and even if it ran, no crate's key would change. |
+| Docs-only or client-only PR | The content selector still runs: Rust tests may read those files. It builds nothing when every content key is unchanged. |
 
 The stage is six jobs (names are part of receipt authentication):
 
-1. **`Rust units: select`** (any `general` runner, a few seconds). Computes
+1. **`Rust units: select`** (any `general` runner). Computes
    every unit crate's content key at the head and at the merge-base with the
    base (§3). A crate is *due* when they differ. For each due crate it then
    looks up authenticated receipts under the head key (§4) and drops the tests
@@ -114,7 +114,8 @@ in place) is:
 1. every tracked file outside `crates/` that no `exempt` glob matches — so
    `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`,
    `vendor/**` and anything new at the top level re-key **every** crate;
-2. the `harness`: this workflow (which pins the CI image digest and the
+2. every workspace member manifest (Cargo unifies features across the whole
+   workspace archive build), plus the `harness`: this workflow (which pins the CI image digest and the
    nextest release), `.config/nextest.toml`, the FFmpeg and native-deps
    actions, `validation/rust_units.py` and the inputs file itself;
 3. the directories of the crate and of every workspace crate in its closure:

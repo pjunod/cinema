@@ -10,7 +10,8 @@
 # The input set of crate C is:
 #   1. every tracked file outside `crates/` that no `exempt` glob matches
 #      (anything not explicitly exempted is an input of every crate);
-#   2. every `harness` file, exempt or not;
+#   2. every `harness` file, exempt or not, and every workspace member manifest
+#      (workspace archive builds unify features requested by all members);
 #   3. the directory of C and of every workspace crate in C's dependency
 #      closure (C's normal, build and dev dependencies, then their normal and
 #      build dependencies), plus external path dependencies;

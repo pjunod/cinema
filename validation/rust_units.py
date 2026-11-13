@@ -388,7 +388,13 @@ class Keys:
                 shared.append(path)
             elif not path.startswith("crates/") and not matches(path, config.exempt):
                 shared.append(path)
-        self.shared = set(shared)
+        # Archive compilation uses --workspace, so Cargo unifies dependency
+        # features from every member. A dependent's manifest can change the
+        # features compiled into a dependency even when that dependency's own
+        # source closure did not change. Keep all member manifests shared.
+        self.shared = set(shared) | {
+            crate.directory + "/Cargo.toml" for crate in self.crates.values()
+        }
         self._own = {}
 
     def own_inputs(self, name):

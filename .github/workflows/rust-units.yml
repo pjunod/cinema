@@ -174,7 +174,7 @@ jobs:
         id: plan
         run: |
           cargo-nextest nextest list --archive-file target/rust-units/archive.tar.zst \
-            --workspace-remap . --run-ignored all --message-format json \
+            --workspace-remap . --profile ci --run-ignored all --message-format json \
             > target/rust-units/listing.json
           python3 -m validation.rust_units plan --listing target/rust-units/listing.json
       - name: Hand the archive to the shards

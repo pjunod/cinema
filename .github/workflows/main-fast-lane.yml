@@ -92,6 +92,9 @@ jobs:
     timeout-minutes: 2
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
+      # The content selector must see every ready PR: Rust tests also read
+      # documentation and fixtures that compile-scope intentionally ignores.
+      rust_units: ${{ steps.scope.outputs.rust_units || 'true' }}
       apple: ${{ steps.scope.outputs.apple }}
       desktop_macos: ${{ steps.scope.outputs.desktop_macos }}
       android_jvm: ${{ steps.scope.outputs.android_jvm }}
@@ -542,7 +545,7 @@ jobs:
   rust_units:
     name: Rust unit tests
     needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    if: needs.scope.outputs.rust_units == 'true'
     uses: ./.github/workflows/rust-units.yml
     with:
       base: ${{ github.event.pull_request.base.sha }}
