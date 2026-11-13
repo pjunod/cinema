@@ -3904,7 +3904,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # spawn_blocking; state.rs run_targeted scopes a probe-only group to the nearest
 # existing folder on one awaited spawn_blocking. Each JoinHandle is awaited by
 # the request's own future, so cancellation and panics surface as task errors.
-expected_occurrences = 1148
+# Offload, +1 test-only (1148 -> 1149): http/tests.rs `fake_curator` serves a
+# stand-in Curator on one axum task bound to a loopback port. It owns no
+# producer or process, holds no lease, and is not joined: it ends with the
+# test's own runtime, which every `#[tokio::test]` tears down before returning.
+expected_occurrences = 1149
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -6982,7 +6986,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # not a process.
 # PR1527: +1 (923 -> 924), the synchronous `.output()` of the test-only
 # bundle-installer --identity child above; it waits for and reaps the child.
-expected_occurrences = 924
+# Offload: +1 (924 -> 925), the `tokio::spawn` in http/tests.rs `fake_curator`
+# counted above; the broad matcher reads it as a launch method, but it starts an
+# in-process HTTP server task, not an operating-system process.
+expected_occurrences = 925
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
