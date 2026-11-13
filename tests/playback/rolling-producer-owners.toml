@@ -6359,7 +6359,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # fixture exercises fd198/cwd/file-stdio. The real no-source true helper replaces
 # one former reader test command (net zero there). Actual spawned children use
 # the production launcher and are joined before their fixture returns.
-expected_occurrences = 348
+# Probe setup compatibility: +1 test-only command constructor. A finite
+# loop verifies relative/custom/non-profile commands keep their resolution
+# and cwd, while a known absolute no-input candidate receives the owned cwd.
+# This fixture launches no child.
+expected_occurrences = 349
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

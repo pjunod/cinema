@@ -544,12 +544,10 @@ fn is_no_source_inventory(args: &[&str]) -> bool {
 async fn probe(ffmpeg: &str, args: &[&str]) -> Result<String, String> {
     let declared_no_source = is_no_source_inventory(args);
     let mut command = tokio::process::Command::new(ffmpeg);
-    if declared_no_source {
-        if let Some(cwd) = plurx_core::process::source_lifetime::daemon_working_directory() {
-            command.current_dir(cwd);
-        }
-    }
     command.args(["-hide_banner"]).args(args);
+    if declared_no_source {
+        plurx_core::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
+    }
     let output = crate::ffmpeg::bounded_command_output_cancellable(
         command,
         Duration::from_secs(10),

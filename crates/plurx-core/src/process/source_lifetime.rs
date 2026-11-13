@@ -12,7 +12,7 @@ pub use descriptors::{
     StdioMode,
 };
 pub use policy::{
-    daemon_working_directory, is_registered_broker, register_broker, set_daemon_roots,
+    configure_no_input_probe, is_registered_broker, register_broker, set_daemon_roots,
     BrokerRegistration,
 };
 

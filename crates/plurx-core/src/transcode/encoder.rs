@@ -1787,9 +1787,7 @@ pub fn parse_video_decoder_list(output: &str) -> Vec<String> {
 pub async fn detect_video_decoders(ffmpeg_bin: &str) -> Vec<String> {
     let mut command = tokio::process::Command::new(ffmpeg_bin);
     command.args(["-hide_banner", "-decoders"]);
-    if let Some(cwd) = crate::process::source_lifetime::daemon_working_directory() {
-        command.current_dir(cwd);
-    }
+    crate::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
     let output = match crate::process::source_lifetime::prepare_stdio(
         &mut command,
         crate::process::source_lifetime::StdioFacts::CAPTURED,
@@ -2331,9 +2329,7 @@ where
 pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
     let mut command = tokio::process::Command::new(ffmpeg_bin);
     command.args(["-hide_banner", "-encoders"]);
-    if let Some(cwd) = crate::process::source_lifetime::daemon_working_directory() {
-        command.current_dir(cwd);
-    }
+    crate::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
     let output = match crate::process::source_lifetime::prepare_stdio(
         &mut command,
         crate::process::source_lifetime::StdioFacts::CAPTURED,

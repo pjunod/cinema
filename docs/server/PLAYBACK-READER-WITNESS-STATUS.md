@@ -70,7 +70,7 @@ Final adversarial review identified arbitrary-tool grammar, loader-environment
 and synchronous diagnostic-scan gaps. The batch now has positive no-input
 profiles, final-launch environment isolation and one bounded blocking scan.
 All-target compiler check passed before review. Focused native macOS evidence
-now passes: 55 core process cases, 27 daemon witness/descriptor/broker cases,
+now passes: 56 core process cases cumulatively, 27 daemon witness/descriptor/broker cases,
 82 Settings cases cumulatively and both ownership inventory contracts. The
 five failing Settings cases and one inventory case were individually retried
 after correction; passing cases were retained. Compiler lint and CI gates
@@ -82,3 +82,9 @@ warning and leaves declarations unverified; it does not prevent playback or
 daemon startup. Formal correspondence pins retain the same authority anchors
 while binding startup setup, shared descriptor construction and read-only
 diagnostics to the reviewed source. Settlement transitions are unchanged.
+
+Probe setup preserves relative/custom executable resolution and cwd unless
+the absolute installed program and final argv already match the positive
+no-input profile. The same profile is checked again at the final launcher;
+preparation itself never grants recovery proof. Its new compatibility case
+passed independently; prior passing regressions were retained.

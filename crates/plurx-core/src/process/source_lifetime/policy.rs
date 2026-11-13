@@ -86,10 +86,39 @@ pub fn set_daemon_roots(owned: &[PathBuf], tools: &[PathBuf]) -> io::Result<()> 
         }
     }
 }
-/// A stable qualified cwd for audited no-input tools. Callers with relative
-/// media/output semantics must choose their own cwd instead.
-pub fn daemon_working_directory() -> Option<PathBuf> {
-    STATE.lock().ok()?.roots.as_ref()?.owned.first().cloned()
+/// Prepare only an audited no-input candidate. Unqualified tools retain the
+/// caller's program resolution and working directory; setup grants no proof.
+pub fn configure_no_input_probe(command: &mut std::process::Command) {
+    if let Ok(state) = STATE.lock() {
+        configure_no_input_probe_in(&state, command);
+    }
+}
+fn configure_no_input_probe_in(state: &State, command: &mut std::process::Command) {
+    let Some(roots) = state.roots.as_ref() else {
+        return;
+    };
+    let program = Path::new(command.get_program());
+    if !program.is_absolute() {
+        return;
+    }
+    let Ok(program) = program.canonicalize() else {
+        return;
+    };
+    if !contained(&program, &roots.tools) {
+        return;
+    }
+    let Some(args) = command
+        .get_args()
+        .map(|arg| arg.to_str())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    if no_input_profile(&program, &args) {
+        if let Some(cwd) = roots.owned.first() {
+            command.current_dir(cwd);
+        }
+    }
 }
 fn contained(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
@@ -1008,6 +1037,29 @@ mod tests {
             Ok(())
         );
     }
+    #[test]
+    fn unqualified_probe_setup_preserves_command_resolution_and_cwd() {
+        let fixture = Fixture::new();
+        let custom = fixture.tools.join("custom-ffmpeg");
+        std::fs::write(&custom, b"custom tool").expect("custom tool");
+        for (program, args) in [
+            (PathBuf::from("bin/ffmpeg"), vec!["-version"]),
+            (custom, vec!["-version"]),
+            (fixture.tools.join("ffmpeg"), vec!["-version", "movie"]),
+            (fixture.media.join("ffmpeg"), vec!["-version"]),
+        ] {
+            let mut command = std::process::Command::new(&program);
+            command.args(args).current_dir(&fixture.media);
+            configure_no_input_probe_in(&fixture.state, &mut command);
+            assert_eq!(command.get_program(), program.as_os_str());
+            assert_eq!(command.get_current_dir(), Some(fixture.media.as_path()));
+        }
+        let mut qualified = fixture.command("ffmpeg", &["-version"]);
+        qualified.current_dir(&fixture.media);
+        configure_no_input_probe_in(&fixture.state, &mut qualified);
+        assert_eq!(qualified.get_current_dir(), Some(fixture.data.as_path()));
+    }
+
     #[test]
     fn trusted_tool_roots_do_not_approve_computed_reads_or_extra_probe_options() {
         let fixture = Fixture::new();
