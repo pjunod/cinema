@@ -3581,6 +3581,7 @@ async fn strict_native_group_hold_never_excludes_outstanding_daemon_read_time() 
 
 /// The strict supervisor refuses any single read() above one service quantum,
 /// and FFmpeg's file protocol otherwise reads a whole large packet at once.
+#[cfg(target_os = "linux")]
 #[test]
 fn strict_parser_reads_are_capped_to_one_service_quantum() {
     let input = strict_source_input();

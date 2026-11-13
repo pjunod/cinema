@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Print only the failing part of a pull request's or commit's CI jobs.
+"""Inspect CI failures and retry a failed Forgejo Actions job.
 
-Forgejo's job-log API answers 200 with a "404 page not found" body, so the
-real logs are read from the forge host's disk, where each job's log is
-`<task id>.log.zst`. This script finds the failed jobs for a commit through the
-API, reads each log over SSH, and prints the failure-looking lines with
-context and the log's tail — a few KB instead of a few MB.
+Workflow runs and their current jobs supply job IDs for the Forgejo 17 retry
+API. Logs are read over SSH from `<task id>.log.zst` on the forge host,
+keeping job IDs (retry targets) distinct from task IDs (log files).
 
     scripts/ci-failures                 # the checkout's HEAD commit
     scripts/ci-failures 045d92f04       # any commit (prefix ok)
     scripts/ci-failures --pr 1145       # a pull request's head
     scripts/ci-failures --task 20565    # one job by task id, failed or not
     scripts/ci-failures --pr 1145 --wait 900   # wait quietly, then report
+    scripts/ci-failures --retry-job 70312 --dry-run  # preview one failed job
+    scripts/ci-failures --retry-job 70312      # retry it and its dependent jobs
 
 Configuration comes from the git-ignored `scripts/ci-failures.fleet.json`,
 shaped like the committed `scripts/ci-failures.fleet.example.json`, and the
@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -53,23 +54,64 @@ def load_config() -> dict:
     return config
 
 
-def api(config: dict, path: str) -> object:
+def api(config: dict, path: str, method: str = "GET") -> object:
     request = urllib.request.Request(
         f"{config['forge_url'].rstrip('/')}/api/v1/repos/{config['repo']}/{path}",
         headers={"Authorization": f"token {config['token']}"},
+        method=method,
     )
     with urllib.request.urlopen(request, timeout=30) as response:
+        if method == "POST":
+            if response.status != 204:
+                raise RuntimeError(f"expected HTTP 204, received HTTP {response.status}")
+            return None
         return json.load(response)
 
 
-def tasks_for(config: dict, sha: str, pages: int) -> list[dict]:
+def jobs_for(config: dict, sha: str, pages: int) -> list[dict]:
+    """Read current job attempts, rather than historical task failures."""
     found: list[dict] = []
     for page in range(1, pages + 1):
-        rows = api(config, f"actions/tasks?limit=50&page={page}").get("workflow_runs", [])
-        found += [row for row in rows if row.get("head_sha", "").startswith(sha)]
-        if not rows or (found and not any(r.get("head_sha", "").startswith(sha) for r in rows)):
+        runs = api(config, f"actions/runs?limit=50&page={page}").get("workflow_runs") or []
+        for run in runs:
+            if run.get("commit_sha", "").startswith(sha):
+                found.extend(api(config, f"actions/runs/{run['id']}/jobs") or [])
+        if len(runs) < 50:
             break
     return found
+
+
+def retry_job(config: dict, job_id: int, dry_run: bool) -> int:
+    """Only retry the explicitly selected job if it is still failed."""
+    try:
+        job = api(config, f"actions/jobs/{job_id}")
+        if job.get("status") != "failure":
+            print(
+                f"ci-failures: refusing to retry job {job_id}: "
+                f"status is {job.get('status', 'unknown')}, not failure",
+                file=sys.stderr,
+            )
+            return 1
+        target = f"failed job {job_id} ({job['name']}); dependent jobs also rerun"
+        if dry_run:
+            print(f"Would retry {target}")
+            return 0
+        api(config, f"actions/jobs/{job_id}/rerun", method="POST")
+        print(f"Retry requested for {target}")
+        return 0
+    except urllib.error.HTTPError as error:
+        # Do not echo server bodies: authentication errors can contain credentials.
+        error.close()
+        print(f"ci-failures: retry job {job_id}: HTTP {error.code}", file=sys.stderr)
+        if error.code == 404:
+            print("Check the workflow job ID and Forgejo version (17.0+ required).", file=sys.stderr)
+    except (urllib.error.URLError, TimeoutError, RuntimeError) as error:
+        print(
+            f"ci-failures: retry job {job_id}: {type(error).__name__}; "
+            "check its status before retrying again",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def read_log(config: dict, task_id: int) -> str:
@@ -110,11 +152,20 @@ def summarize(text: str, tail_n: int, max_rows: int) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("commit", nargs="?", help="commit sha or prefix (default HEAD)")
-    parser.add_argument("--pr", type=int, help="pull request number")
-    parser.add_argument("--task", type=int, help="one task id")
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument("--pr", type=int, help="pull request number")
+    selector.add_argument("--task", type=int, help="read logs by task ID (not a retry target)")
+    selector.add_argument(
+        "--retry-job", type=int, metavar="JOB_ID",
+        help="retry one failed job and its dependents (Forgejo 17+)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="preview --retry-job without sending a retry request",
+    )
     parser.add_argument("--tail", type=int, default=25)
     parser.add_argument("--max", type=int, default=80, help="most failure-context lines per job")
-    parser.add_argument("--pages", type=int, default=6, help="task pages of 50 to scan")
+    parser.add_argument("--pages", type=int, default=6, help="workflow-run pages of 50 to scan")
     parser.add_argument("--all", action="store_true", help="list every job, not only failures")
     parser.add_argument(
         "--wait",
@@ -124,8 +175,16 @@ def main() -> int:
         help="poll quietly until no job is running or waiting (at most SECONDS), then report",
     )
     args = parser.parse_args()
+    if args.commit and any(value is not None for value in (args.pr, args.task, args.retry_job)):
+        parser.error("commit cannot be combined with --pr, --task or --retry-job")
+    if args.dry_run and args.retry_job is None:
+        parser.error("--dry-run requires --retry-job")
+    if args.retry_job is not None and (args.retry_job <= 0 or args.wait or args.all):
+        parser.error("--retry-job needs a positive job ID and cannot use --wait or --all")
     config = load_config()
 
+    if args.retry_job is not None:
+        return retry_job(config, args.retry_job, args.dry_run)
     if args.task:
         print(summarize(read_log(config, args.task), args.tail, args.max))
         return 0
@@ -135,13 +194,13 @@ def main() -> int:
         sha = subprocess.run(
             ["git", "rev-parse", args.commit or "HEAD"], cwd=ROOT, capture_output=True, text=True
         ).stdout.strip() or (args.commit or "")
-    tasks = tasks_for(config, sha, args.pages)
+    tasks = jobs_for(config, sha, args.pages)
     deadline = time.monotonic() + args.wait
     while args.wait and time.monotonic() < deadline and (
         not tasks or any(t.get("status") in ("running", "waiting", "blocked") for t in tasks)
     ):
         time.sleep(min(30, max(1, deadline - time.monotonic())))
-        tasks = tasks_for(config, sha, args.pages)
+        tasks = jobs_for(config, sha, args.pages)
     pending = [t for t in tasks if t.get("status") in ("running", "waiting", "blocked")]
     if args.wait and (pending or not tasks):
         print(f"still running after {args.wait}s: {len(pending)} job(s) not finished")
@@ -154,10 +213,16 @@ def main() -> int:
         counts[task.get("status", "?")] = counts.get(task.get("status", "?"), 0) + 1
     print(f"{sha[:12]}: " + ", ".join(f"{n} {status}" for status, n in sorted(counts.items())))
     for task in tasks if args.all else failed:
-        print(f"{task['status']:>9}  task {task['id']:<6} {task['name']}  ({task.get('workflow_id', '')})")
+        print(
+            f"{task['status']:>9}  job {task['id']:<6} task {task.get('task_id', 0):<6} "
+            f"{task['name']}  (run {task['run_id']})"
+        )
     for task in failed:
-        print(f"\n══ {task['name']} — task {task['id']} ══")
-        print(summarize(read_log(config, task["id"]), args.tail, args.max))
+        print(f"\n══ {task['name']} — job {task['id']} ══")
+        if task.get('task_id'):
+            print(summarize(read_log(config, task['task_id']), args.tail, args.max))
+        else:
+            print('(no task log for this job)')
     if failed:
         return 1
     # A wait that ran out is not a pass: `--wait N && merge` must not merge.

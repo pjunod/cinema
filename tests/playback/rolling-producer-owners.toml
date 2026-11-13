@@ -5840,15 +5840,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bound, which the owner's planning read ran under before D3b. An awaited
 # request-path deadline: no task, no producer, no process; a timeout answers 503.
 # Merged main into D3b: 2203 base, +1 main, +1 D3b = 2205.
-# Main #1568 follow-through, 2205 -> 2211: processed_upgrade::await_successor_start
-# adds one awaited 250 ms pacing sleep while its existing UpgradeRun and pending
-# preparation guard retain the incumbent until cancellation/supersession/end.
-# This schedules an admitted handoff; it neither replaces a producer nor proves
-# physical closure. The two scheduled-handoff regressions add five test-only
-# constructors (four timeouts and one control-cadence sleep) in
-# http/hls/tests/processed_upgrade_runs.rs. Their deadlines assert cancellation
-# or the actual prepared entry; no timeout grants recovery authority. These six
-# shapes are already present on main 882d4b691, not added by storage-domain apply.
+# Processed-upgrade successor staging added six reviewed time shapes after
+# that inventory update: one production 250 ms sleep, selected against the
+# pending candidate's cancellation token while the incumbent retains its
+# admitted root; and five test-only timeout/sleep calls that bound or pace
+# the successor scheduling fixture. No new task, producer, or process.
 expected_occurrences = 2211
 
 

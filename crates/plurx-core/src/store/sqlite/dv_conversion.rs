@@ -1604,7 +1604,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 86] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 87] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1772,6 +1772,9 @@ mod tests {
             // triggers; the shared source-extension fixture rewinds them
             // first, so both fixtures reach v129 before the tails above.
             "ADD COLUMN offloaded_at",
+            // v131: the shared queue helper drops every background_* object,
+            // including the pending storage-domain table, views and marker.
+            "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
         ];
 
         assert!(

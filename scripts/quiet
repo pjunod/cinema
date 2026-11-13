@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,9 +48,15 @@ def main(argv: list[str]) -> int:
     logs = ROOT / "target" / "quiet"
     logs.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", "-".join(argv[:3]))[:60].strip("-")
-    log = logs / f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}.log"
     started = time.monotonic()
-    with log.open("w", encoding="utf-8", errors="replace") as sink:
+    # Parallel jobs often share their first three argv entries and timestamp.
+    # Atomically create a private unique file so no job can truncate another's
+    # evidence, even when the commands start in the same clock tick.
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", errors="replace", delete=False, dir=logs,
+        prefix=f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}-", suffix=".log",
+    ) as sink:
+        log = Path(sink.name)
         proc = subprocess.run(argv, stdout=sink, stderr=subprocess.STDOUT)
     elapsed = time.monotonic() - started
     lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
