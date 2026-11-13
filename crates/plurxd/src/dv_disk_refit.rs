@@ -53,7 +53,9 @@ fn units(
         };
         let payload = &bytes[start + 3..end];
         if payload.is_empty() || payload.len() + 2 > MAX_RPU_NAL_BYTES || payload[0] != 0x19 {
-            return Err(format!("invalid RPU payload at presentation ordinal {ordinal}"));
+            return Err(format!(
+                "invalid RPU payload at presentation ordinal {ordinal}"
+            ));
         }
         let mut nal = Vec::with_capacity(payload.len() + 2);
         nal.extend_from_slice(&[0x7c, 0x01]);
@@ -220,7 +222,11 @@ mod tests {
         let decode_order_pts = [100, 240, 180, 200];
         let starts: Vec<i64> = decode_order_pts
             .into_iter()
-            .map(|pts| scene_for_pts(&scenes, pts).expect("scene for test PTS").first_pts)
+            .map(|pts| {
+                scene_for_pts(&scenes, pts)
+                    .expect("scene for test PTS")
+                    .first_pts
+            })
             .collect();
         assert_eq!(starts, [100, 200, 100, 200]);
         assert!(scene_for_pts(&scenes, 99).is_err());
@@ -229,10 +235,18 @@ mod tests {
 
     #[test]
     fn extracted_rpus_use_unique_presentation_order_not_packet_order() {
-        let mut rows = [(100, [1;32]), (240, [2;32]), (180, [3;32]), (200, [4;32])];
+        let mut rows = [
+            (100, [1; 32]),
+            (240, [2; 32]),
+            (180, [3; 32]),
+            (200, [4; 32]),
+        ];
         presentation_order(&mut rows).expect("unique timestamps");
-        assert_eq!(rows.map(|(pts, hash)| (pts, hash[0])), [(100,1),(180,3),(200,4),(240,2)]);
-        let mut duplicate = [(100,[1;32]), (100,[2;32])];
+        assert_eq!(
+            rows.map(|(pts, hash)| (pts, hash[0])),
+            [(100, 1), (180, 3), (200, 4), (240, 2)]
+        );
+        let mut duplicate = [(100, [1; 32]), (100, [2; 32])];
         assert!(presentation_order(&mut duplicate).is_err());
     }
 
@@ -247,7 +261,10 @@ mod tests {
             }),
             Ok(2)
         );
-        assert_eq!(bodies, [vec![0x7c, 1, 0x19, 0x55], vec![0x7c, 1, 0x19, 0x66]]);
+        assert_eq!(
+            bodies,
+            [vec![0x7c, 1, 0x19, 0x55], vec![0x7c, 1, 0x19, 0x66]]
+        );
         assert!(units(&valid[..4], |_, _| Ok(())).is_err());
     }
 }

@@ -352,12 +352,12 @@ fn spool_name(name: &str) -> Option<(&str, bool)> {
         (key, true)
     } else {
         let key = name
-        .strip_suffix(".partial")
-        .or_else(|| name.strip_suffix(".run"))
-        .or_else(|| {
-            name.strip_suffix(".tmp")
-                .map(|n| n.trim_end_matches(".jsonl.gz").trim_end_matches(".partial"))
-        })?;
+            .strip_suffix(".partial")
+            .or_else(|| name.strip_suffix(".run"))
+            .or_else(|| {
+                name.strip_suffix(".tmp")
+                    .map(|n| n.trim_end_matches(".jsonl.gz").trim_end_matches(".partial"))
+            })?;
         (key, false)
     };
     (key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())).then_some((key, complete))

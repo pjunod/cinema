@@ -161,9 +161,14 @@ pub(super) fn rebind_of(demand: &RefitDemand, source: &RefitSource) -> Option<Re
     })
 }
 
-fn claimed_source(mut source: RefitSource, job: &plurx_core::store::background_jobs::BackgroundJob) -> Result<RefitSource, StoreError> {
+fn claimed_source(
+    mut source: RefitSource,
+    job: &plurx_core::store::background_jobs::BackgroundJob,
+) -> Result<RefitSource, StoreError> {
     let JobPayload::DvRefit { probe_revision, .. } = job.supported_payload()? else {
-        return Err(StoreError::Task("claimed F+ job has another payload kind".into()));
+        return Err(StoreError::Task(
+            "claimed F+ job has another payload kind".into(),
+        ));
     };
     source.probe_revision = probe_revision;
     Ok(source)
