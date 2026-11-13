@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Print CARGO_BUILD_JOBS for this job, sized from its own cgroup limits.
+
+The fast Rust gate used to run with ``CARGO_BUILD_JOBS=1`` inside a
+four-CPU, 20 GiB container: safe, but it left three of the four CPUs idle for
+most of the build. The container's limits are the real budget, and the job's
+first step has already verified them, so the parallelism is derived from them
+rather than written down a second time:
+
+- CPUs: ``cpu.max`` quota / period, rounded down (an unlimited quota falls
+  back to the CPUs this process may run on);
+- memory: one job per ``MEMORY_PER_JOB`` of ``memory.max``. A workspace
+  Clippy driver peaks at 2.3-4.6 GB (docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md
+  §3.6), so 5 GiB per job keeps the worst case inside the limit;
+- jobs = max(1, min(CPUs, memory jobs)).
+
+Usage: ``scripts/ci-cargo-jobs [--cgroup DIR] >> "$GITHUB_ENV"`` prints
+``CARGO_BUILD_JOBS=<n>`` on stdout and how it was derived on stderr. Without
+``--cgroup`` it reads the unified cgroup of this process from /proc/self/cgroup.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+MEMORY_PER_JOB = 5 * 1024**3
+
+
+def own_cgroup(membership: str = "/proc/self/cgroup", mount: str = "/sys/fs/cgroup") -> Path:
+    for line in Path(membership).read_text(encoding="utf-8").splitlines():
+        hierarchy, _, rest = line.partition(":")
+        controllers, _, path = rest.partition(":")
+        if hierarchy == "0" and not controllers:
+            return Path(mount + path)
+    raise SystemExit("ci-cargo-jobs: no unified (cgroup v2) membership in " + membership)
+
+
+def cpu_limit(root: Path) -> int:
+    quota, _, period = (root / "cpu.max").read_text(encoding="utf-8").strip().partition(" ")
+    if quota == "max":
+        return len(os.sched_getaffinity(0))
+    return max(1, int(quota) // int(period))
+
+
+def memory_limit(root: Path) -> int | None:
+    value = (root / "memory.max").read_text(encoding="utf-8").strip()
+    return None if value == "max" else int(value)
+
+
+def jobs(root: Path) -> tuple[int, str]:
+    cpus = cpu_limit(root)
+    memory = memory_limit(root)
+    by_memory = cpus if memory is None else memory // MEMORY_PER_JOB
+    count = max(1, min(cpus, by_memory))
+    shown = "unlimited" if memory is None else f"{memory / 1024**3:.1f} GiB"
+    return count, f"{cpus} CPUs, {shown} memory ({by_memory} jobs at 5 GiB each) -> {count} jobs"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--cgroup", type=Path, help="cgroup directory to read (default: this process's)")
+    args = parser.parse_args(argv)
+    count, why = jobs(args.cgroup or own_cgroup())
+    print(f"ci-cargo-jobs: {why}", file=sys.stderr)
+    print(f"CARGO_BUILD_JOBS={count}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

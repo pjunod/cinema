@@ -273,6 +273,35 @@ class NativeReceiptTests(unittest.TestCase):
                 self.assertNotIn('status', record)
 
 
+class NativeSpecBoundaryTests(unittest.TestCase):
+    def test_only_the_positive_numeric_build_counter_preserves_the_reviewed_shape(self):
+        root = Path(__file__).resolve().parents[2]
+        path = 'clients/apple/project.yml'
+        original = (root / path).read_bytes()
+        bumped = native.APPLE_BUILD_COUNTER.sub(rb'\g<1>99999\g<2>', original)
+        self.assertNotEqual(original, bumped)
+        self.assertTrue(native.reviewed_build_spec(path, original))
+        self.assertTrue(native.reviewed_build_spec(path, bumped))
+        for extra in (b'\n  - path: "../../extra/F.swift"\n',
+                      b'\npreBuildScripts: [{script: cat ../../extra/file}]\n',
+                      b'\n    CURRENT_PROJECT_VERSION: "2"\n'):
+            self.assertFalse(native.reviewed_build_spec(path, bumped + extra))
+        for counter in (b'0', b'-1', b'1.2', b'abc'):
+            invalid = native.APPLE_BUILD_COUNTER.sub(lambda m: m[1] + counter + m[2], original)
+            self.assertFalse(native.reviewed_build_spec(path, invalid))
+
+    def test_build_counter_changes_still_refuse_cross_build_case_credit(self):
+        specs = native.FAMILY_SPECS['tv_navigation']
+        project = 'clients/apple/project.yml'
+        def tree(*args):
+            source = args[-1]
+            return ''.join('100644 blob ' + ('b' if source == 'current' and path == project else 'a') * 40
+                           + '\t' + path + '\0' for path in specs)
+        with patch.object(native, 'regular_inputs'), patch.object(native, 'git', side_effect=tree):
+            with self.assertRaisesRegex(ReceiptError, 'Native input changed outside reviewed transitions:'):
+                native.case_input_compatibility('original', 'current')
+
+
 class NativeCaseReceiptTests(unittest.TestCase):
     def test_current_case_specs_match_reviewed_boundary_and_refuse_extensions(self):
         root = Path(__file__).resolve().parents[2]

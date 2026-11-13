@@ -54,7 +54,8 @@ async fn upgrade_after_playing_to(
 /// The trial verifies its window at the viewer, never at the create's start
 /// (the old code handed it the create's request unchanged, so a successor
 /// began fifteen to thirty seconds behind a viewer of a fresh start and the
-/// client's alignment refused it), and the staging position is the viewer's.
+/// client's alignment refused it), and the successor is staged at that
+/// window, never behind the viewer.
 #[tokio::test]
 async fn the_upgrade_positions_its_trial_and_stage_at_the_viewer_not_the_start() {
     let dir = crate::test_tempdir().expect("state dir");
@@ -83,11 +84,7 @@ async fn the_upgrade_positions_its_trial_and_stage_at_the_viewer_not_the_start()
         "the trial's window starts at the viewer (600 s) plus at most its budget, not at \
          the create's start: {asked} s"
     );
-    let staged_at = super::processed_upgrade::viewer_film_time_ms(&fixture.state, &intent, &run).await;
-    assert!(
-        (600_000..630_000).contains(&staged_at),
-        "the successor is staged where the viewer is: {staged_at} ms"
-    );
+
 }
 
 /// A trial that fails leaves the ordinary session exactly as it was: the same
@@ -329,4 +326,161 @@ async fn an_ordinary_fallback_reports_the_reason_without_private_qualification_d
         assert!(!wire.contains(private),"private continuation data must not enter Playback Info: {wire}");
     }
     assert_eq!(crate::transcode::ordinary_processing_decline("the decoder refused the window".into()),"the decoder refused the window");
+}
+
+/// A repeat upgrade of the same playback: this node described the processed
+/// recipe on an earlier trial, and nothing is producing it now, so the
+/// description carries no production proof. That is what the trial measures,
+/// so it never refuses the trial; Auto's link evidence alone decides before
+/// it (Avatar on the Google TV: every resume after the first upgrade was
+/// refused as "link evidence" before any trial ran).
+#[tokio::test]
+async fn a_description_without_production_proof_still_reaches_the_trial() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-repeat-description");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (mut intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 60_000).await;
+    // A 4K source: the projection only describes a source with a height.
+    let unprobed = fixture
+        .store
+        .get_file(intent.request.file_id)
+        .await
+        .expect("file read")
+        .expect("source");
+    fixture
+        .store
+        .upsert_file(
+            unprobed.item_id,
+            unprobed.path.to_str().expect("fixture source path"),
+            unprobed.size,
+            unprobed.mtime,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: unprobed.duration_ms,
+                width: Some(3840),
+                height: Some(2160),
+                ..plurx_core::domain::ProbeResult::default()
+            },
+        )
+        .await
+        .expect("probe the fixture's source");
+    let source = fixture
+        .store
+        .get_file(intent.request.file_id)
+        .await
+        .expect("file read")
+        .expect("source");
+    let height = 2160;
+    assert_eq!(source.height, Some(2160));
+    intent.auto_policy = true;
+    intent.request.candidate_context = Some(Box::new(
+        crate::transcode::continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x31; 32]),
+            [0x31; 32],
+            height,
+        ),
+    ));
+    let mut described = crate::transcode::continuous_test_candidate_context(
+        plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x32; 32]),
+        [0x32; 32],
+        height,
+    )
+    .selected_candidate;
+    described.processed_dv = true;
+    described.planned_codec = Some("hevc".into());
+    described.complete_cache = false;
+    described.sustainable = false;
+    assert!(
+        !crate::http::hls::processed_candidate_kept(
+            std::slice::from_ref(&described),
+            &described
+        ).is_some_and(|row| row.playable()),
+        "the description has no current production proof"
+    );
+    intent.request.quality_catalog = Some(std::sync::Arc::new(
+        crate::media_pool::QualityCatalogResult {
+            candidates: vec![crate::media_pool::WorkerQualityCandidate {
+                node_id: fixture.state.node_id.clone(),
+                candidate: described,
+                binding: None,
+                partial: false,
+                dispatch_supported: true,
+            }],
+            authority_refused: false,
+            complete: true,
+            causes: Vec::new(),
+        },
+    ));
+    assert!(
+        super::processed_upgrade::projected_processed_candidate(&fixture.state, &intent, &source)
+            .is_some(),
+        "the admission before the trial sees the description"
+    );
+    let reached = std::sync::atomic::AtomicBool::new(false);
+    let outcome = super::processed_upgrade::run_upgrade_with(
+        &fixture.state,
+        &intent,
+        &run,
+        |_request, _recovery| {
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Err("test trial".to_owned()))
+        },
+    )
+    .await;
+    assert_eq!(outcome, "declined", "the trial decides, not the missing proof");
+    assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// Scheduling a future prepared window happens before client overlap, and
+/// remains owned by the predecessor's ordinary cancellation lifecycle.
+#[tokio::test]
+async fn a_scheduled_processed_handoff_is_cancelled_with_its_predecessor() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-scheduled-cancel");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 600_000).await;
+    let pending = super::preparation::begin_processed_upgrade(&playback, run.cancelled())
+        .expect("the upgrade holds the preparation slot");
+    let window = 620_000..622_000;
+    let scheduling = super::processed_upgrade::await_successor_start(
+        &fixture.state, &intent, &run, &pending, Some(&window), None,
+    );
+    tokio::pin!(scheduling);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut scheduling)
+        .await.is_err(), "a future entry waits instead of staging earlier media");
+    super::processed_upgrade::cancel_for_session(&session_id);
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), &mut scheduling)
+        .await.expect("cancellation wakes the scheduler"), Err("cancelled"));
+}
+
+#[tokio::test]
+async fn a_scheduled_processed_handoff_meets_the_actual_prepared_entry() {
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-scheduled-entry");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (intent, run, mut request) =
+        upgrade_after_playing_to(&fixture, &session_id, &route, 600_000).await;
+    let pending = super::preparation::begin_processed_upgrade(&playback, run.cancelled())
+        .expect("the upgrade holds the preparation slot");
+    let window = 620_000..622_000;
+    let scheduling = super::processed_upgrade::await_successor_start(
+        &fixture.state, &intent, &run, &pending, Some(&window), None,
+    );
+    tokio::pin!(scheduling);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut scheduling)
+        .await.is_err());
+    // Honour the real control exchange cadence, then let the ordinary
+    // incumbent approach the prepared entry before opening client overlap.
+    tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    request.sequence = 2;
+    request.position_ms = 616_000;
+    request.buffered_from_ms = Some(614_000);
+    request.buffered_through_ms = 640_000;
+    let (status, body) = control_body(control_local_inner(
+        &fixture.state, &route, request, unix_ms().saturating_add(4_000),
+    ).await).await;
+    assert_eq!(status, StatusCode::OK, "the incumbent keeps playing: {body}");
+    let (position, waited) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut scheduling)
+        .await.expect("the incumbent reached the handoff lead").expect("the session is current");
+    assert_eq!(position, window.start, "staging uses produced media, not an earlier clamp");
+    assert!(waited);
 }

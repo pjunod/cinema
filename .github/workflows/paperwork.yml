@@ -29,11 +29,17 @@ jobs:
       - name: Check index rows, release counters, names and Regression-Test fields
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The description and title are read from the event payload file
+          # (validation/pr_event.py), never the environment: a long
+          # description made the runner unable to start this step at all.
           GITHUB_TOKEN: ${{ github.token }}
+          # Persistent publisher credentials must never enter a PR-controlled
+          # workflow. The job token can publish a fix but starts no new run.
         run: |
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
@@ -41,5 +47,25 @@ jobs:
             "+refs/heads/main:refs/remotes/origin/main"
           # Release counters are judged against main: an effort that already
           # claimed its bump does not owe another one per task pull request.
-          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" \
-            --counter-target origin/main --body-env
+          if python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --counter-target origin/main --body-env; then
+            exit 0
+          fi
+          # Derivable bookkeeping is fixed on the branch instead of failing the
+          # lane (docs/ci/PAPERWORK.md "What fixes itself"). Anything else, or
+          # a head that is already a fix, fails here with paperwork's own fix.
+          [ "$SAME_REPO" = true ] || exit 1
+          python3 scripts/paperwork-fix --ci --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --counter-target origin/main \
+            --head-sha "$PR_HEAD_SHA" --run-url "$RUN_URL" || exit 1
+          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --counter-target origin/main --body-env || remaining=1
+          # Leased to the checked head, only to an ordinary work branch, token
+          # through git's environment (scripts/paperwork-fix push_refusal).
+          python3 scripts/paperwork-fix --push --head-ref "$HEAD_REF" --base-ref "$BASE_REF" \
+            --head-sha "$PR_HEAD_SHA" || exit 1
+          fixed="$(git rev-parse HEAD)"
+          echo "::notice::paperwork pushed $fixed to $HEAD_REF with the derivable fixes; pull it before your next push (git pull --rebase)."
+          if [ -n "${remaining:-}" ]; then
+            echo "Paperwork still fails after the derivable fixes; the [FAIL] above is the author's to fix."
+            exit 1
+          fi
+          echo "The fix was pushed with the run's own token, which starts no run: push any commit (git commit --allow-empty) to run the lane on $fixed."
+          exit 1

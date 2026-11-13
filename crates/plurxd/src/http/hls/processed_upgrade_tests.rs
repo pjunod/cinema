@@ -302,6 +302,33 @@ fn an_unreadable_recovery_memory_lets_the_trial_run_but_never_grants_after_it() 
 }
 
 #[test]
+fn a_processed_successor_begins_at_its_verified_window_unless_the_viewer_passed_it() {
+    use super::successor_start_ms;
+    // The trial verified the window at 18 s while the viewer reached 15 s:
+    // the successor begins at the produced window, not behind it.
+    assert_eq!(successor_start_ms(15_000, 18_000), Some(18_000));
+    // A fast trial must wait before staging rather than clamp backward
+    // into unprepared media. At the lead boundary it uses the exact entry.
+    assert_eq!(successor_start_ms(11_000, 18_000), None);
+    assert_eq!(successor_start_ms(14_000, 18_000), Some(18_000));
+    assert_eq!(successor_start_ms(1_000, 8_000), None);
+    assert_eq!(successor_start_ms(4_000, 8_000), Some(8_000));
+    // A viewer already past the window is never sent back to it.
+    assert_eq!(successor_start_ms(21_000, 18_000), Some(21_000));
+}
+
+#[test]
+fn a_trial_that_did_not_prove_production_is_never_staged() {
+    let mut candidate = processed_candidate_fixture();
+    candidate.planned_codec = Some("hevc".into());
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+    candidate.sustainable = false;
+    assert!(super::trial_proved_production(&candidate).is_err());
+    candidate.complete_cache = true;
+    assert_eq!(super::trial_proved_production(&candidate), Ok(()));
+}
+
+#[test]
 fn an_upgrade_displaced_by_another_preparation_waits_for_the_free_slot() {
     // 2026-11-12: every Twilight play's in-session preparation took the
     // playback's slot, which cancelled the processed upgrade for good.
