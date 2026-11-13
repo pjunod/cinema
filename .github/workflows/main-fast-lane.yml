@@ -68,9 +68,10 @@ jobs:
           python3 scripts/paperwork-fix --ci --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" \
             --head-sha "$PR_HEAD_SHA" --run-url "$RUN_URL" || exit 1
           python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env || remaining=1
-          push_token="${PAPERWORK_PUSH_TOKEN:-$GITHUB_TOKEN}"
-          push_auth="$(printf 'x-access-token:%s' "$push_token" | base64 | tr -d '\n')"
-          git -c http.extraheader="AUTHORIZATION: basic $push_auth" push origin "HEAD:refs/heads/$HEAD_REF"
+          # Leased to the checked head, only to an ordinary work branch, token
+          # through git's environment (scripts/paperwork-fix push_refusal).
+          python3 scripts/paperwork-fix --push --head-ref "$HEAD_REF" --base-ref "$BASE_REF" \
+            --head-sha "$PR_HEAD_SHA" || exit 1
           fixed="$(git rev-parse HEAD)"
           echo "::notice::paperwork pushed $fixed to $HEAD_REF with the derivable fixes; pull it before your next push (git pull --rebase)."
           if [ -n "${remaining:-}" ]; then
@@ -320,7 +321,12 @@ jobs:
           path: .main-preflight-receipts/receipt.json
           if-no-files-found: error
           retention-days: 90
+      # Fails only on gaps this pull request introduces; gaps already on the
+      # base branch are printed as a labelled report and need a follow-up
+      # there (docs/ci/CI-THROUGHPUT.md). ci.yml keeps the full audit.
       - name: Audit corrective-history evidence
+        env:
+          PLURX_HISTORY_MERGE_TARGET: origin/${{ github.event.pull_request.base.ref }}
         run: make history-check
       # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
       # request's `Regression-Test:` lines, judged in the tree the merge will

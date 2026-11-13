@@ -43,8 +43,12 @@ again on it, and the commit is pushed to the PR branch. Guards:
 - a head that is already a `Paperwork-Fix:` commit is never fixed again, so a
   fix that does not converge fails instead of looping;
 - only same-repository PRs, and only when the checkout is the event's head;
-- the push is a plain fast-forward: if you pushed meanwhile, it is refused and
-  your push's run takes over.
+- the push (`scripts/paperwork-fix --push`) is leased to the head the run
+  checked: if the branch moved at all meanwhile (your new commit, or a
+  force-push that dropped one), it is refused and your push's run takes over;
+  it goes only to an ordinary work branch, never `main`, the base or a
+  `refs/…` head, and its token reaches git through the environment, never a
+  command line, with hooks off.
 
 The push uses the repository secret `PAPERWORK_PUSH_TOKEN` when it is set, so
 the push starts the next lane run and that run cancels this one: no red run.
@@ -78,7 +82,8 @@ opening its pull request, before any compiler job is allocated.
 | Docs stay under 40 KB; the shrink-only list only shrinks (running `*_LOG.md` logs, STATUS-HISTORY files, the project backlog and tool-maintained docs are outside it) | `test_doc_size_budget` | move a status doc's dated log into a sibling `*_LOG.md`, or split the doc; never add to the allowlist |
 | A new web file is registered everywhere; Developer cards graduate | `tests/web/asset-*.test.js`, `settings-sections.test.js` (only when web files changed) | file + `WEB_ASSETS` row + shell tag + [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md) row, one commit |
 
-The full corrective-history audit (`make history-check`, ~80 s) and the
+The corrective-history audit (`make history-check`; in the PR lane it fails
+only on the PR's own gaps, [CI-THROUGHPUT.md](CI-THROUGHPUT.md) §2a) and the
 operations suite (~110 s) stay in the preflight job. Paperwork is the subset
 that fails for a missing piece of bookkeeping rather than a behavior.
 

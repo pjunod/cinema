@@ -15130,16 +15130,18 @@ pub(crate) fn record_preparation_staged(staged: bool) {
 /// an upgrade after the first frame). Index order is
 /// [`PROCESSED_UPGRADE_OUTCOMES`]; `other` keeps the sum equal to the number of
 /// first frames that scheduled one.
-pub(crate) const PROCESSED_UPGRADE_OUTCOMES: [&str; 7] = [
+pub(crate) const PROCESSED_UPGRADE_OUTCOMES: [&str; 9] = [
     "scheduled",
     "not_applicable",
     "declined",
     "admission_refused",
     "staged",
     "not_staged",
+    "qualification_pending",
+    "displaced",
     "cancelled",
 ];
-static PROCESSED_UPGRADES: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static PROCESSED_UPGRADES: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 
 pub(crate) fn record_processed_upgrade(outcome: &'static str) {
     let index = PROCESSED_UPGRADE_OUTCOMES

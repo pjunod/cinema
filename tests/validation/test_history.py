@@ -1627,5 +1627,164 @@ class AuthenticatedPromotionHistoryCase(unittest.TestCase):
             resolve.assert_not_called()
 
 
+class MergeTargetScopeCase(RepositoryFixture):
+    """A pull request fails for its own history gaps and only reports main's.
+
+    Run 7556 (PR #1550) failed `make history-check` on
+    `corrective commit db1c581e landed in 90a1bf97 with no Regression-Test:`,
+    PR #1542's landing, already on `main`; nothing that pull request could do
+    turned it green, and 31 lane runs in ten days failed that way. With a
+    merge target the audit fails only on what the change is responsible for
+    and lists the rest under `inherited`; without one it is the full audit
+    that judges `main` itself.
+    """
+
+    ledger = CorrectiveBoundaryCase.ledger
+    merge = CorrectiveBoundaryCase.merge
+
+    def main_with_a_gap(self):
+        root, catalog, coverage = self.repository()
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=root, check=True)
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        ledger = self.ledger(root, boundary)
+        self.commit(root, "chore: the merge ledger")
+        subprocess.run(["git", "checkout", "-q", "-b", "landed-topic"], cwd=root, check=True)
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        main_fix = self.commit(root, "fix(app): stop the reader stalling")
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=root, check=True)
+        main_landing = self.merge(
+            root, "landed-topic",
+            "Merge pull request 'fix(app): stop the reader stalling' (#3) from landed-topic into main",
+        )
+        subprocess.run(["git", "checkout", "-q", "-b", "pr"], cwd=root, check=True)
+        return root, catalog, coverage, boundary, ledger, main_fix, main_landing
+
+    def test_a_gap_already_on_main_is_reported_not_failed(self):
+        root, catalog, coverage, _, ledger, main_fix, main_landing = self.main_with_a_gap()
+        (root / "src/feature.txt").write_text("a feature\n", encoding="utf-8")
+        self.commit(root, "feat: an unrelated feature")
+
+        full = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        gap = [error for error in full.errors if main_landing[:8] in error]
+        self.assertTrue(
+            any(main_fix[:8] in error for error in gap),
+            f"the full audit must still fail on main's gap: {full.errors}",
+        )
+        self.assertEqual(full.errors, tuple(gap))
+
+        scoped = audit_history(root, catalog, coverage, merge_ledger_path=ledger, merge_target="main")
+        self.assertEqual(scoped.errors, (), "a gap only on main failed the pull request")
+        self.assertEqual(scoped.inherited, tuple(gap), "main's gap must still be reported")
+        self.assertEqual(scoped.merge_target, "main")
+
+        # On main itself nothing is the change's own, so a scoped run there
+        # would excuse everything: main is judged by the full audit.
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=root, check=True)
+        on_main = audit_history(root, catalog, coverage, merge_ledger_path=ledger)
+        self.assertTrue(any(main_fix[:8] in error for error in on_main.errors), on_main.errors)
+
+        report = root / "history.json"
+        _write_report(report, scoped)
+        written = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(written["inherited"], list(gap))
+        self.assertEqual(written["summary"]["inherited_from_merge_target"], len(gap))
+        self.assertEqual(written["merge_target"], "main")
+
+    def test_a_gap_in_the_changes_own_commits_fails(self):
+        root, catalog, coverage, _, ledger, main_fix, _ = self.main_with_a_gap()
+        # The branch lands a corrective topic of its own (an integration
+        # branch) with no line: that gap is the change's, not main's.
+        subprocess.run(["git", "checkout", "-q", "-b", "own-topic"], cwd=root, check=True)
+        (root / "crates/other.rs").write_text("pub fn b() -> u8 { 1 }\n", encoding="utf-8")
+        own_fix = self.commit(root, "fix(other): stop the writer stalling")
+        subprocess.run(["git", "checkout", "-q", "pr"], cwd=root, check=True)
+        own_landing = self.merge(
+            root, "own-topic",
+            "Merge pull request 'fix(other): stop the writer stalling' (#4) from own-topic into pr",
+        )
+
+        scoped = audit_history(root, catalog, coverage, merge_ledger_path=ledger, merge_target="main")
+        self.assertTrue(
+            any(own_fix[:8] in error and own_landing[:8] in error for error in scoped.errors),
+            f"the change's own landing gap escaped: {scoped.errors}",
+        )
+        self.assertFalse(any(main_fix[:8] in error for error in scoped.errors), scoped.errors)
+        self.assertTrue(any(main_fix[:8] in error for error in scoped.inherited), scoped.inherited)
+
+    def test_removing_mains_erratum_is_the_changes_own_gap(self):
+        root, catalog, coverage, boundary, _, main_fix, main_landing = self.main_with_a_gap()
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=root, check=True)
+        ledger = self.ledger(root, boundary, errata=((main_landing[:12], "landed without its line"),))
+        self.commit(root, "chore: excuse the bare landing")
+        subprocess.run(["git", "checkout", "-q", "-B", "pr"], cwd=root, check=True)
+        self.assertEqual(
+            audit_history(root, catalog, coverage, merge_ledger_path=ledger, merge_target="main").errors,
+            (),
+        )
+        # Editing the ledger is the change's own act: dropping the erratum
+        # must fail it even though the gap's commits are all on main.
+        self.ledger(root, boundary)
+        self.commit(root, "chore: drop the erratum")
+        scoped = audit_history(root, catalog, coverage, merge_ledger_path=ledger, merge_target="main")
+        self.assertTrue(any(main_fix[:8] in error for error in scoped.errors), scoped.errors)
+
+    def anchored_main(self, *, missing_anchor=False):
+        root, catalog, coverage = self.repository()
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=root, check=True)
+        (root / "clients").mkdir()
+        (root / "clients/app.swift").write_text("func primaryPolicy() {}\n")
+        (root / "tests/client.swift").write_text("func testPrimaryPolicy() {}\n")
+        fix = self.commit(root, "fix(client): restore primary policy")
+        (root / "tests/client-fixes.toml").write_text(
+            "version = 1\n" + ClientFixSupplementsCase.row("primary", [fix[:12]])
+        )
+        if missing_anchor:
+            (root / "clients/app.swift").write_text("func unrelatedPolicy() {}\n")
+        self.commit(root, "chore: record the client anchor")
+        subprocess.run(["git", "checkout", "-q", "-b", "pr"], cwd=root, check=True)
+        return root, catalog, coverage
+
+    def test_a_missing_anchor_already_on_main_is_reported_not_failed(self):
+        root, catalog, coverage = self.anchored_main(missing_anchor=True)
+        (root / "src/feature.txt").write_text("an unrelated feature\n")
+        self.commit(root, "feat: add a feature")
+        scoped = audit_history(root, catalog, coverage, merge_target="main")
+        self.assertEqual(scoped.errors, ())
+        self.assertTrue(any("lost source anchor" in error for error in scoped.inherited))
+        full = audit_history(root, catalog, coverage)
+        self.assertTrue(any("lost source anchor" in error for error in full.errors))
+
+    def test_deleting_mains_anchor_is_fatal_in_dirty_staged_and_committed_trees(self):
+        root, catalog, coverage = self.anchored_main()
+        (root / "clients/app.swift").write_text("func unrelatedPolicy() {}\n")
+        for state in ("dirty", "staged", "committed"):
+            if state == "staged":
+                subprocess.run(["git", "add", "clients/app.swift"], cwd=root, check=True)
+            elif state == "committed":
+                self.commit(root, "chore: remove primary policy")
+            with self.subTest(state=state):
+                scoped = audit_history(root, catalog, coverage, merge_target="main")
+                self.assertTrue(any("lost source anchor" in error for error in scoped.errors))
+                self.assertFalse(any("lost source anchor" in error for error in scoped.inherited))
+
+    def test_renaming_mains_anchored_file_is_the_changes_own_gap(self):
+        root, catalog, coverage = self.anchored_main()
+        subprocess.run(
+            ["git", "mv", "clients/app.swift", "clients/renamed.swift"], cwd=root, check=True
+        )
+        self.commit(root, "chore: rename the client source")
+        scoped = audit_history(root, catalog, coverage, merge_target="main")
+        self.assertTrue(any("missing source path clients/app.swift" in error for error in scoped.errors))
+        self.assertFalse(any("missing source path clients/app.swift" in error for error in scoped.inherited))
+
+    def test_an_unknown_merge_target_is_an_error_not_a_pass(self):
+        root, catalog, coverage, _, ledger, _, _ = self.main_with_a_gap()
+        with self.assertRaises(HistoryError):
+            audit_history(root, catalog, coverage, merge_ledger_path=ledger, merge_target="no-such-ref")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import contextlib
 import dataclasses
 import json
 import os
@@ -192,6 +193,10 @@ class HistoryReport:
     merges: tuple[MergeRegression, ...] = ()
     pending: tuple[str, ...] = ()
     covered_by_trailer: tuple[str, ...] = ()
+    # With a merge target: the gaps that came only from commits and files
+    # already on it. Reported, never failing (`audit_history`'s `merge_target`).
+    inherited: tuple[str, ...] = ()
+    merge_target: str | None = None
 
     @property
     def direct_count(self) -> int:
@@ -208,6 +213,46 @@ class HistoryReport:
     @property
     def anchored_count(self) -> int:
         return len(self.covered_by_anchor)
+
+
+class _Errors(list):
+    """Error messages, each remembering the commits and files it is about.
+
+    A plain `append` is about nothing in particular, so it is always the
+    change's own error. `add` (or an `about` block) records the commits and
+    tracked paths that produced the error; `audit_history` uses that to tell
+    a gap the change introduced from one that is already on its merge target.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blame: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+        self.unblamed: set[str] = set()
+        self._scope: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+
+    def append(self, message: str) -> None:  # type: ignore[override]
+        if self._scope is None:
+            super().append(message)
+            self.unblamed.add(message)
+        else:
+            self.add(message, *self._scope)
+
+    def add(self, message: str, commits=(), paths=()) -> None:
+        super().append(message)
+        if not commits and not paths:
+            self.unblamed.add(message)
+            return
+        old_commits, old_paths = self.blame.get(message, (frozenset(), frozenset()))
+        self.blame[message] = (old_commits | frozenset(commits), old_paths | frozenset(paths))
+
+    @contextlib.contextmanager
+    def about(self, commits=(), paths=()):
+        previous = self._scope
+        self._scope = (tuple(commits), tuple(paths))
+        try:
+            yield
+        finally:
+            self._scope = previous
 
 
 def _strings(value: object, field: str) -> tuple[str, ...]:
@@ -721,6 +766,9 @@ class LandingAudit:
     covers: frozenset[str] = frozenset()
     introduced: dict[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
     landed: frozenset[str] = frozenset()
+    # error -> the landing commit it is about; errors absent here are about
+    # the ledger itself.
+    blame: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 def _excuse(ledger: MergeLedger, sha: str) -> str | None:
@@ -751,6 +799,7 @@ def audit_merge_regressions(
         return LandingAudit()
     rows: list[MergeRegression] = []
     errors: list[str] = []
+    blame: dict[str, str] = {}
     covers: set[str] = set()
     introduced: dict[str, list[str]] = {}
     landings: list[str] = []
@@ -814,11 +863,13 @@ def audit_merge_regressions(
         if excuse is None:
             for problem in problems:
                 errors.append(f"landing commit {sha[:8]} (#{pull}): {problem}")
+                blame[errors[-1]] = sha
             if corrective and not fields:
                 errors.append(
                     f"corrective landing commit {sha[:8]} (#{pull}) carries no "
                     f"{REGRESSION_TRAILER}: line: {title}"
                 )
+                blame[errors[-1]] = sha
         if resolved or excuse is not None:
             covers.update(brought)
         rows.append(
@@ -851,6 +902,7 @@ def audit_merge_regressions(
         covers=frozenset(covers),
         introduced={commit: tuple(by) for commit, by in introduced.items()},
         landed=landed_set,
+        blame=blame,
     )
 
 
@@ -914,7 +966,20 @@ def audit_history(
     client_fixes_path: Path | None = None,
     merge_ledger_path: Path | None = None,
     landed_baseline: str | None = None,
+    merge_target: str | None = None,
 ) -> HistoryReport:
+    """The corrective-history audit.
+
+    Without `merge_target` every gap is an error: the full audit, which is
+    what judges `main` itself (`make history-check`, `ci.yml`). With it --
+    the pull request lane -- an error fails only when the change is
+    responsible for it: it is about a commit not reachable from the merge
+    target, or about a ledger, fragment or anchored file the change edits,
+    or it is about nothing more specific (a malformed ledger). A gap that came
+    only from commits and files already on the merge target cannot be fixed by
+    the change's author and is returned in `inherited` instead, to be reported
+    and followed up on that branch.
+    """
     if landed_baseline is not None:
         if not re.fullmatch(r"[0-9a-f]{40}", landed_baseline):
             raise HistoryError("promotion history baseline must be an immutable commit SHA")
@@ -928,7 +993,10 @@ def audit_history(
     )
     catalog = catalog or load_catalog()
     history_heads = _history_heads(root)
-    errors: list[str] = []
+    errors = _Errors()
+    coverage_file = _relative(root, coverage_path)
+    client_fixes_file = _relative(root, client_fixes_path or root / "tests" / "client-fixes.toml")
+    ledger_file = _relative(root, merge_ledger_path or root / "validation" / "merge-errata.toml")
     post_boundary: frozenset[str] = frozenset()
     boundary: str | None = None
     if merge_ledger.enforce_after:
@@ -956,111 +1024,129 @@ def audit_history(
     landing = audit_merge_regressions(
         root, history_heads, merge_ledger, boundary, post_boundary, landed_baseline
     )
-    errors.extend(landing.errors)
+    for error in landing.errors:
+        if error in landing.blame:
+            errors.add(error, (landing.blame[error],), (ledger_file,))
+        else:
+            errors.append(error)
 
     by_sha = {issue.sha: issue for issue in issues}
     resolved: dict[str, CoverageEntry] = {}
     anchored: set[str] = set()
 
+    # Which audited commits a ledger row's prefixes name, for attributing its
+    # errors (`_split_by_merge_target`). Prefixes are at least seven digits.
+    by_prefix: dict[str, list[str]] = {}
+    for sha in {*by_sha, *post_boundary}:
+        by_prefix.setdefault(sha[:7], []).append(sha)
+
+    def named_by(prefixes: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(
+            sha for prefix in prefixes for sha in by_prefix.get(prefix[:7], ())
+            if sha.startswith(prefix)
+        )
+
     for entry in entries:
-        where = entry.origin
-        # The freeze, phase B. A fragment is evidence for the pre-boundary
-        # range and nothing else: neither a new fragment nor a commit added to
-        # an old one may name a commit past the boundary. Such a commit
-        # carries its evidence on the commit that lands it, where the tree it
-        # names can never change under it.
-        for prefix in entry.commits:
-            if any(sha.startswith(prefix) for sha in post_boundary):
-                errors.append(
-                    f"{where} maps {prefix}, which is past the frozen "
-                    f"boundary {merge_ledger.enforce_after}: name its test in "
-                    f"the pull request as `{REGRESSION_TRAILER}: <path>::<name>` "
-                    f"so its landing commit carries it, instead of adding to "
-                    f"validation/regressions.d"
-                )
-        if not entry.commits:
-            errors.append(f"{where} has no commits")
-        if not entry.reason:
-            errors.append(f"{where} has no reason")
-        if entry.ignore and (entry.points or entry.checks):
-            errors.append(f"{where} ignore entries cannot claim points or checks")
-        if not entry.ignore and not entry.checks:
-            errors.append(f"{where} has no checks")
-        for point in entry.points:
-            if point not in catalog.point_map:
-                errors.append(f"{where} references unknown point {point}")
-        for check in entry.checks:
-            if check not in catalog.check_map:
-                errors.append(f"{where} references unknown check {check}")
+        with errors.about(named_by(entry.commits), (f"{coverage_file}/{entry.origin}",)):
+            where = entry.origin
+            # The freeze, phase B. A fragment is evidence for the pre-boundary
+            # range and nothing else: neither a new fragment nor a commit added to
+            # an old one may name a commit past the boundary. Such a commit
+            # carries its evidence on the commit that lands it, where the tree it
+            # names can never change under it.
+            for prefix in entry.commits:
+                if any(sha.startswith(prefix) for sha in post_boundary):
+                    errors.append(
+                        f"{where} maps {prefix}, which is past the frozen "
+                        f"boundary {merge_ledger.enforce_after}: name its test in "
+                        f"the pull request as `{REGRESSION_TRAILER}: <path>::<name>` "
+                        f"so its landing commit carries it, instead of adding to "
+                        f"validation/regressions.d"
+                    )
+            if not entry.commits:
+                errors.append(f"{where} has no commits")
+            if not entry.reason:
+                errors.append(f"{where} has no reason")
+            if entry.ignore and (entry.points or entry.checks):
+                errors.append(f"{where} ignore entries cannot claim points or checks")
+            if not entry.ignore and not entry.checks:
+                errors.append(f"{where} has no checks")
+            for point in entry.points:
+                if point not in catalog.point_map:
+                    errors.append(f"{where} references unknown point {point}")
+            for check in entry.checks:
+                if check not in catalog.check_map:
+                    errors.append(f"{where} references unknown check {check}")
 
-        for prefix in entry.commits:
-            matches_sha = tuple(sha for sha in by_sha if sha.startswith(prefix))
-            if len(matches_sha) != 1:
-                errors.append(
-                    f"{where} commit {prefix} matches {len(matches_sha)} audited commits"
-                )
-                continue
-            sha = matches_sha[0]
-            issue = by_sha[sha]
-            if sha in resolved:
-                errors.append(f"corrective commit {prefix} is covered more than once")
-                continue
-            resolved[sha] = entry
-            if (
-                not entry.ignore
-                and issue.point_ids
-                and not set(issue.point_ids).intersection(entry.points)
-            ):
-                errors.append(
-                    f"{where} commit {prefix} maps to {', '.join(issue.point_ids)}; "
-                    f"entry claims {', '.join(entry.points) or 'no point'}"
-                )
+            for prefix in entry.commits:
+                matches_sha = tuple(sha for sha in by_sha if sha.startswith(prefix))
+                if len(matches_sha) != 1:
+                    errors.append(
+                        f"{where} commit {prefix} matches {len(matches_sha)} audited commits"
+                    )
+                    continue
+                sha = matches_sha[0]
+                issue = by_sha[sha]
+                if sha in resolved:
+                    errors.append(f"corrective commit {prefix} is covered more than once")
+                    continue
+                resolved[sha] = entry
+                if (
+                    not entry.ignore
+                    and issue.point_ids
+                    and not set(issue.point_ids).intersection(entry.points)
+                ):
+                    errors.append(
+                        f"{where} commit {prefix} maps to {', '.join(issue.point_ids)}; "
+                        f"entry claims {', '.join(entry.points) or 'no point'}"
+                    )
 
-        allowed_checks = set(catalog.always_checks)
-        for point in entry.points:
-            if point in catalog.point_map:
-                allowed_checks.update(catalog.point_map[point].checks)
-        for check in entry.checks:
-            if check in catalog.check_map and check not in allowed_checks:
-                errors.append(
-                    f"{where} check {check} is not evidence for its listed point(s)"
-                )
+            allowed_checks = set(catalog.always_checks)
+            for point in entry.points:
+                if point in catalog.point_map:
+                    allowed_checks.update(catalog.point_map[point].checks)
+            for check in entry.checks:
+                if check in catalog.check_map and check not in allowed_checks:
+                    errors.append(
+                        f"{where} check {check} is not evidence for its listed point(s)"
+                    )
 
     anchor_ids: set[str] = set()
     anchor_prefixes: set[str] = set()
     for index, entry in enumerate(client_fixes.fixes):
-        where = f"fixes[{index}]"
-        if not entry.id or entry.id in anchor_ids:
-            errors.append(f"{where} has a missing or duplicate id {entry.id!r}")
-        anchor_ids.add(entry.id)
-        for path, anchor, kind in (
-            (entry.source, entry.source_anchor, "source"),
-            (entry.test, entry.test_anchor, "test"),
-        ):
-            target = root / path
-            if not target.is_file():
-                errors.append(f"{where} missing {kind} path {path}")
-            elif anchor not in target.read_text(encoding="utf-8"):
-                errors.append(f"{where} lost {kind} anchor {anchor!r} in {path}")
-        for prefix in entry.commits:
-            if prefix in anchor_prefixes:
-                errors.append(f"client fix commit {prefix} is anchored more than once")
-                continue
-            anchor_prefixes.add(prefix)
-            matches_sha = tuple(sha for sha in by_sha if sha.startswith(prefix))
-            if len(matches_sha) != 1:
-                errors.append(
-                    f"{where} commit {prefix} matches {len(matches_sha)} corrective commits"
-                )
-                continue
-            sha = matches_sha[0]
-            if sha in resolved:
-                errors.append(f"corrective commit {prefix} has both ledger and anchor evidence")
-                continue
-            if sha in anchored:
-                errors.append(f"corrective commit {prefix} is anchored more than once")
-                continue
-            anchored.add(sha)
+        with errors.about(named_by(entry.commits), (client_fixes_file, entry.source, entry.test)):
+            where = f"fixes[{index}]"
+            if not entry.id or entry.id in anchor_ids:
+                errors.append(f"{where} has a missing or duplicate id {entry.id!r}")
+            anchor_ids.add(entry.id)
+            for path, anchor, kind in (
+                (entry.source, entry.source_anchor, "source"),
+                (entry.test, entry.test_anchor, "test"),
+            ):
+                target = root / path
+                if not target.is_file():
+                    errors.append(f"{where} missing {kind} path {path}")
+                elif anchor not in target.read_text(encoding="utf-8"):
+                    errors.append(f"{where} lost {kind} anchor {anchor!r} in {path}")
+            for prefix in entry.commits:
+                if prefix in anchor_prefixes:
+                    errors.append(f"client fix commit {prefix} is anchored more than once")
+                    continue
+                anchor_prefixes.add(prefix)
+                matches_sha = tuple(sha for sha in by_sha if sha.startswith(prefix))
+                if len(matches_sha) != 1:
+                    errors.append(
+                        f"{where} commit {prefix} matches {len(matches_sha)} corrective commits"
+                    )
+                    continue
+                sha = matches_sha[0]
+                if sha in resolved:
+                    errors.append(f"corrective commit {prefix} has both ledger and anchor evidence")
+                    continue
+                if sha in anchored:
+                    errors.append(f"corrective commit {prefix} is anchored more than once")
+                    continue
+                anchored.add(sha)
 
     explicit_commits: set[str] = set()
     if client_fixes.enforce_after:
@@ -1088,9 +1174,10 @@ def audit_history(
             # commit could offer (a fragment, a direct test change) is replaced
             # by the `Regression-Test:` lines on the commit that lands it.
             if client_anchor_required and issue.sha not in anchored:
-                errors.append(
+                errors.add(
                     f"corrective client commit {issue.sha[:8]} needs a "
-                    f"tests/client-fixes.toml anchor row: {issue.subject}"
+                    f"tests/client-fixes.toml anchor row: {issue.subject}",
+                    (issue.sha,), (client_fixes_file,),
                 )
             if not is_corrective(issue.subject, issue.sha, post_boundary):
                 # Here only because a `tests/client-fixes.toml` row names it.
@@ -1103,15 +1190,17 @@ def audit_history(
                 trailer_covered.add(issue.sha)
             elif issue.sha in landing.introduced:
                 by = ", ".join(sha[:8] for sha in landing.introduced[issue.sha])
-                errors.append(
+                errors.add(
                     f"corrective commit {issue.sha[:8]} landed in {by} with no "
-                    f"{REGRESSION_TRAILER}: line that resolves: {issue.subject}"
+                    f"{REGRESSION_TRAILER}: line that resolves: {issue.subject}",
+                    (issue.sha, *landing.introduced[issue.sha]), (ledger_file,),
                 )
             elif issue.sha in landing.landed and _excuse(merge_ledger, issue.sha) is None:
-                errors.append(
+                errors.add(
                     f"corrective commit {issue.sha[:8]} reached main outside any "
                     f"landing commit, so nothing can carry its "
-                    f"{REGRESSION_TRAILER}: line: {issue.subject}"
+                    f"{REGRESSION_TRAILER}: line: {issue.subject}",
+                    (issue.sha,), (ledger_file,),
                 )
             elif issue.sha not in landing.landed:
                 # Not on `main` yet. Its pull request's description is where
@@ -1121,9 +1210,10 @@ def audit_history(
             continue
         if client_anchor_required:
             if issue.sha not in anchored:
-                errors.append(
+                errors.add(
                     f"corrective client commit {issue.sha[:8]} needs a "
-                    f"tests/client-fixes.toml anchor row: {issue.subject}"
+                    f"tests/client-fixes.toml anchor row: {issue.subject}",
+                    (issue.sha,), (client_fixes_file,),
                 )
             continue
         runtime_mapping_required = issue.sha in explicit_commits and any(
@@ -1131,18 +1221,24 @@ def audit_history(
         )
         if runtime_mapping_required:
             if issue.sha not in resolved and issue.sha not in anchored:
-                errors.append(
+                errors.add(
                     f"corrective runtime commit {issue.sha[:8]} needs an explicit "
-                    f"regressions.d mapping or client-fix anchor: {issue.subject}"
+                    f"regressions.d mapping or client-fix anchor: {issue.subject}",
+                    (issue.sha,), (coverage_file, client_fixes_file),
                 )
             continue
         if issue.point_ids and issue.direct_test_evidence:
             continue
         if issue.sha not in resolved:
             missing = "functionality point" if not issue.point_ids else "regression evidence"
-            errors.append(
-                f"corrective commit {issue.sha[:8]} has no {missing}: {issue.subject}"
+            errors.add(
+                f"corrective commit {issue.sha[:8]} has no {missing}: {issue.subject}",
+                (issue.sha,), (coverage_file, client_fixes_file),
             )
+
+    failing, inherited = tuple(errors), ()
+    if merge_target is not None:
+        failing, inherited = _split_by_merge_target(root, errors, history_heads, merge_target)
 
     return HistoryReport(
         issues=issues,
@@ -1151,11 +1247,55 @@ def audit_history(
         ),
         covered_by_anchor=tuple(sorted(anchored)),
         ignored=tuple(sorted(sha for sha, entry in resolved.items() if entry.ignore)),
-        errors=tuple(errors),
+        errors=failing,
         merges=landing.rows,
         pending=tuple(sorted(pending)),
         covered_by_trailer=tuple(sorted(trailer_covered)),
+        inherited=inherited,
+        merge_target=merge_target,
     )
+
+
+def _relative(root: Path, path: Path) -> str:
+    try:
+        return Path(os.path.relpath(Path(path).resolve(), Path(root).resolve())).as_posix()
+    except ValueError:
+        return Path(path).as_posix()
+
+
+def _split_by_merge_target(
+    root: Path, errors: _Errors, history_heads: tuple[str, ...], merge_target: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(the change's own errors, the errors already on `merge_target`).
+
+    Own commits are those the audited heads have and the merge target does
+    not; own files are those that differ between the merge base and the
+    checkout. An error stays the change's own when it is about any own commit
+    or own file, or about nothing recorded at all.
+    """
+
+    target = _git(root, "rev-parse", "--verify", f"{merge_target}^{{commit}}").strip()
+    own_commits = frozenset(
+        _git(root, "rev-list", *history_heads, "--not", target, "--").split()
+    )
+    base = _git(root, "merge-base", history_heads[0], target).strip()
+    # Report both sides of a rename: an anchored path that disappears is a
+    # change to that path even when Git detects its contents at a new name.
+    own_paths = frozenset(_git(root, "diff", "--no-renames", "--name-only", base, "--").splitlines())
+
+    def touched(path: str) -> bool:
+        path = path.rstrip("/")
+        return any(changed == path or changed.startswith(path + "/") for changed in own_paths)
+
+    def own(message: str) -> bool:
+        if message in errors.unblamed or message not in errors.blame:
+            return True
+        commits, paths = errors.blame[message]
+        return bool(commits & own_commits) or any(touched(path) for path in paths)
+
+    failing = tuple(dict.fromkeys(error for error in errors if own(error)))
+    inherited = tuple(dict.fromkeys(error for error in errors if not own(error)))
+    return failing, inherited
 
 
 def _write_report(path: Path, report: HistoryReport) -> None:
@@ -1176,7 +1316,9 @@ def _write_report(path: Path, report: HistoryReport) -> None:
             "landing_trailer": len(report.covered_by_trailer),
             "awaiting_landing": len(report.pending),
             "errors": len(report.errors),
+            "inherited_from_merge_target": len(report.inherited),
         },
+        "merge_target": report.merge_target,
         # Generated, never tracked. The whole point of the merge trailer is
         # that landing a PR adds no file to the repository.
         "merges": [
@@ -1214,6 +1356,7 @@ def _write_report(path: Path, report: HistoryReport) -> None:
             for issue in report.issues
         ],
         "errors": list(report.errors),
+        "inherited": list(report.inherited),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -1246,6 +1389,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--report", type=Path, help="write the machine-readable audit JSON")
     parser.add_argument(
+        "--merge-target",
+        default=os.environ.get("PLURX_HISTORY_MERGE_TARGET") or None,
+        help=(
+            "pull request mode: fail only on gaps this change introduces (commits not "
+            "reachable from REF, or ledger/anchor files it edits); gaps already on REF "
+            "are reported and do not fail (default: $PLURX_HISTORY_MERGE_TARGET; unset "
+            "audits the whole history and fails on any gap)"
+        ),
+        metavar="REF",
+    )
+    parser.add_argument(
         "--compare-legacy",
         type=Path,
         help="prove the fragment ledger is semantically identical to a legacy ledger",
@@ -1257,12 +1411,20 @@ def main(argv: list[str] | None = None) -> int:
             print("regression-ledger migration preserves every legacy entry")
             return 0
         baseline = authenticated_history_baseline(dict(os.environ), REPO_ROOT)
-        report = audit_history(landed_baseline=baseline)
+        report = audit_history(landed_baseline=baseline, merge_target=args.merge_target)
     except HistoryError as exc:
         print(f"history audit error: {exc}", file=sys.stderr)
         return 2
     if args.report:
         _write_report(args.report, report)
+    if report.inherited:
+        print(
+            f"history gaps already on {report.merge_target} -- reported, NOT failing this "
+            f"change; they need a follow-up on {report.merge_target} "
+            f"(an errata row in validation/merge-errata.toml, or the missing evidence):"
+        )
+        for error in report.inherited:
+            print(f"  - [on {report.merge_target}] {error}")
     if report.errors:
         print("historical regression coverage is incomplete:", file=sys.stderr)
         for error in report.errors:
