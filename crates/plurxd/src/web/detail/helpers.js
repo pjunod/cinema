@@ -75,7 +75,7 @@ function offloadLine(a){
   return a.message||a.state||"";
 }
 async function getItBack(id){
-  const btn=document.getElementById("offask"), line=document.getElementById("offstatus");
+  const btn=/** @type {HTMLButtonElement|null} */(document.getElementById("offask")), line=document.getElementById("offstatus");
   if(btn) btn.disabled=true;
   if(line) line.textContent="Asking Curator…";
   try{
