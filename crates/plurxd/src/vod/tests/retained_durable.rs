@@ -134,6 +134,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
     let serve = local_serve(base.path().to_owned(), store);
     let video = CopyVideoOptions::new(crate::ffmpeg::has_dovi_rpu().await, false);
     let recipe = Recipe {
+        dv_refit_gain: None,
             source_telemetry:false,
         retained_logical: None, measured_candidate: None, file: file.clone(),
         audio_index: None, aac: true, audio_delivery: None, video,

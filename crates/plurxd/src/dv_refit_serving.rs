@@ -80,6 +80,31 @@ pub(crate) fn digest_hex(digest: [u8; 32]) -> String {
     hex::encode(digest)
 }
 
+/// Status-only fact read with the exact curve table selected for a rendition.
+/// This never contributes to a recipe, index, or output byte identity.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PinnedRefitGain {
+    pub digest: [u8; 32],
+    pub gain: Option<f64>,
+}
+
+struct FittedSelection {
+    table: Arc<ServedCurveTable>,
+    fact: PinnedRefitGain,
+}
+
+fn fitted_selection(table: &RefitCurveTable) -> Result<Option<FittedSelection>, String> {
+    let Some(served) = served_table(table)? else {
+        return Ok(None);
+    };
+    let digest = digest_bytes(served.digest())
+        .ok_or("the fitted F+ curve table has an invalid digest")?;
+    Ok(Some(FittedSelection {
+        table: Arc::new(served),
+        fact: PinnedRefitGain { digest, gain: table.title.gain },
+    }))
+}
+
 /// The one adapter from the store's curve table: `None` unless the title
 /// serves fitted curves in at least one scene.
 pub(crate) fn served_table(table: &RefitCurveTable) -> Result<Option<ServedCurveTable>, String> {
@@ -106,6 +131,13 @@ pub(crate) async fn current_table(
     store: &dyn Store,
     file: &MediaFile,
 ) -> Result<Option<Arc<ServedCurveTable>>, String> {
+    Ok(current_selection(store, file).await?.map(|selection| selection.table))
+}
+
+async fn current_selection(
+    store: &dyn Store,
+    file: &MediaFile,
+) -> Result<Option<FittedSelection>, String> {
     if !plurx_core::playback::file_can_convert_to_p81(file) {
         return Ok(None);
     }
@@ -116,7 +148,7 @@ pub(crate) async fn current_table(
     else {
         return Ok(None);
     };
-    Ok(served_table(&table)?.map(Arc::new))
+    fitted_selection(&table)
 }
 
 /// The table a pinned digest names, or `None` when the store no longer
@@ -127,17 +159,26 @@ pub(crate) async fn pinned_table(
     file: &MediaFile,
     digest: [u8; 32],
 ) -> Result<Option<Arc<ServedCurveTable>>, String> {
+    Ok(pinned_selection(store, file, digest).await?.map(|selection| selection.table))
+}
+
+async fn pinned_selection(
+    store: &dyn Store,
+    file: &MediaFile,
+    digest: [u8; 32],
+) -> Result<Option<FittedSelection>, String> {
     let table = store
         .dv_refit_curves_by_digest(file.id, &digest_hex(digest))
         .await
         .map_err(|error| error.to_string())?;
     match table {
         Some(table) => {
-            let served = served_table(&table)?.ok_or("a pinned F+ table has no fitted scenes")?;
-            if digest_bytes(served.digest()) != Some(digest) {
+            let selection = fitted_selection(&table)?
+                .ok_or("a pinned F+ table has no fitted scenes")?;
+            if selection.fact.digest != digest {
                 return Err("the pinned F+ table's digest disagrees with its identity".into());
             }
-            Ok(Some(Arc::new(served)))
+            Ok(Some(selection))
         }
         None => Ok(None),
     }
@@ -207,33 +248,32 @@ pub(crate) async fn rendition_refit(
     file: &MediaFile,
     video: CopyVideoOptions,
     pinned: Option<&str>,
-) -> Result<(CopyVideoOptions, Option<Arc<ServedCurveTable>>), String> {
+) -> Result<(CopyVideoOptions, Option<PinnedRefitGain>), String> {
     let Some(digest) = pinned
         .and_then(digest_bytes)
         .filter(|_| video.converts_dolby_vision())
     else {
         return Ok((video.with_dolby_vision_refit(None), None));
     };
-    let table = match pinned_table(store, file, digest).await {
+    let selection = match pinned_selection(store, file, digest).await {
         Ok(Some(table)) => Some(table),
         Ok(None) => {
-            let current = current_table(store, file).await?;
+            let current = current_selection(store, file).await?;
             tracing::info!(
                 file_id = file.id,
                 pinned = %digest_hex(digest),
-                current = current.as_ref().map(|table| table.digest()),
+                current = current.as_ref().map(|selection| selection.table.digest()),
                 "the session's F+ curves are no longer kept; re-pinning at this rendition"
             );
             current
         }
         Err(error) => return Err(format!("reading the pinned F+ curve table: {error}")),
     };
-    match table
-        .as_ref()
-        .and_then(|table| digest_bytes(table.digest()))
-    {
-        Some(digest) => Ok((video.with_dolby_vision_refit(Some(digest)), table)),
-        None if table.is_some() => Err("the pinned F+ table has an invalid digest".into()),
+    match selection {
+        Some(selection) => Ok((
+            video.with_dolby_vision_refit(Some(selection.fact.digest)),
+            Some(selection.fact),
+        )),
         None => Ok((video.with_dolby_vision_refit(None), None)),
     }
 }

@@ -152,6 +152,8 @@ impl VodServe {
                     };
                     Some((
                         VodDeliveryInfo {
+                            dolby_vision_refit: session.rendition.as_ref()
+                                .and_then(|rendition| rendition.recipe.refit_report()),
                             dv_refit_digest: session.rendition.as_ref().and_then(|rendition|
                                 rendition.recipe.video.dolby_vision_refit().map(hex::encode)),
                             dv_refit_identity_reason: session.rendition.as_ref().and_then(|rendition|

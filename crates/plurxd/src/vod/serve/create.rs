@@ -682,7 +682,7 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
-        let video = if prepared.encoding.is_none() {
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
             crate::dv_refit_serving::rendition_refit(
                 self.shared.store.as_ref(),
                 file,
@@ -691,9 +691,8 @@ impl VodServe {
             )
             .await
             .map_err(|error| format!("resolving fitted copy rendition: {error}"))?
-            .0
         } else {
-            video
+            (video, None)
         };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
@@ -952,6 +951,7 @@ impl VodServe {
                 .and_then(|encoding| encoding.options.audio.clone())
                 .or_else(|| req.audio_delivery.clone()),
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
             copy_index_init_contract,
@@ -2702,7 +2702,7 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
-        let video = if prepared.encoding.is_none() {
+        let (video, dv_refit_gain) = if prepared.encoding.is_none() {
             crate::dv_refit_serving::rendition_refit(
                 self.shared.store.as_ref(),
                 file,
@@ -2711,9 +2711,8 @@ impl VodServe {
             )
             .await
             .map_err(|error| format!("resolving fitted source copy rendition: {error}"))?
-            .0
         } else {
-            video
+            (video, None)
         };
         let identity = match prepared.encoding.as_ref() {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
@@ -2963,6 +2962,7 @@ impl VodServe {
             audio_index: req.audio_index,
             aac,
             video,
+            dv_refit_gain,
             source_object_version,
             cluster_cache_key,
             copy_index_init_contract,

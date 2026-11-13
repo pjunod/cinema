@@ -2908,11 +2908,17 @@ pub(super) async fn session_info(
     } else {
         "waiting"
     };
+    let dv_refit_identity_reason = matches!(
+        &s.kind,
+        SessionKind::Copy { convert_dolby_vision: true, .. }
+    )
+    .then(|| "Live copy uses the v1 identity converter".to_owned());
     SessionInfo {
+        dolby_vision_refit: dv_refit_identity_reason.clone()
+            .map(crate::transcode::RefitPlaybackReport::identity),
         vod_observation: None,
         dv_refit_digest: None,
-        dv_refit_identity_reason: matches!(&s.kind, SessionKind::Copy { convert_dolby_vision: true, .. })
-            .then(|| "Live copy uses the v1 identity converter".to_owned()),
+        dv_refit_identity_reason,
         id: id.to_owned(),
         presentation: "live-recovery",
         file_id: s.file_id,
@@ -3044,6 +3050,7 @@ pub(super) async fn session_info(
 pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
     let observation = info.observation.as_ref();
     SessionInfo {
+        dolby_vision_refit: info.dolby_vision_refit,
         vod_observation: info.observation.clone(),
         dv_refit_digest: info.dv_refit_digest,
         dv_refit_identity_reason: info.dv_refit_identity_reason,
@@ -3149,6 +3156,7 @@ mod activity_vod_tests {
     #[test]
     fn vod_activity_projects_real_control_without_rolling_measurements() {
         let info = crate::vodserve::VodDeliveryInfo {
+            dolby_vision_refit: None,
             dv_refit_digest: None,
             dv_refit_identity_reason: None,
             observation: Some(crate::vodserve::VodActivityObservation {

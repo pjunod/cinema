@@ -232,6 +232,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                dv_refit_gain: None,
                 source_telemetry: false,
                 retained_logical: None,
                 measured_candidate: None,
