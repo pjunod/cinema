@@ -270,6 +270,13 @@ internal const val RENDEZVOUS_MAX_REPARKS = 2
  * Not thread-safe: the controller drives it from the player's scope.
  */
 internal class RendezvousHold(
+    /**
+     * The successor's own start in film time, its `media_origin_ms`. Nothing
+     * before it exists in the successor, so no rendezvous is earlier: a
+     * successor staged ahead of the viewer (a processed upgrade begins at the
+     * window its trial already produced) is met where it begins.
+     */
+    private val floorFilmMs: Long = Long.MIN_VALUE,
     private val leadMs: Long = RENDEZVOUS_LEAD_MS,
     private val slackMs: Long = PREPARED_ALIGNMENT_SLACK_MS,
     private val maxReparks: Int = RENDEZVOUS_MAX_REPARKS,
@@ -386,7 +393,7 @@ internal class RendezvousHold(
         val wallLead = maxOf(leadMs, measuredWallLead)
         val rate = speed.takeIf { it.isFinite() && it > 0 }?.coerceAtMost(16.0) ?: 1.0
         val filmLead = kotlin.math.ceil(wallLead.toDouble() * rate).toLong().coerceAtLeast(1)
-        val target = incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead
+        val target = maxOf(incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead, floorFilmMs)
         rendezvousFilmMs = target
         parkIssuedAtMs = nowMs
         ready = false

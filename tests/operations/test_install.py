@@ -41,7 +41,7 @@ def mac_ffmpeg_pin() -> tuple[str, dict[str, str]]:
     macOS video path pins -- the single source the installer must agree with."""
     text = MAC_FFMPEG_PIN.read_text(encoding="utf-8")
     tag = re.search(r'^TAG = "v([^"]+)"', text, re.M).group(1)
-    sums = dict(re.findall(r'"(arm64|x86_64)": \("mac(?:arm)?64", "([0-9a-f]{64})"\)', text))
+    sums = dict(re.findall(r'"(arm64)": \("macarm64", "([0-9a-f]{64})"\)', text))
     return tag, sums
 
 
@@ -479,6 +479,19 @@ class InstallerCase(unittest.TestCase):
         self.assertFalse([call for call in self.host.calls() if call.startswith("curl") and " -o " in call])
         self.assertIn("already in", result.stdout)
 
+    def test_intel_mac_is_refused_before_anything_changes(self):
+        # macOS releases and every bundled tool are Apple Silicon only.
+        self.host.stub("launchctl", "")
+        self.host.stub("uname", 'case "$1" in -m) echo x86_64 ;; *) echo Darwin ;; esac\n')
+        prefix = self.tmp / "homebrew"
+        result = self.host.run("--prefix", str(prefix), "--binary", str(self.host.fake_binary))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Intel Macs are not supported", result.stderr)
+        self.assertFalse(prefix.exists())
+        self.assertFalse((self.host.home / "Library/LaunchAgents/com.plurx.plurxd.plist").exists())
+        # The refusal comes before every other step, ownership checks included.
+        self.assertEqual({call.split()[0] for call in self.host.calls()}, {"uname"}, self.host.calls())
+
     def test_macos_release_archive_installs_its_own_plurxd_and_clears_quarantine(self):
         # The GitHub release's macOS archive is this script, the agent template
         # and a built plurxd side by side; `./install` alone must install that
@@ -486,7 +499,7 @@ class InstallerCase(unittest.TestCase):
         # the browser-download quarantine Gatekeeper would otherwise enforce.
         self.host.stub("launchctl", "")
         self.host.stub("xattr", "")
-        archive = self.tmp / "plurxd-0.0.0-macos-universal"
+        archive = self.tmp / "plurxd-0.0.0-macos-arm64"
         archive.mkdir()
         shutil.copy2(INSTALL, archive / "install")
         shutil.copy2(ROOT / "deploy/verify-subtitle-engine", archive / "verify-subtitle-engine")
@@ -655,7 +668,9 @@ class InstallerCase(unittest.TestCase):
         script = INSTALL.read_text(encoding="utf-8")
         self.assertIn(f"jellyfin_ffmpeg_version={MAC_FFMPEG_VERSION}\n", script)
         self.assertIn(f"jellyfin_ffmpeg_sha256_arm64={MAC_FFMPEG_SHA256['arm64']}\n", script)
-        self.assertIn(f"jellyfin_ffmpeg_sha256_x86_64={MAC_FFMPEG_SHA256['x86_64']}\n", script)
+        self.assertEqual(set(MAC_FFMPEG_SHA256), {"arm64"}, "macOS is Apple Silicon only")
+        self.assertNotIn("jellyfin_ffmpeg_sha256_x86_64", script)
+        self.assertNotIn("mac64", script.replace("macarm64", ""))
 
     def test_macos_upgrade_keeps_the_operators_plist(self):
         self.host.stub("launchctl", "")

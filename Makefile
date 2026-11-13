@@ -1909,21 +1909,19 @@ hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks, and Ripw
 ## ---- native macOS server tray ------------------------------------------
 
 .PHONY: desktop-macos-build desktop-macos-test desktop-macos-check
-# Cross-architecture slices prove compilation; unit tests execute only on the
-# runner's actual architecture. Separate scratch roots allow parallel make.
-desktop-macos-build: ## Compile both macOS server tray architectures without executing tests
-	@set -e; for arch in arm64 x86_64; do \
-	  clients/server-tray/macos/build --configuration release \
-	    --version "$(VERSION)" --arch "$$arch" \
-	    --scratch "$(CURDIR)/target/desktop-macos/scratch/$$arch" \
-	    --output "$(CURDIR)/target/desktop-macos/$$arch/Plurx Server.app"; \
-	done
+# The tray is built for Apple Silicon only; unit tests execute on the runner's
+# own architecture. Separate scratch roots allow parallel make.
+desktop-macos-build: ## Compile the Apple Silicon macOS server tray without executing tests
+	clients/server-tray/macos/build --configuration release \
+	  --version "$(VERSION)" --arch arm64 \
+	  --scratch "$(CURDIR)/target/desktop-macos/scratch/arm64" \
+	  --output "$(CURDIR)/target/desktop-macos/arm64/Plurx Server.app"
 
 desktop-macos-test: ## Run native server tray Swift and AppKit unit contracts
 	swift test --package-path clients/server-tray/macos \
 	  --scratch-path "$(CURDIR)/target/desktop-macos/tests"
 
-desktop-macos-check: desktop-macos-build desktop-macos-test ## Build both slices and test on the native macOS architecture
+desktop-macos-check: desktop-macos-build desktop-macos-test ## Build the arm64 tray and test it
 
 ## ---- apple clients -----------------------------------------------------
 

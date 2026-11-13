@@ -2481,7 +2481,7 @@ impl TranscodeManager {
                     .ok_or("processed trial executable escaped before qualification")?
                     .candidate_recipe = Some(digest);
             }
-            if root.reused_parent.is_none() {
+            let prepared_window = if root.reused_parent.is_none() {
                 let grid = encoding.grid;
                 let plan = grid.plan(file.duration_ms.ok_or("processed duration missing")?, 0);
                 let first = runtime
@@ -2508,7 +2508,16 @@ impl TranscodeManager {
                 ) {
                     return Err("the processed trial selected no processing plan".into());
                 }
-            }
+                // Round into the entry, never into the preceding frame-grid
+                // segment when its start falls between whole milliseconds.
+                let start_ms = first_entry
+                    .start_ticks
+                    .saturating_mul(1_000)
+                    .div_ceil(u64::from(grid.numerator)) as i64;
+                Some(start_ms..end_ms(first_entry))
+            } else {
+                None
+            };
             let encoding = &root.encoding;
             if !encoding
                 .engine
@@ -2556,6 +2565,7 @@ impl TranscodeManager {
                 request: trial,
                 candidate,
                 root,
+                prepared_window,
             }))
         }
     }
