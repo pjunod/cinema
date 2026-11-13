@@ -83,6 +83,39 @@ class CinemaModel(unittest.TestCase):
         self.assertEqual(player.delete_session.call_args_list,
                          [mock.call({'session_id': 'incumbent'}), mock.call(candidate)])
 
+    def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls(self):
+        mpv, http = mock.Mock(), mock.Mock()
+        mpv.get.side_effect = lambda _name, default=None: default
+        http.request.return_value = (200, {})
+        http.url.side_effect = lambda url: url
+        player = Playback(http, mpv, {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
+        incumbent = {'session_id': 'incumbent', 'playlist_url': '/old.m3u8',
+                     'control': {'url': '/old/control', 'generation': 'old', 'control_epoch': 1}}
+        candidate = {'session_id': 'candidate', 'playlist_url': '/new.m3u8',
+                     'control': {'url': '/new/control', 'generation': 'new', 'control_epoch': 1}}
+        player.started, player.mode, player.session = True, 'transcode', incumbent
+        player.decision = {'quality_candidates': [
+            {'route': 'encode', 'decoder_compatible': True, 'target_height': 1080}]}
+        for name in ('publish_chrome', 'progress', 'decide', 'plan_subtitle', 'load', 'show_film_timeline'):
+            setattr(player, name, mock.Mock())
+        player.position_ms = mock.Mock(return_value=65000)
+        player.create_session = mock.Mock(return_value=candidate)
+        player.delete_session = mock.Mock()
+        player.heartbeat()
+        player.heartbeat()
+        player.change_quality('1080')
+        player.heartbeat()
+        player.heartbeat()
+        player.settle_quality('Candidate failed after its control exchanges')
+        player.heartbeat()
+        controls = [(call.args[1], call.args[2]) for call in http.request.call_args_list]
+        self.assertEqual([(url, body['sequence']) for url, body in controls],
+                         [('/old/control', 1), ('/old/control', 2),
+                          ('/new/control', 1), ('/new/control', 2), ('/old/control', 3)])
+        self.assertEqual([body['generation'] for _, body in controls], ['old', 'old', 'new', 'new', 'old'])
+        self.assertEqual({body['client_instance_id'] for _, body in controls}, {player.client_instance_id})
+        player.delete_session.assert_called_once_with(candidate)
+
     def test_autoplay_saves_atomically_and_failed_save_preserves_effective_choice(self):
         with tempfile.TemporaryDirectory() as root:
             prefs = Preferences(root)
@@ -160,6 +193,10 @@ class CinemaControls(LauncherCase):
         advance_at = self.server.index('POST', r'/self/next$')
         old_progress = self.server.index('POST', rf'/items/{ITEM_ID}/progress$')
         self.assertLess(old_progress, advance_at)
+        for session in self.server.sessions:
+            controls = self.server.calls('POST', prefix=session['control']['url'])
+            self.assertTrue(controls)
+            self.assertEqual([r['body']['sequence'] for r in controls], list(range(1, len(controls) + 1)))
 
     def test_autoplay_advances_once_at_eof_and_saved_off_stays_on_predecessor(self):
         self.advertise_next()
@@ -209,6 +246,20 @@ class CinemaControls(LauncherCase):
         self.close_at(12); self.assertEqual(self.run_launcher(), 0)
         self.assertTrue(self.chrome()[-1]['retryable'])
         self.assertIn('read failed', self.chrome()[-1]['error'])
+
+    def test_retry_recreation_starts_new_control_sequence(self):
+        self.clock.at(6, lambda: self.mpv.emit({'event': 'end-file', 'reason': 'error', 'file_error': 'read failed'}))
+        self.intent_at(8, 'cinema-retry')
+        self.close_at(16)
+        self.assertEqual(self.run_launcher(), 0)
+        self.assertEqual(len(self.server.sessions), 2)
+        incumbent, replacement = self.server.sessions
+        before = self.server.calls('POST', prefix=incumbent['control']['url'])
+        after = self.server.calls('POST', prefix=replacement['control']['url'])
+        self.assertGreaterEqual(len(before), 2)
+        self.assertTrue(after)
+        self.assertEqual([r['body']['sequence'] for r in after], list(range(1, len(after) + 1)))
+        self.assertTrue(all(r['body']['generation'] == replacement['control']['generation'] for r in after))
 
     def test_next_request_lost_before_advance_retains_current_playback(self):
         self.advertise_next(); self.intent_at(6, 'cinema-next'); self.close_at(12)
