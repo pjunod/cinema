@@ -232,11 +232,15 @@
         let durable = e1c_route(&fixture, &session_id, &fixture.state.node_id).await;
         let buffer = Arc::new(crate::logbuf::LogBuffer::new(16));
         let _capture = crate::logbuf::capture_for_test(&buffer);
-        let gate = (!release_before_read)
-            .then(|| fixture.state.media_sessions.hold_route_store_for_test());
+        let gate =
+            (!release_before_read).then(|| fixture.state.media_sessions.hold_route_store_for_test());
         if release_before_read {
             assert!(matches!(
-                fixture.state.media_sessions.begin_release_reconciliation(&session_id).await,
+                fixture
+                    .state
+                    .media_sessions
+                    .begin_release_reconciliation(&session_id)
+                    .await,
                 ReleaseAdmission::Won(_)
             ));
         }
@@ -249,13 +253,22 @@
             &fixture.state.serving,
             route,
             &path,
-            control_inner(fixture.state.clone(), session_id.clone(), body, unix_ms() + 4_000),
+            control_inner(
+                fixture.state.clone(),
+                session_id.clone(),
+                body,
+                unix_ms() + 4_000,
+            ),
         );
         let release = async {
             if let Some((entered, gate)) = gate {
                 entered.notified().await;
                 assert!(matches!(
-                    fixture.state.media_sessions.begin_release_reconciliation(&session_id).await,
+                    fixture
+                        .state
+                        .media_sessions
+                        .begin_release_reconciliation(&session_id)
+                        .await,
                     ReleaseAdmission::Won(_)
                 ));
                 gate.close();
@@ -263,20 +276,44 @@
         };
         let (response, ()) = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::join!(exchange, release)
-        }).await.expect("deterministic route/release interleave");
+        })
+        .await
+        .expect("deterministic route/release interleave");
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(response.extensions().get::<crate::http::error::ApiErrorCode>()
-            .expect("typed control error").0, "control_unavailable");
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.expect("body");
+        assert_eq!(
+            response
+                .extensions()
+                .get::<crate::http::error::ApiErrorCode>()
+                .expect("typed control error")
+                .0,
+            "control_unavailable"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body");
         assert_eq!(bytes.as_ref(), br#"{"code":"control_unavailable","message":"the durable media route is temporarily unavailable","retry_after_ms":500}"#);
-        assert_eq!(fixture.store.media_session_route(&session_id).await
-            .expect("durable route").expect("active row").state, "active",
-            "diagnostics never bypass the release fence or mutate the row");
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("durable route")
+                .expect("active row")
+                .state,
+            "active",
+            "diagnostics never bypass the release fence or mutate the row"
+        );
         let lines = buffer.tail("trace", 16);
-        let failures = lines.iter().filter(|line| line.message.contains("playback response failed"))
+        let failures = lines
+            .iter()
+            .filter(|line| line.message.contains("playback response failed"))
             .collect::<Vec<_>>();
-        assert_eq!(failures.len(), 1, "one existing diagnostic event: {lines:?}");
+        assert_eq!(
+            failures.len(),
+            1,
+            "one existing diagnostic event: {lines:?}"
+        );
         let message = &failures[0].message;
         let expected_stage = if release_before_read {
             "control_route_failure=\"release_pending_before_read\""
@@ -284,15 +321,26 @@
             "control_route_failure=\"release_pending_after_read\""
         };
         for field in [
-            "status=503", "code=\"control_unavailable\"", expected_stage,
-            "control_error_file=\"http/hls/control.rs\"", "control_error_line=",
-            &format!("session=\"{}\"", crate::transcode::session_log_id(&session_id)),
+            "status=503",
+            "code=\"control_unavailable\"",
+            expected_stage,
+            "control_error_file=\"http/hls/control.rs\"",
+            "control_error_line=",
+            &format!(
+                "session=\"{}\"",
+                crate::transcode::session_log_id(&session_id)
+            ),
         ] {
             assert!(message.contains(field), "{field} missing from {message}");
         }
-        assert!(!message.contains(&session_id), "never log the bearer capability");
-        assert!(!message.contains("control_store_error_class="),
-            "a release fence is not a backend error: {message}");
+        assert!(
+            !message.contains(&session_id),
+            "never log the bearer capability"
+        );
+        assert!(
+            !message.contains("control_store_error_class="),
+            "a release fence is not a backend error: {message}"
+        );
     }
 
     #[tokio::test]
