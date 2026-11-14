@@ -7970,7 +7970,7 @@ test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
 id = "apple.dv-enhancement-pills"
 commits = ["3c4931f9faca91d0a50a97df390550274763babf"]
 source = "clients/apple/Sources/PlayerView.swift"
-source_anchor = 'case .enhancement: return "plus.circle"'
+source_anchor = 'case .enhancement, .toneMapping: return "plus.circle"'
 test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
 test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
 
@@ -8583,3 +8583,48 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = '"origin_ms", "control_binding", "sequence")}'
 test = "clients/linux-player/tests/test_cinema_controls.py"
 test_anchor = "def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls"
+
+# PR #1587: tone-mapping pills require current server evidence on every client.
+[[fixes]]
+id = "web.tone-mapping-pill-current-processing-evidence"
+commits = ["6fc8b300e4c2c69ddb3f82c4cee008f975b73499"]
+source = "crates/plurxd/src/web/detail/dynamic-range.js"
+source_anchor = "function playerToneMapping(p){"
+test = "tests/web/dv-processing-badge.test.js"
+test_anchor = "test('Tone mapping pill follows current server telemetry and confirmed display mapping',()=>{"
+
+[[fixes]]
+id = "apple.tone-mapping-pill-active-processing-evidence"
+commits = []
+supplements = "web.tone-mapping-pill-current-processing-evidence"
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "static func toneMappingActive("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testToneMappingPillRequiresActiveProcessingEvidence()"
+
+[[fixes]]
+id = "android.tone-mapping-pill-active-processing-evidence"
+commits = []
+supplements = "web.tone-mapping-pill-current-processing-evidence"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "val cpuMapping = (toneMapPeakNits ?: 0) > 0 &&"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "fun toneMappingPillRequiresActiveProcessingEvidence()"
+
+[[fixes]]
+id = "linux-player.tone-mapping-pill-active-processing-evidence"
+commits = []
+supplements = "web.tone-mapping-pill-current-processing-evidence"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def effective_tone_mapping(self):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_tone_mapping_requires_current_server_processing_evidence(self):"
+
+# Commit 9a980fb: collect optional tone-mapping telemetry off the input loop.
+[[fixes]]
+id = "linux-player.tone-mapping-probe-off-input-loop"
+commits = ["9a980fb053db7720f20a0711594af2fee171b170"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def refresh_tone_mapping"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_slow_tone_mapping_telemetry_keeps_input_loop_responsive(self):"
