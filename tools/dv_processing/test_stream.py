@@ -44,6 +44,14 @@ def test_stream_controls():
                 assert not (out/'reconstructed.rgb48le').exists()
                 rows=(out/'timing.tsv').read_text().splitlines()
                 assert len(rows)==events[-1]['frames']==len(list((out/'rpus').glob('*.nal')))
+                # Diagnostic stage clock: ordered, monotonic, ends complete.
+                stages=[line.split('\t') for line in (out/'stages.tsv').read_text().splitlines()]
+                names=[stage[0] for stage in stages]
+                assert names[0]=='started' and names[-1]=='complete',names
+                assert all(n in names for n in ('opened','probed','decoders','first_frame','gpu_ready','rendered')),names
+                micros=[int(stage[1]) for stage in stages]
+                assert micros==sorted(micros),stages
+                assert int(stages[-1][4])==events[-1]['frames'],stages
                 accepted=[e for e in events if e['kind']=='accepted_source_pair']
                 for i,event in enumerate(accepted):
                     assert hashlib.sha256((out/'rpus'/f'frame-{i:03d}.nal').read_bytes()).hexdigest()==event['rpu_sha256']

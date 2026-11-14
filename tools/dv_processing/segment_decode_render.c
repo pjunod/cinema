@@ -16,6 +16,7 @@
 #include <libavutil/sha.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <va/va.h>
@@ -55,6 +56,26 @@ static struct movie_source_interrupt movie_interrupt = {.read_fd = -1, .write_fd
 static bool movie_interrupt_initialized;
 
 static FILE *rgb_output, *timing_output;
+// Where this window's wall time went, for the daemon's per-window timing
+// line: one flushed row per stage (name, microseconds since start, preroll,
+// paired, emitted), so a window stopped at its deadline still shows how far
+// it got. Diagnostic only: no failure here changes what is rendered or
+// refused, and nothing reads it back to decide anything.
+static FILE *stage_output;
+static struct timespec helper_started;
+static void stage_mark(const char *name) {
+  struct timespec now;
+  if (!stage_output || clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return;
+  long long us = (long long)(now.tv_sec - helper_started.tv_sec) * 1000000LL +
+                 (now.tv_nsec - helper_started.tv_nsec) / 1000;
+  if (fprintf(stage_output, "%s\t%lld\t%u\t%u\t%d\n", name, us, preroll,
+              paired, emitted) < 0 ||
+      fflush(stage_output) != 0) {
+    fclose(stage_output);
+    stage_output = NULL;
+  }
+}
 static AVFormatContext *nut_output;
 static AVStream *nut_stream;
 static int64_t output_pts, output_duration, nut_tick_scale;
@@ -596,11 +617,13 @@ static void render_pairs(void) {
         base_only || (mapped && !diagnostic_hashes) ? NULL : pack(el)};
     const AVFrame *hardware[2] = {bl, el};
     if (!initialized) {
+      stage_mark("first_frame");
       if (base_only)
         base_gpu_init(expected_w[0], expected_h[0]);
       else
         gpu_init(expected_w[0], expected_h[0], expected_w[1], expected_h[1]);
       initialized = true;
+      stage_mark("gpu_ready");
     }
     char pts[64], duration[64], bl_hash[65], el_hash[65], rpu_hash[65];
     need(source_time_base.num > 0 && source_time_base.den > 0 &&
@@ -824,6 +847,8 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 int main(int argc, char **argv) {
   if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed")))
     return refit_main(argc, argv);
+  if (clock_gettime(CLOCK_MONOTONIC, &helper_started) != 0)
+    helper_started = (struct timespec){0};
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};
   if (held_origin) {
@@ -910,6 +935,8 @@ int main(int argc, char **argv) {
   timing_output = fopen("timing.tsv", "wx");
   need((streaming || rgb_output) && timing_output,
        "exclusive private output files");
+  stage_output = fopen("stages.tsv", "wx");
+  stage_mark("started");
   AVFormatContext *input = avformat_alloc_context();
   need(input != NULL, "input context");
   input->probesize = 1024 * 1024;
@@ -921,6 +948,7 @@ int main(int argc, char **argv) {
   int opened = avformat_open_input(&input, argv[1], NULL, NULL);
   need(!movie_io.exhausted, "window source read budget exhausted");
   need(opened >= 0, "timestamped segment open");
+  stage_mark("opened");
   need(input->nb_streams > 0 && input->nb_streams <= 256,
        "bounded stream inventory");
   // This helper consumes only the selected coded AU. Keep the original
@@ -948,6 +976,7 @@ int main(int argc, char **argv) {
     av_dict_free(&probe_options[i]);
   need(!movie_io.exhausted, "window source read budget exhausted");
   need(probed >= 0, "bounded stream discovery");
+  stage_mark("probed");
   need((unsigned)stream_index < input->nb_streams &&
            input->streams[stream_index]->codecpar->codec_type ==
                AVMEDIA_TYPE_VIDEO &&
@@ -999,6 +1028,7 @@ int main(int argc, char **argv) {
     need(avformat_seek_file(input, stream_index, INT64_MIN, target, target,
                             AVSEEK_FLAG_BACKWARD) >= 0,
          "keyframe seek before exact window start");
+    stage_mark("seeked");
     // require() refusals in shared renderer code must also avoid destructors
     // throughout the reader-only interval before the export writer starts.
     dv_threads_live = true;
@@ -1023,6 +1053,7 @@ int main(int argc, char **argv) {
   layers[0] = open_layer(stream, 0);
   if (!base_only)
     layers[1] = open_layer(stream, 1);
+  stage_mark("decoders");
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "demux packet");
   int result;
@@ -1054,6 +1085,7 @@ int main(int argc, char **argv) {
   }
   // Every frame is rendered: finish its writes before the window checks.
   writer_finish();
+  stage_mark("rendered");
   release_held();
   need(emitted > 0 &&
            (window_done || (layers[0].count == 0 && layers[1].count == 0)),
@@ -1170,5 +1202,8 @@ int main(int argc, char **argv) {
            "\"fel_contributed\":false,"
            "\"production_qualified\":false}\n", source_profile, emitted);
   need(fflush(stdout) == 0, "observations flush");
+  stage_mark("complete");
+  if (stage_output)
+    fclose(stage_output);
   return 0;
 }
