@@ -1,6 +1,6 @@
 # CM4 trim fidelity — source hue labels and spatial weights
 
-**Status:** open; source implemented, final qualification in progress · **Owner:** Codex · **Updated:** 2026-11-13
+**Status:** built; focused/native qualification passed, main promotion pending · **Owner:** Codex · **Updated:** 2026-11-13
 
 Companion to the [processing ledger](DV_HDR_PROCESSING_STATUS.md) and
 [display-targeted build](DISPLAY-TARGETED-DV-BUILD.md). This records two
@@ -86,7 +86,11 @@ to a different display ID at the source's exact peak; no successful result is
 claimed for that boundary control. The existing no-trims-at-master path is
 unchanged and has a separate neutral-weight invariant.
 
-Final native parity, adversarial review and merge checks remain pending.
+Adversarial review found no actionable issues. All four focused regressions
+passed. The native L8 MS unittest passed its six reference controls, including
+the below-first-target hold; ten affected hue/L5 parity cases also passed on
+CPU-only lavapipe. The pinned Linux control compiled with warnings as errors.
+Main promotion remains pending.
 Bridged expanded-XML evidence retains its omitted/defaulted-field limits;
 it does not establish raw-RPU, full-title or physical-display acceptance.
 Existing backend identity includes renderer/source digests, so changed helper
