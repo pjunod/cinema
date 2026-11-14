@@ -6,7 +6,13 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub(crate) const SCHEMA: &str = include_str!("dv_title_jobs.sql");
+pub(crate) const SCHEMA_V1: &str = include_str!("dv_title_jobs.sql");
+pub(crate) const MIGRATION_V2: &str = include_str!("dv_title_jobs_v2.sql");
+pub(crate) const SCHEMA: &str = concat!(
+    include_str!("dv_title_jobs.sql"),
+    "\n-- next statement\n",
+    include_str!("dv_title_jobs_v2.sql")
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleDemand {
@@ -18,7 +24,28 @@ pub struct TitleDemand {
     pub probe_json: String,
     /// Resume the same yielded job even when its pending recipe set changed.
     pub queued_job_id: Option<String>,
+    /// Current observed job, including a running owner during rolling upgrades.
+    #[serde(default)]
+    pub active_job_id: Option<String>,
+    /// An unexpired playback interest in this exact source and scanner generation.
+    #[serde(default)]
+    pub playback_requested: bool,
+    #[serde(default)]
+    pub playback_recipes: Vec<String>,
+    #[serde(default)]
+    pub scanner_digest: Option<String>,
 }
+/// Bounded viewer interest in one already registered exact quality recipe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TitleViewerRequest {
+    pub file_id: i64,
+    pub viewer: String,
+    pub request: crate::transcode::dv_fel_qualification::FelRecipeRequest,
+    pub scanner_digest: String,
+    pub deadline_ms: i64,
+    pub now_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleOutput {
     pub file_id: i64,
@@ -61,41 +88,110 @@ pub struct PublishTitleJob {
     pub now_ms: i64,
 }
 
+const DEMAND_ROWS: &str = r#"
+WITH candidates AS (
+ SELECT d.revision,d.terminal,d.scanner_digest,file.id,file.size,file.mtime,file.probe_json,
+ (SELECT json_group_array(DISTINCT w.consumer_ref)
+  FROM background_jobs j JOIN background_job_waiters w ON w.job_id=j.id
+  JOIN json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+   THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r
+   ON r.key=w.consumer_ref AND json_extract(r.value,'$.identity')=w.consumer_ref
+  WHERE d.terminal=0 AND j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running')
+   AND json_extract(j.payload_json,'$.file_id')=file.id
+   AND json_extract(j.payload_json,'$.source_size')=file.size
+   AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
+   AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+   AND json_extract(j.payload_json,'$.scanner_digest')=d.scanner_digest
+   AND json_extract(r.value,'$.source_size')=file.size AND json_extract(r.value,'$.source_mtime')=file.mtime
+   AND w.consumer_kind='playback_qualification' AND w.state IN ('pending','awaiting_hydration')
+   AND w.deadline_ms IS NOT NULL AND w.deadline_ms>json_extract($1,'$.now')) AS playback_recipes
+ FROM dv_title_jobs_demand d JOIN files file ON file.id=d.file_id
+)
+SELECT json_object('file_id',file.id,'probe_revision',file.revision,
+ 'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
+ 'scanner_digest',file.scanner_digest,'playback_recipes',json(file.playback_recipes),
+ 'playback_requested',json(CASE WHEN json_array_length(file.playback_recipes)>0 THEN 'true' ELSE 'false' END),
+ 'active_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running')
+  AND json_extract(j.payload_json,'$.file_id')=file.id AND json_extract(j.payload_json,'$.probe_revision')=file.revision
+  AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
+  AND json_extract(j.payload_json,'$.scanner_digest')=file.scanner_digest ORDER BY CASE WHEN j.state='running' AND j.lease_expires_ms>json_extract($1,'$.now') THEN 0 WHEN j.state='queued' THEN 1 ELSE 2 END,j.created_at_ms,j.id LIMIT 1),
+ 'queued_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.payload_version=1 AND j.state='queued'
+  AND json_extract(j.payload_json,'$.file_id')=file.id
+  AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
+  AND json_extract(j.payload_json,'$.probe_revision')=file.revision
+  AND json_extract(j.payload_json,'$.scanner_digest')=COALESCE(json_extract($1,'$.scanner'),file.scanner_digest)
+  ORDER BY CASE WHEN j.state='running' AND j.lease_expires_ms>json_extract($1,'$.now') THEN 0 WHEN j.state='queued' THEN 1 ELSE 2 END,j.created_at_ms,j.id LIMIT 1)) AS result_json
+FROM candidates file
+"#;
+
 pub(super) async fn demands<T: QueueSql>(
     store: &T,
     scanner: &str,
     after: i64,
+    now_ms: i64,
 ) -> Result<Vec<TitleDemand>, StoreError> {
-    if !digest(scanner) || after < 0 {
+    if !digest(scanner) || after < 0 || now_ms < 0 {
         return Err(StoreError::Task("invalid title demand query".into()));
     }
-    store.queue_sql(r#"
-UPDATE dv_title_jobs_demand SET terminal=0 WHERE terminal=1 AND json_type($1)='object'
- AND EXISTS(SELECT 1 FROM files f WHERE f.id=dv_title_jobs_demand.file_id AND json_valid(f.probe_json)
-  AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_requests_v3')='object'
-   THEN json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r
-   WHERE json_extract(r.value,'$.source_size')=f.size AND json_extract(r.value,'$.source_mtime')=f.mtime))
- AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
-  AND json_extract(j.payload_json,'$.file_id')=dv_title_jobs_demand.file_id)
-RETURNING 'true' AS result_json
-"#.into(),"{}".into(),true,true).await?;
-    let rows = store.queue_sql(r#"
-SELECT json_object('file_id',file.id,'probe_revision',d.revision,
- 'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
- 'queued_job_id',(SELECT j.id FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state='queued'
-  AND json_extract(j.payload_json,'$.file_id')=file.id
-  AND json_extract(j.payload_json,'$.source_size')=file.size AND json_extract(j.payload_json,'$.source_mtime')=file.mtime
-  AND json_extract(j.payload_json,'$.probe_revision')=d.revision
-  AND json_extract(j.payload_json,'$.scanner_digest')=json_extract($1,'$.scanner')
-  ORDER BY j.created_at_ms,j.id LIMIT 1)) AS result_json
-FROM dv_title_jobs_demand d JOIN files file ON file.id=d.file_id
-WHERE d.revision>json_extract($1,'$.after') AND (d.terminal=0 OR d.scanner_digest IS NOT json_extract($1,'$.scanner'))
- AND (NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+    let sql = format!(
+        "{DEMAND_ROWS} {}",
+        r#"
+WHERE file.revision>json_extract($1,'$.after')
+ AND (file.terminal=0 OR file.scanner_digest IS NOT json_extract($1,'$.scanner'))
+ AND (json_array_length(file.playback_recipes)>0 OR NOT EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(file.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(file.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END))
  OR NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('running','cancelling')
   AND json_extract(j.payload_json,'$.file_id')=file.id))
-ORDER BY d.revision LIMIT 128
-"#.into(), encode(&serde_json::json!({"scanner":scanner,"after":after}))?, false, true).await?;
+ORDER BY file.revision LIMIT 128"#
+    );
+    let rows = store
+        .queue_sql(
+            sql,
+            encode(&serde_json::json!({"scanner":scanner,"after":after,"now":now_ms}))?,
+            false,
+            true,
+        )
+        .await?;
+    rows.iter().map(|row| decode(row)).collect()
+}
+
+/// Read-only bounded keyset walk over exact live recipe interests. A direct
+/// file lookup protects an owned live attempt independently of page pressure.
+pub(super) async fn playback_demands<T: QueueSql>(
+    store: &T,
+    after: i64,
+    now_ms: i64,
+    file_id: Option<i64>,
+) -> Result<Vec<TitleDemand>, StoreError> {
+    if after < 0 || now_ms < 0 || file_id.is_some_and(|id| id <= 0) {
+        return Err(StoreError::Task("invalid live title demand query".into()));
+    }
+    let rows=store.queue_sql(r#"
+WITH live AS MATERIALIZED (
+ SELECT job_id,consumer_ref FROM background_job_waiters
+ WHERE consumer_kind='playback_qualification' AND state IN ('pending','awaiting_hydration')
+  AND deadline_ms>json_extract($1,'$.now') AND length(consumer_ref)=64
+), eligible AS (
+ SELECT d.revision,d.scanner_digest,f.id,f.size,f.mtime,f.probe_json,w.consumer_ref,j.id AS job_id,j.state,j.lease_expires_ms
+ FROM live w JOIN background_jobs j ON j.id=w.job_id
+ JOIN dv_title_jobs_demand d ON d.file_id=json_extract(j.payload_json,'$.file_id')
+ JOIN files f ON f.id=d.file_id
+ WHERE j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running') AND d.terminal=0
+  AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+  AND json_extract(j.payload_json,'$.scanner_digest')=d.scanner_digest
+  AND json_extract(j.payload_json,'$.source_size')=f.size AND json_extract(j.payload_json,'$.source_mtime')=f.mtime
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||w.consumer_ref||'.identity')=w.consumer_ref
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||w.consumer_ref||'.source_size')=f.size
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||w.consumer_ref||'.source_mtime')=f.mtime
+  AND ((json_extract($1,'$.file') IS NOT NULL AND f.id=json_extract($1,'$.file'))
+   OR (json_extract($1,'$.file') IS NULL AND d.revision>json_extract($1,'$.after')))
+)
+SELECT json_object('file_id',id,'probe_revision',revision,'source_size',size,'source_mtime',mtime,
+ 'probe_json',probe_json,'scanner_digest',scanner_digest,'playback_requested',json('true'),
+ 'playback_recipes',json_group_array(DISTINCT consumer_ref),
+ 'active_job_id',COALESCE(min(CASE WHEN state='running' AND lease_expires_ms>json_extract($1,'$.now') THEN job_id END),min(CASE WHEN state='queued' THEN job_id END),min(job_id)),'queued_job_id',min(CASE WHEN state='queued' THEN job_id ELSE NULL END)) AS result_json
+FROM eligible GROUP BY revision ORDER BY revision LIMIT 128
+"#.into(),encode(&serde_json::json!({"after":after,"now":now_ms,"file":file_id}))?,false,true).await?;
     rows.iter().map(|row| decode(row)).collect()
 }
 
@@ -404,7 +500,8 @@ pub(super) async fn put_fel_verdict<T: QueueSql>(
         if encode(&body)?.len() > 64 * 1024 {
             return Err(StoreError::Task("FEL variant receipt exceeds bound".into()));
         }
-        let rows=store.queue_sql(r#"
+        let encoded = encode(&body)?;
+        store.queue_transaction(vec![(r#"
 UPDATE files SET probe_json=json_set(
  json_remove(probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')),
  '$.plurx_dv_fel_variants_v3',json_set(
@@ -415,8 +512,25 @@ UPDATE files SET probe_json=json_set(
   '$.'||json_extract($1,'$.identity'),json(json_extract($1,'$.row'))))
 WHERE id=json_extract($1,'$.file') AND size=json_extract($1,'$.size') AND mtime=json_extract($1,'$.mtime')
  AND dv_profile=7 AND dv_el_present=1 AND json_valid(probe_json)
-RETURNING 'true' AS result_json
-"#.into(),encode(&body)?,true,true).await?;
+"#.into(),encoded.clone()),(r#"
+UPDATE background_job_waiters SET state='succeeded',
+ result_ref='dv-fel:'||json_extract($1,'$.identity'),updated_at_ms=json_extract($1,'$.row.verdict.measured_at_ms')
+WHERE consumer_kind='playback_qualification' AND consumer_ref=json_extract($1,'$.identity')
+ AND state IN ('pending','awaiting_hydration')
+ AND EXISTS(SELECT 1 FROM background_jobs j JOIN dv_title_jobs_demand d ON d.file_id=json_extract(j.payload_json,'$.file_id')
+  JOIN files f ON f.id=d.file_id WHERE j.id=background_job_waiters.job_id
+  AND j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running','succeeded')
+  AND d.terminal=0 AND d.revision=json_extract(j.payload_json,'$.probe_revision')
+  AND d.scanner_digest=json_extract(j.payload_json,'$.scanner_digest')
+  AND f.id=json_extract($1,'$.file') AND f.size=json_extract($1,'$.size') AND f.mtime=json_extract($1,'$.mtime')
+  AND json_extract(j.payload_json,'$.source_size')=f.size AND json_extract(j.payload_json,'$.source_mtime')=f.mtime
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.request.identity')=json_extract($1,'$.identity'))
+"#.into(),encoded.clone())]).await?;
+        let rows=store.queue_sql(r#"
+SELECT 'true' AS result_json FROM files f
+WHERE f.id=json_extract($1,'$.file') AND f.size=json_extract($1,'$.size') AND f.mtime=json_extract($1,'$.mtime')
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.request.identity')=json_extract($1,'$.identity')
+"#.into(),encoded,false,true).await?;
         return Ok(!rows.is_empty());
     }
     let body = serde_json::json!({"file_id":file_id,"size":source_size,"mtime":source_mtime,"verdict":verdict});
@@ -592,8 +706,9 @@ pub(super) async fn request_fel_variant<T: QueueSql>(
     if file_id <= 0 || !request.valid() {
         return Err(StoreError::Task("invalid FEL recipe request".into()));
     }
-    let body = serde_json::json!({"file":file_id,"request":request,"identity":request.identity,"size":request.source_size,"mtime":request.source_mtime});
-    let rows=store.queue_sql(r#"
+    let body = serde_json::json!({"file":file_id,"request":request,"identity":request.identity,"size":request.source_size,"mtime":request.source_mtime,"schema":crate::transcode::dv_fel_qualification::SCHEMA});
+    let encoded = encode(&body)?;
+    store.queue_transaction(vec![(r#"
 UPDATE files SET probe_json=json_set(probe_json,
  '$.plurx_dv_fel_requests_v3',json_set(COALESCE((SELECT json_group_object(key,json(value))
  FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_requests_v3')='object'
@@ -607,8 +722,31 @@ WHERE id=json_extract($1,'$.file') AND size=json_extract($1,'$.size') AND mtime=
  OR (SELECT count(*) FROM json_each(CASE WHEN json_type(files.probe_json,'$.plurx_dv_fel_requests_v3')='object'
  THEN json_extract(files.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END)
  WHERE json_extract(value,'$.source_size')=files.size AND json_extract(value,'$.source_mtime')=files.mtime)<8)
-RETURNING 'true' AS result_json
-"#.into(),encode(&body)?,true,true).await?;
+"#.into(),encoded.clone()),(r#"
+UPDATE dv_title_jobs_demand AS d SET terminal=0 WHERE d.file_id=json_extract($1,'$.file') AND d.terminal=1
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('cancelling','cancelled','failed')
+  AND json_extract(j.payload_json,'$.probe_revision')=d.revision)
+ AND EXISTS(SELECT 1 FROM files f WHERE f.id=d.file_id AND f.size=json_extract($1,'$.size') AND f.mtime=json_extract($1,'$.mtime')
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')||'.identity')=json_extract($1,'$.identity')
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')||'.source_size')=f.size
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')||'.source_mtime')=f.mtime)
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=d.file_id)
+"#.into(),encoded.clone())]).await?;
+    let rows=store.queue_sql(r#"
+SELECT 'true' AS result_json FROM files f WHERE f.id=json_extract($1,'$.file')
+ AND f.size=json_extract($1,'$.size') AND f.mtime=json_extract($1,'$.mtime') AND f.dv_profile=7 AND f.dv_el_present=1
+ AND ((json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')||'.identity')=json_extract($1,'$.identity')
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')||'.source_size')=f.size
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.identity')||'.source_mtime')=f.mtime)
+ OR (json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.request.identity')=json_extract($1,'$.identity')
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.request.source_size')=f.size
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.request.source_mtime')=f.mtime
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.verdict.source_size')=f.size
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.verdict.source_mtime')=f.mtime
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.verdict.identity')=json_extract($1,'$.identity')
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_variants_v3.'||json_extract($1,'$.identity')||'.verdict.schema')=json_extract($1,'$.schema')))
+"#.into(),encoded,false,true).await?;
     Ok(!rows.is_empty())
 }
 
@@ -618,40 +756,206 @@ RETURNING 'true' AS result_json
 /// a play waiting on a measurement queued behind library or subtitle work
 /// would otherwise wait for all of it. The waiter is bounded by `deadline_ms`
 /// and renewed by the viewer's own rendering exchanges; upkeep cancels it once
-/// the viewer stops renewing, a resumed viewer revives it, and publishing the
-/// scan settles it with every other waiter. It does not lift the hard cap on
+/// the viewer stops renewing and a resumed viewer revives it. An exact quality
+/// receipt settles only its matching recipe interests; full aggregate publication
+/// settles the remaining maintenance work. It does not lift the hard cap on
 /// concurrent source readers or the foreground owner's own priority: the scan
 /// still reads only in the gaps the viewer's playback leaves.
 pub(super) async fn attach_viewer<T: QueueSql>(
     store: &T,
-    file_id: i64,
-    viewer: &str,
-    deadline_ms: i64,
-    now_ms: i64,
+    input: TitleViewerRequest,
 ) -> Result<bool, StoreError> {
-    if file_id <= 0
-        || viewer.is_empty()
-        || viewer.len() > 128
-        || viewer.chars().any(|c| c.is_control())
-        || deadline_ms <= now_ms
+    use super::background_jobs::{
+        BackgroundJobStore, EnqueueJob, EnqueueOutcome, JobPayload, JobRequest,
+    };
+    if input.file_id <= 0
+        || input.viewer.is_empty()
+        || input.viewer.len() > 128
+        || input.viewer.chars().any(char::is_control)
+        || input.now_ms < 0
+        || input.deadline_ms <= input.now_ms
+        || !digest(&input.scanner_digest)
+        || !input.request.valid()
     {
         return Err(StoreError::Task("invalid title viewer demand".into()));
     }
-    let body =
-        serde_json::json!({"file":file_id,"viewer":viewer,"deadline":deadline_ms,"now":now_ms});
-    let rows = store.queue_sql(r#"
+    let body = encode(&input)?;
+    // Binding an unbound generation is safe; a viewer never rotates another
+    // installed scanner's authority. Reopening happens at the explicit event,
+    // never in the scheduler's read-only discovery loop.
+    let rows=store.queue_sql(r#"
+UPDATE dv_title_jobs_demand AS d SET scanner_digest=COALESCE(scanner_digest,json_extract($1,'$.scanner_digest')),terminal=0
+WHERE d.file_id=json_extract($1,'$.file_id') AND (scanner_digest IS NULL OR scanner_digest=json_extract($1,'$.scanner_digest'))
+ AND NOT EXISTS(SELECT 1 FROM background_job_waiters w JOIN background_jobs j ON j.id=w.job_id
+  WHERE w.request_scope='playback-qualification' AND w.request_id=json_extract($1,'$.viewer')
+   AND (w.consumer_ref=json_extract($1,'$.request.identity') OR w.consumer_ref=json_extract($1,'$.viewer'))
+   AND j.kind='dv_title_scan' AND j.state IN ('cancelling','cancelled','failed')
+   AND json_extract(j.payload_json,'$.probe_revision')=d.revision
+   AND json_extract(j.payload_json,'$.source_size')=json_extract($1,'$.request.source_size')
+   AND json_extract(j.payload_json,'$.source_mtime')=json_extract($1,'$.request.source_mtime'))
+ AND EXISTS(SELECT 1 FROM files f WHERE f.id=d.file_id AND f.size=json_extract($1,'$.request.source_size')
+  AND f.mtime=json_extract($1,'$.request.source_mtime') AND f.dv_profile=7 AND f.dv_el_present=1 AND json_valid(f.probe_json)
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.request.identity')||'.identity')=json_extract($1,'$.request.identity')
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.request.identity')||'.source_size')=f.size
+  AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.request.identity')||'.source_mtime')=f.mtime)
+RETURNING json_object('revision',revision) AS result_json
+"#.into(),body.clone(),true,true).await?;
+    #[derive(Deserialize)]
+    struct Bound {
+        revision: i64,
+    }
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    let revision = decode::<Bound>(row)?.revision;
+    let mut body_value =
+        serde_json::to_value(&input).map_err(|e| StoreError::Task(e.to_string()))?;
+    body_value["revision"] = revision.into();
+    let body = encode(&body_value)?;
+    let rows = store
+        .queue_sql(
+            r#"
+SELECT json_quote(j.id) AS result_json FROM background_jobs j
+WHERE j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running')
+ AND json_extract(j.payload_json,'$.file_id')=json_extract($1,'$.file_id')
+ AND json_extract(j.payload_json,'$.source_size')=json_extract($1,'$.request.source_size')
+ AND json_extract(j.payload_json,'$.source_mtime')=json_extract($1,'$.request.source_mtime')
+ AND json_extract(j.payload_json,'$.probe_revision')=json_extract($1,'$.revision')
+ AND json_extract(j.payload_json,'$.scanner_digest')=json_extract($1,'$.scanner_digest')
+ORDER BY j.created_at_ms,j.id LIMIT 1
+"#
+            .into(),
+            body.clone(),
+            false,
+            true,
+        )
+        .await?;
+    let job_id = if let Some(row) = rows.first() {
+        decode::<String>(row)?
+    } else {
+        let episode = uuid::Uuid::new_v4().to_string();
+        let outcome = store
+            .enqueue_job(EnqueueJob {
+                id: episode.clone(),
+                payload: JobPayload::DvTitleScan {
+                    file_id: input.file_id,
+                    source_size: input.request.source_size,
+                    source_mtime: input.request.source_mtime,
+                    probe_revision: revision,
+                    scanner_digest: input.scanner_digest.clone(),
+                },
+                dedupe_key: format!(
+                    "dv-title-generation:{}:{}:{}",
+                    input.file_id, revision, input.scanner_digest
+                ),
+                priority: 0,
+                not_before_ms: input.now_ms,
+                now_ms: input.now_ms,
+                request: JobRequest {
+                    scope: "dv-title-maintenance".into(),
+                    request_id: episode,
+                    request_digest: input.request.identity.clone(),
+                    consumer_kind: "dv_title_scan".into(),
+                    consumer_ref: input.file_id.to_string(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await?;
+        match outcome {
+            EnqueueOutcome::Accepted { job_id, .. }
+            | EnqueueOutcome::Existing {
+                job_id,
+                cancelled: false,
+                ..
+            } => job_id,
+            _ => return Ok(false),
+        }
+    };
+    body_value["job_id"] = job_id.into();
+    let rows=store.queue_sql(r#"
 INSERT INTO background_job_waiters(request_scope,request_id,request_digest,job_id,consumer_kind,consumer_ref,
  priority,state,target_node_id,deadline_ms,receipt_expires_ms,created_at_ms,updated_at_ms)
 SELECT 'playback-qualification',json_extract($1,'$.viewer'),json_extract($1,'$.viewer'),j.id,
- 'playback_qualification',json_extract($1,'$.viewer'),3,'pending',NULL,
- json_extract($1,'$.deadline'),json_extract($1,'$.deadline'),json_extract($1,'$.now'),json_extract($1,'$.now')
-FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running')
- AND json_extract(j.payload_json,'$.file_id')=json_extract($1,'$.file')
-ORDER BY j.created_at_ms,j.id LIMIT 1
+ 'playback_qualification',json_extract($1,'$.request.identity'),3,'pending',NULL,
+ json_extract($1,'$.deadline_ms'),json_extract($1,'$.deadline_ms'),json_extract($1,'$.now_ms'),json_extract($1,'$.now_ms')
+FROM background_jobs j JOIN dv_title_jobs_demand d ON d.file_id=json_extract(j.payload_json,'$.file_id')
+ JOIN files f ON f.id=d.file_id
+WHERE j.id=json_extract($1,'$.job_id') AND j.kind='dv_title_scan' AND j.payload_version=1 AND j.state IN ('queued','running')
+ AND d.terminal=0 AND d.revision=json_extract($1,'$.revision') AND d.scanner_digest=json_extract($1,'$.scanner_digest')
+ AND json_extract(j.payload_json,'$.probe_revision')=d.revision AND json_extract(j.payload_json,'$.scanner_digest')=d.scanner_digest
+ AND f.size=json_extract($1,'$.request.source_size') AND f.mtime=json_extract($1,'$.request.source_mtime')
+ AND json_extract(j.payload_json,'$.source_size')=f.size AND json_extract(j.payload_json,'$.source_mtime')=f.mtime
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.request.identity')||'.identity')=json_extract($1,'$.request.identity')
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.request.identity')||'.source_size')=f.size
+ AND json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3.'||json_extract($1,'$.request.identity')||'.source_mtime')=f.mtime
 ON CONFLICT(request_scope,request_id) DO UPDATE SET state='pending',job_id=excluded.job_id,
+ consumer_ref=excluded.consumer_ref,request_digest=excluded.request_digest,result_ref=NULL,
  deadline_ms=excluded.deadline_ms,receipt_expires_ms=excluded.receipt_expires_ms,updated_at_ms=excluded.updated_at_ms
- WHERE background_job_waiters.state IN ('pending','cancelled')
+ WHERE background_job_waiters.state IN ('pending','awaiting_hydration','cancelled')
+ OR background_job_waiters.consumer_ref!=excluded.consumer_ref
 RETURNING 'true' AS result_json
-"#.into(),encode(&body)?,true,true).await?;
+"#.into(),encode(&body_value)?,true,true).await?;
+    Ok(!rows.is_empty())
+}
+
+/// Conservative advisory handoff. Real typed claim still owns admission.
+pub(super) async fn title_can_preempt<T: QueueSql>(
+    store: &T,
+    candidate_id: &str,
+    current_id: &str,
+    node: &str,
+    now: i64,
+) -> Result<bool, StoreError> {
+    if uuid::Uuid::parse_str(candidate_id).is_err()
+        || uuid::Uuid::parse_str(current_id).is_err()
+        || !super::background_jobs::identifier(node)
+        || now < 0
+    {
+        return Err(StoreError::Task(
+            "invalid live title priority observation".into(),
+        ));
+    }
+    let rows=store.queue_sql(r#"
+SELECT 'true' AS result_json FROM background_jobs job
+JOIN background_jobs current ON current.id=json_extract($1,'$.current') AND current.kind='dv_title_scan'
+ AND current.state='running' AND current.owner_node_id=json_extract($1,'$.node') AND current.lease_expires_ms>json_extract($1,'$.now')
+JOIN dv_title_jobs_demand d ON d.file_id=json_extract(job.payload_json,'$.file_id')
+JOIN files f ON f.id=d.file_id
+WHERE job.id=json_extract($1,'$.candidate') AND job.kind='dv_title_scan' AND job.payload_version=1 AND job.state='queued'
+ AND (job.target_node_id IS NULL OR job.target_node_id=json_extract($1,'$.node'))
+ AND job.not_before_ms<=json_extract($1,'$.now') AND job.failed_attempts<job.attempt_limit
+ AND (job.retry_deadline_ms=0 OR job.retry_deadline_ms>json_extract($1,'$.now'))
+ AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||json_extract($1,'$.node'))
+ AND d.terminal=0 AND d.revision=json_extract(job.payload_json,'$.probe_revision')
+ AND d.scanner_digest=json_extract(job.payload_json,'$.scanner_digest')
+ AND f.size=json_extract(job.payload_json,'$.source_size') AND f.mtime=json_extract(job.payload_json,'$.source_mtime')
+ AND EXISTS(SELECT 1 FROM background_job_waiters w
+  JOIN json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+   THEN json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r ON r.key=w.consumer_ref
+  WHERE w.job_id=job.id AND w.consumer_kind='playback_qualification' AND w.state IN ('pending','awaiting_hydration')
+  AND w.deadline_ms>json_extract($1,'$.now') AND json_extract(r.value,'$.identity')=w.consumer_ref
+  AND json_extract(r.value,'$.source_size')=f.size AND json_extract(r.value,'$.source_mtime')=f.mtime)
+ AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r JOIN source_io_occupancy h
+  ON (h.resource_key=r.resource_key OR (h.resource_key LIKE 'source_io%' AND r.resource_key LIKE 'source_io%'
+   AND (h.resource_key='source_io' OR r.resource_key='source_io')))
+  WHERE r.job_id=job.id AND h.custody_id IS NOT NULL AND h.active_occupancy=1
+   AND h.expires_at_ms<=json_extract($1,'$.now'))
+ AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r JOIN foreground_source_permissions fg
+  ON r.resource_key LIKE 'source_io%' AND (fg.resource_key=r.resource_key OR fg.resource_key='source_io' OR r.resource_key='source_io')
+  WHERE r.job_id=job.id AND (fg.lease_expires_at_ms>json_extract($1,'$.now') OR fg.custody_held=1)
+   AND (fg.lease_expires_at_ms<=json_extract($1,'$.now') OR COALESCE(fg.permits_through_ms,0)<=json_extract($1,'$.now')))
+ AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r WHERE r.job_id=job.id AND r.resource_key LIKE 'source_io%'
+  AND (SELECT count(DISTINCT json_array(h.owner_kind,h.work_id,h.fence)) FROM source_io_occupancy h
+   WHERE (h.resource_key=r.resource_key OR (h.resource_key LIKE 'source_io%' AND r.resource_key LIKE 'source_io%'
+    AND (h.resource_key='source_io' OR r.resource_key='source_io'))) AND h.active_occupancy=1
+    AND (h.expires_at_ms>json_extract($1,'$.now') OR h.custody_id IS NOT NULL)
+    AND NOT (h.owner_kind='job' AND h.work_id=current.id AND h.fence=current.fence))>=2)
+ AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r WHERE r.job_id=job.id AND r.resource_key NOT LIKE 'source_io%'
+  AND (EXISTS(SELECT 1 FROM background_job_reservations h WHERE h.resource_key=r.resource_key
+   AND h.job_id!=current.id AND h.expires_at_ms>json_extract($1,'$.now'))
+  OR EXISTS(SELECT 1 FROM analysis_source_reservations h WHERE h.resource_key=r.resource_key AND h.expires_at_ms>json_extract($1,'$.now'))))
+"#.into(),encode(&serde_json::json!({"candidate":candidate_id,"current":current_id,"node":node,"now":now}))?,false,true).await?;
     Ok(!rows.is_empty())
 }

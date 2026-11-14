@@ -21,6 +21,10 @@ use tokio::sync::{mpsc, oneshot};
 mod diagnostics;
 mod recovery;
 
+pub(crate) fn validate_recovery_startup(authoritative: bool) -> Result<(), String> {
+    recovery::validate_startup(authoritative)
+}
+
 pub(crate) fn configure_recovery_backend(
     store: &Arc<dyn Store>,
     data_dir: &Path,
@@ -81,10 +85,33 @@ pub(crate) fn process_started_ms() -> Option<i64> {
 
 /// Configure the process-wide verifier once from startup's canonical managed
 /// roots. Unit AppStates do not mutate this registry or inherit test roots.
-pub(crate) fn configure_access_roots(
+pub(crate) async fn configure_access_roots(
     config: &plurx_core::config::Config,
     dirs: &crate::state::Dirs,
 ) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let validated = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+        Ok(Some(tools)) => tools.executable_directories(),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, "invalid DV helper bundle is excluded from source-access tool roots");
+            Vec::new()
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let validated = Vec::new();
+    let (owned, tools) = access_root_paths(config, dirs, &validated);
+    plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
+        .map_err(|error| error.to_string())
+}
+
+/// Construct startup's managed paths from the same validated tool capture
+/// used for execution. This pure constructor does not alter verifier state.
+pub(crate) fn access_root_paths(
+    config: &plurx_core::config::Config,
+    dirs: &crate::state::Dirs,
+    validated_tool_directories: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let owned = vec![
         config.storage.data_dir.clone(),
         dirs.artwork.clone(),
@@ -135,8 +162,8 @@ pub(crate) fn configure_access_roots(
     }
     // Daemon-created executable snapshots live in this managed runtime cache.
     tools.push(dirs.runtime_cache.clone());
-    plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
-        .map_err(|error| error.to_string())
+    tools.extend_from_slice(validated_tool_directories);
+    (owned, tools)
 }
 
 /// Local observations only; source recovery never uses these diagnostics as proof.

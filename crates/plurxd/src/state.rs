@@ -2558,30 +2558,42 @@ fn measured_index_budget_secs(
 }
 
 /// A local whole-file read owes viewers the same preemption as a queued
-/// cluster pass. Dropping the losing build kills its child and removes its
-/// partial subtitle stage; callers must return without recording a refusal
-/// or advancing the cursor so the interrupted file remains due.
+/// cluster pass. Cancellation must join the child and companion and remove
+/// the partial subtitle stage before the admission can be released. Callers
+/// return without recording a refusal or advancing the cursor, so the
+/// interrupted file remains due.
 ///
 /// The read runs under `admission`, its turn on the heavy-background lane,
 /// so the pool is never idle while it runs: what preempts it is foreground
 /// demand beyond that admission's own claim, not the claim itself.
 ///
-/// Known limit: only work that holds an admission is visible here. A
-/// copy-mode or VOD viewer reading the source without one does not preempt
-/// the read, and a preempted read starts over from the beginning next time.
+/// A pending playback qualification also marks maintenance pressure so this
+/// read yields even when native copy playback has no encoder permit. Bare
+/// copy or VOD playback that requests no qualification remains invisible, and
+/// a preempted read starts over from the beginning next time.
 pub(crate) async fn local_index_until_foreground<T>(
     transcode: &TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
     build: impl std::future::Future<Output = T>,
 ) -> Option<T> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // Local builders inherit this token through every probe/child stage. Keep
+    // polling the owner after cancellation: dropping it skips its explicit
+    // child wait, source bridge closure and joined DV companion cleanup.
+    let build = plurx_core::process::bounded::cancellable(cancel.clone(), build);
+    tokio::pin!(build);
     tokio::select! {
         biased;
         () = async {
             while !transcode.fragment_must_yield(admission) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-        } => None,
-        result = build => Some(result),
+        } => {
+            cancel.cancel();
+            let _ = build.await;
+            None
+        },
+        result = &mut build => Some(result),
     }
 }
 
