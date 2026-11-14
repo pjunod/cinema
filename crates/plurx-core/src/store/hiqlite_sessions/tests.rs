@@ -71,7 +71,7 @@ fn ending_a_session_reads_its_owner_inside_the_transaction() {
         "the pin delete covers every epoch of the ended incarnation"
     );
     assert!(
-        source.contains("Ok(route_by(self, \"incarnation_id\", &route.incarnation_id)"),
+        source.split_whitespace().collect::<Vec<_>>().join(" ").contains("Ok(route_by( \"end_media_session\", self, \"incarnation_id\", &route.incarnation_id, )"),
         "the returned route must be re-read after the transaction commits"
     );
 }
@@ -130,7 +130,7 @@ fn preparation_neither_reaps_nor_repoints() {
         normalized_method.contains("let statements = prepare_statements(preparation, layout)?;")
             && method.matches("let statements =").count() == 1
             && method.matches(".txn(").count() == 1
-            && method.matches(".txn(statements)").count() == 1
+            && normalized_method.matches(".txn(\"prepare_media_session\", statements)").count() == 1
             && !method.contains("statements.push(")
             && !method.contains("statements.extend(")
             && !method.contains("statements.insert(")

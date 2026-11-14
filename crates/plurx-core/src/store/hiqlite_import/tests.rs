@@ -477,9 +477,10 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // schema marker is installed locally, like the annotations marker.
     assert!(names.contains(&"background_scan_request_v2"));
     assert!(!names.contains(&"background_scan_request_v2_schema"));
-    // 104 with the source arbitration tables (SQLite v122), 105 with the scan
-    // request sidecar (SQLite v125).
-    assert_eq!(names.len(), 105, "review every imported durable table");
+    // 104 with source arbitration (SQLite v122), 105 with the scan request
+    // sidecar (v125), 106 with saved pending storage-domain mappings (v131).
+    // The pending row is durable desired state, explicitly inventoried above.
+    assert_eq!(names.len(), 106, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its

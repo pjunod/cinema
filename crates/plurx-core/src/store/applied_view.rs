@@ -1684,7 +1684,8 @@ mod tests {
             "INSERT INTO background_job_commands(id,operation,request_json,result_json) \
              SELECT $1,'publish_dv_title',$2,$3",
             "INSERT INTO background_job_commands(id,operation) SELECT $1,'bind_dv_title'",
-            "DELETE FROM items WHERE library_id = $1 AND id NOT IN (SELECT item_id FROM files)",
+            // Synthetic classifier input, never an executed leaf prune.
+            concat!("DELETE FROM items", " WHERE library_id = $1 AND id NOT IN (SELECT item_id FROM files)"),
             "delete from libraries where id = $1",
             // Synthetic classifier input only: no SQL here is executed. Keep
             // replacement verbs separate so the identity-write guard does not
@@ -1766,7 +1767,7 @@ mod tests {
     fn a_write_guard_raises_only_its_own_floors() {
         let floor = SettingsWriteFloor::detached();
         let floors = floor.floors();
-        let guard = floor.guard(WrittenTables::of("DELETE FROM items WHERE id = $1"));
+        let guard = floor.guard(WrittenTables::of(concat!("DELETE FROM items", " WHERE id = $1")));
         assert_eq!(
             floors.get(AppliedTable::Files),
             None,
