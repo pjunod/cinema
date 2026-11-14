@@ -1,6 +1,32 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1587: retained source/test anchors after adding the active tone-map pill.
+[[fixes]]
+id = "apple.active-tone-mapping-pill"
+commits = ["6fc8b300e4c2c69ddb3f82c4cee008f975b73499"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "static func toneMappingActive("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testToneMappingPillRequiresActiveProcessingEvidence()"
+
+[[fixes]]
+id = "linux-player.tone-map-telemetry-input-loop"
+commits = ["9a980fb053db7720f20a0711594af2fee171b170"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "Thread(target=self._probe_tone_mapping, args=(sid, result), daemon=True).start()"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_slow_tone_mapping_telemetry_keeps_input_loop_responsive(self):"
+
+# PR #1588: the reader accepts the same supported server origins as the session.
+[[fixes]]
+id = "android.reader-canonical-server-origin"
+commits = ["0e946dcfee51af196e7b761e3823017d1d12bcc9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/ReaderScreen.kt"
+source_anchor = "val canonical = readerOrigin(origin) ?: return null"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/ReaderPolicyTest.kt"
+test_anchor = "fun shellUsesTheSameCanonicalServerIdentityAsTheSession()"
+
 # PR #1378: native media-wait retirement matches the existing shared fixture.
 [[fixes]]
 id = "apple.media-wait-intent-retirement-parity"

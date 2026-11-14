@@ -25,7 +25,7 @@ function readerShell(item,file){
       <button class="ghost sm" onclick="closeReader()" aria-label="Back to book detail">← Back</button>
       <h1 id="reader-title">${esc(item.title)}</h1><span class="reader-progress" id="reader-progress">0%</span>
       <span class="reader-spacer"></span>
-      <button class="ghost sm" onclick="toggleReaderPanel('toc')" aria-expanded="false" id="reader-toc-button">Contents</button>
+      <button class="ghost sm" onclick="toggleReaderPanel('toc')" aria-expanded="false" id="reader-toc-button" aria-label="Table of contents">Contents</button>
       <button class="ghost sm" onclick="toggleReaderPanel('search')" aria-expanded="false" id="reader-search-button">Search</button>
       <button class="ghost sm" onclick="toggleReaderSettings()" aria-expanded="false" id="reader-settings-button">Aa</button>
       <button class="ghost sm" onclick="setReaderCompleted(true)" id="reader-finish">Mark finished</button>
@@ -41,9 +41,9 @@ function readerShell(item,file){
       </section>
     </div>
     <div class="reader-bottom">
-      <button class="ghost sm" onclick="readerStep(-1)" aria-label="Previous page or chapter">← Previous</button>
-      <span class="reader-location" id="reader-location">Opening…</span>
-      <button class="ghost sm" onclick="readerStep(1)" aria-label="Next page or chapter">Next →</button>
+      <button class="ghost sm" id="reader-previous" onclick="readerStep(-1)">← Previous page</button>
+      <div class="reader-position"><button class="reader-chapter" id="reader-chapter" onclick="toggleReaderPanel('toc')" aria-label="Open table of contents">Contents</button><span class="reader-location" id="reader-location">Opening…</span></div>
+      <button class="ghost sm" id="reader-next" onclick="readerStep(1)">Next page →</button>
     </div>
   </div>`;
 }
@@ -77,7 +77,7 @@ function readerTocRows(entries,depth){
 }
 function showReaderToc(){
   const panel=document.getElementById("reader-panel"); if(!panel||!READER) return;
-  panel.innerHTML=`<h2>Contents</h2><div class="reader-toc">${readerTocRows(READER.open.publication.toc,0)||'<div class="muted">This EPUB has no authored table of contents.</div>'}</div>`;
+  panel.innerHTML=`<h2>Contents</h2><div class="reader-toc">${readerTocRows(ReaderCore.navigationEntries(READER.open.publication),0)}</div>`;
   updateReaderTocCurrent();
 }
 function showReaderSearch(){
@@ -149,6 +149,8 @@ async function navigateReader(href,locator){
     await r.navigator.load(url,resolved,index,r.open.publication.readingOrder.length,r.prefs,destination);
     if(READER!==r||r.navigationGeneration!==generation) return;
     hideReaderLoading(); updateReaderTocCurrent(); updateReaderLocation();
+    const panel=document.getElementById("reader-panel");
+    if(panel&&!panel.hidden&&window.matchMedia("(max-width:720px)").matches) toggleReaderPanel(r.panel);
   }catch(error){ if(READER===r&&r.navigationGeneration===generation) readerError(error.message); }
 }
 function updateReaderLocation(){
@@ -156,7 +158,21 @@ function updateReaderLocation(){
   const total=READER.progression||0, current=READER.index+1, count=READER.open.publication.readingOrder.length;
   const progress=document.getElementById("reader-progress"), location=document.getElementById("reader-location");
   if(progress) progress.textContent=readerProgressLabel(total);
-  if(location) location.textContent=`${current} of ${count} · ${readerProgressLabel(total)}`;
+  const pages=READER.navigator&&READER.navigator.pageInfo();
+  const within=READER.locator&&READER.locator.locations&&READER.locator.locations.progression||0;
+  const atStart=pages?pages.page===1:within<=0, atEnd=pages?pages.page===pages.pages:within>=1;
+  const section=READER.open.publication.readingOrder[READER.index];
+  const chapter=document.getElementById("reader-chapter");
+  if(chapter) chapter.textContent=section.title||`Section ${current}`;
+  if(location) location.textContent=`Section ${current} of ${count}${pages?` · Page ${pages.page} of ${pages.pages}`:` · ${readerProgressLabel(total)}`}`;
+  for(const direction of [-1,1]){
+    const button=document.getElementById(direction<0?"reader-previous":"reader-next");
+    if(!(button instanceof HTMLButtonElement)) continue;
+    const boundary=direction<0?atStart:atEnd;
+    const unit=boundary?"section":pages?"page":"screen";
+    button.textContent=direction<0?`← Previous ${unit}`:`Next ${unit} →`;
+    button.disabled=boundary&&(direction<0?current===1:current===count);
+  }
 }
 function readerLocated(locator){
   if(!READER||!locator) return;
@@ -165,12 +181,13 @@ function readerLocated(locator){
   READER.dirty=true; updateReaderLocation(); scheduleReaderSave();
 }
 async function readerStep(direction){
-  if(!READER||!READER.navigator) return;
+  if(!READER||!READER.navigator||!READER.navigator.ready) return;
   if(READER.navigator.move(direction)) return;
   const next=READER.index+direction;
   if(next<0){ readerStatus("Beginning of book"); return; }
   if(next>=READER.open.publication.readingOrder.length){ readerStatus("End of book · use Mark finished when you are done"); return; }
-  await navigateReader(READER.open.publication.readingOrder[next].href);
+  const href=READER.open.publication.readingOrder[next].href;
+  await navigateReader(href,direction<0?{version:1,href,locations:{progression:1}}:null);
 }
 function scheduleReaderSave(){
   if(!READER) return; clearTimeout(READER.saveTimer);
