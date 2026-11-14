@@ -568,6 +568,7 @@ fn published_trigger(migration: &str, name: &str) -> String {
 /// Desired configuration is user data, including an already settled revision,
 /// so no pending-table row may be discarded by a historical fixture.
 fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection) {
+    rewind_empty_delegation_to_v131(connection);
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture storage domain pending ordinal");
@@ -747,4 +748,123 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
             panic!("atomic source fixture rewind: {error}");
         }
     });
+}
+
+/// Remove only the exact, entirely empty v132 extension before older tails.
+/// Read and validate the complete removal plan before changing any object.
+#[allow(dead_code)]
+pub(crate) fn rewind_empty_delegation_to_v131(conn: &rusqlite::Connection) {
+    let ordinal: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .expect("delegation ordinal");
+    if ordinal < 132 {
+        return;
+    };
+    assert_eq!(ordinal, 132, "only published delegation tail can rewind");
+    const QUERY: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'delegation*' OR tbl_name GLOB 'delegation*') AND sql IS NOT NULL ORDER BY name";
+    let shape = |db: &rusqlite::Connection| {
+        db.prepare(QUERY)
+            .expect("shape query")
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .expect("shape rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete shape")
+    };
+    let fixture = rusqlite::Connection::open_in_memory().expect("canonical shape");
+    fixture
+        .execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY);")
+        .expect("dependency");
+    fixture
+        .execute_batch(include_str!("../../src/store/delegation.sql"))
+        .expect("published delegation");
+    assert_eq!(
+        shape(conn),
+        shape(&fixture),
+        "exact delegation shape required"
+    );
+    let marker: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM delegation_schema WHERE singleton=1 AND version=1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("marker");
+    assert_eq!(marker, 1, "published marker required");
+    for table in [
+        "delegation_schema",
+        "delegation_clients",
+        "delegation_codes",
+        "delegation_grants",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .expect("data inventory");
+        assert_eq!(
+            count,
+            if table == "delegation_schema" { 1 } else { 0 },
+            "cannot discard delegation user data"
+        )
+    }
+    conn.execute_batch("DROP TABLE delegation_grants;DROP TABLE delegation_codes;DROP TABLE delegation_clients;DROP TABLE delegation_schema;PRAGMA user_version=131;").expect("empty delegation rewind");
+}
+
+#[cfg(test)]
+mod delegation_rewind_tests {
+    use super::*;
+    fn snapshot(c: &rusqlite::Connection) -> Vec<String> {
+        let mut out = vec![];
+        for query in [
+            "SELECT json_array(name,sql) FROM sqlite_master ORDER BY name",
+            "SELECT json_array(id,name,secret_hash,redirect,generation,active) FROM delegation_clients ORDER BY id",
+            "SELECT json_array(code_hash,client_id,client_generation,user_id,subject,source_hash,challenge,redirect,expires_at,claim) FROM delegation_codes ORDER BY code_hash",
+            "SELECT json_array(grant_hash,code_hash,client_id,client_generation,user_id,subject,source_hash,expires_at) FROM delegation_grants ORDER BY grant_hash",
+            "SELECT json_array(singleton,version) FROM delegation_schema",
+        ] {
+            out.extend(
+                c.prepare(query)
+                    .expect("snapshot query")
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .expect("snapshot rows")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("snapshot"),
+            )
+        }
+        out
+    }
+    fn fixture() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().expect("fixture");
+        c.execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY);")
+            .expect("dependency");
+        c.execute_batch(include_str!("../../src/store/delegation.sql"))
+            .expect("delegation");
+        c.pragma_update(None, "user_version", 132).expect("ordinal");
+        c
+    }
+    #[test]
+    fn empty_delegation_rewind_is_strict_and_preserves_user_data() {
+        let empty = fixture();
+        rewind_empty_delegation_to_v131(&empty);
+        let ordinal: i64 = empty
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .expect("ordinal");
+        assert_eq!(ordinal, 131);
+        for mutation in [
+            "INSERT INTO delegation_clients(id,name,secret_hash,redirect) VALUES('keep','keep','hash','https://keep')",
+            "INSERT INTO delegation_codes VALUES('keep','client',1,1,'subject','source','challenge','redirect',9999999999,'')",
+            "INSERT INTO delegation_grants VALUES('keep','code','client',1,1,'subject','source',9999999999)",
+            "DELETE FROM delegation_schema",
+            "DROP INDEX delegation_codes_expiry",
+            "CREATE INDEX alien ON delegation_clients(name)",
+        ] {
+            let c = fixture();
+            c.execute_batch(mutation).expect("refusal fixture");
+            let before = snapshot(&c);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                within_fixture_savepoint(&c, || rewind_empty_delegation_to_v131(&c))
+            }));
+            assert!(refused.is_err());
+            let after = snapshot(&c);
+            assert_eq!(before, after, "refusal must not mutate fixture");
+        }
+    }
 }

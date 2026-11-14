@@ -206,3 +206,36 @@ async fn delegation_disconnect_and_recreated_names_never_restore_identity() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn delegation_client_limit_is_atomic_and_every_active_client_is_disconnectable() {
+    for_each_backend(|store, backend| async move {
+        for n in 0..99 {
+            let mut c = client();
+            c.id = format!("client-{n:03}");
+            store
+                .delegation_register(c, hash("secret"))
+                .await
+                .expect("register")
+        }
+        let mut a = client();
+        a.id = "final-a".into();
+        let mut b = client();
+        b.id = "final-b".into();
+        let (left, right) = tokio::join!(
+            store.delegation_register(a, hash("secret")),
+            store.delegation_register(b, hash("secret"))
+        );
+        assert_ne!(left.is_ok(), right.is_ok(), "atomic cap: {backend}");
+        let active = store.delegation_clients().await.expect("inventory");
+        assert_eq!(active.len(), 100, "complete active inventory: {backend}");
+        for c in active {
+            store
+                .delegation_disconnect(&c.id)
+                .await
+                .expect("disconnect")
+        }
+        assert!(store.delegation_clients().await.expect("empty").is_empty());
+    })
+    .await;
+}

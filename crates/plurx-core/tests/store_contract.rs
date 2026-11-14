@@ -110,6 +110,8 @@ mod applied_view;
 mod background_jobs;
 #[path = "store_contract/claim_selection.rs"]
 mod claim_selection;
+#[path = "store_contract/delegation.rs"]
+mod delegation;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -128,8 +130,6 @@ mod jellyfin_play;
 mod library_schedule;
 #[path = "store_contract/offload.rs"]
 mod offload;
-#[path = "store_contract/delegation.rs"]
-mod delegation;
 #[path = "store_contract/playback_handoffs.rs"]
 mod playback_handoffs;
 #[path = "store_contract/remote.rs"]

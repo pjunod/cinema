@@ -15,6 +15,16 @@ async fn delegation_http_requires_exact_callback_secret_pkce_and_live_source() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(
+        &app,
+        post(
+            "/api/v1/delegation/clients",
+            Some(&owner),
+            json!({"name":"Curator","redirect":"https://curator.example/unsupported-callback"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let redirect = "https://curator.example/api/v1/auth/cinema/callback";
     let (status, registered) = call(
         &app,

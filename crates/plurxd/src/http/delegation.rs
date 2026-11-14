@@ -29,7 +29,8 @@ pub struct Register {
 fn callback(value: &str) -> Result<reqwest::Url, ApiError> {
     let u = reqwest::Url::parse(value)
         .map_err(|_| ApiError::BadRequest("exact HTTPS callback required".into()))?;
-    if u.scheme() != "https"
+    if u.path() != "/api/v1/auth/cinema/callback"
+        || u.scheme() != "https"
         || u.host_str().is_none()
         || !u.username().is_empty()
         || u.password().is_some()

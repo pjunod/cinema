@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 pub(crate) const SCHEMA: &str = include_str!("delegation.sql");
-pub(crate) const SHAPE_SQL:&str="SELECT name,sql FROM sqlite_master WHERE name GLOB 'delegation*' AND sql IS NOT NULL ORDER BY name";
+pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'delegation*' OR tbl_name GLOB 'delegation*') AND sql IS NOT NULL ORDER BY name";
 pub(crate) const MARKER_SQL: &str =
     "SELECT count(*) AS count FROM delegation_schema WHERE singleton=1 AND version=1";
 const DEPENDENCIES: &str = "CREATE TABLE users(id INTEGER PRIMARY KEY);";
@@ -20,7 +20,12 @@ fn decode<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, StoreError> {
     serde_json::from_str(s).map_err(|_| invalid())
 }
 fn policy_sql() -> String {
-    format!("json_object('enabled',(SELECT value FROM settings WHERE key='{}'),'days',(SELECT value FROM settings WHERE key='{}'),'since',(SELECT value FROM settings WHERE key='{}'))",super::keys::AUTH_TOKEN_EXPIRY_ENABLED,super::keys::AUTH_TOKEN_IDLE_DAYS,super::keys::AUTH_TOKEN_EXPIRY_SINCE)
+    format!(
+        "json_object('enabled',(SELECT value FROM settings WHERE key='{}'),'days',(SELECT value FROM settings WHERE key='{}'),'since',(SELECT value FROM settings WHERE key='{}'))",
+        super::keys::AUTH_TOKEN_EXPIRY_ENABLED,
+        super::keys::AUTH_TOKEN_IDLE_DAYS,
+        super::keys::AUTH_TOKEN_EXPIRY_SINCE
+    )
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DelegationClient {
@@ -78,7 +83,10 @@ async fn source_proof_scoped<T: Backend>(
     grant: Option<(&str, &str, &str)>,
 ) -> Result<Option<String>, StoreError> {
     let clock = now()?;
-    let mut sql=format!("SELECT json_object('hash',t.token_hash,'user_id',u.id,'subject',j.wire_id,'last_seen',t.last_seen_at,'policy',{},'observed',$4,'expires',$4+2592000) AS payload FROM tokens t JOIN users u ON u.id=t.user_id JOIN jellyfin_entity_ids j ON j.entity_kind='user' AND j.native_id=u.id AND j.retired=0 WHERE t.token_hash=$1 AND u.id=$2 AND j.wire_id=$3 AND NOT EXISTS(SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash=t.token_hash)",policy_sql());
+    let mut sql = format!(
+        "SELECT json_object('hash',t.token_hash,'user_id',u.id,'subject',j.wire_id,'last_seen',t.last_seen_at,'policy',{},'observed',$4,'expires',$4+2592000) AS payload FROM tokens t JOIN users u ON u.id=t.user_id JOIN jellyfin_entity_ids j ON j.entity_kind='user' AND j.native_id=u.id AND j.retired=0 WHERE t.token_hash=$1 AND u.id=$2 AND j.wire_id=$3 AND NOT EXISTS(SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash=t.token_hash)",
+        policy_sql()
+    );
     let mut values = vec![
         hash.to_owned().into(),
         user.into(),
@@ -119,7 +127,10 @@ async fn source_proof<T: Backend>(
     source_proof_scoped(s, hash, user, subject, None).await
 }
 fn source_fence(proof: &str, clock: &str) -> String {
-    format!("EXISTS(SELECT 1 FROM tokens t JOIN users u ON u.id=t.user_id JOIN jellyfin_entity_ids j ON j.entity_kind='user' AND j.native_id=u.id AND j.retired=0 WHERE t.token_hash=json_extract({proof},'$.hash') AND u.id=json_extract({proof},'$.user_id') AND j.wire_id=json_extract({proof},'$.subject') AND t.last_seen_at>=json_extract({proof},'$.last_seen') AND {}=json_extract({proof},'$.policy') AND NOT EXISTS(SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash=t.token_hash)) AND {clock}>=json_extract({proof},'$.observed') AND {clock}-json_extract({proof},'$.observed')<=5 AND {clock}<json_extract({proof},'$.expires')",policy_sql())
+    format!(
+        "EXISTS(SELECT 1 FROM tokens t JOIN users u ON u.id=t.user_id JOIN jellyfin_entity_ids j ON j.entity_kind='user' AND j.native_id=u.id AND j.retired=0 WHERE t.token_hash=json_extract({proof},'$.hash') AND u.id=json_extract({proof},'$.user_id') AND j.wire_id=json_extract({proof},'$.subject') AND t.last_seen_at>=json_extract({proof},'$.last_seen') AND {}=json_extract({proof},'$.policy') AND NOT EXISTS(SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash=t.token_hash)) AND {clock}>=json_extract({proof},'$.observed') AND {clock}-json_extract({proof},'$.observed')<=5 AND {clock}<json_extract({proof},'$.expires')",
+        policy_sql()
+    )
 }
 const CLIENT_JSON: &str =
     "json_object('id',id,'name',name,'redirect',redirect,'generation',generation)";
@@ -166,12 +177,17 @@ impl<T: Backend> DelegationStore for T {
         if c.id.len() > 80 || c.name.len() > 100 || c.redirect.len() > 2048 || secret.len() != 64 {
             return Err(invalid());
         }
-        self.sharing_txn(vec![(
-            "INSERT INTO delegation_clients(id,name,secret_hash,redirect) VALUES($1,$2,$3,$4)"
+        let result=self.sharing_txn(vec![(
+            "INSERT INTO delegation_clients(id,name,secret_hash,redirect) SELECT $1,$2,$3,$4 WHERE (SELECT count(*) FROM delegation_clients WHERE active=1)<100"
                 .into(),
             vec![c.id.into(), c.name.into(), secret.into(), c.redirect.into()],
         )])
         .await?;
+        if result.last() != Some(&1) {
+            return Err(StoreError::Migration(
+                "maximum of 100 active application connections reached".into(),
+            ));
+        }
         Ok(())
     }
     async fn delegation_client_authorized(
@@ -210,9 +226,11 @@ impl<T: Backend> DelegationStore for T {
         };
         let clock = now()?;
         let fence = source_fence("$9", "$10");
-        let sql=format!("INSERT INTO delegation_codes(code_hash,client_id,client_generation,user_id,subject,source_hash,challenge,redirect,expires_at) SELECT $1,id,generation,$2,$3,$4,$5,redirect,$6 FROM delegation_clients WHERE id=$7 AND active=1 AND $8='household-requests' AND {fence}");
+        let sql = format!(
+            "INSERT INTO delegation_codes(code_hash,client_id,client_generation,user_id,subject,source_hash,challenge,redirect,expires_at) SELECT $1,id,generation,$2,$3,$4,$5,redirect,$6 FROM delegation_clients WHERE id=$7 AND active=1 AND $8='household-requests' AND {fence}"
+        );
         let result = self
-            .sharing_txn(vec![("DELETE FROM delegation_grants WHERE grant_hash IN(SELECT grant_hash FROM delegation_grants WHERE expires_at<=$1 LIMIT 64)".into(),vec![clock.into()]),("DELETE FROM delegation_codes WHERE code_hash IN(SELECT code_hash FROM delegation_codes WHERE expires_at<=$1 LIMIT 64)".into(),vec![clock.into()]),(
+            .sharing_txn(vec![("DELETE FROM delegation_grants WHERE grant_hash IN(SELECT grant_hash FROM delegation_grants WHERE expires_at<=$1 ORDER BY expires_at,grant_hash LIMIT 64)".into(),vec![clock.into()]),("DELETE FROM delegation_codes WHERE code_hash IN(SELECT code_hash FROM delegation_codes WHERE expires_at<=$1 ORDER BY expires_at,code_hash LIMIT 64)".into(),vec![clock.into()]),(
                 sql,
                 vec![
                     c.code_hash.into(),
@@ -234,9 +252,10 @@ impl<T: Backend> DelegationStore for T {
         &self,
         r: DelegationRedemption,
     ) -> Result<Option<DelegationIdentity>, StoreError> {
-        let rows=self.sharing_read("SELECT json_object('source',d.source_hash,'user',d.user_id,'subject',d.subject) AS payload FROM delegation_codes d JOIN delegation_clients c ON c.id=d.client_id AND c.generation=d.client_generation WHERE d.code_hash=$1 AND c.id=$2 AND c.secret_hash=$3 AND c.active=1 AND d.redirect=$4 AND d.challenge=$5 AND d.claim='' AND d.expires_at>$6",vec![r.code_hash.clone().into(),r.client_id.clone().into(),r.secret_hash.clone().into(),r.redirect.clone().into(),r.challenge.clone().into(),now()?.into()]).await?;
+        let rows=self.sharing_read("SELECT json_object('source',d.source_hash,'user',d.user_id,'subject',d.subject,'expires',d.expires_at) AS payload FROM delegation_codes d JOIN delegation_clients c ON c.id=d.client_id AND c.generation=d.client_generation WHERE d.code_hash=$1 AND c.id=$2 AND c.secret_hash=$3 AND c.active=1 AND d.redirect=$4 AND d.challenge=$5 AND d.claim='' AND d.expires_at>$6",vec![r.code_hash.clone().into(),r.client_id.clone().into(),r.secret_hash.clone().into(),r.redirect.clone().into(),r.challenge.clone().into(),now()?.into()]).await?;
         #[derive(Deserialize)]
         struct Source {
+            expires: i64,
             source: String,
             user: i64,
             subject: String,
@@ -251,10 +270,21 @@ impl<T: Backend> DelegationStore for T {
         };
         let clock = now()?;
         let fence = source_fence("$8", "$7");
-        let claim=format!("UPDATE delegation_codes SET claim=$1 WHERE code_hash=$2 AND claim='' AND redirect=$3 AND challenge=$4 AND client_id=$5 AND EXISTS(SELECT 1 FROM delegation_clients c WHERE c.id=delegation_codes.client_id AND c.secret_hash=$6 AND c.active=1 AND c.generation=delegation_codes.client_generation) AND expires_at>$7 AND {fence}");
+        let claim = format!(
+            "UPDATE delegation_codes SET claim=$1 WHERE code_hash=$2 AND claim='' AND redirect=$3 AND challenge=$4 AND client_id=$5 AND EXISTS(SELECT 1 FROM delegation_clients c WHERE c.id=delegation_codes.client_id AND c.secret_hash=$6 AND c.active=1 AND c.generation=delegation_codes.client_generation) AND expires_at>$7 AND {fence}"
+        );
         self.sharing_txn(vec![(claim,vec![r.claim.clone().into(),r.code_hash.clone().into(),r.redirect.into(),r.challenge.into(),r.client_id.clone().into(),r.secret_hash.clone().into(),clock.into(),proof.into()]),("INSERT INTO delegation_grants(grant_hash,code_hash,client_id,client_generation,user_id,subject,source_hash,expires_at) SELECT $1,code_hash,client_id,client_generation,user_id,subject,source_hash,$2 FROM delegation_codes WHERE code_hash=$3 AND claim=$4".into(),vec![r.grant_hash.clone().into(),(clock+2592000).into(),r.code_hash.into(),r.claim.into()])]).await?;
-        self.delegation_introspect(&r.client_id, &r.secret_hash, &r.grant_hash)
-            .await
+        let identity = self
+            .delegation_introspect(&r.client_id, &r.secret_hash, &r.grant_hash)
+            .await?;
+        // A queued writer may commit after the code's 120-second deadline.
+        // Check the clock after all post-commit IO before exposing the grant.
+        if now()? >= source.expires {
+            self.delegation_revoke(&r.client_id, &r.secret_hash, &r.grant_hash)
+                .await?;
+            return Ok(None);
+        }
+        Ok(identity)
     }
     async fn delegation_introspect(
         &self,
@@ -427,4 +457,195 @@ mod tests {
             .expect("partial fixture");
         assert!(verify_sqlite(&conn).is_err());
     }
+    #[test]
+    fn delegation_migration_refuses_partial_or_markerless_predecessor_atomically() {
+        for mutation in [
+            "DROP TABLE delegation_grants;DROP TABLE delegation_codes;DROP TABLE delegation_schema;INSERT INTO delegation_clients(id,name,secret_hash,redirect) VALUES('keep','Keep','secret','https://keep')",
+            "DELETE FROM delegation_schema",
+            "CREATE INDEX alien_index ON delegation_clients(name)",
+        ] {
+            let conn = rusqlite::Connection::open_in_memory().expect("fixture");
+            super::super::sqlite::SqliteStore::migrate(&conn).expect("current schema");
+            conn.execute_batch(mutation).expect("invalid predecessor");
+            conn.pragma_update(None, "user_version", 131)
+                .expect("old marker");
+            let before = rows(&conn).expect("before shape");
+            assert!(super::super::sqlite::SqliteStore::migrate(&conn).is_err());
+            assert_eq!(rows(&conn).expect("after shape"), before);
+            let ordinal: i64 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .expect("ordinal");
+            assert_eq!(ordinal, 131);
+        }
+    }
+
+    #[tokio::test]
+    async fn delegation_cleanup_uses_a_stable_bounded_expiry_order() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("cinema.db");
+        let store = SqliteStore::open(&path).expect("store");
+        let user = store
+            .create_user("person", "hash", false)
+            .await
+            .expect("user");
+        store
+            .create_token("source", user.id, None)
+            .await
+            .expect("source");
+        let subject = store
+            .jellyfin_entity_ids(JellyfinEntityKind::User, &[user.id])
+            .await
+            .expect("subject")[0]
+            .wire_id
+            .clone();
+        store
+            .delegation_register(
+                DelegationClient {
+                    id: "client".into(),
+                    name: "Curator".into(),
+                    redirect: "https://curator.example/api/v1/auth/cinema/callback".into(),
+                    generation: 1,
+                },
+                "a".repeat(64),
+            )
+            .await
+            .expect("register");
+        let conn = rusqlite::Connection::open(path).expect("connection");
+        let expired = now().expect("now") - 1;
+        for n in (0..70).rev() {
+            let digest = format!("expired-{n:03}");
+            conn.execute("INSERT INTO delegation_codes VALUES(?1,'client',1,?2,?3,'source','challenge','redirect',?4,'')",rusqlite::params![digest,user.id,subject,expired]).expect("expired code");
+            conn.execute(
+                "INSERT INTO delegation_grants VALUES(?1,?1,'client',1,?2,?3,'source',?4)",
+                rusqlite::params![digest, user.id, subject, expired],
+            )
+            .expect("expired grant");
+        }
+        assert!(store
+            .delegation_mint(DelegationCode {
+                code_hash: "new".into(),
+                client_id: "client".into(),
+                user_id: user.id,
+                subject,
+                source_hash: "source".into(),
+                challenge: "challenge".into()
+            })
+            .await
+            .expect("mint and cleanup"));
+        for (table, column) in [
+            ("delegation_codes", "code_hash"),
+            ("delegation_grants", "grant_hash"),
+        ] {
+            let actual=conn.prepare(&format!("SELECT {column} FROM {table} WHERE {column} LIKE 'expired-%' ORDER BY {column}")).expect("query").query_map([],|r|r.get::<_,String>(0)).expect("rows").collect::<Result<Vec<_>,_>>().expect("remaining");
+            assert_eq!(
+                actual,
+                (64..70)
+                    .map(|n| format!("expired-{n:03}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    struct QueuedWriter<'a>(&'a SqliteStore);
+    #[async_trait]
+    impl Backend for QueuedWriter<'_> {
+        fn sharing_is_replicated(&self) -> bool {
+            false
+        }
+        async fn sharing_read(
+            &self,
+            sql: &str,
+            values: Vec<super::super::sharing::Value>,
+        ) -> Result<Vec<String>, StoreError> {
+            self.0.sharing_read(sql, values).await
+        }
+        async fn sharing_txn(
+            &self,
+            statements: Vec<super::super::sharing::Statement>,
+        ) -> Result<Vec<usize>, StoreError> {
+            if statements
+                .iter()
+                .any(|(sql, _)| sql.starts_with("UPDATE delegation_codes SET claim"))
+            {
+                super::super::sharing::LogicalClock::advance(121000)
+            }
+            self.0.sharing_txn(statements).await
+        }
+        async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
+            self.0.sharing_revision_key_rows().await
+        }
+        async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError> {
+            self.0.sharing_file_locator_key_rows().await
+        }
+        async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
+            self.0.sharing_purpose_archive_rows().await
+        }
+    }
+    #[tokio::test]
+    async fn delegation_queued_writer_cannot_return_a_grant_after_code_expiry() {
+        let _clock = super::super::sharing::LogicalClock::install();
+        let directory = tempfile::tempdir().expect("fixture");
+        let store = SqliteStore::open(&directory.path().join("cinema.db")).expect("store");
+        let user = store
+            .create_user("person", "hash", false)
+            .await
+            .expect("user");
+        store
+            .create_token("source", user.id, None)
+            .await
+            .expect("source");
+        let subject = store
+            .jellyfin_entity_ids(JellyfinEntityKind::User, &[user.id])
+            .await
+            .expect("subject")[0]
+            .wire_id
+            .clone();
+        store
+            .delegation_register(
+                DelegationClient {
+                    id: "client".into(),
+                    name: "Curator".into(),
+                    redirect: "https://curator.example/api/v1/auth/cinema/callback".into(),
+                    generation: 1,
+                },
+                "a".repeat(64),
+            )
+            .await
+            .expect("register");
+        assert!(store
+            .delegation_mint(DelegationCode {
+                code_hash: "code".into(),
+                client_id: "client".into(),
+                user_id: user.id,
+                subject,
+                source_hash: "source".into(),
+                challenge: "challenge".into()
+            })
+            .await
+            .expect("mint"));
+        let identity = QueuedWriter(&store)
+            .delegation_redeem(DelegationRedemption {
+                code_hash: "code".into(),
+                client_id: "client".into(),
+                secret_hash: "a".repeat(64),
+                redirect: "https://curator.example/api/v1/auth/cinema/callback".into(),
+                challenge: "challenge".into(),
+                grant_hash: "grant".into(),
+                claim: "claim".into(),
+            })
+            .await
+            .expect("redeem");
+        assert!(identity.is_none());
+        assert!(store
+            .delegation_introspect("client", &"a".repeat(64), "grant")
+            .await
+            .expect("revoked")
+            .is_none());
+    }
+}
+
+pub(crate) fn verify_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    if version(&rows(conn)?)?.is_some() {
+        verify_sqlite(conn)?
+    };
+    Ok(())
 }

@@ -1,6 +1,6 @@
 # Curator login — optional household delegation and qualification
 
-**Status:** implemented; final review and regression execution pending ·
+**Status:** Astra findings fixed; static recheck and regression execution pending ·
 **Updated:** 2026-11-13 · **Owner:** Codex/root ·
 **Branch:** `codex/curator-delegation` · **Current-main integration:** `483d2bcf3`.
 
@@ -12,7 +12,8 @@
   and Curator retain independent local accounts, credentials and permissions.
 - **Where it stands:** Store, HTTP and web consent/registration code exists.
   Pinned 1.97.1 compile checks pass on the integrated source and authored core
-  fixtures. Final Astra review, regression suites, PR/CI qualification and merge
+  fixtures. Astra requested changes on `6f12ce9d`; the fixes and new fixtures
+  await a targeted static recheck. Regression suites, PR/CI qualification and merge
   remain pending. No deployment or real-account linking has been performed.
 - **Read further only for:** the authority contract, endpoint/setup workflow,
   storage/migration boundaries and the evidence ledger below. The canonical
@@ -102,3 +103,20 @@ format checks and focused regressions (including `hiqlite-store` and the replica
 contract feature), run paperwork and the ordinary main-lane checks on the actual
 candidate. Record PR, exact checks, merge and owned-storage finish receipt here.
 No live deployment, mobile signing or physical-device acceptance is claimed.
+
+## Final review correction ledger
+
+The reviewed fixes mount the shipped layout on cold consent/management routes,
+require the exact Curator callback path, enforce an atomic 100-active-client
+limit matching the complete disconnect inventory, order replicated expiry
+cleanup by expiry and digest, and recheck code expiry after queued commit and
+post-commit source validation before returning a grant. SQLite v132 preflights
+existing objects and verifies final shape inside the migration transaction.
+Historical v43/v14 helpers first validate and remove only an exact empty v132
+extension; registrations, codes, grants, altered objects or missing markers
+refuse without mutation. The census includes v132.
+
+New core/backend, HTTP and actual shipped-shell Chromium fixtures were authored.
+Only pinned compile checks have run; static fix recheck precedes all runtime
+regressions. Curator separately requires app-verifier plus consenting-device
+completion proof, retaining standalone local login during upstream outages.

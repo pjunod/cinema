@@ -1822,6 +1822,9 @@ impl SqliteStore {
         already_applied: bool,
     ) -> Result<(), StoreError> {
         let tx = conn.unchecked_transaction()?;
+        if version == 132 {
+            super::delegation::verify_predecessor(&tx)?;
+        }
         if !already_applied {
             if version == super::subtitle_managed_schema::RESOURCE_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_resource_predecessor(&tx)?;
@@ -1840,6 +1843,9 @@ impl SqliteStore {
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
+        }
+        if version == 132 {
+            super::delegation::verify_sqlite(&tx)?;
         }
         // Foreign keys are OFF for the step (see the caller), so integrity is
         // checked here, before the step can commit.

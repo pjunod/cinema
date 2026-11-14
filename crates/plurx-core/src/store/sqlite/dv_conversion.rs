@@ -1604,7 +1604,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 87] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 88] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1775,6 +1775,7 @@ mod tests {
             // v131: the shared queue helper drops every background_* object,
             // including the pending storage-domain table, views and marker.
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
+ "CREATE TABLE IF NOT EXISTS delegation_schema",
         ];
 
         assert!(
