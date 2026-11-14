@@ -117,6 +117,7 @@ class Playback:
         self.mapper = None
         self.physical_target_nits = None
         self.physical_target_generation = None
+        self.tone_mapping_session = None
         self.mapper_logged = False
         # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
         self.vo_failed = False
@@ -445,6 +446,7 @@ class Playback:
                                       "hls" if self.mode in ("remux", "transcode") else None,
                          "session": "vod" if self.session and self.session.get("vod") else
                                     "live" if self.session else "none" if self.mode == "direct" else None},
+            "tone_mapping": bool(self.session and self.session.get("session_id") == self.tone_mapping_session),
             "quality": {"selected": self.quality, "choices": quality_choices(self.decision or {})},
             "autoplay_next": self.autoplay_next, "busy": self.changing, "error": self.chrome_error,
             "retryable": self.retryable, "revision": self.chrome_revision})
@@ -659,20 +661,76 @@ class Playback:
             "observation": None, "acknowledgement": None,
         }
 
+    def effective_tone_mapping(self):
+        session = self.session or {}
+        report = session.get("effective_processing")
+        generation = (session.get("control") or {}).get("generation")
+        if not isinstance(report, dict) or not isinstance(generation, str):
+            return False
+        if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", generation) is None:
+            return False
+        delivered = session.get("delivered_dynamic_range")
+        sdr = delivered == "sdr" and report.get("sdr_processed") is True and report.get("hdr10_enhanced") is False
+        hdr = delivered == "hdr10" and report.get("hdr10_enhanced") is True and report.get("sdr_processed") is False
+        operations = report.get("applied_operations")
+        if not (sdr or hdr) or report.get("generation") != generation or type(report.get("fel_contributed")) is not bool \
+                or not isinstance(operations, list) or not 0 < len(operations) <= 16:
+            return False
+        targets = [100] if sdr else [400, 600, 1000, 1600, 2000, 4000]
+        for op in operations:
+            if isinstance(op, str) and 0 < len(op) <= 64:
+                continue
+            if not isinstance(op, dict) or set(op) != {"DisplayTargetMapping"}:
+                return False
+            target = op["DisplayTargetMapping"]
+            if not isinstance(target, dict) or set(target) != {"nits"} or type(target["nits"]) is not int or target["nits"] not in targets:
+                return False
+        mapped = any(isinstance(op, dict) for op in operations)
+        if sdr and (not mapped or "Bt709Gamma24Conversion" not in operations):
+            return False
+        return mapped or "TargetMapping" in operations
+
+    def refresh_tone_mapping(self):
+        """Only current server processing evidence can light the playback pill."""
+        sid = (self.session or {}).get("session_id")
+        active = sid if sid and self.effective_tone_mapping() else None
+        if sid and active is None:
+            try:
+                status, body = self.http.request(
+                    "GET", f"/api/v1/hls/{urllib.parse.quote(str(sid), safe='')}/status",
+                    auth=False, timeout=3)
+                if status == 200 and isinstance(body, dict) and body.get("id") == sid:
+                    peak = _number(body.get("tone_map_peak_nits"))
+                    if peak is not None and 0 < peak < float("inf") and body.get("tone_map_peak_source") in (
+                            "cll", "mdcv", "default"):
+                        active = sid
+            except ApiError:
+                pass
+        if active != self.tone_mapping_session:
+            self.tone_mapping_session = active
+            self.publish_chrome()
+
     def heartbeat(self):
         control = (self.session or {}).get("control")
         if not isinstance(control, dict) or not control.get("url"):
+            self.refresh_tone_mapping()
             return
+        self.session.pop("effective_processing", None)
         try:
             status, body = self.http.request("POST", control["url"], self.control_body(),
                                              auth=False, timeout=4.5)
         except ApiError as error:
             self.log(f"control exchange failed: {error}")
+            self.refresh_tone_mapping()
             return
         if status in (404, 410):
             raise ServerStop(error_text(body, "Playback was stopped on the server"))
         if status != 200:
             self.log(f"control exchange answered {status}: {error_text(body, '')}")
+        elif isinstance(body, dict) and body.get("protocol") == PROTOCOL \
+                and body.get("generation") == control.get("generation"):
+            self.session["effective_processing"] = body.get("effective_processing")
+        self.refresh_tone_mapping()
 
     def progress(self, reason):
         if self.item_id is None:

@@ -49,6 +49,48 @@ class CinemaModel(unittest.TestCase):
         self.assertEqual(mpv.set.call_args.args[1]['playback'],
                          {'mode': None, 'transport': None, 'session': None})
 
+    def test_tone_mapping_requires_current_server_processing_evidence(self):
+        http, mpv = mock.Mock(), mock.Mock()
+        player = Playback(http, mpv, {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
+        player.session = {'session_id': 'current'}
+        for source in ('cll', 'mdcv', 'default'):
+            http.request.return_value = (200, {'id': 'current', 'tone_map_peak_nits': 1000,
+                                               'tone_map_peak_source': source})
+            player.refresh_tone_mapping()
+            player.publish_chrome()
+            self.assertTrue(mpv.set.call_args.args[1]['tone_mapping'])
+        player.session = {'session_id': 'replacement'}
+        player.publish_chrome()
+        self.assertFalse(mpv.set.call_args.args[1]['tone_mapping'])
+        for status, body in ((200, {'id': 'current', 'tone_map_peak_nits': 1000, 'tone_map_peak_source': 'cll'}),
+                             (200, {'id': 'replacement', 'tone_map_peak_nits': True, 'tone_map_peak_source': 'cll'}),
+                             (200, {'id': 'replacement', 'tone_map_peak_nits': 1000, 'tone_map_peak_source': 'unknown'}),
+                             (503, {})):
+            http.request.return_value = status, body
+            player.refresh_tone_mapping()
+            player.publish_chrome()
+            self.assertFalse(mpv.set.call_args.args[1]['tone_mapping'])
+        generation = '47b48458-a01e-4df2-9476-4d46892400b0'
+        report = {'generation': generation, 'sdr_processed': True, 'hdr10_enhanced': False,
+                  'fel_contributed': False, 'applied_operations': [{'DisplayTargetMapping': {'nits': 100}}, 'Bt709Gamma24Conversion']}
+        player.session.update(control={'generation': generation}, effective_processing=report,
+                              delivered_dynamic_range='sdr')
+        player.refresh_tone_mapping()
+        self.assertTrue(mpv.set.call_args.args[1]['tone_mapping'])
+        report['generation'] = 'stale'
+        player.refresh_tone_mapping()
+        self.assertFalse(mpv.set.call_args.args[1]['tone_mapping'])
+        report['generation'] = generation
+        player.session['control']['url'] = '/api/v1/hls/replacement/control'
+        player.control_body = mock.Mock(return_value={})
+        http.request.return_value = 200, {'protocol': 'plurx-playback-control-v1',
+                                         'generation': generation, 'effective_processing': report}
+        player.heartbeat()
+        self.assertTrue(mpv.set.call_args.args[1]['tone_mapping'])
+        http.request.return_value = 200, {'protocol': 'plurx-playback-control-v1', 'generation': generation}
+        player.heartbeat()
+        self.assertFalse(mpv.set.call_args.args[1]['tone_mapping'])
+
     def test_queued_incumbent_restart_cannot_commit_unloaded_quality(self):
         player = Playback(mock.Mock(), mock.Mock(), {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
         player.started, player.loading = True, True
@@ -99,11 +141,12 @@ class CinemaModel(unittest.TestCase):
                 player.session['control'][field] = replacement
                 player.heartbeat()
                 player.heartbeat()
-                controls = [call.args[2] for call in http.request.call_args_list]
+                exchanges = [call for call in http.request.call_args_list if call.args[0] == 'POST']
+                controls = [call.args[2] for call in exchanges]
                 self.assertEqual([body['sequence'] for body in controls], [1, 2, 1, 2])
                 initial = 'initial-generation' if field == 'generation' else 1
                 self.assertEqual([body[field] for body in controls], [initial, initial, replacement, replacement])
-                self.assertEqual([call.args[1] for call in http.request.call_args_list], ['/same/control'] * 4)
+                self.assertEqual([call.args[1] for call in exchanges], ['/same/control'] * 4)
                 self.assertEqual({body['client_instance_id'] for body in controls}, {player.client_instance_id})
 
     def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls(self):
@@ -131,7 +174,8 @@ class CinemaModel(unittest.TestCase):
         player.heartbeat()
         player.settle_quality('Candidate failed after its control exchanges')
         player.heartbeat()
-        controls = [(call.args[1], call.args[2]) for call in http.request.call_args_list]
+        controls = [(call.args[1], call.args[2]) for call in http.request.call_args_list
+                    if call.args[0] == 'POST']
         self.assertEqual([(url, body['sequence']) for url, body in controls],
                          [('/old/control', 1), ('/old/control', 2),
                           ('/new/control', 1), ('/new/control', 2), ('/old/control', 3)])
