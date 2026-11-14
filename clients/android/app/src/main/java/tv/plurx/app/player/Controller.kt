@@ -4986,6 +4986,7 @@ class Controller internal constructor(
         val sessionStatus: PlaybackSessionStatus?,
         val sessionStatusObservedAtMs: Long?,
         val establishedPlayback: Boolean,
+        val automaticCandidateAdoption: PlaybackIntent.AutomaticCandidateAdoption?,
     )
 
     /** Retained until a real successor frame makes rollback unnecessary. */
@@ -5309,6 +5310,16 @@ class Controller internal constructor(
         successor.playWhenReady = park.playWhenReady
         preparedVideoSurfaces?.invalidate(successor)
         successor.seekTo(successorAttachPositionMs(originMs, park.rendezvousFilmMs))
+        // At most the initial park and two reparks. Numeric local/film clocks
+        // explain a missed target without exposing media URLs or session tokens.
+        runCatching {
+            playbackTelemetry.report(event = "prepared_successor_park", level = "info",
+                message = "Prepared successor parked beside incumbent.",
+                detail = preparedPositionDetail("park", successor.playbackState, originMs,
+                    realPosition(), park.rendezvousFilmMs, successor.currentPosition,
+                    successor.bufferedPosition, rendezvous?.reparks ?: 0,
+                    monotonicNowMs() - preparedStartedAtMs))
+        }
     }
 
     /**
@@ -5541,6 +5552,9 @@ class Controller internal constructor(
             sessionStatus = sessionStatus,
             sessionStatusObservedAtMs = sessionStatusObservedAtMs,
             establishedPlayback = establishedPlayback,
+            automaticCandidateAdoption = action.effectiveSelection?.let {
+                playbackIntent.adoptCommittedAutomaticCandidate(it.candidateId, it.height, it.qualityAuto)
+            },
         )
 
         handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())
@@ -5739,6 +5753,7 @@ class Controller internal constructor(
         predecessor.player.addListener(this.listener)
         externalListeners.forEach { predecessor.player.addListener(it) }
 
+        playbackIntent.rollbackAutomaticCandidate(predecessor.automaticCandidateAdoption)
         progressiveMediaOrigin = predecessor.progressiveMediaOrigin
         attachedModeOverride = predecessor.modeOverride
         attachedRequiresHlsOverride = predecessor.requiresHlsOverride
@@ -5862,7 +5877,10 @@ class Controller internal constructor(
                 )
                 playbackTelemetry.report(event = "prepared_successor_failure", level = "warn",
                     message = "Prepared successor failed; incumbent outcome is reported separately.",
-                    code = errorCode, detail = diagnostic.detail())
+                    code = errorCode, detail = preparedPositionDetail(reason.name, successor?.playbackState,
+                        originMs, realPosition(), target, successor?.currentPosition, successor?.bufferedPosition,
+                        rendezvous?.reparks ?: 0, monotonicNowMs() - preparedStartedAtMs,
+                        diagnostic.observedWaitGate))
             }
             surfaceOwner.logOnly(
                 mediaMutationEpoch,
@@ -6403,6 +6421,22 @@ internal data class AutoTickState(
 
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
+
+/** Compact clocks survive the client-log boundary's 200-character detail cap. */
+internal fun preparedPositionDetail(
+    reason: String,
+    state: Int?,
+    originMs: Long?,
+    incumbentMs: Long?,
+    targetMs: Long?,
+    localMs: Long?,
+    bufferedLocalMs: Long?,
+    reparks: Int,
+    elapsedMs: Long,
+    gate: String? = null,
+): String = ("r=${reason.take(24)} s=${state ?: "?"} o=${originMs ?: "?"} i=${incumbentMs ?: "?"} " +
+    "t=${targetMs ?: "?"} p=${localMs ?: "?"} b=${bufferedLocalMs ?: "?"} n=$reparks ms=$elapsedMs" +
+    (gate?.let { " g=$it" } ?: "")).take(200)
 
 /**
  * The control plane's effective selection names the session recipe's

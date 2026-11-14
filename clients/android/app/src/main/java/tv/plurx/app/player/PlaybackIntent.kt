@@ -51,6 +51,7 @@ class PlaybackIntent(
         private set
     var automaticCandidateHeight: Int? = null
         private set
+    private var automaticCandidateRevision = 0L
     private var envelopeRecipeRevision = 1L
     private var envelopeDestinationRevision = 1L
     private var envelopeTransportRevision = 1L
@@ -65,6 +66,39 @@ class PlaybackIntent(
     fun requestAutomaticCandidate(id: String?, height: Int?) {
         automaticCandidateId = id
         automaticCandidateHeight = height
+        automaticCandidateRevision += 1
+    }
+
+    internal data class AutomaticCandidateAdoption(
+        val previousId: String?,
+        val previousHeight: Int?,
+        val revision: Long,
+    )
+
+    /** A committed server route owns standing Auto, never a newer viewer choice. */
+    @Synchronized
+    internal fun adoptCommittedAutomaticCandidate(
+        candidateId: String?,
+        height: Long,
+        qualityAuto: Boolean,
+    ): AutomaticCandidateAdoption? {
+        if (!qualityAuto || desiredQuality != PlaybackQuality.Auto ||
+            pendingQualityChange != null || retainedControlQuality != null ||
+            candidateId.isNullOrBlank() || height !in PlaybackControl.MIN_HEIGHT.toLong()..PlaybackControl.MAX_HEIGHT.toLong()
+        ) return null
+        val previousId = automaticCandidateId
+        val previousHeight = automaticCandidateHeight
+        requestAutomaticCandidate(candidateId, height.toInt())
+        return AutomaticCandidateAdoption(previousId, previousHeight, automaticCandidateRevision)
+    }
+
+    /** Rollback restores its route only while no later candidate request owns it. */
+    @Synchronized
+    internal fun rollbackAutomaticCandidate(adoption: AutomaticCandidateAdoption?) {
+        if (adoption == null || automaticCandidateRevision != adoption.revision ||
+            desiredQuality != PlaybackQuality.Auto || pendingQualityChange != null || retainedControlQuality != null
+        ) return
+        requestAutomaticCandidate(adoption.previousId, adoption.previousHeight)
     }
 
     @Synchronized
@@ -134,6 +168,7 @@ class PlaybackIntent(
     /** Adopt the quality carried by the exact decision that a successor opens. */
     @Synchronized
     fun adoptQuality(quality: PlaybackQuality) {
+        automaticCandidateRevision += 1
         desiredQuality = quality
         retainedControlQuality = null
         retainedExecutionQuality = null
@@ -159,6 +194,7 @@ class PlaybackIntent(
         tappedAtMs: Long = monotonicNowMs(),
     ): PendingQualityChange {
         val incumbentQuality = qualityForMedia()
+        automaticCandidateRevision += 1
         desiredQuality = quality
         retainedControlQuality = null
         retainedExecutionQuality = null
