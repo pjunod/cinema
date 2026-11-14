@@ -14,7 +14,7 @@ make paperwork-fix      # applies the fixes that are derivable (below) to your w
 scripts/paperwork --body-file <description.md>   # also checks your PR description's Regression-Test: lines
 ```
 
-`make hooks` runs `make paperwork` on every push. After the lane has pushed a
+`make hooks` runs `make paperwork` on every push. After the trusted publisher has pushed a
 `chore(paperwork)` commit to your branch (below), `git pull --rebase` before
 your next push.
 
@@ -42,29 +42,57 @@ head guard anyway (33 of the 117 analysed preflight failures). It is now
 The receipt rules treat a cancelled preflight as a terminal job, so a cancel
 never wedges a PR ([PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md)).
 
+### 1a. A job retry can erase the run's artifacts
+
+The inspected Forgejo 17 job-rerun implementation shares the run reset in
+`services/actions/rerun.go`: retrying one job deletes **all artifacts of that
+workflow run**, including artifacts from successful sibling jobs. Selecting a
+failed setup job does not preserve previously published test evidence.
+
+`scripts/ci-failures --retry-job JOB_ID` therefore checks the selected job's
+whole run and its paginated artifact inventory before requesting a retry. It
+requires terminal run metadata and no unexpired artifacts, including ordinary
+build data. Missing or inconsistent identities, unknown expiry, failed API
+reads and incomplete pagination refuse the retry. `--dry-run` performs the
+same checks and sends no retry request.
+
+```sh
+scripts/ci-failures --retry-job JOB_ID --dry-run  # inspect artifact safety before a retry
+```
+
+When it refuses, start a fresh lane and let authenticated adoption reuse
+finished evidence. Keep the artifact-bearing run intact. This is a client
+preflight, not an atomic server-side retention guarantee: another actor can
+change the run or publish an artifact between the inventory read and the rerun
+request. Requiring a terminal run avoids retrying while its jobs can still
+publish; it cannot serialize other clients against Forgejo's deletion.
+
 ### 2. Derivable paperwork fixes itself
 
-The `paperwork` job (fast lane, and `paperwork.yml` for PRs into effort
-branches) runs `scripts/paperwork`. When it fails it runs
-`scripts/paperwork-fix --ci`, which applies only fixes whose correct output is
-derivable, commits them as `chore(paperwork): apply derivable bookkeeping
-fixes` with a `Paperwork-Fix:` trailer, re-runs paperwork, and pushes the
-commit to the PR branch. [PAPERWORK.md](PAPERWORK.md) lists what is fixed and
-the guards. The PR description and title are read from the event payload, not
-an environment variable: a long description used to stop the runner from
-starting the step (`argument list too long`).
+The PR `paperwork` jobs run `scripts/paperwork` and stop on failure before
+compiler jobs. They carry no persistent publisher credential and do not commit
+or push PR-controlled output. The separate ci-fleet publisher uses pinned policy
+in a credential-free sandbox, validates the live same-repository PR identity,
+and leases a canonical fix commit to the original head. Its dedicated bot push
+starts the replacement main-bound lane. Installation and a real replacement-run
+canary remain operational acceptance; effort PRs use the local fixer meanwhile.
+[PAPERWORK.md](PAPERWORK.md) describes the boundary and supported edits.
+
+The description and title are read from the event payload, not an environment
+variable: a long description used to stop the runner from starting the step
+(`argument list too long`).
 
 Paperwork failures, 62 job logs of the 65 failed `paperwork` jobs (a run can
 fail several rules):
 
 | Rule | Runs | PRs | Now |
 |---|---|---|---|
-| mobile release counters (mostly: main claimed the same number first) | 23 | 5 | fixed by the lane |
+| mobile release counters (mostly: main claimed the same number first) | 23 | 5 | trusted publisher/local fixer |
 | `Regression-Test:` line missing for a `fix(`/`perf(` commit | 19 | 12 | author; message names the commits and the command |
-| real host names in the tree | 9 | 3 | fixed by the lane in Markdown; code is left to the author |
+| real host names in the tree | 9 | 3 | trusted publisher/local fixer in Markdown; code stays author-owned |
 | file without a functionality point | 8 | 3 | author |
 | doc over 40 KB | 4 | 3 | author |
-| doc without an index row | 4 | 1 | fixed by the lane (row from title and Status header) |
+| doc without an index row | 4 | 1 | trusted publisher/local fixer (row from title and Status header) |
 | step never started: description too long for an env var | 3 | 3 | fixed (read from the event file) |
 
 Preflight failures, 117 job logs of the 127 failed preflight jobs:

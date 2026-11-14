@@ -1,0 +1,25 @@
+# cargo-nextest settings for the PR-time Rust unit stage
+# (.github/workflows/rust-units.yml; docs/ci/RUST-UNIT-FANOUT.md). A local
+# `cargo nextest run --profile ci` behaves the same; plain `cargo test` and
+# `make unit` ignore this file. It is an input of every crate's content key.
+nextest-version = { required = "0.9.151" }
+
+[profile.ci]
+# Child bodies, not tests: each returns at once unless it was started by its
+# parent test as `<binary> --exact <its name>`, and nextest starts every test
+# exactly that way, so here they would run their child behaviour (sleep for
+# minutes, exit 13) instead. Their parents still spawn them directly.
+# tests/validation/test_rust_units.py keeps this filter equal to the set of
+# `invoked_as_child` fixtures.
+default-filter = "not test(/^scan::probe::tests::fixture_child_/)"
+fail-fast = false
+retries = 0
+# One status line per test: shard outcomes, and the receipts' PASS evidence,
+# are read from these lines in the job log.
+status-level = "pass"
+final-status-level = "fail"
+failure-output = "immediate-final"
+success-output = "never"
+# `make unit` has no per-test limit; this only stops a hung test from eating
+# the shard's job budget. Twenty minutes is far past every measured test.
+slow-timeout = { period = "300s", terminate-after = 4 }
