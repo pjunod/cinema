@@ -705,20 +705,36 @@ impl SharingManager {
                 () = lifetime.cancelled() => { stop.cancel(); return; }
                 () = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
-            match enabled(state.store.as_ref()).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.listener_status("disabled");
-                    self.disable_bodies();
-                    stop.cancel();
-                    return;
-                }
-                Err(_) => {
-                    self.listener_status("authority_unavailable");
-                    self.disable_bodies();
-                    stop.cancel();
-                    return;
-                }
+            if self.running_listener_closes(enabled(state.store.as_ref()).await) {
+                stop.cancel();
+                return;
+            }
+        }
+    }
+    /// One look at the saved switch by a listener that is already serving.
+    ///
+    /// Only a confirmed disable closes it. An unreadable switch is unknown, not
+    /// off: `enabled` is a linearizable read with a one-second deadline, and a
+    /// single slow quorum confirmation would otherwise refuse every peer for at
+    /// least `LISTENER_IDLE_POLL` and end this node's live shared bodies.
+    /// Admission does not depend on this: `peer_guard` reads the switch for
+    /// each request and answers a typed, retryable refusal while it is
+    /// unreadable. A listener is still first opened only after a confirmed
+    /// enable.
+    fn running_listener_closes(&self, observed: Result<bool, StoreError>) -> bool {
+        match observed {
+            Ok(true) => {
+                self.listener_status("listening");
+                false
+            }
+            Ok(false) => {
+                self.listener_status("disabled");
+                self.disable_bodies();
+                true
+            }
+            Err(_) => {
+                self.listener_status("authority_unavailable");
+                false
             }
         }
     }
@@ -2856,6 +2872,31 @@ mod catalogue_cache_tests {
 #[cfg(test)]
 mod loop_pacing_tests {
     use super::*;
+    #[test]
+    fn running_listener_survives_an_unreadable_switch_and_closes_on_a_confirmed_disable() {
+        let manager = SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([43; 32])),
+            PathBuf::from("unused-running-listener-fixture"),
+            SharingNetworkConfig::default(),
+        );
+        let bodies = manager.begin_lifetime();
+        let unreadable = || Err(StoreError::Identity("sharing authority unavailable".into()));
+        // A missed quorum confirmation is not a disable: keep serving and
+        // keep live bodies, and report the degraded look.
+        assert!(!manager.running_listener_closes(unreadable()));
+        assert_eq!(manager.status().listener, "authority_unavailable");
+        assert!(!bodies.is_cancelled());
+        assert!(!manager.running_listener_closes(unreadable()));
+        assert!(!bodies.is_cancelled());
+        // The next readable enable restores the serving status.
+        assert!(!manager.running_listener_closes(Ok(true)));
+        assert_eq!(manager.status().listener, "listening");
+        assert!(!bodies.is_cancelled());
+        // A confirmed disable closes the listener and ends bodies at once.
+        assert!(manager.running_listener_closes(Ok(false)));
+        assert_eq!(manager.status().listener, "disabled");
+        assert!(bodies.is_cancelled());
+    }
     #[test]
     fn sharing_claim_schedule_refreshes_healthy_active_imports_at_the_backoff_ceiling() {
         assert_eq!(claim_retry_delay(0, true), ACTIVE_IMPORT_REFRESH);
