@@ -27,7 +27,7 @@ The cost on a production voter, 2026-11-14: one slow quorum confirmation ends li
    - **Switch, grant, items, files:** `Ok(false)` or an affirmative absence is `Revoked`. `Err` or timeout is `Unknown`.
    - **Member floor:** returns `Ready` or `NotReady`. `NotReady` and `Err` are both `Unknown`.
    - **`receiver_delivery` and `receiver_source_binding` absent because of a time or lease term** (`sharing_receiver_sessions.rs:521`, `sharing_receiver_delivery.rs:112`): `Unknown`. Their SQL is split so that "row absent or grant revoked" is distinguishable from "lease or deadline lapsed".
-   - **`receiver_content_current`:** switches to `scope_proof` (`sharing.rs:2044`), which separates a refusal from unreachable, busy or rate-limited.
+   - **`receiver_content_current`:** unchanged in M1. It is only an admission point: it gates in-memory catalogue and artwork responses before they return, and no session ends on it. Failing closed with a typed, retryable 503 is the admission rule. Moving it to `scope_proof` (`sharing.rs:2044`) helps M2's read budget, not session survival.
    - **`open_sharing` failure** (`:826-836`): a key or rewrap state, so `Unknown`.
    - **Local stop or retirement already in progress** (`:778-784`, `:853`, `:858-866`): `Ending`. The monitor stops without starting a retirement.
 2. **The classification travels in `ReceiverStartError`.** It gains `Unknown` and `PeerUnavailable` alongside the `Revoked`-class errors. The owner loop and the resource and direct opens use it.

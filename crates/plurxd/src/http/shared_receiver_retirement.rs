@@ -327,6 +327,21 @@ impl ReceiverStartActor {
             confirmation: format!("{:x}", digest.finalize()),
         })
     }
+    /// Retire after this owner's proof stayed unknown past the session grace,
+    /// or its Source stayed unreachable until the lease could not be renewed.
+    /// Not a revocation: the durable reason is `Replaced`, the value orphan
+    /// retirements already record for an ending that is not one, while every
+    /// transport is still cut so a partitioned node stops its bytes.
+    pub(crate) fn begin_outage_retirement(&self, state: Arc<AppState>) {
+        {
+            let mut owned = self.0.state.lock().expect("receiver owner");
+            if owned.retirement_started {
+                return;
+            }
+            owned.retirement_cuts = true;
+        }
+        self.begin_retirement(state, ReceiverRetirementReason::Replaced);
+    }
     pub(crate) fn begin_retirement(&self, state: Arc<AppState>, reason: ReceiverRetirementReason) {
         {
             let mut owned = self.0.state.lock().expect("receiver owner");
