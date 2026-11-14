@@ -457,12 +457,13 @@ class NamedTestsTests(unittest.TestCase):
         self.assertEqual(plan["crates"]["app"]["remaining"], ["app t::a", "app::bin/app m::c"])  # not `app m::c`
         self.assertEqual(plan["crates"]["app"]["adopted"], [])
 
-    def test_a_named_id_the_listing_lacks_fails_the_plan(self):
+    def test_a_named_id_the_listing_lacks_is_absent_and_the_others_still_run(self):
         config = ru.Config.load(CONFIG)
-        pending = {"crates": {"app": {"key": "1" * 64, "passed": [], "only": ["t::gone"],
-                                      "exact": ["app t::gone"]}}}
-        with self.assertRaises(ru.UnitsError):
-            ru.make_plan({"head": "a" * 40, "base": "b" * 40}, pending, listing(app=[("t::a", False)]), config, run=5)
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": [], "only": ["t::a", "t::gone"],
+                                      "exact": ["app t::a", "app t::gone"]}}}
+        plan = ru.make_plan({"head": "a" * 40, "base": "b" * 40}, pending, listing(app=[("t::a", False)]), config, run=5)
+        self.assertEqual(plan["crates"]["app"]["remaining"], ["app t::a"])
+        self.assertEqual(plan["crates"]["app"]["absent"], ["app t::gone"])
 
     def test_adopt_never_takes_a_pass_from_a_receipt_for_a_named_test(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -482,10 +483,12 @@ class NamedTestsTests(unittest.TestCase):
 
 
 class NamedVerdictTests(unittest.TestCase):
-    def run_verdict(self, passed=(), failed=()):
+    def run_verdict(self, passed=(), failed=(), absent=()):
+        planned = [t for t in ("app t::a", "app t::b") if t not in absent]
         plan = {"run": 9, "shards": 1, "head": "a" * 40, "base": "b" * 40, "crates": {
             "app": {"key": "1" * 64, "listing": {"count": 2, "sha256": "2" * 64}, "adopted": [],
-                    "remaining": ["app t::a", "app t::b"], "serial": [], "exact": ["app t::a", "app t::b"]}}}
+                    "remaining": planned, "serial": [], "exact": ["app t::a", "app t::b"],
+                    "absent": list(absent)}}}
         receipt = {"schema": 1, "run": 9, "shards": 1, "head": "a" * 40, "index": 1,
                    "results": {"app": {"passed": list(passed), "failed": list(failed), "skipped": []}}}
         with tempfile.TemporaryDirectory() as tmp:
@@ -497,6 +500,8 @@ class NamedVerdictTests(unittest.TestCase):
                     mock.patch.object(ru, "summarize", side_effect=lambda lines: captured.append("\n".join(lines))):
                 ru.command_verdict(mock.Mock(plan=str(root / "plan.json"), receipts=str(root / "shards"),
                                              output=str(root / "receipts")))
+            self.written = {"named": json.loads((root / "state" / "named.json").read_text()),
+                            "receipt": json.loads((root / "receipts" / "app" / "receipt.json").read_text())}
             return {c.args[0]: c.args[1] for c in emit.call_args_list}, captured[0]
 
     def test_every_named_test_reports_its_actual_outcome(self):
@@ -505,6 +510,17 @@ class NamedVerdictTests(unittest.TestCase):
         self.assertIn("named `app t::b`: FAIL", text)
         self.assertEqual(outputs["failures"], "true")
         self.assertEqual(outputs["complete"], "true")
+
+    def test_an_absent_named_test_is_reported_distinctly_and_is_never_a_pass(self):
+        outputs, text = self.run_verdict(passed=["app t::a"], absent=["app t::b"])
+        self.assertIn("ABSENT app t::b", text)
+        self.assertIn("named `app t::a`: PASS", text)
+        self.assertEqual(outputs["complete"], "false")  # the gate fails on an incomplete verdict
+
+    def test_the_absent_status_reaches_the_json_and_the_receipt(self):
+        self.run_verdict(passed=["app t::a"], absent=["app t::b"])
+        self.assertEqual(self.written["named"]["tests"], {"app t::a": "passed", "app t::b": "absent"})
+        self.assertEqual(self.written["receipt"]["absent"], ["app t::b"])
 
     def test_a_named_test_that_did_not_run_is_incomplete_and_never_a_pass(self):
         outputs, text = self.run_verdict(passed=["app t::a"])

@@ -112,7 +112,7 @@ each id exactly as cargo-nextest prints it (`<binary id> <test path>`, for examp
 same authority rule applies (bot-authored `train/` head); a malformed or empty list
 fails the scope job. The unit stage then runs exactly those tests, whatever the
 content keys say, adopts nothing from receipts, and its verdict and gate report each
-named test as PASS, FAIL or NOT RUN: a failing, unknown, skipped or unrun named test
+named test as PASS, FAIL, NOT RUN or `ABSENT <id>` (an id the archive lacks, for example a new test probed on main alone; the others still run): a failing, absent, skipped or unrun named test
 fails the gate, and the stage's own merge-base excuse is not applied. The train
 classifies by comparing the main-alone probe with the branch probe.
 

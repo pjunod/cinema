@@ -881,14 +881,17 @@ def make_plan(selection_doc, pending, listing, config, run):
             serial = [t for t in serial if t.split(" ", 1)[1] in only]
         exact = entry.get("exact")
         if exact is not None:
+            # A named test the archive lacks (a train member's new test, probed
+            # on main alone) is reported as absent; it never stops the others.
             absent = sorted(set(exact) - set(everything))
-            require(not absent, f"{crate}: named tests not in the listing (unknown id, ignored, or excluded): {absent}")
             tests = [t for t in tests if t in exact]
             serial = [t for t in serial if t in exact]
+        else:
+            absent = []
         adopted = sorted(set(entry["passed"]) & set(everything))
         remaining = sorted(set(tests) - set(adopted))
         remaining_serial = sorted(set(serial) - set(adopted))
-        crates[crate] = {"key": entry["key"], "only": only, "exact": exact,
+        crates[crate] = {"key": entry["key"], "only": only, "exact": exact, "absent": absent,
                          "listing": {"count": len(everything), "sha256": digest_lines(sorted(everything))},
                          "adopted": adopted, "remaining": remaining, "serial": remaining_serial}
         partitioned += remaining
@@ -1048,6 +1051,7 @@ def crate_receipt(plan, crate, outcome, run, publisher, evidence_jobs, key=None,
             "key": key or entry["key"], "commit": commit or plan["head"], "run": run,
             "publisher": publisher, "evidence_jobs": evidence_jobs,
             "listing": entry.get("listing") if listing else None,
+            "absent": list(entry.get("absent") or []),
             "passed": sorted(t for t in ran if outcome[t] == "passed"),
             "failed": sorted(t for t in ran if outcome[t] == "failed")}
 
@@ -1137,7 +1141,9 @@ def command_plan(args):
                f"{adopted} already passed under the same keys."] +
               [f"- `{name}`: {len(c['remaining']) + len(c['serial'])} to run of {c['listing']['count']}"
                for name, c in sorted(plan["crates"].items())])
-    emit("shards", list(range(1, plan["shards"] + 1)) if total else [])
+    # An all-absent named probe still needs its verdict to say so.
+    absent = sum(len(c.get("absent") or []) for c in plan["crates"].values())
+    emit("shards", list(range(1, plan["shards"] + 1)) if total or absent else [])
     emit("tests", str(total))
     return 0
 
@@ -1178,11 +1184,19 @@ def command_verdict(args):
         lines.append(f"- `{crate}` failed: " + ", ".join(f"`{t}`" for t in tests[:20])
                      + (f" … {len(tests) - 20} more" if len(tests) > 20 else ""))
     named = sorted(t for entry in plan["crates"].values() for t in entry.get("exact") or [])
+    absent = {t for entry in plan["crates"].values() for t in entry.get("absent") or []}
+    statuses = {}
     for test in named:
-        state = outcome.get(test)
-        lines.append(f"- named `{test}`: " + {"passed": "PASS", "failed": "FAIL"}.get(state, "NOT RUN"))
-        if state not in ("passed", "failed"):
+        state = "absent" if test in absent else outcome.get(test, "not run")
+        statuses[test] = state
+        lines.append(f"- ABSENT {test}" if state == "absent" else f"- named `{test}`: " +
+                     {"passed": "PASS", "failed": "FAIL"}.get(state, "NOT RUN"))
+        if state == "absent":
+            problems.append(f"named test absent from the archive listing: {test}")
+        elif state not in ("passed", "failed"):
             problems.append(f"named test did not run: {test}")
+    if named:
+        write_json(STATE / "named.json", {"head": plan["head"], "tests": statuses})
     lines += [f"- incomplete: {problem}" for problem in problems]
     summarize(lines)
     write_json(STATE / "failures.json", {"head": plan["head"], "base": plan["base"], "failures": failures})
