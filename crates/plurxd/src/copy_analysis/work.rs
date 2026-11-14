@@ -967,16 +967,20 @@ pub(super) async fn publish_source(
                     Attempt::Discard(_) => "copy_observation_refused",
                     _ => "copy_publication_retry",
                 };
-                let _ = context
-                    .store
-                    .retry_analysis_request(
-                        &claimed,
-                        code,
-                        now,
-                        now.saturating_add(context.retry_ms),
-                        !matches!(attempt, Attempt::Busy),
-                    )
-                    .await;
+                crate::store_result::observe(
+                    crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                    crate::store_result::Discard::BestEffort,
+                    context
+                        .store
+                        .retry_analysis_request(
+                            &claimed,
+                            code,
+                            now,
+                            now.saturating_add(context.retry_ms),
+                            !matches!(attempt, Attempt::Busy),
+                        )
+                        .await,
+                );
             }
             attempt
         }
@@ -1704,16 +1708,20 @@ async fn publish_claimed(
             Ok(JobPublishOutcome::ArtifactConflict) => "artifact_conflict",
             _ => "copy_publication_unsettled",
         };
-        let _ = context
-            .store
-            .settle_job(plurx_core::store::background_jobs::SettleJob {
-                token,
-                settlement: plurx_core::store::background_jobs::JobSettlement::Fail {
-                    error_code: code.into(),
-                },
-                now_ms: crate::state::clock_ms(),
-            })
-            .await;
+        crate::store_result::observe(
+            crate::store_result::Operation::SettleAnalysisAfterQueueAdmission,
+            crate::store_result::Discard::BestEffort,
+            context
+                .store
+                .settle_job(plurx_core::store::background_jobs::SettleJob {
+                    token,
+                    settlement: plurx_core::store::background_jobs::JobSettlement::Fail {
+                        error_code: code.into(),
+                    },
+                    now_ms: crate::state::clock_ms(),
+                })
+                .await,
+        );
     }
     match outcome? {
         JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. } => {

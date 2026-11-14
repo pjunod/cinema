@@ -2435,7 +2435,7 @@ fn a_commit_carries_the_origin_it_adopted_and_not_a_wall_clock() {
         "a first-frame time is not a substitute for saying what was built",
     );
     assert_eq!(
-        ack(AcknowledgementState::Committed, Some(0), None).validate(),
+        ack(AcknowledgementState::Committed, Some(0), Some(1_700_000_000_000)).validate(),
         Err("acknowledgement.first_frame_unix_ms"),
         "and the origin does not replace the measurement either — this is \
              additive, so a commit carries both",
@@ -2471,14 +2471,14 @@ fn a_commit_carries_the_origin_it_adopted_and_not_a_wall_clock() {
     // Range, so a garbage origin is refused at the door rather than
     // compared against an offer it could never match.
     assert_eq!(
-        ack(AcknowledgementState::Committed, Some(-1), None).validate(),
+        ack(AcknowledgementState::Committed, Some(-1), Some(1_700_000_000_000)).validate(),
         Err("acknowledgement.committed_media_origin_ms"),
     );
     assert_eq!(
         ack(
             AcknowledgementState::Committed,
             Some(MAX_MEDIA_MILLIS + 1),
-            None,
+            Some(1_700_000_000_000),
         )
         .validate(),
         Err("acknowledgement.committed_media_origin_ms"),

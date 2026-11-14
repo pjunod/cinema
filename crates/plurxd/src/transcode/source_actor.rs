@@ -2118,7 +2118,7 @@ impl TranscodeManager {
                     .await
                     .is_err()
                 {
-                    tracing::warn!(target:"plurxd::transcode","Source payload cache retirement remains incomplete after physical/body settlement");
+                    tracing::warn!(target: "plurxd::transcode","Source payload cache retirement remains incomplete after physical/body settlement");
                 }
             }
         }
