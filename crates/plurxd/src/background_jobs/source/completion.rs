@@ -194,10 +194,7 @@ impl Completion {
                     .iter()
                     .filter(|file| Arc::strong_count(file) != 1)
                     .count();
-                (
-                    ready,
-                    (state.operations, state.holders, state.raw, shared),
-                )
+                (ready, (state.operations, state.holders, state.raw, shared))
             };
             if ready {
                 break;

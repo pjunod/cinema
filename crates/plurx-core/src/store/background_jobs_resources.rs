@@ -2064,14 +2064,20 @@ mod source_tests {
         reap_settled_source_custody(&store, job_lease + SOURCE_AUTHORITY_REAP_GRACE_MS - 1)
             .await
             .expect("sweep before the grace ends");
-        assert!(resolve_foreground(&store, foreground.clone())
-            .await
-            .expect("lookup foreground")
-            .is_none(), "the foreground lease (2000) lapsed long before this sweep");
-        assert!(resolve_background_custody(&store, background.clone())
-            .await
-            .expect("lookup background")
-            .is_some(), "background authority is the job lease, still inside the grace");
+        assert!(
+            resolve_foreground(&store, foreground.clone())
+                .await
+                .expect("lookup foreground")
+                .is_none(),
+            "the foreground lease (2000) lapsed long before this sweep"
+        );
+        assert!(
+            resolve_background_custody(&store, background.clone())
+                .await
+                .expect("lookup background")
+                .is_some(),
+            "background authority is the job lease, still inside the grace"
+        );
 
         // At the end of the grace the unsettled background owner is released
         // and its capacity is free; no physical proof is asked for.
@@ -2086,7 +2092,10 @@ mod source_tests {
             .0
             .lock()
             .expect("connection")
-            .execute("DELETE FROM background_job_reservations WHERE job_id=?1", [&job.job_id])
+            .execute(
+                "DELETE FROM background_job_reservations WHERE job_id=?1",
+                [&job.job_id],
+            )
             .expect("job reservation released with its lease");
         assert_eq!(charged(&store), 0, "nothing still charges source_io");
     }
