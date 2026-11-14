@@ -2315,10 +2315,8 @@ impl MetricsStore for SqliteStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
                             + (SELECT COUNT(*) FROM analysis_source_reservations
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND ")
-                    + &source_lapsed
-                    + " <= ?2 * 1000 - 180000),
-                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ")
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND {source_lapsed} <= ?2 * 1000 - 180000),
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))), ").replace("{source_lapsed}", &source_lapsed)
                     + &request_health
                     + " FROM offline_packages WHERE node_id = ?1"),
                 params![node_id, now, live],
