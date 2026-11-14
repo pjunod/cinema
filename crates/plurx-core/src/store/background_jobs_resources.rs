@@ -398,7 +398,8 @@ const _: () = assert!(SOURCE_RECOVERY_OVERDUE_MS == 180_000);
 /// `cleanup_pending` with the time it first saw it, and the grace runs from
 /// that stamp. A paused row holds no capacity and lapses at once. The sweep,
 /// the recovery metric and the Activity observation all use this one
-/// expression so they can never disagree about how long an owner has been gone.
+/// expression so they can never disagree about how long an owner has been gone
+/// (the metric snapshots inline it; `lapse_expression_is_shared` pins that).
 pub fn custody_lapsed_at_sql(c: &str) -> String {
     format!(
         "(CASE WHEN {c}.authority_expires_at_ms>0 THEN {c}.authority_expires_at_ms \
@@ -488,11 +489,11 @@ async fn clear_orphaned_coordination_roles<T: QueueSql>(
     store: &T,
     body: &str,
 ) -> Result<(), StoreError> {
-    let orphaned = "role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM background_source_custody custody WHERE custody.custody_id=role.active_custody_id)";
+    let orphaned = "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM background_source_custody custody WHERE custody.custody_id=role.active_custody_id)";
     // The coordination extension is not installed on every store.
     let pending = store
         .queue_sql(
-            "SELECT 'true' AS result_json WHERE EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_coordination_roles')".to_owned(),
+            "SELECT 'true' AS result_json WHERE json_valid($1) AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_coordination_roles')".to_owned(),
             body.to_owned(),
             false,
             true,
@@ -2311,6 +2312,13 @@ mod source_tests {
                 "{state}: released at the end of the grace"
             );
         }
+    }
+
+    #[test]
+    fn lapse_expression_is_shared() {
+        let lapsed = custody_lapsed_at_sql("c");
+        assert!(include_str!("hiqlite.rs").contains(&lapsed));
+        assert!(include_str!("sqlite/mod.rs").contains(&lapsed));
     }
 
     #[tokio::test]

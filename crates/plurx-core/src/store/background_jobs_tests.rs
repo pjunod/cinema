@@ -87,12 +87,33 @@ async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_g
     );
     assert_eq!(held.origin_job_state.as_deref(), Some("succeeded"));
     assert_eq!(held.phase.as_deref(), Some("cleanup_pending"));
+    // Not yet seen by the expiry sweep: no lapse time, so not overdue.
     let metrics = store
-        .prometheus_store_snapshot("observer", 3)
+        .prometheus_store_snapshot("observer", 1000)
         .await
         .expect("sample");
     assert_eq!(metrics.background_jobs.source_io_reservations, 0);
+    assert_eq!(metrics.background_jobs.source_recovery_pending, 0);
+    // The sweep stamped it at 1 s and it is still charged at 1000 s: the
+    // sweep is not releasing it, which is what the gauge reports.
+    db.execute(
+        "UPDATE background_source_custody SET phase='cleanup_pending',updated_at_ms=1000 WHERE custody_id='reader'",
+        [],
+    )
+    .expect("stamped by the sweep");
+    let metrics = store
+        .prometheus_store_snapshot("observer", 1000)
+        .await
+        .expect("sample");
     assert_eq!(metrics.background_jobs.source_recovery_pending, 1);
+    let metrics = store
+        .prometheus_store_snapshot("observer", 100)
+        .await
+        .expect("sample");
+    assert_eq!(
+        metrics.background_jobs.source_recovery_pending, 0,
+        "inside the grace plus a sweep tick the release is still on its way"
+    );
 }
 
 #[tokio::test]
