@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Main PR #1587's label is preserved by #1589's combined player integration.
+[[fixes]]
+id = "android.cinema-tone-mapping-pill"
+commits = ["6fc8b300e4c2c69ddb3f82c4cee008f975b73499"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/MediaFacts.kt"
+source_anchor = "if (cpuMapping || effectiveMapping) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/components/MediaFactsTest.kt"
+test_anchor = "fun toneMappingPillRequiresActiveProcessingEvidence()"
+
 # PR #1589: original-file delivery and configured codec evidence own native DYN.
 [[fixes]]
 id = "android.direct-dolby-vision-enhancement"
