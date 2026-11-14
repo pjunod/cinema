@@ -2876,11 +2876,22 @@ mod tests {
             fixture_root.clone(),
             ffmpeg.parent().expect("FFmpeg tool directory").to_owned(),
         ];
-        plurx_core::process::source_lifetime::set_daemon_roots(
-            std::slice::from_ref(&fixture_root),
-            &tools,
-        )
-        .expect("isolated immutable reader and script roots");
+        let mut config = plurx_core::config::Config::default();
+        config.storage.data_dir = fixture_root.clone();
+        let dirs = crate::state::Dirs {
+            artwork: fixture_root.join("artwork"),
+            transcode: fixture_root.join("transcode"),
+            cache: fixture_root.join("cache"),
+            subs: fixture_root.join("subs"),
+            runtime_cache: fixture_root.join("runtime"),
+            renditions: fixture_root.join("renditions"),
+        };
+        let (owned, tools) = crate::source_custody::access_root_paths(&config, &dirs, &tools);
+        for path in &owned {
+            std::fs::create_dir_all(path).expect("private startup-owned directory");
+        }
+        plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
+            .expect("isolated immutable reader and script roots");
         for cancelled in [false, true] {
             let dir = tempfile::Builder::new()
                 .prefix("broker-")

@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "30ef41420dad3f483e002e945f53af0be7eb5a1fe6a30852a7780f0ef8d5a853"
+        "sha256": "6005810f3f8a63abe0ce2364ae1119085e0518d89cf6b2aa82f594a9958664e1"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -345,7 +345,7 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "916b8775441965302982df160ec3d181519b90fb45f096bba4cbcb41ae723eff"
+        "sha256": "e7c36aa391092d744091a20c7f2fd21fca6a6be18109232e0b6f56b9065fd70f"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
