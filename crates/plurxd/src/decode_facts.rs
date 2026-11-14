@@ -2814,13 +2814,25 @@ impl ProbeExecutionSupervisor {
     fn finish(&mut self) -> Result<(), DecodeFactError> {
         #[cfg(target_os = "linux")]
         if let Some(supervisor) = self.linux.as_mut() {
+            #[cfg(test)]
+            if self.retirement.is_some() {
+                eprintln!("raw-probe before supervisor finish worker_present={}", supervisor.worker.is_some());
+            }
             let finished = supervisor.finish();
+            #[cfg(test)]
+            if self.retirement.is_some() {
+                eprintln!("raw-probe supervisor worker joined result={finished:?} worker_present={}", supervisor.worker.is_some());
+            }
             if let Some(cause) = supervisor
                 .source_failure
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
             {
+                #[cfg(test)]
+                if self.retirement.is_some() {
+                    eprintln!("raw-probe supervisor semantic source failure={cause:?}; retirement still armed={}", self.retirement.is_some());
+                }
                 return Err(cause);
             }
             finished.map_err(|error| DecodeFactError::Read(error.to_string()))?;
@@ -3229,13 +3241,27 @@ async fn terminate_probe_session(
     if _launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
         COMPLETION_CLEANUP_STARTED.store(true, Ordering::Release);
     }
+    #[cfg(all(test, target_os = "linux"))]
+    if _launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
+        eprintln!("raw-probe before kill/reap child_pid={:?} retirement_armed={}", child.id(), supervisor.retirement.is_some());
+    }
     session.kill_once();
-    if wait_for_probe_reap(child, _launch_mode).await.is_ok() {
-        let _ = supervisor.finish_joined();
+    let reaped = wait_for_probe_reap(child, _launch_mode).await;
+    #[cfg(all(test, target_os = "linux"))]
+    if _launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
+        eprintln!("raw-probe child reap result={reaped:?}");
+    }
+    let finished = if reaped.is_ok() {
+        supervisor.finish_joined()
     } else {
         // An attempted wait is not a physical exit proof.
-        let _ = supervisor.finish();
+        supervisor.finish()
+    };
+    #[cfg(all(test, target_os = "linux"))]
+    if _launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
+        eprintln!("raw-probe teardown result={finished:?} retirement_armed={}", supervisor.retirement.is_some());
     }
+    let _ = finished;
 }
 
 #[cfg(unix)]

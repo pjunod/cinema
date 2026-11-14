@@ -343,6 +343,18 @@ pub(crate) async fn run_source_census(
         .next()
         .is_none_or(|sample| u64::from(sample.size) != packet.size)
     {
+        #[cfg(test)]
+        eprintln!(
+            "copy-head mismatch source_object={object:?} file_id={} source_size={} source_mtime={} sample={:?} base_dts={} packet={packet:?} canonical_mdat_bytes={} canonical_mdat_prefix={:02x?} raw_clock={:?}",
+            file.id,
+            file.size,
+            file.mtime,
+            track.samples().next(),
+            track.base_decode_time,
+            raw_canonical_fragment.mdat_payload.len(),
+            &raw_canonical_fragment.bytes[raw_canonical_fragment.mdat_payload.clone()][..raw_canonical_fragment.mdat_payload.len().min(32)],
+            String::from_utf8_lossy(&clock),
+        );
         return Err("copy_head_clock_sample_mismatch".into());
     }
     Ok(CopyClockCensus {

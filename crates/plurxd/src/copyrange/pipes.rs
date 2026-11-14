@@ -265,6 +265,21 @@ pub(crate) async fn spawn_source_generation(
             return Err(error);
         }
     };
+    #[cfg(test)]
+    eprintln!("copy-generation final argv={args:?}");
+    #[cfg(all(test, target_os = "linux"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let identity = spawned.child.id().ok_or_else(|| "child PID unavailable".to_owned()).and_then(|pid| {
+            let path = format!("/proc/{pid}/exe");
+            // Open the actual child image before fstat; a configured path or
+            // a missing/exited child must never stand in for executed identity.
+            let image = std::fs::File::open(&path).map_err(|error| format!("{path}: {error}"))?;
+            let metadata = image.metadata().map_err(|error| format!("fstat {path}: {error}"))?;
+            Ok((std::fs::read_link(&path), metadata.dev(), metadata.ino(), metadata.len(), metadata.mtime(), metadata.mtime_nsec()))
+        });
+        eprintln!("copy-generation actual child image identity (unavailable is not proof)={identity:?}");
+    }
     drop(canonical_write);
     drop(clock_write);
     let (registration, writers) = slot

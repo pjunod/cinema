@@ -3673,6 +3673,7 @@ async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector()
         .await
         .expect("actual production probe");
     probe.launch_mode = ProbeLaunchMode::ProductionCompletionWorkerHeld;
+    eprintln!("raw-probe exact fixture image path={:?} build_digest={}", probe.executable(), probe.build_digest());
     COMPLETION_WORKER_STARTED.store(false, Ordering::Release);
     COMPLETION_CLEANUP_STARTED.store(false, Ordering::Release);
     *COMPLETION_WORKER_RELEASE.0.lock().expect("worker gate") = false;
@@ -3740,7 +3741,15 @@ async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector()
         }
     })
     .await
-    .expect("explicit child reap and worker join retire the collector");
+    .unwrap_or_else(|error| {
+        panic!(
+            "explicit child reap and worker join retire the collector: {error:?}; completion={:?}; cleanup_started={}; worker_started={}; worker_released={}",
+            budget.completion_observation(),
+            COMPLETION_CLEANUP_STARTED.load(Ordering::Acquire),
+            COMPLETION_WORKER_STARTED.load(Ordering::Acquire),
+            *COMPLETION_WORKER_RELEASE.0.lock().expect("worker gate"),
+        );
+    });
     assert_eq!(budget.completion_observation(), Some((0, 0, false)));
     active.finish().await;
 }
