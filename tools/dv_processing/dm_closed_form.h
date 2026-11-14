@@ -77,7 +77,8 @@ DM_STATIC void dm_mat_mul(const double a[3][3], const double b[3][3], double o[3
 DM_STATIC int dm_mat_inv(const double m[3][3], double o[3][3]) {
   double d = m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1]) - m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0])
            + m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]);
-  if (fabs(d) < 1e-300) return 0;
+  /* A singular matrix still defines o (zeros), so callers never read an unset inverse. */
+  if (fabs(d) < 1e-300) { memset(o, 0, sizeof(double[3][3])); return 0; }
   double t[3][3];
   t[0][0] = (m[1][1]*m[2][2]-m[1][2]*m[2][1])/d; t[0][1] = (m[0][2]*m[2][1]-m[0][1]*m[2][2])/d;
   t[0][2] = (m[0][1]*m[1][2]-m[0][2]*m[1][1])/d; t[1][0] = (m[1][2]*m[2][0]-m[1][0]*m[2][2])/d;

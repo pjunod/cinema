@@ -28,8 +28,7 @@ int cm4_hue(int prim, double shot_max, double target_nits, double hue, double *o
   return 1;
 }
 double cm4_ms(int count, double target_nits, double master_nits) {
-  dm_cm4_trim trims[2] = {{0}, {0}};
-  trims[0].ms = -0.5; trims[1].ms = 0.25;
+  dm_cm4_trim trims[2] = {{.ms = -0.5}, {.ms = 0.25}};
   double peaks[2] = {dm_pq_oetf(100), dm_pq_oetf(1000)};
   enum dm_prim primaries[2] = {DM_BT709, DM_P3D65};
   dm_cm4_trim out = dm_cm4_interp_gamut(trims, peaks, primaries, count,
