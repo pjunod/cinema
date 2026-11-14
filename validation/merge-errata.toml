@@ -649,3 +649,12 @@ parents = ["d7baa379af3ce4788469fcebd7d9c96c16a69426", "34d16b4e53fde577519f43fc
 title = "feat(offload): keep offloaded titles, mark them, and get them back from curator"
 pull = "1564"
 reason = "Verified PR1564 main landing: custom title omitted its PR number. Exact tree and ordered parents restore landing recognition only; all six original Regression-Test fields remain mandatory own-tree evidence. No execution or acceptance claim."
+
+# PR #1553 likewise preserved its raw title instead of a PR-numbered merge subject.
+[[landings]]
+commit = "819b5c68de557ff402912a9f73debd3b74d8b66c"
+tree = "f6cba5f5253a361bed9d58bd94cfeade4666b721"
+parents = ["483d2bcf35edde6b8c6d3cb31471257e2e2a03e6", "c086ed6feb6c8475d4c9d2cb015d6ac97fc101b2"]
+title = "perf(ci): retain unit evidence and qualify batched train lanes"
+pull = "1553"
+reason = "Verified PR1553 main landing: custom title omitted its PR number. Exact tree and ordered parents restore landing recognition only; all eleven original Regression-Test fields remain mandatory own-tree evidence. No execution or acceptance claim."

@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# The input-loop correction is part of main's tone-mapping integration.
+[[fixes]]
+id = "linux-player.tone-map-telemetry-input-loop"
+commits = ["9a980fb053db7720f20a0711594af2fee171b170"]
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def refresh_tone_mapping(self, start_probe=True):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_slow_tone_mapping_telemetry_keeps_input_loop_responsive(self):"
+
+[[fixes]]
+id = "linux-player.hdr-tone-map-omitted-false-sdr"
+commits = []
+supplements = "linux-player.tone-map-telemetry-input-loop"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def effective_tone_mapping(self):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_hdr_tone_mapping_accepts_omitted_false_sdr_flag(self):"
+
 # Main PR #1587's label is preserved by #1589's combined player integration.
 [[fixes]]
 id = "android.cinema-tone-mapping-pill"
