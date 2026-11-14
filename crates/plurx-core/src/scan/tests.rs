@@ -3277,3 +3277,145 @@ async fn a_hint_covers_only_the_files_its_request_named_and_every_part_of_them()
     let other = item_of(&stranger).expect("stranger placed");
     assert_ne!(other, item, "an unnamed file is not placed by the hint");
 }
+
+#[tokio::test]
+async fn scan_identity_curator_copy_imports_keep_show_files_and_watch_history() {
+    for first in ["City Watch", "City Watch (Manual copy 012345abcd)"] {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let initial = write_fake_video(
+            dir.path(),
+            &format!("{first}/Season 1/City Watch S01E01 source.mkv"),
+        )
+        .await;
+        let library = show_library(&store, dir.path()).await;
+        scan_path(&store, &library, &initial)
+            .await
+            .expect("initial import");
+        let show = only_show(&store, library.id).await;
+        let episode = only_episode(&store, show.id).await;
+        let original_file = store
+            .files_for_item(episode.id)
+            .await
+            .expect("copy import fixture")[0]
+            .id;
+        let user = store
+            .create_user("copy-import-viewer", "hash", false)
+            .await
+            .expect("copy import fixture");
+        let watch = store
+            .put_progress_at(user.id, episode.id, 42_000, Some(100_000), Some(1))
+            .await
+            .expect("copy import fixture");
+        store
+            .update_item_fields(
+                show.id,
+                &ItemEdit {
+                    title: Some("City-Watch".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("copy import fixture");
+        let next = write_fake_video(
+            dir.path(),
+            "City Watch (Manual copy abcdef0123)/Season 1/City Watch S01E02.mkv",
+        )
+        .await;
+        scan_path(&store, &library, &next)
+            .await
+            .expect("new episode import");
+        let alternate = write_fake_video(
+            dir.path(),
+            "City Watch (Manual copy 987654abcd)/Season 1/City Watch S01E01 alternate.mkv",
+        )
+        .await;
+        scan_path(&store, &library, &alternate)
+            .await
+            .expect("additional version import");
+        assert_eq!(only_show(&store, library.id).await.id, show.id);
+        let seasons = store
+            .get_item_children(show.id)
+            .await
+            .expect("copy import fixture");
+        assert_eq!(seasons.len(), 1);
+        assert_eq!(
+            store
+                .get_item_children(seasons[0].id)
+                .await
+                .expect("copy import fixture")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .files_for_item(episode.id)
+                .await
+                .expect("copy import fixture")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .get_file(original_file)
+                .await
+                .expect("copy import fixture")
+                .expect("copy import fixture")
+                .item_id,
+            episode.id
+        );
+        assert_eq!(
+            store
+                .watch_state(user.id, episode.id)
+                .await
+                .expect("copy import fixture"),
+            Some(watch)
+        );
+    }
+}
+
+#[tokio::test]
+async fn scan_identity_curator_copy_family_never_uses_a_configured_root_as_owner() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("tmp");
+    let initial = write_fake_video(dir.path(), "City Watch/Season 1/City Watch S01E01.mkv").await;
+    let mut library = show_library(&store, dir.path()).await;
+    library.paths.push(dir.path().join("City Watch"));
+    scan_path(&store, &library, &initial)
+        .await
+        .expect("initial import");
+    let original = only_show(&store, library.id).await;
+    store
+        .update_item_fields(
+            original.id,
+            &ItemEdit {
+                title: Some("Different display title".into()),
+                ..ItemEdit::default()
+            },
+        )
+        .await
+        .expect("copy import fixture");
+    let next = write_fake_video(
+        dir.path(),
+        "City Watch (Manual copy 012345abcd)/Season 1/City Watch S01E02.mkv",
+    )
+    .await;
+    let imported = scan_path(&store, &library, &next)
+        .await
+        .expect("copy import");
+    let new_episode = store
+        .get_item(imported.items[0].item_id)
+        .await
+        .expect("copy import fixture")
+        .expect("copy import fixture");
+    let new_season = store
+        .get_item(new_episode.parent_id.expect("copy import fixture"))
+        .await
+        .expect("copy import fixture")
+        .expect("copy import fixture");
+    assert_ne!(
+        new_season.parent_id,
+        Some(original.id),
+        "a configured root cannot serve as family ownership evidence"
+    );
+}
