@@ -47,14 +47,14 @@ class PlaybackIntentTest {
         for (quality in listOf(PlaybackQuality.Original, PlaybackQuality.Q720)) {
             val intent = PlaybackIntent(initialQuality = quality)
             intent.requestAutomaticCandidate("previous", 2160)
-            assertNull(intent.adoptCommittedAutomaticCandidate("processed", 2160, true))
+            assertFalse(intent.adoptCommittedAutomaticCandidate("processed", 2160, true))
             assertEquals("previous", intent.automaticCandidateId)
             assertEquals(quality, intent.desiredQuality)
         }
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
         val pending = intent.beginQualityChange(PlaybackQuality.Auto, 10L)
         intent.requestAutomaticCandidate("new-choice", 720)
-        assertNull(intent.adoptCommittedAutomaticCandidate("processed", 2160, true))
+        assertFalse(intent.adoptCommittedAutomaticCandidate("processed", 2160, true))
         assertSame(pending, intent.pendingQualityChange)
         assertEquals("new-choice", intent.automaticCandidateId)
     }
@@ -64,46 +64,45 @@ class PlaybackIntentTest {
         val pending = intent.beginQualityChange(PlaybackQuality.Auto, 10L)
         val retained = QualitySelection.Manual(720)
         assertTrue(intent.retainFailedQuality(pending, retained))
-        assertNull(intent.adoptCommittedAutomaticCandidate("processed", 2160, true))
+        assertFalse(intent.adoptCommittedAutomaticCandidate("processed", 2160, true))
         assertEquals(retained, intent.retainedControlQuality)
         assertEquals(PlaybackQuality.Q720, intent.qualityForMedia())
     }
 
-    @Test fun failedProcessedCommitRestoresThePredecessorCandidate() {
+    @Test fun observingAProcessedHandoffDoesNotChangeThePredecessorSelection() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
         intent.requestAutomaticCandidate("copy-original", 2160)
-        val adoption = intent.adoptCommittedAutomaticCandidate("processed", 1080, true)
-        intent.rollbackAutomaticCandidate(adoption)
+        val owner = intent.automaticCandidateOwner()
+        assertEquals("copy-original", intent.automaticCandidateId)
+        assertEquals(owner, intent.automaticCandidateOwner())
+    }
+
+    @Test fun acceptedProcessedCommitDoesNotOverwriteANewerCandidateRequestEvenWithTheSameId() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        intent.requestAutomaticCandidate("copy-original", 2160)
+        val owner = intent.automaticCandidateOwner()
+        intent.requestAutomaticCandidate("copy-original", 2160)
+        assertFalse(intent.adoptCommittedAutomaticCandidate("processed", 1080, true, owner))
         assertEquals("copy-original", intent.automaticCandidateId)
         assertEquals(2160, intent.automaticCandidateHeight)
     }
 
-    @Test fun processedRollbackDoesNotOverwriteANewerCandidateRequestEvenWithTheSameId() {
+    @Test fun acceptedProcessedCommitDoesNotOverwriteACompletedViewerQualityChange() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
         intent.requestAutomaticCandidate("copy-original", 2160)
-        val adoption = intent.adoptCommittedAutomaticCandidate("processed", 1080, true)
-        intent.requestAutomaticCandidate("processed", 1080)
-        intent.rollbackAutomaticCandidate(adoption)
-        assertEquals("processed", intent.automaticCandidateId)
-        assertEquals(1080, intent.automaticCandidateHeight)
-    }
-
-    @Test fun processedRollbackDoesNotOverwriteACompletedViewerQualityChange() {
-        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
-        intent.requestAutomaticCandidate("copy-original", 2160)
-        val adoption = intent.adoptCommittedAutomaticCandidate("processed", 1080, true)
+        val owner = intent.automaticCandidateOwner()
         intent.adoptQuality(PlaybackQuality.Q720)
         intent.adoptQuality(PlaybackQuality.Auto)
-        intent.rollbackAutomaticCandidate(adoption)
-        assertEquals("processed", intent.automaticCandidateId)
+        assertFalse(intent.adoptCommittedAutomaticCandidate("processed", 1080, true, owner))
+        assertEquals("copy-original", intent.automaticCandidateId)
     }
 
     @Test fun processedCommitRequiresAnAutomaticIdentifiedCandidate() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
         intent.requestAutomaticCandidate("copy-original", 2160)
-        assertNull(intent.adoptCommittedAutomaticCandidate("processed", 2160, false))
-        assertNull(intent.adoptCommittedAutomaticCandidate(null, 2160, true))
-        assertNull(intent.adoptCommittedAutomaticCandidate("processed", Long.MAX_VALUE, true))
+        assertFalse(intent.adoptCommittedAutomaticCandidate("processed", 2160, false))
+        assertFalse(intent.adoptCommittedAutomaticCandidate(null, 2160, true))
+        assertFalse(intent.adoptCommittedAutomaticCandidate("processed", Long.MAX_VALUE, true))
         assertEquals("copy-original", intent.automaticCandidateId)
     }
 

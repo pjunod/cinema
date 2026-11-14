@@ -69,36 +69,23 @@ class PlaybackIntent(
         automaticCandidateRevision += 1
     }
 
-    internal data class AutomaticCandidateAdoption(
-        val previousId: String?,
-        val previousHeight: Int?,
-        val revision: Long,
-    )
+    @Synchronized
+    internal fun automaticCandidateOwner(): Long = automaticCandidateRevision
 
-    /** A committed server route owns standing Auto, never a newer viewer choice. */
+    /** Only a durably committed route may replace standing Auto's candidate. */
     @Synchronized
     internal fun adoptCommittedAutomaticCandidate(
         candidateId: String?,
         height: Long,
         qualityAuto: Boolean,
-    ): AutomaticCandidateAdoption? {
-        if (!qualityAuto || desiredQuality != PlaybackQuality.Auto ||
+        expectedOwner: Long = automaticCandidateRevision,
+    ): Boolean {
+        if (expectedOwner != automaticCandidateRevision || !qualityAuto || desiredQuality != PlaybackQuality.Auto ||
             pendingQualityChange != null || retainedControlQuality != null ||
             candidateId.isNullOrBlank() || height !in PlaybackControl.MIN_HEIGHT.toLong()..PlaybackControl.MAX_HEIGHT.toLong()
-        ) return null
-        val previousId = automaticCandidateId
-        val previousHeight = automaticCandidateHeight
+        ) return false
         requestAutomaticCandidate(candidateId, height.toInt())
-        return AutomaticCandidateAdoption(previousId, previousHeight, automaticCandidateRevision)
-    }
-
-    /** Rollback restores its route only while no later candidate request owns it. */
-    @Synchronized
-    internal fun rollbackAutomaticCandidate(adoption: AutomaticCandidateAdoption?) {
-        if (adoption == null || automaticCandidateRevision != adoption.revision ||
-            desiredQuality != PlaybackQuality.Auto || pendingQualityChange != null || retainedControlQuality != null
-        ) return
-        requestAutomaticCandidate(adoption.previousId, adoption.previousHeight)
+        return true
     }
 
     @Synchronized
@@ -732,3 +719,40 @@ internal class PlaybackTargetDeadline(private val timeoutMs: Long = 8_000) {
         elapsedActiveMs = 0
     }
 }
+
+/** The server's exact accepted commit, not a local picture swap or any 200 response. */
+internal data class PreparedControlHandoff(
+    val action: ControlAction,
+    val standingSelection: ClientSelection,
+    val candidateOwner: Long,
+) {
+    val bootstrap: ControlBootstrap? get() = action.control?.takeIf {
+        it.isValid && it.url == "/api/v1/hls/${action.sessionId}/control"
+    }
+
+    // The receipt carries the predecessor's effective selection, not the
+    // successor's. Exact request identity is checked by the reporter before
+    // this callback; the server consumes the bound commit with preparation:none.
+    fun receiptAccepted(acknowledgement: ActionAcknowledgement, preparation: String?, responseAction: String,
+        attachedSession: String?): Boolean =
+        acknowledgement.isValid && acknowledgement.state == AcknowledgementState.COMMITTED &&
+            acknowledgement.actionId == action.actionId &&
+            acknowledgement.committedMediaOriginMs == action.mediaOriginMs && attachedSession == action.sessionId &&
+            preparation == "none" && responseAction in setOf("none", "hold")
+
+    fun accepted(acknowledgement: ActionAcknowledgement, preparation: String?, responseAction: String,
+        attachedSession: String?): Boolean = bootstrap != null &&
+        receiptAccepted(acknowledgement, preparation, responseAction, attachedSession)
+
+}
+
+/** Finite diagnostic vocabulary: never accepts key text, URLs, or remote payloads. */
+internal enum class PlaybackExitOrigin(val wire: String) {
+    Input("input"), BackHandler("back_handler"), RemoteNavigation("remote_navigation"),
+    RemoteStop("remote_stop"), CloseControl("close_control"), SurfaceClose("surface_close"),
+    SignIn("sign_in"), PlanFailure("plan_failure"), LoadingBack("loading_back"),
+}
+
+internal fun playbackExitDetail(origin: PlaybackExitOrigin, input: PlayerContractInput? = null,
+    repeatCount: Int = 0): String =
+    "origin=${origin.wire} input=${input?.contractName ?: "none"} repeat=${repeatCount.coerceIn(0, 9999)}"

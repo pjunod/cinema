@@ -2290,6 +2290,17 @@ class Controller internal constructor(
         playbackControl.playerChanged()
     }
 
+    internal fun reportExit(origin: PlaybackExitOrigin, input: PlayerContractInput? = null, repeats: Int = 0) {
+        playbackTelemetry.report(event = "playback_exit_requested", level = "info",
+            message = "Playback exit requested.", detail = playbackExitDetail(origin, input, repeats))
+    }
+
+    internal fun reportScreenDisposed() {
+        playbackTelemetry.report(event = "playback_screen_disposed", level = "info",
+            message = "Playback screen disposed.",
+            detail = "p=${realPosition()} s=${player.playbackState} handoff=${pendingPreparedControlHandoff != null}")
+    }
+
     fun release() {
         effectiveProcessing = null
         effectiveProcessingGeneration = null
@@ -3408,6 +3419,10 @@ class Controller internal constructor(
         effectiveProcessingGeneration = bootstrap.generation
         effectiveProcessing = tv.plurx.app.data.EffectiveProcessingReport.fromJson(hls.effective_processing)
             ?.takeIf { it.matches(bootstrap.generation, hls.delivered_dynamic_range) }
+        startPlaybackControl(bootstrap, claim)
+    }
+
+    private fun startPlaybackControl(bootstrap: ControlBootstrap, claim: PlaybackControlBootstrapFence.Claim) {
         // Capabilities are the one input that has to be probed rather than
         // read, and the protocol requires them on the first request of a
         // generation, so reporting waits for that one probe. Until it lands
@@ -3482,6 +3497,8 @@ class Controller internal constructor(
         effectiveProcessingGeneration = null
         enhancement = null
         playbackControlBootstrapFence.invalidate()
+        pendingPreparedControlHandoff = null
+        pendingPreparedControlPlayer = null
         if (settling != null) {
             playbackControl.endAfterFinalExchange(
                 vm.viewModelScope,
@@ -3655,6 +3672,7 @@ class Controller internal constructor(
      * made a choice it has not made.
      */
     private fun playbackControlSelection(): ClientSelection {
+        pendingPreparedControlHandoff?.let { return it.standingSelection }
         val mode = when {
             selectedSubtitle == null -> SubtitleMode.OFF
             subtitleDelivery == SubtitleDelivery.Burn -> SubtitleMode.BURN
@@ -4986,11 +5004,12 @@ class Controller internal constructor(
         val sessionStatus: PlaybackSessionStatus?,
         val sessionStatusObservedAtMs: Long?,
         val establishedPlayback: Boolean,
-        val automaticCandidateAdoption: PlaybackIntent.AutomaticCandidateAdoption?,
     )
 
     /** Retained until a real successor frame makes rollback unnecessary. */
     private var preparedPredecessor: PreparedPredecessor? = null
+    private var pendingPreparedControlHandoff: PreparedControlHandoff? = null
+    private var pendingPreparedControlPlayer: ExoPlayer? = null
 
     /** Ordinary reopen to begin only after the surface has returned to A. */
     private var preparedRollbackReopen: Pair<Long, String>? = null
@@ -5552,9 +5571,6 @@ class Controller internal constructor(
             sessionStatus = sessionStatus,
             sessionStatusObservedAtMs = sessionStatusObservedAtMs,
             establishedPlayback = establishedPlayback,
-            automaticCandidateAdoption = action.effectiveSelection?.let {
-                playbackIntent.adoptCommittedAutomaticCandidate(it.candidateId, it.height, it.qualityAuto)
-            },
         )
 
         handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())
@@ -5577,6 +5593,12 @@ class Controller internal constructor(
         successor.addListener(this.listener)
         externalListeners.forEach { successor.addListener(it) }
 
+        // Keep the predecessor's exact selection until its committed ACK is
+        // accepted. Adopting the processed candidate here changes that ACK's
+        // recipe before the server has committed the staged generation.
+        pendingPreparedControlHandoff = PreparedControlHandoff(action, playbackControlSelection(),
+            playbackIntent.automaticCandidateOwner())
+        pendingPreparedControlPlayer = successor
         player = successor
         // A different `ExoPlayer` with its own item is on the screen now, so
         // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
@@ -5753,7 +5775,8 @@ class Controller internal constructor(
         predecessor.player.addListener(this.listener)
         externalListeners.forEach { predecessor.player.addListener(it) }
 
-        playbackIntent.rollbackAutomaticCandidate(predecessor.automaticCandidateAdoption)
+        pendingPreparedControlHandoff = null
+        pendingPreparedControlPlayer = null
         progressiveMediaOrigin = predecessor.progressiveMediaOrigin
         attachedModeOverride = predecessor.modeOverride
         attachedRequiresHlsOverride = predecessor.requiresHlsOverride
@@ -5958,16 +5981,46 @@ class Controller internal constructor(
         playbackControl.reportEvidence()
     }
 
-    /**
-     * The exchange that carried an acknowledgement came back accepted.
-     *
-     * A `200` is not proof the *server* accepted the settlement — an
-     * acknowledgement whose `action_id` does not match the bound staging is
-     * silently ignored — but it is proof this client does not have to send this
-     * one again, which is the only thing this slot decides.
-     */
-    private fun acknowledgementDelivered(value: ActionAcknowledgement) {
-        if (pendingAcknowledgement == value) pendingAcknowledgement = null
+    /** Preserve the offered recipe until the exact committed exchange is accepted. */
+    private fun acknowledgementDelivered(value: ActionAcknowledgement, response: ControlResponse) {
+        if (pendingAcknowledgement != value) return
+        val handoff = pendingPreparedControlHandoff
+        if (value.state == AcknowledgementState.COMMITTED) {
+            if (handoff == null || !handoff.receiptAccepted(value, response.delivery?.preparation,
+                    response.action.type, sessionId) || pendingPreparedControlPlayer !== player ||
+                !playbackControlBootstrapFence.isActive() || controlObservationIsClosed
+            ) return
+            pendingAcknowledgement = null
+            pendingPreparedControlHandoff = null
+            pendingPreparedControlPlayer = null
+            // The server has retired the predecessor. Stop its reporter without
+            // sending End, then claim the successor that actually rendered.
+            playbackControl.end()
+            playbackControlBootstrapFence.invalidate()
+            effectiveProcessing = null
+            effectiveProcessingGeneration = null
+            controlObservationOverride = null
+            controlRenderOverride = null
+            controlEvidencePositionMs = null
+            val bootstrap = handoff.bootstrap
+            if (bootstrap == null) {
+                playbackTelemetry.report(event = "prepared_control_unavailable", level = "warn",
+                    message = "Prepared playback continues without a successor control bootstrap.",
+                    detail = if (handoff.action.control == null) "reason=missing_bootstrap" else "reason=invalid_bootstrap")
+                return
+            }
+            handoff.action.effectiveSelection?.let {
+                playbackIntent.adoptCommittedAutomaticCandidate(it.candidateId, it.height, it.qualityAuto,
+                    handoff.candidateOwner)
+                autoActiveCandidateId = it.candidateId
+            }
+            val attached = sessionId ?: return
+            val claim = playbackControlBootstrapFence.claim(attached)
+            effectiveProcessingGeneration = bootstrap.generation
+            startPlaybackControl(bootstrap, claim)
+        } else {
+            pendingAcknowledgement = null
+        }
     }
 }
 
