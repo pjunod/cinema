@@ -10,6 +10,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 | File | Answers | |
 |---|---|---|
+| [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | open |
 | [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) | P42 physical recovery: same-kernel macOS/Linux reader witnesses, legacy evidence limits, and validation ledger. | open |
 | [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md) | November queue incident, recovered scan requests, cross-type scheduling, Activity completion rates, and remaining acceptance milestones. | open |
 | [STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md](STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) | Deferred storage-domain implementation, ownership, review and qualification state. | built |
