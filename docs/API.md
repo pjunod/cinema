@@ -1550,6 +1550,7 @@ verdict for the same hardware.
 | `method` | **The verdict**: `direct_play` · `remux` · `transcode` |
 | `reasons` | Every dimension that failed. Empty ⇒ directly playable |
 | `delivery` | **The execution plan — execute this, not `play_url`** |
+| `enhancement` | Optional original-file Dolby Vision enhancement, in the HLS §9 shape. Present only for direct delivery preserving the source profile with a probed RPU. Describes metadata delivered to the device, not server processing; HLS sessions publish their own report. |
 | `play_url` | Legacy. For a transcode verdict it points at `stream.mp4`, the only progressive URL there is |
 | `transcode_audio` | Re-encode audio to AAC because the source codec is outside the profile |
 | `preserve_dolby_vision` / `convert_dolby_vision` | Keep DV signalling on a copy; rewrite Profile 7 RPUs to 8.1 in transit. The second is only ever true beside the first |

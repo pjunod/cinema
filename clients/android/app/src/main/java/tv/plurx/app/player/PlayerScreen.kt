@@ -193,6 +193,7 @@ private data class Plan(
     override val preserveDolbyVision: Boolean,
     override val deliveredDynamicRange: String?,
     override val deliveredDolbyVisionProfile: Int?,
+    override val enhancement: tv.plurx.app.data.PlaybackEnhancement?,
     /** Both protocol spellings from the route probe that produced the plan. */
     val legacyCaps: Map<String, String>,
     val decisionCaps: DeviceCaps,
@@ -291,6 +292,7 @@ private suspend fun loadPlan(
                 ?: decision.preserve_dolby_vision,
             deliveredDynamicRange = decision.delivered_dynamic_range,
             deliveredDolbyVisionProfile = decision.delivered_dolby_vision_profile,
+            enhancement = tv.plurx.app.data.PlaybackEnhancement.fromJson(decision.enhancement),
             legacyCaps = playbackDecision.capabilities.legacyQuery,
             decisionCaps = playbackDecision.capabilities.document,
             audioOutputRoute = playbackDecision.capabilities.audioOutputRoute,
@@ -1757,6 +1759,7 @@ private fun PlayerContent(
                     effectiveProcessing = controller.effectiveProcessing,
                     activeGeneration = controller.effectiveProcessingGeneration,
                     enhancement = controller.enhancement,
+                    selectedCodecMime = controller.selectedVideoCodecMime,
                     toneMapPeakNits = controller.sessionStatus?.takeIf { it.id == controller.currentSessionId }?.tone_map_peak_nits,
                     toneMapPeakSource = controller.sessionStatus?.takeIf { it.id == controller.currentSessionId }?.tone_map_peak_source,
                 ),
@@ -2426,12 +2429,20 @@ private fun PlayerInfo(
     ).let { label ->
         controller.pgsOverlayStatus.label?.let { "$label · $it" } ?: label
     }
+    val videoFormat = player.videoFormat
+    val rendered = renderedRange(
+        delivered = controller.deliveredRange,
+        decoderMime = videoFormat?.sampleMimeType,
+        decoderColorTransfer = videoFormat?.colorInfo?.colorTransfer,
+        hdrTypes = displayHdrTypes,
+    )
     val shownEnhancement = controller.enhancement?.shown(
         controller.effectiveProcessing,
         controller.effectiveProcessingGeneration,
         controller.deliveredRange,
+        rendered,
+        controller.selectedVideoCodecMime,
     )
-    val videoFormat = player.videoFormat
     val source = plan.source
     val clientLoadedSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
     val method = playbackDeliverySummary(
@@ -2471,12 +2482,7 @@ private fun PlayerInfo(
             dynamicRange = dynamicRangeSummary(
                 source = sourceDynamicRange(plan.source),
                 delivered = controller.deliveredRange,
-                rendered = renderedRange(
-                    delivered = controller.deliveredRange,
-                    decoderMime = player.videoFormat?.sampleMimeType,
-                    decoderColorTransfer = player.videoFormat?.colorInfo?.colorTransfer,
-                    hdrTypes = displayHdrTypes,
-                ),
+                rendered = rendered,
                 reasons = plan.reasons,
                 effectiveProcessing = controller.effectiveProcessing,
                 activeGeneration = controller.effectiveProcessingGeneration,
