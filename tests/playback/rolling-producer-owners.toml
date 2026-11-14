@@ -2839,6 +2839,25 @@ expected_occurrences = 14
 # and filesystem work. Every JoinHandle is awaited by its caller; timeout paths
 # retain or abort-and-await the task before the surrounding owner returns.
 
+# FEL/title ownership audit (ef01fdcb8 -> 8ad3e9f5b), including test shapes:
+# +5 namespaced tasks: admission::tests::foreground_preparation_waits_for_companion_reap_within_its_deadline
+# joins its foreground waiter; title_work_tests::playback_qualification_reclaims_local_index_heavy_turn_without_encoder_waiter
+# joins both index and qualification owners after the explicit reap acknowledgment;
+# qualification_pressure_does_not_preempt_speech_and_cleans_up_on_cancel aborts
+# AND awaits its two qualification waiters. None adds a detached production task.
+# The local-index fixture owns one sleep child (+1 method spawn, Command::new,
+# launch and kill_on_drop); try_wait/start_kill/wait add the three lifecycle
+# calls. The index task retains its admission until child.wait physically reaps.
+# fel_qualification::tests::qualification_broker_pauses_pipe_partners_and_reaps_before_close
+# adds two Command::new sites: its isolated self-exec is bounded and reaped by
+# output_command_inherited_env (45s/64KiB); testfixtures::run synchronously owns
+# and waits for the real FFmpeg generator. Neither is a new runtime producer.
+# +11 timer constructors: eight bounded coordination/join deadlines in those
+# two title fixtures; one joined foreground-admission fixture deadline; one
+# broker-fixture setup-failure cleanup timeout; and admit_dv_title(true)'s
+# production QUEUE_WAIT around acquire_owned. That future is directly awaited,
+# and HeavyTurnWait removes its pressure on timeout/cancellation before return.
+
 [[module_structures]]
 id = "namespaced-task-spawn"
 # Source-budget audit (8ab61a779 -> bbc5c1664): +3 owned spawns. The existing
@@ -3964,7 +3983,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Reader B0/B1: +1 bounded source-recovery diagnostic spawn_blocking. One
 # try-acquired owned semaphore permit remains in the closure through completion
 # even after request cancellation; contention returns unavailable, never queues.
-expected_occurrences = 1153
+expected_occurrences = 1158
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4219,7 +4238,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 98
+expected_occurrences = 99
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5875,7 +5894,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # closes that gate after deterministic admission. Expiry fails the test and
 # drops the joined observation futures; it proves no terminal mutation, child
 # reap or resource settlement. No production timer, task or process is added.
-expected_occurrences = 2212
+expected_occurrences = 2223
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6393,7 +6412,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 349
+expected_occurrences = 352
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7112,7 +7131,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Control refusal diagnostics: +2 HTTP Response::status() assertions, one
 # in the process-free release-interleaving fixture and one in the privacy
 # observer fixture. Both inspect returned values; neither launches a process.
-expected_occurrences = 929
+expected_occurrences = 930
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7426,7 +7445,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Reader B0/B1: +1 explicit wait for the verified native true fixture. The
 # fixture retains ChildJob through the positive physical join. The output-pipe
 # collision fixture now calls status instead of output (net zero lifecycle).
-expected_occurrences = 390
+expected_occurrences = 393
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7668,7 +7687,7 @@ pattern = "kill_on_drop\\s*\\("
 # Reader B0/B1: -1 former reader-fixture kill_on_drop configuration. Its
 # isolated real no-source true helper uses the production ChildJob and awaits
 # actual exit; no production kill-on-drop guarantee is removed.
-expected_occurrences = 126
+expected_occurrences = 127
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
