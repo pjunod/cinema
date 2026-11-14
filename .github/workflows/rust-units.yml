@@ -56,6 +56,12 @@ jobs:
   select:
     name: "Rust units: select"
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 15
     outputs:
       build: ${{ steps.adopt.outputs.build || 'false' }}
@@ -88,6 +94,11 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
       # Only absent named tests: no archive or shard; the verdict reads this plan.
       - name: Hand the all-absent plan to the verdict
@@ -313,6 +324,12 @@ jobs:
       always() && (needs.select.outputs.absent_only == 'true' ||
       (needs.rust_units_archive.result == 'success' && needs.rust_units_archive.outputs.shards != '[]'))
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 15
     outputs:
       failures: ${{ steps.verdict.outputs.failures }}
@@ -440,6 +457,11 @@ jobs:
       - name: Fail when a shard's partition is missing
         if: always() && steps.verdict.outputs.complete != 'true'
         run: exit 1
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   rust_units_baseline:
     name: "Rust units: merge-base check of failures"
@@ -579,7 +601,13 @@ jobs:
     needs: [select, rust_units_archive, shard, verdict, rust_units_baseline]
     if: always()
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 10
     steps:
       - name: Require every due test to have passed here or before
         env:
@@ -618,3 +646,8 @@ jobs:
             [ "$BASELINE" = success ] || { echo "new Rust unit failures (see the merge-base check)"; exit 1; }
             echo "Only failures that also fail at the merge-base: pre-existing on main, reported, not blocking."
           fi
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

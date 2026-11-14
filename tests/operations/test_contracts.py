@@ -5046,6 +5046,93 @@ assert.equal(context.ACT_TIMER, null);
                     f"{relative}:{name} does not repair root container output",
                 )
 
+    def test_every_general_lane_job_runs_in_the_pinned_ci_image(self):
+        # A job that selects the plain `general` label set can land on any
+        # host in the fleet. On the host it inherited that host's compiler,
+        # Python, Node and FFmpeg, so the same commit passed on one runner and
+        # failed on the next (a C fixture under -Werror on one host's gcc;
+        # Ubuntu 24.04 guests retired because host jobs behaved differently
+        # there). Every such job runs in the one image the Rust unit shards
+        # use, with the general-job resource cap. The reference is read from
+        # the shard job, so the digest is written in the workflows only.
+        general = ("self-hosted", "Linux", "X64", "lab", "general")
+        shard = workflow_job_blocks(".github/workflows/rust-units.yml")["shard"]
+        expected = re.search(
+            r"(?m)^    container:\n      image: (.+)\n      options: (.+)\n"
+            r"      credentials:\n        username: noirr\n"
+            r"        password: \$\{\{ secrets\.CI_REGISTRY_PULL_TOKEN \}\}\n",
+            shard.split("    steps:\n", 1)[0],
+        )
+        self.assertIsNotNone(expected, "the shard job no longer pins the CI image")
+        image = expected.group(1)
+        self.assertRegex(
+            image,
+            "^" + re.escape(FLEET_REGISTRY_EXPR) + r"/noirr/plurx-ci@sha256:[0-9a-f]{64}$",
+        )
+        self.assertEqual(
+            "--memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096", expected.group(2)
+        )
+        # The only general-lane jobs outside the image, each with the reason
+        # it cannot be inside yet. A job leaves this table by entering the
+        # image; nothing is added to it without a reason of the same kind.
+        outside = {
+            # Their subject is the runner host's Docker daemon; the image has
+            # no Docker client (Dockerfile, stage `ci`).
+            (".github/workflows/media-runtime.yml", "index"),
+            (".github/workflows/media-runtime-public.yml", "copy"),
+            (".github/workflows/publish-release.yml", "resolve"),
+            # `cargo audit`: the image carries no cargo-audit.
+            (".github/workflows/rust-audit.yml", "workspace"),
+            (".github/workflows/rust-audit.yml", "fuzz"),
+            (".github/workflows/rust-audit.yml", "scheduled"),
+            # Asserts the distribution FFmpeg 8 of ubuntu:26.04, in that
+            # container; the image carries the Jellyfin build instead.
+            (".github/workflows/validation-nightly.yml", "ffmpeg8-pacing"),
+        }
+        seen = set()
+        inside = set()
+        digests = set()
+        for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+            relative = path.relative_to(ROOT).as_posix()
+            digests.update(re.findall(r"/noirr/plurx-ci@sha256:[0-9a-f]{64}", read(relative)))
+            for name, block in workflow_job_blocks(relative).items():
+                runs_on = re.search(r"(?m)^    runs-on: (.+)$", block)
+                if runs_on is None or general not in self_hosted_label_sets(
+                    runs_on.group(0) + "\n"
+                ):
+                    continue
+                header = block.split("    steps:\n", 1)[0]
+                with self.subTest(job=f"{relative}:{name}"):
+                    if (relative, name) in outside:
+                        seen.add((relative, name))
+                        self.assertNotIn(image, header, "this job entered the image; drop its row")
+                        continue
+                    self.assertEqual("    runs-on: [" + ", ".join(general) + "]", runs_on.group(0))
+                    self.assertIn(expected.group(0), header)
+                    self.assertEqual(1, len(re.findall(r"(?m)^    container:", block)))
+                    inside.add((relative, name))
+        self.assertEqual(outside, seen, "a row names a job that is no longer on the general lane")
+        self.assertEqual(1, len(digests), "the workflows pin more than one plurx-ci digest")
+        for job in ("paperwork", "scope", "preflight", "web_compile", "promotion_gate"):
+            self.assertIn((".github/workflows/main-fast-lane.yml", job), inside)
+        for job in ("select", "shard", "verdict", "gate"):
+            self.assertIn((".github/workflows/rust-units.yml", job), inside)
+        # What the retained image lacks is supplied the way ci.yml's own
+        # image jobs supply it, before the first compile.
+        for relative, name, desktop in (
+            (".github/workflows/lint.yml", "lint", True),
+            (".github/workflows/fix-evidence.yml", "revert-proof", True),
+            (".github/workflows/validation-nightly.yml", "parser-fuzz", False),
+        ):
+            block = workflow_job_blocks(relative)[name]
+            dependency = "      - uses: ./.github/actions/rust-native-deps\n"
+            if desktop:
+                dependency += '        with:\n          desktop: "true"\n'
+            self.assertIn(dependency, block, f"{relative}:{name}")
+            self.assertLess(
+                block.index("rust-toolchain@"), block.index(dependency), f"{relative}:{name}"
+            )
+
     def test_workflows_have_no_hosted_runner_escape(self):
         script = ROOT / "scripts/ci-runner-mode"
 
@@ -5302,6 +5389,10 @@ assert.equal(context.ACT_TIMER, null);
         checked = set()
         for name, block in jobs.items():
             if "/noirr/plurx-ci@sha256:" not in block:
+                continue
+            # The image is also the environment of the general lane's policy,
+            # scope and verdict jobs; those compile nothing.
+            if "rust-toolchain@" not in block:
                 continue
             with self.subTest(job=name):
                 dependency = "uses: ./.github/actions/rust-native-deps"

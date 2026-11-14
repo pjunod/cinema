@@ -80,6 +80,12 @@ jobs:
   scope:
     name: validation scope
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     # Complete retained-evidence authentication exceeds the old two-minute budget.
     # Use a literal bound instead of relying on expression-level fallback semantics.
     timeout-minutes: 10
@@ -186,6 +192,11 @@ jobs:
             exit 1
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   # A stale counter must fail the aggregate gate without hiding the native test
   # result. Run release hygiene beside preflight and the affected platform jobs
@@ -195,7 +206,13 @@ jobs:
     needs: scope
     if: needs.scope.outputs.mobile_version == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 3
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -239,6 +256,11 @@ jobs:
           else
             python3 -m validation.mobile_versions
           fi
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   # The failure history says policy mistakes are both common and cheap to
   # detect. Run the structural contracts before provisioning Rust, browsers,
@@ -248,6 +270,12 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     # Match the fast lane's cold Python/history budget. Run 6887 spent over
     # four minutes before units and was still progressing at the 10m cutoff.
     # Keep all validation and receipt publication within a finite 30m limit.
@@ -364,6 +392,11 @@ jobs:
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; runtime and compiler surfaces are skipped."
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   rust_compile:
     name: fast Rust gate
@@ -734,7 +767,13 @@ jobs:
       - cluster_store_shards
     if: always() && needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 10
     steps:
       - name: Select the required Store graph
         env:
@@ -766,6 +805,11 @@ jobs:
               exit 1
               ;;
           esac
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   cluster_topology:
     name: replicated topology contracts
@@ -2419,6 +2463,12 @@ jobs:
       - android_device
       - package_smoke
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     # The exact-tree receipt repeats complete live evidence authentication.
     timeout-minutes: 10
     steps:
@@ -2508,6 +2558,11 @@ jobs:
           path: target/validation/qualification-receipt.json
           if-no-files-found: error
           retention-days: 14
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   badge:
     name: publish CI badge
@@ -2532,7 +2587,13 @@ jobs:
       - publish_main
       - pr_gate
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 5
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -2570,3 +2631,8 @@ jobs:
             --json-color "$color" \
             --label-width 20 \
             --message-width 48
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

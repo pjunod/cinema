@@ -24,6 +24,12 @@ jobs:
   paperwork:
     name: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -41,12 +47,23 @@ jobs:
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/main:refs/remotes/origin/main"
           python3 scripts/paperwork --merge-target origin/main
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   scope:
     name: effort validation scope
     needs: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       apple: ${{ steps.scope.outputs.apple }}
@@ -81,6 +98,11 @@ jobs:
         run: |
           mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   preflight:
     name: Python unit receipts
@@ -89,6 +111,12 @@ jobs:
       group: python-unit-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     # Allows the 5-minute worker witness smoke, other package smokes, toolchain
     # provisioning and preflight validation to finish with headroom.
     timeout-minutes: 15
@@ -196,6 +224,11 @@ jobs:
       - name: Record effort-only unit execution policy
         if: inputs.compile_only
         run: echo "Task gate compiles and checks policy; unit suites execute on the main-bound effort candidate."
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   rust_compile:
     name: effort Rust compile
@@ -285,7 +318,13 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.web_layout == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 5
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -298,6 +337,11 @@ jobs:
         # Focused behavior units have once-per-PR receipts; web-check is retained
         # for explicit manual/final qualification, not automatic retries.
         run: make effort-web-static-check
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   apple_compile:
     name: effort Apple compile
@@ -377,7 +421,13 @@ jobs:
       - apple_compile
       - android_compile
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 10
     steps:
       - name: Require policy and every affected compile surface
         env:
@@ -400,3 +450,8 @@ jobs:
               *) echo "An effort validation job ended with: $result"; exit 1 ;;
             esac
           done
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
