@@ -7,7 +7,9 @@
 
 #[cfg(unix)]
 use plurx_core::process::source_lifetime::InheritedFd;
-pub(crate) use plurx_core::process::source_lifetime::{DescriptorManifest, StdioFacts, StdioMode};
+pub(crate) use plurx_core::process::source_lifetime::{
+    ArgumentProfile, DescriptorManifest, StdioFacts, StdioMode,
+};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
@@ -182,13 +184,32 @@ impl Descriptors {
         command: &mut tokio::process::Command,
         stdio: ChildStdios<'_>,
     ) -> std::io::Result<Arc<DescriptorManifest>> {
-        self.prepare_std(command.as_std_mut(), stdio)
+        self.prepare_with_profile(command, stdio, ArgumentProfile::Default)
     }
 
+    pub(crate) fn prepare_with_profile(
+        &self,
+        command: &mut tokio::process::Command,
+        stdio: ChildStdios<'_>,
+        profile: ArgumentProfile,
+    ) -> std::io::Result<Arc<DescriptorManifest>> {
+        self.prepare_std_with_profile(command.as_std_mut(), stdio, profile)
+    }
+
+    #[cfg(test)]
     pub(crate) fn prepare_std(
         &self,
         command: &mut std::process::Command,
         stdio: ChildStdios<'_>,
+    ) -> std::io::Result<Arc<DescriptorManifest>> {
+        self.prepare_std_with_profile(command, stdio, ArgumentProfile::Default)
+    }
+
+    pub(crate) fn prepare_std_with_profile(
+        &self,
+        command: &mut std::process::Command,
+        stdio: ChildStdios<'_>,
+        profile: ArgumentProfile,
     ) -> std::io::Result<Arc<DescriptorManifest>> {
         #[cfg(unix)]
         let mut inherited = self
@@ -230,7 +251,9 @@ impl Descriptors {
         let cwd = self.effective_cwd();
         #[cfg(not(unix))]
         let cwd = None;
-        let manifest = Arc::new(DescriptorManifest::new(inherited, facts, cwd)?);
+        let manifest = Arc::new(DescriptorManifest::new_with_profile(
+            inherited, facts, cwd, profile,
+        )?);
         Self::install(&manifest, command);
         Ok(manifest)
     }

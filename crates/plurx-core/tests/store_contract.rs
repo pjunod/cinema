@@ -13426,25 +13426,26 @@ async fn rewind_empty_managed_subtitle_extension(client: &Client) {
         &tail_counts,
         &tail_markers,
     );
-    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 1).await;
+    require_replicated_fixture_marker(client, "dv_title_jobs_schema", 2).await;
     require_replicated_fixture_marker(client, "library_annotations_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_translation_schema", 1).await;
     require_replicated_fixture_marker(client, "subtitle_managed_schema", 5).await;
     let title_shape = extension_shape(client, queue_fixture::TITLE_FIXTURE_SHAPE_SQL).await;
     let title_marker: Vec<I64Value> = client
         .query_consistent_map(
-            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
+            "SELECT count(*) AS value FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
             hiqlite::params!(),
         )
         .await
         .expect("current title fixture marker");
     assert_eq!(title_marker.len(), 1);
     let title_data: Vec<I64Value> = client.query_consistent_map(
-        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL) AS value", hiqlite::params!(),
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL)) AS value", hiqlite::params!(),
     ).await.expect("complete title fixture data inventory");
     assert_eq!(title_data.len(), 1);
     let title_drops = queue_fixture::validated_empty_title_rewind(
         &title_shape,
+        2,
         title_marker[0].value,
         title_data[0].value,
     );
@@ -21250,6 +21251,8 @@ const RECENT_SOURCE_METHODS: &[&str] = &[
     "copy_index_v3_locations",
     "copy_index_v3_quarantine_code",
     "copy_index_v3_variant",
+    "dv_title_can_preempt",
+    "dv_title_playback_demands",
     "ensure_copy_index_v3_head",
     "establish_analysis_coordination",
     "find_offloaded_episode",

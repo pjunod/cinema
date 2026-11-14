@@ -64,6 +64,13 @@ class PiSetupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             setup.native_unit(self.args(), runtime | {'groups': ['video\nUser=root']})
 
+    def test_native_unit_requires_actual_host_identity_mounts(self):
+        runtime = {'ffmpeg': '/opt/runtime/ffmpeg', 'ffprobe': '/opt/runtime/ffprobe',
+                   'bound_ffprobe': '/opt/runtime/static-probe', 'groups': []}
+        lines = setup.native_unit(self.args(server_runtime='native'), runtime).splitlines()
+        self.assertIn('BindReadOnlyPaths=/etc/machine-id:/run/plurx-host-machine-id', lines)
+        self.assertIn('BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/plurx-host-boot-id', lines)
+
     def test_native_unit_has_private_writable_temp_without_hiding_var_tmp_media(self):
         args = self.args(server_runtime='native', data_dir=Path('/var/tmp/plurx-pi-native-data'),
                          media=[Path('/var/tmp/plurx-pi-media')])

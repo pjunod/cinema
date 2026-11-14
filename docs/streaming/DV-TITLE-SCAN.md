@@ -1,6 +1,7 @@
 # Dolby Vision title scanning — metadata, shared reads and demand identity
 
-**Status:** open · Implementation reviewed in [PR #1301](http://forge.lan:3000/noirr/plurx/pulls/1301); qualification and landing tracked there. Not deployed.
+**Status:** implemented; scheduling and launch-contract corrections reviewed by Astra.
+Affected qualification, the required lane, merge and operator deployment remain pending.
 
 Companion to [the display-targeted DV build ledger](DISPLAY-TARGETED-DV-BUILD.md)
 (target selection and rendering) — this is how the title scanner reads and
@@ -57,6 +58,65 @@ It runs two ways, with one aggregate:
   stored and settles without reading the file (and qualifies a FEL title). A
   fresh title's job waits up to an hour for the node-local pass that reads it
   anyway.
+
+## Playback qualification precedes maintenance scanning
+
+An exact, unexpired `playback_qualification` waiter with an outstanding
+source-bound FEL recipe holds its current
+`dv_title_scan` demand in a separate bounded live queue before ordinary probe
+and title pagination. The live queue has its own revision cursor; the owned
+attempt checks its interest directly, independently of page pressure. A viewer
+can create the current typed job and attach its exact recipe before physical
+admission, so active playback cannot prevent that demand from being recorded. The worker checks current
+source facts, readability, installed scanner and the requested encoder identity
+before replacing an ordinary title task. Only a queued, due, locally eligible candidate can preempt another title; a
+healthy owner on another node or a backoff timer cannot interrupt maintenance.
+Cancellation reaps the existing child and settles its typed yield before the
+replacement starts.
+
+The promoted turn measures only the explicitly requested FEL recipe. Its
+bounded picture windows do not depend on a complete title aggregate, so it
+publishes the recipe receipt before a full-file metadata scan. Storing a receipt atomically completes only the matching recipe interest,
+preserving other viewers and recipes. It yields the unfinished aggregate job
+back to maintenance; a qualification receipt never
+stands in for complete title metadata or marks the scan complete. Window
+coverage and quality thresholds remain unchanged, so this removes queue and
+whole-file prerequisites rather than promising a fixed measurement duration.
+
+Qualification uses a preemptible companion admission alongside playback,
+within the CPU and GPU pools. Its permits count as background capacity, so a
+foreground start keeps its waiter until qualification has actually reaped and
+released the resources. Waiting viewers retain priority; companion work cannot
+use the isolated oversized-job exception or adopt foreground handoff capacity. It
+still owns the heavy lane and uses the same durable job, source grant,
+foreground sharing permission, physical pause and freshness fences. Expired
+playback interest returns the task to maintenance. Ordinary complete-title
+scans retain their idle-node admission and index-read reuse.
+
+A pending qualification posts a distinct bounded heavy-lane request. Ordinary
+indexing and maintenance yield through their existing cancellation paths even
+when native/copy playback holds no encoder permit. This signal does not preempt
+a running qualification or speech task. Cancellation removes the request, and
+dispatch revalidates the exact viewer interest after the handoff before claiming
+work. No CPU, GPU or source capacity is discounted while the prior owner exits.
+
+Local index cancellation retains admission until FFmpeg exits, its input bridge
+closes and its DV companion joins, including output-pipe setup failures.
+Qualification launches use immutable argument profiles for the renderer's
+rational timestamps and FFmpeg's rate operands. The device and generated-window
+input cross exec as pinned descriptors; owned-file registrations survive through
+physical cleanup. Startup derives executable directories from the validated DV
+bundle through the same root constructor exercised by the regressions. Argument
+grammar validation preserves the conservative, unqualified broker-confinement
+verdict and grants no clean recovery witness.
+
+SQLite migration 132 and the matching replicated-store extension upgrade install
+version 2 of the title outbox. A successful aggregate publication keeps demand
+open when exact current recipes remain pending, and preserves those recipe
+waiters until their receipts arrive. Rollout repairs previously stranded pending
+recipes once; it preserves cancellation and failure authority. The scheduler's
+live and maintenance discovery remain read-only. The original version 1 SQL is
+retained unchanged for historical migration replay.
 
 ## Scanner identity keeps renderer updates from re-queuing titles
 

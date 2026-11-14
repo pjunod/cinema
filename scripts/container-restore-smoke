@@ -122,6 +122,8 @@ start_instance() {
   docker create \
     --name "$1" \
     --publish 127.0.0.1:0:32400 \
+    --mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly \
+    --mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly \
     --volume "$2:/var/lib/plurx" \
     "$image" >/dev/null
   docker start "$1" >/dev/null
