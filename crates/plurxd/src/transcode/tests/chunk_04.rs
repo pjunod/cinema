@@ -2504,6 +2504,15 @@ fn every_vod_refusal_code_is_classified() {
     assert_eq!(vod_refusal_class("vod_preparation_changed"), Some(VodRefusalClass::Refuse));
     assert_eq!(LiveRecoveryReason::from_refusal("vod_preparation_changed"), None,
         "changed preparation custody never authorizes rolling fallback");
+    assert_eq!(
+        vod_refusal_class("fel_qualification_pending"),
+        Some(VodRefusalClass::Refuse),
+    );
+    assert_eq!(
+        LiveRecoveryReason::from_refusal("fel_qualification_pending"),
+        None,
+        "an exact pending FEL verdict belongs to its deferred upgrade, not generic rolling recovery",
+    );
     // The lead's S-05 rulings: only VOD cannot build these.
     for code in [
         "hevc_configuration_unverified",

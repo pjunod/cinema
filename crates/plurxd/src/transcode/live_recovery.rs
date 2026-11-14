@@ -182,6 +182,10 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         // before, until each is shown to be VOD-only (S-05 follow-up): a
         // decoder plan or DV plan the rolling engine would make from the
         // same facts may fail the same way.
+        // An exact FEL recipe is still being measured. The deferred upgrade
+        // owner consumes its private continuation; a generic engine fallback
+        // cannot supply that verdict or authorize the unmeasured recipe.
+        ("fel_qualification_pending", Refuse),
         ("vod_decoder_plan_refused", Refuse),
         ("vod_dv_planning_invalid", Refuse),
         ("vod_audio_recipe_invalid", Refuse),

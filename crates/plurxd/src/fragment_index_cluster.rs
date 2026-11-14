@@ -2255,23 +2255,34 @@ mod tests {
         }
     }
 
-    /// Run a whole-file attestation and drop it once it has read `past` bytes,
-    /// the way a playback preemption drops the attempt future.
+    /// Preempt through the production cooperative checkpoint once `past`
+    /// bytes have settled. A Notify/select race cannot force the attestation
+    /// future to yield: cached reads can finish within the same poll.
     async fn preempt_full_attestation(node_id: &str, file: &MediaFile, past: u64) {
-        let stop = tokio::sync::Notify::new();
+        let stop = tokio_util::sync::CancellationToken::new();
         let report = |bytes: u64| {
             if bytes >= past {
-                stop.notify_one();
+                stop.cancel();
             }
         };
-        tokio::select! {
-            biased;
-            () = stop.notified() => {}
-            result = attest_copy_source(node_id, file, None, &report) => panic!(
-                "the attempt was meant to be preempted, but it finished: {:?}",
-                result.map(|attested| attested.observation.source_sha256)
-            ),
-        }
+        let result = plurx_core::process::bounded::cancellable(
+            stop.clone(),
+            attest_copy_source(node_id, file, None, &report),
+        )
+        .await;
+        assert!(stop.is_cancelled(), "the requested byte boundary was reached");
+        assert!(
+            result.is_err(),
+            "the bounded operation must acknowledge preemption"
+        );
+        let checkpoint = full_digest_checkpoints()
+            .load(&full_key(node_id, file))
+            .expect("cooperative preemption retains its exact continuation");
+        assert!(
+            checkpoint.offset >= past && checkpoint.offset < file.size as u64,
+            "preemption must retain settled progress before EOF: {}",
+            checkpoint.offset
+        );
     }
 
     /// Records the first progress report, which on a resumed attempt is the
@@ -2371,9 +2382,9 @@ mod tests {
         assert_eq!(again, reference);
     }
 
-    /// Two preemptions in a row: the second attempt is dropped before it
-    /// reaches a checkpoint of its own, and the third must still resume from
-    /// the first attempt's progress rather than from 0.
+    /// Two preemptions in a row: the second attempt is cancelled before its
+    /// next periodic checkpoint, and the third must retain the earlier
+    /// settled progress rather than starting again from 0.
     #[tokio::test]
     async fn an_attempt_preempted_before_its_first_checkpoint_keeps_the_earlier_one() {
         let dir = tempfile::tempdir().expect("resume fixture");
@@ -2385,9 +2396,21 @@ mod tests {
         let file = sampled_file(path);
         let node = "twice-node";
         preempt_full_attestation(node, &file, 2 * FULL_DIGEST_CHECKPOINT_BYTES + 1).await;
-        // Resumes at >= 2 checkpoints and is dropped one chunk later, well
-        // before 3 checkpoints.
+        let earlier = full_digest_checkpoints()
+            .load(&full_key(node, &file))
+            .expect("first preemption checkpoint")
+            .offset;
+        // Resumes at >= 2 checkpoints and acknowledges cancellation at its
+        // first resumed progress report, before the next periodic checkpoint.
         preempt_full_attestation(node, &file, 2 * FULL_DIGEST_CHECKPOINT_BYTES + 1).await;
+        assert_eq!(
+            full_digest_checkpoints()
+                .load(&full_key(node, &file))
+                .expect("second preemption retains the earlier checkpoint")
+                .offset,
+            earlier,
+            "cancellation before another read preserves the exact earlier continuation"
+        );
         let (resumed_from, digest) = first_progress_and_digest(node, &file).await;
         assert!(
             resumed_from >= 2 * FULL_DIGEST_CHECKPOINT_BYTES,
