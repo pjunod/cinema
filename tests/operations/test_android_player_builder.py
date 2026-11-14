@@ -33,8 +33,10 @@ class AndroidPlayerBuilderContract(unittest.TestCase):
                 "val continuousOutput = ContinuousOutputEvidence()",
                 "continuousSources = continuousSources",
                 "continuousOutput = continuousOutput",
+                "val videoDecoderEvidence = VideoDecoderEvidence()",
+                "videoDecoderEvidence = videoDecoderEvidence",
                 "return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, "
-                "continuousSources, continuousOutput)",
+                "continuousSources, continuousOutput, videoDecoderEvidence)",
             ),
             "livetv/LiveTvPlayer.kt": (
                 "PlayerRole.LiveTv",

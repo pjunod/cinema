@@ -570,6 +570,20 @@ it engaged — and renders one of three badge states:
 An older client never reads the field; a newer one treats an absent field as
 "unknown" and falls back to the source-only chip. Nothing breaks either way.
 
+Direct Dolby Vision delivery also carries the server's `enhancement` report:
+only original-file delivery preserving a known source profile and a probed RPU
+can advertise `DYN`. Android seeds it from the decision on that route; an HLS
+session replaces it with its own report, and returning to direct playback
+restores the decision's report. The chip and Enhancement row agree: native
+`DYN` is active only with a selected Dolby Vision codec and Dolby Vision display
+verdict. The codec MIME comes from the initialized Media3 codec, not merely
+the input format (which can retain its DV tag during HEVC fallback). Evidence
+belongs to the active player and clears with codec release/disable. A pending
+codec or HDR/SDR fallback has an inactive explanation.
+This distinguishes metadata consumed by the device from server FEL/RPU pixel
+processing; it does not measure the panel's optical output. Server-processed
+badges retain their generation-matching processing-receipt requirement.
+
 ## Subtitles — three independent delivery questions
 
 While an HLS text sidecar is cold, indexed Matroska playback windows use a

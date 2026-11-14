@@ -120,10 +120,11 @@ internal fun playerMediaFacts(
     effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? = null,
     activeGeneration: String? = null,
     enhancement: tv.plurx.app.data.PlaybackEnhancement? = null,
+    selectedCodecMime: String? = null,
 ): List<MediaFact> = buildList {
     resolutionFact(file)?.let(::add)
     dynamicRangeFact(file, delivered, rendered, deliveredDolbyVisionProfile, effectiveProcessing, activeGeneration)?.let(::add)
-    addAll(enhancementFacts(enhancement?.shown(effectiveProcessing, activeGeneration, delivered)))
+    addAll(enhancementFacts(enhancement?.shown(effectiveProcessing, activeGeneration, delivered, rendered, selectedCodecMime)))
     audio?.let { audioFact(it.codec, it.channels, it.title) }?.let(::add)
 }
 

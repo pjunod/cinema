@@ -14,6 +14,9 @@ bump may break compatibility and a **patch** bump never does.
 - Playback-control refusal logs retain the protocol code, route-read failure
   stage and sanitized source location, distinguishing release reconciliation
   from storage errors without exposing session capabilities.
+- Android direct Dolby Vision playback lists preserved dynamic metadata, and
+  native DYN indicators wait for a selected Dolby Vision decoder instead of
+  claiming enhancement during HDR/SDR decoder fallback.
 
 - The host source census can release a dead owner's custody after the host
   has rebooted. It proves from the machine's own journal that the witness's

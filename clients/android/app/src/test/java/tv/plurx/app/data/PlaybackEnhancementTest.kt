@@ -75,7 +75,77 @@ class PlaybackEnhancementTest {
             ),
         )
         assertFalse(enhancement.requiresEffectiveProcessing)
-        assertEquals(enhancement, enhancement.shown(null, null, "dolby_vision"))
+        assertEquals(enhancement, enhancement.shown(null, null, "dolby_vision", "dolby_vision", "video/dolby-vision"))
+    }
+
+    @Test
+    fun directDecisionCarriesEnhancementWithoutAnHlsSession() {
+        val decision = json.decodeFromString(
+            Decision.serializer(),
+            """{"file_id":1,"method":"direct_play","play_url":"/api/v1/files/1/stream",
+                "delivery":{"mode":"direct","url":"/api/v1/files/1/stream"},
+                "delivered_dynamic_range":"dolby_vision","preserve_dolby_vision":true,
+                "enhancement":{"active":["DYN"],"details":[
+                  {"badge":"DYN","active":true,"text":"Dolby Vision dynamic metadata is preserved."}]}}""",
+        )
+        val enhancement = checkNotNull(PlaybackEnhancement.fromJson(decision.enhancement))
+        assertEquals(listOf(EnhancementBadge.DYN), enhancement.active)
+        assertEquals(enhancement, enhancement.shown(null, null, decision.delivered_dynamic_range,
+            "dolby_vision", "video/dolby-vision"))
+        val olderServer = json.decodeFromString(Decision.serializer(),
+            """{"file_id":1,"method":"direct_play","play_url":"/stream"}""")
+        assertNull(PlaybackEnhancement.fromJson(olderServer.enhancement))
+    }
+
+    @Test
+    fun nativeDynamicMetadataWaitsForTheAcceptedFormatAndRetractsOnFallback() {
+        val enhancement = PlaybackEnhancement(
+            listOf(EnhancementBadge.DYN),
+            listOf(EnhancementDetail(EnhancementBadge.DYN, true, "Dolby Vision dynamic metadata is preserved.")),
+        )
+        val pending = checkNotNull(enhancement.shown(null, null, "dolby_vision", "dolby_vision", null))
+        assertTrue(pending.active.isEmpty())
+        assertFalse(pending.details.single().active)
+        assertTrue(pending.details.single().text.contains("waiting"))
+        // The same server report must not survive a decoder's HDR base fallback,
+        // or a DV format presented to a display without Dolby Vision support.
+        for ((rendered, mime) in listOf("hdr10" to "video/hevc", "dolby_vision" to "video/hevc", "sdr" to "video/dolby-vision")) {
+            val fallback = checkNotNull(enhancement.shown(null, null, "dolby_vision", rendered, mime))
+            assertTrue(fallback.active.isEmpty())
+            assertFalse(fallback.details.single().active)
+            assertTrue(fallback.details.single().text.contains("not active"))
+        }
+        // A subsequent confirmed native delivery restores its own immutable report.
+        assertEquals(enhancement, enhancement.shown(null, null, "dolby_vision", "dolby_vision", "video/dolby-vision"))
+    }
+
+    @Test
+    fun nativeDynamicMetadataAcceptsTheConfiguredDolbyVisionVendorAliases() {
+        val enhancement = PlaybackEnhancement(listOf(EnhancementBadge.DYN), emptyList())
+        for (mime in listOf("video/dolby-vision", "video/hevcdv", "video/dv_hevc")) {
+            assertEquals(enhancement, enhancement.shown(null, null, "dolby_vision", "dolby_vision", mime))
+        }
+        // Input MIME can still say Dolby Vision after Media3 chooses an HEVC
+        // alternate. The configured codec, not that input Format, is decisive.
+        assertTrue(checkNotNull(enhancement.shown(null, null, "dolby_vision", "dolby_vision", "video/hevc")).active.isEmpty())
+    }
+
+    @Test
+    fun serverAppliedDynamicMappingUsesItsReceiptRatherThanANativeDvDecoder() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val enhancement = PlaybackEnhancement(
+            listOf(EnhancementBadge.RPU, EnhancementBadge.DYN),
+            listOf(EnhancementDetail(EnhancementBadge.DYN, true, "Dynamic mapping applied by the server.")),
+            requiresEffectiveProcessing = true,
+        )
+        val hdr = EffectiveProcessingReport(generation, true, false, listOf("DisplayTargetMapping:1000"))
+        assertEquals(enhancement, enhancement.shown(hdr, generation, "hdr10", "hdr10", "video/hevc"))
+        val sdr = checkNotNull(EffectiveProcessingReport.fromJson(json.parseToJsonElement(
+            """{"generation":"$generation","hdr10_enhanced":false,"sdr_processed":true,
+                "fel_contributed":false,"applied_operations":["Bt709Gamma24Conversion",{"DisplayTargetMapping":{"nits":100}}]}""")))
+        assertEquals(enhancement, enhancement.shown(sdr, generation, "sdr", "sdr", "video/avc"))
+        assertNull(enhancement.shown(hdr, "replacement", "hdr10", "hdr10", "video/hevc"))
+        assertNull(enhancement.shown(null, generation, "sdr", "sdr", "video/avc"))
     }
 
     @Test

@@ -828,7 +828,11 @@ fn planned(method: playback::PlaybackMethod) -> Decision {
 fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
     fn body(decision: Decision) -> serde_json::Value {
         let (play_url, delivery) = delivery_plan(42, &decision, None, false);
+        let mut file = hevc_file(Some("dolby_vision"));
+        file.dolby_vision.profile = Some(8);
+        file.dolby_vision.rpu_present = Some(true);
         serde_json::to_value(DecisionResponse {
+            enhancement: direct_enhancement(&file, &decision, &delivery),
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -866,7 +870,16 @@ fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
         .expect("serialize decision body")
     }
 
+    let direct = body(planned(playback::PlaybackMethod::DirectPlay));
+    assert_eq!(
+        direct.pointer("/enhancement/active"),
+        Some(&serde_json::json!(["DYN"]))
+    );
     let converted = body(planned(playback::PlaybackMethod::Remux));
+    assert!(
+        converted.get("enhancement").is_none(),
+        "session owns its enhancement"
+    );
     assert_eq!(
         converted.pointer("/delivered_audio/action/kind"),
         Some(&serde_json::json!("none")),
@@ -899,6 +912,65 @@ fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
         Some(&serde_json::json!("hdr10")),
         "{stripped}"
     );
+}
+
+#[test]
+fn direct_enhancement_reports_only_preserved_original_dolby_vision_metadata() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    let mut file = hevc_file(Some("dolby_vision"));
+    file.dolby_vision.profile = Some(8);
+    file.dolby_vision.rpu_present = Some(true);
+    file.dolby_vision.el_present = Some(false);
+    let decision = planned(playback::PlaybackMethod::DirectPlay);
+    let (_, delivery) = delivery_plan(file.id, &decision, None, false);
+    let enhancement = direct_enhancement(&file, &decision, &delivery)
+        .expect("preserved original Dolby Vision exposes dynamic metadata");
+    assert_eq!(enhancement.active, vec![EnhancementBadge::Dyn]);
+    assert!(!enhancement.requires_effective_processing);
+    assert!(enhancement
+        .details
+        .iter()
+        .all(|detail| { detail.badge == EnhancementBadge::Dyn || !detail.active }));
+    let wire = serde_json::to_value(&enhancement).expect("serialize enhancement report");
+    assert_eq!(wire["active"], serde_json::json!(["DYN"]));
+    assert!(enhancement.details.iter().any(|detail| {
+        detail.badge == EnhancementBadge::Rpu && !detail.active && detail.text.contains("display")
+    }));
+
+    for rpu_present in [None, Some(false)] {
+        let mut unknown_metadata = file.clone();
+        unknown_metadata.dolby_vision.rpu_present = rpu_present;
+        assert!(direct_enhancement(&unknown_metadata, &decision, &delivery).is_none());
+    }
+    let mut unknown_profile = file.clone();
+    unknown_profile.dolby_vision.profile = None;
+    assert!(direct_enhancement(&unknown_profile, &decision, &delivery).is_none());
+    let mut ordinary_hdr = file.clone();
+    ordinary_hdr.hdr = Some("hdr10".into());
+    assert!(direct_enhancement(&ordinary_hdr, &decision, &delivery).is_none());
+
+    let mut fallback = decision.clone();
+    fallback.delivered_dynamic_range = "hdr10";
+    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    fallback = decision.clone();
+    fallback.preserve_dolby_vision = false;
+    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    fallback = decision.clone();
+    fallback.delivered_dolby_vision_profile = Some(5);
+    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+    fallback = decision.clone();
+    fallback.convert_dolby_vision = true;
+    assert!(direct_enhancement(&file, &fallback, &delivery).is_none());
+
+    for method in [
+        playback::PlaybackMethod::Remux,
+        playback::PlaybackMethod::Transcode,
+    ] {
+        let session_decision = planned(method);
+        let (_, session_delivery) = delivery_plan(file.id, &session_decision, None, true);
+        assert!(direct_enhancement(&file, &session_decision, &session_delivery).is_none());
+        assert!(direct_enhancement(&file, &decision, &session_delivery).is_none());
+    }
 }
 
 #[test]

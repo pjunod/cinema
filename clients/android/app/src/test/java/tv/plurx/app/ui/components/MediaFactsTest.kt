@@ -1,6 +1,7 @@
 package tv.plurx.app.ui.components
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -373,7 +374,7 @@ class MediaFactsTest {
         val audio = AudioTrack(index = 0, codec = "eac3", channels = 6, default = true)
         val facts = playerMediaFacts(
             dolbyVisionP7(), audio, delivered = DynamicRange.DOLBY_VISION, rendered = DynamicRange.DOLBY_VISION,
-            enhancement = enhancement(requires = false),
+            enhancement = enhancement(requires = false), selectedCodecMime = "video/dolby-vision",
         )
         assertEquals(
             listOf(MediaFactKind.Resolution, MediaFactKind.DynamicRange, MediaFactKind.Enhancement,
@@ -385,6 +386,18 @@ class MediaFactsTest {
         val pills = facts.filter { it.kind == MediaFactKind.Enhancement }
         assertEquals(listOf("FEL", "DYN"), pills.map { it.chipText })
         assertTrue(pills.all { it.state == FactState.Active })
+    }
+
+    @Test
+    fun nativePillsAndInfoAgreeWhenTheDecoderFallsBackToHdr10() {
+        val native = enhancement(requires = false)
+        val facts = playerMediaFacts(dolbyVisionP7(), null,
+            delivered = DynamicRange.DOLBY_VISION, rendered = DynamicRange.HDR10,
+            enhancement = native, selectedCodecMime = "video/hevc")
+        assertFalse(facts.any { it.kind == MediaFactKind.Enhancement && it.label == "DYN" })
+        val shown = native.shown(null, null, DynamicRange.DOLBY_VISION, DynamicRange.HDR10, "video/hevc")
+        assertFalse(checkNotNull(enhancementSummary(shown)).contains("DYN"))
+        assertTrue(checkNotNull(enhancementLines(shown)).any { it.contains("not active") })
     }
 
     @Test

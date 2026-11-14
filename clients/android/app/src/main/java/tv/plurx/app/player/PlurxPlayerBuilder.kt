@@ -111,6 +111,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
         transferListener: TransferListener? = null,
         continuousSources: ContinuousSourceRegistry? = null,
         continuousOutput: ContinuousOutputEvidence? = null,
+        videoDecoderEvidence: VideoDecoderEvidence? = null,
     ): ExoPlayer {
         require(role != PlayerRole.Offline || dataSource is CacheDataSource.Factory) {
             "Offline playback requires a cache-only data source"
@@ -141,7 +142,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
                 .build()
         }
         val renderers = (if (role in setOf(PlayerRole.Finite, PlayerRole.Successor))
-            PreparedFrameRenderersFactory(context, continuousOutput) else DefaultRenderersFactory(context))
+            PreparedFrameRenderersFactory(context, continuousOutput, videoDecoderEvidence) else DefaultRenderersFactory(context))
             .setEnableDecoderFallback(true)
         val ordinaryLoadControl = playbackLoadControl(
             context,

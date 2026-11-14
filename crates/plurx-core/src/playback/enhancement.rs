@@ -142,7 +142,7 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             details.push(detail(
                 Dyn,
                 true,
-                "DYN: L1/L2/L8 dynamic metadata carried to the display",
+                "DYN: Dolby Vision dynamic metadata carried to the display",
             ));
         }
         EnhancementRoute::ConvertedProfile81 => {
@@ -165,7 +165,7 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             details.push(detail(
                 Dyn,
                 true,
-                "DYN: L1/L2/L8 dynamic metadata carried to the display",
+                "DYN: Dolby Vision dynamic metadata carried to the display",
             ));
         }
         EnhancementRoute::ReconstructedProfile81 { fel_contributed } => {
@@ -190,7 +190,7 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             details.push(detail(
                 Dyn,
                 true,
-                "DYN: L1/L2/L8 dynamic metadata carried to the display",
+                "DYN: Dolby Vision dynamic metadata carried to the display",
             ));
         }
         EnhancementRoute::ProcessedHdr10 {
