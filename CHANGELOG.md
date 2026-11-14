@@ -14,9 +14,7 @@ bump may break compatibility and a **patch** bump never does.
 - Playback-control refusal logs retain the protocol code, route-read failure
   stage and sanitized source location, distinguishing release reconciliation
   from storage errors without exposing session capabilities.
-- Android direct Dolby Vision playback lists preserved dynamic metadata, and
-  native DYN indicators wait for a selected Dolby Vision decoder instead of
-  claiming enhancement during HDR/SDR decoder fallback.
+
 - Curator's additional TV copies now join their existing series instead of
   creating identical show cards. Consolidation recognizes the generated copy
   folders while preserving physical files, versions and watch history.
@@ -264,6 +262,10 @@ bump may break compatibility and a **patch** bump never does.
 - Apple TV Settings enters each category at its first setting and restores the
   category when returning with Back. Picker controls expose their names and
   selected values to accessibility.
+
+- Android direct Dolby Vision playback lists preserved dynamic metadata, and
+  native DYN indicators wait for a selected Dolby Vision decoder instead of
+  claiming enhancement during HDR/SDR decoder fallback.
 
 ### Added
 
