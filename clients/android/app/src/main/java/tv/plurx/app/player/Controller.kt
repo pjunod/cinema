@@ -4920,6 +4920,8 @@ class Controller internal constructor(
     private var autoStagedObservation: AutoStagedObservation? = null
     private var autoStagedPlaylistJob: Job? = null
     private var preparedTimelineOwner: PreparedTimelineOwner? = null
+    private var preparedAcquisition: PreparedAcquisitionResolution? = null
+    private var preparedInitialLocalMs: Long? = null
 
     private fun autoStagedObservationCurrent(observation: AutoStagedObservation, nowMs: Long): Boolean =
         nowMs >= observation.startedAtMs && nowMs < observation.deadlineMs &&
@@ -4930,15 +4932,69 @@ class Controller internal constructor(
             autoDesiredCandidate?.id == observation.candidateId &&
             autoDesiredCandidate?.recipe_digest == observation.recipeDigest
 
+    private fun currentPreparedTimelineOwner(successor: ExoPlayer, action: ControlAction): PreparedTimelineOwner? {
+        val authorization = Session.playbackAuthorization()
+        val owner = preparedTimelineOwner ?: return null
+        return owner.takeIf {
+            !controlObservationIsClosed && playbackControlBootstrapFence.isActive() && preparedPlayer === successor &&
+                preparedLedger.action === action && owner.isCurrent(successor, action.actionId, action.sessionId,
+                    action.mediaOriginMs, mediaMutationEpoch, authorization.origin, authorization.generation)
+        }
+    }
+
+    /** Resolve the received acquisition entry once, before acknowledging metadata readiness. */
+    private fun resolvePreparedAcquisition(successor: ExoPlayer, action: ControlAction) {
+        if (preparedAcquisition != null) return
+        val owner = currentPreparedTimelineOwner(successor, action) ?: return
+        val manifest = successor.currentManifest as? HlsManifest ?: return
+        val playlist = manifest.mediaPlaylist
+        val uri = Uri.parse(playlist.baseUri)
+        if (Session.canonicalOrigin(playlist.baseUri) != Session.canonicalOrigin(owner.credentialOrigin) ||
+            !uri.pathSegments.contains(owner.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true
+        ) return
+        val hintUs = playlist.startOffsetUs.takeUnless { it == androidx.media3.common.C.TIME_UNSET }
+        var entryMs: Long? = null
+        val timeline = successor.currentTimeline
+        if (owner.originMs == 0L && playlist.playlistType ==
+            androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist.PLAYLIST_TYPE_VOD && playlist.hasEndTag &&
+            playlist.mediaSequence == 0L && hintUs != null && playlist.hasPositiveStartOffset && !playlist.preciseStart &&
+            hintUs in 0..playlist.durationUs && playlist.segments.isNotEmpty() && !timeline.isEmpty
+        ) {
+            // HlsMediaSource::createTimelineForOnDemand resolves PRECISE=NO to
+            // this preceding segment. Read that native default, not a new origin.
+            var low = 0
+            var high = playlist.segments.lastIndex
+            var index = -1
+            while (low <= high) {
+                val middle = low + (high - low) / 2
+                if (playlist.segments[middle].relativeStartTimeUs <= hintUs) {
+                    index = middle
+                    low = middle + 1
+                } else high = middle - 1
+            }
+            if (index >= 0) {
+                val startUs = playlist.segments[index].relativeStartTimeUs
+                val window = timeline.getWindow(0, androidx.media3.common.Timeline.Window())
+                if (startUs >= 0 && window.defaultPositionUs == startUs) entryMs = startUs / 1000
+            }
+        }
+        val incumbentMs = realPosition()
+        val resolution = preparedAcquisitionResolution(currentPreparedTimelineOwner(successor, action) === owner,
+            owner.originMs, incumbentMs, entryMs) ?: return
+        preparedAcquisition = resolution
+        resolution.localSeekMs?.let(successor::seekTo)
+        runCatching {
+            playbackTelemetry.report(event = "prepared_successor_acquisition", level = "info",
+                message = "Prepared successor acquisition entry resolved.",
+                detail = preparedAcquisitionDetail(resolution, owner.originMs, preparedInitialLocalMs,
+                    hintUs?.div(1000), entryMs, incumbentMs))
+        }
+    }
+
     /** Native parsed media belongs to this exact staged pipeline, independently of Auto policy. */
     private fun preparedSuccessorVodTimeline(successor: ExoPlayer, action: ControlAction): PreparedVodTimelineProof {
-        val authorization = Session.playbackAuthorization()
-        val owner = preparedTimelineOwner
-        if (owner == null || controlObservationIsClosed || !playbackControlBootstrapFence.isActive() ||
-            preparedPlayer !== successor || preparedLedger.action !== action ||
-            !owner.isCurrent(successor, action.actionId, action.sessionId, action.mediaOriginMs,
-                mediaMutationEpoch, authorization.origin, authorization.generation)
-        ) return PreparedVodTimelineProof(PreparedVodProofReason.Owner)
+        val owner = currentPreparedTimelineOwner(successor, action)
+            ?: return PreparedVodTimelineProof(PreparedVodProofReason.Owner)
         val manifest = successor.currentManifest as? HlsManifest
             ?: return PreparedVodTimelineProof(PreparedVodProofReason.Manifest)
         val playlist = manifest.mediaPlaylist
@@ -5164,6 +5220,8 @@ class Controller internal constructor(
             return
         }
         preparedPlayer = built.player
+        preparedAcquisition = null
+        preparedInitialLocalMs = null
         if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.CONSTRUCTION_OVERLAP)
             return
@@ -5204,6 +5262,7 @@ class Controller internal constructor(
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                resolvePreparedAcquisition(built.player, action)
                 autoStagedObservation?.takeIf { it.player === built.player }?.let(::captureAutoStagedVodPlaylist)
             }
             override fun onPlayerError(error: PlaybackException) {
@@ -5244,9 +5303,10 @@ class Controller internal constructor(
         // removed, so the two seconds *after* the commit are on the same
         // series as the two before it.
         built.player.addAnalyticsListener(preparedSwitchAnalytics(built.player))
+        preparedInitialLocalMs = preparedInitialAttachPositionMs(originMs, realPosition())
         built.player.setMediaItem(
             MediaItem.fromUri(Session.url(playlist)),
-            successorAttachPositionMs(originMs, realPosition()),
+            preparedInitialLocalMs ?: androidx.media3.common.C.TIME_UNSET,
         )
         built.player.prepare()
     }
@@ -5336,7 +5396,8 @@ class Controller internal constructor(
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.READINESS_OVERLAP)
             return
         }
-        if (successor.playbackState != Player.STATE_READY) return
+        preparedLedger.action?.let { resolvePreparedAcquisition(successor, it) }
+        if (preparedAcquisition == null || successor.playbackState != Player.STATE_READY) return
         // Tracks known is what separates "playable" from "prepared": a player
         // at STATE_READY with no published tracks has nothing to switch to.
         if (successor.currentTracks.groups.isEmpty()) return
@@ -5346,7 +5407,7 @@ class Controller internal constructor(
         // From here the rendezvous owns this preparation. This tick keeps the
         // readiness bound and the terminal failures; it is far too coarse for
         // anything measured against a 250 ms window.
-        val hold = RendezvousHold(floorFilmMs = originMs)
+        val hold = RendezvousHold(floorFilmMs = preparedAcquisition?.floorFilmMs ?: originMs)
         rendezvous = hold
         // The incumbent is *not* touched here, and that is the change. It keeps
         // playing all the way to the meeting point.
@@ -5820,6 +5881,9 @@ class Controller internal constructor(
 
         pendingPreparedControlHandoff = null
         pendingPreparedControlPlayer = null
+        preparedTimelineOwner = null
+        preparedAcquisition = null
+        preparedInitialLocalMs = null
         progressiveMediaOrigin = predecessor.progressiveMediaOrigin
         attachedModeOverride = predecessor.modeOverride
         attachedRequiresHlsOverride = predecessor.requiresHlsOverride
@@ -5990,6 +6054,8 @@ class Controller internal constructor(
         autoStagedPlaylistJob = null
         autoStagedObservation = null
         preparedTimelineOwner = null
+        preparedAcquisition = null
+        preparedInitialLocalMs = null
         autoStagedStatus = null
         autoStagedStatusObservedMs = null
         val successor = preparedPlayer ?: return
@@ -6518,6 +6584,32 @@ internal data class AutoTickState(
 
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
+
+/** Null means use Media3's received playlist default, never an invented film zero. */
+internal fun preparedInitialAttachPositionMs(originMs: Long, incumbentFilmMs: Long): Long? =
+    if (originMs == 0L) null else successorAttachPositionMs(originMs, incumbentFilmMs)
+
+internal enum class PreparedAcquisitionKind(val wire: String) {
+    Hint("hint"), LegacyFallback("legacy_fallback"), ExplicitOrigin("explicit_origin"),
+}
+internal data class PreparedAcquisitionResolution(val kind: PreparedAcquisitionKind,
+    val floorFilmMs: Long, val localSeekMs: Long?)
+
+internal fun preparedAcquisitionResolution(ownerCurrent: Boolean, originMs: Long,
+    incumbentFilmMs: Long, hintEntryMs: Long?): PreparedAcquisitionResolution? {
+    if (!ownerCurrent) return null
+    if (originMs != 0L) return PreparedAcquisitionResolution(PreparedAcquisitionKind.ExplicitOrigin, originMs, null)
+    return if (hintEntryMs != null && hintEntryMs in 0..PlaybackControl.MAX_MEDIA_MILLIS)
+        PreparedAcquisitionResolution(PreparedAcquisitionKind.Hint, hintEntryMs, null)
+    else PreparedAcquisitionResolution(PreparedAcquisitionKind.LegacyFallback, 0,
+        successorAttachPositionMs(originMs, incumbentFilmMs))
+}
+
+internal fun preparedAcquisitionDetail(resolution: PreparedAcquisitionResolution, originMs: Long,
+    initialLocalMs: Long?, hintMs: Long?, entryMs: Long?, incumbentMs: Long): String =
+    ("kind=${resolution.kind.wire} o=$originMs initial_ms=${initialLocalMs ?: "default"} " +
+        "hint_ms=${hintMs ?: "none"} entry_ms=${entryMs ?: "none"} floor_ms=${resolution.floorFilmMs} " +
+        "seek_ms=${resolution.localSeekMs ?: "none"} i=$incumbentMs").take(200)
 
 /** An observation cannot migrate between pipeline, media mutation, or authenticated owner. */
 internal data class PreparedTimelineOwner(
