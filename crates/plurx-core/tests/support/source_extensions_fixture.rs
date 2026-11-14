@@ -564,6 +564,39 @@ fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
+fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("title continuation ordinal");
+    if version != 132 {
+        return;
+    }
+    super::require_fixture_marker(connection, "dv_title_jobs_schema", 2);
+    let actual = connection
+        .prepare(super::TITLE_FIXTURE_SHAPE_SQL)
+        .expect("title v2 shape")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("title v2 shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete title v2 shape");
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("exact title v2 marker");
+    let retained: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL))",
+        [], |row| row.get(0)).expect("complete title v2 retained data");
+    let _ = super::validated_empty_title_rewind(&actual, 2, marker, retained);
+    connection
+        .execute_batch("PRAGMA user_version=131;")
+        .expect("owned empty title v2 tail");
+}
+
 /// Rewind an owned, empty v131 storage-domain extension to published v130.
 /// Desired configuration is user data, including an already settled revision,
 /// so no pending-table row may be discarded by a historical fixture.
@@ -720,10 +753,11 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
         .expect("published custody retention rewind");
 }
 
-/// Rewind an owned, empty v127-v131 coordination tail to published v126;
+/// Rewind an owned, empty v127-v132 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
+    rewind_title_v2_to_v131(connection);
     rewind_empty_storage_domain_pending_to_v130(connection);
     rewind_offload_to_v129(connection);
     rewind_custody_retention_to_v128(connection);

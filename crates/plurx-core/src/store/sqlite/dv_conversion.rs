@@ -1775,6 +1775,8 @@ mod tests {
             // v131: the shared queue helper drops every background_* object,
             // including the pending storage-domain table, views and marker.
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
+            // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
+            "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
         ];
 
         assert!(

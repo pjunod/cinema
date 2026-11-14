@@ -834,6 +834,7 @@ pub(crate) const ANNOTATIONS_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sql
 #[allow(dead_code)]
 pub(crate) fn validated_empty_title_rewind(
     actual: &[(String, String)],
+    marker_version: i64,
     marker: i64,
     retained: i64,
 ) -> Vec<String> {
@@ -853,10 +854,14 @@ pub(crate) fn validated_empty_title_rewind(
     expected
         .execute_batch(include_str!("../../src/store/dv_title_jobs.sql"))
         .expect("published title objects");
-    assert_eq!(
-        actual,
-        shape(&expected),
-        "exact current title shape required"
+    let v1 = shape(&expected);
+    expected
+        .execute_batch(include_str!("../../src/store/dv_title_jobs_v2.sql"))
+        .expect("published exact title continuation objects");
+    assert!(
+        (marker_version == 1 && actual == v1)
+            || (marker_version == 2 && actual == shape(&expected)),
+        "exact published title shape and matching generation required"
     );
     assert_eq!(marker, 1, "current title marker required");
     assert_eq!(
@@ -898,15 +903,23 @@ fn validated_title_rewind(connection: &rusqlite::Connection, version: i64) -> (S
         version, 114,
         "only the current title fixture may be rewound"
     );
+    let marker_version: i64 = connection
+        .query_row(
+            "SELECT version FROM dv_title_jobs_schema WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("published title marker version");
+    require_fixture_marker(connection, "dv_title_jobs_schema", marker_version);
     let marker: i64 = connection
         .query_row(
-            "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
+            "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version IN (1,2)",
             [],
             |row| row.get(0),
         )
         .expect("title marker");
-    let retained: i64 = connection.query_row("SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL)", [], |row| row.get(0)).expect("title fixture data");
-    let drops = validated_empty_title_rewind(&actual, marker, retained);
+    let retained: i64 = connection.query_row("SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL))", [], |row| row.get(0)).expect("title fixture data");
+    let drops = validated_empty_title_rewind(&actual, marker_version, marker, retained);
     (format!("{};", drops.join(";")), 113)
 }
 
