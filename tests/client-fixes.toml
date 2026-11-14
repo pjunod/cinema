@@ -1,6 +1,42 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1589: original-file delivery and configured codec evidence own native DYN.
+[[fixes]]
+id = "android.direct-dolby-vision-enhancement"
+commits = ["fe632d11b89e94882d47767acd37b4d76d140cdd"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"
+source_anchor = "internal fun directPlaybackEnhancement("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun onlyOriginalDirectDolbyVisionBytesUseTheDecisionEnhancement()"
+
+[[fixes]]
+id = "android.direct-dolby-vision-decision-report"
+commits = []
+supplements = "android.direct-dolby-vision-enhancement"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "data class Decision("
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun directDecisionCarriesEnhancementWithoutAnHlsSession()"
+
+[[fixes]]
+id = "android.direct-dolby-vision-configured-codec-proof"
+commits = []
+supplements = "android.direct-dolby-vision-enhancement"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "val nativeCodec = selectedCodecMime?.lowercase()"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun nativeDynamicMetadataWaitsForTheAcceptedFormatAndRetractsOnFallback()"
+
+[[fixes]]
+id = "android.direct-dolby-vision-codec-ownership"
+commits = []
+supplements = "android.direct-dolby-vision-enhancement"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/VideoDecoderEvidence.kt"
+source_anchor = "if (current === claim) current = null"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/VideoDecoderEvidenceTest.kt"
+test_anchor = "fun aLateReleaseCannotClearAReinitializedCodecWithTheSameName()"
+
 # PR #1378: native media-wait retirement matches the existing shared fixture.
 [[fixes]]
 id = "apple.media-wait-intent-retirement-parity"
@@ -7970,7 +8006,7 @@ test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
 id = "apple.dv-enhancement-pills"
 commits = ["3c4931f9faca91d0a50a97df390550274763babf"]
 source = "clients/apple/Sources/PlayerView.swift"
-source_anchor = 'case .enhancement: return "plus.circle"'
+source_anchor = 'case .enhancement, .toneMapping: return "plus.circle"'
 test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
 test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
 

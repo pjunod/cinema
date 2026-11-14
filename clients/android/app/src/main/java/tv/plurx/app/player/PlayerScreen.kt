@@ -1745,6 +1745,8 @@ private fun PlayerContent(
                     activeGeneration = controller.effectiveProcessingGeneration,
                     enhancement = controller.enhancement,
                     selectedCodecMime = controller.selectedVideoCodecMime,
+                    toneMapPeakNits = controller.sessionStatus?.takeIf { it.id == controller.currentSessionId }?.tone_map_peak_nits,
+                    toneMapPeakSource = controller.sessionStatus?.takeIf { it.id == controller.currentSessionId }?.tone_map_peak_source,
                 ),
                 onTransportHeight = { transportHeightPx = it },
                 // The arrow is the `close` control, not the BACK key: `Back`

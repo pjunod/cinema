@@ -35,6 +35,9 @@ internal enum class MediaFactKind {
 
     /** One active Dolby Vision enhancement — `FEL`, `RPU` or `DYN`. */
     Enhancement,
+
+    /** Cinema is mapping the active session to its output luminance target. */
+    ToneMapping,
 }
 
 /**
@@ -121,10 +124,20 @@ internal fun playerMediaFacts(
     activeGeneration: String? = null,
     enhancement: tv.plurx.app.data.PlaybackEnhancement? = null,
     selectedCodecMime: String? = null,
+    toneMapPeakNits: Long? = null,
+    toneMapPeakSource: String? = null,
 ): List<MediaFact> = buildList {
     resolutionFact(file)?.let(::add)
     dynamicRangeFact(file, delivered, rendered, deliveredDolbyVisionProfile, effectiveProcessing, activeGeneration)?.let(::add)
     addAll(enhancementFacts(enhancement?.shown(effectiveProcessing, activeGeneration, delivered, rendered, selectedCodecMime)))
+    val cpuMapping = (toneMapPeakNits ?: 0) > 0 &&
+        toneMapPeakSource?.lowercase(java.util.Locale.US) in setOf("cll", "mdcv", "default")
+    val effectiveMapping = effectiveProcessing?.takeIf { it.matches(activeGeneration, delivered) }
+        ?.appliedOperations?.any { it == "TargetMapping" || it.startsWith("DisplayTargetMapping:") } == true
+    if (cpuMapping || effectiveMapping) {
+        add(MediaFact(MediaFactKind.ToneMapping, "Tone mapping", "Cinema tone mapping active", FactState.Active))
+    }
+
     audio?.let { audioFact(it.codec, it.channels, it.title) }?.let(::add)
 }
 
@@ -177,7 +190,7 @@ private val MediaFact.icon: ImageVector?
         MediaFactKind.DynamicRange -> Icons.Filled.AutoAwesome
         MediaFactKind.Container -> Icons.Filled.Movie
         MediaFactKind.Audio -> Icons.Filled.GraphicEq
-        MediaFactKind.Enhancement -> null
+        MediaFactKind.Enhancement, MediaFactKind.ToneMapping -> null
     }
 
 private val MediaFact.brandColor: Color
@@ -192,7 +205,7 @@ private val MediaFact.brandColor: Color
         MediaFactKind.Container -> Color(0xFFABB6CA)
         MediaFactKind.Audio -> Color(0xFFA9B5FF)
         // The single active accent: every enhancement pill is the same teal.
-        MediaFactKind.Enhancement -> Color(0xFF62CBBE)
+        MediaFactKind.Enhancement, MediaFactKind.ToneMapping -> Color(0xFF62CBBE)
     }
 
 private fun resolutionFact(file: MediaFileDto?): MediaFact? {
