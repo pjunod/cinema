@@ -857,6 +857,9 @@ mod delegation_rewind_tests {
             "CREATE INDEX alien ON delegation_clients(name)",
         ] {
             let c = fixture();
+            if mutation.starts_with("INSERT INTO delegation_codes")||mutation.starts_with("INSERT INTO delegation_grants") {
+                c.execute_batch("INSERT INTO users(id) VALUES(1);INSERT INTO delegation_clients(id,name,secret_hash,redirect) VALUES('client','Curator','hash','https://curator.example/api/v1/auth/cinema/callback');").expect("valid populated fixture parents");
+            }
             c.execute_batch(mutation).expect("refusal fixture");
             let before = snapshot(&c);
             let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
