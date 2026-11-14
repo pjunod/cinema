@@ -338,6 +338,7 @@ class SourceApplicability:
         self.source_reader = source_reader
         self.worktree_reader = worktree_reader
         self.files = {}
+        self.content_modules = {}
         self.fingerprints = {}
         self.byte_count = 0
         self.node_count = 0
@@ -365,6 +366,14 @@ class SourceApplicability:
         if commit == self.current_commit and self.worktree_reader(path) != raw:
             # The current run's own checkout, not history: always refuse.
             raise IntegrityError("Current unit worktree differs from dispatched Git source")
+        # Commit identities remain bounded separately. Identical immutable
+        # source at the same path shares one parsed module across revisions;
+        # the current checkout check above still runs before every new alias.
+        content_key = (path, hashlib.sha256(raw).hexdigest())
+        if content_key in self.content_modules:
+            value = self.content_modules[content_key]
+            self.files[key] = value
+            return value
         require(self.byte_count + len(raw) <= MAX_SOURCE_CACHE_BYTES,
                 "Unit applicability source-cache byte bound exhausted")
         try:
@@ -421,6 +430,7 @@ class SourceApplicability:
                  {alias.asname or alias.name for node in tree.body
                   if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names})
         self.files[key] = value
+        self.content_modules[content_key] = value
         self.byte_count += len(raw)
         self.node_count += nodes
         return value
