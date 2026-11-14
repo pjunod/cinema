@@ -4948,9 +4948,8 @@ class Controller internal constructor(
         val owner = currentPreparedTimelineOwner(successor, action) ?: return
         val manifest = successor.currentManifest as? HlsManifest ?: return
         val playlist = manifest.mediaPlaylist
-        val uri = Uri.parse(playlist.baseUri)
-        if (Session.canonicalOrigin(playlist.baseUri) != Session.canonicalOrigin(owner.credentialOrigin) ||
-            !uri.pathSegments.contains(owner.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true
+        if (preparedPlaylistOwnership(playlist.baseUri, owner.credentialOrigin, owner.sessionId) !=
+            PreparedPlaylistOwnership.Owned
         ) return
         val hintUs = playlist.startOffsetUs.takeUnless { it == androidx.media3.common.C.TIME_UNSET }
         var entryMs: Long? = null
@@ -4991,6 +4990,24 @@ class Controller internal constructor(
         }
     }
 
+    /** One terminal diagnostic only; these facts never select a recovery action. */
+    private fun preparedAcquisitionFailureGate(successor: ExoPlayer?, action: ControlAction?): String {
+        if (controlObservationIsClosed) return "acq_closed"
+        if (!playbackControlBootstrapFence.isActive()) return "acq_released"
+        val owner = preparedTimelineOwner ?: return "acq_owner_absent"
+        if (successor == null || preparedPlayer !== successor || owner.player !== successor) return "acq_player"
+        if (action == null || preparedLedger.action !== action || owner.actionId != action.actionId) return "acq_action"
+        if (owner.sessionId != action.sessionId) return "acq_session"
+        if (owner.originMs != action.mediaOriginMs) return "acq_origin"
+        if (owner.mutationEpoch != mediaMutationEpoch) return "acq_mutation"
+        val authorization = Session.playbackAuthorization()
+        if (owner.credentialOrigin != authorization.origin) return "acq_credential_origin"
+        if (owner.authorizationGeneration != authorization.generation) return "acq_authorization"
+        val manifest = successor.currentManifest as? HlsManifest ?: return "acq_manifest"
+        val ownership = preparedPlaylistOwnership(manifest.mediaPlaylist.baseUri, owner.credentialOrigin, owner.sessionId)
+        return if (ownership == PreparedPlaylistOwnership.Owned) "acq_unresolved" else "acq_${ownership.wire}"
+    }
+
     /** Native parsed media belongs to this exact staged pipeline, independently of Auto policy. */
     private fun preparedSuccessorVodTimeline(successor: ExoPlayer, action: ControlAction): PreparedVodTimelineProof {
         val owner = currentPreparedTimelineOwner(successor, action)
@@ -4998,9 +5015,8 @@ class Controller internal constructor(
         val manifest = successor.currentManifest as? HlsManifest
             ?: return PreparedVodTimelineProof(PreparedVodProofReason.Manifest)
         val playlist = manifest.mediaPlaylist
-        val uri = Uri.parse(playlist.baseUri)
-        if (Session.canonicalOrigin(playlist.baseUri) != Session.canonicalOrigin(owner.credentialOrigin) ||
-            !uri.pathSegments.contains(owner.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true
+        if (preparedPlaylistOwnership(playlist.baseUri, owner.credentialOrigin, owner.sessionId) !=
+            PreparedPlaylistOwnership.Owned
         ) return PreparedVodTimelineProof(PreparedVodProofReason.PlaylistOwner, playlist.durationUs)
         val reason = preparedFilmLocalVodReason(owner.originMs,
             playlist.playlistType == androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist.PLAYLIST_TYPE_VOD,
@@ -5022,9 +5038,8 @@ class Controller internal constructor(
         if (!autoStagedObservationCurrent(observation, monotonicNowMs()) || observation.playlistUrl != null) return
         val manifest = observation.player.currentManifest as? HlsManifest ?: return
         val url = manifest.mediaPlaylist.baseUri
-        val uri = Uri.parse(url)
-        if (Session.canonicalOrigin(url) != Session.canonicalOrigin(observation.credentialOrigin) ||
-            !uri.pathSegments.contains(observation.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true) return
+        if (preparedPlaylistOwnership(url, observation.credentialOrigin, observation.sessionId) !=
+            PreparedPlaylistOwnership.Owned) return
         observation.playlistUrl = url
         val remaining = observation.deadlineMs - monotonicNowMs()
         if (remaining <= 0) return
@@ -6010,7 +6025,8 @@ class Controller internal constructor(
                     code = errorCode, detail = preparedPositionDetail(reason.name, successor?.playbackState,
                         originMs, realPosition(), target, successor?.currentPosition, successor?.bufferedPosition,
                         rendezvous?.reparks ?: 0, monotonicNowMs() - preparedStartedAtMs,
-                        diagnostic.observedWaitGate))
+                        if (preparedAcquisition == null) preparedAcquisitionFailureGate(successor, action)
+                        else diagnostic.observedWaitGate))
             }
             surfaceOwner.logOnly(
                 mediaMutationEpoch,
@@ -6584,6 +6600,33 @@ internal data class AutoTickState(
 
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
+
+internal enum class PreparedPlaylistOwnership(val wire: String) {
+    Owned("owned"), Malformed("malformed"), Scheme("scheme"), UserInfo("userinfo"), Fragment("fragment"),
+    CredentialOrigin("credential_origin"), ResourceOrigin("resource_origin"), OriginMismatch("origin_mismatch"),
+    SessionPath("session_path"), PathEncoding("path_encoding"), Traversal("traversal"),
+}
+
+/** Resource paths are valid here; canonicalOrigin deliberately accepts authorities only. */
+internal fun preparedPlaylistOwnership(url: String, credentialOrigin: String, sessionId: String): PreparedPlaylistOwnership {
+    val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return PreparedPlaylistOwnership.Malformed
+    if (uri.scheme?.lowercase() !in setOf("http", "https")) return PreparedPlaylistOwnership.Scheme
+    if (uri.rawUserInfo != null) return PreparedPlaylistOwnership.UserInfo
+    if (uri.rawFragment != null) return PreparedPlaylistOwnership.Fragment
+    val expected = Session.canonicalOrigin(credentialOrigin) ?: return PreparedPlaylistOwnership.CredentialOrigin
+    val authority = uri.rawAuthority ?: return PreparedPlaylistOwnership.ResourceOrigin
+    val actual = Session.canonicalOrigin("${uri.scheme}://$authority") ?: return PreparedPlaylistOwnership.ResourceOrigin
+    if (actual != expected) return PreparedPlaylistOwnership.OriginMismatch
+    val path = uri.rawPath ?: return PreparedPlaylistOwnership.SessionPath
+    // The server's canonical scalar/child playlist routes contain no escapes.
+    // Reject encoded separators/dot segments rather than normalizing authority.
+    if (path != uri.path) return PreparedPlaylistOwnership.PathEncoding
+    val parts = path.split('/')
+    if (parts.drop(1).any { it.isEmpty() || it == "." || it == ".." }) return PreparedPlaylistOwnership.Traversal
+    if (parts.size < 6 || parts.take(4) != listOf("", "api", "v1", "hls") || parts[4] != sessionId ||
+        !parts.last().endsWith(".m3u8")) return PreparedPlaylistOwnership.SessionPath
+    return PreparedPlaylistOwnership.Owned
+}
 
 /** Null means use Media3's received playlist default, never an invented film zero. */
 internal fun preparedInitialAttachPositionMs(originMs: Long, incumbentFilmMs: Long): Long? =
