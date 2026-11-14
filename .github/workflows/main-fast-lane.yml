@@ -3,6 +3,15 @@ name: main fast lane
 # Every main-bound pull request, as soon as it is ready. `ready_for_review`
 # is what starts the lane now — a PR that is marked ready and merged can no
 # longer skip the gate, which is what an opt-in label allowed.
+#
+# With the merge train on (repository variable MERGE_TRAIN = on) the lane's
+# heavy jobs run only on the train's own pull requests: head
+# `train/...`, opened by the train's bot (MERGE_TRAIN_BOT, default train-bot).
+# A train PR is main plus the boarded PRs, so its promotion gate is the gate
+# for every one of them; a per-PR run would test a tree that never lands.
+# Ordinary ready PRs still run the lightweight scope job to read the switch
+# exactly. Off (unset or anything but `on`), every PR runs the whole lane.
+# docs/ci/MERGE-TRAIN.md.
 on:
   pull_request:
     branches: [main]
@@ -41,17 +50,13 @@ jobs:
       - name: Check index rows, release counters, names and Regression-Test fields
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # The description and title are read from the event payload file
           # (validation/pr_event.py), never the environment: a long
           # description made the runner unable to start this step at all.
           GITHUB_TOKEN: ${{ github.token }}
           # Persistent publisher credentials must never enter a PR-controlled
-          # workflow. The job token can publish a fix but starts no new run.
+          # workflow. This job checks and fetches only; publication is external.
         run: |
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
@@ -59,24 +64,10 @@ jobs:
           if python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env; then
             exit 0
           fi
-          # Derivable bookkeeping is fixed on the branch instead of failing the
-          # lane (docs/ci/PAPERWORK.md "What fixes itself"). Anything else, or
-          # a head that is already a fix, fails here with paperwork's own fix.
-          [ "$SAME_REPO" = true ] || exit 1
-          python3 scripts/paperwork-fix --ci --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" \
-            --head-sha "$PR_HEAD_SHA" --run-url "$RUN_URL" || exit 1
-          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env || remaining=1
-          # Leased to the checked head, only to an ordinary work branch, token
-          # through git's environment (scripts/paperwork-fix push_refusal).
-          python3 scripts/paperwork-fix --push --head-ref "$HEAD_REF" --base-ref "$BASE_REF" \
-            --head-sha "$PR_HEAD_SHA" || exit 1
-          fixed="$(git rev-parse HEAD)"
-          echo "::notice::paperwork pushed $fixed to $HEAD_REF with the derivable fixes; pull it before your next push (git pull --rebase)."
-          if [ -n "${remaining:-}" ]; then
-            echo "Paperwork still fails after the derivable fixes; the [FAIL] above is the author's to fix."
-            exit 1
-          fi
-          echo "The fix was pushed with the run's own token, which starts no run: push any commit (git commit --allow-empty) to run the lane on $fixed."
+          # PR code has no publisher credential. The separately installed
+          # ci-fleet service independently derives supported fixes and leases
+          # one commit to this head; its bot push starts the replacement lane.
+          echo "Paperwork failed. Use make paperwork-fix locally, or inspect the trusted publisher status; no compiler jobs started."
           exit 1
 
   scope:
@@ -87,17 +78,29 @@ jobs:
     # `fast-lane` label, and the label is what let three lanes merge in one day
     # without this workflow ever running - one of them carrying a fix for the
     # regression the lane before it had shipped to the fleet.
-    if: github.event.pull_request.draft == false
+    # Python compares MERGE_TRAIN exactly: Forgejo expressions fold string
+    # case, so comparing the variable in job conditions would treat ON as on.
+    # Scope runs for every ready PR and switches off heavy outputs for ordinary
+    # PRs only when the variable is exactly on.
+    if: >-
+      github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
+      # The content selector must see every ready PR: Rust tests also read
+      # documentation and fixtures that compile-scope intentionally ignores.
+      rust_units: ${{ steps.scope.outputs.rust_units || 'true' }}
       apple: ${{ steps.scope.outputs.apple }}
       desktop_macos: ${{ steps.scope.outputs.desktop_macos }}
       android_jvm: ${{ steps.scope.outputs.android_jvm }}
       web_layout: ${{ steps.scope.outputs.web_layout }}
       mobile_version: ${{ steps.scope.outputs.mobile_version }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
+      preflight: ${{ steps.scope.outputs.preflight }}
+      worker_control: ${{ steps.scope.outputs.worker_control }}
+      train_selected: ${{ steps.scope.outputs.train_selected }}
+      run_lane: ${{ steps.scope.outputs.run_lane }}
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -108,14 +111,19 @@ jobs:
         id: scope
         env:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
-        run: >-
-          python3 -m validation.ci_scope
-          --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}
+          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}
+        # validation/merge_train.py: on a merge-train probe only its
+        # `Train-Jobs:` run; anywhere else the scope passes through.
+        run: |
+          set -euo pipefail
+          python3 -m validation.ci_scope --event pull_request --base "$VALIDATION_BASE" \
+            | python3 -m validation.merge_train scope >> "$GITHUB_OUTPUT"
 
   worker_control_proof:
     name: production worker controller proof
     needs: scope
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft == false && needs.scope.outputs.worker_control == 'true'
     runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
@@ -262,6 +270,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
+    if: needs.scope.outputs.preflight == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     # A cold continuation can run the full unit set when older receipts cannot
     # authenticate. History alone took seven minutes in run 6234; allow the
@@ -445,7 +454,13 @@ jobs:
   rust_compile:
     name: fast Rust gate
     needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.rust == 'true')
     # The nonvoter compile pool, in the pinned rust-gate image: no per-run apt
     # or toolchain downloads. The container's limits are the job's bound on
     # either carrier; the first step verifies them and CARGO_BUILD_JOBS is
@@ -535,10 +550,35 @@ jobs:
           owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
+  # The Rust unit tests this change can affect, each at most once per set of
+  # inputs, fanned out over idle runners: docs/ci/RUST-UNIT-FANOUT.md. Its own
+  # gate job is the stage's one result; a failure that also fails at the
+  # merge-base is reported there and does not block.
+  rust_units:
+    name: Rust unit tests
+    needs: [scope, preflight]
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.rust_units == 'true')
+    uses: ./.github/workflows/rust-units.yml
+    with:
+      base: ${{ github.event.pull_request.base.sha }}
+    secrets: inherit
+
   web_compile:
     name: fast web syntax gate
     needs: [scope, preflight]
-    if: needs.scope.outputs.web_layout == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.web_layout == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     # web-unit-check measured 103 s serial on two cores; the rest is checkout,
     # node and the pinned tsc.
@@ -592,7 +632,13 @@ jobs:
   apple_compile:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true')
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
@@ -677,7 +723,13 @@ jobs:
   android_compile:
     name: fast Android compile
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.android_jvm == 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
     steps:
@@ -713,15 +765,20 @@ jobs:
 
   promotion_gate:
     name: Main promotion gate
+    # Not on a merge-train probe (it runs a few jobs only, and the train
+    # judges those itself), and with the train on only on the train's PRs.
     if: >-
       always() &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      needs.scope.outputs.train_selected != 'true' &&
+      needs.scope.outputs.run_lane != 'false'
     needs:
       - paperwork
       - scope
       - preflight
       - worker_control_proof
       - rust_compile
+      - rust_units
       - web_compile
       - apple_compile
       - android_compile
@@ -735,6 +792,7 @@ jobs:
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
+          RUST_UNITS_RESULT: ${{ needs.rust_units.result }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
@@ -750,7 +808,7 @@ jobs:
           fi
           for result in \
             "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
-            "$RUST_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
+            "$RUST_RESULT" "$RUST_UNITS_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
             "$ANDROID_RESULT"; do
             case "$result" in
               success|skipped) ;;

@@ -1,4 +1,4 @@
-"""Failed-job retries must use workflow job IDs and never replay other jobs."""
+"""Failed-job retries preserve published run artifacts and use workflow job IDs."""
 
 import contextlib
 import importlib.machinery
@@ -17,6 +17,7 @@ CI = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(CI)
 CONFIG = {"forge_url": "https://forge.example/", "repo": "owner/repo", "token": "test-token"}
 FAILED = {"id": 700, "task_id": 300, "run_id": 70, "name": "compile", "status": "failure"}
+RUN = {"id": 70, "status": "failure"}
 
 
 class RetryJobTests(unittest.TestCase):
@@ -34,19 +35,24 @@ class RetryJobTests(unittest.TestCase):
         response.read.assert_not_called()  # HTTP 204 has no JSON body.
 
     def test_failed_job_is_checked_then_retried_without_using_its_task_id(self):
-        with mock.patch.object(CI, "api", side_effect=[FAILED, None]) as api, contextlib.redirect_stdout(io.StringIO()) as out:
+        with mock.patch.object(CI, "api", side_effect=[FAILED, RUN, [], None]) as api, contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(CI.retry_job(CONFIG, 700, False), 0)
         self.assertEqual(api.call_args_list, [
             mock.call(CONFIG, "actions/jobs/700"),
+            mock.call(CONFIG, "actions/runs/70"),
+            mock.call(CONFIG, "actions/runs/70/artifacts?limit=50&page=1"),
             mock.call(CONFIG, "actions/jobs/700/rerun", method="POST"),
         ])
         self.assertIn("Retry requested", out.getvalue())
         self.assertIn("dependent jobs also rerun", out.getvalue())
 
     def test_preview_checks_the_job_but_never_posts(self):
-        with mock.patch.object(CI, "api", return_value=FAILED) as api, contextlib.redirect_stdout(io.StringIO()) as out:
+        with mock.patch.object(CI, "api", side_effect=[FAILED, RUN, []]) as api, contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(CI.retry_job(CONFIG, 700, True), 0)
-        api.assert_called_once_with(CONFIG, "actions/jobs/700")
+        self.assertEqual(api.call_args_list, [
+            mock.call(CONFIG, "actions/jobs/700"), mock.call(CONFIG, "actions/runs/70"),
+            mock.call(CONFIG, "actions/runs/70/artifacts?limit=50&page=1"),
+        ])
         self.assertIn("Would retry", out.getvalue())
         self.assertNotIn("Retry requested", out.getvalue())
 
@@ -60,17 +66,17 @@ class RetryJobTests(unittest.TestCase):
     def test_api_errors_do_not_report_success_or_echo_server_credentials(self):
         for status in [400, 403, 404, 409, 500]:
             error = urllib.error.HTTPError("https://forge.example", status, "private credential", {}, io.BytesIO(b"private credential"))
-            with self.subTest(status=status), mock.patch.object(CI, "api", side_effect=[FAILED, error]) as api, contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.subTest(status=status), mock.patch.object(CI, "api", side_effect=[FAILED, RUN, [], error]) as api, contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(CI.retry_job(CONFIG, 700, False), 1)
-                self.assertEqual(api.call_count, 2)
+                self.assertEqual(api.call_count, 4)
                 self.assertIn(f"HTTP {status}", err.getvalue())
                 self.assertNotIn("private credential", err.getvalue())
                 self.assertNotIn("Retry requested", out.getvalue())
 
     def test_network_failure_is_not_automatically_retried(self):
-        with mock.patch.object(CI, "api", side_effect=[FAILED, urllib.error.URLError("private detail")]) as api, contextlib.redirect_stderr(io.StringIO()) as err:
+        with mock.patch.object(CI, "api", side_effect=[FAILED, RUN, [], urllib.error.URLError("private detail")]) as api, contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(CI.retry_job(CONFIG, 700, False), 1)
-        self.assertEqual(api.call_count, 2)
+        self.assertEqual(api.call_count, 4)
         self.assertIn("check its status", err.getvalue())
         self.assertNotIn("private detail", err.getvalue())
 
@@ -81,6 +87,66 @@ class RetryJobTests(unittest.TestCase):
         with mock.patch.object(CI.urllib.request, "urlopen", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "expected HTTP 204"):
                 CI.api(CONFIG, "actions/jobs/700/rerun", method="POST")
+
+
+class ArtifactPreservationTests(unittest.TestCase):
+    def invoke(self, responses, dry_run=False):
+        with mock.patch.object(CI, "api", side_effect=responses) as api, contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            result = CI.retry_job(CONFIG, 700, dry_run)
+        return result, api.call_args_list, err.getvalue(), out.getvalue()
+
+    def assert_refused(self, responses, dry_run=False):
+        result, calls, error, output = self.invoke(responses, dry_run)
+        self.assertEqual(result, 1)
+        self.assertTrue(all(call.kwargs.get("method", "GET") != "POST" for call in calls), calls)
+        self.assertIn("refusing", error)
+        self.assertIn("fresh lane", error)
+        self.assertNotIn("Retry requested", output)
+        return calls, error
+
+    def test_unexpired_proofs_and_ordinary_data_block_real_retry_and_preview(self):
+        for name in ("rust-unit-proof", "ordinary-build-log"):
+            for dry_run in (False, True):
+                with self.subTest(name=name, dry_run=dry_run):
+                    artifact = {"id": 1, "run_id": 70, "expired": False, "name": name}
+                    self.assert_refused([FAILED, RUN, [artifact]], dry_run)
+
+    def test_expired_artifacts_allow_failed_setup_retry_after_complete_inventory(self):
+        result, calls, error, _ = self.invoke([FAILED, RUN, [{"id": 1, "run_id": 70, "expired": True}], [], None])
+        self.assertEqual(result, 0, error)
+        self.assertEqual(calls[-1], mock.call(CONFIG, "actions/jobs/700/rerun", method="POST"))
+
+    def test_unknown_job_or_active_mismatched_run_metadata_never_reaches_post(self):
+        for job in (None, {**FAILED, "id": 701}, {**FAILED, "run_id": None}, {**FAILED, "run_id": True}):
+            with self.subTest(job=job):
+                self.assert_refused([job])
+        for run in (None, {}, {**RUN, "id": 71}, {**RUN, "status": "running"}, {**RUN, "status": None}):
+            with self.subTest(run=run):
+                self.assert_refused([FAILED, run])
+
+    def test_unknown_artifact_schema_or_expiry_is_not_treated_as_an_empty_inventory(self):
+        for artifacts in (None, {}, {"artifacts": []}, [None], [{"id": 1, "run_id": 70}],
+                          [{"id": 1, "run_id": 71, "expired": True}],
+                          [{"id": 1, "run_id": 70, "expired": "true"}]):
+            with self.subTest(artifacts=artifacts):
+                self.assert_refused([FAILED, RUN, artifacts])
+
+    def test_listing_failures_are_closed_and_do_not_echo_private_response_details(self):
+        for failure in (urllib.error.HTTPError("https://forge.example", 403, "private body", {}, io.BytesIO(b"private body")),
+                        urllib.error.URLError("private body"), TimeoutError("private body"), ValueError("private body")):
+            with self.subTest(failure=type(failure).__name__):
+                calls, error = self.assert_refused([FAILED, RUN, failure])
+                self.assertEqual(len(calls), 3)
+                self.assertNotIn("private body", error)
+
+    def test_artifact_on_later_page_blocks_and_incomplete_pagination_never_allows_post(self):
+        expired = [{"id": i, "run_id": 70, "expired": True} for i in range(1, 51)]
+        for first_page in (expired, expired[:1]):
+            with self.subTest(first_page_size=len(first_page)):
+                calls, _ = self.assert_refused([FAILED, RUN, first_page, [{"id": 51, "run_id": 70, "expired": False}]])
+                self.assertEqual(calls[-1], mock.call(CONFIG, "actions/runs/70/artifacts?limit=50&page=2"))
+        with mock.patch.object(CI, "ARTIFACT_PAGES", 1):
+            self.assert_refused([FAILED, RUN, expired])
 
 
 class CurrentJobReportTests(unittest.TestCase):

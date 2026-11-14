@@ -259,7 +259,7 @@ def check_mobile_versions(base: str, merge_target: str) -> Result:
     )
 
 
-def check_tests(base: str) -> list[Result]:
+def check_tests(base: str, merge_target: str) -> list[Result]:
     start = time.monotonic()
     names = [module for module, _, _ in TEST_RULES]
     code, out = run(
@@ -268,6 +268,7 @@ def check_tests(base: str) -> list[Result]:
             "PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT / "tests" / "operations"), str(ROOT), os.environ.get("PYTHONPATH", "")])),
             # Rules that compare against the merge base read it from here.
             "PLURX_VALIDATION_BASE": base,
+            "PLURX_VALIDATION_MERGE_TARGET": merge_target,
         },
     )
     elapsed = time.monotonic() - start
@@ -379,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         check_catalog(),
         check_regression_fields(base, body, title),
         check_mobile_versions(base, args.counter_target or args.merge_target),
-        *check_tests(base),
+        *check_tests(base, args.merge_target),
     ]
     web = check_web(paths)
     if web is not None:
