@@ -728,7 +728,6 @@ macro_rules! claim_maintenance_reader {
     };
 }
 
-
 pub(super) const CLAIM_SQL: &str = concat!(
     r#"
 UPDATE background_jobs SET
@@ -765,6 +764,216 @@ WHERE "#,
     claim_maintenance_reader!("json_extract($1, '$.job_id')"),
     "\n"
 );
+
+/// Why this node's applied replica says [`CLAIM_SQL`] would refuse a claim
+/// (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md §3.2). The fragments decide;
+/// this only names the first predicate group that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimBlock {
+    /// Identity, queue state, placement, attempts or counters.
+    State,
+    /// The kind's own demand or configuration admission.
+    KindDemand,
+    /// A foreground owner still holds source custody after its lease lapsed.
+    SourceRecovery,
+    /// A live foreground owner does not permit background reads now.
+    ForegroundWindow,
+    /// Two holders already occupy the source.
+    SourceHolders,
+    /// The second reader is reserved for live demand.
+    MaintenanceReader,
+}
+
+impl ClaimBlock {
+    pub const ALL: [Self; 6] = [
+        Self::State,
+        Self::KindDemand,
+        Self::SourceRecovery,
+        Self::ForegroundWindow,
+        Self::SourceHolders,
+        Self::MaintenanceReader,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::State => "state",
+            Self::KindDemand => "kind_demand",
+            Self::SourceRecovery => "source_recovery",
+            Self::ForegroundWindow => "foreground_window",
+            Self::SourceHolders => "source_holders",
+            Self::MaintenanceReader => "maintenance_reader",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|block| block.as_str() == value)
+    }
+}
+
+/// The local claim verdict: [`CLAIM_SQL`]'s predicate groups, evaluated
+/// against this node's applied replica for the request's row, in the
+/// statement's own order. A predicate that is NULL refuses, as in a WHERE
+/// clause. The row filter leaves out exactly the rows the claim's
+/// authoritative pre-read answers without proposing — missing, owner removed,
+/// another kind or payload version (by column or by the payload's own tag),
+/// cancelling or cancelled, or this claim's own replay — so those keep their
+/// own outcomes. No row means no verdict.
+const CLAIM_VERDICT_SQL: &str = concat!(
+    r#"SELECT CASE
+  WHEN NOT COALESCE(("#,
+    claim_identity!(),
+    "\n  AND ",
+    claim_state!(),
+    "\n  AND ",
+    claim_attempt_ledger!(),
+    r#"), 0) THEN 'state'
+  WHEN NOT COALESCE(("#,
+    claim_kind_demand!(),
+    r#"), 0) THEN 'kind_demand'
+  WHEN NOT COALESCE(("#,
+    claim_foreground_window!("json_extract($1,'$.job_id')"),
+    r#"), 0) THEN CASE WHEN EXISTS (SELECT 1 FROM background_job_required_resources required
+    JOIN foreground_source_permissions fg ON required.resource_key LIKE 'source_io%'
+      AND (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
+    WHERE required.job_id=json_extract($1,'$.job_id') AND fg.custody_held=1
+      AND fg.lease_expires_at_ms<=json_extract($1,'$.now_ms')) THEN 'source_recovery' ELSE 'foreground_window' END
+  WHEN NOT COALESCE(("#,
+    claim_source_holders!("json_extract($1, '$.job_id')"),
+    r#"), 0) THEN 'source_holders'
+  WHEN NOT COALESCE(("#,
+    claim_maintenance_reader!("json_extract($1, '$.job_id')"),
+    r#"), 0) THEN 'maintenance_reader'
+  ELSE 'admit' END AS result_json
+FROM background_jobs
+WHERE id = json_extract($1, '$.job_id')
+  AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
+  AND json_extract(payload_json, '$.kind') IS kind
+  AND state NOT IN ('cancelling','cancelled')
+  AND (owner_node_id IS NULL OR claim_id IS NOT json_extract($1, '$.claim_id'))
+  AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"#
+);
+
+/// How a claim attempt ended, beside its [`ClaimOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimPath {
+    /// [`CLAIM_SQL`] was proposed.
+    Proposed,
+    /// The authoritative pre-read answered (missing, replayed, cancelled or
+    /// unsupported) without a proposal.
+    Settled,
+    /// This node's replica showed the statement would refuse: no pre-read
+    /// and no proposal. The outcome is [`ClaimOutcome::Contended`].
+    Skipped(ClaimBlock),
+}
+
+/// A claim's outcome and how it was reached.
+#[derive(Debug, Clone)]
+pub struct ClaimAttempt {
+    pub outcome: ClaimOutcome,
+    pub path: ClaimPath,
+}
+
+/// The local verdict for `request` (`body` is its encoding): `Some` only
+/// when this process has an applied replica and that replica shows the
+/// claim statement refusing. A stale verdict is safe either way (plan §3.3):
+/// a stale block is re-evaluated on the next pass, a stale admit costs the
+/// one refused proposal of today. A local read error is no verdict.
+async fn claim_verdict<T: QueueSql + ?Sized>(store: &T, body: &str) -> Option<ClaimBlock> {
+    match store
+        .local_replica_sql(CLAIM_VERDICT_SQL.to_owned(), body.to_owned())
+        .await
+    {
+        Ok(Some(rows)) => rows.first().and_then(|row| ClaimBlock::parse(row)),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::debug!(%error, "local claim verdict unavailable; proposing");
+            None
+        }
+    }
+}
+
+/// [`BackgroundJobStore::claim_job`], reporting how it ended. On a process
+/// with an applied replica the local verdict runs first, and a claim the
+/// replica shows the statement refusing is neither pre-read nor proposed.
+async fn claim_attempt<T: QueueSql + ?Sized>(
+    store: &T,
+    request: ClaimJob,
+) -> Result<ClaimAttempt, StoreError> {
+    request.validate()?;
+    let body = encode(&request)?;
+    if let Some(block) = claim_verdict(store, &body).await {
+        return Ok(ClaimAttempt {
+            outcome: ClaimOutcome::Contended,
+            path: ClaimPath::Skipped(block),
+        });
+    }
+    let settled = |outcome| {
+        Ok(ClaimAttempt {
+            outcome,
+            path: ClaimPath::Settled,
+        })
+    };
+    // Replaying an acknowledged or ambiguous claim must return its current
+    // identity, not compete for a fresh fence. Never adopt another boot.
+    let previous = store.queue_sql(
+        format!("SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
+        body.clone(), false, true,
+    ).await?;
+    let Some(previous) = previous.first() else {
+        return settled(ClaimOutcome::ExpiredOrPruned);
+    };
+    let snapshot: ClaimSnapshot = decode(previous)?;
+    let previous = snapshot.job;
+    if previous.payload_version != request.payload_version
+        || previous
+            .supported_payload()
+            .map(|payload| payload.kind())
+            .ok()
+            != Some(request.kind)
+    {
+        return settled(ClaimOutcome::Unsupported);
+    }
+    if let Some(token) = &previous.token {
+        if token.claim_id == request.claim_id {
+            return settled(
+                if snapshot.resources_current == 1
+                    && previous.state == JobState::Running
+                    && token.node_id == request.node_id
+                    && token.boot_id == request.boot_id
+                    && token.lease_expires_ms > request.now_ms
+                    && (previous.retry_deadline_ms == 0
+                        || previous.retry_deadline_ms > request.now_ms)
+                {
+                    ClaimOutcome::Claimed {
+                        job: Box::new(previous),
+                    }
+                } else {
+                    ClaimOutcome::ExpiredOrPruned
+                },
+            );
+        }
+    }
+    if matches!(previous.state, JobState::Cancelling | JobState::Cancelled) {
+        return settled(ClaimOutcome::Cancelled);
+    }
+    let rows = store
+        .queue_sql(
+            format!("{CLAIM_SQL} RETURNING {JOB_JSON} AS result_json"),
+            body,
+            true,
+            true,
+        )
+        .await?;
+    Ok(ClaimAttempt {
+        outcome: match rows.first() {
+            Some(row) => ClaimOutcome::Claimed { job: decode(row)? },
+            None => ClaimOutcome::Contended,
+        },
+        path: ClaimPath::Proposed,
+    })
+}
 
 const RENEW_SQL: &str = r#"
 WITH inputs AS (
@@ -2819,6 +3028,10 @@ pub trait BackgroundJobStore: Send + Sync {
         replacement: crate::cluster::coordination::Lease,
     ) -> Result<EnqueueOutcome, StoreError>;
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
+    /// [`Self::claim_job`], also saying how it ended: proposed, settled by
+    /// the authoritative pre-read, or skipped because this node's applied
+    /// replica shows the claim statement refusing it.
+    async fn claim_job_attempt(&self, request: ClaimJob) -> Result<ClaimAttempt, StoreError>;
     /// Narrow entry point shared by voter and learner artifact workers.
     async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
@@ -3087,6 +3300,18 @@ pub(super) trait QueueSql: Send + Sync {
         mutation: bool,
         authoritative: bool,
     ) -> Result<Vec<String>, StoreError>;
+
+    /// Run a read on this process's own applied replica. `None` when there is
+    /// none: the SQLite store is its own authority (its claims must not start
+    /// skipping), and a remote-authority client has no replica. A replica can
+    /// lag, so only a read whose stale answer is safe may use this.
+    async fn local_replica_sql(
+        &self,
+        _sql: String,
+        _request: String,
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        Ok(None)
+    }
 }
 
 // Claim acknowledgement and renewal reconciliation must not revive a token
@@ -4897,60 +5122,11 @@ LIMIT 1
     }
 
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError> {
-        request.validate()?;
-        // Replaying an acknowledged or ambiguous claim must return its current
-        // identity, not compete for a fresh fence. Never adopt another boot.
-        let previous = self.queue_sql(
-            format!("SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
-            encode(&request)?, false, true,
-        ).await?;
-        let Some(previous) = previous.first() else {
-            return Ok(ClaimOutcome::ExpiredOrPruned);
-        };
-        let snapshot: ClaimSnapshot = decode(previous)?;
-        let previous = snapshot.job;
-        if previous.payload_version != request.payload_version
-            || previous
-                .supported_payload()
-                .map(|payload| payload.kind())
-                .ok()
-                != Some(request.kind)
-        {
-            return Ok(ClaimOutcome::Unsupported);
-        }
-        if let Some(token) = &previous.token {
-            if token.claim_id == request.claim_id {
-                return if snapshot.resources_current == 1
-                    && previous.state == JobState::Running
-                    && token.node_id == request.node_id
-                    && token.boot_id == request.boot_id
-                    && token.lease_expires_ms > request.now_ms
-                    && (previous.retry_deadline_ms == 0
-                        || previous.retry_deadline_ms > request.now_ms)
-                {
-                    Ok(ClaimOutcome::Claimed {
-                        job: Box::new(previous),
-                    })
-                } else {
-                    Ok(ClaimOutcome::ExpiredOrPruned)
-                };
-            }
-        }
-        if matches!(previous.state, JobState::Cancelling | JobState::Cancelled) {
-            return Ok(ClaimOutcome::Cancelled);
-        }
-        let rows = self
-            .queue_sql(
-                format!("{CLAIM_SQL} RETURNING {JOB_JSON} AS result_json"),
-                encode(&request)?,
-                true,
-                true,
-            )
-            .await?;
-        match rows.first() {
-            Some(row) => Ok(ClaimOutcome::Claimed { job: decode(row)? }),
-            None => Ok(ClaimOutcome::Contended),
-        }
+        Ok(claim_attempt(self, request).await?.outcome)
+    }
+
+    async fn claim_job_attempt(&self, request: ClaimJob) -> Result<ClaimAttempt, StoreError> {
+        claim_attempt(self, request).await
     }
 
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {

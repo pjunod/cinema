@@ -1391,6 +1391,17 @@ impl TimedClient {
         }
     }
 
+    /// Whether this client reads an applied replica in this process (an
+    /// embedded voter or learner). A remote client has none; neither do the
+    /// test-only clients, which must not reach hiqlite at all.
+    pub(super) fn has_local_replica(&self) -> bool {
+        match &self.inner {
+            TimedClientInner::Connected(client) => client.local_db_applied_mark().is_ok(),
+            #[cfg(test)]
+            TimedClientInner::Disconnected | TimedClientInner::InjectedConsistentRead(_) => false,
+        }
+    }
+
     fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
         #[cfg(test)]
         if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {

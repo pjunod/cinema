@@ -801,6 +801,9 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_job_fenced",
     "retry_background_job",
     "claim_job",
+    // The same claim, reporting proposed / settled / skipped on the local
+    // verdict: tests/claim_local_verdict.rs drives it on both backends.
+    "claim_job_attempt",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
