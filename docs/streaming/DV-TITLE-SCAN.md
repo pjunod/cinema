@@ -1,7 +1,7 @@
 # Dolby Vision title scanning — metadata, shared reads and demand identity
 
-**Status:** implemented scanner; live playback scheduling correction in progress.
-The scheduling correction still requires adversarial review, qualification and operator deployment.
+**Status:** implemented; scheduling and launch-contract corrections reviewed by Astra.
+Affected qualification, merge-train admission and operator deployment remain pending.
 
 Companion to [the display-targeted DV build ledger](DISPLAY-TARGETED-DV-BUILD.md)
 (target selection and rendering) — this is how the title scanner reads and
@@ -99,6 +99,16 @@ when native/copy playback holds no encoder permit. This signal does not preempt
 a running qualification or speech task. Cancellation removes the request, and
 dispatch revalidates the exact viewer interest after the handoff before claiming
 work. No CPU, GPU or source capacity is discounted while the prior owner exits.
+
+Local index cancellation retains admission until FFmpeg exits, its input bridge
+closes and its DV companion joins, including output-pipe setup failures.
+Qualification launches use immutable argument profiles for the renderer's
+rational timestamps and FFmpeg's rate operands. The device and generated-window
+input cross exec as pinned descriptors; owned-file registrations survive through
+physical cleanup. Startup derives executable directories from the validated DV
+bundle through the same root constructor exercised by the regressions. Argument
+grammar validation preserves the conservative, unqualified broker-confinement
+verdict and grants no clean recovery witness.
 
 SQLite migration 132 and the matching replicated-store extension upgrade install
 version 2 of the title outbox. A successful aggregate publication keeps demand
