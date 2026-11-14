@@ -545,6 +545,37 @@ class NamedVerdictTests(unittest.TestCase):
         self.assertIn("\nABSENT ghost t::a", "\n" + captured[0])
         self.assertEqual((outputs["complete"], outputs["absent"]), ("true", "true"))
 
+    def test_all_absent_builds_nothing_and_the_verdict_runs_from_the_select_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doc = {"head": "a" * 40, "base": "b" * 40, "crates": {}, "tests": ["ghost t::a"], "absent": ["ghost t::a"]}
+            ru.write_json(root / "sel.json", doc)
+            emitted = {}
+            with mock.patch.object(ru, "Tree") as tree, mock.patch.object(ru, "STATE", root / "state"), \
+                    mock.patch.object(ru, "emit", side_effect=lambda k, v: emitted.update({k: v})), \
+                    mock.patch.dict(os.environ, {"GITHUB_RUN_ID": "7"}, clear=False):
+                os.environ.pop("GITHUB_TOKEN", None)
+                tree.return_value.text.return_value = CONFIG
+                ru.command_adopt(mock.Mock(selection=str(root / "sel.json"), output=str(root / "pending.json")))
+                self.assertEqual((emitted["build"], emitted["absent_only"]), ("false", "true"))
+                plan = json.loads((root / "state" / "plan.json").read_text())
+                self.assertEqual((plan["shards"], plan["crates"], plan["absent"]), (0, {}, ["ghost t::a"]))
+                captured = []
+                with mock.patch.object(ru, "summarize", side_effect=lambda lines: captured.append("\n".join(lines))):
+                    (root / "shards").mkdir()
+                    ru.command_verdict(mock.Mock(plan=str(root / "state" / "plan.json"),
+                                                 receipts=str(root / "shards"), output=str(root / "receipts")))
+            self.assertIn("Rust units verdict: 0 passed, 0 failed, 0 adopted.", captured[0])
+            self.assertIn("\nABSENT ghost t::a", "\n" + captured[0])
+            self.assertEqual((emitted["complete"], emitted["absent"]), ("true", "true"))
+
+    def test_the_all_absent_wiring_skips_archive_and_shards_and_the_gate_fails(self):
+        stage = (ROOT / ".github/workflows/rust-units.yml").read_text()
+        self.assertIn("absent_only: ${{ steps.adopt.outputs.absent_only || 'false' }}", stage)
+        self.assertIn("needs.select.outputs.absent_only == 'true'", stage)
+        self.assertIn('[ "$ABSENT_ONLY" = true ]', stage)
+        self.assertNotIn("none()", (ROOT / "validation/rust_units.py").read_text())
+
     def test_the_gate_fails_on_absent_but_the_verdict_job_does_not(self):
         stage = (ROOT / ".github/workflows/rust-units.yml").read_text()
         self.assertIn("absent: ${{ steps.verdict.outputs.absent }}", stage)

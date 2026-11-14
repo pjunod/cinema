@@ -1129,7 +1129,15 @@ def command_adopt(args):
         pending["crates"][crate] = {"key": entry["key"], "passed": sorted(found["passed"]),
                                     "only": entry.get("only"), "exact": entry.get("exact")}
     write_json(args.output, pending)
-    emit("build", "true" if pending["crates"] or pending["absent"] else "false")
+    emit("build", "true" if pending["crates"] else "false")
+    # Every named id is absent: nothing to build or run. The plan is written
+    # here with no shards, and the verdict job reports the ABSENT lines directly.
+    only_absent = bool(pending["absent"]) and not pending["crates"]
+    if only_absent:
+        plan = make_plan(doc, pending, {}, config, int(os.environ.get("GITHUB_RUN_ID", "0")))
+        plan["shards"] = 0
+        write_json(STATE / "plan.json", plan)
+    emit("absent_only", "true" if only_absent else "false")
     emit("crates", sorted(pending["crates"]))
     return 0
 
@@ -1157,10 +1165,8 @@ def command_package_filter(args):
     """The archive filterset: binaries of the crates the plan may run."""
     pending = read_json(args.pending)
     crates = sorted(pending["crates"])
-    require(all(CRATE_NAME.fullmatch(c) for c in crates), "no crates to archive")
-    require(crates or pending.get("absent"), "no crates to archive")
-    # Only absent named tests: archive nothing, so the verdict can still say so.
-    print(" | ".join(f"package(={c})" for c in crates) or "none()")
+    require(crates and all(CRATE_NAME.fullmatch(c) for c in crates), "no crates to archive")
+    print(" | ".join(f"package(={c})" for c in crates))
     return 0
 
 
