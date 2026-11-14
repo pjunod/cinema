@@ -27,7 +27,9 @@ pub(super) struct TitleTask {
     probe_pipeline: String,
     probe_after: Option<CandidateCursor>,
     scanner: String,
-    backend_digest: String,
+    /// The claimed tools. Live eligibility re-resolves their FEL identity, so
+    /// an encoder change still makes owned live work yield.
+    tools: Arc<ToolSet>,
     file_id: i64,
     probe_revision: i64,
     playback_requested: bool,
@@ -138,6 +140,7 @@ impl TitleTask {
             requalify_stale_fel_titles(state, &tools, &scanner).await;
             return Ok(None);
         }
+        let fel = fel_backend(state, &tools).await;
         for mut demand in demands {
             if playback_only {
                 *live_after = demand.probe_revision;
@@ -152,7 +155,7 @@ impl TitleTask {
                     continue;
                 }
             }
-            let Some(file) = eligible_file(state, &demand, &tools.backend_digest()).await? else {
+            let Some(file) = eligible_file(state, &demand, fel.as_deref()).await? else {
                 continue;
             };
             // The local index pass reads this title next, and reads its RPUs
@@ -161,11 +164,6 @@ impl TitleTask {
                 continue;
             }
             let playback_recipe = if demand.playback_requested {
-                let backend = state
-                    .transcode
-                    .fel_identity(&tools.backend_digest())
-                    .await
-                    .ok();
                 let selected = plurx_core::transcode::dv_fel_qualification::pending_recipes(
                     &demand.probe_json,
                     file.size,
@@ -173,7 +171,7 @@ impl TitleTask {
                 )
                 .into_iter()
                 .find(|request| {
-                    Some(&request.backend_identity) == backend.as_ref()
+                    Some(&request.backend_identity) == fel.as_ref()
                         && demand.playback_recipes.contains(&request.identity)
                 })
                 .map(|request| request.identity);
@@ -209,7 +207,7 @@ impl TitleTask {
                     if latest.probe_revision == demand.probe_revision
                         && latest.scanner_digest.as_deref() == Some(scanner.as_str())
                         && latest.playback_recipes.contains(recipe)
-                        && eligible_file(state, &latest, &tools.backend_digest())
+                        && eligible_file(state, &latest, fel.as_deref())
                             .await?
                             .is_some()
                     {
@@ -337,7 +335,7 @@ impl TitleTask {
             let file_id = file.id;
             let probe_revision = demand.probe_revision;
             let playback_requested = demand.playback_requested;
-            let backend_digest = tools.backend_digest();
+            let task_tools = Arc::clone(&tools);
             let work = execute(
                 state.clone(),
                 file,
@@ -356,7 +354,7 @@ impl TitleTask {
                 probe_pipeline,
                 probe_after: None,
                 scanner,
-                backend_digest,
+                tools: task_tools,
                 file_id,
                 probe_revision,
                 playback_requested,
@@ -378,6 +376,7 @@ impl TitleTask {
                 .store
                 .dv_title_playback_demands(0, now, Some(self.file_id))
                 .await?;
+            let fel = fel_backend(state, &self.tools).await;
             for demand in own {
                 if demand.probe_revision == self.probe_revision
                     && self
@@ -385,7 +384,7 @@ impl TitleTask {
                         .as_ref()
                         .is_some_and(|recipe| demand.playback_recipes.contains(recipe))
                     && demand.scanner_digest.as_deref() == Some(self.scanner.as_str())
-                    && eligible_file(state, &demand, &self.backend_digest)
+                    && eligible_file(state, &demand, fel.as_deref())
                         .await?
                         .is_some()
                 {
@@ -401,10 +400,11 @@ impl TitleTask {
         if demands.is_empty() {
             self.live_after = 0;
         }
+        let fel = fel_backend(state, &self.tools).await;
         for demand in demands {
             self.live_after = demand.probe_revision;
             if demand.scanner_digest.as_deref() != Some(self.scanner.as_str())
-                || eligible_file(state, &demand, &self.backend_digest)
+                || eligible_file(state, &demand, fel.as_deref())
                     .await?
                     .is_none()
             {
@@ -487,10 +487,16 @@ impl TitleTask {
 
 /// Scheduling interest never substitutes for a locally readable current source
 /// or for the backend able to satisfy its exact pending FEL recipe.
+/// FEL verdicts measure the renderer, so its key is read only to form the FEL
+/// identity; title demand itself is keyed by the scanner alone.
+async fn fel_backend(state: &AppState, tools: &ToolSet) -> Option<String> {
+    state.transcode.fel_identity(&tools.backend_digest()).await.ok()
+}
+
 async fn eligible_file(
     state: &AppState,
     demand: &TitleDemand,
-    backend_digest: &str,
+    fel_backend: Option<&str>,
 ) -> Result<Option<plurx_core::domain::MediaFile>, StoreError> {
     let Some(file) = state.store.get_file(demand.file_id).await? else {
         return Ok(None);
@@ -513,9 +519,8 @@ async fn eligible_file(
             return Ok(None);
         }
         if !pending.is_empty() {
-            let backend = state.transcode.fel_identity(backend_digest).await.ok();
             if !pending.iter().any(|request| {
-                Some(&request.backend_identity) == backend.as_ref()
+                Some(request.backend_identity.as_str()) == fel_backend
                     && (!demand.playback_requested
                         || demand.playback_recipes.contains(&request.identity))
             }) {
@@ -524,7 +529,7 @@ async fn eligible_file(
         }
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = backend_digest;
+    let _ = fel_backend;
     Ok(Some(file))
 }
 
