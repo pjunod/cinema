@@ -27,7 +27,8 @@ authenticated is simply not adopted.
 
 The stage is six jobs (names are part of receipt authentication):
 
-1. **`Rust units: select`** (any `general` runner). Computes
+1. **`Rust units: select`** (any `general` runner, in the `plurx-ci` image like
+   every general job — [GENERAL-LANE-IMAGE.md](GENERAL-LANE-IMAGE.md)). Computes
    every unit crate's content key at the head and at the merge-base with the
    base (§3). A crate is *due* when they differ. For each due crate it then
    looks up authenticated receipts under the head key (§4) and drops the tests
