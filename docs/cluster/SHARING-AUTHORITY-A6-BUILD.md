@@ -61,6 +61,8 @@ The cost on a production voter, 2026-11-14: one slow quorum confirmation ends li
 
 - A single-flight cached `sharing_member_floor_ready` **advisory bool**, per `SharingMemberFloor`, used only by the monitors and `authority()`.
 - It is invalidated on a change in the serving-loss generation or the local membership snapshot, and it is never older than `SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS` (5 s). The max age is the real bound, because readiness also depends on replicated heartbeat, capability and join rows that neither invalidator sees (`membership.rs:3157-3190`, `:3727-3736`).
+- Only a ready answer is kept for later callers. A not-ready answer serves only the callers already waiting on its read, so a floor blip ends with the next look rather than spending the monitors' outage grace. Errors are never kept; a read runs on its own task with its own 1 s bound, so a caller that gives up does not cancel it for the callers behind it; while the serving fence is not ready the read is fresh and nothing is kept.
+- Its readers are the body monitors and the read-only admission points: `authority()` and `source_content_current` (catalogue, artwork and body start). A ready answer can admit for up to 5 s after a heartbeat, capability or join change; an error, a timeout or not-ready still refuses with the typed 503.
 - `observe_source_admission_members` and `observe_ingress_custody_members` keep their fresh reads, because their `write_guard_for` rejects observations older than 5 s (`:3306`). The "never a cached readiness permission" rule therefore still holds for permissions; the cache is advisory evidence only (`:3192-3194`, `:11621-11623`).
 
 ## M3 — change-driven re-observation

@@ -716,6 +716,15 @@ impl ServingFence {
         self.state.subscribe()
     }
 
+    /// The epoch an advisory answer is read under: the loss generation, which
+    /// advances on every published loss, while the fence is ready with no
+    /// loss pending; `None` otherwise, so nothing read then is kept.
+    pub(crate) fn advisory_epoch(&self) -> Option<u64> {
+        let word = self.word.load();
+        (word.ready && self.loss_transitions_pending.load(Ordering::Acquire) == 0)
+            .then_some(word.loss_generation)
+    }
+
     pub(crate) fn authority(&self) -> ServingAuthority {
         ServingAuthority {
             word: self.word.clone(),

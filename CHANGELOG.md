@@ -338,6 +338,10 @@ bump may break compatibility and a **patch** bump never does.
 - New libraries scan every six hours by default. Existing libraries keep their
   schedule; a library at Never shows what that costs and offers a one-click
   "Enable 6-hourly reconcile".
+- Shared-library stream monitors and serving-read admission share one
+  advisory member-floor answer instead of each proving quorum: a ready answer
+  serves for up to five seconds, a not-ready one only the callers already
+  waiting on it, and a read survives the caller that gave up on it.
 
 ## [0.8.0] — 2026-10-29
 

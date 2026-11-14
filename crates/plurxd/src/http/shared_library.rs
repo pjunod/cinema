@@ -136,12 +136,16 @@ pub(super) async fn authority<
         return Err(missing());
     }
     // This is serving-read admission only. Future shared writes must carry
-    // their capability floor and effective grant predicate atomically.
+    // their capability floor and effective grant predicate atomically. The
+    // floor here is the shared advisory answer: a ready answer can admit for
+    // up to five seconds after a heartbeat, capability or join change the
+    // answer's key does not see; an error, a timeout or not-ready refuses.
     if state.membership.is_replicated() {
         let ready = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            state.membership.sharing_member_floor_ready(
+            state.membership.sharing_member_floor_advisory(
                 plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+                state.serving.advisory_epoch(),
             ),
         )
         .await
@@ -618,7 +622,9 @@ pub(super) fn attach_source_file_authority(
     });
 }
 
-/// Admission and in-memory responses: only a current authority passes.
+/// Admission and in-memory responses (catalogue, artwork, body start): only a
+/// current authority passes. Its member floor is the shared advisory answer,
+/// with the same five-second bound as `authority()`.
 async fn source_content_current(state: &AppState, authority: &SourceContentAuthority) -> bool {
     source_content_observation(state, authority).await == SharingObservation::Current
 }
@@ -641,8 +647,9 @@ async fn source_content_observation(
             let floor = SharingObservation::of_floor(
                 state
                     .membership
-                    .sharing_member_floor_ready(
+                    .sharing_member_floor_advisory(
                         plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+                        state.serving.advisory_epoch(),
                     )
                     .await,
             );
