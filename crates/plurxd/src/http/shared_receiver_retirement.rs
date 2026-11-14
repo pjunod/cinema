@@ -333,16 +333,20 @@ impl ReceiverStartActor {
     /// retirements already record for an ending that is not one, while every
     /// transport is still cut so a partitioned node stops its bytes.
     pub(crate) fn begin_outage_retirement(&self, state: Arc<AppState>) {
-        {
-            let mut owned = self.0.state.lock().expect("receiver owner");
-            if owned.retirement_started {
-                return;
-            }
-            owned.retirement_cuts = true;
-        }
-        self.begin_retirement(state, ReceiverRetirementReason::Replaced);
+        self.begin_retirement_with(state, ReceiverRetirementReason::Replaced, true);
     }
     pub(crate) fn begin_retirement(&self, state: Arc<AppState>, reason: ReceiverRetirementReason) {
+        self.begin_retirement_with(state, reason, false);
+    }
+    /// The reason and the cut are claimed in the one critical section that
+    /// wins `retirement_started`, so a concurrent hand-over never inherits an
+    /// outage's cut.
+    fn begin_retirement_with(
+        &self,
+        state: Arc<AppState>,
+        reason: ReceiverRetirementReason,
+        cuts: bool,
+    ) {
         {
             let mut owned = self.0.state.lock().expect("receiver owner");
             if owned.retirement_started {
@@ -350,6 +354,7 @@ impl ReceiverStartActor {
             }
             owned.retirement_started = true;
             owned.retirement_reason = Some(reason);
+            owned.retirement_cuts = cuts;
             owned.dispatch_closed = true;
         }
         // An uncommitted prepared successor has no viewer once the session it
@@ -924,6 +929,47 @@ mod tests {
         assert!(
             !idle.0.is_cancelled(),
             "a hand-over never cuts a transport it has no writer on"
+        );
+    }
+    /// An outage ending is not a revocation (durable `Replaced`), yet it cuts
+    /// every transport so a partitioned node stops its bytes. A hand-over
+    /// that won first keeps its drain: the outage claims nothing.
+    #[tokio::test]
+    async fn receiver_outage_retirement_cuts_busy_transports_and_records_replaced() {
+        use super::super::tests::registered;
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let registry = ReceiverStartRegistry::default();
+        let outage = ReceiverStartActor(registered(&registry, "outage", "player", 1));
+        let busy = crate::SharingConnectionCancellation::new();
+        let _busy_writer = outage
+            .retain_accepted_connection(state.clone(), &busy)
+            .expect("busy writer");
+        outage.begin_outage_retirement(state.clone());
+        assert!(matches!(
+            outage
+                .0
+                .state
+                .lock()
+                .expect("receiver owner")
+                .retirement_reason,
+            Some(ReceiverRetirementReason::Replaced)
+        ));
+        tokio::time::timeout(Duration::from_secs(5), busy.0.cancelled())
+            .await
+            .expect("an outage ending cuts a busy transport instead of draining it");
+        let handed = ReceiverStartActor(registered(&registry, "handed", "other", 2));
+        let streaming = crate::SharingConnectionCancellation::new();
+        let _writer = handed
+            .retain_accepted_connection(state.clone(), &streaming)
+            .expect("streaming writer");
+        handed.begin_retirement(state.clone(), ReceiverRetirementReason::Superseded);
+        handed.begin_outage_retirement(state);
+        tokio::time::timeout(Duration::from_secs(5), streaming.drain_token().cancelled())
+            .await
+            .expect("the hand-over drains");
+        assert!(
+            !streaming.0.is_cancelled(),
+            "a hand-over never inherits an outage's cut"
         );
     }
     #[tokio::test]

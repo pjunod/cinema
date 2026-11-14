@@ -81,14 +81,32 @@ async fn current_scope(
 fn fail(status: StatusCode, code: &'static str) -> ApiError {
     ApiError::typed(status, code, code.replace('_', " "))
 }
+/// This Source's own authority could not be read (an outage, not a refusal):
+/// a 503 with `Retry-After`, which a receiver retries instead of retiring.
+fn retry_unavailable(code: &'static str) -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code,
+        message: code.replace('_', " "),
+        retry_after_seconds: 1,
+    }
+}
+/// The response for a content authority that is not current.
+fn content_refusal(observed: SharingObservation) -> ApiError {
+    if observed == SharingObservation::Unknown {
+        retry_unavailable("sharing_body_authority_unavailable")
+    } else {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        )
+    }
+}
 fn invalid() -> ApiError {
     fail(StatusCode::BAD_REQUEST, "sharing_invalid_request")
 }
 fn unavailable(_: plurx_core::error::StoreError) -> ApiError {
-    fail(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "sharing_authority_unavailable",
-    )
+    retry_unavailable("sharing_authority_unavailable")
 }
 fn missing() -> ApiError {
     fail(StatusCode::NOT_FOUND, "sharing_not_found")
@@ -127,23 +145,10 @@ pub(super) async fn authority<
             ),
         )
         .await
-        .map_err(|_| {
-            fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_member_floor_unavailable",
-            )
-        })?
-        .map_err(|_| {
-            fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_member_floor_unavailable",
-            )
-        })?;
+        .map_err(|_| retry_unavailable("sharing_member_floor_unavailable"))?
+        .map_err(|_| retry_unavailable("sharing_member_floor_unavailable"))?;
         if !ready {
-            return Err(fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_member_floor_unavailable",
-            ));
+            return Err(retry_unavailable("sharing_member_floor_unavailable"));
         }
     }
     if let Some(principal) = headers.authenticated_principal() {
@@ -734,12 +739,9 @@ pub(super) async fn guard_source_response(
         // returns, so this check is their authority point. Re-observing bytes
         // that already exist cannot withdraw them; artwork memory is owned by
         // its Bytes (`shared_artwork::asset_response`), not by a monitor.
-        if !source_content_current(&state, &authority).await {
-            return fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_body_authority_unavailable",
-            )
-            .into_response();
+        let observed = source_content_observation(&state, &authority).await;
+        if observed != SharingObservation::Current {
+            return content_refusal(observed).into_response();
         }
         return response;
     };
@@ -753,12 +755,9 @@ pub(super) async fn guard_source_response(
     let Ok(permit) = CONTENT_MONITORS.clone().try_acquire_owned() else {
         return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
     };
-    if !source_content_current(&state, &authority).await {
-        return fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sharing_body_authority_unavailable",
-        )
-        .into_response();
+    let observed = source_content_observation(&state, &authority).await;
+    if observed != SharingObservation::Current {
+        return content_refusal(observed).into_response();
     }
     let cancel = connection.0.clone();
     let drain = connection.drain_token();
@@ -777,6 +776,8 @@ pub(super) async fn guard_source_response(
         let mut serving = state.serving.subscribe();
         loop {
             tokio::select! {
+                // Retirement is decided before another observation is due.
+                biased;
                 () = body_live.cancelled() => break,
                 () = source_guard.cancelled() => {
                     let mode=source_guard.retirement_mode();

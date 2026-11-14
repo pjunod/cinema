@@ -83,6 +83,21 @@ pub(super) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverS
         _ => ReceiverStartError::Unresolved,
     }
 }
+/// Why an exact receiver read came back empty. Inside this owner's own lease
+/// only a non-temporal fact can make it empty (a revoked grant, a logout, a
+/// removed import or a replaced owner): affirmative. Once the lease has
+/// passed, the lease itself is the likelier cause (its renewals failed while
+/// the store could not answer): unknown, and an outage once the grace is
+/// spent.
+pub(crate) fn absence(
+    owner: &plurx_core::sharing_receiver_sessions::ReceiverSourceOwner,
+) -> ReceiverStartError {
+    if owner.now_ms >= owner.lease_expires_at_ms {
+        ReceiverStartError::Unknown
+    } else {
+        ReceiverStartError::Unresolved
+    }
+}
 /// How a receiver owner reads one look at its delivery authority.
 pub(crate) fn delivery_observation<T>(
     looked: &Result<T, ReceiverStartError>,
@@ -623,10 +638,15 @@ impl ReceiverStartRegistry {
                 // An owner whose authority stayed unknown, or whose Source stayed
                 // unreachable until its lease could not be renewed, ended in an
                 // outage, not a revocation.
-                let outage = matches!(
-                    error,
-                    ReceiverStartError::Unknown | ReceiverStartError::PeerUnavailable
+                let published = matches!(
+                    owner.state.lock().expect("receiver owner").start,
+                    Some(Ok(_))
                 );
+                let outage = published
+                    && matches!(
+                        error,
+                        ReceiverStartError::Unknown | ReceiverStartError::PeerUnavailable
+                    );
                 // An uncommitted prepared successor that failed or reached its
                 // deadline is withdrawn, as a Local aborted successor is.
                 let reason = if owner.awaiting_commit() {
@@ -841,13 +861,13 @@ impl ReceiverStartActor {
             .prepare_receiver_session_authority(self.0.intent.clone())
             .await
             .map_err(|_| ReceiverStartError::Unknown)?
-            .ok_or(ReceiverStartError::Unknown)?;
+            .ok_or(ReceiverStartError::Unresolved)?;
         let snapshot = state
             .store
             .receiver_source_binding(&authority, &attachment.owner)
             .await
             .map_err(|_| ReceiverStartError::Unknown)?
-            .ok_or(ReceiverStartError::Unknown)?;
+            .ok_or_else(|| absence(&attachment.owner))?;
         let a = &attachment.binding;
         let b = &snapshot.binding;
         if snapshot.response_json.is_none()
@@ -889,7 +909,7 @@ impl ReceiverStartActor {
             .receiver_delivery(&authority, &attachment, &hash)
             .await
             .map_err(|_| ReceiverStartError::Unknown)?
-            .ok_or(ReceiverStartError::Unknown)?;
+            .ok_or_else(|| absence(&attachment.owner))?;
         if self.0.stop.is_cancelled() {
             return Err(ReceiverStartError::Ending);
         }
@@ -1352,7 +1372,7 @@ impl ReceiverStartActor {
             lifetime,
         )
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        .map_err(peer_failure)?;
         let known = received
             .lineage()
             .map_err(|_| ReceiverStartError::Unresolved)?;
@@ -1411,7 +1431,7 @@ impl ReceiverStartActor {
                 tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", "receiver Source status refused");
                 ReceiverStartError::Unknown
             })?
-            .ok_or(ReceiverStartError::Unknown)
+            .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
                 tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "authority_absent", "receiver Source status refused");
             })?;
@@ -2129,21 +2149,36 @@ async fn run_owner(
                 .prepare_receiver_session_authority(intent.clone())
                 .await
                 .map_err(|_| ReceiverStartError::Unknown)?
-                .ok_or(ReceiverStartError::Unknown)?;
+                .ok_or(ReceiverStartError::Unresolved)?;
             attachment.owner.now_ms = clock_ms();
             let new_lease = attachment.owner.now_ms + 30_000;
             let renewal = ReceiverSourceRenewal {
                 attachment: attachment.clone(),
                 lease_expires_at_ms: new_lease,
             };
-            if state
+            match state
                 .store
                 .renew_receiver_source_session(&authority, &renewal)
                 .await
-                .map_err(|_| ReceiverStartError::Unknown)?
-                == ReceiverSourceWrite::Refused
             {
-                return Err(ReceiverStartError::Unresolved);
+                Ok(ReceiverSourceWrite::Refused) => return Err(ReceiverStartError::Unresolved),
+                Ok(_) => {}
+                // The answer was lost, not necessarily the write: adopt the new
+                // lease if the route now carries it for this exact owner.
+                Err(_) => {
+                    let mut committed = attachment.owner.clone();
+                    committed.lease_expires_at_ms = new_lease;
+                    let adopted = state
+                        .store
+                        .receiver_source_binding(&authority, &committed)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    if !adopted {
+                        return Err(ReceiverStartError::Unknown);
+                    }
+                }
             }
             attachment.owner.lease_expires_at_ms = new_lease;
             let mut owned = entry.state.lock().expect("receiver owner");
