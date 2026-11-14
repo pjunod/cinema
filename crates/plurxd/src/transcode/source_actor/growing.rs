@@ -490,7 +490,7 @@ impl TranscodeManager {
             )
             .await
             .map_err(|error| {
-                tracing::warn!(target:"plurxd::transcode",reason=%error,"Source copy head refused");
+                tracing::warn!(target: "plurxd::transcode", reason = %error, "Source copy head refused");
                 SourceWorkerError::copy_failure(&error)
             })?,
         );
