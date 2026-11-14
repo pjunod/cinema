@@ -8693,3 +8693,19 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "titleDurationMs = plan.durationMs,"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
 test_anchor = "fun controlDurationIsTitleTimeSoAnOriginSessionPlayheadIsNotClamped()"
+
+[[fixes]]
+id = "android.optional-auto-withdraw-to-standing"
+commits = ["64fc34d63292dde9c24feae68d010bf3edda1a02"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun withdraw(intent: PlaybackIntent): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/OptionalAutoAttemptTest.kt"
+test_anchor = "fun failedOptionalTargetIsWithdrawnEvenAfterTheExecutionMovedUnderIt()"
+
+[[fixes]]
+id = "android.prepared-handoff-owns-its-acknowledgement"
+commits = ["64fc34d63292dde9c24feae68d010bf3edda1a02"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun owns(acknowledgement: ActionAcknowledgement): Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedControlHandoffTest.kt"
+test_anchor = "fun handoffOwnsOnlyItsActionAndAdoptsOnlyUnderItsOwnRevision()"
