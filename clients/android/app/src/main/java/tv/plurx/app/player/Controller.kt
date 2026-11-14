@@ -558,6 +558,7 @@ class Controller internal constructor(
         continuousExecutedQuality = desired
         val current = currentRecipe()
         autoActiveCandidateId = id
+        optionalAutoAttempt = null
         planReplacement.presented(desired)
         stallReopenBudget.seed(row.number("height")?.toInt())
         if (autoDesiredCandidate?.id == id) {
@@ -1009,9 +1010,9 @@ class Controller internal constructor(
     private class AutoBoundaryAttempt(val incumbent: ExoPlayer, val sessionId: String, val epoch: Long,
         val candidateId: String, val recipe: PlaybackMediaRecipe, val qualitySequence: Long?,
         val transportLifetime: Any, val audio: Long?, val subtitle: Long?, val audioOffsetMs: Long,
-        val previousCandidate: tv.plurx.app.data.QualityCandidate?, val previousId: String?,
-        val previousHeight: Int?)
+        val optional: OptionalAutoAttempt)
     private var autoBoundaryAttempt: AutoBoundaryAttempt? = null
+    private var optionalAutoAttempt: OptionalAutoAttempt? = null
     /** The viewer boundary the next ordinary Auto evaluation owes a re-plan. */
     private val autoBoundaryReplan = AutoBoundaryReplan()
 
@@ -2302,6 +2303,7 @@ class Controller internal constructor(
     }
 
     fun release() {
+        optionalAutoAttempt = null
         effectiveProcessing = null
         effectiveProcessingGeneration = null
         enhancement = null
@@ -2563,6 +2565,8 @@ class Controller internal constructor(
         // rather than left for the server's 330 s deadline — which would hold
         // this session's one preparation slot for the rest of the film.
         abandonPreparedReplacement(failed = false)
+        optionalAutoAttempt = null
+        autoPreparing = false
         val requestVersion = stallGuard.beginRequest()
         val recipe = currentRecipe()
         val createBody = sessionBody(ms, recipe = recipe.recipe)
@@ -3719,6 +3723,7 @@ class Controller internal constructor(
     }
 
     private fun refreshAutoCatalogForViewerRecipe() {
+        optionalAutoAttempt = null
         autoDesiredCandidate = null
         autoPreparing = false
         autoUpgradeSinceMs = null
@@ -3744,6 +3749,7 @@ class Controller internal constructor(
     }
 
     private fun resetAutoQualityBudgetForViewer() {
+        optionalAutoAttempt = null
         autoSwitchTimes.clear()
         autoLastSwitchMs = null
         autoUpgradeSinceMs = null
@@ -3816,6 +3822,7 @@ class Controller internal constructor(
                 sample.ageMs(monotonicNowMs()) > 15_000L) return
             autoLinkClaims[receipt] = Triple(sample.completedAtMs, true, current.id)
         }
+        optionalAutoAttempt = null
         reportAutoRecoveryCause(if (producer) tv.plurx.app.data.ReopenReason.Encode else tv.plurx.app.data.ReopenReason.Link)
         autoDesiredCandidate = next
         sessionId?.let { session -> autoRecoveryCause = AutoRecoveryCauseTicket(session, player,
@@ -3849,6 +3856,7 @@ class Controller internal constructor(
         if (autoDecodeQualityResponseUsed) return false
         val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return false
         autoDecodeQualityResponseUsed = true
+        optionalAutoAttempt = null
         autoRecoveryCause = AutoRecoveryCauseTicket(session, player, current.id, next.id,
             tv.plurx.app.data.ReopenReason.Decode, observedAt)
         autoDesiredCandidate = next
@@ -3974,10 +3982,10 @@ class Controller internal constructor(
             pick
         } ?: return
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
+        val attempt = requestOptionalAutoCandidate(chosen) ?: return
         autoDesiredCandidate = chosen
         if (!pressure) autoTransfersByPlayer[player]?.let { autoLastEvaluation = Triple(it, mediaMutationEpoch, now) }
         autoVoluntary = !pressure
-        playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
         autoPreparing = true
         autoPreparedTargetRevision = target.revision
         autoPreparedMutationEpoch = mediaMutationEpoch
@@ -3994,7 +4002,7 @@ class Controller internal constructor(
                 try {
                     if (!withTimeout(12_000) {
                         continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), true, continuousRequest)
-                    }) failAutoPreparation()
+                    }) failAutoPreparation(attempt)
                 } catch (_: TimeoutCancellationException) {
                     continuousAutoUncertain(continuousRequest, epoch, chosen.id)
                 }
@@ -4010,9 +4018,9 @@ class Controller internal constructor(
                         autoExecuting() &&
                         step.action.effectiveSelection?.candidateId == chosen.id) {
                         onPrepareAction(step.action)
-                    } else failAutoPreparation()
+                    } else failAutoPreparation(attempt)
                 }
-                else -> failAutoPreparation()
+                else -> failAutoPreparation(attempt)
             }
         }
     }
@@ -4175,17 +4183,17 @@ class Controller internal constructor(
      */
     private fun beginAutoBoundaryPreparation(chosen: tv.plurx.app.data.QualityCandidate, now: Long): Boolean {
         val currentSession = sessionId ?: return false
+        val executingRecipe = currentRecipe().recipe
+        val attempt = requestOptionalAutoCandidate(chosen) ?: return false
         val boundary = AutoBoundaryAttempt(player, currentSession, mediaMutationEpoch, chosen.id,
-            currentRecipe().recipe, playbackIntent.pendingQualityChange?.sequence, viewerTransportLifetime,
-            selectedAudio, selectedSubtitle, audioOffsetMs, autoDesiredCandidate,
-            playbackIntent.automaticCandidateId, playbackIntent.automaticCandidateHeight)
+            executingRecipe, playbackIntent.pendingQualityChange?.sequence, viewerTransportLifetime,
+            selectedAudio, selectedSubtitle, audioOffsetMs, attempt)
         autoBoundaryAttempt = boundary
         autoDesiredCandidate = chosen
         autoVoluntary = true
         autoPreparing = true
         autoPreparedTargetRevision = autoPresentationTarget?.revision
         autoPreparedMutationEpoch = mediaMutationEpoch
-        playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
         scope.launch {
             playbackControl.reportIntent()
             val step = playbackControl.awaitPreparedOffer(now)
@@ -4209,23 +4217,38 @@ class Controller internal constructor(
         return true
     }
 
-    /** Put Auto back where the boundary found it, if nothing newer owns it. */
-    private fun withdrawAutoBoundary(boundary: AutoBoundaryAttempt) {
-        if (autoBoundaryAttempt === boundary) autoBoundaryAttempt = null
-        if (autoDesiredCandidate?.id != boundary.candidateId) return
-        autoDesiredCandidate = boundary.previousCandidate
-        playbackIntent.requestAutomaticCandidate(boundary.previousId, boundary.previousHeight)
-        autoPreparing = false
-        playbackControl.reportEvidence()
+    /** Capture execution before publishing the independent optional target. */
+    private fun requestOptionalAutoCandidate(chosen: tv.plurx.app.data.QualityCandidate): OptionalAutoAttempt? {
+        // Its standing selection still belongs to the predecessor until the
+        // accepted ACK adopts execution. An optional offer cannot own it yet.
+        if (pendingPreparedControlHandoff != null) return null
+        return OptionalAutoAttempt.capture(playbackIntent, player, sessionId, mediaMutationEpoch,
+            autoActiveCandidateId, playbackControlSelection().quality, chosen.id, chosen.target_height)
+            ?.also { optionalAutoAttempt = it }
     }
 
-    private fun failAutoPreparation() {
+    /** Put Auto back where execution stood, only while this attempt owns it. */
+    private fun withdrawAutoBoundary(boundary: AutoBoundaryAttempt) {
+        settleOptionalAutoFailure(boundary.optional, blockTarget = false)
+    }
+
+    private fun failAutoPreparation(attempt: OptionalAutoAttempt? = optionalAutoAttempt) {
+        if (attempt != null) settleOptionalAutoFailure(attempt, blockTarget = true)
+    }
+
+    private fun settleOptionalAutoFailure(attempt: OptionalAutoAttempt, blockTarget: Boolean) {
+        if (optionalAutoAttempt !== attempt) return
+        val restored = attempt.restoreIfCurrent(playbackIntent,
+            player, sessionId, mediaMutationEpoch, autoActiveCandidateId)
+        // Even if a newer intent owns the wire, this ended attempt no longer
+        // owns pending policy. Clearing it cannot rewrite that newer choice.
+        optionalAutoAttempt = null
         autoBoundaryAttempt = null
-        autoDesiredCandidate?.let { autoBlockedUntil[it.id] = monotonicNowMs() + 300_000L }
+        if (restored && blockTarget) autoBlockedUntil[attempt.requestedId] = monotonicNowMs() + 300_000L
         autoDesiredCandidate = null
-        playbackIntent.requestAutomaticCandidate(null, null)
         autoPreparing = false
         autoUpgradeSinceMs = null
+        if (restored) playbackControl.reportEvidence()
     }
 
     private var continuousProbeLastMs: Long? = null
@@ -6133,6 +6156,7 @@ class Controller internal constructor(
                 !playbackControlBootstrapFence.isActive() || controlObservationIsClosed
             ) return
             pendingAcknowledgement = null
+            optionalAutoAttempt = null
             pendingPreparedControlHandoff = null
             pendingPreparedControlPlayer = null
             // The server has retired the predecessor. Stop its reporter without

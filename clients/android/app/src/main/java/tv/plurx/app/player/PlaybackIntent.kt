@@ -63,14 +63,36 @@ class PlaybackIntent(
     }
 
     @Synchronized
-    fun requestAutomaticCandidate(id: String?, height: Int?) {
+    fun requestAutomaticCandidate(id: String?, height: Int?): Long {
         automaticCandidateId = id
         automaticCandidateHeight = height
         automaticCandidateRevision += 1
+        return automaticCandidateRevision
     }
 
     @Synchronized
     internal fun automaticCandidateOwner(): Long = automaticCandidateRevision
+
+    @Synchronized
+    internal fun requestOptionalAutomaticCandidate(id: String, height: Int): Long? {
+        if (desiredQuality != PlaybackQuality.Auto || pendingQualityChange != null || retainedControlQuality != null)
+            return null
+        return requestAutomaticCandidate(id, height)
+    }
+
+    /** A failed optional target cannot erase the recipe that still executes. */
+    @Synchronized
+    internal fun restoreOptionalAutomaticCandidate(
+        expectedOwner: Long,
+        requestedId: String,
+        executing: QualitySelection.AutoCandidate?,
+    ): Boolean {
+        if (automaticCandidateRevision != expectedOwner || automaticCandidateId != requestedId ||
+            desiredQuality != PlaybackQuality.Auto || pendingQualityChange != null || retainedControlQuality != null
+        ) return false
+        requestAutomaticCandidate(executing?.candidateId, executing?.height)
+        return true
+    }
 
     /** Only a durably committed route may replace standing Auto's candidate. */
     @Synchronized
@@ -756,3 +778,49 @@ internal enum class PlaybackExitOrigin(val wire: String) {
 internal fun playbackExitDetail(origin: PlaybackExitOrigin, input: PlayerContractInput? = null,
     repeatCount: Int = 0): String =
     "origin=${origin.wire} input=${input?.contractName ?: "none"} repeat=${repeatCount.coerceIn(0, 9999)}"
+
+/** Execution authority captured before an optional Auto target is published. */
+internal class OptionalAutoAttempt private constructor(
+    private val incumbent: Any,
+    private val sessionId: String?,
+    private val mutationEpoch: Long,
+    val requestedId: String,
+    private val candidateOwner: Long,
+    private val executing: QualitySelection.AutoCandidate?,
+) {
+    companion object {
+        /** Unknown execution authority must never be published as unnamed Auto. */
+        fun capture(
+            intent: PlaybackIntent,
+            incumbent: Any,
+            sessionId: String?,
+            mutationEpoch: Long,
+            activeCandidateId: String?,
+            standing: QualitySelection,
+            requestedId: String,
+            requestedHeight: Int,
+        ): OptionalAutoAttempt? {
+            val executing = when (standing) {
+                is QualitySelection.AutoCandidate -> standing.takeIf { it.candidateId == activeCandidateId }
+                    ?: return null
+                QualitySelection.Auto -> if (activeCandidateId == null) null else return null
+                else -> return null
+            }
+            val owner = intent.requestOptionalAutomaticCandidate(requestedId, requestedHeight) ?: return null
+            return OptionalAutoAttempt(incumbent, sessionId, mutationEpoch, requestedId, owner, executing)
+        }
+    }
+
+    fun restoreIfCurrent(
+        intent: PlaybackIntent,
+        player: Any,
+        session: String?,
+        epoch: Long,
+        activeCandidateId: String?,
+    ): Boolean {
+        if (player !== incumbent || session != sessionId || epoch != mutationEpoch ||
+            activeCandidateId != executing?.candidateId
+        ) return false
+        return intent.restoreOptionalAutomaticCandidate(candidateOwner, requestedId, executing)
+    }
+}
