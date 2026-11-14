@@ -12,11 +12,7 @@ remaining milestones stay in the build handoff. The
 
 ## 1. Current boundary
 
-**CM4 trim fidelity (2026-11-13, qualification open):** the six-vector labels
-now use the L9 source-gamut palette; L8 MS also feeds the shared spatial
-weight, replacing the previous constant zero. CPU real-frame and independent synthetic evidence removes all
-observed pixels above0.05dE; every worsening coordinate remains preserved.
-[Root cause and remaining qualification](CM4-TRIM-FIDELITY.md).
+CM4 source-gamut/MS corrections: [qualification ledger](CM4-TRIM-FIDELITY.md).
 
 **CM4 active area (2026-11-09, merged #1481):** checked L5 offsets bound the
 CM4 detail filter to the uncropped native active rectangle, with vertical
