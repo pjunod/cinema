@@ -317,17 +317,74 @@ impl Rendition {
             deadline_ms,
             admitted,
             incarnation: incarnation.to_owned(),
-            successor: Arc::downgrade(successor),
+            claimant: HandoffClaimant::Rendition(Arc::downgrade(successor)),
             wanted,
         });
         fresh
     }
 
+    /// Ask this producer to hand its permit to its own viewer's processed
+    /// upgrade trial. A request for a staged successor, or for another trial,
+    /// is never replaced: one handoff at a time, and the staged one wins.
+    pub(super) fn request_trial_handoff(
+        &self,
+        claim: &Arc<TrialClaim>,
+        wanted: crate::admission::TranscodeResourceEstimate,
+    ) -> bool {
+        let mut slot = self.handoff.lock().expect("handoff lock");
+        if slot.as_ref().is_some_and(|request| request.until > Instant::now()) {
+            return false;
+        }
+        *slot = Some(HandoffRequest {
+            // A trial is not refreshed by a polling successor and has no
+            // deadline of its own: the claim's liveness and the viewer's
+            // runway bind it (see `live_handoff` and `bound_handoff`).
+            until: Instant::now(),
+            deadline_ms: i64::MAX,
+            admitted: Arc::clone(&claim.admitted),
+            incarnation: claim.incarnation.clone(),
+            claimant: HandoffClaimant::Trial(Arc::clone(claim)),
+            wanted,
+        });
+        true
+    }
+
+    /// Drop this trial's request, if it still owns the slot. A staged
+    /// successor that took over the same incarnation keeps its handoff.
+    pub(super) fn release_trial_claim(&self, claim: &Arc<TrialClaim>) {
+        let released = {
+            let mut slot = self.handoff.lock().expect("handoff lock");
+            let owned = slot.as_ref().is_some_and(|request| match &request.claimant {
+                HandoffClaimant::Trial(trial) => Arc::ptr_eq(trial, claim),
+                HandoffClaimant::Rendition(_) => false,
+            });
+            if owned {
+                *slot = None;
+            }
+            owned
+        };
+        if released {
+            self.kick();
+        }
+    }
+
     pub(super) fn live_handoff(&self) -> Option<HandoffRequest> {
         let mut request = self.handoff.lock().expect("handoff lock").as_ref()?.clone();
-        let successor = request.successor.upgrade()?;
-        if successor.closed.load(Relaxed) || successor.failure().is_some() {
-            return None;
+        match &request.claimant {
+            HandoffClaimant::Rendition(successor) => {
+                let successor = successor.upgrade()?;
+                if successor.closed.load(Relaxed) || successor.failure().is_some() {
+                    return None;
+                }
+            }
+            HandoffClaimant::Trial(claim) => {
+                if claim.is_closed() {
+                    return None;
+                }
+                // Unstaged: liveness and runway (`bound_handoff`). Staged: the
+                // preparation slot, which owns its own deadline and abort.
+                return Some(request);
+            }
         }
         let now = Instant::now();
         let remaining = request
@@ -358,6 +415,13 @@ impl Rendition {
         let released = {
             let mut slot = self.handoff.lock().expect("handoff lock");
             match slot.as_ref() {
+                // A trial is bound by its claim, not the preparation slot: a
+                // successor settling or aborting here does not end it.
+                Some(request)
+                    if matches!(&request.claimant, HandoffClaimant::Trial(claim) if !claim.is_staged()) =>
+                {
+                    false
+                }
                 Some(request) if Some(request.incarnation.as_str()) != live_incarnation => {
                     *slot = None;
                     true

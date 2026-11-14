@@ -233,7 +233,7 @@ async fn a_late_qualification_resumes_once_with_fresh_authority_and_keeps_its_re
         snapshot.file.size,snapshot.file.mtime,snapshot.generation,"metadata:fixture");
     let encoded = crate::transcode::pending_fel_qualification_error(pending);
     assert_eq!(super::processed_upgrade::run_upgrade_with(&fixture.state,&intent,&run,
-        |_,_| std::future::ready(Err(encoded))).await,"qualification_pending");
+        move |_,_| std::future::ready(Err(encoded.clone()))).await,"qualification_pending");
     drop(run);
     assert!(fixture.state.transcode.validate_candidate_planning_binding(&intent.request,None,None).await.is_err(),
         "reusing the old intent would fail normal binding validation");
@@ -283,7 +283,7 @@ async fn a_viewer_change_cancels_a_pending_receipt_check_before_it_can_resume() 
     let encoded=crate::transcode::pending_fel_qualification_error(super::processed_upgrade::pending_qualification_fixture(
         intent.request.file_id,snapshot.file.size,snapshot.file.mtime,snapshot.generation,"metadata:fixture"));
     assert_eq!(super::processed_upgrade::run_upgrade_with(&fixture.state,&intent,&run,
-        |_,_|std::future::ready(Err(encoded))).await,"qualification_pending");drop(run);
+        move |_,_|std::future::ready(Err(encoded.clone()))).await,"qualification_pending");drop(run);
     let recipe:RemoteStartRequest=serde_json::from_str(&route.recipe_json).expect("recipe");
     let delivered=crate::playback_control::EffectiveSelection::from_recipe(&recipe,1080,Some("dolby_vision".into()));
     let (started_tx,started_rx)=tokio::sync::oneshot::channel();

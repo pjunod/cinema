@@ -598,10 +598,29 @@ async fn new_start_wants_permit(shared: &Shared, rendition: &Rendition, belief: 
 async fn bound_handoff(shared: &Shared, rendition: &Rendition) -> Option<HandoffRequest> {
     rendition.recipe.encoding.as_ref()?;
     let request = rendition.live_handoff()?;
-    let successor_live = request
-        .successor
-        .upgrade()
-        .is_some_and(|successor| !successor.closed.load(Relaxed));
+    if let HandoffClaimant::Trial(claim) = &request.claimant {
+        let claim = Arc::clone(claim);
+        let bound = if claim.is_staged() {
+            staged_trial_bound(shared, rendition, &claim.incarnation).await
+        } else {
+            trial_claim_bound(shared, rendition, &claim).await
+        };
+        if bound {
+            return Some(request);
+        }
+        // Runway spent, a seek past it, another reader, or the viewer's
+        // session ended: the incumbent is released at once, and the closed
+        // claim tells the upgrade to give back what it took.
+        claim.close();
+        rendition.release_trial_claim(&claim);
+        return None;
+    }
+    let successor_live = match &request.claimant {
+        HandoffClaimant::Rendition(successor) => successor
+            .upgrade()
+            .is_some_and(|successor| !successor.closed.load(Relaxed)),
+        HandoffClaimant::Trial(_) => false,
+    };
     let bound = successor_live && {
         let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
         let sessions = shared.sessions.lock().await;
@@ -625,31 +644,130 @@ async fn bound_handoff(shared: &Shared, rendition: &Rendition) -> Option<Handoff
     }
 }
 
+/// A trial claim stays bound while every reader of this rendition is a live
+/// session of the claim's own playback, and the published runway past that
+/// viewer's playhead still covers the claim's reserve: what a failed trial
+/// needs to give the permit back and let this producer re-admit.
+pub(super) async fn trial_claim_bound(shared: &Shared, rendition: &Rendition, claim: &TrialClaim) -> bool {
+    let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
+    if readers.is_empty() {
+        return false;
+    }
+    let playhead_ms = {
+        let sessions = shared.sessions.lock().await;
+        let mut playhead: Option<i64> = None;
+        for id in &readers {
+            let Some(session) = sessions.get(id) else {
+                return false;
+            };
+            if !session.renewable() || session.playback_id != claim.playback_id {
+                return false;
+            }
+            if let (Some(demand), Some(observed)) =
+                (session.last_control_snapshot.as_ref(), session.control_observed_at)
+            {
+                let at = crate::playback_control::rolling_estimated_position_ms(
+                    demand,
+                    observed.elapsed(),
+                );
+                playhead = Some(playhead.map_or(at, |earliest| earliest.min(at)));
+            }
+        }
+        match playhead {
+            Some(playhead) => playhead.max(0),
+            None => return false,
+        }
+    };
+    trial_runway_ms(rendition, playhead_ms).await >= claim.reserve_ms
+}
+
+/// A staged trial's handoff is bound exactly as a staged successor's: some
+/// reader of this rendition is being replaced by that incarnation now.
+async fn staged_trial_bound(shared: &Shared, rendition: &Rendition, incarnation: &str) -> bool {
+    let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
+    let sessions = shared.sessions.lock().await;
+    readers.iter().any(|id| {
+        sessions.get(id).is_some_and(|session| {
+            session.tombstone.is_none()
+                && session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .live_preparation_incarnation()
+                    == Some(incarnation)
+        })
+    })
+}
+
+/// Published media contiguous from `playhead_ms`, in milliseconds.
+async fn trial_runway_ms(rendition: &Rendition, playhead_ms: i64) -> i64 {
+    let segment_ms = rendition.seconds_per_segment * 1_000.0;
+    if !segment_ms.is_finite() || segment_ms <= 0.0 {
+        return 0;
+    }
+    let index = (playhead_ms as f64 / segment_ms) as u32;
+    let manifest = rendition.manifest.lock().await;
+    let end = manifest.next_gap(index).unwrap_or(manifest.len() as u32);
+    ((f64::from(end) * segment_ms) as i64).saturating_sub(playhead_ms)
+}
+
+/// What a yield woke: the staged successor rendition, or a trial's claim.
+enum HandoffWoken {
+    Rendition(Arc<Rendition>),
+    Trial,
+}
+
 /// Reserve the successor's capacity before this producer's permit is
 /// released, so nothing else can start in the gap before it retries.
-fn reserve_for_successor(request: &HandoffRequest) -> Option<Arc<Rendition>> {
-    let successor = request.successor.upgrade()?;
-    if let Some(encoding) = successor.recipe.encoding.as_ref() {
-        let token = encoding
-            .admissions
-            .reserve_for_handoff(&request.wanted, HANDOFF_RESERVATION_TTL);
-        encoding.accept_handoff_claim(token, Arc::clone(&request.admitted));
+fn reserve_for_successor(rendition: &Rendition, request: &HandoffRequest) -> Option<HandoffWoken> {
+    match &request.claimant {
+        HandoffClaimant::Rendition(successor) => {
+            let successor = successor.upgrade()?;
+            if let Some(encoding) = successor.recipe.encoding.as_ref() {
+                let token = encoding
+                    .admissions
+                    .reserve_for_handoff(&request.wanted, HANDOFF_RESERVATION_TTL);
+                encoding.accept_handoff_claim(token, Arc::clone(&request.admitted));
+            }
+            Some(HandoffWoken::Rendition(successor))
+        }
+        HandoffClaimant::Trial(claim) => {
+            if claim.is_closed() || claim.is_staged() {
+                return None;
+            }
+            let encoding = rendition.recipe.encoding.as_ref()?;
+            // Held for the claim's reserve: the trial plans before it admits,
+            // and an expired reservation would hand the capacity to whoever
+            // asked first. The claim's drop returns it unused.
+            let token = encoding.admissions.reserve_for_handoff(
+                &request.wanted,
+                Duration::from_millis(claim.reserve_ms.max(0) as u64),
+            );
+            *claim.token.lock().expect("trial claim token") = Some(token);
+            claim.ready.notify_waiters();
+            Some(HandoffWoken::Trial)
+        }
     }
-    Some(successor)
 }
 
 fn finish_handoff_yield(
     shared: &Arc<Shared>,
     rendition: &Rendition,
-    successor: Option<Arc<Rendition>>,
+    woken: Option<HandoffWoken>,
 ) {
+    let (claimant, successor) = match &woken {
+        Some(HandoffWoken::Rendition(successor)) => ("prepared successor", successor.key.as_str()),
+        Some(HandoffWoken::Trial) => ("processed upgrade trial", "trial"),
+        None => ("prepared successor", "gone"),
+    };
     tracing::info!(
         target: "plurxd::vodserve",
         rendition = %rendition.key,
-        successor = successor.as_ref().map_or("gone", |successor| successor.key.as_str()),
+        claimant,
+        successor,
         "gave this viewer's encoder permit to its prepared successor"
     );
-    if let Some(successor) = successor {
+    if let Some(HandoffWoken::Rendition(successor)) = woken {
         successor.kick();
     }
     shared.kick_all();
@@ -836,7 +954,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
                 drop(manifest);
                 if matches!(step, Step::Restart { .. }) {
-                    let successor = handoff.as_ref().map(reserve_for_successor);
+                    let successor = handoff.as_ref().map(|request| reserve_for_successor(rendition, request));
                     match perform_driver_step(shared, rendition, step).await {
                         Ok(_) => {}
                         Err(error) => {
@@ -991,7 +1109,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 let successor = handoff
                     .as_ref()
                     .filter(|_| yielding_for_handoff)
-                    .map(reserve_for_successor);
+                    .map(|request| reserve_for_successor(rendition, request));
                 // Epoch and handoff decisions are committed above, as for
                 // Start/Restart. Join only after releasing the publication lock.
                 drop(manifest);

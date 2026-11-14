@@ -101,8 +101,150 @@ struct HandoffRequest {
     deadline_ms: i64,
     admitted: Arc<std::sync::atomic::AtomicBool>,
     incarnation: String,
-    successor: Weak<Rendition>,
+    claimant: HandoffClaimant,
     wanted: crate::admission::TranscodeResourceEstimate,
+}
+
+/// Who a predecessor's permit is being handed to.
+#[derive(Clone)]
+enum HandoffClaimant {
+    /// The staged prepared successor rendition (bound through the
+    /// predecessor's preparation slot).
+    Rendition(Weak<Rendition>),
+    /// This viewer's own processed-upgrade trial. Before staging it is bound
+    /// through the claim and the viewer's playback and runway, never the
+    /// slot; once its successor is staged it is bound by the slot like any
+    /// staged successor's handoff.
+    Trial(Arc<TrialClaim>),
+}
+
+/// A processed upgrade trial's claim on its own viewer's incumbent encoder
+/// permit. Held by [`IncumbentPermitClaim`]; the request lapses when it is
+/// dropped or closed, and the incumbent re-admits through the existing expiry.
+pub(crate) struct TrialClaim {
+    playback_id: String,
+    incarnation: String,
+    /// Published runway the incumbent must keep past the viewer while it is
+    /// parked: what a failed trial needs to give the permit back and let the
+    /// incumbent re-admit (`PROCESSED_UPGRADE_TRIAL_BUDGET + QUEUE_WAIT`).
+    reserve_ms: i64,
+    admitted: Arc<std::sync::atomic::AtomicBool>,
+    token: StdMutex<Option<u64>>,
+    ready: tokio::sync::Notify,
+    closed: std::sync::atomic::AtomicBool,
+    /// The trial's successor was staged under this incarnation: from now the
+    /// preparation slot binds the handoff, until commit, abort or rejection.
+    staged: std::sync::atomic::AtomicBool,
+}
+
+impl TrialClaim {
+    #[cfg(test)]
+    pub(crate) fn reserved_for_test(token: u64) -> Arc<Self> {
+        Arc::new(Self {
+            playback_id: "test-playback".into(),
+            incarnation: "test-incarnation".into(),
+            reserve_ms: 0,
+            admitted: Arc::new(AtomicBool::new(false)),
+            token: StdMutex::new(Some(token)),
+            ready: Notify::new(),
+            closed: AtomicBool::new(false),
+            staged: AtomicBool::new(false),
+        })
+    }
+
+    fn is_staged(&self) -> bool {
+        self.staged.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The capacity reservation the incumbent left for this trial, once it yielded.
+    pub(crate) fn token(&self) -> Option<u64> {
+        *self.token.lock().expect("trial claim token")
+    }
+
+    /// The incumbent stopped being bound (runway, readers, seek, session end).
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The trial took its bundle with the reservation: the request is then
+    /// kept to its deadline rather than its short refresh lifetime.
+    pub(crate) fn mark_admitted(&self) {
+        self.admitted.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::Release);
+        self.ready.notify_waiters();
+    }
+
+    /// Resolves once the claim is closed.
+    pub(crate) async fn closed(&self) {
+        loop {
+            let notified = self.ready.notified();
+            if self.is_closed() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait until the incumbent yielded (a token is present), the claim
+    /// closed, or `deadline` passed.
+    pub(crate) async fn wait_ready(&self, deadline: tokio::time::Instant) -> Option<u64> {
+        loop {
+            let notified = self.ready.notified();
+            if let Some(token) = self.token() {
+                return Some(token);
+            }
+            if self.is_closed() {
+                return None;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.token();
+            }
+        }
+    }
+}
+
+/// Owner of a [`TrialClaim`]. Dropping it releases the incumbent from the
+/// trial (unless a staged successor has taken over the same incarnation's
+/// handoff) and returns any reservation nobody admitted with.
+pub(crate) struct IncumbentPermitClaim {
+    claim: Arc<TrialClaim>,
+    incumbent: Weak<Rendition>,
+    admissions: crate::admission::Admissions,
+}
+
+impl IncumbentPermitClaim {
+    pub(crate) fn claim(&self) -> &Arc<TrialClaim> {
+        &self.claim
+    }
+
+    /// The successor was staged under the claim's incarnation: the incumbent
+    /// stays parked under the preparation slot's binding, which commit, abort
+    /// and rejection already settle.
+    pub(crate) fn hand_to_staging(self) {
+        self.claim
+            .staged
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for IncumbentPermitClaim {
+    fn drop(&mut self) {
+        if self.claim.is_staged() {
+            return;
+        }
+        self.claim.close();
+        if !self.claim.admitted.load(std::sync::atomic::Ordering::Acquire) {
+            if let Some(token) = self.claim.token() {
+                self.admissions.release_reservation(token);
+            }
+        }
+        if let Some(incumbent) = self.incumbent.upgrade() {
+            incumbent.release_trial_claim(&self.claim);
+        }
+    }
 }
 
 /// How long a rendition with no attached sessions is kept warm before an
