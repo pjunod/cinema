@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Signed node-to-node requests (`PeerTransport`) reuse connections: the membership manager owns
+  one pooled client with a two-second connect bound, and every peer transport takes it. Before, each of about twenty
+  call sites built its own client — the peer-status loop a new one every three seconds — so
+  requests redialled, and a peer that dropped packets consumed the caller's whole deadline
+  (cluster layer audit, item A5).
 - Linearizable reads no longer time out when one TCP SYN is lost: the vendored Hiqlite Raft client
   reuses an idle connection per voter instead of dialing a new TCP + WebSocket handshake inside
   every 800 ms leadership read-confirm (Hiqlite patch 28,
