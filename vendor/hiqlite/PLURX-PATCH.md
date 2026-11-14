@@ -1,8 +1,8 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-seven patches for clustered deployments. An
-upstream release can retire the eight generic bugs and the one dependency-only
+Apache-2.0. Plurx carries twenty-eight patches for clustered deployments. An
+upstream release can retire the nine generic bugs and the one dependency-only
 constraint; it cannot retire the eighteen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -38,6 +38,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
 | 27 | Applied mark: registered-table revisions, applied index and image generation, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
+| 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -431,6 +432,32 @@ made-up URL and prevents the fork from being declared fully tracked.
   `src/config_toml.rs`, `src/store/state_machine/sqlite/writer.rs`,
   `src/store/state_machine/sqlite/state_machine.rs`, `src/store/mod.rs`,
   `src/app_state.rs`, `src/client/mgmt.rs`, `src/query/mod.rs`, `src/lib.rs`.
+- The Raft client factory reuses connections. OpenRaft 0.9.25's leadership
+  read-confirm (every `ensure_linearizable`, so every `query_consistent*`)
+  calls `new_client` per voter per read and drops the client after one empty
+  append; OpenRaft's contract is that `new_client` does not create a
+  connection. Upstream's factory dialed a TCP + WebSocket handshake for each
+  client and closed it on drop, so the handshake ran inside the read's
+  heartbeat-interval budget, where one lost SYN outlasts the budget because
+  TCP's initial retransmission timeout is one second (fleet capture
+  2026-11-14: ~223 dials/s leader to one voter; 32 of 33 originating timeouts
+  followed a lost SYN by 800–801 ms; `docs/cluster/RAFT-READ-CONFIRM-DIAL-RCA-2026-11-14.md`).
+  A dropped client now parks its connection in the factory's
+  `IdleConnections` when no reset, cancellation, queued request or snapshot
+  attempt touched it, and the next `new_client` for the same group and target
+  leases it. A lease is exclusive, so each connection still carries one
+  client's RPCs; at most eight are kept per target. The parked supervisor owns
+  its 30 s idle deadline and closes its socket when it passes, and it exits
+  instead of reconnecting when its socket ends; nothing is leased after Raft
+  stops. No timeout, heartbeat or retry changes. Tests:
+  `raft_client::tests::read_confirm_cycle_reuses_one_socket_across_answered_rpcs`,
+  `dropped_healthy_client_is_leased_without_a_new_socket`,
+  `client_reset_during_lease_is_closed_not_reused`,
+  `timed_out_rpc_closes_its_connection_instead_of_parking_it`,
+  `parking_beyond_the_per_target_cap_closes_the_extra_connection`,
+  `parked_supervisor_closes_its_socket_at_the_idle_deadline`,
+  `parked_connection_whose_socket_ends_exits_and_is_not_leased`.
+  Files: `src/network/raft_client.rs`, `src/store/mod.rs`.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
 was accepted on 2026-10-05 as
@@ -480,7 +507,7 @@ patch description remains the historical/local contract; row 19 stays
 `generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19 and 26: the
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 28: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
 (rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25 and 27) still needs a patch. Their
