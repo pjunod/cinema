@@ -1,6 +1,7 @@
 package tv.plurx.app.ui.components
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -34,6 +35,30 @@ class MediaFactsTest {
             appliedOperations = listOf("Bt709Gamma24Conversion", "DisplayTargetMapping:100"))
         assertTrue(playerMediaFacts(null, null, delivered = "sdr", effectiveProcessing = sdr,
             activeGeneration = generation).any { it.kind == MediaFactKind.ToneMapping })
+    }
+
+    @Test
+    fun nativeDynAndServerToneMappingDescribeDifferentAppliedPaths() {
+        val file = MediaFileDto(id = 8, filename = "native-p8.mp4", hdr = "dolby_vision",
+            hdr_format = "Dolby Vision Profile 8")
+        val native = tv.plurx.app.data.PlaybackEnhancement(
+            listOf(tv.plurx.app.data.EnhancementBadge.DYN), emptyList(),
+        )
+        val direct = playerMediaFacts(file, null, delivered = "dolby_vision", rendered = "dolby_vision",
+            selectedCodecMime = "video/dolby-vision", enhancement = native)
+        assertEquals(listOf("DYN"), direct.filter { it.kind == MediaFactKind.Enhancement }.map { it.label })
+        assertTrue(direct.none { it.kind == MediaFactKind.ToneMapping })
+
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val report = tv.plurx.app.data.EffectiveProcessingReport(generation, true, false,
+            listOf("RpuColorConversion", "TargetMapping", "DisplayTargetMapping:1000"))
+        val processed = native.copy(requiresEffectiveProcessing = true)
+        fun mapped(active: String) = playerMediaFacts(file, null, delivered = "hdr10", rendered = "hdr10",
+            selectedCodecMime = "video/hevc", enhancement = processed,
+            effectiveProcessing = report, activeGeneration = active)
+        assertEquals(listOf("DYN"), mapped(generation).filter { it.kind == MediaFactKind.Enhancement }.map { it.label })
+        assertEquals(listOf("Tone mapping"), mapped(generation).filter { it.kind == MediaFactKind.ToneMapping }.map { it.label })
+        assertTrue(mapped("replacement").none { it.kind in setOf(MediaFactKind.Enhancement, MediaFactKind.ToneMapping) })
     }
 
     @Test
@@ -397,7 +422,7 @@ class MediaFactsTest {
         val audio = AudioTrack(index = 0, codec = "eac3", channels = 6, default = true)
         val facts = playerMediaFacts(
             dolbyVisionP7(), audio, delivered = DynamicRange.DOLBY_VISION, rendered = DynamicRange.DOLBY_VISION,
-            enhancement = enhancement(requires = false),
+            enhancement = enhancement(requires = false), selectedCodecMime = "video/dolby-vision",
         )
         assertEquals(
             listOf(MediaFactKind.Resolution, MediaFactKind.DynamicRange, MediaFactKind.Enhancement,
@@ -409,6 +434,18 @@ class MediaFactsTest {
         val pills = facts.filter { it.kind == MediaFactKind.Enhancement }
         assertEquals(listOf("FEL", "DYN"), pills.map { it.chipText })
         assertTrue(pills.all { it.state == FactState.Active })
+    }
+
+    @Test
+    fun nativePillsAndInfoAgreeWhenTheDecoderFallsBackToHdr10() {
+        val native = enhancement(requires = false)
+        val facts = playerMediaFacts(dolbyVisionP7(), null,
+            delivered = DynamicRange.DOLBY_VISION, rendered = DynamicRange.HDR10,
+            enhancement = native, selectedCodecMime = "video/hevc")
+        assertFalse(facts.any { it.kind == MediaFactKind.Enhancement && it.label == "DYN" })
+        val shown = native.shown(null, null, DynamicRange.DOLBY_VISION, DynamicRange.HDR10, "video/hevc")
+        assertFalse(checkNotNull(enhancementSummary(shown)).contains("DYN"))
+        assertTrue(checkNotNull(enhancementLines(shown)).any { it.contains("not active") })
     }
 
     @Test
