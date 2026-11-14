@@ -1,0 +1,113 @@
+# The merge train — how a pull request lands on `main`
+
+**Status:** built (the train service is in [noirr/ci-fleet](http://forge.lan:3000/noirr/ci-fleet), `ci-fleet train`); off until the owner switches it on · **Updated:** 2026-11-13 · **Owner:** Codex continuation of Claude session 01BCWLA2
+
+Any agent — Claude, GPT, OpenRouter — or person can follow this page. It says
+how a pull request into `main` lands with the train **off** and **on**, the
+four controls, and what the bot's comment on your PR means.
+
+## Is it on?
+
+One switch: the repository Actions variable `MERGE_TRAIN`. `on` means on;
+unset or any other value means off. `ci-fleet train status` (from a ci-fleet
+checkout) prints it with the queue; every bot comment also names the mode.
+Only the owner flips it (`ci-fleet train on` / `ci-fleet train off`).
+
+## Train off — what you do today
+
+Nothing changes: open your PR, take `WIP:` off the title when it is ready, the
+`main fast lane` runs on it, and you merge it yourself once its
+`Main promotion gate` passes (AGENTS.md "Large efforts" for the merge message).
+The train service writes nothing to your PR while it is off.
+
+## Train on — what you do instead
+
+1. **Open your PR.** If its title has no `WIP:`, the bot adds it and posts one
+   comment (it edits that comment from then on; it never adds a second).
+   While it is a draft only the `paperwork` job runs.
+2. **Take `WIP:` off when you want it merged.** The PR joins the queue. Only a
+   PR the bot has already seen as a draft can board: a PR that is ready when
+   the bot first sees it — including every ready PR at the moment the switch
+   goes on — is drafted, never boarded, so you take `WIP:` off again.
+3. **Do not merge it yourself.** The train takes up to eight queued PRs in
+   order, merges them onto `main` in a branch `train/<n>`, and opens a pull
+   request for that branch. With the switch on, the lane's heavy jobs run on
+   the train PR only. Ordinary ready PRs still run paperwork and lightweight
+   scope selection; their heavy checks wait for the tree the train will land.
+4. **Green:** the train PR's run succeeded and its `Main promotion gate` job
+   passed (a run that skipped the gate is not green: the train halts). The bot
+   merges each PR through its own PR, in order, pinned to the commit that was
+   tested, and after each merge checks that `main` has exactly the tree tested
+   for the PRs so far; the first mismatch (someone merged into `main` meanwhile)
+   halts the train before anything else lands. Your PR shows as merged; the
+   train PR is closed.
+5. **Red:** the bot re-runs only the failed jobs on `main` alone. If they fail
+   there too, with the same failure lines, the failure was already on `main`:
+   the train lands anyway and the bot opens one issue for it (if `main` alone
+   fails differently, the train halts for a person to look). Otherwise it
+   narrows the failure down to the PR that caused it (re-running only those
+   jobs), re-runs them once more on that tree to rule out a flake, then puts
+   `WIP:` back on that PR with a comment linking the failing job's log, and
+   lands the rest after they pass the whole lane again without it. A failure
+   that does not reproduce evicts nobody; the train is rebuilt.
+   **Rust unit-stage exception:** its own verdict already checks failed tests
+   at the merge base. If the final `Rust unit verdict` fails, the train halts
+   for inspection. A main-alone content selector has no diff and may select
+   no tests; that empty result must never authorize an eviction or landing.
+   Automated unit-stage bisection waits until probes can carry and authenticate
+   the original exact failing test plan. Passing unit stages work normally;
+   there is no blanket unit-suite retry.
+6. **Conflicts:** a PR that does not merge onto `main` plus the PRs ahead of it
+   gets `WIP:` back and a comment naming what it conflicts with.
+
+Pushing to a PR that is on a running train is allowed; the train is rebuilt
+with your new commit before anything lands.
+
+## The four controls
+
+| Control | Effect |
+|---|---|
+| `WIP:` at the start of the title | A draft. Remove it to ask for a merge; put it back to leave the queue or a running train (a running train then lands without you). |
+| label `hold` | Keeps an undrafted PR out of the train until you remove the label. |
+| label `train:solo` | A hotfix: it goes next as a train of one, ahead of the queue. It does not cancel a running train, and it runs the same lane. The comment records who set the label. |
+| `MERGE_TRAIN` (owner only) | `on` / off, above. Switching off lets a running train finish and land, then nothing more boards. |
+
+## The bot comment
+
+The first line gives the mode, the PR's owner and, for a hotfix, who set
+`train:solo`. **State** is one of:
+
+| State | Meaning |
+|---|---|
+| drafted | Seen as a draft. Remove `WIP:` when ready. "Switched on while this PR was ready" means it was drafted by the rollout rule. |
+| queued, position k of m | Waiting for a train. |
+| ready, held / waiting for the forge to report it mergeable | Not boarding: remove `hold`, or resolve the conflict with `main`. |
+| on merge train n (phase) · run | Being tested with the PRs ahead of it; the link is the lane run. |
+| landed by merge train n | Merged. |
+| bounced: … | Back to you with the reason (conflict, or the failing job's log). Fix it and remove `WIP:` again. |
+| halted: … | The train stopped itself (for instance `main` did not end up with the tested tree). Nothing lands until the owner runs `ci-fleet train resume`. |
+
+## How the lane knows
+
+The lightweight scope job passes `vars.MERGE_TRAIN` to Python for an exact
+comparison. Forgejo expression string comparisons ignore case, so job-level
+`== 'on'` would incorrectly enable train-only lanes for `ON` while the service
+remained off. Only exact `on` switches off ordinary PRs' heavy scope outputs;
+`Main promotion gate` follows the resulting `run_lane` output. A train PR's head starts with `train/` and
+its author is the bot (`vars.MERGE_TRAIN_BOT`, default `train-bot`). The bot's
+re-runs of only some jobs are train PRs too, with a `Train-Jobs:` line in the
+description; `validation/merge_train.py` turns that line into the scope
+outputs, and the promotion gate does not run on them. Rust compile and Rust
+unit fan-out are separate selectable stages: a compile probe does not rerun
+units, and a unit probe still runs its content selector on an empty main diff.
+Selected probe jobs may run when their unrequested preflight is skipped;
+ordinary lanes still require preflight success before allocating compile work. The train lands
+through pull requests and never pushes to `main`. `paperwork` never fixes a
+bot-authored `train/` head in place (it fails instead); a `train/` branch of
+anyone else is an ordinary PR and keeps the auto-fix.
+
+One limit to know: a probe on `main` alone has an empty diff, so a job that
+decides from the diff what to check (the worker controller proof, the formal
+mapping, `web-types --base`, the Rust unit content selector) can pass there vacuously. Such a failure is then
+treated as caused by the train and bisected; the PR whose diff triggers the
+failing check is the one returned, as its own lane run would have failed too.
