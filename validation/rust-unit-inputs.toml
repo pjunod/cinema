@@ -90,6 +90,19 @@ reason = "The process-launch census walks the src trees of DAEMON_CRATES."
 [[dynamic]]
 crate = "plurx-core"
 file = "crates/plurx-core/src/process/census.rs"
+function = "every_production_descriptor_install_uses_the_single_builder"
+reads = [
+    "crates/plurx-core/src/**",
+    "crates/plurxd/src/**",
+    "crates/plurx-pgs/src/**",
+    "crates/plurx-compat-plex/src/**",
+]
+tests = ["process::census::every_production_descriptor_install_uses_the_single_builder"]
+reason = "The descriptor-boundary census resolves workspace paths and inspects all DAEMON_CRATES source trees."
+
+[[dynamic]]
+crate = "plurx-core"
+file = "crates/plurx-core/src/process/census.rs"
 function = "clippy_refuses_every_spawning_method_outside_tests"
 reads = ["clippy.toml"]
 tests = ["process::census::clippy_refuses_every_spawning_method_outside_tests"]

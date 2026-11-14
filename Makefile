@@ -1513,12 +1513,6 @@ library-rows-browser-check: ## Test grouped library rows with the provisioned Pl
 		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
 		--test tests/web/library-rows.browser.cjs
 
-.PHONY: reader-layout-browser-check
-reader-layout-browser-check: ## Test ebook reader layout in the provisioned Playwright browser
-	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
-		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
-		--test tests/web/reader-layout.browser.cjs
-
 .PHONY: subtitle-generation-browser-check
 subtitle-generation-browser-check: ## Run subtitle setup and attached playback regressions in provisioned Chromium
 	@set -eu; \
