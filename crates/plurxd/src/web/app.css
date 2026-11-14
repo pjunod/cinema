@@ -1616,7 +1616,7 @@
   .vbadge.hdr{color:#12b3a6;border-color:color-mix(in srgb,#12b3a6 48%,transparent);background:color-mix(in srgb,#12b3a6 14%,transparent)}
   .vbadge.dv{color:#c99a2b;border-color:color-mix(in srgb,#c99a2b 52%,transparent);background:color-mix(in srgb,#c99a2b 15%,transparent)}
   .vbadge.audio{color:#7f8fe0;border-color:color-mix(in srgb,#7f8fe0 46%,transparent);background:color-mix(in srgb,#7f8fe0 14%,transparent)}
-  .vbadge.enh{color:color-mix(in srgb,var(--enhance) 74%,var(--text));border-color:color-mix(in srgb,var(--enhance) 50%,transparent);background:color-mix(in srgb,var(--enhance) 14%,transparent)}
+  .vbadge.enh,.vbadge.tonemap{color:color-mix(in srgb,var(--enhance) 74%,var(--text));border-color:color-mix(in srgb,var(--enhance) 50%,transparent);background:color-mix(in srgb,var(--enhance) 14%,transparent)}
   /* Downgraded: the source grade named on the chip is NOT what is on screen.
      Keeps the coloured border so it still reads as the same badge, drops the
      tint, and dims the icon and the source half — the "→ SDR" suffix stays
