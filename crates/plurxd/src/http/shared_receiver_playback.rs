@@ -3567,6 +3567,30 @@ mod outage_policy_tests {
         );
     }
 
+    /// An empty exact read inside the owner's own lease can only be a
+    /// non-temporal fact (a revoked grant, a logout, a replaced owner): it
+    /// revokes at once. Only after the lease has passed is it unknown.
+    #[test]
+    fn receiver_absence_inside_the_lease_is_affirmative_and_after_it_unknown() {
+        let owner = |now_ms, lease_expires_at_ms| {
+            plurx_core::sharing_receiver_sessions::ReceiverSourceOwner {
+                incarnation_id: uuid::Uuid::nil(),
+                session_id: uuid::Uuid::nil(),
+                owner_node_id: String::new(),
+                owner_epoch: 1,
+                request_id: String::new(),
+                lease_expires_at_ms,
+                now_ms,
+            }
+        };
+        assert_eq!(
+            absence(&owner(1_000, 30_000)),
+            ReceiverStartError::Unresolved
+        );
+        assert_eq!(absence(&owner(30_000, 30_000)), ReceiverStartError::Unknown);
+        assert_eq!(absence(&owner(31_000, 30_000)), ReceiverStartError::Unknown);
+    }
+
     /// A Source that is unreachable or busy is unavailable, never a refusal
     /// that retires the viewer's session.
     #[test]
