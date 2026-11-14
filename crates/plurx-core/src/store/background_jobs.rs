@@ -510,21 +510,31 @@ pub(super) const JOB_JSON: &str = r#"json_object(
     'created_at_ms', created_at_ms, 'updated_at_ms', updated_at_ms
 )"#;
 
-pub(super) const CLAIM_SQL: &str = concat!(
-    r#"
-UPDATE background_jobs SET
-  failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
-  attempt_errors = CASE WHEN state = 'running' THEN
-    CASE WHEN length(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired') <= 2048 THEN attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired' ELSE 'history_compacted,' || substr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), instr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), ',') + 1) END ELSE attempt_errors END,
-  state = 'running', owner_node_id = json_extract($1, '$.node_id'),
-  owner_boot_id = json_extract($1, '$.boot_id'), claim_id = json_extract($1, '$.claim_id'),
-  fence = fence + 1, revision = revision + 1,
-  lease_expires_ms = json_extract($1, '$.now_ms') + 30000,
-  updated_at_ms = json_extract($1, '$.now_ms')
-WHERE id = json_extract($1, '$.job_id')
+// The claim statement's WHERE clause, one fragment per predicate group
+// (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md §3.1). `CLAIM_SQL` is the
+// authority and is assembled from these fragments verbatim; the local claim
+// verdict and the candidate listing are assembled from the same fragments, so
+// neither can drift from what the statement admits. Every fragment reads the
+// claimed row as the unaliased `background_jobs` and the request as `$1`
+// (`node_id`, `now_ms` and, in the identity and ledger groups, the claim's own
+// fields). The source fragments take the job id expression as `$job`: the
+// statement and the verdict bind it to the request's `job_id`, which SQLite
+// pushes into every branch of the resource view; a listing binds the row.
+
+/// The CAS identity: the job, the revision the claimant saw, kind and payload.
+macro_rules! claim_identity {
+    () => {
+        r#"id = json_extract($1, '$.job_id')
   AND revision = json_extract($1, '$.expected_revision')
-  AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
-  AND (kind!='dv_title_scan' OR EXISTS(SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+  AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')"#
+    };
+}
+
+/// Per-kind demand and configuration admission.
+macro_rules! claim_kind_demand {
+    () => {
+        concat!(
+        r#"(kind!='dv_title_scan' OR EXISTS(SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
     WHERE d.revision=json_extract(background_jobs.payload_json,'$.probe_revision')
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
@@ -573,8 +583,16 @@ WHERE id = json_extract($1, '$.job_id')
   AND (kind != 'subtitle_model_operation' OR NOT EXISTS (
     SELECT 1 FROM background_jobs other WHERE other.kind='subtitle_model_operation'
       AND other.id != background_jobs.id AND other.target_node_id=background_jobs.target_node_id
-      AND other.state IN ('running','cancelling') AND other.lease_expires_ms > json_extract($1,'$.now_ms')))
-  AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
+      AND other.state IN ('running','cancelling') AND other.lease_expires_ms > json_extract($1,'$.now_ms')))"#
+    )
+    };
+}
+
+/// Placement, queue state, retry and attempt budget, a pending waiter, owner
+/// membership and the counters.
+macro_rules! claim_state {
+    () => {
+        r#"(target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
   AND (kind = 'fragment_index_build' OR failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END < attempt_limit)
@@ -587,28 +605,51 @@ WHERE id = json_extract($1, '$.job_id')
       AND failed_attempts + CASE WHEN background_jobs.state = 'running'
         AND participation_fence = background_jobs.fence THEN 1 ELSE 0 END < attempt_limit)))
   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
-  AND fence < 9223372036854775807 AND revision < 9223372036854775807
-  AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
-  AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
-  -- The outer CAS already fixes id to this request. Bind resource lookup to
-  -- that same value so SQLite pushes the identity into every UNION branch
-  -- of the resource view instead of scanning all jobs under the Raft writer.
-  -- A lapsed custody counts as one ordinary reader below until the sweep
-  -- releases it; it no longer refuses every source claim on its own.
-  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+  AND fence < 9223372036854775807 AND revision < 9223372036854775807"#
+    };
+}
+
+/// This claim id has no attempt yet, and the attempt ledger has room.
+macro_rules! claim_attempt_ledger {
+    () => {
+        r#"NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
+  AND (SELECT COUNT(*) FROM background_job_attempts) < 40000"#
+    };
+}
+
+/// A foreground owner of the source either still holds custody after its
+/// lease lapsed, or holds a live lease outside its permission window.
+macro_rules! claim_foreground_window {
+    ($job:literal) => {
+        concat!(
+        r#"NOT EXISTS (SELECT 1 FROM background_job_required_resources required
     JOIN foreground_source_permissions fg ON required.resource_key LIKE 'source_io%'
       AND (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
-    WHERE required.job_id=json_extract($1,'$.job_id') AND (fg.lease_expires_at_ms>json_extract($1,'$.now_ms') OR fg.custody_held=1)
-      AND (fg.lease_expires_at_ms<=json_extract($1,'$.now_ms') OR COALESCE(fg.permits_through_ms,0)<=json_extract($1,'$.now_ms')))
-  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = json_extract($1, '$.job_id') AND (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
+    WHERE required.job_id="#, $job, r#" AND (fg.lease_expires_at_ms>json_extract($1,'$.now_ms') OR fg.custody_held=1)
+      AND (fg.lease_expires_at_ms<=json_extract($1,'$.now_ms') OR COALESCE(fg.permits_through_ms,0)<=json_extract($1,'$.now_ms')))"#
+    )
+    };
+}
+
+/// Two distinct holders already occupy the source.
+macro_rules! claim_source_holders {
+    ($job:literal) => {
+        concat!(
+        r#"NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = "#, $job, r#" AND (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
       WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.active_occupancy=1
         AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)
-        AND (held.work_id!=json_extract($1,'$.job_id') OR held.custody_id IS NOT NULL))>=2)
-  -- A second source reader is reserved for live demand. Classification uses
-  -- durable consumer ownership, never the job's caller-supplied priority.
-  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = json_extract($1, '$.job_id')
+        AND (held.work_id!="#, $job, r#" OR held.custody_id IS NOT NULL))>=2)"#
+    )
+    };
+}
+
+/// The second source reader is reserved for live demand.
+macro_rules! claim_maintenance_reader {
+    ($job:literal) => {
+        concat!(
+        r#"NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = "#, $job, r#"
       AND required.resource_key LIKE 'source_io%'
       AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
           WHERE interest.job_id = background_jobs.id
@@ -682,8 +723,47 @@ WHERE id = json_extract($1, '$.job_id')
         + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
           WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
             AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
-            AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)) >= 1))
-"#
+            AND (held.expires_at_ms>json_extract($1,'$.now_ms') OR held.custody_id IS NOT NULL)) >= 1))"#
+    )
+    };
+}
+
+
+pub(super) const CLAIM_SQL: &str = concat!(
+    r#"
+UPDATE background_jobs SET
+  failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+  attempt_errors = CASE WHEN state = 'running' THEN
+    CASE WHEN length(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired') <= 2048 THEN attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired' ELSE 'history_compacted,' || substr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), instr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), ',') + 1) END ELSE attempt_errors END,
+  state = 'running', owner_node_id = json_extract($1, '$.node_id'),
+  owner_boot_id = json_extract($1, '$.boot_id'), claim_id = json_extract($1, '$.claim_id'),
+  fence = fence + 1, revision = revision + 1,
+  lease_expires_ms = json_extract($1, '$.now_ms') + 30000,
+  updated_at_ms = json_extract($1, '$.now_ms')
+WHERE "#,
+    claim_identity!(),
+    "\n  AND ",
+    claim_kind_demand!(),
+    "\n  AND ",
+    claim_state!(),
+    "\n  AND ",
+    claim_attempt_ledger!(),
+    r#"
+  -- The outer CAS already fixes id to this request. Bind resource lookup to
+  -- that same value so SQLite pushes the identity into every UNION branch
+  -- of the resource view instead of scanning all jobs under the Raft writer.
+  -- A lapsed custody counts as one ordinary reader below until the sweep
+  -- releases it; it no longer refuses every source claim on its own.
+  AND "#,
+    claim_foreground_window!("json_extract($1,'$.job_id')"),
+    "\n  AND ",
+    claim_source_holders!("json_extract($1, '$.job_id')"),
+    r#"
+  -- A second source reader is reserved for live demand. Classification uses
+  -- durable consumer ownership, never the job's caller-supplied priority.
+  AND "#,
+    claim_maintenance_reader!("json_extract($1, '$.job_id')"),
+    "\n"
 );
 
 const RENEW_SQL: &str = r#"
@@ -5393,3 +5473,6 @@ mod principal_tests;
 
 #[cfg(test)]
 mod subtitle_admission_tests;
+
+#[cfg(test)]
+mod claim_verdict_tests;
