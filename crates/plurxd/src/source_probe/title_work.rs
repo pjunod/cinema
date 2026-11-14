@@ -518,14 +518,14 @@ async fn eligible_file(
         if demand.playback_requested && pending.is_empty() {
             return Ok(None);
         }
-        if !pending.is_empty() {
-            if !pending.iter().any(|request| {
+        if !pending.is_empty()
+            && !pending.iter().any(|request| {
                 Some(request.backend_identity.as_str()) == fel_backend
                     && (!demand.playback_requested
                         || demand.playback_recipes.contains(&request.identity))
-            }) {
-                return Ok(None);
-            }
+            })
+        {
+            return Ok(None);
         }
     }
     #[cfg(not(target_os = "linux"))]
