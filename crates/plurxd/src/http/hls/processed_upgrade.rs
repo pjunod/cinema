@@ -548,6 +548,12 @@ async fn run_upgrade(
                 )
                 .await
         },
+        |incarnation, needed| async move {
+            state
+                .transcode
+                .claim_incumbent_permit(&intent.session_id, &incarnation, needed)
+                .await
+        },
     )
     .await
 }
@@ -691,19 +697,47 @@ where
     F: FnMut(crate::transcode::SessionRequest, crate::transcode::SessionRecoveryIdentity) -> Fut,
     Fut: std::future::Future<Output = TrialOutcome>,
 {
-    run_upgrade_with_claim(state, intent, run, None, run_trial).await
+    run_upgrade_with_claim(state, intent, run, None, run_trial, |incarnation, needed| async move {
+        state
+            .transcode
+            .claim_incumbent_permit(&intent.session_id, &incarnation, needed)
+            .await
+    })
+    .await
 }
 
-async fn run_upgrade_with_claim<F, Fut>(
+/// [`run_upgrade_with`] with the incumbent claim supplied too, so the
+/// refusal → claim → retry path is exercised without a vod incumbent.
+#[cfg(test)]
+pub(in crate::http) async fn run_upgrade_with_incumbent<F, Fut, C, CFut>(
+    state: &AppState,
+    intent: &UpgradeIntent,
+    run: &UpgradeRun,
+    run_trial: F,
+    claim_incumbent: C,
+) -> &'static str
+where
+    F: FnMut(crate::transcode::SessionRequest, crate::transcode::SessionRecoveryIdentity) -> Fut,
+    Fut: std::future::Future<Output = TrialOutcome>,
+    C: FnOnce(String, crate::admission::TranscodeResourceEstimate) -> CFut,
+    CFut: std::future::Future<Output = Option<crate::vodserve::IncumbentPermitClaim>>,
+{
+    run_upgrade_with_claim(state, intent, run, None, run_trial, claim_incumbent).await
+}
+
+async fn run_upgrade_with_claim<F, Fut, C, CFut>(
     state: &AppState,
     intent: &UpgradeIntent,
     run: &UpgradeRun,
     pending: Option<super::preparation::PendingCandidateGuard>,
     mut run_trial: F,
+    claim_incumbent: C,
 ) -> &'static str
 where
     F: FnMut(crate::transcode::SessionRequest, crate::transcode::SessionRecoveryIdentity) -> Fut,
     Fut: std::future::Future<Output = TrialOutcome>,
+    C: FnOnce(String, crate::admission::TranscodeResourceEstimate) -> CFut,
+    CFut: std::future::Future<Output = Option<crate::vodserve::IncumbentPermitClaim>>,
 {
     let session = crate::transcode::session_log_id(&intent.session_id);
     // One preparation slot per playback: a viewer's own change in flight wins,
@@ -825,11 +859,7 @@ where
     let mut incumbent_claim = None;
     let trial = match (trial, admission.needed()) {
         (Err(reason), Some(needed)) => {
-            match state
-                .transcode
-                .claim_incumbent_permit(&intent.session_id, &ids.incarnation_id, needed)
-                .await
-            {
+            match claim_incumbent(ids.incarnation_id.clone(), needed).await {
                 None => Err(reason),
                 Some(claim) => {
                     let granted = tokio::select! {
@@ -851,8 +881,16 @@ where
                         let scoped = Arc::new(crate::vodencode::ProcessedTrialAdmission::with_claim(
                             Arc::clone(claim.claim()),
                         ));
+                        // A claim closed mid-trial (a seek past the runway)
+                        // means the incumbent must produce now: the trial is
+                        // dropped at once rather than holding its capacity
+                        // to its own deadline.
                         let trial = tokio::select! {
                             () = superseded.cancelled() => return "cancelled",
+                            () = claim.claim().closed() => {
+                                run.skipped(INCUMBENT_RUNWAY_SPENT);
+                                return "declined";
+                            }
                             trial = crate::vodencode::PROCESSED_TRIAL_ADMISSION
                                 .scope(scoped, run_trial(retry, recovery.clone())) => trial,
                         };

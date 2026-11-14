@@ -3683,7 +3683,11 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         let base = crate::test_tempdir().expect("base");
         let fixture = prepared_handoff_fixture(base.path(), false).await;
         viewer_at_film_start(&fixture).await;
-        assert!(claim_for_trial(&fixture, i64::MAX).await.is_none(), "no runway, no claim");
+        // The fixture publishes four one-second segments from film zero.
+        assert!(claim_for_trial(&fixture, 4_100).await.is_none(), "runway short of the reserve");
+        assert!(!fixture.predecessor.handoff_requested());
+        let covered = claim_for_trial(&fixture, 3_900).await.expect("runway covers the reserve");
+        drop(covered);
         assert!(!fixture.predecessor.handoff_requested());
         insert_control_session(&fixture.serve, "someone-else", Arc::clone(&fixture.predecessor),
             Instant::now()).await;

@@ -227,6 +227,11 @@ impl ProcessedTrialAdmission {
 /// other viewers' stopped encoders yield to it. Otherwise it is the ordinary
 /// [`admit_frozen_preparation`], and a capacity refusal records what it asked
 /// for so the upgrade can claim it.
+///
+/// Unlike a voluntary Auto probe (`Encoding::nonpreemptive_trial`, which may
+/// not borrow the incumbent's resources), a processed upgrade's claim is taken
+/// only while the incumbent's published runway covers a failed hand-back, so
+/// its viewer never waits on the trial: the incumbent is parked, not starved.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) async fn admit_processed_trial(
     admissions: &Admissions,
@@ -237,6 +242,7 @@ pub(crate) async fn admit_processed_trial(
 ) -> Result<crate::admission::TranscodePermit, bool> {
     let scoped = PROCESSED_TRIAL_ADMISSION.try_with(Arc::clone).ok();
     let claim = scoped.as_ref().and_then(|scope| scope.claim());
+    let claimed = claim.as_ref().is_some_and(|claim| !claim.is_closed());
     let result = match claim.as_ref().filter(|claim| !claim.is_closed()) {
         Some(claim) => match claim.token() {
             Some(token) => try_admit_frozen_bundle(
@@ -263,7 +269,11 @@ pub(crate) async fn admit_processed_trial(
             .await
         }
     };
-    if matches!(result, Err(false)) {
+    // Only the immediate foreground refusal names an incumbent that could
+    // yield. A deadline spent waiting for background work to yield is not
+    // this viewer's incumbent's doing, and a claim for it would end that
+    // incumbent for nothing.
+    if !claimed && matches!(result, Err(false)) && !admissions.background_is_active() {
         if let Some(scope) = scoped.as_ref() {
             scope.record_needed(*resources);
         }

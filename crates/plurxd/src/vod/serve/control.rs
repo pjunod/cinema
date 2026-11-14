@@ -15,12 +15,6 @@ impl VodServe {
         Some((session.last_control_snapshot.clone(), touched))
     }
 
-    /// Where the viewer of `session_id` is now on the source timeline: the
-    /// latest newly accepted control demand, advanced by that observation's
-    /// age the way the delivery driver reads it
-    /// ([`crate::playback_control::rolling_estimated_position_ms`]). `None`
-    /// before any exchange was accepted, or for a session this engine does
-    /// not hold.
     /// Ask `session_id`'s own incumbent encoded rendition to give its encoder
     /// permit to this viewer's processed upgrade trial, through the same
     /// predecessor-yield handoff a staged successor uses.
@@ -81,6 +75,12 @@ impl VodServe {
         })
     }
 
+    /// Where the viewer of `session_id` is now on the source timeline: the
+    /// latest newly accepted control demand, advanced by that observation's
+    /// age the way the delivery driver reads it
+    /// ([`crate::playback_control::rolling_estimated_position_ms`]). `None`
+    /// before any exchange was accepted, or for a session this engine does
+    /// not hold.
     pub(crate) async fn accepted_playhead_estimate_ms(&self, session_id: &str) -> Option<i64> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;

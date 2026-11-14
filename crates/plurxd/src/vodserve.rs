@@ -177,6 +177,11 @@ impl TrialClaim {
         self.ready.notify_waiters();
     }
 
+    #[cfg(test)]
+    pub(crate) fn close_for_test(&self) {
+        self.close();
+    }
+
     /// Resolves once the claim is closed.
     pub(crate) async fn closed(&self) {
         loop {
@@ -220,6 +225,19 @@ impl IncumbentPermitClaim {
         &self.claim
     }
 
+    /// A claim with no incumbent rendition, for the upgrade's own tests.
+    #[cfg(test)]
+    pub(crate) fn detached_for_test(
+        claim: Arc<TrialClaim>,
+        admissions: crate::admission::Admissions,
+    ) -> Self {
+        Self {
+            claim,
+            incumbent: Weak::new(),
+            admissions,
+        }
+    }
+
     /// The successor was staged under the claim's incarnation: the incumbent
     /// stays parked under the preparation slot's binding, which commit, abort
     /// and rejection already settle.
@@ -236,8 +254,11 @@ impl Drop for IncumbentPermitClaim {
             return;
         }
         self.claim.close();
+        // After `close`, under the same lock `reserve_for_successor` reserves
+        // under: no reservation can appear after this read.
+        let token = *self.claim.token.lock().expect("trial claim token");
         if !self.claim.admitted.load(std::sync::atomic::Ordering::Acquire) {
-            if let Some(token) = self.claim.token() {
+            if let Some(token) = token {
                 self.admissions.release_reservation(token);
             }
         }

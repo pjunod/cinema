@@ -678,6 +678,24 @@ pub(super) async fn trial_claim_bound(shared: &Shared, rendition: &Rendition, cl
             None => return false,
         }
     };
+    // A reader blocked on media this parked incumbent has not published (a
+    // seek whose GET beat its next control exchange) is owed that media now.
+    let blocked: Vec<u32> = rendition
+        .demand_since
+        .lock()
+        .expect("demand clock")
+        .keys()
+        .copied()
+        .collect();
+    {
+        let manifest = rendition.manifest.lock().await;
+        if blocked
+            .iter()
+            .any(|index| !manifest.state(*index).is_some_and(|state| state.is_materialized()))
+        {
+            return false;
+        }
+    }
     trial_runway_ms(rendition, playhead_ms).await >= claim.reserve_ms
 }
 
@@ -732,18 +750,22 @@ fn reserve_for_successor(rendition: &Rendition, request: &HandoffRequest) -> Opt
             Some(HandoffWoken::Rendition(successor))
         }
         HandoffClaimant::Trial(claim) => {
-            if claim.is_closed() || claim.is_staged() {
-                return None;
-            }
             let encoding = rendition.recipe.encoding.as_ref()?;
-            // Held for the claim's reserve: the trial plans before it admits,
-            // and an expired reservation would hand the capacity to whoever
-            // asked first. The claim's drop returns it unused.
-            let token = encoding.admissions.reserve_for_handoff(
-                &request.wanted,
-                Duration::from_millis(claim.reserve_ms.max(0) as u64),
-            );
-            *claim.token.lock().expect("trial claim token") = Some(token);
+            {
+                // Under the token lock: a claim whose owner is dropping either
+                // sees this token or this pass sees it closed, never neither.
+                let mut token = claim.token.lock().expect("trial claim token");
+                if claim.is_closed() || claim.is_staged() || token.is_some() {
+                    return None;
+                }
+                // Held for the claim's reserve: the trial plans before it
+                // admits, and an expired reservation would hand the capacity
+                // to whoever asked first. The claim's drop returns it unused.
+                *token = Some(encoding.admissions.reserve_for_handoff(
+                    &request.wanted,
+                    Duration::from_millis(claim.reserve_ms.max(0) as u64),
+                ));
+            }
             claim.ready.notify_waiters();
             Some(HandoffWoken::Trial)
         }
@@ -765,7 +787,7 @@ fn finish_handoff_yield(
         rendition = %rendition.key,
         claimant,
         successor,
-        "gave this viewer's encoder permit to its prepared successor"
+        "gave this viewer's encoder permit to its {claimant}"
     );
     if let Some(HandoffWoken::Rendition(successor)) = woken {
         successor.kick();
@@ -776,6 +798,15 @@ fn finish_handoff_yield(
 /// A parked predecessor wakes itself when its handoff lapses, so a viewer GET
 /// that arrived meanwhile is not left to its whole block budget.
 fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
+    // A trial has no expiry of its own: every path that ends it (claim drop,
+    // a closed claim in `bound_handoff`, the slot's settlement once staged)
+    // kicks this producer directly.
+    if rendition
+        .live_handoff()
+        .is_some_and(|request| matches!(request.claimant, HandoffClaimant::Trial(_)))
+    {
+        return;
+    }
     if rendition.handoff_expiry_armed.swap(true, AcqRel) {
         return;
     }

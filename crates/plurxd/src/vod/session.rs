@@ -295,6 +295,10 @@ impl Rendition {
 
     /// Ask (or keep asking) this producer to hand its permit to `successor`.
     /// `true` when this starts a new handoff rather than refreshing one.
+    ///
+    /// This may replace a trial's request: only the staged successor of that
+    /// same incarnation can ask while the trial's upgrade holds its playback's
+    /// one preparation slot, and a viewer's own change cancels that upgrade.
     pub(super) fn request_handoff(
         &self,
         incarnation: &str,
@@ -331,10 +335,12 @@ impl Rendition {
         claim: &Arc<TrialClaim>,
         wanted: crate::admission::TranscodeResourceEstimate,
     ) -> bool {
-        let mut slot = self.handoff.lock().expect("handoff lock");
-        if slot.as_ref().is_some_and(|request| request.until > Instant::now()) {
+        // Never replaces a live request: a staged successor's, or another
+        // trial's whose claim is still open.
+        if self.live_handoff().is_some() {
             return false;
         }
+        let mut slot = self.handoff.lock().expect("handoff lock");
         *slot = Some(HandoffRequest {
             // A trial is not refreshed by a polling successor and has no
             // deadline of its own: the claim's liveness and the viewer's
