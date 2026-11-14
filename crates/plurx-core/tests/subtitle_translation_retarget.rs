@@ -206,6 +206,7 @@ async fn sqlite_recognized_legacy_trigger_upgrade_preserves_operation_and_receip
         })
         .expect("known legacy trigger");
     source_extensions_fixture::rewind_empty_source_extensions_to_v121(&conn);
+    source_extensions_fixture::title_extension_fixture::assert_title_fixture_generation(&conn, 1);
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .expect("current fixture checkpoint"),
