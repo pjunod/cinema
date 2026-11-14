@@ -86,6 +86,29 @@ internal fun successorFilmPositionMs(
         else (mediaOriginMs + local).coerceAtLeast(0L)
 }
 
+/**
+ * The title duration on the same film clock as [realMediaPositionMs].
+ *
+ * The control protocol clamps the reported playhead to this duration and reads
+ * a playhead near it as the title's end, so it must be film time. Media3's own
+ * `duration` is film time only when the player timeline starts at film zero
+ * (direct play, film-local VOD). A live or copy-HLS session that began at a
+ * resume point has a player timeline that starts at its media origin, and its
+ * `duration` is the length of that window: clamping a film position of 4:16 to
+ * a two-minute window reported the viewer at 2:06, and a processed upgrade
+ * staged its successor two minutes behind them. The title duration from the
+ * plan is used when known; an unknown duration is 0, which does not clamp.
+ */
+internal fun filmDurationMs(
+    titleDurationMs: Long,
+    playerDurationMs: Long,
+    playerTimelineIsFilm: Boolean,
+): Long = when {
+    titleDurationMs > 0 -> titleDurationMs
+    playerTimelineIsFilm && playerDurationMs > 0 -> playerDurationMs
+    else -> 0L
+}
+
 /** Resolve the player's local clock through the active delivery regime. */
 internal fun realMediaPositionMs(
     playerPositionMs: Long,

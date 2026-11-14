@@ -8,6 +8,24 @@ import org.junit.Test
 import tv.plurx.app.data.HlsStart
 
 class MediaOriginTest {
+    // Axel F on the Google TV, 2026-11-14: a copy-HLS recovery session began at
+    // origin 137_125 ms. Media3's duration was its ~2 min window, the control
+    // snapshot clamped the 4:16 film playhead to it, and the processed upgrade
+    // staged its successor at 2:06, failing the 12 s seam overlap.
+    @Test fun controlDurationIsTitleTimeSoAnOriginSessionPlayheadIsNotClamped() {
+        val film = realMediaPositionMs(playerPositionMs = 119_000, directTransport = false,
+            sessionIsVod = false, progressiveTransport = false, progressiveOriginMs = 0,
+            sessionBaseMs = 137_125)
+        assertEquals(256_125L, film)
+        val duration = filmDurationMs(titleDurationMs = 7_080_000, playerDurationMs = 121_000,
+            playerTimelineIsFilm = false)
+        assertEquals(7_080_000L, duration)
+        // Without a title duration, a window-relative duration is not a film
+        // duration and must not clamp; a film-local player's own duration is.
+        assertEquals(0L, filmDurationMs(0, 121_000, playerTimelineIsFilm = false))
+        assertEquals(7_080_000L, filmDurationMs(0, 7_080_000, playerTimelineIsFilm = true))
+    }
+
     @Test fun boundedSharedNinetyMinuteAttachmentAndPreparedCompletionKeepTitleClock() {
         val range = HlsStart(session_id = "range", playlist_url = "/range.m3u8",
             vod = false, start_seconds = 5_398.0, media_origin_ms = 5_398_000,

@@ -3626,7 +3626,11 @@ class Controller internal constructor(
                 decoderCaps = DecoderCapabilitySnapshot.fromVideo(1L, decisionCaps.video),
             ) else baseCapabilities
         val position = realPosition()
-        val duration = player.duration
+        val duration = filmDurationMs(
+            titleDurationMs = plan.durationMs,
+            playerDurationMs = player.duration,
+            playerTimelineIsFilm = directTransport || sessionIsVod,
+        )
         // Only the runway *ahead* is protocol runway. Media3's bufferedPosition
         // is in player time while the protocol wants title time, so the range
         // is reported from the playhead forward rather than converted with an
@@ -3634,7 +3638,7 @@ class Controller internal constructor(
         val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
         return PlayerControlObservation(
             positionMs = position,
-            durationMs = if (duration > 0) duration else 0L,
+            durationMs = duration,
             bufferedFromMs = position,
             bufferedThroughMs = position + runway,
             rate = player.playbackParameters.speed.toDouble(),
