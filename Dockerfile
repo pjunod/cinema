@@ -107,6 +107,9 @@ FROM ${PLURX_MEDIA_RUNTIME_REPOSITORY}@sha256:b171d3de4e9dc30fb544b3ca18945b5e14
 # digest just like the release bases; neither builds the release binaries.
 FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS ci-rust-toolchain
 FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS ci-node-toolchain
+# The Docker client and compose plugin only: the contract tests that resolve a
+# compose file or inspect through a socket need the CLI, never a daemon.
+FROM docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS ci-docker-cli
 
 FROM runtime-assets AS ci
 ARG PLURX_CI_SOURCE_SHA=""
@@ -121,6 +124,10 @@ ENV CARGO_HOME=/usr/local/cargo \
 # only the repository-pinned 1.97.1 toolchain belongs in this CI layer.
 COPY --from=ci-rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin
 COPY --from=ci-node-toolchain /usr/local/bin/node /usr/local/bin/node
+# npm with the same Node: scripts/web-types installs its locked TypeScript.
+COPY --from=ci-node-toolchain /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=ci-docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=ci-docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
 COPY licenses/ /usr/share/doc/plurx/licenses/
 # Keep both the daemon's explicit path and shell-invoked fixture generation on
@@ -135,8 +142,10 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-        build-essential clang cmake curl git jq libssl-dev lld llvm make nasm ninja-build \
-        libgtk-4-dev libdbus-1-dev pkg-config python3 python3-venv \
+        autoconf automake build-essential clang cmake curl dbus-daemon git jq libssl-dev lld llvm \
+        make nasm ninja-build libgtk-4-dev libdbus-1-dev pkg-config python3 python3-venv \
+    && ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
     && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \
@@ -144,6 +153,12 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
         --component rustfmt --component clippy --component llvm-tools-preview \
     && rustc +1.97.1 --version | grep -F 'rustc 1.97.1' \
     && node --version | grep -Fx 'v22.23.4' \
+    && npm --version \
+    && docker --version | grep -F 'Docker version 27.5.1' \
+    && docker compose version \
+    && autoconf --version | sed -n '1p' && aclocal --version | sed -n '1p' \
+    && command -v dbus-run-session \
+    && pkg-config --exists openssl 'gtk4 >= 4.0' dbus-1 \
     && ffmpeg -version | grep -E '^ffmpeg version n?8' \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*

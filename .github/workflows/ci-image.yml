@@ -1,0 +1,116 @@
+name: ci image
+
+# Builds the `ci` stage of Dockerfile, publishes it to the fleet registry, and
+# then runs, inside the image it just published and on the general lane's own
+# label and limits, the contract tests that skip when a tool is missing: a
+# skip there fails the run. Dispatch only, on the branch that changed the
+# stage; pin the digest it prints in every job that names plurx-ci.
+# docs/ci/GENERAL-LANE-IMAGE.md is the reference.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish the ci image
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 60
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build, smoke and publish the image
+        id: publish
+        env:
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # One tag per publication, named by the source it was built from: a
+          # pinned digest must never lose the only tag that keeps it from
+          # registry cleanup when a later publication lands.
+          tag="$REGISTRY/noirr/plurx-ci:source-$GITHUB_SHA-run$GITHUB_RUN_ID"
+          # A job-local Docker config: the registry login never lands in the
+          # runner user's ~/.docker on a shared host.
+          export DOCKER_CONFIG="$RUNNER_TEMP/ci-image-docker-$GITHUB_RUN_ID"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          DOCKER_BUILDKIT=1 docker build --pull --platform linux/amd64 --target ci \
+            --build-arg "PLURX_CI_SOURCE_SHA=$GITHUB_SHA" -t "$tag" .
+          docker run --rm "$tag" sh -ec '
+            rustc +1.97.1 --version | grep -F "rustc 1.97.1 "
+            node --version | grep -Fx v22.23.4
+            npm --version
+            ffmpeg -version | grep -E "^ffmpeg version n?8"
+            test "$(readlink -f "$(command -v ffmpeg)")" = /usr/lib/jellyfin-ffmpeg/ffmpeg
+            python3 -c "import tomllib, playwright"
+            docker --version
+            docker compose version
+            autoconf --version | sed -n 1p
+            aclocal --version | sed -n 1p
+            command -v dbus-run-session
+            pkg-config --exists openssl "gtk4 >= 4.0" dbus-1'
+          test "$(docker image inspect "$tag" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
+          docker push "$tag"
+          image="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" \
+            | grep -F "$REGISTRY/noirr/plurx-ci@sha256:" | head -n 1)"
+          test -n "$image"
+          echo "ci-image digest: $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ci image"
+            echo "source \`$GITHUB_SHA\`, published \`$image\`"
+            echo "pin \`${image#*@}\` in every job that names \`plurx-ci@sha256:\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The image just published, where the general lane runs it and with the
+  # lane's limits, before any lane is pointed at it. These are the modules
+  # whose tests skip when Docker, compose, autoconf or a compiler is absent.
+  probe:
+    name: tool-dependent contract tests on the published image
+    needs: publish
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ needs.publish.outputs.image }}
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 20
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Run the tool-dependent contract tests; a skip is a failure
+        run: |
+          set -euo pipefail
+          mkdir -p target/ci-image
+          set +e
+          python3 -m unittest -v \
+            tests.operations.test_docker_https_ports \
+            tests.operations.test_docker_hardware \
+            tests.operations.test_compose_inspection \
+            tests.operations.test_ffmpeg_support_matrix \
+            tests.operations.test_cm29_gamut_tables \
+            tests.operations.test_dv_dm_pq_precision \
+            tests.operations.test_dv_dm_closed_form \
+            tests.operations.test_linux_dolby_package \
+            2>&1 | tee target/ci-image/probe.log
+          status=$?
+          set -e
+          if grep -E ' \.\.\. skipped ' target/ci-image/probe.log; then
+            echo "::error::A tool-dependent contract test skipped inside the published image; add the tool to the ci stage of Dockerfile."
+            exit 1
+          fi
+          exit "$status"
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

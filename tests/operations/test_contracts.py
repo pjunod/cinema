@@ -5081,6 +5081,9 @@ assert.equal(context.ACT_TIMER, null);
             (".github/workflows/media-runtime.yml", "index"),
             (".github/workflows/media-runtime-public.yml", "copy"),
             (".github/workflows/publish-release.yml", "resolve"),
+            # Runs the image `ci-image.yml` has just published, before any
+            # lane pins it, with the same options and credential.
+            (".github/workflows/ci-image.yml", "probe"),
             # `cargo audit`: the image carries no cargo-audit.
             (".github/workflows/rust-audit.yml", "workspace"),
             (".github/workflows/rust-audit.yml", "fuzz"),
@@ -5117,6 +5120,46 @@ assert.equal(context.ACT_TIMER, null);
             self.assertIn((".github/workflows/main-fast-lane.yml", job), inside)
         for job in ("select", "shard", "verdict", "gate"):
             self.assertIn((".github/workflows/rust-units.yml", job), inside)
+        # The image has one definition and one publication path: the `ci`
+        # stage, built and pushed by ci-image.yml, which then runs the
+        # tool-dependent contract tests inside it and fails on a skip.
+        ci_stage = read("Dockerfile").split("FROM runtime-assets AS ci", 1)[1].split(
+            "FROM runtime-assets AS runtime", 1
+        )[0]
+        for needed in (
+            "autoconf automake ",
+            " dbus-daemon ",
+            "COPY --from=ci-node-toolchain /usr/local/lib/node_modules/npm ",
+            "COPY --from=ci-docker-cli /usr/local/bin/docker ",
+            "/usr/local/libexec/docker/cli-plugins/docker-compose",
+            "&& docker compose version",
+            "&& npm --version",
+        ):
+            self.assertIn(needed, ci_stage)
+        self.assertRegex(
+            read("Dockerfile"),
+            r"(?m)^FROM docker:[0-9.]+-cli@sha256:[0-9a-f]{64} AS ci-docker-cli$",
+        )
+        image_jobs = workflow_job_blocks(".github/workflows/ci-image.yml")
+        publish = image_jobs["publish"]
+        self.assertIn("--target ci", publish)
+        self.assertIn('--build-arg "PLURX_CI_SOURCE_SHA=$GITHUB_SHA"', publish)
+        self.assertIn("/noirr/plurx-ci:source-$GITHUB_SHA-run$GITHUB_RUN_ID", publish)
+        self.assertLess(publish.index("docker run --rm"), publish.index("docker push"))
+        probe = image_jobs["probe"]
+        self.assertIn("      image: ${{ needs.publish.outputs.image }}\n", probe)
+        self.assertIn("      options: " + expected.group(2) + "\n", probe)
+        for module in (
+            "test_docker_https_ports",
+            "test_docker_hardware",
+            "test_compose_inspection",
+            "test_ffmpeg_support_matrix",
+        ):
+            self.assertIn("tests.operations." + module, probe)
+        self.assertIn("grep -E ' \\.\\.\\. skipped '", probe)
+        self.assertRegex(
+            read(".github/workflows/ci-image.yml"), r"(?m)^on:\n  workflow_dispatch:\n\n"
+        )
         # What the retained image lacks is supplied the way ci.yml's own
         # image jobs supply it, before the first compile.
         for relative, name, desktop in (
