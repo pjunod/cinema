@@ -8649,6 +8649,32 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(context.overview, "A precise description.")
     }
 
+    func testToneMappingPillRequiresActiveProcessingEvidence() {
+        let generation = "11111111-1111-4111-8111-111111111111"
+        let report = EffectiveProcessingReport(generation: generation, hdr10Enhanced: true,
+            felContributed: false, appliedOperations: ["DisplayTargetMapping:600"])
+        func pills(_ peak: Int? = nil, _ source: String? = nil,
+                   _ processing: EffectiveProcessingReport? = nil, _ active: String? = nil) -> [PlayerMetadataBadge] {
+            PlayerView.playbackBadges(source: nil, audio: nil, delivered: "hdr10",
+                effectiveProcessing: processing, activeGeneration: active,
+                toneMapPeakNits: peak, toneMapPeakSource: source).filter { $0.kind == .toneMapping }
+        }
+        XCTAssertTrue(pills().isEmpty)
+        XCTAssertTrue(pills(0, "cll").isEmpty)
+        XCTAssertTrue(pills(1000, "unknown").isEmpty)
+        XCTAssertEqual(pills(1000, "cll").map(\.mark), ["Tone mapping"])
+        XCTAssertEqual(pills(nil, nil, report, generation).map(\.accessibilityLabel), ["Cinema tone mapping active"])
+        XCTAssertTrue(pills(nil, nil, report, "22222222-2222-4222-8222-222222222222").isEmpty)
+        let enhancementOnly = EffectiveProcessingReport(generation: generation, hdr10Enhanced: true,
+            felContributed: true, appliedOperations: ["PolynomialReshape"])
+        XCTAssertTrue(pills(nil, nil, enhancementOnly, generation).isEmpty)
+        XCTAssertEqual(pills(1000, "default", report, generation).count, 1)
+        let sdr = EffectiveProcessingReport(generation: generation, hdr10Enhanced: false,
+            felContributed: false, appliedOperations: ["Bt709Gamma24Conversion", "DisplayTargetMapping:100"], sdrProcessed: true)
+        XCTAssertTrue(PlayerView.toneMappingActive(peakNits: nil, peakSource: nil,
+            effectiveProcessing: sdr, activeGeneration: generation, delivered: "sdr"))
+    }
+
     func testPlayerFactsSurfaceUsefulSourceInformation() {
         let source = SourceSummary(
             container: nil,

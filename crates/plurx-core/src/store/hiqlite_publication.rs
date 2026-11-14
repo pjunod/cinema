@@ -543,12 +543,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
             .map_err(database_error)?;
         let expected_watches = serde_json::to_string(&watch_rows).map_err(database_error)?;
         let expected_owners =
-            serde_json::to_string(&snapshot.directory_owner_ids).map_err(database_error)?;
+            serde_json::to_string(&snapshot.directory_guard_rows).map_err(database_error)?;
         let source_directory = plan
             .source_directory
             .as_deref()
             .ok_or_else(|| StoreError::Task("repair_blocked".to_owned()))?;
-        let (lower, upper) = super::directory_path_bounds(source_directory)?;
+        let (lower, upper) = super::show_directory_path_bounds(source_directory)?;
 
         let artwork_guard = if snapshot
             .dependency_rows
@@ -576,13 +576,14 @@ impl FencedPublicationStore for HiqliteAuthStore {
                    UNION SELECT e.id FROM items e JOIN items s ON s.id=e.parent_id JOIN requested r ON s.parent_id=r.id) \
                    SELECT json_group_array(row_json) FROM (SELECT json_array(user_id,item_id,position_ms,duration_ms,watched,updated_at) AS row_json \
                    FROM watch_state WHERE item_id IN (SELECT id FROM selected) ORDER BY item_id,user_id)), '[]') = $6 \
-             AND COALESCE((SELECT json_group_array(show_id) FROM ( \
-                   SELECT DISTINCT show.id AS show_id FROM files f INDEXED BY sqlite_autoindex_files_1 \
+             AND COALESCE((SELECT json_group_array(row_json) FROM ( \
+                   SELECT DISTINCT json_array(f.path,show.id) AS row_json FROM files f INDEXED BY sqlite_autoindex_files_1 \
                    JOIN items episode ON episode.id=f.item_id AND episode.kind='episode' \
                    JOIN items season ON season.id=episode.parent_id AND season.kind='season' \
                    JOIN items show ON show.id=season.parent_id AND show.kind='show' \
                   WHERE f.path >= $7 AND f.path < $8 AND show.library_id=$2 \
-                  ORDER BY show.id)), '[]') = $9 \
+                    AND season.library_id=$2 AND episode.library_id=$2 \
+                  ORDER BY row_json COLLATE BINARY)), '[]') = $9 \
              AND EXISTS (SELECT 1 FROM libraries WHERE id=$2 AND kind=$10 AND paths=$11) \
              AND NOT EXISTS (SELECT 1 FROM reading_state WHERE item_id IN (SELECT value FROM json_each($12))) \
              AND NOT EXISTS (SELECT 1 FROM scan_reconcile_items WHERE item_id IN (SELECT value FROM json_each($12))) \

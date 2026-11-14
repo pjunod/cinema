@@ -244,6 +244,15 @@ local function test_info_dynamic_range_requires_transfer()
     reset()
 end
 test_info_dynamic_range_requires_transfer()
+-- The processing pill follows the authoritative launcher fact, never source HDR.
+reset();update('user-data/cinema',{tone_mapping=true})
+assert(overlay.data:find('Tone mapping',1,true))
+update('user-data/cinema',{tone_mapping=false})
+assert(not overlay.data:find('Tone mapping',1,true))
+update('user-data/cinema',{})
+P['video-params']={gamma='pq'};timers[1]()
+assert(not overlay.data:find('Tone mapping',1,true))
+P['video-params']={}
 -- Open menus win input over the underlying Next card at the same coordinates.
 reset();update('user-data/cinema',context());click(930,681)
 click(1070,565);assert(not last() or last()[2]~='cinema-next')

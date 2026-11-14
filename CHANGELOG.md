@@ -19,6 +19,9 @@ bump may break compatibility and a **patch** bump never does.
 - Playback-control refusal logs retain the protocol code, route-read failure
   stage and sanitized source location, distinguishing release reconciliation
   from storage errors without exposing session capabilities.
+- Curator's additional TV copies now join their existing series instead of
+  creating identical show cards. Consolidation recognizes the generated copy
+  folders while preserving physical files, versions and watch history.
 
 - The host source census can release a dead owner's custody after the host
   has rebooted. It proves from the machine's own journal that the witness's
