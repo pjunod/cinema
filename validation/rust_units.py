@@ -13,10 +13,10 @@ Four steps, one module (docs/ci/RUST-UNIT-FANOUT.md is the operating guide):
   dropped. Anything that cannot be authenticated is simply not adopted.
 * ``plan`` / ``shard`` build one cargo-nextest archive of the due crates and
   run it in ``hash:i/N`` partitions on idle runners.
-* ``verdict`` / ``baseline`` / ``gate`` prove the partitions covered the plan
-  exactly once, publish per-crate receipts, and classify any failure by
-  running it on the merge-base: a test that fails there too is a pre-existing
-  failure on main, reported and not blocking; anything else blocks.
+* ``verdict`` / ``gate`` require a positive pass for every due case, either
+  authenticated under the same key or executed in this run. Missing and
+  skipped cases are incomplete; failures block promotion. ``baseline`` runs
+  failures on the merge-base to diagnose their origin, never to waive them.
 """
 
 from __future__ import annotations
@@ -765,12 +765,28 @@ def nextest_suites(listing):
     Tests the profile's `default-filter` excludes are left out entirely:
     nextest never runs them, so they are not part of any crate's listing.
     """
+    require(isinstance(listing, dict) and isinstance(listing.get("rust-suites"), dict),
+            "nextest listing must contain a rust-suites object")
     suites = {}
-    for binary_id, suite in listing.get("rust-suites", {}).items():
-        cases = suite.get("testcases", {})
-        suites[binary_id] = {
-            name: bool(case.get("ignored")) for name, case in cases.items()
-            if (case.get("filter-match") or {}).get("reason") != "default-filter"}
+    for binary_id, suite in listing["rust-suites"].items():
+        require(isinstance(binary_id, str) and binary_id and isinstance(suite, dict),
+                "nextest listing contains an invalid suite")
+        require(isinstance(suite.get("testcases"), dict),
+                f"{binary_id}: nextest suite must contain a testcases object")
+        suites[binary_id] = {}
+        for name, case in suite["testcases"].items():
+            require(isinstance(name, str) and name and isinstance(case, dict)
+                    and type(case.get("ignored")) is bool,
+                    f"{binary_id}: malformed nextest testcase")
+            match = case.get("filter-match")
+            require(match is None or isinstance(match, dict),
+                    f"{binary_id} {name}: malformed nextest filter result")
+            if match and match.get("reason") == "default-filter":
+                require(match.get("status") == "mismatch",
+                        f"{binary_id} {name}: invalid default-filter exclusion")
+                continue
+            suites[binary_id][name] = case["ignored"]
+
     return suites
 
 
@@ -827,6 +843,8 @@ def make_plan(selection_doc, pending, listing, config, run):
     suites = nextest_suites(listing)
     crates, partitioned, serial_all = {}, [], []
     for crate, entry in sorted(pending["crates"].items()):
+        require(any(crate_of(binary_id) == crate for binary_id in suites),
+                f"{crate}: pending crate is absent from the nextest listing")
         tests, serial = crate_tests(suites, crate, set(config.serial_ignored.get(crate, ())))
         missing = set(config.serial_ignored.get(crate, ())) - {t.split(" ", 1)[1] for t in serial}
         require(not missing, f"{crate}: declared serial ignored tests not found: {sorted(missing)}")
@@ -963,7 +981,8 @@ def run_shard(plan_path, archive, index, threads):
 def collect(plan, receipts):
     """Outcomes of every planned test, and what keeps the run from being complete.
 
-    Complete means one receipt per shard and every planned test exactly once.
+    Complete means one receipt per shard and every planned test exactly once
+    with a non-skipped outcome. Failed outcomes remain visible to the gate.
     Integrity problems (a receipt from another plan, a test in two shards)
     raise; a missing shard or test is returned so the passes that did run can
     still be published.
@@ -992,6 +1011,9 @@ def collect(plan, receipts):
     missing = sorted(planned - set(outcome))
     if missing:
         problems.append(f"{len(missing)} planned tests did not run, e.g. {missing[:5]}")
+    skipped = sorted(test for test, status in outcome.items() if status == "skipped")
+    if skipped:
+        problems.append(f"{len(skipped)} planned tests were skipped without a positive pass, e.g. {skipped[:5]}")
     return outcome, problems
 
 
@@ -1144,7 +1166,7 @@ def command_baseline_filter(args):
 
 
 def command_classify(args):
-    """Failures that also fail at the merge-base are pre-existing; others block."""
+    """Classify failure provenance for diagnostics, never promotion authority."""
     failures = read_json(args.failures)
     head_failures = failures["failures"]
     base_outcomes = {}
@@ -1156,7 +1178,7 @@ def command_classify(args):
             (pre_existing if base_outcomes.get(test) == "FAIL" else new).setdefault(crate, []).append(test)
     lines = ["Rust units: failures checked at merge-base " + failures["base"][:12] + "."]
     for crate, tests in sorted(pre_existing.items()):
-        lines += [f"- pre-existing on main (`{crate}`, not blocking): `{t}`" for t in tests]
+        lines += [f"- pre-existing on main (`{crate}`, diagnostic only): `{t}`" for t in tests]
     for crate, tests in sorted(new.items()):
         for test in tests:
             state = ("passes at the merge-base" if base_outcomes.get(test) == "PASS"

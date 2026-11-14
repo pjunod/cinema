@@ -4,7 +4,8 @@ enforce_after = "e8a910f"
 # PR #1587: retained source/test anchors after adding the active tone-map pill.
 [[fixes]]
 id = "apple.active-tone-mapping-pill"
-commits = ["6fc8b300e4c2c69ddb3f82c4cee008f975b73499"]
+commits = []
+supplements = "web.tone-mapping-pill-current-processing-evidence"
 source = "clients/apple/Sources/PlayerView.swift"
 source_anchor = "static func toneMappingActive("
 test = "clients/apple/Tests/AppleClientTests.swift"
@@ -12,7 +13,8 @@ test_anchor = "func testToneMappingPillRequiresActiveProcessingEvidence()"
 
 [[fixes]]
 id = "linux-player.tone-map-telemetry-input-loop"
-commits = ["9a980fb053db7720f20a0711594af2fee171b170"]
+commits = []
+supplements = "linux-player.tone-mapping-probe-off-input-loop"
 source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = "Thread(target=self._probe_tone_mapping, args=(sid, result), daemon=True).start()"
 test = "clients/linux-player/tests/test_cinema_controls.py"

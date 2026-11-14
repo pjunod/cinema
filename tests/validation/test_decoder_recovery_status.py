@@ -1267,7 +1267,24 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
 
         # Both hand-written downgrade fixtures give the v48 table back.
-        self.assertRegex(dv_conversion, r"DROPPED_BY_THE_FIXTURE: \[&str; \d+\]")
+        # The inferred slice keeps the schema arithmetic authoritative rather
+        # than duplicating its length in the declaration. Require its typed
+        # shape AND the count/migration-membership assertions below.
+        self.assertRegex(
+            dv_conversion,
+            r"const DROPPED_BY_THE_FIXTURE: &\[&str\] = &\[",
+        )
+        self.assertRegex(
+            dv_conversion,
+            r"assert_eq!\(\s*crate::store::SQLITE_SCHEMA_VERSION - GUARD_SCHEMA_VERSION,"
+            r"\s*DROPPED_BY_THE_FIXTURE\.len\(\) as i64,",
+        )
+        self.assertRegex(
+            dv_conversion,
+            r"for &table in DROPPED_BY_THE_FIXTURE \{\s*assert!\(\s*"
+            r"crate::store::sqlite::MIGRATIONS\[GUARD_SCHEMA_VERSION as usize\.\.\]"
+            r"\s*\.iter\(\)\s*\.any\(\|migration\| migration\.contains\(table\)\)",
+        )
         self.assertIn("media_session_producer_recovery", dv_conversion)
         self.assertIn(
             "DROP TABLE media_session_producer_recovery", store_contract

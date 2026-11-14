@@ -1,6 +1,6 @@
 # Source custody recovery — settle abandoned readers with physical proof
 
-**Status:** open · reboot-free macOS/Linux witnesses qualified; legacy fleet acceptance pending · **Updated:** 2026-11-11
+**Status:** open · reviewed PR #1570 guard incorporated into the playback scheduling batch; combined qualification and rollout pending; the lab4 exact-owner recovery completed 2026-11-13 · **Updated:** 2026-11-13
 
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
@@ -295,6 +295,44 @@ before this field existed prove nothing and keep their reboot or census path.
 An older daemon refuses the new evidence field and so skips the record, the
 safe direction during a rolling upgrade. Each release logs `source custody
 recovered after its daemon's PID namespace was torn down`.
+
+### 1.5 Linux replicated startup requires actual-host identity
+
+**Owner:** Codex/root · **PR:** #1570 · **Scope:** startup prevention only;
+fast lane passed on head `876c6c5858c2`; fleet rollout remains pending.
+
+A replicated Linux daemon must read the actual host's machine ID and boot ID
+through read-only binds before it starts source readers or listeners. It
+refuses startup if either bind is missing or invalid, or if the bound boot ID
+does not match the current procfs kernel boot ID. This prevents a container
+from serving with image-local or empty host identity and creating custody that
+cannot use the existing reboot-recovery path. SQLite bootstrap and native
+macOS recovery are unchanged.
+
+The [Compose deployment](../../deploy/docker-compose.yml) supplies
+`/etc/machine-id` and `/proc/sys/kernel/random/boot_id` at
+`/run/plurx-host-machine-id` and `/run/plurx-host-boot-id`, read-only, with
+missing-source creation disabled. The [native systemd unit](../../deploy/plurxd.service)
+requires the same mounts. These are required host configuration, not an
+optional feature switch.
+
+This guard prevents new Linux replicated owners from starting without valid
+host identity; it does not repair historical records. The lab4 owner was
+released at 2026-11-13 19:01:59.868984 UTC through the existing exact-custody
+census recovery in §1.3, implemented by merged PR #1567. The daemon recorded
+the release; managed sidecars were clean, the temporary root proof was removed
+after the normal release acknowledgement, and the census binding remains
+installed. No direct database edits were made.
+
+Read-only queries at 19:06:45 UTC on lab3, lab4, lab6 and media1, all running
+revision `882d4b691e048f24b6c3e665717aa5966db71a28`, found the exact custody
+row absent and `plurx_background_source_recovery_pending=0` on each replica.
+A separate 19:03:52 UTC host audit found both required read-only identity
+mounts valid and matching on those four hosts. Revision 882 does not include
+PR #1570's startup guard, so rollout of the prevention remains pending. These
+bounded checks establish recovery of this one owner, not general fleet or
+playback acceptance. See the
+[shared-playback RCA §5.1](../streaming/SHARED-LIBRARY-PLAYBACK-RCA.md#51-missing-host-identity-let-a-replicated-linux-daemon-start-without-reboot-recovery).
 
 ## 2. The journal never impersonates an activation or completed join
 
