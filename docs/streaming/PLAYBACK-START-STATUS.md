@@ -19,12 +19,15 @@ Codex owns the resumed E1/D3 reading and control503 investigation; Paul owns
 and confirmed full-fleet rollout. #1568 landed as `882d4b691`, #1573 corrected
 the Developer renderer, and #1582 landed diagnostics as `65493acc8` after green
 fast lane 7477 (API 7690), Main promotion, local Clippy and three regressions.
-All four nodes run `483d2bcf3` and are healthy at 23:03:46 UTC. Four natural
-control503s identify the pre-read pending-release fence; the original 18:44
-branch remains unproven. [Measured results and attribution limits](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md)
-retain the historical 882 interval, actual Developer cards, unexercised Create
-plan counts and separate status503s. Final post-rollout hour reading is pending
-00:03:00 UTC November 14. Earlier fleet snapshots below are historical.
+All four nodes retain `483d2bcf3` starts and are healthy at 00:04:17 UTC
+November 14 after over an hour of sampled health. The requested reading is
+complete: leader hour traffic 5124, new playback5xx/control Unavailable 3/1;
+other nodes have no playback ingress. Five cumulative control503s identify the
+pre-read release fence; the original 18:44 exact branch remains unproven.
+[Measured results and limits](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md)
+retain typed status/playlist refusals, final UI seven-of-seven replica plans,
+unexercised peer/refusal paths and the historical 882 interval. This completes
+measurement, not all feature acceptance. Earlier snapshots below are historical.
 
 ## Merged batch — index timestamp repair and Source locate eligibility
 
