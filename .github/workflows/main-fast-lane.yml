@@ -101,6 +101,7 @@ jobs:
       worker_control: ${{ steps.scope.outputs.worker_control }}
       train_selected: ${{ steps.scope.outputs.train_selected }}
       run_lane: ${{ steps.scope.outputs.run_lane }}
+      train_tests: ${{ steps.scope.outputs.train_tests }}
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -114,7 +115,8 @@ jobs:
           MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}
           MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}
         # validation/merge_train.py: on a merge-train probe only its
-        # `Train-Jobs:` run; anywhere else the scope passes through.
+        # `Train-Jobs:` run (and `Train-Tests:` narrows rust_units to exactly
+        # those tests); anywhere else the scope passes through.
         run: |
           set -euo pipefail
           python3 -m validation.ci_scope --event pull_request --base "$VALIDATION_BASE" \
@@ -567,6 +569,7 @@ jobs:
     uses: ./.github/workflows/rust-units.yml
     with:
       base: ${{ github.event.pull_request.base.sha }}
+      tests: ${{ needs.scope.outputs.train_tests }}
     secrets: inherit
 
   web_compile:

@@ -106,6 +106,16 @@ through pull requests and never pushes to `main`. `paperwork` never fixes a
 bot-authored `train/` head in place (it fails instead); a `train/` branch of
 anyone else is an ordinary PR and keeps the auto-fix.
 
+A probe whose `Train-Jobs:` names `rust_units` may add `Train-Tests: <id>,<id>`,
+each id exactly as cargo-nextest prints it (`<binary id> <test path>`, for example
+`plurx-core::store_contract contract_inventory_matches_every_store_method`). The
+same authority rule applies (bot-authored `train/` head); a malformed or empty list
+fails the scope job. The unit stage then runs exactly those tests, whatever the
+content keys say, adopts nothing from receipts, and its verdict and gate report each
+named test as PASS, FAIL or NOT RUN: a failing, unknown, skipped or unrun named test
+fails the gate, and the stage's own merge-base excuse is not applied. The train
+classifies by comparing the main-alone probe with the branch probe.
+
 One limit to know: a probe on `main` alone has an empty diff, so a job that
 decides from the diff what to check (the worker controller proof, the formal
 mapping, `web-types --base`, the Rust unit content selector) can pass there vacuously. Such a failure is then
