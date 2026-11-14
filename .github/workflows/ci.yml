@@ -1534,6 +1534,11 @@ jobs:
           command -v xauth
       - name: Test Cinema remote browser contracts
         run: make cinema-remote-browser-check
+      - name: Test ebook reader layout in a real browser
+        run: |
+          PLAYWRIGHT_MODULE="$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')" \
+            "$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')" \
+            --test tests/web/reader-layout.browser.cjs
       - name: Test grouped library rows in a real browser
         run: make library-rows-browser-check
       - name: Test Shared library layouts and enriched metadata in a real browser
