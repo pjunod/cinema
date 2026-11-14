@@ -196,6 +196,7 @@ impl Descriptors {
         self.prepare_std_with_profile(command.as_std_mut(), stdio, profile)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_std(
         &self,
         command: &mut std::process::Command,

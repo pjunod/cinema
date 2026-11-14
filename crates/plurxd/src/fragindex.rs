@@ -2658,6 +2658,7 @@ pub(crate) async fn build_riding_with_store(
 /// [`build_riding`] for several identities from one read of the held source,
 /// in `videos` order. Every build carries the same `source_unchanged`: one
 /// held source, one fence.
+#[cfg(test)]
 pub(crate) async fn build_riding_shared(
     file: &MediaFile,
     videos: &[transcode::CopyVideoOptions],
@@ -2782,7 +2783,7 @@ where
 }
 
 /// The cluster worker's build: every identity in `videos` from one read of the
-/// held source ([`build_shared_attested`]), in `videos` order, with progress
+/// held source (`build_shared_attested_with_store`), in `videos` order, with progress
 /// reported and the file's PGS tracks kept when `ride_along` allows. The
 /// worker publishes the harvest only after its own `source_still_matches` and
 /// `still_current` checks.
@@ -2870,6 +2871,7 @@ fn first_build(builds: Vec<IndexBuild>) -> IndexBuild {
 /// cannot be described is refused alone; the rest still share the read.
 #[cfg(not(windows))]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn build_shared_attested(
     file: &MediaFile,
     source: &std::fs::File,
@@ -2930,6 +2932,7 @@ async fn build_shared_attested_with_store(
 /// first pass rides along, so the tracks are still kept once.
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn build_shared_attested(
     file: &MediaFile,
     source: &std::fs::File,
