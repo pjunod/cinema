@@ -167,7 +167,7 @@ function updateReaderLocation(){
   if(location) location.textContent=`Section ${current} of ${count}${pages?` · Page ${pages.page} of ${pages.pages}`:` · ${readerProgressLabel(total)}`}`;
   for(const direction of [-1,1]){
     const button=document.getElementById(direction<0?"reader-previous":"reader-next");
-    if(!button) continue;
+    if(!(button instanceof HTMLButtonElement)) continue;
     const boundary=direction<0?atStart:atEnd;
     const unit=boundary?"section":pages?"page":"screen";
     button.textContent=direction<0?`← Previous ${unit}`:`Next ${unit} →`;
