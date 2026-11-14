@@ -41,7 +41,7 @@ per-run apt and toolchain provisioning whether the cache is warm or cold.
 |---|---|---|---|---|---|
 | before | lab1 guests (`-j1`) | 2.1–2.8 min | 9.2–10.7 min | 10.5–12.1 min | 22.4–25.0 min |
 | before | lab5 compile slot (`-j1`) | 2.2–2.6 min | 5.8–6.8 min | 6.6–7.9 min | 14.6–17.4 min |
-| after | lab1 guest `gha-lab1-plurx-heavy-02` (`-j4`, warm cache, first pull of the image) | 1.0 min | — | 6.7 min (+0.2 vendored) | 8.2 min |
+| after (historical; Forgejo registration 62, now retired) | lab1 guest `gha-lab1-plurx-heavy-02` (`-j4`, warm cache, first pull of the image) | 1.0 min | — | 6.7 min (+0.2 vendored) | 8.2 min |
 
 ## Bumping the image (one command per step)
 
