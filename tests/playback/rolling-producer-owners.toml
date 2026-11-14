@@ -7112,7 +7112,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Control refusal diagnostics: +2 HTTP Response::status() assertions, one
 # in the process-free release-interleaving fixture and one in the privacy
 # observer fixture. Both inspect returned values; neither launches a process.
-expected_occurrences = 929
+# Sharing listener (#1598): +5 SharingManager::status() reads in the listener
+# tests, asserting the reported listener state. They read an in-memory status
+# snapshot; none launches a process.
+expected_occurrences = 934
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
