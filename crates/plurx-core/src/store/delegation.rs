@@ -397,6 +397,13 @@ pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreErro
     Ok(())
 }
 
+pub(crate) fn verify_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    if version(&rows(conn)?)?.is_some() {
+        verify_sqlite(conn)?
+    };
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,11 +648,4 @@ mod tests {
             .expect("revoked")
             .is_none());
     }
-}
-
-pub(crate) fn verify_predecessor(conn: &rusqlite::Connection) -> Result<(), StoreError> {
-    if version(&rows(conn)?)?.is_some() {
-        verify_sqlite(conn)?
-    };
-    Ok(())
 }

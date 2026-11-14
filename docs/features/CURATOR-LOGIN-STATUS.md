@@ -1,8 +1,8 @@
 # Curator login — optional household delegation and qualification
 
-**Status:** Astra findings fixed; static recheck and regression execution pending ·
+**Status:** reviewed and locally qualified; PR/train qualification pending ·
 **Updated:** 2026-11-13 · **Owner:** Codex/root ·
-**Branch:** `codex/curator-delegation` · **Current-main integration:** `483d2bcf3`.
+**Branch:** `codex/curator-delegation` · **Current-main integration:** `819b5c68d`.
 
 ## At a glance
 
@@ -10,11 +10,13 @@
 
 - **What this is:** An optional, explicit application login connection. Cinema
   and Curator retain independent local accounts, credentials and permissions.
-- **Where it stands:** Store, HTTP and web consent/registration code exists.
-  Pinned 1.97.1 compile checks pass on the integrated source and authored core
-  fixtures. Astra requested changes on `6f12ce9d`; the fixes and new fixtures
-  await a targeted static recheck. Regression suites, PR/CI qualification and merge
-  remain pending. No deployment or real-account linking has been performed.
+- **Where it stands:** Astra cleared the implementation and current-main
+  composition. Local scoped store contracts (SQLite and three voters), delayed
+  expiry/migration fixtures, v43/v14 upgrade/import regressions, actual HTTP
+  routes, three shipped-shell browser cases, the full Node web suite, pinned
+  Clippy and web type-baseline checks passed. Paperwork passes all 16 checks.
+  PR/train qualification and merge remain; no deployment or real-account
+  linking has been performed.
 - **Read further only for:** the authority contract, endpoint/setup workflow,
   storage/migration boundaries and the evidence ledger below. The canonical
   route reference is [API.md](../API.md#optional-curator-household-login).
@@ -116,7 +118,31 @@ Historical v43/v14 helpers first validate and remove only an exact empty v132
 extension; registrations, codes, grants, altered objects or missing markers
 refuse without mutation. The census includes v132.
 
-New core/backend, HTTP and actual shipped-shell Chromium fixtures were authored.
-Only pinned compile checks have run; static fix recheck precedes all runtime
-regressions. Curator separately requires app-verifier plus consenting-device
+Core/backend, HTTP and actual shipped-shell Chromium fixtures were authored
+before the static review gate; the final local results are recorded below. Curator separately requires app-verifier plus consenting-device
 completion proof, retaining standalone local login during upstream outages.
+
+## Local qualification receipt
+
+Astra cleared Curator `99eb022` / Cinema `e0f60d0c3` and then current-main
+composition at Curator `7a90fd1` / Cinema `7c6845ddd`. Runtime qualification
+found only fixture/census and static-tool issues: valid FK parents for historical
+refusals, exact current import-family names, helper placement before Rust tests,
+precise DOM types and generated shell configuration. Those are corrected.
+
+- Pinned Rust 1.97.1 Clippy: core + daemon all targets, including Hiqlite fixtures.
+- `cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests delegation`:
+  local and three-voter scoped login, client cap, revocation, deterministic
+  cleanup, delayed-writer expiry and strict schema/rewind checks pass.
+- Existing v43 guarded upgrade and both populated-v14 activation/import checks
+  pass, including exact current-family parity on three voters.
+- Actual HTTP router proof/PKCE/replay/source-revocation regression passes.
+- `make web-unit-check`, `scripts/web-types --base origin/main`, and
+  `make curator-login-browser-check` pass (three fresh consent/management cases).
+- `make paperwork` passes 16/16. The browser target is registered in the
+  provisioned full CI workflow, and the delegated files map to identity access.
+
+The repository Actions variable `MERGE_TRAIN=on` was verified. Submit as WIP,
+wait for train acknowledgment, then remove WIP after local qualification; the
+train owns landing after current-candidate promotion checks. Do not manually
+merge around the train. External receipts retain logs and the cross-app review.

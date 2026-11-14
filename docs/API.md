@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-11-12, plurx has 415 routes declared by the ordinary listener's
+As of 2026-11-12, plurx has 422 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 415 routes across the registered routers.
+plurx has 422 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -4816,16 +4816,16 @@ These routes add an explicit optional application connection; neither standalone
 account directory depends on the other application. This is a fixed household
 scope, not a general OIDC provider or a native API bearer exchange.
 
-| Route | Authority and result |
-|---|---|
-| `GET /api/v1/delegation/clients` | Local native administrator; registered active application names, IDs, exact callbacks and generations, never secrets. |
-| `POST /api/v1/delegation/clients` | Local native administrator; JSON `name`, `redirect` (exact HTTPS URL, no query/fragment/userinfo). Returns `client`, `issuer`, and one-time `clientSecret`. |
-| `DELETE /api/v1/delegation/clients/{id}` | Local native administrator; disconnects and advances generation, immediately invalidating its codes/grants. |
-| `GET /api/v1/delegation/info?clientId=…` | Public registered-client consent metadata: issuer, client and fixed `household-requests` scope. |
-| `POST /api/v1/delegation/consent` | Native user bearer remains on Cinema's origin; JSON `clientId`, `state`, `challenge` (S256). Returns the exact registered redirect with one-use `code`, echoed state and issuer. |
-| `POST /api/v1/delegation/exchange` | Confidential backend JSON `clientId`, `clientSecret`, `code`, `verifier`, `redirect`. Atomically claims one unexpired code and returns a separate opaque `grant`. |
-| `POST /api/v1/delegation/introspect` | Confidential backend JSON `clientId`, `clientSecret`, `grant`. Returns `active: false`, or current issuer/subject/audience/scope/display name/expiry. Never refreshes source login activity or returns administrator authority. |
-| `POST /api/v1/delegation/revoke` | Confidential backend JSON `clientId`, `clientSecret`, `grant`; idempotently removes that client's grant. |
+| Method | Route | Authority and result |
+|---|---|---|
+| GET | `/api/v1/delegation/clients` | Local native administrator; registered active application names, IDs, exact callbacks and generations, never secrets. |
+| POST | `/api/v1/delegation/clients` | Local native administrator; JSON `name`, `redirect` (exact HTTPS URL, no query/fragment/userinfo). Returns `client`, `issuer`, and one-time `clientSecret`. |
+| DELETE | `/api/v1/delegation/clients/{id}` | Local native administrator; disconnects and advances generation, immediately invalidating its codes/grants. |
+| GET | `/api/v1/delegation/info` | Public registered-client consent metadata: issuer, client and fixed `household-requests` scope. |
+| POST | `/api/v1/delegation/consent` | Native user bearer remains on Cinema's origin; JSON `clientId`, `state`, `challenge` (S256). Returns the exact registered redirect with one-use `code`, echoed state and issuer. |
+| POST | `/api/v1/delegation/exchange` | Confidential backend JSON `clientId`, `clientSecret`, `code`, `verifier`, `redirect`. Atomically claims one unexpired code and returns a separate opaque `grant`. |
+| POST | `/api/v1/delegation/introspect` | Confidential backend JSON `clientId`, `clientSecret`, `grant`. Returns `active: false`, or current issuer/subject/audience/scope/display name/expiry. Never refreshes source login activity or returns administrator authority. |
+| POST | `/api/v1/delegation/revoke` | Confidential backend JSON `clientId`, `clientSecret`, `grant`; idempotently removes that client's grant. |
 
 Codes expire after 120 seconds and accept one redemption, with a unique claim
 nonce. Grants expire after 30 days and become inactive sooner when their source

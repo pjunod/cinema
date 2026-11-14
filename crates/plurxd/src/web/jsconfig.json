@@ -112,6 +112,7 @@
     "pages/remote.js",
     "pages/diagnostics.js",
     "pages/activity-starts.js",
+    "curator-login.js",
     "router.js"
   ]
 }
