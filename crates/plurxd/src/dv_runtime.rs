@@ -355,6 +355,18 @@ fn contained(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 impl ToolSet {
+    /// Only parents of the canonical executables accepted by bundle validation.
+    /// Never infer trust from the configured bundle root before capture succeeds.
+    pub(crate) fn executable_directories(&self) -> Vec<PathBuf> {
+        let mut directories: Vec<_> = [&self.renderer, &self.scanner]
+            .into_iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect();
+        directories.sort();
+        directories.dedup();
+        directories
+    }
+
     /// The whole processing backend: renderer, libraries, parser and helper
     /// sources. FEL verdicts are measurements of that renderer, so they are
     /// keyed by it.
@@ -3529,6 +3541,27 @@ mod bundle_capture_tests {
             .expect("validate current installer bundle")
             .expect("current bundle accepted");
         assert!(tools.is_current().await);
+        let mut config = plurx_core::config::Config::default();
+        config.storage.data_dir = fixture.path().join("data");
+        let dirs = crate::state::Dirs {
+            artwork: fixture.path().join("artwork"),
+            transcode: fixture.path().join("transcode"),
+            cache: fixture.path().join("cache"),
+            subs: fixture.path().join("subs"),
+            runtime_cache: fixture.path().join("runtime"),
+            renditions: fixture.path().join("renditions"),
+        };
+        let validated_directories = tools.executable_directories();
+        let (_, production_tools) =
+            crate::source_custody::access_root_paths(&config, &dirs, &validated_directories);
+        for executable in [&tools.renderer, &tools.scanner] {
+            let parent = executable.parent().expect("validated helper directory");
+            assert!(
+                production_tools.iter().any(|path| path == parent),
+                "startup must qualify the actual validated helper parent: {parent:?}"
+            );
+        }
+
         assert_eq!(
             tools.renderer,
             root.join("bin/segment_decode_render")

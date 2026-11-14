@@ -5920,7 +5920,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Twilight/F+ integration: +1 bounded production qualification-admission timeout, +1 admission
 # fixture timeout, +8 title-lane fixture timeouts and +1 deterministic F+ handoff timeout.
 # Expiry proves no physical settlement; tests still join/reap their owners.
-expected_occurrences = 2231
+# Reviewed renderer launch integration: +1 net test-only timeout bounds joined cleanup after cancellation; timeout alone proves no settlement.
+expected_occurrences = 2232
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6441,7 +6442,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # F+ integration retains both reviewed source additions.
 # Integration: +1 test-owned sleep child for title-lane reclamation and +1 isolated test-
 # executable policy subprocess for F+ spool manifests. Both are retained and awaited.
-expected_occurrences = 360
+# Reviewed renderer integration: +2 test-only command constructors, an isolated policy test image and a real generated-media FFmpeg fixture. Existing awaited test/process owners retain and reap both.
+expected_occurrences = 362
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

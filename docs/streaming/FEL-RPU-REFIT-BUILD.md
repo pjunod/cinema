@@ -19,8 +19,9 @@ on the server. Developer controls and playback-info presentation are part of
 The combined candidate integrates main `483d2bcf3` and reviewed Twilight source
 `757ba29badc75cc3872889f2b08459f280658d33`; that source has not yet landed.
 Worker protocol11 combines main's strict catalog provenance with the F+ digest.
-SQLite132 preserves exact title-demand continuity; F+ appends133. Integration
-review and exact-source qualification remain pending; no deployment is implied.
+SQLite132 preserves exact title-demand continuity; F+ appends133. The reviewed integration also includes core typed-argument source `9f717f94e`
+and final Twilight launch/startup source `9db044132`. Independent integration
+review passed; exact-source qualification remains pending. No deployment is implied.
 
 ## 1. Objective
 

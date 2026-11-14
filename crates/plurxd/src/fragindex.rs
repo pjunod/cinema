@@ -999,7 +999,7 @@ fn held_filtered_packet_hash<'a>(
         );
         #[cfg(not(unix))]
         let descriptors = crate::producer_spawn::Descriptors::default();
-        let result = crate::ffmpeg::bounded_command_output_descriptors_cancellable(
+        let result = crate::ffmpeg::bounded_ffmpeg_output_descriptors_cancellable(
             command,
             budget.min(Duration::from_secs(30)),
             64 * 1024,

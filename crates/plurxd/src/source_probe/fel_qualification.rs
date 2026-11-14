@@ -14,9 +14,10 @@
 mod child_group;
 
 use crate::dv_segment::RendererDecode;
-use plurx_core::process::ChildWork;
+use plurx_core::process::{source_lifetime::ArgumentProfile, ChildWork};
 use plurx_core::transcode::dv_fel_qualification::{self as q, Lattice, WindowScore};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -364,6 +365,7 @@ fn inherit_renderer_outputs(
     directory: &std::fs::File,
     output: &std::fs::File,
     stdio: crate::producer_spawn::ChildStdios<'_>,
+    profile: ArgumentProfile,
 ) -> Result<std::sync::Arc<crate::producer_spawn::DescriptorManifest>, String> {
     use std::os::unix::fs::FileTypeExt;
     if !directory
@@ -387,7 +389,7 @@ fn inherit_renderer_outputs(
         &[(directory.as_raw_fd(), 4), (output.as_raw_fd(), 5)],
         None,
     )
-    .prepare(command, stdio)
+    .prepare_with_profile(command, stdio, profile)
     .map_err(|error| error.to_string())
 }
 
@@ -400,6 +402,9 @@ struct QualificationStage {
     group_join_unconfirmed: bool,
     input: Option<crate::source_input::SourceInput>,
     input_close: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    input_close_unconfirmed: bool,
+    // Registry guards pin generated files/directories through physical cleanup.
+    assets: Vec<plurx_core::process::source_lifetime::DaemonFileRegistration>,
 }
 impl QualificationStage {
     fn new(input: Option<crate::source_input::SourceInput>) -> Self {
@@ -410,6 +415,8 @@ impl QualificationStage {
             group_join_unconfirmed: false,
             input,
             input_close: None,
+            input_close_unconfirmed: false,
+            assets: Vec::new(),
         }
     }
 
@@ -456,6 +463,7 @@ impl QualificationStage {
         self.input_close.take();
         if let Some(closed) = closed {
             if !matches!(closed, Ok(Ok(()))) {
+                self.input_close_unconfirmed = true;
                 tracing::error!(
                     ?closed,
                     "FEL source bridge could not confirm physical close; retaining owner"
@@ -463,6 +471,7 @@ impl QualificationStage {
                 std::future::pending::<()>().await;
             }
         }
+        self.assets.clear();
     }
 }
 impl Drop for QualificationStage {
@@ -473,10 +482,12 @@ impl Drop for QualificationStage {
         let mut children = std::mem::take(&mut self.children);
         let group = self.group.take();
         let group_close = self.group_close.take();
-        let group_join_unconfirmed = self.group_join_unconfirmed;
+        let closure_unconfirmed = self.group_join_unconfirmed || self.input_close_unconfirmed;
         let input = self.input.take();
         let input_close = self.input_close.take();
-        if children.is_empty()
+        let assets = std::mem::take(&mut self.assets);
+        if !closure_unconfirmed
+            && children.is_empty()
             && group.is_none()
             && group_close.is_none()
             && input.is_none()
@@ -487,7 +498,7 @@ impl Drop for QualificationStage {
         // An abandoned future transfers its owned children and broker, never
         // a settled receipt. Job registrations survive through the real joins.
         tokio::spawn(async move {
-            if group_join_unconfirmed {
+            if closure_unconfirmed {
                 std::future::pending::<()>().await;
             }
             if let Some(close) = group_close {
@@ -517,6 +528,7 @@ impl Drop for QualificationStage {
                 tracing::error!(%error, "abandoned FEL source bridge close remains unconfirmed");
                 std::future::pending::<()>().await;
             }
+            drop(assets);
         });
     }
 }
@@ -559,17 +571,19 @@ async fn render_owned(
         .map_err(|error| error.to_string())?;
     // This directory was created immediately above for this qualification;
     // an arbitrary media or subtitle handle must never gain this registration.
-    let _directory_registration =
+    stage.assets.push(
         plurx_core::process::source_lifetime::register_daemon_file(&directory, &evidence)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?,
+    );
     let (read, write) = std::io::pipe().map_err(|error| error.to_string())?;
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
     let diagnostics_path = scratch.join(format!("{mode}-{export}.log"));
     let diagnostics =
         std::fs::File::create(&diagnostics_path).map_err(|error| error.to_string())?;
-    let _diagnostics_registration =
+    stage.assets.push(
         plurx_core::process::source_lifetime::register_daemon_file(&diagnostics, &diagnostics_path)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?,
+    );
     let mut args = helper_args(&sample.clock, window, mode, export);
     args[0] = stage
         .input
@@ -579,6 +593,7 @@ async fn render_owned(
         .into();
     let mut helper = tokio::process::Command::new(sample.renderer);
     helper
+        .current_dir(scratch)
         .args(args)
         .envs(
             sample
@@ -600,7 +615,9 @@ async fn render_owned(
             stdout: crate::producer_spawn::ChildStdio::Piped,
             stderr: crate::producer_spawn::ChildStdio::File(&diagnostics),
         },
+        ArgumentProfile::FelRendererWindowV1,
     )?;
+    let mut device = None;
     let mut consumer = tokio::process::Command::new(&sample.ffmpeg);
     match encode_to {
         Some(output) => {
@@ -612,6 +629,27 @@ async fn render_owned(
                 output,
             )?;
             sample.envelope.apply_args(&mut args, sample.encoder);
+            if sample.encoder == plurx_core::transcode::Encoder::Vaapi {
+                let option = args
+                    .iter()
+                    .position(|arg| arg == "-vaapi_device")
+                    .ok_or("FEL VAAPI encode has no device operand")?;
+                let operand = args
+                    .get_mut(option + 1)
+                    .ok_or("FEL VAAPI device operand is missing")?;
+                let path = std::fs::canonicalize(&*operand).map_err(|error| error.to_string())?;
+                let held = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(path)
+                    .map_err(|error| error.to_string())?;
+                // The typed manifest validates this held device's DRM character
+                // identity. FFmpeg receives that exact object, never a pathname
+                // it could reopen after validation or an ambient /dev exception.
+                *operand = "/proc/self/fd/7".into();
+                device = Some(held);
+            }
             consumer.args(args);
             consumer.stdout(Stdio::null());
         }
@@ -620,10 +658,16 @@ async fn render_owned(
             consumer.stdout(Stdio::piped());
         }
     }
-    consumer.kill_on_drop(true);
+    consumer.current_dir(scratch).kill_on_drop(true);
     let read = read_end_file(read);
-    let consumer_manifest = crate::producer_spawn::Descriptors::default()
-        .prepare(
+    let descriptors = match device.as_ref() {
+        Some(device) => {
+            crate::producer_spawn::Descriptors::from_mappings(&[(device.as_raw_fd(), 7)], None)
+        }
+        None => crate::producer_spawn::Descriptors::default(),
+    };
+    let consumer_manifest = descriptors
+        .prepare_with_profile(
             &mut consumer,
             crate::producer_spawn::ChildStdios {
                 stdin: crate::producer_spawn::ChildStdio::File(&read),
@@ -633,6 +677,9 @@ async fn render_owned(
                     crate::producer_spawn::ChildStdio::Piped
                 },
                 stderr: crate::producer_spawn::ChildStdio::Piped,
+            },
+            ArgumentProfile::Ffmpeg {
+                drm_device: device.as_ref().map(|_| 7),
             },
         )
         .map_err(|error| error.to_string())?;
@@ -790,20 +837,52 @@ async fn reap(child: &mut tokio::process::Child) {
 }
 
 async fn decode(sample: &Sample<'_>, encoded: &Path) -> Result<Vec<Lattice>, String> {
+    let input = plurx_core::fs_secure::open_read_nofollow_blocking(encoded)
+        .map_err(|error| error.to_string())?;
+    if !input
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("FEL served window must be a generated regular file".into());
+    }
+    let mut stage = QualificationStage::new(None);
+    stage.assets.push(
+        plurx_core::process::source_lifetime::register_daemon_file(&input, encoded)
+            .map_err(|error| error.to_string())?,
+    );
     let mut command = tokio::process::Command::new(&sample.ffmpeg);
     command
-        .args(rgb48_args(&encoded.to_string_lossy(), false))
+        .current_dir(
+            encoded
+                .parent()
+                .ok_or("FEL served window has no owned directory")?,
+        )
+        .args(rgb48_args("/proc/self/fd/6", false))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let group = plurx_core::process::source_lifetime::mediated(child_group::Group::start(
-        &mut command,
-        &sample.cancel,
-        ChildWork::background("Dolby Vision FEL qualification sample"),
-    ))
-    .await?;
-    let mut stage = QualificationStage::new(None);
+    let manifest =
+        crate::producer_spawn::Descriptors::from_mappings(&[(input.as_raw_fd(), 6)], None)
+            .prepare_with_profile(
+                &mut command,
+                crate::producer_spawn::ChildStdios {
+                    stdin: crate::producer_spawn::ChildStdio::Null,
+                    stdout: crate::producer_spawn::ChildStdio::Piped,
+                    stderr: crate::producer_spawn::ChildStdio::Piped,
+                },
+                ArgumentProfile::Ffmpeg { drm_device: None },
+            )
+            .map_err(|error| error.to_string())?;
+    let group =
+        plurx_core::process::source_lifetime::mediated(child_group::Group::start_with_manifest(
+            &mut command,
+            &sample.cancel,
+            ChildWork::background("Dolby Vision FEL qualification sample"),
+            manifest,
+        ))
+        .await?;
     stage.group = Some(group);
     let group = stage.group.as_mut().expect("owned decoder group");
     let (guard, id, children) = group.parts();
@@ -821,6 +900,7 @@ async fn decode(sample: &Sample<'_>, encoded: &Path) -> Result<Vec<Lattice>, Str
     })
     .await;
     let statuses = stage.close_group_and_wait().await;
+    stage.close_and_wait().await;
     let lattices = outcome?;
     if statuses
         .iter()
@@ -1328,7 +1408,8 @@ mod tests {
                 &mut command,
                 &directory,
                 &source,
-                crate::producer_spawn::ChildStdios::CAPTURED
+                crate::producer_spawn::ChildStdios::CAPTURED,
+                ArgumentProfile::Default,
             )
             .is_err(),
             "a regular source file must never qualify as an output pipe"
@@ -1338,6 +1419,7 @@ mod tests {
             &directory,
             &write,
             crate::producer_spawn::ChildStdios::CAPTURED,
+            ArgumentProfile::Default,
         )
         .expect("output-only handoff");
         assert!(
@@ -2738,8 +2820,83 @@ mod tests {
             SourcePausePhase,
         };
         use std::os::unix::fs::PermissionsExt;
+        const ISOLATED_ROOT: &str = "PLURX_FEL_BROKER_FIXTURE_ROOT";
+        const FIXTURE_FFMPEG: &str = "PLURX_FEL_BROKER_FIXTURE_FFMPEG";
+        let Some(root) = std::env::var_os(ISOLATED_ROOT) else {
+            // Reader roots are immutable process state. Configure production
+            // registration only inside this isolated test image.
+            let root = crate::test_tempdir().expect("isolated source-broker root");
+            let ffmpeg = crate::ffmpeg::EncodedExecutable::capture_program(
+                &plurx_core::testfixtures::ffmpeg(),
+            )
+            .await
+            .expect("capture actual fixture FFmpeg");
+            assert!(
+                ffmpeg.path.is_absolute(),
+                "fixture FFmpeg must be resolved before isolation"
+            );
+            let mut command =
+                tokio::process::Command::new(std::env::current_exe().expect("test image"));
+            command.args([
+                "--exact",
+                "source_probe::fel_qualification::tests::qualification_broker_pauses_pipe_partners_and_reaps_before_close",
+                "--nocapture",
+            ]).env_clear().env(ISOLATED_ROOT, root.path()).env(FIXTURE_FFMPEG, &ffmpeg.path).current_dir(root.path());
+            for name in ["TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+            let output = plurx_core::process::source_lifetime::mediated(
+                plurx_core::process::bounded::output_command_inherited_env(
+                    &mut command,
+                    Duration::from_secs(45),
+                    64 * 1024,
+                    ChildWork::background("isolated FEL broker fixture"),
+                ),
+            )
+            .await
+            .expect("bounded isolated source-broker test");
+            assert!(
+                output.status.success(),
+                "isolated source-broker fixture failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let fixture_root = std::path::PathBuf::from(root)
+            .canonicalize()
+            .expect("isolated root");
+        let ffmpeg = std::path::PathBuf::from(
+            std::env::var_os(FIXTURE_FFMPEG).expect("isolated actual FFmpeg path"),
+        );
+        assert!(ffmpeg.is_absolute());
+        let tools = [
+            fixture_root.clone(),
+            ffmpeg.parent().expect("FFmpeg tool directory").to_owned(),
+        ];
+        let mut config = plurx_core::config::Config::default();
+        config.storage.data_dir = fixture_root.clone();
+        let dirs = crate::state::Dirs {
+            artwork: fixture_root.join("artwork"),
+            transcode: fixture_root.join("transcode"),
+            cache: fixture_root.join("cache"),
+            subs: fixture_root.join("subs"),
+            runtime_cache: fixture_root.join("runtime"),
+            renditions: fixture_root.join("renditions"),
+        };
+        let (owned, tools) = crate::source_custody::access_root_paths(&config, &dirs, &tools);
+        for path in &owned {
+            std::fs::create_dir_all(path).expect("private startup-owned directory");
+        }
+        plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
+            .expect("isolated immutable reader and script roots");
         for cancelled in [false, true] {
-            let dir = tempfile::tempdir().expect("create source-broker fixture");
+            let dir = tempfile::Builder::new()
+                .prefix("broker-")
+                .tempdir_in(&fixture_root)
+                .expect("create source-broker fixture");
             let helper = dir.path().join("helper.py");
             let consumer = dir.path().join("consumer.py");
             std::fs::write(
@@ -2805,7 +2962,7 @@ while True:
             let worker_cancel = cancel.clone();
             let root = dir.path().to_path_buf();
             let (send, recv) = tokio::sync::oneshot::channel();
-            let task = tokio::spawn(async move {
+            let mut task = tokio::spawn(async move {
                 pausable(worker_controller, async move {
                     let (input, source) =
                         crate::source_input::SourceInput::qualification_fixture(b"fixture source")
@@ -2854,15 +3011,41 @@ while True:
                 .await
             });
             let url = recv.await.expect("receive fixture broker URL");
-            tokio::time::timeout(Duration::from_secs(5), async {
+            let diagnostics = || {
+                format!(
+                    "helper_pid={} reads={} consumer_pid={} helper_stderr={}",
+                    dir.path().join("helper.pid").exists(),
+                    dir.path().join("reads").exists(),
+                    dir.path().join("consumer.pid").exists(),
+                    std::fs::read_to_string(dir.path().join("fel-pq-bilinear-rgb48-v1.log"))
+                        .unwrap_or_else(|error| format!("unavailable: {error}")),
+                )
+            };
+            let started = tokio::time::timeout(Duration::from_secs(5), async {
                 while !dir.path().join("reads").exists()
                     || !dir.path().join("consumer.pid").exists()
                 {
+                    if task.is_finished() {
+                        let result = (&mut task).await.map(|result| result.map(|_| ()));
+                        panic!(
+                            "source-broker setup exited early: {result:?}; {}",
+                            diagnostics()
+                        );
+                    }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
-            .await
-            .expect("wait for both children to start");
+            .await;
+            if started.is_err() {
+                cancel.cancel();
+                let result = tokio::time::timeout(Duration::from_secs(5), &mut task)
+                    .await
+                    .map(|joined| joined.map(|result| result.map(|_| ())));
+                panic!(
+                    "source-broker children did not start; cleanup={result:?}; {}",
+                    diagnostics()
+                );
+            }
             let pid: i32 = std::fs::read_to_string(dir.path().join("helper.pid"))
                 .expect("read helper PID")
                 .parse()
@@ -2931,6 +3114,77 @@ while True:
                 "bridge joined and closed before result"
             );
         }
+
+        // The derived-window decoder must use the actual media tool and the
+        // generated file's pinned descriptor, with its own prepared manifest.
+        let encoded = fixture_root.join("served-window.mp4");
+        plurx_core::testfixtures::run(
+            std::process::Command::new(&ffmpeg)
+                .args([
+                    "-hide_banner",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=white:s=64x64:r=24",
+                    "-frames:v",
+                    "48",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-threads",
+                    "1",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-y",
+                ])
+                .arg(&encoded),
+        );
+        let (input, source) =
+            crate::source_input::SourceInput::qualification_fixture(b"fixture source").await;
+        let sample = Sample {
+            source: &source,
+            clock: Clock {
+                video_index: 0,
+                raster: (64, 64),
+                native_raster: (64, 64),
+                rate: (24, 1),
+                origin: (0, 1),
+            },
+            duration_ms: 2_000,
+            envelope: plurx_core::transcode::EnhancementRateEnvelope::resolve(
+                20_000,
+                plurx_core::transcode::EnhancementRateProvenance::ExplicitEncode,
+                64,
+                64,
+                (24, 1),
+                true,
+                Default::default(),
+            )
+            .expect("derived decoder fixture envelope"),
+            encoder: plurx_core::transcode::Encoder::Vaapi,
+            vaapi_hdr_policy: Some(plurx_core::transcode::VaapiHdrPolicy::MesaRadeonsiVbaq),
+            renderer: &ffmpeg,
+            renderer_env: Vec::new(),
+            ffmpeg: ffmpeg.to_str().expect("FFmpeg executable path").to_owned(),
+            runtime_cache: &fixture_root,
+            decode: RendererDecode::Software,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let pictures = decode(&sample, &encoded).await;
+        input
+            .close_and_wait()
+            .await
+            .expect("close derived decoder fixture source bridge");
+        assert_eq!(
+            pictures
+                .expect("decode actual generated window through held FD6")
+                .len(),
+            48
+        );
     }
 
     #[tokio::test]

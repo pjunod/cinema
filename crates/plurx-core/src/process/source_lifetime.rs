@@ -5,8 +5,10 @@ use std::future::Future;
 use std::io;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+mod arguments;
 mod descriptors;
 mod policy;
+pub use arguments::ArgumentProfile;
 pub use descriptors::{
     register_daemon_file, DaemonFileRegistration, DescriptorManifest, InheritedFd, StdioFacts,
     StdioMode,
