@@ -1,7 +1,7 @@
 # Dolby Vision title scanning — metadata, shared reads and demand identity
 
 **Status:** implemented; scheduling and launch-contract corrections reviewed by Astra.
-Affected qualification, merge-train admission and operator deployment remain pending.
+Affected qualification, the required lane, merge and operator deployment remain pending.
 
 Companion to [the display-targeted DV build ledger](DISPLAY-TARGETED-DV-BUILD.md)
 (target selection and rendering) — this is how the title scanner reads and
