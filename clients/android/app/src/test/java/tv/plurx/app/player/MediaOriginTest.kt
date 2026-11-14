@@ -24,6 +24,8 @@ class MediaOriginTest {
         // duration and must not clamp; a film-local player's own duration is.
         assertEquals(0L, filmDurationMs(0, 121_000, playerTimelineIsFilm = false))
         assertEquals(7_080_000L, filmDurationMs(0, 7_080_000, playerTimelineIsFilm = true))
+        // A film-timeline player's loaded media outranks stale plan metadata.
+        assertEquals(7_095_000L, filmDurationMs(7_080_000, 7_095_000, playerTimelineIsFilm = true))
     }
 
     @Test fun boundedSharedNinetyMinuteAttachmentAndPreparedCompletionKeepTitleClock() {

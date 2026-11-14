@@ -104,8 +104,8 @@ internal fun filmDurationMs(
     playerDurationMs: Long,
     playerTimelineIsFilm: Boolean,
 ): Long = when {
-    titleDurationMs > 0 -> titleDurationMs
     playerTimelineIsFilm && playerDurationMs > 0 -> playerDurationMs
+    titleDurationMs > 0 -> titleDurationMs
     else -> 0L
 }
 

@@ -10,18 +10,15 @@ import tv.plurx.app.data.PlaybackQuality
 class OptionalAutoAttemptTest {
     private class Fixture {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
-        val player = Any()
         val executing = QualitySelection.AutoCandidate(2160, "frozen-processed-hdr10")
         val attempt: OptionalAutoAttempt
         init {
             intent.requestAutomaticCandidate("copy", 2160)
             assertTrue(intent.adoptCommittedAutomaticCandidate(executing.candidateId, 2160, true))
-            attempt = OptionalAutoAttempt.capture(intent, player, "owned-session", 7,
+            attempt = OptionalAutoAttempt.capture(intent,
                 executing.candidateId, executing, "ordinary-hdr10-1080", 1080)!!
         }
-        fun restore(player: Any = this.player, session: String = "owned-session", epoch: Long = 7,
-            active: String = executing.candidateId): Boolean =
-            attempt.restoreIfCurrent(intent, player, session, epoch, active)
+        fun restore(): Boolean = attempt.withdraw(intent)
         fun wireQuality(): QualitySelection.AutoCandidate =
             QualitySelection.AutoCandidate(intent.automaticCandidateHeight, intent.automaticCandidateId!!)
         fun selection(quality: QualitySelection) = ClientSelection(quality, 0,
@@ -77,27 +74,26 @@ class OptionalAutoAttemptTest {
         assertFalse(roundTrip.restore())
     }
 
-    @Test fun failedOptionalTargetRequiresTheSameExecutingPlayerSessionMutationAndCandidate() {
-        for (change in 0..3) {
-            val f = Fixture()
-            assertFalse(f.restore(player = if (change == 0) Any() else f.player,
-                session = if (change == 1) "replacement-session" else "owned-session",
-                epoch = if (change == 2) 8 else 7,
-                active = if (change == 3) "replacement-candidate" else f.executing.candidateId))
-            assertEquals(QualitySelection.AutoCandidate(1080, "ordinary-hdr10-1080"), f.wireQuality())
-        }
+    // Review M4: an in-player seek, reopen or player swap after the target was
+    // published used to leave the abandoned target as the standing ask. While
+    // the candidate revision is still the attempt's, it is withdrawn.
+    @Test fun failedOptionalTargetIsWithdrawnEvenAfterTheExecutionMovedUnderIt() {
+        val f = Fixture()
+        f.intent.beginSeek(1_500_000L, 1_480_000L)
+        assertEquals("ordinary-hdr10-1080", f.intent.automaticCandidateId)
+        assertTrue(f.restore())
+        assertEquals(f.executing, f.wireQuality())
     }
 
     @Test fun acceptedPreparedOwnershipCannotBeRolledBackByItsOldOptionalFailure() {
         val f = Fixture()
         assertTrue(f.intent.adoptCommittedAutomaticCandidate("new-committed", 1080, true))
-        assertFalse(f.restore(active = "new-committed"))
+        assertFalse(f.restore())
         assertEquals(QualitySelection.AutoCandidate(1080, "new-committed"), f.wireQuality())
     }
     @Test fun missingOrMismatchedExecutingReceiptDoesNotPublishAnOptionalTarget() {
         val known = QualitySelection.AutoCandidate(2160, "processed")
         for ((active, standing) in listOf(
-            "processed" to QualitySelection.Auto,
             "processed" to QualitySelection.AutoCandidate(1080, "different"),
             null to known,
             "processed" to QualitySelection.Manual(720),
@@ -105,7 +101,7 @@ class OptionalAutoAttemptTest {
             val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
             intent.requestAutomaticCandidate("processed", 2160)
             val owner = intent.automaticCandidateOwner()
-            assertEquals(null, OptionalAutoAttempt.capture(intent, Any(), "session", 1,
+            assertEquals(null, OptionalAutoAttempt.capture(intent,
                 active, standing, "target", 1080))
             assertEquals(owner, intent.automaticCandidateOwner())
             assertEquals("processed", intent.automaticCandidateId)
@@ -115,11 +111,10 @@ class OptionalAutoAttemptTest {
 
     @Test fun genuinelyUnnamedAutoExecutionCanRestoreItsUnnamedStandingChoice() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
-        val player = Any()
-        val attempt = OptionalAutoAttempt.capture(intent, player, "session", 1,
+        val attempt = OptionalAutoAttempt.capture(intent,
             null, QualitySelection.Auto, "target", 1080)!!
         assertEquals("target", intent.automaticCandidateId)
-        assertTrue(attempt.restoreIfCurrent(intent, player, "session", 1, null))
+        assertTrue(attempt.withdraw(intent))
         assertEquals(null, intent.automaticCandidateId)
         assertEquals(null, intent.automaticCandidateHeight)
     }
@@ -137,11 +132,23 @@ class OptionalAutoAttemptTest {
                 }
             }
             val owner = intent.automaticCandidateOwner()
-            assertEquals(null, OptionalAutoAttempt.capture(intent, Any(), "session", 1, "processed",
+            assertEquals(null, OptionalAutoAttempt.capture(intent, "processed",
                 QualitySelection.AutoCandidate(2160, "processed"), "target", 1080))
             assertEquals(owner, intent.automaticCandidateOwner())
             assertEquals("processed", intent.automaticCandidateId)
         }
     }
 
+    // Review M3: after an audio, subtitle or offset change the intent stands
+    // at unnamed Auto while the reopened session's receipt names its candidate.
+    // That is a known state whose restore target is unnamed Auto, so optional
+    // Auto (and its pressure downshift) keeps working.
+    @Test fun unnamedStandingAutoWithANamedExecutingReceiptStillCapturesAndRestoresUnnamed() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val attempt = OptionalAutoAttempt.capture(intent, "executing-from-receipt",
+            QualitySelection.Auto, "target", 1080)!!
+        assertEquals("target", intent.automaticCandidateId)
+        assertTrue(attempt.withdraw(intent))
+        assertEquals(null, intent.automaticCandidateId)
+    }
 }

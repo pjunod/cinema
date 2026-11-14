@@ -1027,9 +1027,17 @@ impl Drop for ReservedPreparationGuard {
     }
 }
 
+/// How a reservation that did not produce a guard ended.
+enum ReservationEnd {
+    Refused(PreparationStageRefusal),
+    /// The reservation answered `false` because an outside cancellation (a
+    /// foreground watch, a newer claim) had already landed: not a refusal.
+    Cancelled,
+}
+
 async fn reserve_preparation_before(
     active: ActivePreparedSuccessor,
-) -> Result<ReservedPreparationGuard, PreparationStageRefusal> {
+) -> Result<ReservedPreparationGuard, ReservationEnd> {
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result = active.executor.reserve(&active.preparation).await;
@@ -1038,23 +1046,28 @@ async fn reserve_preparation_before(
                 let _ = send.send(Ok(ReservedPreparationGuard::new(active)));
             }
             refused => {
-                let reason = if refused.is_err() {
-                    PreparationStageRefusal::ReservationError
+                // Read before the settlement below, which cancels this same
+                // token itself and would make every refusal look cancelled.
+                let cancelled = matches!(refused, Ok(false)) && active.cancelled.is_cancelled();
+                let end = if cancelled {
+                    ReservationEnd::Cancelled
+                } else if refused.is_err() {
+                    ReservationEnd::Refused(PreparationStageRefusal::ReservationError)
                 } else {
-                    PreparationStageRefusal::ReservationRefused
+                    ReservationEnd::Refused(PreparationStageRefusal::ReservationRefused)
                 };
                 // Keep the original cleanup-before-return ordering. The outer
                 // budget covers reservation and this exact owner's settlement.
                 settle_cancelled_preparation(active, "prepared successor reservation refused")
                     .await;
-                let _ = send.send(Err(reason));
+                let _ = send.send(Err(end));
             }
         }
     });
     match tokio::time::timeout(PREPARATION_STORE_BUDGET, receive).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err(PreparationStageRefusal::ReservationTaskClosed),
-        Err(_) => Err(PreparationStageRefusal::ReservationSettlementDeadline),
+        Ok(Err(_)) => Err(ReservationEnd::Refused(PreparationStageRefusal::ReservationTaskClosed)),
+        Err(_) => Err(ReservationEnd::Refused(PreparationStageRefusal::ReservationSettlementDeadline)),
     }
 }
 
@@ -2593,6 +2606,7 @@ pub(super) enum PreparationStageRefusal {
 enum PreparationStageCancellation {
     QualityIntent,
     BeforeReservation,
+    Reservation,
     Prime,
     PrimeReadiness,
     Activation,
@@ -3106,7 +3120,15 @@ pub(super) async fn stage_prepared_successor_as(
         arm_preparation_foreground_watch(active.clone());
         let reservation = match reserve_preparation_before(active.clone()).await {
             Ok(reservation) => reservation,
-            Err(reason) => return PreparationStageOutcome::refused(session_id, reason),
+            Err(ReservationEnd::Refused(reason)) => {
+                return PreparationStageOutcome::refused(session_id, reason)
+            }
+            Err(ReservationEnd::Cancelled) => {
+                return PreparationStageOutcome::cancelled(
+                    session_id,
+                    PreparationStageCancellation::Reservation,
+                )
+            }
         };
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
@@ -3241,6 +3263,16 @@ pub(super) async fn stage_prepared_successor_as(
             () = active.cancelled.cancelled() => return PreparationStageOutcome::cancelled(session_id, PreparationStageCancellation::Activation),
         };
         let guard = match activated {
+            // A success answered in the same poll as an outside cancellation
+            // is a successor the watcher is tearing down: dropping the guard
+            // settles it, and the cancellation keeps its retry. Refusals keep
+            // their classification (no recheck on the failure arm).
+            Ok(_guard) if active.cancelled.is_cancelled() => {
+                return PreparationStageOutcome::cancelled(
+                    session_id,
+                    PreparationStageCancellation::Activation,
+                )
+            }
             Ok(guard) => guard,
             Err(reason) => return PreparationStageOutcome::refused(session_id, reason),
         };

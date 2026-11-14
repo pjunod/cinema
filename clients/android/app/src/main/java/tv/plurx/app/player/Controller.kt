@@ -3033,7 +3033,7 @@ class Controller internal constructor(
             serverProtocol = Session.displayAwareAutoProtocol,
             planProtocol = plan.displayAwareAutoProtocol,
             displayAwareAuto = Session.displayAwareAuto,
-            selection = playbackControlSelection(),
+            selection = sessionCreateSelection(),
             presentationTarget = autoPresentationTarget,
         )
         return if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1" &&
@@ -3679,8 +3679,23 @@ class Controller internal constructor(
      * client forces neither, and saying otherwise would tell the server it had
      * made a choice it has not made.
      */
-    private fun playbackControlSelection(): ClientSelection {
-        pendingPreparedControlHandoff?.let { return it.standingSelection }
+    private fun playbackControlSelection(): ClientSelection =
+        pendingPreparedControlHandoff?.standingSelection ?: intentSelection()
+
+    /**
+     * The selection a new session is created with. A presented prepared
+     * successor is what the viewer is watching, so its committed candidate is
+     * adopted first; the predecessor's standing selection belongs only to the
+     * predecessor reporter, which the new session's create ends anyway.
+     */
+    private fun sessionCreateSelection(): ClientSelection {
+        val handoff = pendingPreparedControlHandoff ?: return intentSelection()
+        if (!handoff.framePresented) return handoff.standingSelection
+        if (handoff.adoptInto(playbackIntent)) autoActiveCandidateId = handoff.action.effectiveSelection?.candidateId
+        return intentSelection()
+    }
+
+    private fun intentSelection(): ClientSelection {
         val mode = when {
             selectedSubtitle == null -> SubtitleMode.OFF
             subtitleDelivery == SubtitleDelivery.Burn -> SubtitleMode.BURN
@@ -4225,10 +4240,14 @@ class Controller internal constructor(
     private fun requestOptionalAutoCandidate(chosen: tv.plurx.app.data.QualityCandidate): OptionalAutoAttempt? {
         // Its standing selection still belongs to the predecessor until the
         // accepted ACK adopts execution. An optional offer cannot own it yet.
-        if (pendingPreparedControlHandoff != null) return null
-        return OptionalAutoAttempt.capture(playbackIntent, player, sessionId, mediaMutationEpoch,
+        if (pendingPreparedControlHandoff != null) {
+            noteAutoGate("prepared_handoff_pending")
+            return null
+        }
+        val attempt = OptionalAutoAttempt.capture(playbackIntent,
             autoActiveCandidateId, playbackControlSelection().quality, chosen.id, chosen.target_height)
-            ?.also { optionalAutoAttempt = it }
+        if (attempt == null) noteAutoGate("execution_unknown") else optionalAutoAttempt = attempt
+        return attempt
     }
 
     /** Put Auto back where execution stood, only while this attempt owns it. */
@@ -4242,8 +4261,7 @@ class Controller internal constructor(
 
     private fun settleOptionalAutoFailure(attempt: OptionalAutoAttempt, blockTarget: Boolean) {
         if (optionalAutoAttempt !== attempt) return
-        val restored = attempt.restoreIfCurrent(playbackIntent,
-            player, sessionId, mediaMutationEpoch, autoActiveCandidateId)
+        val restored = attempt.withdraw(playbackIntent)
         // Even if a newer intent owns the wire, this ended attempt no longer
         // owns pending policy. Clearing it cannot rewrite that newer choice.
         optionalAutoAttempt = null
@@ -4973,15 +4991,22 @@ class Controller internal constructor(
     private fun resolvePreparedAcquisition(successor: ExoPlayer, action: ControlAction) {
         if (preparedAcquisition != null) return
         val owner = currentPreparedTimelineOwner(successor, action) ?: return
-        val manifest = successor.currentManifest as? HlsManifest ?: return
-        val playlist = manifest.mediaPlaylist
-        if (preparedPlaylistOwnership(playlist.baseUri, owner.credentialOrigin, owner.sessionId) !=
-            PreparedPlaylistOwnership.Owned
-        ) return
-        val hintUs = playlist.startOffsetUs.takeUnless { it == androidx.media3.common.C.TIME_UNSET }
+        // Ownership gates only the native entry hint, which is the one fact
+        // read from the manifest. An explicit origin, or an origin-0 playlist
+        // that is not provably this session's (another node after failover, a
+        // redirect), resolves without it: the legacy incumbent attachment,
+        // never a stall until the readiness bound.
+        val manifest = successor.currentManifest
+        // An origin-0 entry hint is read once the manifest has loaded.
+        if (owner.originMs == 0L && manifest == null) return
+        val playlist = (manifest as? HlsManifest)?.mediaPlaylist?.takeIf {
+            preparedPlaylistOwnership(it.baseUri, owner.credentialOrigin, owner.sessionId) ==
+                PreparedPlaylistOwnership.Owned
+        }
+        val hintUs = playlist?.startOffsetUs?.takeUnless { it == androidx.media3.common.C.TIME_UNSET }
         var entryMs: Long? = null
         val timeline = successor.currentTimeline
-        if (owner.originMs == 0L && playlist.playlistType ==
+        if (playlist != null && owner.originMs == 0L && playlist.playlistType ==
             androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist.PLAYLIST_TYPE_VOD && playlist.hasEndTag &&
             playlist.mediaSequence == 0L && hintUs != null && playlist.hasPositiveStartOffset && !playlist.preciseStart &&
             hintUs in 0..playlist.durationUs && playlist.segments.isNotEmpty() && !timeline.isEmpty
@@ -5878,6 +5903,7 @@ class Controller internal constructor(
         // A boundary preparation ends with its own first frame, exactly like
         // the mid-play upgrade it now is.
         autoBoundaryAttempt = null
+        pendingPreparedControlHandoff?.framePresented = true
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
         // The viewer is looking at the rung they asked for. The directed change
         // is honoured and owes nothing — least of all a reopen.
@@ -6155,10 +6181,17 @@ class Controller internal constructor(
         if (pendingAcknowledgement != value) return
         val handoff = pendingPreparedControlHandoff
         if (value.state == AcknowledgementState.COMMITTED) {
-            if (handoff == null || !handoff.receiptAccepted(value, response.delivery?.preparation,
-                    response.action.type, sessionId) || pendingPreparedControlPlayer !== player ||
+            // Only a live handoff that owns this action may hold the
+            // acknowledgement for its accepting receipt. Without one (a reopen
+            // or rollback ended it) the exchange delivered it, as before.
+            if (handoff == null || !handoff.owns(value) || pendingPreparedControlPlayer !== player ||
                 !playbackControlBootstrapFence.isActive() || controlObservationIsClosed
-            ) return
+            ) {
+                pendingAcknowledgement = null
+                return
+            }
+            if (!handoff.receiptAccepted(value, response.delivery?.preparation,
+                    response.action.type, sessionId)) return
             pendingAcknowledgement = null
             optionalAutoAttempt = null
             pendingPreparedControlHandoff = null
@@ -6172,17 +6205,13 @@ class Controller internal constructor(
             controlObservationOverride = null
             controlRenderOverride = null
             controlEvidencePositionMs = null
+            if (handoff.adoptInto(playbackIntent)) autoActiveCandidateId = handoff.action.effectiveSelection?.candidateId
             val bootstrap = handoff.bootstrap
             if (bootstrap == null) {
                 playbackTelemetry.report(event = "prepared_control_unavailable", level = "warn",
                     message = "Prepared playback continues without a successor control bootstrap.",
                     detail = if (handoff.action.control == null) "reason=missing_bootstrap" else "reason=invalid_bootstrap")
                 return
-            }
-            handoff.action.effectiveSelection?.let {
-                playbackIntent.adoptCommittedAutomaticCandidate(it.candidateId, it.height, it.qualityAuto,
-                    handoff.candidateOwner)
-                autoActiveCandidateId = it.candidateId
             }
             val attached = sessionId ?: return
             val claim = playbackControlBootstrapFence.claim(attached)

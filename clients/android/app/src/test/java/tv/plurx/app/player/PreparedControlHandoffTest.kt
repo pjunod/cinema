@@ -37,6 +37,28 @@ class PreparedControlHandoffTest {
     private fun committed() = ActionAcknowledgement(actionId, AcknowledgementState.COMMITTED,
         committedMediaOriginMs = 0, firstFrameUnixMs = 1234)
 
+    // Review M1/M2/m2: ownership of the acknowledgement is the action id; the
+    // committed candidate is adopted even without a valid bootstrap, and only
+    // while the intent's candidate revision is still the handoff's.
+    @Test fun handoffOwnsOnlyItsActionAndAdoptsOnlyUnderItsOwnRevision() {
+        val handoff = handoff()
+        assertTrue(handoff.owns(committed()))
+        assertFalse(handoff.owns(committed().copy(actionId = successor)))
+        assertFalse(handoff.framePresented)
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        intent.requestAutomaticCandidate("copy-original", 2160)
+        val owned = handoff.copy(candidateOwner = intent.automaticCandidateOwner(),
+            action = handoff.action.copy(control = null))
+        assertTrue(owned.adoptInto(intent))
+        assertEquals("processed", intent.automaticCandidateId)
+        val stale = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        stale.requestAutomaticCandidate("copy-original", 2160)
+        val staleOwner = stale.automaticCandidateOwner()
+        stale.requestAutomaticCandidate("viewer-newer", 1080)
+        assertFalse(handoff.copy(candidateOwner = staleOwner).adoptInto(stale))
+        assertEquals("viewer-newer", stale.automaticCandidateId)
+    }
+
     @Test fun serverPrepareCarriesItsOwnControlBootstrap() {
         val action = Json { ignoreUnknownKeys = true }.decodeFromString(ControlAction.serializer(), """
             {"type":"prepare","action_id":"$actionId","session_id":"$successor",

@@ -748,6 +748,23 @@ internal data class PreparedControlHandoff(
     val standingSelection: ClientSelection,
     val candidateOwner: Long,
 ) {
+    /**
+     * Set once the successor's first frame is on screen and its COMMITTED
+     * acknowledgement is owed. From then on the viewer is watching the
+     * committed candidate: a session created before the receipt arrives (a
+     * seek held behind the switch) must carry it, not [standingSelection],
+     * which exists only for the predecessor reporter's own exchanges.
+     */
+    var framePresented: Boolean = false
+
+    /** Whether this handoff owns [acknowledgement]'s action. */
+    fun owns(acknowledgement: ActionAcknowledgement): Boolean = acknowledgement.actionId == action.actionId
+
+    /** Adopt the committed effective selection into [intent]; true when the intent now names it. */
+    fun adoptInto(intent: PlaybackIntent): Boolean = action.effectiveSelection?.let {
+        intent.adoptCommittedAutomaticCandidate(it.candidateId, it.height, it.qualityAuto, candidateOwner)
+    } ?: false
+
     val bootstrap: ControlBootstrap? get() = action.control?.takeIf {
         it.isValid && it.url == "/api/v1/hls/${action.sessionId}/control"
     }
@@ -779,48 +796,49 @@ internal fun playbackExitDetail(origin: PlaybackExitOrigin, input: PlayerContrac
     repeatCount: Int = 0): String =
     "origin=${origin.wire} input=${input?.contractName ?: "none"} repeat=${repeatCount.coerceIn(0, 9999)}"
 
-/** Execution authority captured before an optional Auto target is published. */
+/**
+ * What was standing before an optional Auto target was published, so a failed
+ * attempt is withdrawn to exactly that.
+ *
+ * Ownership of the wire is the intent's candidate revision plus the requested
+ * id: while both are still this attempt's, nothing newer (a viewer quality
+ * change, a committed route, another Auto request) exists to protect, so the
+ * target is withdrawn even when the player, session or media epoch moved under
+ * it. Withdrawing restores the standing selection: the named executing
+ * candidate, or unnamed Auto when unnamed Auto was standing.
+ */
 internal class OptionalAutoAttempt private constructor(
-    private val incumbent: Any,
-    private val sessionId: String?,
-    private val mutationEpoch: Long,
     val requestedId: String,
     private val candidateOwner: Long,
-    private val executing: QualitySelection.AutoCandidate?,
+    private val standing: QualitySelection.AutoCandidate?,
 ) {
     companion object {
-        /** Unknown execution authority must never be published as unnamed Auto. */
+        /**
+         * Null when standing is not Auto, or names a candidate that is not the
+         * one executing: an unknown execution must never be restored as
+         * something it was not.
+         */
         fun capture(
             intent: PlaybackIntent,
-            incumbent: Any,
-            sessionId: String?,
-            mutationEpoch: Long,
             activeCandidateId: String?,
             standing: QualitySelection,
             requestedId: String,
             requestedHeight: Int,
         ): OptionalAutoAttempt? {
-            val executing = when (standing) {
+            val restore = when (standing) {
                 is QualitySelection.AutoCandidate -> standing.takeIf { it.candidateId == activeCandidateId }
                     ?: return null
-                QualitySelection.Auto -> if (activeCandidateId == null) null else return null
+                // Unnamed Auto restores to unnamed Auto, whatever the server
+                // chose to execute under it.
+                QualitySelection.Auto -> null
                 else -> return null
             }
             val owner = intent.requestOptionalAutomaticCandidate(requestedId, requestedHeight) ?: return null
-            return OptionalAutoAttempt(incumbent, sessionId, mutationEpoch, requestedId, owner, executing)
+            return OptionalAutoAttempt(requestedId, owner, restore)
         }
     }
 
-    fun restoreIfCurrent(
-        intent: PlaybackIntent,
-        player: Any,
-        session: String?,
-        epoch: Long,
-        activeCandidateId: String?,
-    ): Boolean {
-        if (player !== incumbent || session != sessionId || epoch != mutationEpoch ||
-            activeCandidateId != executing?.candidateId
-        ) return false
-        return intent.restoreOptionalAutomaticCandidate(candidateOwner, requestedId, executing)
-    }
+    /** Withdraw the target to what was standing; false when a newer intent owns the wire. */
+    fun withdraw(intent: PlaybackIntent): Boolean =
+        intent.restoreOptionalAutomaticCandidate(candidateOwner, requestedId, standing)
 }
