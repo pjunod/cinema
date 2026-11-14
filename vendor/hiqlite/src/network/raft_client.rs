@@ -90,7 +90,148 @@ pub struct NetworkStreaming {
     pub is_startup_finished: Arc<AtomicBool>,
     pub(crate) snapshot_budgets: SnapshotRpcBudgets,
     pub(crate) snapshot_transport: crate::LocalSnapshotTransportStatus,
+    /// Plurx patch 28: connections released by dropped clients, leased again
+    /// by the next `new_client` for the same target instead of dialing.
+    pub(crate) idle_connections: Arc<IdleConnections>,
     // pub sender: flume::Sender<RaftRequest>,
+}
+
+/// Most idle connections kept per target. OpenRaft 0.9 opens one client per
+/// voter for every linearizable read, so this bounds the parked sockets left
+/// by a burst of concurrent reads; a lease beyond it dials as before.
+const IDLE_CONNECTIONS_PER_TARGET: usize = 8;
+/// An idle connection unused for longer than this is closed at the next pool
+/// access rather than leased.
+const IDLE_CONNECTION_TTL: Duration = Duration::from_secs(30);
+
+type IdleKey = (&'static str, NodeId, String);
+
+/// Healthy, unused client connections, keyed by Raft group and target.
+///
+/// OpenRaft's factory contract is that `new_client` "should not create a
+/// connection but rather a client that will connect when required". Its 0.9
+/// leadership read-confirm calls `new_client` per voter per read, and each
+/// client used to dial a new TCP + WebSocket handshake that it closed on drop.
+/// The handshake then ran inside the read's heartbeat-interval budget, where a
+/// single lost SYN outlasts the budget because TCP's initial retransmission
+/// timeout is one second. A lease is exclusive: a connection carries one
+/// client's RPCs at a time, exactly as a freshly dialed one did.
+#[derive(Default)]
+pub(crate) struct IdleConnections {
+    by_target: StdMutex<HashMap<IdleKey, Vec<IdleConnection>>>,
+}
+
+struct IdleConnection {
+    sender: flume::Sender<RaftRequest>,
+    reset: Arc<ConnectionResetState>,
+    shutdown: Arc<ConnectionShutdownState>,
+    snapshot_attempt: Arc<StdMutex<Option<Arc<SnapshotAttempt>>>>,
+    transport_connection_id: u64,
+    runtime: tokio::runtime::Handle,
+    task: Option<JoinHandle<()>>,
+    parked_at: time::Instant,
+}
+
+impl IdleConnection {
+    fn is_live(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| !task.is_finished())
+            && self.reset.is_connected()
+            && !self.shutdown.is_requested()
+            && self.parked_at.elapsed() < IDLE_CONNECTION_TTL
+    }
+}
+
+impl Drop for IdleConnection {
+    fn drop(&mut self) {
+        // A leased entry has handed its supervisor to the new client; only a
+        // connection still owned here is closed.
+        if let Some(task) = self.task.take() {
+            close_connection(&self.shutdown, &self.sender, &self.runtime, Some(task));
+        }
+    }
+}
+
+impl IdleConnections {
+    fn lease(&self, key: &IdleKey) -> Option<IdleConnection> {
+        let mut closed = Vec::new();
+        let leased = {
+            let mut by_target = self.by_target.lock().ok()?;
+            let parked = by_target.get_mut(key)?;
+            let mut leased = None;
+            while let Some(candidate) = parked.pop() {
+                if !candidate.is_live() {
+                    closed.push(candidate);
+                    continue;
+                }
+                candidate.shutdown.unpark();
+                // The supervisor may have seen its socket end just before the
+                // unpark; it then exits instead of reconnecting.
+                if candidate.is_live() {
+                    leased = Some(candidate);
+                    break;
+                }
+                closed.push(candidate);
+            }
+            parked.retain(|idle| idle.is_live());
+            leased
+        };
+        drop(closed);
+        leased
+    }
+
+    fn park(&self, key: IdleKey, idle: IdleConnection) {
+        let mut rejected = None;
+        let mut closed = Vec::new();
+        if let Ok(mut by_target) = self.by_target.lock() {
+            let parked = by_target.entry(key).or_default();
+            let mut kept = Vec::with_capacity(parked.len() + 1);
+            for existing in parked.drain(..) {
+                if existing.is_live() {
+                    kept.push(existing);
+                } else {
+                    closed.push(existing);
+                }
+            }
+            *parked = kept;
+            if parked.len() < IDLE_CONNECTIONS_PER_TARGET {
+                idle.shutdown.park();
+                parked.push(idle);
+            } else {
+                rejected = Some(idle);
+            }
+        } else {
+            rejected = Some(idle);
+        }
+        drop(closed);
+        drop(rejected);
+    }
+
+    #[cfg(test)]
+    fn parked(&self, key: &IdleKey) -> usize {
+        self.by_target
+            .lock()
+            .map(|by_target| by_target.get(key).map_or(0, Vec::len))
+            .unwrap_or(0)
+    }
+}
+
+fn close_connection(
+    shutdown: &ConnectionShutdownState,
+    sender: &flume::Sender<RaftRequest>,
+    runtime: &tokio::runtime::Handle,
+    task: Option<JoinHandle<()>>,
+) {
+    shutdown.request();
+    let _ = sender.try_send(RaftRequest::Shutdown);
+    let Some(task) = task else {
+        return;
+    };
+    // Drop cannot await and may run on a non-runtime thread. The handle
+    // captured when this connection was constructed remains the cleanup
+    // owner for its supervisor and split socket tasks.
+    runtime.spawn(async move {
+        let _ = task.await;
+    });
 }
 
 #[cfg(feature = "cache")]
@@ -99,50 +240,7 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn new_client(&mut self, _target: NodeId, node: &Node) -> Self::Network {
-        debug!("Building new Raft Cache client with target {}", node);
-
-        let (sender, rx) = flume::bounded(1);
-        let reset = Arc::new(ConnectionResetState::default());
-        let shutdown = Arc::new(ConnectionShutdownState::default());
-        let snapshot_attempt = Arc::new(StdMutex::new(None));
-        let transport_connection_id = self.snapshot_transport.next_outbound_connection_id();
-
-        let task_status = self.snapshot_transport.clone();
-        let handler = Self::ws_handler(
-            self.node_id,
-            self.raft_type.clone(),
-            node.clone(),
-            self.tls_config.clone(),
-            self.secret_raft.clone(),
-            rx,
-            self.heartbeat_interval,
-            self.is_raft_stopped.clone(),
-            self.is_startup_finished.clone(),
-            Arc::clone(&reset),
-            Arc::clone(&shutdown),
-            self.snapshot_transport.clone(),
-            "cache",
-            transport_connection_id,
-        );
-        let task = tokio::task::spawn(Box::pin(async move {
-            let _task_guard = task_status.owned_async_task();
-            handler.await;
-        }));
-
-        NetworkConnectionStreaming {
-            node: node.clone(),
-            sender,
-            reset,
-            shutdown,
-            local_node_id: self.node_id,
-            raft_group: "cache",
-            snapshot_budgets: self.snapshot_budgets,
-            snapshot_transport: self.snapshot_transport.clone(),
-            snapshot_attempt,
-            transport_connection_id,
-            runtime: tokio::runtime::Handle::current(),
-            task: Some(task),
-        }
+        self.lease_or_dial(node, "cache")
     }
 }
 
@@ -152,50 +250,7 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn new_client(&mut self, _target: NodeId, node: &Node) -> Self::Network {
-        debug!("Building new Raft DB client with target {}", node);
-
-        let (sender, rx) = flume::bounded(1);
-        let reset = Arc::new(ConnectionResetState::default());
-        let shutdown = Arc::new(ConnectionShutdownState::default());
-        let snapshot_attempt = Arc::new(StdMutex::new(None));
-        let transport_connection_id = self.snapshot_transport.next_outbound_connection_id();
-
-        let task_status = self.snapshot_transport.clone();
-        let handler = Self::ws_handler(
-            self.node_id,
-            self.raft_type.clone(),
-            node.clone(),
-            self.tls_config.clone(),
-            self.secret_raft.clone(),
-            rx,
-            self.heartbeat_interval,
-            self.is_raft_stopped.clone(),
-            self.is_startup_finished.clone(),
-            Arc::clone(&reset),
-            Arc::clone(&shutdown),
-            self.snapshot_transport.clone(),
-            "sqlite",
-            transport_connection_id,
-        );
-        let task = tokio::task::spawn(Box::pin(async move {
-            let _task_guard = task_status.owned_async_task();
-            handler.await;
-        }));
-
-        NetworkConnectionStreaming {
-            node: node.clone(),
-            sender,
-            reset,
-            shutdown,
-            local_node_id: self.node_id,
-            raft_group: "sqlite",
-            snapshot_budgets: self.snapshot_budgets,
-            snapshot_transport: self.snapshot_transport.clone(),
-            snapshot_attempt,
-            transport_connection_id,
-            runtime: tokio::runtime::Handle::current(),
-            task: Some(task),
-        }
+        self.lease_or_dial(node, "sqlite")
     }
 }
 
@@ -362,10 +417,25 @@ struct ConnectionResetState {
 #[derive(Default)]
 struct ConnectionShutdownState {
     requested: AtomicBool,
+    /// Set while the connection waits in `IdleConnections`: a parked
+    /// supervisor whose socket ends exits instead of reconnecting.
+    parked: AtomicBool,
     notify: Notify,
 }
 
 impl ConnectionShutdownState {
+    fn park(&self) {
+        self.parked.store(true, Ordering::Release);
+    }
+
+    fn unpark(&self) {
+        self.parked.store(false, Ordering::Release);
+    }
+
+    fn is_parked(&self) -> bool {
+        self.parked.load(Ordering::Acquire)
+    }
+
     fn request(&self) {
         if !self.requested.swap(true, Ordering::AcqRel) {
             self.notify.notify_one();
@@ -589,6 +659,75 @@ async fn stop_stream_tasks(
 
 #[allow(clippy::type_complexity)]
 impl NetworkStreaming {
+    fn lease_or_dial(&self, node: &Node, raft_group: &'static str) -> NetworkConnectionStreaming {
+        let key: IdleKey = (raft_group, node.id, node.addr_raft.clone());
+        if let Some(mut idle) = self.idle_connections.lease(&key) {
+            debug!("Reusing idle Raft {raft_group} client with target {node}");
+            return NetworkConnectionStreaming {
+                node: node.clone(),
+                sender: idle.sender.clone(),
+                leased_reset_epoch: idle.reset.epoch(),
+                reset: Arc::clone(&idle.reset),
+                shutdown: Arc::clone(&idle.shutdown),
+                local_node_id: self.node_id,
+                raft_group,
+                snapshot_budgets: self.snapshot_budgets,
+                snapshot_transport: self.snapshot_transport.clone(),
+                snapshot_attempt: Arc::clone(&idle.snapshot_attempt),
+                transport_connection_id: idle.transport_connection_id,
+                runtime: idle.runtime.clone(),
+                task: idle.task.take(),
+                idle_connections: Arc::downgrade(&self.idle_connections),
+            };
+        }
+        debug!("Building new Raft {raft_group} client with target {node}");
+
+        let (sender, rx) = flume::bounded(1);
+        let reset = Arc::new(ConnectionResetState::default());
+        let shutdown = Arc::new(ConnectionShutdownState::default());
+        let snapshot_attempt = Arc::new(StdMutex::new(None));
+        let transport_connection_id = self.snapshot_transport.next_outbound_connection_id();
+
+        let task_status = self.snapshot_transport.clone();
+        let handler = Self::ws_handler(
+            self.node_id,
+            self.raft_type.clone(),
+            node.clone(),
+            self.tls_config.clone(),
+            self.secret_raft.clone(),
+            rx,
+            self.heartbeat_interval,
+            self.is_raft_stopped.clone(),
+            self.is_startup_finished.clone(),
+            Arc::clone(&reset),
+            Arc::clone(&shutdown),
+            self.snapshot_transport.clone(),
+            raft_group,
+            transport_connection_id,
+        );
+        let task = tokio::task::spawn(Box::pin(async move {
+            let _task_guard = task_status.owned_async_task();
+            handler.await;
+        }));
+
+        NetworkConnectionStreaming {
+            node: node.clone(),
+            sender,
+            leased_reset_epoch: reset.epoch(),
+            reset,
+            shutdown,
+            local_node_id: self.node_id,
+            raft_group,
+            snapshot_budgets: self.snapshot_budgets,
+            snapshot_transport: self.snapshot_transport.clone(),
+            snapshot_attempt,
+            transport_connection_id,
+            runtime: tokio::runtime::Handle::current(),
+            task: Some(task),
+            idle_connections: Arc::downgrade(&self.idle_connections),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn ws_handler(
         this_node: NodeId,
@@ -617,7 +756,7 @@ impl NetworkStreaming {
         let mut shutdown = false;
 
         'outer: loop {
-            if connection_shutdown.is_requested() {
+            if connection_shutdown.is_requested() || connection_shutdown.is_parked() {
                 break;
             }
             if is_raft_stopped.load(Ordering::Relaxed) {
@@ -1244,6 +1383,10 @@ pub struct NetworkConnectionStreaming {
     transport_connection_id: u64,
     runtime: tokio::runtime::Handle,
     task: Option<JoinHandle<()>>,
+    /// Reset epoch when this client took the connection; any reset requested
+    /// during the lease (a cancelled or timed-out RPC) makes it unreusable.
+    leased_reset_epoch: u64,
+    idle_connections: std::sync::Weak<IdleConnections>,
 }
 
 struct ConnectionResetGuard {
@@ -1277,19 +1420,46 @@ impl Drop for ConnectionResetGuard {
     }
 }
 
+impl NetworkConnectionStreaming {
+    fn is_reusable(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| !task.is_finished())
+            && self.reset.epoch() == self.leased_reset_epoch
+            && self.reset.is_connected()
+            && !self.shutdown.is_requested()
+            && self.sender.is_empty()
+            && self
+                .snapshot_attempt
+                .lock()
+                .is_ok_and(|attempt| attempt.is_none())
+    }
+}
+
 impl Drop for NetworkConnectionStreaming {
     fn drop(&mut self) {
-        self.shutdown.request();
-        let _ = self.sender.try_send(RaftRequest::Shutdown);
-        let Some(task) = self.task.take() else {
+        if self.is_reusable()
+            && let Some(idle_connections) = self.idle_connections.upgrade()
+        {
+            idle_connections.park(
+                (self.raft_group, self.node.id, self.node.addr_raft.clone()),
+                IdleConnection {
+                    sender: self.sender.clone(),
+                    reset: Arc::clone(&self.reset),
+                    shutdown: Arc::clone(&self.shutdown),
+                    snapshot_attempt: Arc::clone(&self.snapshot_attempt),
+                    transport_connection_id: self.transport_connection_id,
+                    runtime: self.runtime.clone(),
+                    task: self.task.take(),
+                    parked_at: time::Instant::now(),
+                },
+            );
             return;
-        };
-        // Drop cannot await and may run on a non-runtime thread. The handle
-        // captured when this connection was constructed remains the cleanup
-        // owner for its supervisor and split socket tasks.
-        self.runtime.spawn(async move {
-            let _ = task.await;
-        });
+        }
+        close_connection(
+            &self.shutdown,
+            &self.sender,
+            &self.runtime,
+            self.task.take(),
+        );
     }
 }
 
@@ -2120,6 +2290,8 @@ mod tests {
             transport_connection_id: 1,
             runtime: tokio::runtime::Handle::current(),
             task: Some(task),
+            leased_reset_epoch: 0,
+            idle_connections: std::sync::Weak::new(),
         };
 
         std::thread::spawn(move || drop(connection))
@@ -2226,6 +2398,7 @@ mod tests {
             is_startup_finished: Arc::new(AtomicBool::new(true)),
             snapshot_budgets: test_snapshot_budgets(),
             snapshot_transport: transport.clone(),
+            idle_connections: Default::default(),
         };
         let node = Node {
             id: 2,
@@ -2266,6 +2439,7 @@ mod tests {
             is_startup_finished: Arc::new(AtomicBool::new(true)),
             snapshot_budgets: test_snapshot_budgets(),
             snapshot_transport: transport.clone(),
+            idle_connections: Default::default(),
         };
         let node = Node {
             id: 2,
@@ -2366,6 +2540,193 @@ mod tests {
         );
     }
 
+    /// An authenticated test listener plus the factory pointed at it.
+    #[cfg(feature = "sqlite")]
+    async fn idle_reuse_fixture() -> (
+        NetworkStreaming,
+        Node,
+        flume::Receiver<u64>,
+        Arc<Notify>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind authenticated idle-reuse server");
+        let address = listener.local_addr().expect("read idle-reuse endpoint");
+        let (accepted, accepted_rx) = flume::unbounded();
+        let release_first = Arc::new(Notify::new());
+        let app = Router::new()
+            .route("/stream/sqlite", get(reconnecting_raft_server))
+            .with_state(ReconnectServerState {
+                accepted,
+                connection_sequence: Arc::new(AtomicU64::new(0)),
+                release_first: Arc::clone(&release_first),
+                release_second: Arc::new(Notify::new()),
+            });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve authenticated idle-reuse route");
+        });
+        let factory = NetworkStreaming {
+            node_id: 1,
+            tls_config: None,
+            secret_raft: b"test-secret".to_vec(),
+            raft_type: RaftType::Sqlite,
+            heartbeat_interval: 0,
+            is_raft_stopped: Arc::new(AtomicBool::new(false)),
+            is_startup_finished: Arc::new(AtomicBool::new(true)),
+            snapshot_budgets: test_snapshot_budgets(),
+            snapshot_transport: crate::LocalSnapshotTransportStatus::new(
+                1,
+                std::collections::BTreeSet::from([2]),
+            ),
+            idle_connections: Default::default(),
+        };
+        let node = Node {
+            id: 2,
+            addr_raft: address.to_string(),
+            addr_api: "127.0.0.1:1".to_owned(),
+        };
+        (factory, node, accepted_rx, release_first, server)
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn connected_client(
+        factory: &mut NetworkStreaming,
+        node: &Node,
+        accepted_rx: &flume::Receiver<u64>,
+        expected_socket: u64,
+    ) -> NetworkConnectionStreaming {
+        let connection = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            factory, node.id, node,
+        )
+        .await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv_async())
+                .await
+                .expect("socket must authenticate")
+                .expect("socket report"),
+            expected_socket
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !connection.reset.is_connected() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client must publish its connected socket");
+        connection
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn idle_key(node: &Node) -> IdleKey {
+        ("sqlite", node.id, node.addr_raft.clone())
+    }
+
+    /// Plurx patch 28: OpenRaft 0.9 read-confirm builds and drops a client per
+    /// voter per read. A healthy dropped client's socket must serve the next
+    /// client instead of a new TCP + WebSocket handshake.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn dropped_healthy_client_is_leased_without_a_new_socket() {
+        let (mut factory, node, accepted_rx, _release_first, server) = idle_reuse_fixture().await;
+        let first = connected_client(&mut factory, &node, &accepted_rx, 1).await;
+        let first_reset = Arc::clone(&first.reset);
+        let first_id = first.transport_connection_id;
+        drop(first);
+        assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 1);
+
+        for _ in 0..3 {
+            let leased = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+                &mut factory,
+                node.id,
+                &node,
+            )
+            .await;
+            assert!(Arc::ptr_eq(&leased.reset, &first_reset));
+            assert_eq!(leased.transport_connection_id, first_id);
+            assert!(leased.task.is_some(), "lease must own the supervisor");
+            assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 0);
+            drop(leased);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), accepted_rx.recv_async())
+                .await
+                .is_err(),
+            "reused clients must not open another socket"
+        );
+        assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 1);
+
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// A reset requested while leased (a timed-out or cancelled RPC) makes the
+    /// connection unfit for reuse: the next client gets its own socket.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn client_reset_during_lease_is_closed_not_reused() {
+        let (mut factory, node, accepted_rx, _release_first, server) = idle_reuse_fixture().await;
+        let first = connected_client(&mut factory, &node, &accepted_rx, 1).await;
+        let first_reset = Arc::clone(&first.reset);
+        let first_shutdown = Arc::clone(&first.shutdown);
+        first.reset.request_reset(first.reset.epoch());
+        drop(first);
+        assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 0);
+        assert!(first_shutdown.is_requested());
+
+        let second = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            &mut factory,
+            node.id,
+            &node,
+        )
+        .await;
+        assert!(!Arc::ptr_eq(&second.reset, &first_reset));
+
+        drop(second);
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// A parked connection whose socket ends exits rather than reconnecting in
+    /// the background, and is never leased.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn parked_connection_whose_socket_ends_exits_and_is_not_leased() {
+        let (mut factory, node, accepted_rx, release_first, server) = idle_reuse_fixture().await;
+        let first = connected_client(&mut factory, &node, &accepted_rx, 1).await;
+        let first_reset = Arc::clone(&first.reset);
+        drop(first);
+        assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 1);
+
+        release_first.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while first_reset.is_connected() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server close must reach the parked supervisor");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), accepted_rx.recv_async())
+                .await
+                .is_err(),
+            "a parked supervisor must not reconnect"
+        );
+
+        let second = connected_client(&mut factory, &node, &accepted_rx, 2).await;
+        assert!(!Arc::ptr_eq(&second.reset, &first_reset));
+        assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 0);
+
+        drop(second);
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn production_natural_reconnect_advances_physical_socket_epoch_without_reset() {
@@ -2402,6 +2763,7 @@ mod tests {
             is_startup_finished: Arc::new(AtomicBool::new(true)),
             snapshot_budgets: test_snapshot_budgets(),
             snapshot_transport: transport.clone(),
+            idle_connections: Default::default(),
         };
         let node = Node {
             id: 2,
@@ -2488,6 +2850,7 @@ mod tests {
             is_startup_finished: Arc::new(AtomicBool::new(true)),
             snapshot_budgets: test_snapshot_budgets(),
             snapshot_transport: transport.clone(),
+            idle_connections: Default::default(),
         };
         let node = Node {
             id: 2,
@@ -2978,6 +3341,8 @@ mod tests {
                 transport_connection_id: 1,
                 runtime: tokio::runtime::Handle::current(),
                 task: None,
+                leased_reset_epoch: 0,
+                idle_connections: std::sync::Weak::new(),
             },
             receiver,
         )
@@ -3542,6 +3907,8 @@ mod tests {
             transport_connection_id: 1,
             runtime: tokio::runtime::Handle::current(),
             task: None,
+            leased_reset_epoch: 0,
+            idle_connections: std::sync::Weak::new(),
         };
         let mut rpc = tokio::spawn(async move {
             <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
@@ -3902,6 +4269,8 @@ mod tests {
             transport_connection_id: 1,
             runtime: tokio::runtime::Handle::current(),
             task: None,
+            leased_reset_epoch: 0,
+            idle_connections: std::sync::Weak::new(),
         };
         let responder = tokio::spawn(async move {
             for expected_offset in [4, 0] {
@@ -3996,6 +4365,8 @@ mod tests {
             transport_connection_id: 1,
             runtime: tokio::runtime::Handle::current(),
             task: None,
+            leased_reset_epoch: 0,
+            idle_connections: std::sync::Weak::new(),
         };
         let responder = tokio::spawn(async move {
             for expected_offset in [4, 0] {
