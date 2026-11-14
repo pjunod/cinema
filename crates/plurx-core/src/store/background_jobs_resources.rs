@@ -1590,11 +1590,18 @@ mod source_tests {
         .await
         .expect("activate");
         store.0.lock().expect("connection").execute("UPDATE analysis_requests SET state='queued',owner_node_id=NULL,lease_expires_ms=NULL,last_error_code='lease_expired' WHERE request_id='coordinator'",[]).expect("existing lease expiry");
-        let successor =
-            coordinator::claim(&store, "coordinator", source.clone(), "worker", 1, 40000, 80000)
-                .await
-                .expect("takeover")
-                .expect("metadata successor");
+        let successor = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            1,
+            40000,
+            80000,
+        )
+        .await
+        .expect("takeover")
+        .expect("metadata successor");
         // The old owner never joins or closes. The sweep stamps, then releases.
         reap_settled_source_custody(&store, 40000)
             .await

@@ -170,32 +170,22 @@ impl Completion {
         let mut last_check = waiting;
         let mut reported = false;
         loop {
-            let (ready, open) = {
+            let observed = {
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.closed = true;
                 if state.veto {
-                    tracing::warn!(custody_id = %self.receipt.custody_id,
-                        "untracked source capability: no joined proof; capacity is released when its authority lapses");
-                    drop(state);
-                    return self.retire_after_release().await;
+                    None
+                } else {
+                    Some(Self::observe(&mut state))
                 }
-                let ready = state.operations == 0
-                    && state.holders == 0
-                    && state.raw == 0
-                    && state.files.iter().all(|file| Arc::strong_count(file) == 1);
-                if ready {
-                    // Close the last real descriptors BEFORE publishing proof.
-                    state.files.clear();
-                }
-                let shared = state
-                    .files
-                    .iter()
-                    .filter(|file| Arc::strong_count(file) != 1)
-                    .count();
-                (ready, (state.operations, state.holders, state.raw, shared))
+            };
+            let Some((ready, open)) = observed else {
+                tracing::warn!(custody_id = %self.receipt.custody_id,
+                    "untracked source capability: no joined proof; capacity is released when its authority lapses");
+                return self.retire_after_release().await;
             };
             if ready {
                 break;
@@ -236,6 +226,24 @@ impl Completion {
             }
         }
         crate::background_jobs::settle_joined_source_custody(&store, self.receipt.clone()).await;
+    }
+    /// Whether every registered holder has closed, and what is still open
+    /// (operations, holders, raw children, shared file references).
+    fn observe(state: &mut State) -> (bool, (usize, usize, usize, usize)) {
+        let ready = state.operations == 0
+            && state.holders == 0
+            && state.raw == 0
+            && state.files.iter().all(|file| Arc::strong_count(file) == 1);
+        if ready {
+            // Close the last real descriptors BEFORE publishing proof.
+            state.files.clear();
+        }
+        let shared = state
+            .files
+            .iter()
+            .filter(|file| Arc::strong_count(file) != 1)
+            .count();
+        (ready, (state.operations, state.holders, state.raw, shared))
     }
     /// A ledger that cannot publish a joined proof (dropped owner, untracked
     /// capability, refused join, unprovable children) leaves the release to the
