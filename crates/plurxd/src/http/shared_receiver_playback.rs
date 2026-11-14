@@ -98,6 +98,18 @@ pub(crate) fn absence(
         ReceiverStartError::Unresolved
     }
 }
+/// [`absence`] while a renewal may have committed unseen: the route may carry
+/// the pending lease the reads did not find, so emptiness is unknown.
+pub(crate) fn absence_given(
+    owner: &plurx_core::sharing_receiver_sessions::ReceiverSourceOwner,
+    pending: Option<i64>,
+) -> ReceiverStartError {
+    if pending.is_some() {
+        ReceiverStartError::Unknown
+    } else {
+        absence(owner)
+    }
+}
 /// How a receiver owner reads one look at its delivery authority.
 pub(crate) fn delivery_observation<T>(
     looked: &Result<T, ReceiverStartError>,
@@ -225,6 +237,10 @@ struct ReceiverStartState {
     /// Set by an outage ending: every transport is cut whatever the durable
     /// reason, so a partitioned node stops its bytes.
     retirement_cuts: bool,
+    /// A renewal whose answer was lost: the store may hold this lease instead
+    /// of the retained one. Readers try both and adopt the one the route
+    /// carries; until then an empty read is unknown, not a revocation.
+    pending_lease: Option<i64>,
     retired: bool,
     end_confirmation: Option<Arc<retirement::ReceiverEndConfirmation>>,
     /// Present on a session B started as a prepared successor.
@@ -843,7 +859,7 @@ impl ReceiverStartActor {
         if self.0.stop.is_cancelled() {
             return Err(ReceiverStartError::Ending);
         }
-        let (mut attachment, received) = {
+        let (mut attachment, received, pending) = {
             let owned = self.0.state.lock().expect("receiver owner");
             if !matches!(owned.start, Some(Ok(_))) || owned.retirement_started {
                 return Err(ReceiverStartError::Ending);
@@ -853,6 +869,7 @@ impl ReceiverStartActor {
             (
                 attachment,
                 owned.received.clone().ok_or(ReceiverStartError::Ending)?,
+                owned.pending_lease,
             )
         };
         attachment.owner.now_ms = clock_ms();
@@ -862,12 +879,28 @@ impl ReceiverStartActor {
             .await
             .map_err(|_| ReceiverStartError::Unknown)?
             .ok_or(ReceiverStartError::Unresolved)?;
-        let snapshot = state
+        let mut snapshot = state
             .store
             .receiver_source_binding(&authority, &attachment.owner)
             .await
-            .map_err(|_| ReceiverStartError::Unknown)?
-            .ok_or_else(|| absence(&attachment.owner))?;
+            .map_err(|_| ReceiverStartError::Unknown)?;
+        // A renewal whose answer was lost may have committed: the route then
+        // carries the pending lease, which this exact owner adopts.
+        let mut adopted = None;
+        if let Some(lease) = pending.filter(|_| snapshot.is_none()) {
+            let mut committed = attachment.owner.clone();
+            committed.lease_expires_at_ms = lease;
+            snapshot = state
+                .store
+                .receiver_source_binding(&authority, &committed)
+                .await
+                .map_err(|_| ReceiverStartError::Unknown)?;
+            if snapshot.is_some() {
+                attachment.owner = committed;
+                adopted = Some(lease);
+            }
+        }
+        let snapshot = snapshot.ok_or_else(|| absence_given(&attachment.owner, pending))?;
         let a = &attachment.binding;
         let b = &snapshot.binding;
         if snapshot.response_json.is_none()
@@ -909,7 +942,9 @@ impl ReceiverStartActor {
             .receiver_delivery(&authority, &attachment, &hash)
             .await
             .map_err(|_| ReceiverStartError::Unknown)?
-            .ok_or_else(|| absence(&attachment.owner))?;
+            .ok_or_else(|| {
+                absence_given(&attachment.owner, pending.filter(|_| adopted.is_none()))
+            })?;
         if self.0.stop.is_cancelled() {
             return Err(ReceiverStartError::Ending);
         }
@@ -932,6 +967,13 @@ impl ReceiverStartActor {
                 return Err(ReceiverStartError::Unresolved);
             }
             retained.binding = attachment.binding.clone();
+            if let Some(lease) = adopted {
+                retained.owner.lease_expires_at_ms = lease;
+                if let Some(owner) = owned.owner.as_mut() {
+                    owner.lease_expires_at_ms = lease;
+                }
+                owned.pending_lease = None;
+            }
         }
         Ok((authority, attachment, received))
     }
@@ -2176,6 +2218,7 @@ async fn run_owner(
                         .flatten()
                         .is_some();
                     if !adopted {
+                        entry.state.lock().expect("receiver owner").pending_lease = Some(new_lease);
                         return Err(ReceiverStartError::Unknown);
                     }
                 }
@@ -2184,6 +2227,7 @@ async fn run_owner(
             let mut owned = entry.state.lock().expect("receiver owner");
             owned.owner = Some(attachment.owner.clone());
             owned.source = Some(attachment.clone());
+            owned.pending_lease = None;
             Ok(())
         }
         .await;
@@ -3589,6 +3633,33 @@ mod outage_policy_tests {
         );
         assert_eq!(absence(&owner(30_000, 30_000)), ReceiverStartError::Unknown);
         assert_eq!(absence(&owner(31_000, 30_000)), ReceiverStartError::Unknown);
+    }
+
+    /// While a renewal may have committed unseen, an empty read inside the
+    /// retained lease is unknown: the route may carry the pending lease.
+    #[test]
+    fn a_pending_renewal_keeps_an_empty_read_unknown() {
+        let owner = plurx_core::sharing_receiver_sessions::ReceiverSourceOwner {
+            incarnation_id: uuid::Uuid::nil(),
+            session_id: uuid::Uuid::nil(),
+            owner_node_id: String::new(),
+            owner_epoch: 1,
+            request_id: String::new(),
+            lease_expires_at_ms: 30_000,
+            now_ms: 1_000,
+        };
+        assert_eq!(absence_given(&owner, None), ReceiverStartError::Unresolved);
+        assert_eq!(
+            absence_given(&owner, Some(40_000)),
+            ReceiverStartError::Unknown
+        );
+        let locked = between(
+            include_str!("shared_receiver_playback.rs"),
+            "async fn current_delivery_attachment_locked(",
+            "// Cleanup-only refresh after actual start ownership joins.",
+        );
+        assert!(locked.contains("committed.lease_expires_at_ms = lease;"));
+        assert!(locked.contains("owned.pending_lease = None;"));
     }
 
     /// A Source that is unreachable or busy is unavailable, never a refusal
