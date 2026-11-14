@@ -146,3 +146,11 @@ The repository Actions variable `MERGE_TRAIN=on` was verified. Submit as WIP,
 wait for train acknowledgment, then remove WIP after local qualification; the
 train owns landing after current-candidate promotion checks. Do not manually
 merge around the train. External receipts retain logs and the cross-app review.
+
+## Pull request
+
+Cinema [PR #1586](http://forge.lan:3000/noirr/plurx/pulls/1586) carries the
+reviewed candidate and local qualification. Its Curator counterpart is
+[PR #162](https://github.com/pjunod/curator/pull/162). Submitted WIP for train
+acknowledgment; current-candidate promotion and the train's merge receipt remain
+pending. No deployment is implied.
