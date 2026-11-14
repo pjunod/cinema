@@ -5875,7 +5875,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # closes that gate after deterministic admission. Expiry fails the test and
 # drops the joined observation futures; it proves no terminal mutation, child
 # reap or resource settlement. No production timer, task or process is added.
-expected_occurrences = 2212
+# 2212 -> 2213 with #1597 (lease expiry releases source capacity):
+# `Completion::retire_after_release` in background_jobs/source/completion.rs
+# sleeps REAP_CHECK (5 s) between checks of whether the store sweep has
+# released its custody, then removes its local witness. It owns no producer,
+# process or child, spawns nothing, and decides nothing about capacity: the
+# sweep does; the loop only ends the ledger task once there is nothing left.
+expected_occurrences = 2213
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
