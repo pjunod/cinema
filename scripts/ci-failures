@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Print only the failing part of a pull request's or commit's CI jobs.
+"""Inspect CI failures and retry a failed Forgejo Actions job.
 
-Forgejo's job-log API answers 200 with a "404 page not found" body, so the
-real logs are read from the forge host's disk, where each job's log is
-`<task id>.log.zst`. This script finds the failed jobs for a commit through the
-API, reads each log over SSH, and prints the failure-looking lines with
-context and the log's tail — a few KB instead of a few MB.
+Workflow runs and their current jobs supply job IDs for the Forgejo 17 retry
+API. Logs are read over SSH from `<task id>.log.zst` on the forge host,
+keeping job IDs (retry targets) distinct from task IDs (log files). A retry
+requires a terminal run and a verified inventory with no unexpired artifacts:
+Forgejo 17 deletes the entire run's artifacts even for a single-job rerun.
 
     scripts/ci-failures                 # the checkout's HEAD commit
     scripts/ci-failures 045d92f04       # any commit (prefix ok)
     scripts/ci-failures --pr 1145       # a pull request's head
     scripts/ci-failures --task 20565    # one job by task id, failed or not
     scripts/ci-failures --pr 1145 --wait 900   # wait quietly, then report
+    scripts/ci-failures --retry-job 70312 --dry-run  # preview one failed job
+    scripts/ci-failures --retry-job 70312      # retry it and its dependent jobs
 
 Configuration comes from the git-ignored `scripts/ci-failures.fleet.json`,
 shaped like the committed `scripts/ci-failures.fleet.example.json`, and the
@@ -27,11 +29,15 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "scripts" / "ci-failures.fleet.json"
+ARTIFACT_PAGE_SIZE = 50
+ARTIFACT_PAGES = 20
+TERMINAL_RUN_STATUSES = {"success", "failure", "cancelled", "skipped"}
 # Case-sensitive on purpose: "error" inside a branch name or a path is not a failure.
 SIGNAL = re.compile(
     r"(\berror(\[E\d+\])?:|\b\w*Error:|\bERROR\b|\bFAILED\b|\bFAIL\b|panicked at|Traceback|"
@@ -53,23 +59,121 @@ def load_config() -> dict:
     return config
 
 
-def api(config: dict, path: str) -> object:
+def api(config: dict, path: str, method: str = "GET") -> object:
     request = urllib.request.Request(
         f"{config['forge_url'].rstrip('/')}/api/v1/repos/{config['repo']}/{path}",
         headers={"Authorization": f"token {config['token']}"},
+        method=method,
     )
     with urllib.request.urlopen(request, timeout=30) as response:
+        if method == "POST":
+            if response.status != 204:
+                raise RuntimeError(f"expected HTTP 204, received HTTP {response.status}")
+            return None
         return json.load(response)
 
 
-def tasks_for(config: dict, sha: str, pages: int) -> list[dict]:
+def jobs_for(config: dict, sha: str, pages: int) -> list[dict]:
+    """Read current job attempts, rather than historical task failures."""
     found: list[dict] = []
     for page in range(1, pages + 1):
-        rows = api(config, f"actions/tasks?limit=50&page={page}").get("workflow_runs", [])
-        found += [row for row in rows if row.get("head_sha", "").startswith(sha)]
-        if not rows or (found and not any(r.get("head_sha", "").startswith(sha) for r in rows)):
+        runs = api(config, f"actions/runs?limit=50&page={page}").get("workflow_runs") or []
+        for run in runs:
+            if run.get("commit_sha", "").startswith(sha):
+                found.extend(api(config, f"actions/runs/{run['id']}/jobs") or [])
+        if len(runs) < 50:
             break
     return found
+
+
+
+class UnsafeRetry(RuntimeError):
+    """The client cannot establish that a rerun will preserve published data."""
+
+
+def positive_id(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def check_retry_artifacts(config: dict, job_id: int, job: dict) -> None:
+    """Refuse Forgejo's run-wide deletion when data exists or metadata is unknown."""
+    run_id = job.get("run_id")
+    if job.get("id") != job_id or not positive_id(job.get("id")) or not positive_id(run_id):
+        raise UnsafeRetry("job/run identity is missing or inconsistent")
+    try:
+        run = api(config, f"actions/runs/{run_id}")
+        if (not isinstance(run, dict) or not positive_id(run.get("id"))
+                or run["id"] != run_id or run.get("status") not in TERMINAL_RUN_STATUSES):
+            raise UnsafeRetry(f"run {run_id} is not verifiably terminal; it may still publish artifacts")
+        seen = set()
+        for page in range(1, ARTIFACT_PAGES + 1):
+            artifacts = api(config, f"actions/runs/{run_id}/artifacts?limit={ARTIFACT_PAGE_SIZE}&page={page}")
+            if not isinstance(artifacts, list) or len(artifacts) > ARTIFACT_PAGE_SIZE:
+                raise UnsafeRetry(f"run {run_id} artifact inventory is malformed")
+            for artifact in artifacts:
+                if (not isinstance(artifact, dict) or not positive_id(artifact.get("id"))
+                        or not positive_id(artifact.get("run_id")) or artifact["run_id"] != run_id
+                        or type(artifact.get("expired")) is not bool or artifact["id"] in seen):
+                    raise UnsafeRetry(f"run {run_id} artifact identity or expiry is unknown")
+                seen.add(artifact["id"])
+                # Use the server's explicit expiry flag, never a name-based proof
+                # exception or a guessed expiry for missing metadata.
+                if not artifact["expired"]:
+                    raise UnsafeRetry(f"run {run_id} has unexpired artifact {artifact['id']}")
+            # A server may cap pages below the requested size. Only an empty
+            # page establishes completion; a short nonempty page is not enough.
+            if not artifacts:
+                return
+        raise UnsafeRetry(f"run {run_id} artifact inventory exceeds the complete-list page budget")
+    except UnsafeRetry:
+        raise
+    except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, TypeError) as error:
+        reason = type(error).__name__
+        if isinstance(error, urllib.error.HTTPError):
+            reason = f"HTTP {error.code}"
+            error.close()
+        raise UnsafeRetry(f"cannot verify run {run_id} artifact inventory ({reason})") from None
+
+
+def retry_job(config: dict, job_id: int, dry_run: bool) -> int:
+    """Only retry the explicitly selected job if it is still failed."""
+    try:
+        job = api(config, f"actions/jobs/{job_id}")
+        if not isinstance(job, dict):
+            raise UnsafeRetry("job metadata is malformed")
+        if job.get("status") != "failure":
+            print(
+                f"ci-failures: refusing to retry job {job_id}: "
+                f"status is {job.get('status', 'unknown')}, not failure",
+                file=sys.stderr,
+            )
+            return 1
+        check_retry_artifacts(config, job_id, job)
+        target = f"failed job {job_id} ({job.get('name') or 'name unavailable'}); dependent jobs also rerun"
+        if dry_run:
+            print(f"Would retry {target}")
+            return 0
+        api(config, f"actions/jobs/{job_id}/rerun", method="POST")
+        print(f"Retry requested for {target}")
+        return 0
+    except UnsafeRetry as error:
+        print(f"ci-failures: refusing to retry job {job_id}: {error}", file=sys.stderr)
+        print("Forgejo 17 job reruns delete ALL artifacts of the workflow run. "
+              "Start a fresh lane and let authenticated adoption reuse finished evidence; "
+              "do not rerun this artifact-bearing or unverified run.", file=sys.stderr)
+    except urllib.error.HTTPError as error:
+        # Do not echo server bodies: authentication errors can contain credentials.
+        error.close()
+        print(f"ci-failures: retry job {job_id}: HTTP {error.code}", file=sys.stderr)
+        if error.code == 404:
+            print("Check the workflow job ID and Forgejo version (17.0+ required).", file=sys.stderr)
+    except (urllib.error.URLError, TimeoutError, RuntimeError) as error:
+        print(
+            f"ci-failures: retry job {job_id}: {type(error).__name__}; "
+            "check its status before retrying again",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def read_log(config: dict, task_id: int) -> str:
@@ -110,11 +214,20 @@ def summarize(text: str, tail_n: int, max_rows: int) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("commit", nargs="?", help="commit sha or prefix (default HEAD)")
-    parser.add_argument("--pr", type=int, help="pull request number")
-    parser.add_argument("--task", type=int, help="one task id")
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument("--pr", type=int, help="pull request number")
+    selector.add_argument("--task", type=int, help="read logs by task ID (not a retry target)")
+    selector.add_argument(
+        "--retry-job", type=int, metavar="JOB_ID",
+        help="retry one failed job and its dependents (Forgejo 17+)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="preview --retry-job without sending a retry request",
+    )
     parser.add_argument("--tail", type=int, default=25)
     parser.add_argument("--max", type=int, default=80, help="most failure-context lines per job")
-    parser.add_argument("--pages", type=int, default=6, help="task pages of 50 to scan")
+    parser.add_argument("--pages", type=int, default=6, help="workflow-run pages of 50 to scan")
     parser.add_argument("--all", action="store_true", help="list every job, not only failures")
     parser.add_argument(
         "--wait",
@@ -124,8 +237,16 @@ def main() -> int:
         help="poll quietly until no job is running or waiting (at most SECONDS), then report",
     )
     args = parser.parse_args()
+    if args.commit and any(value is not None for value in (args.pr, args.task, args.retry_job)):
+        parser.error("commit cannot be combined with --pr, --task or --retry-job")
+    if args.dry_run and args.retry_job is None:
+        parser.error("--dry-run requires --retry-job")
+    if args.retry_job is not None and (args.retry_job <= 0 or args.wait or args.all):
+        parser.error("--retry-job needs a positive job ID and cannot use --wait or --all")
     config = load_config()
 
+    if args.retry_job is not None:
+        return retry_job(config, args.retry_job, args.dry_run)
     if args.task:
         print(summarize(read_log(config, args.task), args.tail, args.max))
         return 0
@@ -135,13 +256,13 @@ def main() -> int:
         sha = subprocess.run(
             ["git", "rev-parse", args.commit or "HEAD"], cwd=ROOT, capture_output=True, text=True
         ).stdout.strip() or (args.commit or "")
-    tasks = tasks_for(config, sha, args.pages)
+    tasks = jobs_for(config, sha, args.pages)
     deadline = time.monotonic() + args.wait
     while args.wait and time.monotonic() < deadline and (
         not tasks or any(t.get("status") in ("running", "waiting", "blocked") for t in tasks)
     ):
         time.sleep(min(30, max(1, deadline - time.monotonic())))
-        tasks = tasks_for(config, sha, args.pages)
+        tasks = jobs_for(config, sha, args.pages)
     pending = [t for t in tasks if t.get("status") in ("running", "waiting", "blocked")]
     if args.wait and (pending or not tasks):
         print(f"still running after {args.wait}s: {len(pending)} job(s) not finished")
@@ -154,10 +275,16 @@ def main() -> int:
         counts[task.get("status", "?")] = counts.get(task.get("status", "?"), 0) + 1
     print(f"{sha[:12]}: " + ", ".join(f"{n} {status}" for status, n in sorted(counts.items())))
     for task in tasks if args.all else failed:
-        print(f"{task['status']:>9}  task {task['id']:<6} {task['name']}  ({task.get('workflow_id', '')})")
+        print(
+            f"{task['status']:>9}  job {task['id']:<6} task {task.get('task_id', 0):<6} "
+            f"{task['name']}  (run {task['run_id']})"
+        )
     for task in failed:
-        print(f"\n══ {task['name']} — task {task['id']} ══")
-        print(summarize(read_log(config, task["id"]), args.tail, args.max))
+        print(f"\n══ {task['name']} — job {task['id']} ══")
+        if task.get('task_id'):
+            print(summarize(read_log(config, task['task_id']), args.tail, args.max))
+        else:
+            print('(no task log for this job)')
     if failed:
         return 1
     # A wait that ran out is not a pass: `--wait N && merge` must not merge.

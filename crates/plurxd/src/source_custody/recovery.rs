@@ -1,12 +1,111 @@
 //! Recovery evidence is distinct from a pre-read activation or a joined receipt.
-//! Only a verified reboot of the same physical host proves all former readers,
-//! including escaped process groups, stopped. Same-boot evidence stays held.
+//! Mediated reader lifetime witnesses work on native macOS/Linux and in
+//! containers. Legacy unmediated evidence retains its separate physical proof.
 use super::*;
 use plurx_core::store::background_jobs_resources::{
     BackgroundSourceCustodyToken, BackgroundSourceOwner,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+
+#[cfg(target_os = "linux")]
+mod physical_stop;
+mod reader;
+#[cfg(target_os = "linux")]
+mod source_census;
+pub(super) use reader::Witness;
+
+pub(super) fn declared_background_spawn<T>(
+    receipt: &BackgroundSourceCustodyToken,
+    spawn: impl FnOnce() -> T,
+) -> T {
+    reader::declared_background_spawn(receipt, spawn)
+}
+pub(super) fn record_background_source(
+    store: &Arc<dyn Store>,
+    receipt: &BackgroundSourceCustodyToken,
+    source: &std::fs::File,
+) -> Result<(), String> {
+    let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
+        return Ok(());
+    };
+    reader::record_source(&context.dir.with_file_name("v2"), receipt, source)
+}
+
+/// Read-only observations; none of these fields authorizes settlement.
+pub(super) fn status(store: &Arc<dyn Store>) -> serde_json::Value {
+    let kernel_available = reader::kernel_instance().is_some();
+    let mut authoritative_backend = false;
+    let mut local_filesystem = false;
+    let mut poisoned = serde_json::Value::Null;
+    let mut error = None;
+    match context_snapshot(store) {
+        Ok(Some(context)) if context.authoritative => {
+            authoritative_backend = true;
+            #[cfg(unix)]
+            {
+                // No witness directory is needed before the first reader. The
+                // configured durable data root is two levels above v1/v2.
+                local_filesystem = context
+                    .dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(|root| std::fs::File::open(root).ok())
+                    .is_some_and(|file| reader::local_filesystem(&file));
+            }
+            match reader::poisoned_witnesses(&context.dir.with_file_name("v2")) {
+                Ok(snapshot) => {
+                    poisoned = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null)
+                }
+                Err(reason) => error = Some(reason),
+            }
+        }
+        Ok(_) => {}
+        Err(reason) => error = Some(reason),
+    }
+    #[cfg(target_os = "linux")]
+    let daemon_init_or_subreaper = {
+        let mut subreaper: libc::c_int = 0;
+        // SAFETY: read-only prctl writes one integer through a live pointer.
+        let result = unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut subreaper, 0, 0, 0) };
+        if std::process::id() == 1 {
+            Some(true)
+        } else if result == 0 {
+            Some(subreaper != 0)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let daemon_init_or_subreaper: Option<bool> = None;
+    serde_json::json!({
+        "supported": authoritative_backend && kernel_available && local_filesystem,
+        "authoritative_backend": authoritative_backend,
+        "kernel_available": kernel_available,
+        "local_filesystem": local_filesystem,
+        "daemon_init_or_subreaper": daemon_init_or_subreaper,
+        "poisoned": poisoned, "error": error,
+    })
+}
+
+pub(super) fn live_background_join(
+    store: &Arc<dyn Store>,
+    receipt: &BackgroundSourceCustodyToken,
+) -> super::LiveJoin {
+    let context = match context_snapshot(store) {
+        Ok(context) => context,
+        Err(_) => return super::LiveJoin::Refused("source recovery context unavailable"),
+    };
+    // Without an authoritative backend no witness exists or ever existed.
+    let Some(context) = context.filter(|context| context.authoritative) else {
+        return super::LiveJoin::Unwitnessed;
+    };
+    match reader::live_background_escape(&context.dir.with_file_name("v2"), receipt) {
+        None => super::LiveJoin::Refused("authoritative reader witness missing"),
+        Some(None) => super::LiveJoin::Clean,
+        Some(Some(tick)) => super::LiveJoin::EscapedSince(tick),
+    }
+}
 
 const MAX_BYTES: u64 = 1_048_576;
 const MAX_RECORDS: usize = 128;
@@ -36,6 +135,10 @@ pub(super) fn configure_backend(
 ) -> Result<(), String> {
     if authoritative && data_dir.as_os_str().is_empty() {
         return Err("authoritative source recovery needs a persistent data directory".into());
+    }
+    if authoritative {
+        plurx_core::process::source_lifetime::install_observer(reader::observe_children)
+            .map_err(|error| error.to_string())?;
     }
     let context = Context {
         store: Arc::downgrade(store),
@@ -247,6 +350,10 @@ fn verify_directory(dir: &Path) -> Result<(), String> {
 }
 
 fn read(path: &Path) -> Result<Envelope, String> {
+    serde_json::from_slice(&read_bytes(path)?).map_err(|error| error.to_string())
+}
+
+fn read_bytes(path: &Path) -> Result<Vec<u8>, String> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -273,7 +380,7 @@ fn read(path: &Path) -> Result<Envelope, String> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err("source recovery record grew past its bound".into());
     }
-    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+    Ok(bytes)
 }
 
 fn write_active_at(dir: &Path, record: Record, identity: Option<Identity>) -> Result<(), String> {
@@ -338,33 +445,31 @@ fn write_active_at(dir: &Path, record: Record, identity: Option<Identity>) -> Re
 pub(super) fn foreground(
     store: &Arc<dyn Store>,
     token: &ForegroundSourceToken,
-) -> Result<(), String> {
+    activation_id: &str,
+) -> Result<Option<Arc<Witness>>, String> {
     let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
-        return Ok(());
+        return Ok(None);
     };
-    write_active_at(
-        &context.dir,
-        Record::Foreground {
-            token: token.clone(),
-        },
-        Identity::current(),
-    )
+    let record = Record::Foreground {
+        token: token.clone(),
+    };
+    write_active_at(&context.dir, record.clone(), Identity::current())?;
+    reader::prepare_at(&context.dir.with_file_name("v2"), record, activation_id)
 }
 
 pub(super) fn background(
     store: &Arc<dyn Store>,
     token: &BackgroundSourceCustodyToken,
-) -> Result<(), String> {
+    activation_id: &str,
+) -> Result<Option<Arc<Witness>>, String> {
     let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
-        return Ok(());
+        return Ok(None);
     };
-    write_active_at(
-        &context.dir,
-        Record::Background {
-            token: token.clone(),
-        },
-        Identity::current(),
-    )
+    let record = Record::Background {
+        token: token.clone(),
+    };
+    write_active_at(&context.dir, record.clone(), Identity::current())?;
+    reader::prepare_at(&context.dir.with_file_name("v2"), record, activation_id)
 }
 
 pub(super) fn clear(store: &Arc<dyn Store>, receipt: &SettlementReceipt) -> Result<(), String> {
@@ -380,7 +485,8 @@ pub(super) fn clear(store: &Arc<dyn Store>, receipt: &SettlementReceipt) -> Resu
         },
         _ => return Ok(()),
     };
-    clear_at(&context.dir, &record)
+    clear_at(&context.dir, &record)?;
+    reader::complete_at(&context.dir.with_file_name("v2"), &record)
 }
 
 /// Activation success also clears its legacy intent. Only this separate path
@@ -425,6 +531,7 @@ pub(super) async fn clear_aborted_if_absent(
         _ => return Err("abort cleanup requires an exact activation receipt".into()),
     };
     clear_at(&context.dir, &record)?;
+    reader::complete_at(&context.dir.with_file_name("v2"), &record)?;
     Ok(true)
 }
 
@@ -471,10 +578,21 @@ pub(super) async fn replay(store: &Arc<dyn Store>, node: &str) -> Result<(), Str
     let Some(context) = context_snapshot(store)?.filter(|context| context.authoritative) else {
         return Ok(());
     };
-    let Some(identity) = Identity::current() else {
-        return Ok(());
+    let reader_result =
+        reader::replay_at(store, &context.dir.with_file_name("v2"), &context.dir, node).await;
+    // Native macOS needs no Linux host identity for the common reader path.
+    let legacy_result = if let Some(identity) = Identity::current() {
+        replay_at(store, &context.dir, &identity, node).await
+    } else {
+        Ok(())
     };
-    replay_at(store, &context.dir, &identity, node).await
+    #[cfg(target_os = "linux")]
+    let legacy_result = legacy_result.and(physical_stop::replay(store, &context.dir, node).await);
+    #[cfg(target_os = "linux")]
+    let legacy_result = legacy_result.and(
+        source_census::replay(store, &context.dir.with_file_name("v2"), &context.dir, node).await,
+    );
+    reader_result.and(legacy_result)
 }
 
 async fn replay_at(
@@ -528,52 +646,7 @@ async fn replay_at(
         if !verified(&envelope, identity, node) {
             continue;
         }
-        for record in &envelope.records {
-            match record {
-                Record::Background { token } => {
-                    if store
-                        .mark_background_source_settled(token.clone())
-                        .await
-                        .map_err(|error| error.to_string())?
-                        && !store
-                            .release_background_source_custody(
-                                token.clone(),
-                                crate::state::clock_ms(),
-                            )
-                            .await
-                            .map_err(|error| error.to_string())?
-                    {
-                        return Err(
-                            "background reboot recovery release needs reconciliation".into()
-                        );
-                    }
-                }
-                Record::Foreground { token } => {
-                    if store
-                        .mark_foreground_source_settled(token.clone())
-                        .await
-                        .map_err(|error| error.to_string())?
-                    {
-                        if let Some(current) = store
-                            .resolve_foreground_source(token.clone())
-                            .await
-                            .map_err(|error| error.to_string())?
-                        {
-                            if !store
-                                .release_foreground_source(current, crate::state::clock_ms())
-                                .await
-                                .map_err(|error| error.to_string())?
-                            {
-                                return Err(
-                                    "foreground reboot recovery release needs reconciliation"
-                                        .into(),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        settle_records(store, &envelope.records).await?;
         // Record removal only follows authoritative settlement acknowledgement.
         std::fs::remove_file(&path).map_err(|error| error.to_string())?;
         std::fs::File::open(dir)
@@ -583,6 +656,48 @@ async fn replay_at(
             records = envelope.records.len(),
             "source custody recovered after verified host reboot"
         );
+    }
+    Ok(())
+}
+
+async fn settle_records(store: &Arc<dyn Store>, records: &[Record]) -> Result<(), String> {
+    for record in records {
+        match record {
+            Record::Background { token } => {
+                if store
+                    .mark_background_source_settled(token.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                    && !store
+                        .release_background_source_custody(token.clone(), crate::state::clock_ms())
+                        .await
+                        .map_err(|error| error.to_string())?
+                {
+                    return Err("background recovery release needs reconciliation".into());
+                }
+            }
+            Record::Foreground { token } => {
+                if store
+                    .mark_foreground_source_settled(token.clone())
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    if let Some(current) = store
+                        .resolve_foreground_source(token.clone())
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        if !store
+                            .release_foreground_source(current, crate::state::clock_ms())
+                            .await
+                            .map_err(|error| error.to_string())?
+                        {
+                            return Err("foreground recovery release needs reconciliation".into());
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }

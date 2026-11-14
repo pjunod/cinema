@@ -385,6 +385,7 @@ impl PeerConnection {
                 .header(header::ACCEPT, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -681,10 +682,19 @@ pub(crate) struct SourceStatusReceipt {
     direct: Option<SourceDirectStart>,
 }
 impl SourceStatusReceipt {
+    #[cfg(test)]
     fn parse(
         bytes: &[u8],
         session: &SourcePeerSession,
         known: &SourcePeerLineage,
+    ) -> Result<Self, PeerError> {
+        Self::parse_with_receiver(bytes, session, known, false)
+    }
+    fn parse_with_receiver(
+        bytes: &[u8],
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+        receiver_affirmed: bool,
     ) -> Result<Self, PeerError> {
         if session.is_direct() {
             let decoded = crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
@@ -705,8 +715,13 @@ impl SourceStatusReceipt {
             .map_err(|_| PeerError::InvalidResponse)?;
         let (_, incarnation, response) = decoded.into_parts();
         if &SourcePeerLineage::from_start(incarnation, &response)? != known
-            || !response.vod
-            || response.media_origin_ms != Some(0)
+            || !crate::http::shared_source_playback::receiver_presentation::response_presentable(
+                &response,
+                crate::http::shared_source_playback::receiver_presentation::client_supports_range(
+                    &session.session.to_string(),
+                ),
+                receiver_affirmed,
+            )
         {
             return Err(PeerError::InvalidResponse);
         }
@@ -760,6 +775,7 @@ impl PeerConnection {
                 .header(header::ACCEPT, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -795,7 +811,7 @@ impl PeerConnection {
             if status != StatusCode::OK {
                 return Err(PeerError::Rejected(status));
             }
-            SourceStatusReceipt::parse(&bytes, session, known)
+            SourceStatusReceipt::parse_with_receiver(&bytes, session, known, true)
         })
         .await
         .map_err(|_| PeerError::Unavailable)?
@@ -1044,6 +1060,7 @@ impl PeerConnection {
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -1059,6 +1076,13 @@ impl PeerConnection {
         .map_err(|_| PeerError::Unavailable)??;
         match response.status() {
             StatusCode::OK => {}
+            StatusCode::TOO_MANY_REQUESTS => {
+                return Err(PeerError::Busy {
+                    retry_after_secs: peer_retry_after_secs(
+                        response.headers().get(header::RETRY_AFTER),
+                    ),
+                })
+            }
             StatusCode::UNAUTHORIZED => return Err(PeerError::Authentication),
             StatusCode::UPGRADE_REQUIRED => return Err(PeerError::ProtocolUnsupported),
             status => return Err(PeerError::Rejected(status)),
@@ -1175,6 +1199,86 @@ mod resource_tests {
                 .expect("actual Hyper driver"),
             server,
         )
+    }
+    #[tokio::test]
+    async fn sharing_resource_http_429_preserves_bounded_retry_and_other_refusals() {
+        for (status, retry_after, expected) in [
+            (StatusCode::TOO_MANY_REQUESTS, None, Some(1)),
+            (StatusCode::TOO_MANY_REQUESTS, Some("3"), Some(3)),
+            (StatusCode::TOO_MANY_REQUESTS, Some("invalid"), Some(1)),
+            (StatusCode::TOO_MANY_REQUESTS, Some("99999"), Some(10)),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Some("99999999999999999999999999"),
+                Some(1),
+            ),
+            (StatusCode::SERVICE_UNAVAILABLE, Some("3"), None),
+            (StatusCode::UNAUTHORIZED, Some("3"), None),
+            (StatusCode::UPGRADE_REQUIRED, Some("3"), None),
+        ] {
+            let (mut peer, server) = wire_peer().await;
+            // This fixture exercises HTTP response decoding only. The real
+            // pinned Source/B fixture separately proves authenticated transport.
+            peer.verified_endpoint = Some(Endpoint {
+                ipv4: "100.64.0.1".parse().expect("fixture address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 443,
+                spki_sha256: "a".repeat(64),
+            });
+            let serving = tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |_request| async move {
+                    let mut response = axum::http::Response::builder().status(status);
+                    if let Some(retry_after) = retry_after {
+                        response = response.header(header::RETRY_AFTER, retry_after);
+                    }
+                    Ok::<_, std::convert::Infallible>(
+                        response
+                            .body(Body::from(
+                                "untrusted peer prose is not a client retry message",
+                            ))
+                            .expect("fixture response"),
+                    )
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(server), service)
+                    .await;
+            });
+            let (session, known, resource, _) = fixture();
+            let error = match peer
+                .file_resource(
+                    &Secret::from_cleartext("fixture credential"),
+                    &"b".repeat(64),
+                    &session,
+                    &known,
+                    &resource,
+                )
+                .await
+            {
+                Ok(_) => panic!("an HTTP refusal cannot produce resource data"),
+                Err(error) => error,
+            };
+            if let Some(expected) = expected {
+                assert!(
+                    matches!(error, PeerError::Busy { retry_after_secs } if retry_after_secs == expected),
+                    "{retry_after:?}: {error:?}"
+                );
+            } else {
+                assert!(
+                    match error {
+                        PeerError::Authentication => status == StatusCode::UNAUTHORIZED,
+                        PeerError::ProtocolUnsupported => status == StatusCode::UPGRADE_REQUIRED,
+                        PeerError::Rejected(actual) => actual == status,
+                        _ => false,
+                    },
+                    "a genuine refusal must not become resource busy: {error:?}"
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(5), serving)
+                .await
+                .expect("actual HTTP fixture driver closes")
+                .expect("HTTP fixture joined");
+        }
     }
     #[tokio::test]
     async fn source_resource_body_bounds_frames_bytes_and_original_deadline() {
@@ -1736,6 +1840,7 @@ impl PeerConnection {
                 .header(header::ACCEPT, "application/json")
                 .header(header::AUTHORIZATION, auth)
                 .header("cinemashare-viewer", viewer)
+                .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender

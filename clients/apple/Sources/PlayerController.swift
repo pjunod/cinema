@@ -547,14 +547,35 @@ final class PlayerController: ObservableObject {
     /// reads it back, and no decision, capability, or session request depends
     /// on it (MEDIA-BADGES-PLAN.md §9).
     @Published private(set) var effectiveProcessing: EffectiveProcessingReport?
-    @Published private(set) var effectiveProcessingGeneration: String?
+    @Published private(set) var effectiveProcessingGeneration: String? {
+        didSet { projectPlaybackEnhancement() }
+    }
     /// The server's Dolby Vision enhancement answer for the current HLS
     /// session (FEL / RPU / DYN). Held for the session and cleared wherever
     /// the session's delivery answer is — but not on a seek: a seek clears
     /// `effectiveProcessing`, and `PlaybackEnhancement.presented` hides a
     /// report-gated answer until the next generation's report returns, while
     /// a native Dolby Vision answer stays true across the seek.
+    /// The one published enhancement surface: the session's answer, explained
+    /// by the owner's current-generation skip report when one applies. Its
+    /// inputs are plain state, so the player still publishes one surface.
     @Published private(set) var playbackEnhancement: PlaybackEnhancement?
+    private var basePlaybackEnhancement: PlaybackEnhancement? {
+        didSet { projectPlaybackEnhancement() }
+    }
+    private var processingSkip: ProcessingSkip? {
+        didSet { projectPlaybackEnhancement() }
+    }
+    private func projectPlaybackEnhancement() {
+        let projected = basePlaybackEnhancement?.explainingSkip(
+            processingSkip, generation: effectiveProcessingGeneration)
+        if playbackEnhancement != projected { playbackEnhancement = projected }
+    }
+    /// A new session answer replaces the old one and its skip report.
+    private func adoptPlaybackEnhancement(_ enhancement: PlaybackEnhancement?) {
+        processingSkip = nil
+        basePlaybackEnhancement = enhancement
+    }
     @Published private(set) var deliveredRange: String?
     /// Take a delivery answer, both halves at once.
     ///
@@ -577,7 +598,7 @@ final class PlayerController: ObservableObject {
         } else {
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
-            playbackEnhancement = nil
+            adoptPlaybackEnhancement(nil)
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
         }
@@ -1327,6 +1348,10 @@ final class PlayerController: ObservableObject {
     /// switch cannot be the thing that changes it. The arithmetic lives in
     /// `PreparedSwitchMeasurement.swift` as pure functions.
     private var preparedSwitch = PreparedSwitchMeasurement.Recorder()
+    /// Session opens this controller has started, the initial one included.
+    /// Only its movement matters: a prepared seam report compares it across
+    /// its window to say whether the change also took an ordinary reopen.
+    private var reopensStarted = 0
 
     /// The three rows the info panel shows, computed on demand.
     var preparedSwitchReading: PreparedSwitchMeasurement.Reading { preparedSwitch.reading() }
@@ -1850,7 +1875,7 @@ final class PlayerController: ObservableObject {
         selectedSubtitle = offline.subtitleIndex == nil ? nil : 0
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         deliveredRange = "sdr"
         encoder = "offline"
         isVOD = true
@@ -3513,7 +3538,7 @@ final class PlayerController: ObservableObject {
         lastPreparedAccessLogSequence = nil
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         retireAutoTransferMetrics()
         abandonSeekMeasurement()
         requestedSeekGeneration = nil
@@ -3648,7 +3673,8 @@ final class PlayerController: ObservableObject {
     func realPositionMs() -> Int {
         let seconds = player.currentTime().seconds
         let local = seconds.isFinite ? Int(seconds * 1000) : 0
-        return baseMs + max(local, 0)
+        let (film, overflow) = baseMs.addingReportingOverflow(max(local, 0))
+        return overflow ? Int.max : max(0, film)
     }
 
     // MARK: - Stream lifecycle
@@ -3924,6 +3950,9 @@ final class PlayerController: ObservableObject {
         var request = request
         while true {
             let next = request.positionMs
+            // Every session open after the first is an ordinary reopen; the
+            // seam report reads whether one ran inside its window.
+            reopensStarted &+= 1
             try await open(decision: decision, at: next, intent: request.intent)
             guard isCurrentLifecycle(lifecycle) else { return }
             // A newer `open()` superseded this one while it ran (P2-6). The
@@ -4067,7 +4096,7 @@ final class PlayerController: ObservableObject {
             // it, for the reason `adoptSessionDelivery` gives.
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
-            playbackEnhancement = nil
+            adoptPlaybackEnhancement(nil)
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
             let deliveryPath = try contextForFile(fileId).translatedDeliveryPath(decision.delivery?.url ?? decision.playUrl)
@@ -5743,7 +5772,7 @@ final class PlayerController: ObservableObject {
     private func fail(_ error: Error) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         isChangingStream = false
         ttffMeasurement.reset()
         // M5: the create-retry owner has already stopped the player and raised
@@ -5825,7 +5854,7 @@ final class PlayerController: ObservableObject {
     private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        adoptPlaybackEnhancement(nil)
         abandonSeekMeasurement()
         player.pause()
         isPlaying = false
@@ -5929,9 +5958,15 @@ final class PlayerController: ObservableObject {
                 // Not `started`: that is the controller's own "is this player
                 // running" flag, and shadowing it inside a recovery sequence is
                 // the kind of thing a reader has to stop and check.
-                let opened = try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
-                    let opened = try await requestHlsSession(model, try contextForFile(file), request)
-                    return opened
+                // Every rung tells the server what the sequence's absolute
+                // deadline still allows, so the server answers inside it.
+                let remainingMs = PlaybackCreateRetry.deadlineMs
+                    - Self.milliseconds(began.duration(to: ContinuousClock.now))
+                let opened = try await PlaybackStartupRequestContext.$remainingMs.withValue(max(0, remainingMs)) {
+                    try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
+                        let opened = try await requestHlsSession(model, try contextForFile(file), request)
+                        return opened
+                    }
                 }
                 guard createRetryExpiredEpoch != epoch else {
                     await release(session: opened.sessionId)
@@ -6230,6 +6265,12 @@ final class PlayerController: ObservableObject {
             return PlaybackSurfaceOutcome(source: "vod_transcode_unavailable")
         case "vod_subtitle_burn_unavailable":
             return PlaybackSurfaceOutcome(source: "vod_subtitle_burn_unavailable")
+        // A capacity refusal no re-post of the same request can outlive: a
+        // height this server cannot encode now, a scratch grant above its
+        // ceiling, a replacement past its deadline. Nothing here re-asks at a
+        // smaller height, so the start ends on the row that names it.
+        case "transcode_height_unavailable", "transcode_scratch_exhausted", "replacement_expired":
+            return PlaybackSurfaceOutcome(source: "create_capacity_terminal")
         case "media_owner_lost":
             guard case .refused(_, _, _, let positionMs) = api else { return nil }
             return PlaybackSurfaceOutcome(source: "media_owner_lost_410", positionMs: positionMs)
@@ -7723,7 +7764,8 @@ final class PlayerController: ObservableObject {
             // Fully seekable timelines whose local clock is film time.
             return .native(itemMs: targetMs)
         }
-        let local = targetMs - baseMs
+        let (local, overflow) = targetMs.subtractingReportingOverflow(baseMs)
+        guard !overflow else { return .reopen }
         // Exact containment first, across every advertised range: a target
         // inside a later range must seek there, not snap to an earlier
         // range's edge (PR #122 review: [0…10 s, 11 s…90 s] with a 12 s
@@ -8476,7 +8518,7 @@ final class PlayerController: ObservableObject {
         requestedStartMs: Int
     ) -> Int {
         if vod { return 0 }
-        if let mediaOriginMs { return max(0, mediaOriginMs) }
+        if let mediaOriginMs { return mediaOriginMs }
         return Int((startSeconds ?? Double(requestedStartMs) / 1000.0) * 1000)
     }
 
@@ -8488,7 +8530,8 @@ final class PlayerController: ObservableObject {
         mediaOriginMs: Int,
         minimumCorrectionMs: Int = 100
     ) -> Int? {
-        let correction = max(0, requestedStartMs) - max(0, mediaOriginMs)
+        let (correction, overflow) = max(0, requestedStartMs).subtractingReportingOverflow(mediaOriginMs)
+        guard !overflow else { return nil }
         return correction >= minimumCorrectionMs ? correction : nil
     }
 
@@ -9195,7 +9238,7 @@ extension PlayerController {
         effectiveProcessingGeneration = nil
         // The enhancement answer belongs to this response, controllable or
         // not; a report-gated one stays hidden without a matching report.
-        playbackEnhancement = hls.enhancement
+        adoptPlaybackEnhancement(hls.enhancement)
         guard let bootstrap = hls.control, bootstrap.isValid else { return }
         effectiveProcessingGeneration = bootstrap.generation
         if let report = hls.effectiveProcessing,
@@ -9248,12 +9291,13 @@ extension PlayerController {
                 guard let self, self.selectedSubtitle != nil else { return }
                 self.showPlaybackNotice("That subtitle could not be prepared. Playback was kept unchanged.")
             },
-            onProcessingGeneration: { [weak self] generation, report in
+            onProcessingGeneration: { [weak self] generation, report, skip in
                 guard let self else { return }
                 self.effectiveProcessing = report.flatMap {
                     $0.matches(generation: generation, delivered: self.deliveredRange) ? $0 : nil
                 }
                 self.effectiveProcessingGeneration = generation
+                self.processingSkip = skip.flatMap { $0.matches(generation: generation) ? $0 : nil }
             },
             // Deliberately ungated at this call site. Everything that could
             // refuse a staging — one already live, one already settled, a
@@ -10775,7 +10819,7 @@ extension PlayerController: PreparedSuccessorHost {
         // The successor's own answer, as its prepare action carries it (nil
         // when the server sent none). A report-gated one still stays hidden
         // until a current effective-processing report is held.
-        playbackEnhancement = action.enhancement
+        adoptPlaybackEnhancement(action.enhancement)
         adoptWarmPlayer(successor)
         player.volume = incumbentVolume
         player.isMuted = incumbentMuted
@@ -11279,5 +11323,32 @@ extension PlayerController: PreparedSuccessorHost {
     /// turns the first device that takes this path into the measurement.
     func recordPreparedFallbackInterruption(ms: Int) {
         preparedFallbackInterruptionMs = ms
+    }
+
+    /// One `prepared_seam` beacon per commit outcome, reported once the
+    /// ±2 s window has elapsed. A committed switch then carries the evidence
+    /// its successor's side of the window had its 2 s status poll for (the
+    /// synchronous read at the swap is the other reading), so the report has
+    /// the coverage the ledger row shows. Every outcome says whether an
+    /// ordinary reopen actually ran inside the window (`reopensStarted` moved
+    /// since the outcome): a refused or frameless switch owes one and counts
+    /// as reopened only once it ran. Observation only.
+    func reportPreparedSeam(_ outcome: PreparedCommitOutcome) {
+        let reopensAtOutcome = reopensStarted
+        // The session the outcome is about, not whichever one a reopen
+        // inside the window has since opened.
+        let session = sessionId
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(PreparedSwitchMeasurement.windowMs + 500) * 1_000_000)
+            guard let self else { return }
+            let evidence: PreparedSeamEvidence?
+            if case .committed = outcome { evidence = self.preparedSwitch.seamEvidence() } else { evidence = nil }
+            guard let seam = PreparedSeamBeacon.seam(outcome, evidence: evidence,
+                                                     reopened: self.reopensStarted != reopensAtOutcome)
+            else { return }
+            self.postClientLog(PreparedSeamBeacon(message: "prepared switch: \(seam.outcome)",
+                                                  detail: seam.outcome, session_id: session,
+                                                  prepared_seam: seam))
+        }
     }
 }

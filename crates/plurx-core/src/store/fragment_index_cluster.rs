@@ -91,20 +91,57 @@ BEGIN
 END;
 "#;
 
-/// Shared capacity predicate for the pre-artifact source read. Both Store
-/// backends place it in candidate selection and the fenced claim mutation.
-pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
-    format!(
-        r#"NOT EXISTS (SELECT 1 FROM analysis_required_resources required
-      WHERE required.request_id = analysis_requests.request_id AND (
-        EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now})
-        OR EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
+/// The terms of [`analysis_source_capacity_clause`], each with the reason it
+/// names. Each term is evaluated for one required resource (`required`) of
+/// one `analysis_requests` row; any true term refuses the source read.
+///
+/// `exclude_self` leaves the row's own holdings out of every count, so the
+/// same rule can be asked again after the claim, while the request holds its
+/// reservation and custody (`BackgroundJobStore::analysis_source_admission`).
+/// Claim selection passes `false`: an unclaimed row holds nothing.
+pub(crate) fn analysis_source_capacity_terms(
+    now: &str,
+    exclude_self: bool,
+) -> [(&'static str, String); 4] {
+    let (own_occupancy, own_reservation) = if exclude_self {
+        (
+            " AND NOT (held.owner_kind='analysis' AND held.work_id=analysis_requests.request_id)",
+            " AND held.request_id<>analysis_requests.request_id",
+        )
+    } else {
+        ("", "")
+    };
+    [
+        // A reader whose authority lapsed may still be reading.
+        (
+            "source_custody_unsettled",
+            format!(
+                r#"EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now}{own_occupancy})"#
+            ),
+        ),
+        // A foreground stream needs this domain now.
+        (
+            "foreground_source",
+            format!(
+                r#"EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
           AND (fg.lease_expires_at_ms>{now} OR fg.custody_held=1)
-          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))
-        OR (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL))>=2
-        OR (NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))"#
+            ),
+        ),
+        // Two readers already occupy the domain.
+        (
+            "domain_readers_full",
+            format!(
+                r#"(SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
+          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL){own_occupancy})>=2"#
+            ),
+        ),
+        // Without a live viewer, a background read takes only an idle domain.
+        (
+            "background_reader_busy",
+            format!(
+                r#"(NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
               WHERE viewer.request_scope = 'playback-analysis'
                 AND viewer.job_id = analysis_requests.request_id
                 AND viewer.state = 'pending' AND viewer.deadline_ms > {now})
@@ -129,7 +166,7 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
                               AND source.trigger = 'playback'
                               AND source.state IN ('queued','running'))))))
             + (SELECT COUNT(*) FROM analysis_source_reservations held
-                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}
+                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}{own_reservation}
                   AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
                       WHERE viewer.request_scope = 'playback-analysis'
                         AND viewer.job_id = held.request_id
@@ -137,7 +174,144 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
             + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
               WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
                 AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
-                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)))"#
+                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)"#
+            ),
+        ),
+    ]
+}
+
+/// Shared capacity predicate for the pre-artifact source read. Both Store
+/// backends place it in candidate selection and the fenced claim mutation.
+pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
+    let [custody, foreground, readers, background] =
+        analysis_source_capacity_terms(now, false).map(|(_, term)| term);
+    format!(
+        "NOT EXISTS (SELECT 1 FROM analysis_required_resources required
+      WHERE required.request_id = analysis_requests.request_id AND (
+        {custody}
+        OR {foreground}
+        OR {readers}
+        OR {background}))"
+    )
+}
+
+/// The cross-node arm of the analysis claim (`cross_node`): a fragment-index
+/// row another live member targeted. `node` is the claimant's placeholder;
+/// the claim's own digest filter already pins `pipeline_version`.
+pub(crate) fn analysis_cross_node_clause(node: &str) -> String {
+    format!(
+        "(analysis_requests.component = 'fragment_index' AND analysis_requests.target_node_id <> ''
+        AND analysis_requests.target_node_id <> {node}
+        AND NOT EXISTS (SELECT 1 FROM settings
+          WHERE key = 'internal.cluster_job_owner_removed.' || analysis_requests.target_node_id))"
+    )
+}
+
+/// How many copy-video identities one claim may name as ones its executor
+/// cannot emit. An identity is an argv fingerprint shared by every file of
+/// one pipeline class, so a handful covers a library; the bound keeps the
+/// bound parameter small on every claim.
+pub const MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES: usize = 256;
+
+/// The claim's executor exclusion: another node's row naming a copy-video
+/// identity in `excluded` (a JSON array) is not this executor's to take. The
+/// claimant's own and untargeted rows are never excluded -- an identity its
+/// own node cannot emit is superseded there, not handed on. `node` and
+/// `excluded` are the claim's placeholders.
+pub(crate) fn analysis_executor_exclusion_clause(node: &str, excluded: &str) -> String {
+    format!(
+        "(analysis_requests.target_node_id IN ({node}, '')
+        OR analysis_requests.video_identity NOT IN (SELECT value FROM json_each({excluded})))"
+    )
+}
+
+/// The claim's order: work a viewer is waiting on first, wherever it is
+/// targeted (a foreign row with a live playback waiter outranks this node's
+/// own background rows), then this node's own and untargeted rows, then age
+/// (forced work boosted). `node`, `now` and `boost` are the claim's
+/// placeholders.
+pub(crate) fn analysis_claim_order(node: &str, now: &str, boost: &str) -> String {
+    format!(
+        "CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
+            OR (component = 'fragment_index' AND EXISTS (
+                SELECT 1 FROM background_job_waiters waiter
+                WHERE waiter.request_scope = 'playback-analysis'
+                  AND waiter.job_id = analysis_requests.request_id
+                  AND waiter.state = 'pending' AND waiter.deadline_ms > {now}))
+            THEN 0 ELSE 1 END,
+         CASE WHEN target_node_id IN ({node}, '') THEN 0 ELSE 1 END,
+         created_at_ms - CASE WHEN priority = 'forced' THEN {boost} ELSE 0 END,
+         created_at_ms, request_id"
+    )
+}
+
+/// How many files one [`ClusterFragmentIndexStore::fragment_index_requests_for_files`]
+/// read may name.
+pub const MAX_FILE_REQUEST_LOOKUP: usize = 256;
+
+/// The request per file for `fragment_index_requests_for_files`. `files` is
+/// the JSON array of file ids; columns are `REQUEST_COLS` from `ranked`.
+pub(crate) fn fragment_index_requests_for_files_sql(files: &str, columns: &str) -> String {
+    format!(
+        "WITH ranked AS (
+           SELECT analysis_requests.*, ROW_NUMBER() OVER (
+             PARTITION BY file_id
+             ORDER BY CASE WHEN state IN ('queued', 'running', 'submitted') THEN 0 ELSE 1 END,
+                      created_at_ms DESC, request_id DESC) AS file_rank
+             FROM analysis_requests
+            WHERE component = 'fragment_index'
+              AND file_id IN (SELECT CAST(value AS INTEGER) FROM json_each({files})))
+         SELECT {columns} FROM ranked WHERE file_rank = 1 ORDER BY file_id"
+    )
+}
+
+/// Validate a per-file lookup and bind its file ids as one JSON array.
+pub(crate) fn file_request_lookup_json(file_ids: &[i64]) -> Result<String, StoreError> {
+    if file_ids.len() > MAX_FILE_REQUEST_LOOKUP || file_ids.iter().any(|id| *id <= 0) {
+        return Err(StoreError::Task("invalid file request lookup".to_owned()));
+    }
+    serde_json::to_string(file_ids).map_err(|error| StoreError::Task(error.to_string()))
+}
+
+/// Validate a claim's exclusion list and bind it as one JSON array.
+pub(crate) fn analysis_claim_exclusions_json(excluded: &[String]) -> Result<String, StoreError> {
+    if excluded.len() > MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES
+        || excluded
+            .iter()
+            .any(|identity| identity.is_empty() || identity.len() > 128)
+    {
+        return Err(StoreError::Task("invalid analysis claim".to_owned()));
+    }
+    serde_json::to_string(excluded).map_err(|error| StoreError::Task(error.to_string()))
+}
+
+/// The same rule as [`analysis_source_capacity_clause`], asked of a claimed
+/// request: `"admit"`, the first term's reason, or `"not_owned"` when the
+/// row is no longer this owner's running fence (or membership removed the
+/// owner, as `background_source_may_continue` also refuses). `$1` is
+/// `{request_id, owner_node_id, fence, now_ms}`.
+pub(crate) fn analysis_source_admission_sql() -> String {
+    let now = "json_extract($1,'$.now_ms')";
+    let mut cases = String::new();
+    for (reason, term) in analysis_source_capacity_terms(now, true) {
+        cases.push_str(&format!(
+            "\n  WHEN EXISTS (SELECT 1 FROM analysis_requests JOIN analysis_required_resources required
+        ON required.request_id = analysis_requests.request_id
+      WHERE analysis_requests.request_id = json_extract($1,'$.request_id') AND {term})
+    THEN '\"{reason}\"'"
+        ));
+    }
+    format!(
+        "SELECT CASE
+  WHEN NOT EXISTS (SELECT 1 FROM analysis_requests
+      WHERE request_id = json_extract($1,'$.request_id') AND state = 'running'
+        AND owner_node_id = json_extract($1,'$.owner_node_id')
+        AND fence = json_extract($1,'$.fence') AND cancel_requested = 0
+        AND lease_expires_ms > {now}
+        AND NOT EXISTS (SELECT 1 FROM settings
+          WHERE key = 'internal.cluster_job_owner_removed.' || analysis_requests.owner_node_id))
+    THEN '\"not_owned\"'{cases}
+  ELSE '\"admit\"' END AS result_json"
     )
 }
 
@@ -1402,6 +1576,18 @@ pub struct AnalysisRequest {
     pub updated_at_ms: i64,
 }
 
+/// Persisted analysis IDs are opaque UTF-8 strings. Repair admission has
+/// historically allowed 128 bytes, so custody must accept that full range.
+pub(super) fn analysis_request_id_is_valid(request_id: &str) -> bool {
+    !request_id.is_empty() && request_id.len() <= 128
+}
+
+/// Normal creation and reconciliation retain their existing 64-byte bound;
+/// the wider persisted-ID policy preserves already-admitted repair owners.
+pub(super) fn new_analysis_request_id_is_valid(request_id: &str) -> bool {
+    analysis_request_id_is_valid(request_id) && request_id.len() <= 64
+}
+
 pub(super) const ANALYSIS_RECONCILE_SQL: &str = include_str!("analysis_reconcile.sql");
 
 pub(super) fn reconciliation_parameters(
@@ -1415,8 +1601,7 @@ pub(super) fn reconciliation_parameters(
         || new.video_identity != old.video_identity
         || new.force_rebuild != old.force_rebuild
         || new.request_id == old.request_id
-        || new.request_id.is_empty()
-        || new.request_id.len() > 64
+        || !new_analysis_request_id_is_valid(&new.request_id)
         || new.priority != old.priority
         || new.trigger != old.trigger
         || new.target_node_id.is_empty()
@@ -1779,6 +1964,121 @@ pub struct AnalysisHistoryPage {
 /// other producer needs to be able to enqueue into at all.
 pub const MAX_ACTIVE_ANALYSIS_REQUESTS: i64 = 4_096;
 
+/// The hard bound on *all* active analysis requests, runnable or not, as a
+/// multiple of [`MAX_ACTIVE_ANALYSIS_REQUESTS`]: stranded backlog may not
+/// grow the table without limit while it waits to be reconciled.
+pub const ANALYSIS_BACKLOG_BOUND_FACTOR: i64 = 4;
+
+/// The prefix of the durable fence membership writes for a removed (or
+/// removal-pending) node. A request targeted at a fenced node is never worked
+/// for: the claim's cross-node arm skips it, removal retires it
+/// (`retire_analysis_requests_for_node`) and the settle pass catches any it
+/// missed.
+pub(crate) const REMOVED_TARGET_FENCE_PREFIX: &str = "internal.cluster_job_owner_removed.";
+
+/// What the last worker inventory read knows about who can run a
+/// fragment-index request: the fresh engine digest each reporting node runs,
+/// and the committed members (this node included) when membership could be
+/// read.
+///
+/// It carries the one rule for *stranded* work, shared by the enqueue cap,
+/// the queue health (`incompatible` against `eligible`) and the background
+/// reconciler. A pre-worker fragment-index request (`queued`, no worker cache
+/// key) is claimable by its own target when that target runs its digest, and
+/// by any other idle member that does (the claim's cross-node arm) unless the
+/// target is fenced as removed. So it is **stranded** exactly when no live
+/// worker runs its digest, or its target is removed
+/// ([`analysis_request_stranded_sql`] in SQL, [`Self::is_stranded`] for a row
+/// in hand). Which of the two remedies applies depends on the target
+/// ([`Self::remedy`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveAnalysisEngines {
+    /// Node id to the engine digest it reported inside the freshness window.
+    pub engines: std::collections::BTreeMap<String, String>,
+    /// Committed members, this node included; `None` when membership could
+    /// not be read, which disables the absent-target remedy.
+    pub members: Option<std::collections::BTreeSet<String>>,
+}
+
+/// What the background reconciler does with a stranded request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StrandedRemedy {
+    /// The target reports, fresh, this engine: replace the request onto it
+    /// under the same target (`engine_changed`).
+    TargetEngine(String),
+    /// The target is not a committed member and reports nothing: re-home the
+    /// request through the reconcile candidate's reassign path
+    /// (`target_changed`), source checked on the new node. A removed
+    /// target's request is never re-homed — the Store refuses it and removal
+    /// retires it.
+    TargetAbsent,
+    /// The target is a member that has not reported inside the window:
+    /// absence of evidence retires nothing. It stays counted `incompatible`
+    /// until the target reports again or membership removes it.
+    TargetSilent,
+}
+
+impl LiveAnalysisEngines {
+    /// The distinct digests some live worker runs, the JSON array the SQL
+    /// half binds.
+    #[must_use]
+    pub fn digests(&self) -> Vec<String> {
+        self.engines
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The row-in-hand half of [`analysis_request_stranded_sql`], short of
+    /// the removed-target fence (a Store fact; the reconcile statements
+    /// refuse a fenced target themselves).
+    #[must_use]
+    pub fn is_stranded(&self, request: &AnalysisRequest) -> bool {
+        request.component == "fragment_index"
+            && request.state == "queued"
+            && request.result_cache_key.is_empty()
+            && !self
+                .engines
+                .values()
+                .any(|engine| engine == &request.pipeline_version)
+    }
+
+    /// The remedy for a stranded request, `None` when it is not stranded.
+    #[must_use]
+    pub fn remedy(&self, request: &AnalysisRequest) -> Option<StrandedRemedy> {
+        if !self.is_stranded(request) {
+            return None;
+        }
+        Some(match self.engines.get(&request.target_node_id) {
+            Some(engine) => StrandedRemedy::TargetEngine(engine.clone()),
+            None if self
+                .members
+                .as_ref()
+                .is_some_and(|members| !members.contains(&request.target_node_id)) =>
+            {
+                StrandedRemedy::TargetAbsent
+            }
+            None => StrandedRemedy::TargetSilent,
+        })
+    }
+}
+
+/// [`LiveAnalysisEngines`]'s stranded rule over an unqualified
+/// `analysis_requests` row. `live` is the placeholder bound to the JSON array
+/// of [`LiveAnalysisEngines::digests`], or NULL when the inventory is
+/// unknown — then nothing is stranded, every row counts as before.
+pub(crate) fn analysis_request_stranded_sql(live: &str) -> String {
+    format!(
+        "({live} IS NOT NULL AND component = 'fragment_index' AND state = 'queued' \
+          AND COALESCE(result_cache_key, '') = '' \
+          AND (pipeline_version NOT IN (SELECT value FROM json_each({live})) \
+            OR EXISTS (SELECT 1 FROM settings \
+              WHERE key = '{REMOVED_TARGET_FENCE_PREFIX}' || target_node_id)))"
+    )
+}
+
 /// Room above [`MAX_ACTIVE_ANALYSIS_REQUESTS`] that only a viewer's own
 /// request may use: copy preparation (`priority = foreground`,
 /// `trigger = playback`) and a viewer's subtitle source (`foreground`). Background discovery that filled the queue to the ceiling refused
@@ -1923,6 +2223,20 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         stamp: &SubtitleSourceStamp,
         priority: &str,
         now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.enqueue_or_promote_subtitle_source_with(stamp, priority, now_ms, None)
+            .await
+    }
+
+    /// [`Self::enqueue_or_promote_subtitle_source`] with the same cap as
+    /// [`Self::enqueue_analysis_request_with`]: runnable work holds the
+    /// ceiling, stranded fragment-index backlog only the hard bound.
+    async fn enqueue_or_promote_subtitle_source_with(
+        &self,
+        stamp: &SubtitleSourceStamp,
+        priority: &str,
+        now_ms: i64,
+        live_engines: Option<&LiveAnalysisEngines>,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     async fn retire_subtitle_source_ready(
@@ -1976,6 +2290,23 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn enqueue_analysis_request(
         &self,
         request: &NewAnalysisRequest,
+    ) -> Result<AnalysisRequest, StoreError> {
+        self.enqueue_analysis_request_with(request, None).await
+    }
+
+    /// [`Self::enqueue_analysis_request`] with the cap measured against
+    /// *runnable* work. `live_engines` is the last worker inventory; an
+    /// active pre-worker `fragment_index` row it calls stranded
+    /// ([`LiveAnalysisEngines`]) is backlog nobody can claim and does not hold the
+    /// [`MAX_ACTIVE_ANALYSIS_REQUESTS`] ceiling against new runnable work —
+    /// on 2026-11-07 3,878 such rows held it at 4,097/4,096 and refused every
+    /// background enqueue. All active rows stay bounded by
+    /// [`ANALYSIS_BACKLOG_BOUND_FACTOR`] times the ceiling. `None` (inventory
+    /// unknown) counts every active row, as before.
+    async fn enqueue_analysis_request_with(
+        &self,
+        request: &NewAnalysisRequest,
+        live_engines: Option<&LiveAnalysisEngines>,
     ) -> Result<AnalysisRequest, StoreError>;
 
     async fn claim_analysis_request(
@@ -2006,6 +2337,8 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
             lease_expires_ms,
             false,
             false,
+            false,
+            &[],
         )
         .await
     }
@@ -2017,6 +2350,22 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     /// `targeted_only` limits the claim to requests naming `node_id`: a
     /// learner resolves what is targeted at it, and leaves the untargeted
     /// requests any node may take to the voters.
+    ///
+    /// `cross_node` (with a `pipeline_version`) also admits fragment-index
+    /// requests targeted at another node that asked for exactly this engine:
+    /// an idle node takes a busy one's work, builds the index under the
+    /// requester's `target_node_id`, and delivery hydrates the target. This
+    /// node's own rows (and untargeted ones) come after work a viewer waits
+    /// on, wherever that is targeted; a target membership has removed is
+    /// never worked for.
+    ///
+    /// `excluded_video_identities` (at most
+    /// [`MAX_ANALYSIS_CLAIM_EXCLUDED_IDENTITIES`]) are copy-video identities
+    /// this executor has found it cannot emit: another node's row naming one
+    /// stays queued for a node that can, instead of being claimed, refused
+    /// and requeued uncharged here on every pass. The executor keeps the list
+    /// (node-local); the claimant's own rows are never excluded.
+    #[allow(clippy::too_many_arguments)]
     async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
@@ -2025,12 +2374,15 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         lease_expires_ms: i64,
         viewer_only: bool,
         targeted_only: bool,
+        cross_node: bool,
+        excluded_video_identities: &[String],
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     /// Retire the active (queued, running or submitted) requests targeted at
     /// `node_id`, which membership has removed: nothing but the target ever
     /// claims a targeted request, so they would otherwise stay active --
-    /// counted against [`MAX_ACTIVE_ANALYSIS_REQUESTS`] -- for good. Each is
+    /// counted against [`MAX_ACTIVE_ANALYSIS_REQUESTS`] -- for good (a
+    /// cross-node claim skips a removed target too). Each is
     /// cancelled with `node_removed`; returns how many.
     async fn retire_analysis_requests_for_node(
         &self,
@@ -2102,6 +2454,16 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
 
+    /// For each of `file_ids` (at most [`MAX_FILE_REQUEST_LOOKUP`]), the
+    /// fragment-index request that says what "index now" would do: an active
+    /// (`queued`, `running`, `submitted`) one when there is any, else the
+    /// newest. Files with no request are absent. An advisory read from this
+    /// node's replica: it labels an action the server re-validates.
+    async fn fragment_index_requests_for_files(
+        &self,
+        file_ids: &[i64],
+    ) -> Result<Vec<AnalysisRequest>, StoreError>;
+
     /// Complete keyset inventory of active requests, including older work.
     async fn analysis_reconciliation_page(
         &self,
@@ -2141,9 +2503,15 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ///
     /// Rows are ordered oldest-terminal first, so paging through a backlog
     /// makes progress rather than re-offering the same head.
+    ///
+    /// `error_code` narrows the selection to terminal rows whose
+    /// `last_error_code` is exactly that code, so an operator can put back one
+    /// cause (say, `pipeline_version_unavailable` after a deploy) without the
+    /// rest.
     async fn reopenable_analysis_requests(
         &self,
         component: Option<&str>,
+        error_code: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AnalysisRequest>, StoreError>;
 
@@ -2570,6 +2938,410 @@ pub fn decode_cluster_fragment_index_blob(
     Ok(index)
 }
 
+/// Version of the canonical index-planning observations, not an engine version.
+/// Bump when timing, selected-track, conversion, init or row semantics change.
+pub const FRAGMENT_INDEX_CONTRACT: u32 = 1;
+const V3_BLOB_MAGIC: &[u8; 8] = b"PLRXIDX3";
+const V3_BLOB_FORMAT_VERSION: u16 = 3;
+const V3_ROW_BYTES: usize = 28;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FragmentIndexOutputIdentity {
+    pub contract_version: u32,
+    /// Digest of planning observations; this is not a media-sample digest.
+    pub keyframe_table_sha256: String,
+}
+
+/// Execution provenance never participates in the v3 artifact key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FragmentIndexEngineProvenance {
+    pub engine_sha256: String,
+    pub pipeline_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FragmentIndexProvenance {
+    LegacyV2 {
+        pipeline_sha256: String,
+    },
+    OutputV3 {
+        identity: FragmentIndexOutputIdentity,
+        engine: FragmentIndexEngineProvenance,
+    },
+}
+
+/// New consumers must inspect provenance and explicitly bind the current
+/// attested source before bridging into a file-keyed local index store.
+/// V2 retains its historical neutral pipeline fingerprint; V3 has no legacy
+/// argv fingerprint and leaves that field empty, never filled with a contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedFragmentIndex {
+    pub index: FragmentIndex,
+    pub provenance: FragmentIndexProvenance,
+}
+
+/// A dual reader must supply the identity expected for each permitted format.
+/// Omitting one rejects that format; a v2 pipeline never grants v3 adoption.
+pub struct FragmentIndexBlobExpectations<'a> {
+    pub source_sha256: &'a str,
+    pub legacy_pipeline_sha256: Option<&'a str>,
+    pub output_identity: Option<&'a FragmentIndexOutputIdentity>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V3BlobHeader {
+    segplan_version: u32,
+    timescale: u32,
+    init_sha256: String,
+    init_contract_sha256: String,
+    promotion: PromotionInputs,
+    parameter_sets_constant: bool,
+    source_sha256: String,
+    output_identity: FragmentIndexOutputIdentity,
+    engine: FragmentIndexEngineProvenance,
+    rows: usize,
+}
+
+fn v3_error(message: &str) -> StoreError {
+    StoreError::Task(format!("v3 fragment-index {message}"))
+}
+
+fn v3_portable_promotion(
+    index: &FragmentIndex,
+    source_sha256: &str,
+) -> Result<PromotionInputs, StoreError> {
+    let mut promotion = index.promotion.clone();
+    if let Some(proof) = promotion.hevc_configuration.as_mut() {
+        // Exactly the v2 writer's content-binding rule: no inferred proof and
+        // no case-insensitive substitute for the supplied attestation.
+        if proof.source_sha256.as_deref() != Some(source_sha256) {
+            return Err(v3_error("HEVC proof lacks full source attestation"));
+        }
+        proof.source_object_version.clear();
+        proof.source_node_id.clear();
+        proof.source_sha256 = Some(source_sha256.to_ascii_lowercase());
+    }
+    Ok(promotion)
+}
+
+// Stable typed encoding of promotion's complete serialized shape, including
+// DolbyVisionRecord's private retained raw bytes. Object keys are explicitly
+// sorted; no serde_json map iteration order or JSON whitespace is hashed.
+// Every node has a type tag, integer width, and length-delimited children.
+fn hash_v3_promotion_value(
+    digest: &mut Sha256,
+    value: &serde_json::Value,
+) -> Result<(), StoreError> {
+    use serde_json::Value;
+    match value {
+        Value::Null => digest.update([0]),
+        Value::Bool(value) => digest.update([1, u8::from(*value)]),
+        Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                digest.update([2]);
+                digest.update(value.to_be_bytes());
+            } else if let Some(value) = value.as_i64() {
+                digest.update([3]);
+                digest.update(value.to_be_bytes());
+            } else {
+                return Err(v3_error("promotion contains a non-integer number"));
+            }
+        }
+        Value::String(value) => {
+            digest.update([4]);
+            update_field(digest, value.as_bytes());
+        }
+        Value::Array(values) => {
+            digest.update([5]);
+            digest.update((values.len() as u64).to_be_bytes());
+            for value in values {
+                hash_v3_promotion_value(digest, value)?;
+            }
+        }
+        Value::Object(values) => {
+            digest.update([6]);
+            digest.update((values.len() as u64).to_be_bytes());
+            let mut fields: Vec<_> = values.iter().collect();
+            fields.sort_unstable_by_key(|(left, _)| *left);
+            for (key, value) in fields {
+                update_field(digest, key.as_bytes());
+                hash_v3_promotion_value(digest, value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Canonical planning identity of a complete index. All row fields are hashed
+/// in order with full-width duration, timescale, semantic init and portable promotion.
+/// Worker-local SourceIdentity and engine provenance are deliberately absent.
+/// The caller supplies the freshly observed `copy_video_init_contract_sha256`;
+/// raw init bytes remain provenance and do not identify the output contract.
+/// This measures planning equivalence, not cryptographic sample equivalence.
+pub fn cluster_fragment_index_output_identity(
+    index: &FragmentIndex,
+    source_sha256: &str,
+    init_contract_sha256: &str,
+) -> Result<FragmentIndexOutputIdentity, StoreError> {
+    if index.version != SEGPLAN_VERSION
+        || index.timescale == 0
+        || index.rows.is_empty()
+        || !is_sha256(&index.init_sha256)
+        || !is_sha256(source_sha256)
+        || !is_sha256(init_contract_sha256)
+    {
+        return Err(v3_error("has invalid planning observations"));
+    }
+    let promotion = v3_portable_promotion(index, source_sha256)?;
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/fragment-index/planning-table/v3\0");
+    digest.update(FRAGMENT_INDEX_CONTRACT.to_be_bytes());
+    digest.update(index.version.to_be_bytes());
+    digest.update(index.timescale.to_be_bytes());
+    update_field(
+        &mut digest,
+        init_contract_sha256.to_ascii_lowercase().as_bytes(),
+    );
+    digest.update([u8::from(index.parameter_sets_constant)]);
+    let value = serde_json::to_value(&promotion)
+        .map_err(|error| StoreError::Task(format!("encoding v3 promotion: {error}")))?;
+    hash_v3_promotion_value(&mut digest, &value)?;
+    digest.update((index.rows.len() as u64).to_be_bytes());
+    for row in &index.rows {
+        digest.update(row.dts.to_be_bytes());
+        digest.update(row.duration.to_be_bytes());
+        digest.update(row.bytes.to_be_bytes());
+        digest.update(row.video_bytes.to_be_bytes());
+        digest.update([class_code(row.class)]);
+    }
+    Ok(FragmentIndexOutputIdentity {
+        contract_version: FRAGMENT_INDEX_CONTRACT,
+        keyframe_table_sha256: hex::encode(digest.finalize()),
+    })
+}
+
+/// A v3 key needs origin catalog identity and full source attestation. Opaque
+/// per-node object versions, size/mtime and engine provenance are not keys.
+/// The caller must establish complete source attestation before publication.
+pub fn cluster_fragment_index_v3_key(
+    catalog_namespace: &str,
+    file_id: i64,
+    source_sha256: &str,
+    output: &FragmentIndexOutputIdentity,
+) -> Option<String> {
+    if catalog_namespace.trim().is_empty()
+        || catalog_namespace.len() > 256
+        || file_id <= 0
+        || !is_sha256(source_sha256)
+        || output.contract_version == 0
+        || !is_sha256(&output.keyframe_table_sha256)
+    {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/fragment-index/cache-key/v3\0");
+    digest.update(V3_BLOB_FORMAT_VERSION.to_be_bytes());
+    update_field(&mut digest, catalog_namespace.as_bytes());
+    digest.update(file_id.to_be_bytes());
+    update_field(&mut digest, source_sha256.to_ascii_lowercase().as_bytes());
+    digest.update(output.contract_version.to_be_bytes());
+    update_field(
+        &mut digest,
+        output.keyframe_table_sha256.to_ascii_lowercase().as_bytes(),
+    );
+    Some(hex::encode(digest.finalize()))
+}
+
+/// Additive writer: legacy v2 functions and bytes retain their exact meaning.
+pub fn encode_cluster_fragment_index_blob_v3(
+    index: &FragmentIndex,
+    source_sha256: &str,
+    init_contract_sha256: &str,
+    engine: &FragmentIndexEngineProvenance,
+) -> Result<Vec<u8>, StoreError> {
+    if !is_sha256(&engine.engine_sha256) || !is_sha256(&engine.pipeline_sha256) {
+        return Err(v3_error("has invalid engine provenance"));
+    }
+    let output_identity =
+        cluster_fragment_index_output_identity(index, source_sha256, init_contract_sha256)?;
+    let header = V3BlobHeader {
+        segplan_version: index.version,
+        timescale: index.timescale,
+        init_sha256: index.init_sha256.to_ascii_lowercase(),
+        init_contract_sha256: init_contract_sha256.to_ascii_lowercase(),
+        promotion: v3_portable_promotion(index, source_sha256)?,
+        parameter_sets_constant: index.parameter_sets_constant,
+        source_sha256: source_sha256.to_ascii_lowercase(),
+        output_identity,
+        engine: FragmentIndexEngineProvenance {
+            engine_sha256: engine.engine_sha256.to_ascii_lowercase(),
+            pipeline_sha256: engine.pipeline_sha256.to_ascii_lowercase(),
+        },
+        rows: index.rows.len(),
+    };
+    let header = serde_json::to_vec(&header)
+        .map_err(|error| StoreError::Task(format!("encoding v3 index header: {error}")))?;
+    let capacity = index
+        .rows
+        .len()
+        .checked_mul(V3_ROW_BYTES)
+        .and_then(|bytes| bytes.checked_add(header.len()))
+        .and_then(|bytes| bytes.checked_add(14))
+        .filter(|bytes| *bytes <= MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES)
+        .ok_or_else(|| v3_error("blob exceeds hard limit"))?;
+    let mut blob = Vec::with_capacity(capacity);
+    blob.extend_from_slice(V3_BLOB_MAGIC);
+    blob.extend_from_slice(&V3_BLOB_FORMAT_VERSION.to_be_bytes());
+    blob.extend_from_slice(
+        &u32::try_from(header.len())
+            .map_err(|_| v3_error("header is too large"))?
+            .to_be_bytes(),
+    );
+    blob.extend_from_slice(&header);
+    for row in &index.rows {
+        blob.extend_from_slice(&row.dts.to_le_bytes());
+        blob.extend_from_slice(&row.duration.to_le_bytes());
+        blob.extend_from_slice(&row.bytes.to_le_bytes());
+        blob.extend_from_slice(&row.video_bytes.to_le_bytes());
+        blob.push(class_code(row.class));
+        blob.extend_from_slice(&[0, 0, 0]);
+    }
+    Ok(blob)
+}
+
+/// Decode only v3, requiring independently expected source/output identities.
+/// Engine provenance is returned, never required to equal the local engine.
+pub fn decode_cluster_fragment_index_blob_v3(
+    blob: &[u8],
+    expected_source_sha256: &str,
+    expected_output: &FragmentIndexOutputIdentity,
+) -> Result<DecodedFragmentIndex, StoreError> {
+    if blob.len() < 14 || blob.len() > MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES {
+        return Err(v3_error("has invalid blob size"));
+    }
+    if &blob[..8] != V3_BLOB_MAGIC
+        || u16::from_be_bytes(blob[8..10].try_into().expect("two bytes")) != V3_BLOB_FORMAT_VERSION
+    {
+        return Err(v3_error("has unsupported magic/version"));
+    }
+    let header_len = u32::from_be_bytes(blob[10..14].try_into().expect("four bytes")) as usize;
+    let rows_offset = 14_usize
+        .checked_add(header_len)
+        .filter(|offset| *offset <= blob.len())
+        .ok_or_else(|| v3_error("has truncated header"))?;
+    let header: V3BlobHeader = serde_json::from_slice(&blob[14..rows_offset])
+        .map_err(|error| StoreError::Task(format!("decoding v3 index header: {error}")))?;
+    // In particular, reject unrecognized nested promotion fields instead of
+    // deserializing them away under an unchanged planning contract version.
+    let canonical_header = serde_json::to_vec(&header)
+        .map_err(|error| StoreError::Task(format!("validating v3 index header: {error}")))?;
+    if canonical_header != blob[14..rows_offset] {
+        return Err(v3_error(
+            "header is noncanonical or contains unknown fields",
+        ));
+    }
+    if header.segplan_version != SEGPLAN_VERSION
+        || header.timescale == 0
+        || header.rows == 0
+        || !is_sha256(&header.init_sha256)
+        || !is_sha256(&header.init_contract_sha256)
+        || !is_sha256(expected_source_sha256)
+        || !is_sha256(&header.source_sha256)
+        || !header
+            .source_sha256
+            .eq_ignore_ascii_case(expected_source_sha256)
+        || header.output_identity.contract_version != FRAGMENT_INDEX_CONTRACT
+        || header.output_identity.contract_version != expected_output.contract_version
+        || !is_sha256(&header.output_identity.keyframe_table_sha256)
+        || !header
+            .output_identity
+            .keyframe_table_sha256
+            .eq_ignore_ascii_case(&expected_output.keyframe_table_sha256)
+        || !is_sha256(&header.engine.engine_sha256)
+        || !is_sha256(&header.engine.pipeline_sha256)
+    {
+        return Err(v3_error("identity mismatch"));
+    }
+    if let Some(proof) = &header.promotion.hevc_configuration {
+        if !proof.source_object_version.is_empty()
+            || !proof.source_node_id.is_empty()
+            || proof.source_sha256.as_deref() != Some(header.source_sha256.as_str())
+        {
+            return Err(v3_error("contains unbound or worker-local HEVC proof"));
+        }
+    }
+    let packed = &blob[rows_offset..];
+    if header.rows.checked_mul(V3_ROW_BYTES) != Some(packed.len()) {
+        return Err(v3_error("row count mismatch"));
+    }
+    let mut rows = Vec::with_capacity(header.rows);
+    for chunk in packed.chunks_exact(V3_ROW_BYTES) {
+        let class = class_from_code(chunk[24]).ok_or_else(|| v3_error("has invalid cut class"))?;
+        if chunk[25..28] != [0, 0, 0] {
+            return Err(v3_error("has nonzero reserved row bytes"));
+        }
+        rows.push(IndexRow {
+            dts: u64::from_le_bytes(chunk[0..8].try_into().expect("eight bytes")),
+            duration: u64::from_le_bytes(chunk[8..16].try_into().expect("eight bytes")),
+            bytes: u32::from_le_bytes(chunk[16..20].try_into().expect("four bytes")),
+            video_bytes: u32::from_le_bytes(chunk[20..24].try_into().expect("four bytes")),
+            class,
+        });
+    }
+    let mut index = FragmentIndex::new(
+        header.timescale,
+        rows,
+        header.init_sha256,
+        SourceIdentity::new(0, 0, ""),
+    );
+    index.promotion = header.promotion;
+    index.parameter_sets_constant = header.parameter_sets_constant;
+    let observed = cluster_fragment_index_output_identity(
+        &index,
+        &header.source_sha256,
+        &header.init_contract_sha256,
+    )?;
+    if observed != header.output_identity {
+        return Err(v3_error("planning-table digest mismatch"));
+    }
+    Ok(DecodedFragmentIndex {
+        index,
+        provenance: FragmentIndexProvenance::OutputV3 {
+            identity: header.output_identity,
+            engine: header.engine,
+        },
+    })
+}
+
+/// Explicit dual reader. The historical v2 decoder still rejects v3 blobs.
+pub fn decode_cluster_fragment_index_blob_with_provenance(
+    blob: &[u8],
+    expected: &FragmentIndexBlobExpectations<'_>,
+) -> Result<DecodedFragmentIndex, StoreError> {
+    match blob.get(..8) {
+        Some(magic) if magic == BLOB_MAGIC => {
+            let pipeline = expected
+                .legacy_pipeline_sha256
+                .ok_or_else(|| v3_error("v2 provenance expectation missing"))?;
+            let index = decode_cluster_fragment_index_blob(blob, expected.source_sha256, pipeline)?;
+            let provenance = FragmentIndexProvenance::LegacyV2 {
+                pipeline_sha256: index.source.argv_fingerprint.clone(),
+            };
+            Ok(DecodedFragmentIndex { index, provenance })
+        }
+        Some(magic) if magic == V3_BLOB_MAGIC => {
+            let output = expected
+                .output_identity
+                .ok_or_else(|| v3_error("output identity expectation missing"))?;
+            decode_cluster_fragment_index_blob_v3(blob, expected.source_sha256, output)
+        }
+        _ => Err(v3_error("has unsupported blob magic")),
+    }
+}
+
 pub fn cluster_fragment_index_blob_sha256(blob: &[u8]) -> String {
     hex::encode(Sha256::digest(blob))
 }
@@ -2889,5 +3661,356 @@ mod tests {
             encode_cluster_fragment_index_blob(&first, &source, &pipeline).expect("first"),
             encode_cluster_fragment_index_blob(&second, &source, &pipeline).expect("second")
         );
+    }
+
+    fn codec_index() -> FragmentIndex {
+        FragmentIndex::new(
+            90_000,
+            vec![IndexRow {
+                dts: 12,
+                duration: 3_003,
+                bytes: 45,
+                video_bytes: 31,
+                class: CutClass::CleanIdr,
+            }],
+            digest('c'),
+            SourceIdentity::new(123, 456, "argv"),
+        )
+    }
+
+    fn codec_engine() -> FragmentIndexEngineProvenance {
+        FragmentIndexEngineProvenance {
+            engine_sha256: digest('d'),
+            pipeline_sha256: digest('b'),
+        }
+    }
+
+    #[test]
+    fn v2_blob_remains_byte_compatible_with_legacy_fixture() {
+        let blob = encode_cluster_fragment_index_blob(&codec_index(), &digest('a'), &digest('b'))
+            .expect("legacy encode");
+        // Fixed PLRXIDX2/segplan-3 fixture, independently packed with a
+        // 24-byte row and the original ordered header. V3 never rewrites it.
+        assert_eq!(
+            cluster_fragment_index_blob_sha256(&blob),
+            "50696f0867150955850aabaa4d1cd1305d84a3d571ce8d9da9f0c051f93d9d6c"
+        );
+        let decoded = decode_cluster_fragment_index_blob_with_provenance(
+            &blob,
+            &FragmentIndexBlobExpectations {
+                source_sha256: &digest('a'),
+                legacy_pipeline_sha256: Some(&digest('b')),
+                output_identity: None,
+            },
+        )
+        .expect("explicit legacy reader");
+        assert_eq!(decoded.index.source, SourceIdentity::new(0, 0, digest('b')));
+        assert_eq!(
+            decoded.provenance,
+            FragmentIndexProvenance::LegacyV2 {
+                pipeline_sha256: digest('b'),
+            }
+        );
+    }
+
+    #[test]
+    fn v3_round_trips_full_width_rows_without_legacy_identity_aliasing() {
+        let source = digest('a');
+        let mut index = codec_index();
+        index.rows[0].duration = u64::from(u32::MAX) + 123;
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let engine = codec_engine();
+        let blob = encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &engine)
+            .expect("v3 encode");
+        let decoded = decode_cluster_fragment_index_blob_with_provenance(
+            &blob,
+            &FragmentIndexBlobExpectations {
+                source_sha256: &source,
+                legacy_pipeline_sha256: Some(&engine.pipeline_sha256),
+                output_identity: Some(&output),
+            },
+        )
+        .expect("dual reader");
+        assert_eq!(decoded.index.rows, index.rows);
+        assert_eq!(decoded.index.source, SourceIdentity::new(0, 0, ""));
+        assert_eq!(
+            decoded.provenance,
+            FragmentIndexProvenance::OutputV3 {
+                identity: output,
+                engine: engine.clone(),
+            }
+        );
+        assert!(
+            decode_cluster_fragment_index_blob(&blob, &source, &engine.pipeline_sha256).is_err()
+        );
+        assert!(
+            decode_cluster_fragment_index_blob_with_provenance(
+                &blob,
+                &FragmentIndexBlobExpectations {
+                    source_sha256: &source,
+                    legacy_pipeline_sha256: Some(&engine.pipeline_sha256),
+                    output_identity: None,
+                },
+            )
+            .is_err(),
+            "legacy pipeline identity cannot authorize v3 adoption"
+        );
+        let legacy = encode_cluster_fragment_index_blob(&index, &source, &engine.pipeline_sha256)
+            .expect("legacy encoding retains legacy semantics");
+        assert_eq!(
+            decode_cluster_fragment_index_blob(&legacy, &source, &engine.pipeline_sha256)
+                .expect("legacy decoding")
+                .rows[0]
+                .duration,
+            u64::from(u32::MAX),
+        );
+    }
+
+    #[test]
+    fn v3_planning_identity_covers_every_row_field_and_init_contract() {
+        let source = digest('a');
+        let index = codec_index();
+        let baseline = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("baseline");
+        let mut changed: Vec<FragmentIndex> = vec![index.clone(); 12];
+        changed[0].rows[0].dts += 1;
+        changed[1].rows[0].duration += 1;
+        changed[2].rows[0].bytes += 1;
+        changed[3].rows[0].video_bytes += 1;
+        changed[4].rows[0].class = CutClass::CleanCra;
+        changed[5].timescale += 1;
+        changed[6].init_sha256 = digest('e');
+        changed[7].parameter_sets_constant = false;
+        changed[8].promotion.parameter_sets = vec![vec![32, 1]];
+        changed[9].promotion.dvh1_parameter_sets_malformed = true;
+        changed[10].promotion.indexed_hdr10_metadata = true;
+        changed[11].promotion.dolby_vision = Some(
+            crate::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("DV record"),
+        );
+        for (field, index) in changed.iter().enumerate() {
+            let output = cluster_fragment_index_output_identity(index, &source, &digest('9'))
+                .expect("changed");
+            if field == 6 {
+                assert_eq!(
+                    output, baseline,
+                    "raw muxer init changes are provenance only"
+                );
+            } else {
+                assert_ne!(output, baseline, "planning field {field} must participate");
+            }
+        }
+        assert_ne!(
+            cluster_fragment_index_output_identity(&index, &source, &digest('8'))
+                .expect("semantic change"),
+            baseline,
+            "semantic decoder/timing init changes must rekey"
+        );
+        assert!(
+            cluster_fragment_index_output_identity(&index, &source, "missing semantic digest")
+                .is_err()
+        );
+        let mut reordered = index.clone();
+        reordered.rows.push(IndexRow {
+            dts: 99,
+            ..index.rows[0].clone()
+        });
+        let ordered = cluster_fragment_index_output_identity(&reordered, &source, &digest('9'))
+            .expect("ordered");
+        reordered.rows.reverse();
+        assert_ne!(
+            cluster_fragment_index_output_identity(&reordered, &source, &digest('9'))
+                .expect("reordered"),
+            ordered
+        );
+        let mut local = index;
+        local.source = SourceIdentity::new(999, 888, "another-worker");
+        assert_eq!(
+            cluster_fragment_index_output_identity(&local, &source, &digest('9')).expect("local"),
+            baseline
+        );
+    }
+
+    #[test]
+    fn v3_raw_init_changes_preserve_semantic_identity_and_raw_provenance() {
+        let source = digest('a');
+        let semantic = digest('9');
+        let mut index = codec_index();
+        let identity =
+            cluster_fragment_index_output_identity(&index, &source, &semantic).expect("identity");
+        let original =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &codec_engine())
+                .expect("original");
+        index.init_sha256 = digest('e');
+        let changed =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &semantic, &codec_engine())
+                .expect("changed raw init");
+        assert_ne!(
+            cluster_fragment_index_blob_sha256(&original),
+            cluster_fragment_index_blob_sha256(&changed)
+        );
+        let decoded = decode_cluster_fragment_index_blob_v3(&changed, &source, &identity)
+            .expect("same semantic output");
+        assert_eq!(decoded.index.init_sha256, index.init_sha256);
+        assert_eq!(
+            cluster_fragment_index_output_identity(&decoded.index, &source, &semantic)
+                .expect("decoded identity"),
+            identity
+        );
+    }
+
+    #[test]
+    fn v3_key_is_engine_independent_and_contract_source_catalog_bound() {
+        let index = codec_index();
+        let source = digest('a');
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let key = cluster_fragment_index_v3_key("catalog-one", 1, &source, &output).expect("key");
+        let first =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("first");
+        let mut other_engine = codec_engine();
+        other_engine.engine_sha256 = digest('f');
+        other_engine.pipeline_sha256 = digest('e');
+        let second =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &other_engine)
+                .expect("second");
+        assert_ne!(first, second, "provenance remains in immutable blob bytes");
+        let decoded = decode_cluster_fragment_index_blob_v3(&second, &source, &output)
+            .expect("another engine can satisfy the same planning contract");
+        assert!(
+            matches!(decoded.provenance, FragmentIndexProvenance::OutputV3 { engine, .. } if engine == other_engine)
+        );
+        assert_eq!(
+            cluster_fragment_index_v3_key("catalog-one", 1, &source.to_ascii_uppercase(), &output),
+            Some(key.clone())
+        );
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-two", 1, &source, &output),
+            Some(key.clone())
+        );
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-one", 2, &source, &output),
+            Some(key.clone())
+        );
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-one", 1, &digest('e'), &output),
+            Some(key.clone())
+        );
+        let mut successor = output.clone();
+        successor.contract_version += 1;
+        assert_ne!(
+            cluster_fragment_index_v3_key("catalog-one", 1, &source, &successor),
+            Some(key)
+        );
+        assert!(decode_cluster_fragment_index_blob_v3(&first, &source, &successor).is_err());
+        assert!(cluster_fragment_index_v3_key("", 1, &source, &output).is_none());
+    }
+
+    #[test]
+    fn v3_rejects_corrupt_rows_padding_unknown_fields_and_wrong_identities() {
+        let index = codec_index();
+        let source = digest('a');
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let blob =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("blob");
+        let row = blob.len() - V3_ROW_BYTES;
+        for offset in [0, 8, 16, 20, 24, 25] {
+            let mut corrupt = blob.clone();
+            corrupt[row + offset] ^= 1;
+            assert!(
+                decode_cluster_fragment_index_blob_v3(&corrupt, &source, &output).is_err(),
+                "row corruption at {offset}"
+            );
+        }
+        assert!(
+            decode_cluster_fragment_index_blob_v3(&blob[..blob.len() - 1], &source, &output)
+                .is_err()
+        );
+        assert!(decode_cluster_fragment_index_blob_v3(&blob, &digest('f'), &output).is_err());
+        let mut wrong_table = output.clone();
+        wrong_table.keyframe_table_sha256 = digest('f');
+        assert!(decode_cluster_fragment_index_blob_v3(&blob, &source, &wrong_table).is_err());
+        let header_len = u32::from_be_bytes(blob[10..14].try_into().expect("length")) as usize;
+        let mut header: serde_json::Value =
+            serde_json::from_slice(&blob[14..14 + header_len]).expect("header");
+        for semantic in [None, Some("invalid".to_owned()), Some(digest('8'))] {
+            let mut changed = header.clone();
+            if let Some(semantic) = semantic {
+                changed["init_contract_sha256"] = serde_json::json!(semantic);
+            } else {
+                changed
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("init_contract_sha256");
+            }
+            let encoded = serde_json::to_vec(&changed).expect("changed header");
+            let mut corrupt = blob[..10].to_vec();
+            corrupt.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+            corrupt.extend_from_slice(&encoded);
+            corrupt.extend_from_slice(&blob[14 + header_len..]);
+            assert!(
+                decode_cluster_fragment_index_blob_v3(&corrupt, &source, &output).is_err(),
+                "missing, invalid or changed semantic init cannot inherit expected identity"
+            );
+        }
+        header["promotion"]["unknown_future_rule"] = serde_json::json!(true);
+        let header = serde_json::to_vec(&header).expect("modified header");
+        let mut unknown = blob[..10].to_vec();
+        unknown.extend_from_slice(&(header.len() as u32).to_be_bytes());
+        unknown.extend_from_slice(&header);
+        unknown.extend_from_slice(&blob[14 + header_len..]);
+        assert!(decode_cluster_fragment_index_blob_v3(&unknown, &source, &output).is_err());
+    }
+
+    #[test]
+    fn v3_portable_hevc_proof_never_adopts_local_custody() {
+        let mut index = codec_index();
+        let source = digest('a');
+        index.promotion.hevc_configuration = Some(crate::hevc_configuration::Proof {
+            revision: crate::hevc_configuration::REVISION,
+            source_node_id: "one".into(),
+            source_object_version: "held-one".into(),
+            source_sha256: Some(source.clone()),
+            stream_index: 0,
+            slices: 24,
+            refusal: None,
+        });
+        let output = cluster_fragment_index_output_identity(&index, &source, &digest('9'))
+            .expect("identity");
+        let first =
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("first");
+        let proof = index.promotion.hevc_configuration.as_mut().expect("proof");
+        proof.source_node_id = "two".into();
+        proof.source_object_version = "held-two".into();
+        assert_eq!(
+            first,
+            encode_cluster_fragment_index_blob_v3(&index, &source, &digest('9'), &codec_engine())
+                .expect("portable")
+        );
+        let decoded =
+            decode_cluster_fragment_index_blob_v3(&first, &source, &output).expect("decoded");
+        assert!(!decoded
+            .index
+            .promotion
+            .hevc_configuration
+            .expect("proof")
+            .permits_on_node("held-two", "two"));
+        index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("proof")
+            .source_sha256 = None;
+        assert!(encode_cluster_fragment_index_blob_v3(
+            &index,
+            &source,
+            &digest('9'),
+            &codec_engine()
+        )
+        .is_err());
     }
 }

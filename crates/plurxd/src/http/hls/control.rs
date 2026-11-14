@@ -128,12 +128,23 @@ pub async fn control(
     }
 }
 
-async fn with_current_processing_header(
+pub(super) async fn with_current_processing_header(
     state: &AppState,
     route: &MediaSessionRoute,
     mut response: Response,
 ) -> Response {
     if response.status() == StatusCode::OK {
+        if let Some(report) =
+            super::processed_upgrade::processing_skip(&route.session_id, &route.incarnation_id)
+        {
+            if let Some(bytes) = report.owner_header() {
+                if let Ok(header) = axum::http::HeaderValue::from_str(&bytes) {
+                    response
+                        .headers_mut()
+                        .insert("x-plurx-processing-skip", header);
+                }
+            }
+        }
         if let Some(report) = state
             .transcode
             .dv_effective_report(&route.session_id, &route.incarnation_id)
@@ -155,10 +166,12 @@ async fn with_current_processing_header(
 
 /// The internal relay retains its exact legacy JSON body. Only public ingress
 /// projects the bounded current-owner header onto the additive client field.
-async fn public_control_processing(mut response: Response) -> Response {
-    let Some(header) = response.headers_mut().remove("x-plurx-dv-processing") else {
+pub(super) async fn public_control_processing(mut response: Response) -> Response {
+    let header = response.headers_mut().remove("x-plurx-dv-processing");
+    let skip = response.headers_mut().remove("x-plurx-processing-skip");
+    if header.is_none() && skip.is_none() {
         return response;
-    };
+    }
     if response.status() != StatusCode::OK {
         return response;
     }
@@ -172,22 +185,39 @@ async fn public_control_processing(mut response: Response) -> Response {
         Ok(value) => value,
         Err(_) => return Response::from_parts(parts, axum::body::Body::from(bytes)),
     };
-    let generation = value.get("generation").and_then(serde_json::Value::as_str);
+    let generation = value
+        .get("generation")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let delivered = value
         .get("effective_selection")
         .and_then(|value| value.get("dynamic_range"))
         .and_then(serde_json::Value::as_str);
-    if let Some(report) = generation.and_then(|generation| {
-        plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
-            header.as_bytes(),
-            generation,
-            delivered,
-        )
+    if let Some(report) = header.as_ref().and_then(|header| {
+        generation.as_deref().and_then(|generation| {
+            plurx_core::transcode::dv_processing::DvEffectiveProcessingReport::from_owner_wire(
+                header.as_bytes(),
+                generation,
+                delivered,
+            )
+        })
     }) {
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "effective_processing".into(),
                 serde_json::to_value(report).expect("validated processing report"),
+            );
+        }
+    }
+    if let Some(report) = skip.as_ref().and_then(|header| {
+        generation.as_deref().and_then(|generation| {
+            super::processed_upgrade::ProcessingSkip::from_owner_wire(header.as_bytes(), generation)
+        })
+    }) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "processing_skip".into(),
+                serde_json::to_value(report).expect("bounded skip report"),
             );
         }
     }
@@ -243,6 +273,43 @@ mod dv_processing_wire_tests {
 pub(super) struct RetainedTerminalResponse {
     pub(super) platform: crate::playback_control::ClientPlatform,
     pub(super) response: crate::playback_control::ControlResponseV1,
+}
+
+#[cfg(test)]
+mod processing_skip_wire_tests {
+    use super::*;
+    #[tokio::test]
+    async fn public_skip_report_requires_current_generation_and_bounded_owner_text() {
+        let generation = "00000000-0000-0000-0000-000000000001";
+        let reason = "the title’s reconstruction is being measured on this server’s GPU";
+        for (owner_generation, text, accepted) in [
+            (generation, reason.to_owned(), true),
+            ("old-generation", reason.to_owned(), false),
+            (generation, "x".repeat(513), false),
+            (generation, "bad\nreason".to_owned(), false),
+        ] {
+            let report = super::super::processed_upgrade::ProcessingSkip {
+                generation: owner_generation.to_owned(),
+                reason: text,
+            };
+            let mut response = Json(serde_json::json!({"generation":generation})).into_response();
+            response.headers_mut().insert(
+                "x-plurx-processing-skip",
+                axum::http::HeaderValue::from_str(&report.owner_header().expect("bounded header"))
+                    .expect("ASCII header"),
+            );
+            let response = public_control_processing(response).await;
+            assert!(!response.headers().contains_key("x-plurx-processing-skip"));
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .expect("public body");
+            let value: serde_json::Value = serde_json::from_slice(&bytes).expect("public JSON");
+            assert_eq!(value.get("processing_skip").is_some(), accepted);
+            if accepted {
+                assert_eq!(value["processing_skip"]["reason"], reason);
+            }
+        }
+    }
 }
 
 /// Resolve the selected native text track's cache state for the control
@@ -1080,6 +1147,12 @@ async fn settle_committed_preparation(
     state.media_sessions.cache_route(successor.clone()).await;
     if successor.owner_node_id == state.node_id {
         state.media_sessions.seed_owned_lease(&successor).await;
+        // The client commits only after the successor's own frame is on
+        // screen: this is the successor's first presented frame, and the
+        // processed upgrade its activation left waiting starts here.
+        if let Some(user_id) = successor.principal.local_user_id() {
+            super::processed_upgrade::note_presented(state, user_id, &successor.session_id);
+        }
     }
     if successor.publication_ready_at_ms == 0 {
         return;
@@ -1686,7 +1759,8 @@ async fn control_inner_observed(
                 None,
             );
         }
-        Err(_) => {
+        Err(error) => {
+            super::fence::note_control_route_failure(&error);
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
             return control_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2035,34 +2109,31 @@ async fn candidate_snapshot_current(
     {
         return false;
     }
-    let Some(snapshot) = latest.decoder_caps.as_ref() else {
+    if latest.decoder_caps.is_none() {
+        return false;
+    }
+    let Some(catalog) = recipe.candidate_catalog.as_ref() else {
         return false;
     };
+    if recipe.candidate_id != Some(catalog.candidate.id) || !catalog.candidate.identity_matches() {
+        return false;
+    }
     let Ok(Some(file)) = state.store.get_file(recipe.request.file_id).await else {
         return false;
     };
-    let candidates = state
-        .media_pool
-        .quality_candidates(
-            state,
-            crate::media_pool::QualityCatalogRequest {
-                audio_claim: recipe.request.audio_claim.clone(),
-                audio_delivery: recipe.request.audio_delivery.clone(),
-                copy_contract: recipe.request.kind.copy_contract(),
-                file_id: file.id,
-                source_size: file.size,
-                source_mtime: file.mtime,
-                caps: snapshot.device_caps(),
-                audio_index: recipe.request.audio_index,
-                audio_offset_ms: recipe.request.audio_offset_ms,
-                subtitle_burn: recipe.request.subtitle_burn,
-                presentation: recipe.request.presentation,
-            },
-        )
-        .await;
+    if recipe.source_size != file.size || recipe.source_mtime != file.mtime {
+        return false;
+    }
+    let Some(query) = catalog.validated_catalog_query(&recipe.request, file.size, file.mtime)
+    else {
+        return false;
+    };
+    let candidates = state.media_pool.quality_candidates(state, query).await;
     candidates.iter().any(|entry| {
         entry.node_id == route.owner_node_id
             && Some(entry.candidate.id) == recipe.candidate_id
+            && entry.candidate.recipe_digest == catalog.candidate.recipe_digest
+            && entry.candidate.processed_dv == catalog.candidate.processed_dv
             && entry.candidate.decoder_compatible
     })
 }
@@ -2173,6 +2244,7 @@ async fn staged_successor_action(
     Ok(Some(prepared))
 }
 
+#[track_caller]
 pub(crate) fn control_error(
     status: StatusCode,
     code: &'static str,
@@ -2182,7 +2254,8 @@ pub(crate) fn control_error(
     retry_after_ms: Option<u32>,
     invalid_field: Option<&'static str>,
 ) -> Response {
-    (
+    super::fence::note_control_error_origin(std::panic::Location::caller());
+    let mut response = (
         status,
         [(header::CACHE_CONTROL, "no-store")],
         Json(crate::playback_control::ControlErrorBody {
@@ -2195,7 +2268,11 @@ pub(crate) fn control_error(
             invalid_field: invalid_field.map(str::to_owned),
         }),
     )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(crate::http::error::ApiErrorCode(code));
+    response
 }
 
 /// Whether this route can authorize control at all, and the answer if not.
@@ -3129,6 +3206,29 @@ async fn control_local_with_observation(
                 })
         })
         .flatten();
+    if result.disposition == crate::playback_control::ControlDisposition::Accepted
+        && !durable_receipt_response
+    {
+        if request.generation == route.incarnation_id
+            && request.demand == crate::playback_control::PlaybackDemand::Active
+            && request.render_state == crate::playback_control::RenderState::Rendering
+        {
+            super::processed_upgrade::note_rendering(state, route);
+        }
+        super::processed_upgrade::note_accepted_control(
+            state,
+            route,
+            &recipe,
+            &request,
+            &response.effective_selection,
+            result.selection.capabilities.as_ref(),
+            preparation_purpose.is_none()
+                && !incumbent_waiting
+                && !quality_intent_cancelled
+                && request.demand == crate::playback_control::PlaybackDemand::Active
+                && request.render_state == crate::playback_control::RenderState::Rendering,
+        );
+    }
     // Not on an exchange answering from a durable receipt. That body says
     // `none` and cannot say anything else — it is the stored answer, and its
     // replay has to be the same bytes — so dispatching here would tell a client

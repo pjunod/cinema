@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import stat
 import sys
+
+from validation import pr_event
 
 MAX_BODY_BYTES = 1_048_576
 
@@ -82,7 +83,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _body(args) -> str | None:
     if args.body_env:
-        body = os.environ.get("PR_BODY")
+        body = pr_event.body()
         if body is not None and len(body.encode("utf-8")) > MAX_BODY_BYTES:
             raise ValueError("PR_BODY exceeds 1048576 bytes")
         return body

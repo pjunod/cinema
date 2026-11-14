@@ -3,6 +3,15 @@ name: main fast lane
 # Every main-bound pull request, as soon as it is ready. `ready_for_review`
 # is what starts the lane now — a PR that is marked ready and merged can no
 # longer skip the gate, which is what an opt-in label allowed.
+#
+# With the merge train on (repository variable MERGE_TRAIN = on) the lane's
+# heavy jobs run only on the train's own pull requests: head
+# `train/...`, opened by the train's bot (MERGE_TRAIN_BOT, default train-bot).
+# A train PR is main plus the boarded PRs, so its promotion gate is the gate
+# for every one of them; a per-PR run would test a tree that never lands.
+# Ordinary ready PRs still run the lightweight scope job to read the switch
+# exactly. Off (unset or anything but `on`), every PR runs the whole lane.
+# docs/ci/MERGE-TRAIN.md.
 on:
   pull_request:
     branches: [main]
@@ -11,11 +20,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Preserve per-method success journals through head updates and draft changes.
-# Queued runs still fail the current-head/base guard when superseded.
+# A new push (or a draft/ready change) cancels the PR's in-flight run. That
+# run's head is superseded: its promotion gate would refuse the moved head, so
+# finishing it only held the PR's queue slot. Successes recorded by earlier
+# finished runs stay adoptable; what a cancelled job had newly proved is not
+# adopted (it publishes no final journal) and simply runs again
+# (docs/ci/PYTHON-UNIT-PR-RECEIPTS.md, docs/ci/CI-THROUGHPUT.md).
 concurrency:
   group: main-fast-lane-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   # Runs first, on drafts too, in about a minute: the bookkeeping rules that
@@ -38,15 +51,24 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          # The description and title are read from the event payload file
+          # (validation/pr_event.py), never the environment: a long
+          # description made the runner unable to start this step at all.
           GITHUB_TOKEN: ${{ github.token }}
+          # Persistent publisher credentials must never enter a PR-controlled
+          # workflow. This job checks and fetches only; publication is external.
         run: |
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env
+          if python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env; then
+            exit 0
+          fi
+          # PR code has no publisher credential. The separately installed
+          # ci-fleet service independently derives supported fixes and leases
+          # one commit to this head; its bot push starts the replacement lane.
+          echo "Paperwork failed. Use make paperwork-fix locally, or inspect the trusted publisher status; no compiler jobs started."
+          exit 1
 
   scope:
     name: fast-lane validation scope
@@ -56,17 +78,29 @@ jobs:
     # `fast-lane` label, and the label is what let three lanes merge in one day
     # without this workflow ever running - one of them carrying a fix for the
     # regression the lane before it had shipped to the fleet.
-    if: github.event.pull_request.draft == false
+    # Python compares MERGE_TRAIN exactly: Forgejo expressions fold string
+    # case, so comparing the variable in job conditions would treat ON as on.
+    # Scope runs for every ready PR and switches off heavy outputs for ordinary
+    # PRs only when the variable is exactly on.
+    if: >-
+      github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
+      # The content selector must see every ready PR: Rust tests also read
+      # documentation and fixtures that compile-scope intentionally ignores.
+      rust_units: ${{ steps.scope.outputs.rust_units || 'true' }}
       apple: ${{ steps.scope.outputs.apple }}
       desktop_macos: ${{ steps.scope.outputs.desktop_macos }}
       android_jvm: ${{ steps.scope.outputs.android_jvm }}
       web_layout: ${{ steps.scope.outputs.web_layout }}
       mobile_version: ${{ steps.scope.outputs.mobile_version }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
+      preflight: ${{ steps.scope.outputs.preflight }}
+      worker_control: ${{ steps.scope.outputs.worker_control }}
+      train_selected: ${{ steps.scope.outputs.train_selected }}
+      run_lane: ${{ steps.scope.outputs.run_lane }}
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -77,17 +111,49 @@ jobs:
         id: scope
         env:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
-        run: >-
-          python3 -m validation.ci_scope
-          --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+          MERGE_TRAIN_BOT: ${{ vars.MERGE_TRAIN_BOT }}
+          MERGE_TRAIN: ${{ vars.MERGE_TRAIN }}
+        # validation/merge_train.py: on a merge-train probe only its
+        # `Train-Jobs:` run; anywhere else the scope passes through.
+        run: |
+          set -euo pipefail
+          python3 -m validation.ci_scope --event pull_request --base "$VALIDATION_BASE" \
+            | python3 -m validation.merge_train scope >> "$GITHUB_OUTPUT"
 
   worker_control_proof:
     name: production worker controller proof
     needs: scope
-    if: github.event.pull_request.draft == false
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    if: github.event.pull_request.draft == false && needs.scope.outputs.worker_control == 'true'
+    runs-on: [ci-nonvoter-heavy-amd64]
     timeout-minutes: 45
     steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -141,12 +207,34 @@ jobs:
             'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
           rm -- "$runtime_archive"
           printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
+      - name: Install the pinned Rust controller prerequisite
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          toolchain: "1.97.1"
       - name: Prepare same-PR worker proof resumption
         id: worker-control-resume
         if: steps.worker-control-inputs.outputs.affected == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.worker_control_resume
+      - name: Cache the pinned worker controller toolchain
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        env:
+          PLURX_WORKER_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-worker-control-toolchain
+          PLURX_WORKER_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PLURX_WORKER_CACHE_TOKEN"
+          cache_version="$(sha256sum verification/worker-control/toolchain.json | cut -d' ' -f1)"
+          cache_base="$PLURX_WORKER_CACHE_BASE/$cache_version"
+          mkdir -p target/worker-control-tools/archives
+          curl -q --fail --silent --show-error --proto '=http,https' \
+            --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 268435456 \
+            --user "noirr:$PLURX_WORKER_CACHE_TOKEN" \
+            "$cache_base/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz" \
+            --output target/worker-control-tools/archives/kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz
+          unset PLURX_WORKER_CACHE_TOKEN
       - name: Run the pinned production worker controller proof
         if: steps.worker-control-inputs.outputs.affected == 'true'
         run: >-
@@ -182,6 +270,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
+    if: needs.scope.outputs.preflight == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     # A cold continuation can run the full unit set when older receipts cannot
     # authenticate. History alone took seven minutes in run 6234; allow the
@@ -233,13 +322,19 @@ jobs:
           path: .main-preflight-receipts/receipt.json
           if-no-files-found: error
           retention-days: 90
+      # Fails only on gaps this pull request introduces; gaps already on the
+      # base branch are printed as a labelled report and need a follow-up
+      # there (docs/ci/CI-THROUGHPUT.md). ci.yml keeps the full audit.
       - name: Audit corrective-history evidence
+        env:
+          PLURX_HISTORY_MERGE_TARGET: origin/${{ github.event.pull_request.base.ref }}
         run: make history-check
       # docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.1: the pull
       # request's `Regression-Test:` lines, judged in the tree the merge will
       # produce. The body and title are payload data on the `pull_request`
-      # event, read from the environment: no API call, no credential, and
-      # nothing interpolated into the script. This checkout is the branch
+      # event, read from the event file (validation/pr_event.py): no API call,
+      # no credential, nothing interpolated into the script, and no size
+      # limit from the environment. This checkout is the branch
       # head, not a merge candidate (the step prints both to keep that
       # visible), so the module builds the candidate with `git merge-tree`.
       # Advisory while validation/merge-errata.toml sets no boundary (phase
@@ -248,7 +343,6 @@ jobs:
       # one without the other.
       - name: Check validation catalog and static contracts
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
           KNOWLEDGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           make validation-lint
@@ -271,7 +365,22 @@ jobs:
           python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); worker=json.loads((base/"worker-refinement/ci-inputs.json").read_text()); assert all(type(item["affected"]) is bool for item in (durable, progress, worker)); out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected_worker_refinement=" + str(worker["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"] or worker["affected"]).lower(), file=out)'
       - name: Provision the pinned formal toolchain
         if: steps.formal-inputs.outputs.affected == 'true'
-        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+        env:
+          PLURX_FORMAL_CACHE_BASE: ${{ github.server_url }}/api/packages/noirr/generic/plurx-formal-toolchain
+          PLURX_FORMAL_CACHE_TOKEN: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+        run: |
+          set -eu
+          # Cache the verified upstream bytes by the unchanged manifest hash.
+          # No redirects: credentials stay on this Forgejo instance. Bootstrap
+          # still verifies the original artifact pins before installing either.
+          test -n "$PLURX_FORMAL_CACHE_TOKEN"
+          cache_version="$(sha256sum verification/durable-jobs/toolchain.json | cut -d' ' -f1)"
+          cache_base="$PLURX_FORMAL_CACHE_BASE/$cache_version"
+          mkdir -p target/formal-toolchain-seed
+          curl -q --fail --silent --show-error --proto '=http,https' --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 536870912 --user "noirr:$PLURX_FORMAL_CACHE_TOKEN" "$cache_base/temurin-21.0.12+8-linux-x64.tar.gz" -o target/formal-toolchain-seed/temurin-21.0.12+8-linux-x64.tar.gz
+          curl -q --fail --silent --show-error --proto '=http,https' --retry 2 --connect-timeout 15 --max-time 240 --max-filesize 16777216 --user "noirr:$PLURX_FORMAL_CACHE_TOKEN" "$cache_base/tla2tools-1.7.4.jar" -o target/formal-toolchain-seed/tla2tools-1.7.4.jar
+          unset PLURX_FORMAL_CACHE_TOKEN
+          python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain --seed-dir target/formal-toolchain-seed
       - name: Complete the bounded formal smoke configuration
         id: formal-smoke
         if: steps.formal-inputs.outputs.affected_durable == 'true'
@@ -345,59 +454,77 @@ jobs:
   rust_compile:
     name: fast Rust gate
     needs: [scope, preflight]
-    if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, lab, high-cpu]
-    # The online generic runners currently carry ffmpeg 8. Ubuntu 24.04 is the
-    # pinned ffmpeg 6 environment used by this lane, while the host label keeps
-    # the job on the high-CPU pool.
-    container: ubuntu:24.04
-    # Compile all targets and enforce workspace/vendor Clippy here. The full
-    # Rust unit and SQLite suites belong to manual full CI, while each change
-    # carries its named, locally run focused regression through preflight.
-    # A cold run spent 21m36s provisioning before compilation. Budget for
-    # that setup plus all-target checking and both Clippy stages; no tests
-    # are added by this ceiling.
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.rust == 'true')
+    # The nonvoter compile pool, in the pinned rust-gate image: no per-run apt
+    # or toolchain downloads. The container's limits are the job's bound on
+    # either carrier; the first step verifies them and CARGO_BUILD_JOBS is
+    # derived from them. The idle high-CPU general runners are not used: a
+    # 2026-11-12 probe there (media1) got memory.max but no cpu.max,
+    # pids.max or swap limit from these options, so a voter would carry an
+    # unbounded, swapping build. docs/ci/RUST-GATE-IMAGE.md.
+    runs-on: [ci-nonvoter-compile-amd64]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-rust-gate@sha256:9bb5c1d51f8b0269a1b58c7d8d2bfa8cab9610707453ff21cd6a2d54324ecac3
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    # All-target Clippy and the vendored hiqlite Clippy; the full Rust unit
+    # and SQLite suites belong to manual full CI, while each change carries
+    # its named, locally run focused regression through preflight.
     timeout-minutes: 60
-    env:
-      # Keep compilation within the shared guest's memory budget.
-      CARGO_BUILD_JOBS: "1"
     steps:
-      - name: Install Rust gate prerequisites
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
         run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get -o Acquire::Retries=3 update
-          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
-            libgtk-4-dev libdbus-1-dev make nasm ninja-build xz-utils pkg-config python3
-          # Forgejo needs Node before checkout; use the patched upstream build.
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              node_arch=x64
-              node_sha=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
-              ;;
-            arm64)
-              node_arch=arm64
-              node_sha=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
-              ;;
-            *) echo "Unsupported Node architecture" >&2; exit 1 ;;
-          esac
-          node_tmp="$(mktemp -d)"
-          trap 'rm -rf "$node_tmp"' EXIT
-          curl --fail --silent --show-error --location --retry 3 \
-            "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-${node_arch}.tar.xz" \
-            -o "$node_tmp/node.tar.xz"
-          echo "$node_sha  $node_tmp/node.tar.xz" | sha256sum --check --strict
-          tar -xJf "$node_tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner
-          node --version | grep -Fx 'v22.23.4'
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install the pinned Rust toolchain
-        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-        with:
-          components: rustfmt, clippy
+      - name: Require the gate image built from this tree
+        run: |
+          set -eu
+          want="$(sha256sum Dockerfile.rust-gate | cut -d' ' -f1)"
+          have="$(cat /etc/plurx/rust-gate-input 2>/dev/null || echo none)"
+          if [ "$have" != "$want" ]; then
+            echo "::error::The pinned rust-gate image was built from Dockerfile.rust-gate $have, but this tree's is $want. Run \`scripts/rust-gate-image publish\` and commit the digest with \`scripts/rust-gate-image pin <digest>\` (docs/ci/RUST-GATE-IMAGE.md)."
+            exit 1
+          fi
+          rustc --version | grep -F 'rustc 1.97.1 '
+          cargo clippy --version
+          node --version | grep -Fx 'v22.23.4'
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
       - name: Install the pinned FFmpeg
         uses: ./.github/actions/ffmpeg
         with:
@@ -407,13 +534,8 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: main-fast-rust
-      - name: Compile every Rust target without executing tests
-        run: |
-          make effort-rust-check
-          make hiqlite-vendor-clippy
-      - name: Lint the workspace
-        run: |
-          make lint
+      - name: Run the Rust gate
+        run: make fast-rust-gate
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true
@@ -428,10 +550,35 @@ jobs:
           owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
+  # The Rust unit tests this change can affect, each at most once per set of
+  # inputs, fanned out over idle runners: docs/ci/RUST-UNIT-FANOUT.md. Its own
+  # gate job is the stage's one result; a failure that also fails at the
+  # merge-base is reported there and does not block.
+  rust_units:
+    name: Rust unit tests
+    needs: [scope, preflight]
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.rust_units == 'true')
+    uses: ./.github/workflows/rust-units.yml
+    with:
+      base: ${{ github.event.pull_request.base.sha }}
+    secrets: inherit
+
   web_compile:
     name: fast web syntax gate
     needs: [scope, preflight]
-    if: needs.scope.outputs.web_layout == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.web_layout == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     # web-unit-check measured 103 s serial on two cores; the rest is checkout,
     # node and the pinned tsc.
@@ -485,7 +632,13 @@ jobs:
   apple_compile:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true')
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.2]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
@@ -570,7 +723,13 @@ jobs:
   android_compile:
     name: fast Android compile
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true'
+    # A probe runs exactly its selected jobs, so preflight may be skipped.
+    # Normal runs still require a successful preflight before allocating work.
+    if: >-
+      !cancelled() && needs.scope.result == 'success' &&
+      (needs.preflight.result == 'success' ||
+       (needs.scope.outputs.train_selected == 'true' && needs.preflight.result == 'skipped')) &&
+      (needs.scope.outputs.android_jvm == 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
     steps:
@@ -606,15 +765,20 @@ jobs:
 
   promotion_gate:
     name: Main promotion gate
+    # Not on a merge-train probe (it runs a few jobs only, and the train
+    # judges those itself), and with the train on only on the train's PRs.
     if: >-
       always() &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      needs.scope.outputs.train_selected != 'true' &&
+      needs.scope.outputs.run_lane != 'false'
     needs:
       - paperwork
       - scope
       - preflight
       - worker_control_proof
       - rust_compile
+      - rust_units
       - web_compile
       - apple_compile
       - android_compile
@@ -628,6 +792,7 @@ jobs:
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           WORKER_CONTROL_RESULT: ${{ needs.worker_control_proof.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
+          RUST_UNITS_RESULT: ${{ needs.rust_units.result }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
@@ -643,7 +808,7 @@ jobs:
           fi
           for result in \
             "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
-            "$RUST_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
+            "$RUST_RESULT" "$RUST_UNITS_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
             "$ANDROID_RESULT"; do
             case "$result" in
               success|skipped) ;;

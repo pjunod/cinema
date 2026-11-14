@@ -16,8 +16,12 @@ reachable paired production schedule.
 
 Production admission has two earlier gates. Each node's background-heavy
 physical semaphore has capacity one. Even with separate node-local pools,
-the durable `CLAIM_SQL` source-reader gate rejects a second same-root
-non-live background job while the first holds its reservation. The supported
+the durable `CLAIM_SQL` source-reader gate rejects a second non-live
+background job on the same storage domain (or with an unmapped root, whose
+generic `source_io` key conflicts with every domain) while the first holds its
+reservation. A targeted library job (generation `library-targeted-v1`)
+requires no source reader and is outside this gate; its only serialiser
+against a running scan of its own library is the `scan:library:<id>` fence. The supported
 `enqueue_library_work` API supplies a `library_work` waiter and does not
 attach the qualifying live-demand waiter that would permit that second
 reader. Different dedupe keys and a generic resource capacity of two do not
@@ -174,7 +178,7 @@ cancellation and detached lower application are not forced to occur.
 | Boundary | Premise and scope |
 |---|---|
 | `ProbeReturn`, `WalkReturn` | PRM-fs: selected filesystem operations eventually return; no local finite bound |
-| `Admission`, successful modeled claim | PRM-admission/model abstraction: two independently admitted capable workers may hold claims; production node-local capacity and durable same-root eligibility are omitted, not established by this premise |
+| `Admission`, successful modeled claim | PRM-admission/model abstraction: two independently admitted capable workers may hold claims; production node-local capacity and durable same-storage-domain eligibility (or an unmapped root) are omitted, not established by this premise |
 | Authority actions | PRM-authority: selected local/remote authority checks return |
 | Store and heartbeat apply/reply actions | PRM-backend: stable quorum/transport permits remaining normal calls to apply and return |
 | Individual lock, dispatch, poll, join, retire and drop actions | PRM-runtime: continuously enabled selected task steps eventually run |
@@ -294,3 +298,7 @@ and their resource competition are not added to the worker model.
 These refreshed whole-file hashes identify source correspondence only.
 Final adversarial review and current-source execution remain pending; no
 prior receipt is promoted into evidence for these source bytes.
+
+## November 7 library dispatch and source release
+
+The library claim path now announces eligible successors during an active scan. A complete grant still precedes source execution. The library driver can poll a pending completion through source pressure without waiting on the publisher mutex. The worker model continues to abstract candidate order and eligibility. Cross-type priority and exact custody release are exercised by the separate Store and library driver regressions.

@@ -54,14 +54,10 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
-/// The one capacity refusal a client may safely wait out by re-posting the
-/// same request: this player's previous start has not let go of it yet.
-///
-/// A strict subset of the capacity class, and deliberately narrow. The other
-/// producers of `capacity_error` are not all waits — one instructs the client
-/// to ask for a smaller height, and one reports a scratch ceiling above the
-/// configured budget, which no amount of retrying can satisfy. Those keep the
-/// codeless 503 that no client retries.
+/// One waitable capacity refusal with its own wait: this player's previous
+/// start has not let go of it yet. Every other refusal of the class is
+/// classified by [`capacity_refusal`]: waitable by default, terminal when its
+/// producer names a code ([`terminal_capacity_error`]).
 const REPLACEMENT_WAIT_PREFIX: &str =
     "transcode capacity is temporarily unavailable: waiting for this player's previous start: ";
 /// What a client should wait before re-posting. One cooperative window: by
@@ -615,6 +611,57 @@ pub(crate) struct LiveReconstructionFacts {
     pub(crate) slots_in_use: usize,
 }
 
+/// How long a processed upgrade may spend rendering and verifying its first
+/// window. The same 8 s the in-create qualification was allowed at most, now
+/// spent after the viewer's first frame instead of before it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) const PROCESSED_UPGRADE_TRIAL_BUDGET: Duration = Duration::from_secs(8);
+
+/// One verified processed upgrade: the successor request (its incarnation
+/// already the staged successor's), the candidate it plays, and the exact
+/// prepared root its first window was produced on.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct ProcessedUpgradeTrial {
+    pub(crate) request: SessionRequest,
+    pub(crate) candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub(crate) root: crate::vodserve::PreparedRootAdmission,
+    /// Exact frame-grid entry held by a fresh trial. A reused live parent
+    /// has no new private window; its existing coverage is checked on attach.
+    pub(crate) prepared_window: Option<std::ops::Range<i64>>,
+}
+
+pub(crate) struct HeldProcessedUpgradeRoot {
+    context: Box<CandidateExecutionContext>,
+    root: crate::vodserve::PreparedRootAdmission,
+    deadline: Instant,
+}
+
+/// The holder's claim on a [`HeldProcessedUpgradeRoot`]. Dropped when staging
+/// ends: a root the successor's first preparation did not take is freed then
+/// (its admission credit and graph allowance with it), not at a timer.
+pub(crate) struct ProcessedUpgradeRootLease {
+    roots: Arc<std::sync::Mutex<HashMap<String, HeldProcessedUpgradeRoot>>>,
+    incarnation_id: String,
+}
+
+impl HeldProcessedUpgradeRoot {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn into_root(self) -> crate::vodserve::PreparedRootAdmission {
+        self.root
+    }
+}
+
+impl Drop for ProcessedUpgradeRootLease {
+    fn drop(&mut self) {
+        let unclaimed = self
+            .roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.incarnation_id);
+        drop(unclaimed);
+    }
+}
+
 pub struct TranscodeManager {
     source_identity: Option<crate::source_custody::SourceIdentity>,
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
@@ -679,6 +726,10 @@ pub struct TranscodeManager {
     processed_preparation_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(target_os = "linux")]
     processed_instance_slots: Arc<tokio::sync::Semaphore>,
+    /// Verified processed-upgrade roots waiting for the prepared successor
+    /// they were trialled for, by its incarnation. See
+    /// [`ProcessedUpgradeRootLease`].
+    processed_upgrade_roots: Arc<std::sync::Mutex<HashMap<String, HeldProcessedUpgradeRoot>>>,
     /// Live FEL reconstruction (BL+EL composed on the GPU, then re-encoded):
     /// one graph per worker until concurrent reconstruction is measured. Its
     /// permit lives in the graph's runtime recipe, so it is held exactly as
@@ -832,6 +883,9 @@ pub struct TranscodeManager {
     /// Shared by every heavy durable worker, independently of CPU/GPU cost.
     /// The owned guard follows the physical child through cancellation/join.
     background_heavy: Arc<tokio::sync::Semaphore>,
+    /// Readable manual library jobs currently waiting for a local heavy turn.
+    /// A cancelled waiter removes itself before maintenance resumes.
+    interactive_library_waiters: tokio::sync::watch::Sender<usize>,
     offline_waiting: AtomicBool,
     /// Whether this daemon's ffmpeg can strip a Dolby Vision configuration —
     /// probed at boot ([`crate::ffmpeg::has_dovi_rpu`]).

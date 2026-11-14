@@ -7,6 +7,12 @@ and package 0.4.0 is installed (2026-10-28). See the
 and remaining acceptance · **Owner:** Claude
 (Opus 5.5, Linux Dolby Vision session) · **Written:** 2026-10-25
 
+> **2026-11-09 source update:** the 0.5.0 candidate moves Cinema to the
+> separately maintained system mpv and removes the bundled renderer. The
+> [release ledger](LINUX-PLAYER-CINEMA-UI.md#system-renderer-consolidation-050)
+> owns that change and its pending qualification. Private-build requirements
+> below describe the earlier 0.4.x implementation, not the new package.
+
 Companion to [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) (the browser half) and
 [the display-targeted HDR10-E build](../streaming/DISPLAY-TARGETED-DV-BUILD.md)
 (the server mapping). This is the plan for a native player on Linux. Read §2
@@ -441,6 +447,71 @@ HDR10-E session; their fixes reach the player through
   computation: `run_dm_parity.py` passes, and the patched mpv's 16-bit
   screenshot of the Dumb Money frame is bit-identical before and after. The
   server's display-targeted renders use the same code.
+
+### Reconstruction precision correction — 0.4.2 candidate
+
+Explicit `--vf=format:enhancement-layer=no` remains supported: it suppresses FEL
+application without disabling RPU reconstruction or display management. Its EL
+decoder still runs. The required-layer refusal applies to accidental loss, and
+the extracted C regression distinguishes the two cases without rewriting metadata.
+
+The 2026-11-03 correction appends two mpv patches while preserving the five
+existing patches and pinned dependency versions. Reconstruction uses fresh
+BT.2020/PQ color metadata with explicit .005–10000 nit bounds, so inherited
+mastering/scene fields cannot activate libplacebo's additional shadow mapping.
+RPU representation, creative DM and display-target selection are unchanged.
+Software planar 10-bit DV BL and paired EL, plus limited-range BT.2020
+non-constant-luminance/PQ HDR10 and HDR10-E, use owned high-aligned UNORM16
+staging. The additional HDR10 predicate does not admit SDR, HLG, full-range or other
+matrices/primaries; the existing planar/layout/linear-format guards still apply.
+Hardware/P010/integer fallback paths remain unchanged. Unless explicitly suppressed,
+active NLQ requires its paired EL, with partial-frame cleanup on setup failure and refusal
+of reported reconstruction errors.
+
+Executable CPU controls exercise the actual shipped packing, upload entry point
+and cleanup helpers, including failure after host-copy consumption. Private
+local synthetic GPU controls demonstrate the metadata-triggered shadow lift;
+fixed paired-source experiments support the two mechanisms on two titles.
+A later private one-condition ablation verified the same 48 q14 frames decode
+to identical visible YUV and timing with software and CUDA. Software HDR10
+frames 0/47 then matched frozen NVDEC PNG/full-RGB hashes; NVDEC frame 0 and
+Dolby source A/B frame 32 retained their prior corrected output. This supports
+the upload-precision mechanism on those controls, without treating NVDEC as a
+normative reference or claiming compression tails are fixed.
+
+Those experiments do not qualify every profile, GPU or frame. The generalized
+production patch still needs its exact native compile, package checks, DV/HDR10/P8
+regressions and staging-cost measurement before release or installation. The
+unchanged original MPI callback upload path has a separate upstream failure
+ownership risk; the new staging path uses callback-null consumption/copy
+semantics and does not inherit that risk.
+
+### Final conversion and shared arithmetic — 0.4.3 candidate
+
+[PR #1387](http://forge.lan:3000/noirr/plurx/pulls/1387) groups the reconstruction,
+software-upload and arithmetic corrections. The final Vulkan UNORM16 cache
+uses exact integer arithmetic to select the nearest code from its binary32
+input. In a private full-frame stage control, all 24,883,200 RGB words match
+the rational oracle and the screenshot: 749,372 prior conversion errors are
+corrected with zero new ones. This proves that conversion stage on the observed
+picture, not every upstream computation or delivered frame.
+
+The shared PQ functions use stable small-argument polynomials because measured
+GPU optimization collapsed the prior compensation expressions. RGB48 CPU
+export avoids a binary32 intermediate rounding while retaining all four
+caller rounding modes. ARM64 and Intel controls cover every relevant
+binary32 input. The Intel pack-only median increases from 13.11 to 17.96 ms
+per 4K frame; full-route server cost is not measured. That packer is absent
+from the native player's GPU rendering path.
+
+The 0.4.3 candidate has passed a clean offline normal Debian source-package
+roundtrip and build, including its default tests and explicitly reported
+capability/graphics skips. Actual packaged source bytes and loader closure
+are bound to the produced ELF. Combined clean-player P7/P8/HDR10 captures
+and continuous playback checks are in progress. Nothing is installed by these
+checks. Physical acceptance and the processed-delivery quality problem remain
+open; these independently demonstrated defects do not depend on resolving the
+whole delivery project.
 
 ## 6. Non-goals for v1
 

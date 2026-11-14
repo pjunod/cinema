@@ -117,6 +117,12 @@ pub struct NodeConfig {
     pub snapshot_transfer_timeout: Duration,
     /// Bounded storage admission wait; at most ten minutes. Does not suppress a snapshot.
     pub snapshot_storage_deferral: Duration,
+    /// Plurx patch 27: up to [`crate::APPLIED_MARK_MAX_TABLES`] table names
+    /// whose committed changes this node's applied mark counts, one dedicated
+    /// revision each. Empty registers none; the mark still carries the
+    /// applied index and the image generation.
+    #[cfg(feature = "sqlite")]
+    pub applied_mark_tables: Vec<Cow<'static, str>>,
     /// Specific TLS certificates for the Raft traffic. Overwrites `tls_auto_certificates`.
     pub tls_raft: Option<ServerTlsConfig>,
     /// Specific TLS certificates for the API traffic. Overwrites `tls_auto_certificates`.
@@ -180,6 +186,8 @@ impl Default for NodeConfig {
             snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
             snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             snapshot_storage_deferral: Duration::from_secs(600),
+            #[cfg(feature = "sqlite")]
+            applied_mark_tables: Vec::new(),
             tls_raft: None,
             tls_api: None,
             secret_raft: String::default(),
@@ -351,6 +359,8 @@ impl NodeConfig {
             snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
             snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             snapshot_storage_deferral: Duration::from_secs(600),
+            #[cfg(feature = "sqlite")]
+            applied_mark_tables: Vec::new(),
             tls_raft: ServerTlsConfig::from_env("RAFT"),
             tls_api: ServerTlsConfig::from_env("API"),
             secret_raft: env::var("HQL_SECRET_RAFT").expect("HQL_SECRET_RAFT not found"),
@@ -440,6 +450,23 @@ impl NodeConfig {
             .any(|(index, node)| self.nodes[..index].iter().any(|seen| seen.id == node.id))
         {
             return Err(Error::Config("'nodes' contains duplicate node ids".into()));
+        }
+
+        #[cfg(feature = "sqlite")]
+        {
+            let tables = &self.applied_mark_tables;
+            if tables.len() > crate::APPLIED_MARK_MAX_TABLES {
+                return Err(Error::Config(
+                    "'applied_mark_tables' registers more tables than the mark has slots".into(),
+                ));
+            }
+            if tables.iter().enumerate().any(|(index, table)| {
+                table.is_empty() || tables[..index].iter().any(|seen| seen == table)
+            }) {
+                return Err(Error::Config(
+                    "'applied_mark_tables' contains an empty or duplicate table name".into(),
+                ));
+            }
         }
 
         if self.secret_raft.len() < 16 || self.secret_api.len() < 16 {

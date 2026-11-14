@@ -11,6 +11,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+// `source.rs` is itself a #[path] module, so children resolve beside it.
+#[path = "source/completion.rs"]
+mod completion;
+pub(crate) use completion::{Holder as SourceHolder, Operation as SourceOperation, RawRetirement};
+
 struct Spent {
     bytes: u64,
     retain_until_ms: i64,
@@ -181,6 +186,7 @@ impl Drop for SourcePauseBinding {
 pub(crate) struct SourceReadBudget {
     store: Arc<dyn Store>,
     owner: BackgroundSourceOwner,
+    analysis_phase: Option<plurx_core::store::analysis_coordination::AnalysisPhysicalPhase>,
     grant: tokio::sync::Mutex<Option<BackgroundSourceServiceGrant>>,
     cancel: CancellationToken,
     runtime: tokio::runtime::Handle,
@@ -188,6 +194,7 @@ pub(crate) struct SourceReadBudget {
     changed: tokio::sync::Notify,
     pacing_waiters: AtomicUsize,
     pause_controller: Mutex<Option<plurx_core::process::bounded::SourcePauseController>>,
+    completion: Option<Arc<completion::Completion>>,
 }
 impl SourceReadBudget {
     pub(crate) fn new(
@@ -195,9 +202,28 @@ impl SourceReadBudget {
         owner: BackgroundSourceOwner,
         cancel: CancellationToken,
     ) -> Arc<Self> {
+        Self::new_scoped(store, owner, cancel, None)
+    }
+    /// The supervisor cancels this phase budget after its children join and
+    /// before settling its exact receipt. The next physical phase gets a new
+    /// budget, UUID and sequence; owner-only construction cannot obtain service.
+    pub(crate) fn from_analysis_phase(
+        store: Arc<dyn Store>,
+        phase: plurx_core::store::analysis_coordination::AnalysisPhysicalPhase,
+        cancel: CancellationToken,
+    ) -> Arc<Self> {
+        Self::new_scoped(store, phase.custody.owner.clone(), cancel, Some(phase))
+    }
+    fn new_scoped(
+        store: Arc<dyn Store>,
+        owner: BackgroundSourceOwner,
+        cancel: CancellationToken,
+        analysis_phase: Option<plurx_core::store::analysis_coordination::AnalysisPhysicalPhase>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             owner,
+            analysis_phase,
             grant: tokio::sync::Mutex::new(None),
             cancel,
             runtime: tokio::runtime::Handle::current(),
@@ -205,8 +231,82 @@ impl SourceReadBudget {
             changed: tokio::sync::Notify::new(),
             pacing_waiters: AtomicUsize::new(0),
             pause_controller: Mutex::new(None),
+            completion: None,
         })
     }
+    pub(crate) fn with_completion(
+        store: Arc<dyn Store>,
+        custody: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+        cancel: CancellationToken,
+        authorize: CancellationToken,
+    ) -> Arc<Self> {
+        let mut budget = Self::new(Arc::clone(&store), custody.owner.clone(), cancel.clone());
+        // This bounded enrollment audits the Linux strict probe collector.
+        // Other platform parser lifetimes retain their existing explicit join.
+        if cfg!(target_os = "linux") {
+            Arc::get_mut(&mut budget)
+                .expect("new source budget")
+                .completion = Some(completion::Completion::start(
+                store,
+                custody.clone(),
+                cancel,
+                authorize,
+            ));
+        }
+        budget
+    }
+    pub(crate) fn enroll_preparation(
+        &self,
+        source: Arc<std::fs::File>,
+    ) -> Result<Option<SourceOperation>, String> {
+        self.completion
+            .as_ref()
+            .map(|owner| owner.enroll(source))
+            .transpose()
+    }
+    pub(crate) fn register_source_file(&self, source: Arc<std::fs::File>) -> Result<(), String> {
+        self.completion
+            .as_ref()
+            .map_or(Ok(()), |owner| owner.file(source))
+    }
+    pub(crate) fn source_holder(&self) -> Result<Option<SourceHolder>, String> {
+        self.completion
+            .as_ref()
+            .map(|owner| owner.holder())
+            .transpose()
+            .map(Option::flatten)
+    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn raw_retirement(&self) -> Result<Option<RawRetirement>, String> {
+        self.completion
+            .as_ref()
+            .map(|owner| owner.raw())
+            .transpose()
+            .map(Option::flatten)
+    }
+    /// Call after the loss token fired. True when the live completion ledger
+    /// (not the caller) settles this custody once every holder retires.
+    pub(crate) fn completion_owns_settlement(&self) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(|owner| owner.owns_settlement())
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn completion_observation(&self) -> Option<(usize, usize, bool)> {
+        self.completion.as_ref().map(|owner| owner.observation())
+    }
+    pub(crate) fn untracked_source_capability(&self) {
+        if let Some(owner) = &self.completion {
+            owner.veto();
+        }
+    }
+    pub(super) fn job_token(&self) -> Option<&plurx_core::store::background_jobs::JobToken> {
+        match &self.owner {
+            BackgroundSourceOwner::Job { token } => Some(token),
+            _ => None,
+        }
+    }
+
     /// The existing operation supervisor retains this exact receipt and must
     /// release it explicitly after every read/bridge joins. The budget owns no
     /// cleanup actor and never treats Drop or lease expiry as completion.
@@ -219,6 +319,13 @@ impl SourceReadBudget {
     }
     #[cfg(target_os = "linux")]
     pub(crate) async fn source_may_continue(&self) -> Result<bool, String> {
+        if let Some(phase) = &self.analysis_phase {
+            return self
+                .store
+                .analysis_source_phase_current(phase, crate::state::clock_ms())
+                .await
+                .map_err(|error| format!("source phase observation: {error}"));
+        }
         self.store
             .background_source_may_continue(self.owner.clone(), crate::state::clock_ms())
             .await
@@ -268,7 +375,6 @@ impl SourceReadBudget {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn invalidate_grant(&self) {
         self.invalidated
             .store(true, std::sync::atomic::Ordering::Release);
@@ -314,6 +420,24 @@ impl SourceReadBudget {
             budget: self,
             clock,
             quota,
+        }
+    }
+
+    async fn claim_service(
+        &self,
+        now_ms: i64,
+    ) -> Result<Option<BackgroundSourceServiceGrant>, plurx_core::error::StoreError> {
+        match &self.analysis_phase {
+            Some(phase) => {
+                self.store
+                    .claim_analysis_source_phase_service(phase, now_ms)
+                    .await
+            }
+            None => {
+                self.store
+                    .claim_background_source_service(self.owner.clone(), now_ms)
+                    .await
+            }
         }
     }
 
@@ -368,7 +492,7 @@ impl SourceReadBudget {
                 *cached = tokio::select! {
                     ()=cancel.cancelled()=>return Err("source read cancelled".into()),
                     ()=self.cancel.cancelled()=>return Err("source owner cancelled".into()),
-                    granted=self.store.claim_background_source_service(self.owner.clone(),now)=>granted.map_err(|error|format!("source byte grant: {error}"))?,
+                    granted=self.claim_service(now)=>granted.map_err(|error|format!("source byte grant: {error}"))?,
                 };
                 if let Some(grant) = cached.as_ref() {
                     if let Some(count) = reserve(grant, max, crate::state::clock_ms())? {
@@ -436,6 +560,15 @@ pub(crate) async fn budgeted<T>(
 }
 pub(crate) fn source_budget() -> Option<Arc<SourceReadBudget>> {
     SOURCE_BUDGET.try_with(Arc::clone).ok()
+}
+
+impl super::JobFence {
+    /// Whether this claim registered physical source custody. A job whose
+    /// resources name no `source_io` key (a contract v2 targeted probe) has
+    /// none, and the source service grants bytes only to a custody owner.
+    pub(crate) fn holds_source_custody(&self) -> bool {
+        self.0.source_custody.is_some()
+    }
 }
 
 #[cfg(test)]

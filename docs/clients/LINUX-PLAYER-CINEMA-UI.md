@@ -1,16 +1,105 @@
 # Linux player Cinema UI — release and installation ledger
 
-**Status:** open: 0.4.0 installed; owner confirms UI and quality switching;
-0.4.1 playback Info correction in progress; live TV Next acceptance pending ·
-**Written:** 2026-10-28 · **Executes:** the owner's approved
-Cinema playback renders and request to complete metadata, next episode and
-quality controls, package them and install on the ROG.
+**Status:** open: 0.5.0 frontend source, package and system-renderer interfaces
+qualified; merge, coordinated installation and physical acceptance pending.
+The 0.4.0 installation and owner acceptance below remain earlier evidence. ·
+**Updated:** 2026-11-09 · **Written:** 2026-10-28
 
 Companion to [the Linux player plan](LINUX-PLAYER-PLAN.md) (the playback/render
 contract) and [the launcher README](../../clients/linux-player/README.md)
 (controls and package commands). This ledger separates source evidence,
 package qualification, installation and physical acceptance. It does not
 qualify a different Dolby Vision processor or change the display stack.
+
+## Session control sequence repair (0.5.1)
+
+**Owner:** Codex coordinator; GPT-6.1 Sol implementation. **State:** source
+implemented and independently reviewed; final affected validation is recorded
+in the pull request.
+Deployment and physical acceptance remain owner-controlled.
+
+Seeking outside the produced range creates a new server session, whose first
+control exchange must use sequence 1. The frontend previously retained its
+run-wide sequence counter, so the replacement's controls were refused as stale
+until its lease expired. Quality replacement and retry shared the same ownership mismatch; next
+episode already constructs a fresh controller. The counter now belongs to the advertised
+session ID, generation and owner epoch. A provisional quality change retains
+the incumbent counter so rollback continues monotonically on that session.
+Server generation, client-instance and sequence fences retain their contract.
+
+Regression coverage exercises seek recreation, retry, next episode and quality
+rollback after candidate controls. A failed first heartbeat before server
+acceptance remains a separate transport/replay concern; this repair does not
+change retransmission policy.
+
+The inherited Dolby Vision report is separate: initial native mapping, then a
+reset diagnostic, followed by a seek and stale controls. The private provider
+uses that diagnostic for both missing RPU and explicit stream resets; successful
+mapping at the same target need not repeat its first-success message. It alone
+cannot establish sustained HDR10 fallback or a changed server recipe. A fresh
+owner-started run on November 13 reported active native DV beyond the inherited
+6–24 second window. Sustained playback and physical picture acceptance remain
+open; no causal claim about previous tests or calibrated panel accuracy follows.
+
+## System renderer consolidation (0.5.0)
+
+The launcher now selects an explicit `--mpv` override, then
+`PLURX_PLAYER_MPV`, then executable `/usr/bin/mpv`, then `mpv` on PATH.
+The former `/usr/lib/plurx-player/bin/mpv` never wins implicitly. The Debian
+package depends on system mpv and installs only the frontend; it no longer
+builds or ships a private mpv/libplacebo or upstream source components.
+
+Cinema keeps its Lua controls, full-film timeline, scoped credentials,
+server/session ownership, isolated configuration, renderer arguments and
+loader-environment cleanup. The installed-interface smoke check uses real mpv
+`loadfile`, properties, user-data and Cinema's Lua pause binding. Binary
+selection and the exact frontend file manifest have focused regressions.
+
+Native Dolby Vision is negotiated from the selected binary's compiled
+`native-dovi-api-1` marker on its `List of enabled features:` version line.
+The probe runs with `--no-config --version`, a three-second timeout and the
+same loader-variable cleanup as playback. Marked builds retain P5/P7/P8;
+unmarked, failed or timed-out probes request server conversion to the existing
+HDR10 route and omit Dolby Vision in playback-control capabilities. The
+selected renderer still opens; user overrides and saved choices are retained.
+This is format negotiation, not a runtime feature switch or a version gate.
+The marker's provider boundary requires SDK 2. ROG's unmarked 5.1 renderer must
+be updated to its marked 5.2 successor before frontend installation.
+
+The existing mapper/client-log/OSD fact fields recognize only the shared
+renderer’s exact successful physical-target message from `vo/gpu-next` at
+Info level. Its finite physical peak overrides the signal-envelope property;
+the label is `shared native Dolby renderer`, without inventing a CM version.
+Facts reset on each load/start-file and authoritative target-state changes.
+The read-only `native-dovi-target-state` property reports eligibility and render
+generation; a success must match its active current generation. One read on a
+success or state notification prevents stale compositor/lease facts without
+polling. Eligibility alone does not establish an active grade. A new
+file with no new success stays unknown; a compiled marker alone never proves
+an active grade. Cinema Info’s VO-target rows retain their existing signal
+encoding observations. Independent source review and six focused new/legacy mapper regressions pass.
+
+Qualification is scoped to the recorded frontend source and interfaces:
+
+| Evidence | Result |
+|---|---|
+| Focused binary/capability/package/control regressions | 26 passed |
+| Physical-target facts, spoof/nonfinite input, source/lease/generation lifecycle and legacy mapper regressions | 6 passed |
+| Fresh package verification client suite | 113 passed; no skips |
+| Installed Cinema Lua | 32 control scenarios and 3 live Info regressions passed |
+| Normal Debian package and fresh verification | Passed; lintian zero errors/warnings, checksum negative control, ownership, system default, PQ gpu-next/Vulkan, config/ytdl controls and clean removal |
+| Reproducibility | Second build byte-identical across all four binary/source artifacts |
+| Frontend package payload | 41,652 bytes; no bundled renderer or library |
+| Qualified mpv 5.2 plus exact frontend package | Marker/native capabilities and real generated-video Lua/IPC passed with null outputs; configured unsupported VO reports native target state unavailable |
+
+The frontend payload was built from `3024053`; current-main integration
+preserves all 61 transferred source/test-input blobs and executable modes.
+The shared renderer's active/inactive generations, read-only setter and
+teardown notification have separate native qualification. Interface and
+software-Vulkan checks do not establish optical HDR calibration or Dolby
+conformance. Installation remains pending. Earlier private-renderer CPU
+controls and 0.4.x receipts retain only their original scopes. This change
+makes no claim about unrelated desktop notification behavior.
 
 ## 1. Delivered source
 

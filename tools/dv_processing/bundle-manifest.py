@@ -4,8 +4,30 @@ import hashlib
 import json
 from pathlib import Path
 
-INPUTS = ('base_dv_renderer.h', 'display_target.h', 'dm_closed_form.h', 'dv_dm.h', 'dv_metadata.h', 'dv_trace.h', 'fel_renderer.h', 'hevc-rasl-frame-thread.patch', 'movie_source_io.h',
-          'nlq_clipping.h', 'nut_timing.h', 'rgb48.h', 'scan_title.c', 'segment_decode_render.c', 'source_reader.h', 'title_constants.h', 'yuv420p10.h')
+INPUTS = (
+    'author_p81.c',
+    'base_dv_renderer.h',
+    'display_target.h',
+    'dm_closed_form.h',
+    'dm_cm29_gamut_tables.h',
+    'dv_dm.h',
+    'dv_metadata.h',
+    'dv_trace.h',
+    'fel_renderer.h',
+    'hevc-rasl-frame-thread.patch',
+    'movie_source_io.h',
+    'mux_rgb.c',
+    'nlq_clipping.h',
+    'nut_timing.h',
+    'refit_compose.h',
+    'refit_mode.h',
+    'rgb48.h',
+    'scan_title.c',
+    'segment_decode_render.c',
+    'source_reader.h',
+    'title_constants.h',
+    'yuv420p10.h',
+)
 GRAPH = "dv-native-master-or-closed-form-dm-v1"
 
 
@@ -13,19 +35,24 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build(source, root):
-    source_digest = hashlib.sha256()
+def source_identity(source):
+    """The renderer-source identity plurxd compiles in and requires of a bundle."""
+    digest = hashlib.sha256()
     for name in sorted(INPUTS):
-        source_digest.update(name.encode() + b"\0" + bytes.fromhex(sha(source / name)))
+        digest.update(name.encode() + b"\0" + bytes.fromhex(sha(source / name)))
+    return digest.hexdigest()
+
+
+def build(source, root):
     abi = json.loads((root / "sources/abi.json").read_text())
-    if abi.get("libplacebo") != 374 or any(abi.get(name, 0) <= 0 for name in ("avcodec", "avformat", "avutil")):
+    if abi.get("libplacebo") != 387 or any(abi.get(name, 0) <= 0 for name in ("avcodec", "avformat", "avutil")):
         raise ValueError("unsupported installed helper ABI")
     manifest = {"schema": 1, "graph": GRAPH, "abi": abi,
         "tools": {name: {"path": "bin/" + filename, "sha256": sha(root / "bin" / filename)}
                   for name, filename in (("renderer", "segment_decode_render"), ("muxer", "mux_rgb"), ("author", "author_p81"), ("scanner", "scan_title"))},
-        "libraries": [{"path": "lib/libplacebo.so.374", "sha256": sha(root / "lib/libplacebo.so.374")}],
+        "libraries": [{"path": "lib/libplacebo.so.387", "sha256": sha(root / "lib/libplacebo.so.387")}],
         "parser_sha256": sha(root / "sources/libdovi.a"),
-        "source_sha256": source_digest.hexdigest(),
+        "source_sha256": source_identity(source),
         "environment": {"LD_LIBRARY_PATH": "lib"}}
     (root / "build-identity.json").write_text(json.dumps(manifest, indent=2) + "\n")
     verify(source, root)
@@ -36,14 +63,11 @@ def verify(source, root):
     assert set(manifest) == {"schema", "graph", "abi", "tools", "libraries", "parser_sha256", "source_sha256", "environment"}
     assert manifest["schema"] == 1 and manifest["graph"] == GRAPH
     assert manifest["abi"] == json.loads((root / "sources/abi.json").read_text())
-    assert manifest["abi"].get("libplacebo") == 374
+    assert manifest["abi"].get("libplacebo") == 387
     assert all(type(manifest["abi"].get(name)) is int and manifest["abi"][name] > 0
                for name in ("avcodec", "avformat", "avutil"))
     assert manifest["environment"] == {"LD_LIBRARY_PATH": "lib"}, "leave Vulkan device discovery untouched"
-    digest = hashlib.sha256()
-    for name in sorted(INPUTS):
-        digest.update(name.encode() + b"\0" + bytes.fromhex(sha(source / name)))
-    assert digest.hexdigest() == manifest["source_sha256"]
+    assert source_identity(source) == manifest["source_sha256"]
     assert sha(root / "sources/libdovi.a") == manifest["parser_sha256"]
     for artifact in [*manifest["tools"].values(), *manifest["libraries"]]:
         target = (root / artifact["path"]).resolve()
@@ -55,7 +79,13 @@ def verify(source, root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
-    parser.add_argument("root", type=Path)
+    parser.add_argument("root", type=Path, nargs="?")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--identity", action="store_true", help="print the source identity of SOURCE and exit")
     args = parser.parse_args()
-    (verify if args.verify else build)(args.source, args.root)
+    if args.identity:
+        print(source_identity(args.source))
+    elif args.root is None:
+        parser.error("ROOT is required unless --identity is given")
+    else:
+        (verify if args.verify else build)(args.source, args.root)

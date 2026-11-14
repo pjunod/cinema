@@ -337,7 +337,100 @@ async function saveCinemaRemoteInvitations(button){
 }
 
 function diagnosticDeveloperCard(){return setCard(`${cardHead("Diagnostic ZIP reports","Bounded local evidence for bug and issue attachments.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem saves a ZIP with a readable summary and structured evidence. Attach it to an issue using your usual reporting channel. Web download and phone sharing are available. Native TVs offer a temporary local QR download on trusted Wi-Fi; physical-device sampling remains.</p>${devGraduation("archive export, privacy and recovery have applicable client and device receipts, including native TV file transfer.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
-function developerPanel(settings,readiness,httpsCard=""){
+// C1 (playback start): the indexer no longer waits for an idle node. No
+// switch; the rows say what this node's indexer may do right now.
+function indexingWhileServingCard(readiness){
+  return setCard(`${cardHead("Indexing while serving","Content analysis keeps indexing while this node serves: a viewer waiting for an encoder still comes first, and an idle node takes other nodes' indexing.",'<span class="pill ok">automatic</span>')}
+    ${devReq(readiness,"indexing_while_serving","serving_live_waiters","No viewer queuing for an encoder","While a viewer waits for this node's encoder, analysis claims only requests a playback is waiting on.")}
+    ${devReq(readiness,"indexing_while_serving","serving_slots_in_use","Encoder slots in use","An encoder in use no longer stops analysis; the read holds a storage-domain reservation instead.")}
+    ${devReq(readiness,"indexing_while_serving","serving_domain_readers","Storage-domain reader slots","Two source readers per domain. The same rule is checked when a request is claimed, before its read, while it reads and before it is submitted.")}
+    ${devReq(readiness,"indexing_while_serving","serving_cross_node","Takes other nodes' indexing","An idle node with fragment-index authority builds other nodes' requests for its own engine; delivery copies the index to the node that asked.")}
+    <p class="hint">Advisory: nothing here switches anything on or off.</p>
+    ${devGraduation("after a deploy, idle nodes' analysis claims rise while another node serves, plurx_analysis_completed_total shows completions that reached their target, and no storage domain holds more than its two readers.","this card goes; indexing while serving is simply how analysis works.")}`,{id:"indexing-while-serving-card"});
+}
+// E1 (playback start): settings and media-session routes answered from this
+// node's own applied replica whenever it can prove the replica is current.
+// No switch; the rows are facts loaded when the page asks.
+function appliedViewCard(readiness){
+  return setCard(`${cardHead("Applied view","Settings and playback routes read from this node's own replica when a current quorum proof covers it, and from a quorum read when it does not.",`<span data-devstat="applied_view:applied_view_reads">${devReadinessPill(devReadinessRow(readiness,"applied_view","applied_view_reads"),readiness)}</span>`)}
+    ${devReq(readiness,"applied_view","applied_view_proof","Replica proof present","A quorum-confirmed commit index this node has applied, inside its one-second lease. Without it every view read is a quorum read.")}
+    ${devReq(readiness,"applied_view","applied_view_image","Replica image stable","Closed while a snapshot is installed, and after a failed restore until a later one completes or the node restarts.")}
+    ${devReq(readiness,"applied_view","applied_view_reads","Reads through the view","View and quorum reads since this node started, and the last reason a read fell back.")}
+    <p class="hint">Advisory: nothing here switches anything on or off, and fences never read the view.</p>
+    ${devGraduation("settings (E1b) and media-session routes (E1c) read through the view and the fleet's authority-read rate per request drops as the E1 contract measures it.","this card goes; reading the applied replica is simply how settings and routes are served.")}`,{id:"applied-view-card"});
+}
+// D3b: one planning snapshot per create. Counts and reasons come from the
+// same readiness document as the applied-view rows; none is a setting.
+function createPlanCard(readiness){
+  return setCard(`${cardHead("Create plan","Each playback start plans from one snapshot of its source and settings. These readings show where plans came from and when a plan had to be replaced.",`<span data-devstat="create_plan:create_plan_source">${devReadinessPill(devReadinessRow(readiness,"create_plan","create_plan_source"),readiness)}</span>`)}
+    ${devReq(readiness,"create_plan","create_plan_source","Plans from this replica","The share of plans read from this node's replica, quorum reads and the last reason a plan needed quorum. Counts are since this node started.")}
+    ${devReq(readiness,"create_plan","create_plan_owner","Owner plans at a peer's binding","An owner uses the source and settings revisions a peer planned with, or asks quorum when those revisions differ or the start has no binding.")}
+    ${devReq(readiness,"create_plan","create_plan_peer_catalogs","Peer catalogs at a sender's binding","Peer catalog requests use the sender's source and settings revisions. A stale plan is refused so the sender can plan again.")}
+    ${devReq(readiness,"create_plan","create_plan_replans","Re-plans after a catalog refuted the view","How many starts planned again from quorum after a catalog found the replica's plan stale, before claiming playback.")}
+    ${devReq(readiness,"create_plan","create_plan_refusals","Views closed after an owner refusal","How many owner refusals made planning use quorum until this node could prove its replica held the source and settings revisions the owner saw.")}
+    <p class="hint">Advisory: these counts describe planning; they do not establish playback qualification.</p>
+    ${devGraduation("after a deploy, the fleet's create-plan replica share and quorum reasons are measured, stale plans re-plan safely, and playback-start qualification has its required receipts.","this card goes; planning from one snapshot is simply how playback starts.")}`,{id:"create-plan-card"});
+}
+// D1 (playback start, plan ruling 3): processed Dolby Vision / HDR10-E is an
+// upgrade after the first frame, switched in through the prepared
+// replacement. It always runs when Dolby Vision processing is on; the rows
+// say whether the switch is qualified on each platform and whether this node
+// can run one now. Nothing here switches anything.
+function processedDvUpgradeCard(readiness){
+  return setCard(`${cardHead("Processed DV upgrade","Playback starts ordinary; once the first frame is on screen this node may render processed Dolby Vision and offer it as a prepared switch. The switch is unqualified until each platform has measured twenty clean ones.",'<span class="pill">unqualified until measured</span>')}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_web","Web switches measured","Committed switches with complete ±2 s frame samples, zero dropped frames, observed audio continuity and no reopen, of twenty.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_apple","Apple switches measured","The same bar, from the Apple access log's dropped frames and stalls.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_android","Android switches measured","The same bar, from Media3 decoder counters and audio underruns.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_renderer","Renderer present","Without the processing helper a node's sessions start ordinary and stay so.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_slot","Slot free","One processed preparation per node; an upgrade that finds it busy declines and the session keeps playing.")}
+    ${devReq(readiness,"processed_dv_upgrade","processed_upgrade_activity","Upgrades on this node","Scheduled, staged, declined and cancelled since this node started.")}
+    <p class="hint">Advisory: the upgrade runs whether or not these rows are met.</p>
+    ${devGraduation("each platform has recorded twenty measured switches with complete ±2 s frame samples, independently observed audio continuity and no reopen.","this card goes; the upgrade is simply how Dolby Vision processing plays.")}`,{id:"processed-dv-upgrade-card"});
+}
+function sourceRecoveryCard(value,error=""){
+  const node=value&&value.node_name?String(value.node_name):"Node status unavailable";
+  const unavailable=error||(value&&value.error)||(!value?"Waiting for this node's recovery status.":"");
+  const count=(number)=>number!==null&&number!==undefined&&number!==""&&Number.isFinite(Number(number))?String(Number(number)):"Unknown";
+  const yn=(answer)=>answer===true?"Yes":answer===false?"No":"Unknown";
+  const launches=value&&value.launches||{};
+  const latest=launches.latest_unknown;
+  const poisoned=value&&value.poisoned;
+  const poisonCount=poisoned&&poisoned.total;
+  const poisonUnavailable=!value||!!value.error||poisoned===null||poisoned===undefined||poisonCount===null||poisonCount===undefined||!Number.isFinite(Number(poisonCount));
+  const witnesses=poisoned&&Array.isArray(poisoned.witnesses)?poisoned.witnesses:[];
+  const witnessRows=witnesses.slice(0,32).map(row=>`<li>${esc(row.family||"Unknown family")} · ${esc(row.owner_id||"Unknown owner")} · ${esc(row.purpose||"Unknown purpose")} · boot tick ${esc(String(row.boot_tick??"unknown"))}</li>`).join("");
+  return setCard(`${cardHead("Playback restart recovery",`This node: ${esc(node)}`,'<span class="pill">read-only</span>')}
+    ${unavailable?`<p class="hint" role="status">${esc(unavailable)}</p>`:""}
+    ${!value?'<p class="hint">Poisoned witness status is unavailable; no zero-count or healthy-state conclusion can be drawn.</p>':""}
+    ${value?`<div class="setfields">
+      <div><b>Reader recovery support</b><br>${value.supported===true?"Supported":"Not supported"} (advisory; never gates playback)</div>
+      <div><b>Authoritative backend</b><br>${yn(value.authoritative_backend)}</div>
+      <div><b>Kernel available</b><br>${yn(value.kernel_available)}</div>
+      <div><b>Local filesystem</b><br>${yn(value.local_filesystem)}</div>
+      <div><b>Daemon is init or subreaper</b><br>${yn(value.daemon_init_or_subreaper)}</div>
+    </div>
+    <div class="setfields">
+      <div><b>Verified attempts since process start</b><br>${count(launches.verified)}</div>
+      <div><b>Verified no-source attempts</b><br>${count(launches.no_source)}</div>
+      <div><b>Verified metadata-only attempts</b><br>${count(launches.metadata_only)}</div>
+      <div><b>Verified brokered attempts</b><br>${count(launches.brokered)}</div>
+      <div><b>Unknown attempts since process start</b><br>${count(launches.unknown)}</div>
+      <div><b>Explicitly unverified attempts</b><br>${count(launches.unverified)} · subset of unknown.</div>
+    </div>
+    ${latest?`<p>Latest unknown launch: ${esc(latest.purpose)} · ${Number.isFinite(Number(latest.observed_at_ms))?esc(new Date(Number(latest.observed_at_ms)).toLocaleString()):"time unavailable"}</p>`:""}
+    ${poisonUnavailable?'<p class="hint">Poisoned witness status is unavailable; no zero-count or healthy-state conclusion can be drawn.</p>':`<p><b>Poisoned witnesses:</b> ${count(poisonCount)}</p>${Number(poisonCount)>0?`<ul>${witnessRows}</ul>${Number(poisonCount)>32?`<p class="hint">Showing up to the first 32 witnesses.</p>`:""}<p class="hint">Poisoned witnesses await verified owner-stop proof, namespace teardown, or reboot. Confined-reader recovery is future work; this status does not make a playback census safe.</p>`:"<p class=\"hint\">No poisoned witnesses are currently reported.</p>"}`}`:""}
+    <p class="hint">Verified counts mean the final program, arguments, working directory and inherited descriptors passed the launch access check. Unknown includes undeclared and failed declarations; explicitly unverified is a subset of unknown. This read-only status never gates playback.</p>
+    ${devGraduation("source access declarations are implemented and native Linux/macOS crash recovery and performance qualification are accepted.","this card goes; playback restart recovery is simply part of how plurx works.")}
+    <button type="button" class="ghost sm" onclick="reloadSourceRecovery(this)">${unavailable?"Retry":"Refresh this node"}</button>`);
+}
+function sourceRecoveryMount(value,error=""){
+  return `<div id="settings-source-recovery">${sourceRecoveryCard(value,error)}</div>`;
+}
+function applySourceRecovery(value,error=""){
+  const mount=document.getElementById("settings-source-recovery");
+  if(mount)mount.innerHTML=sourceRecoveryCard(value,error);
+}
+function developerPanel(settings,readiness,httpsCard="",sourceRecoveryHtml=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
   // lives in its own section; the links below are the way back to them.
@@ -348,18 +441,21 @@ function developerPanel(settings,readiness,httpsCard=""){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${httpsCard}${diagnosticDeveloperCard()}
+      ${destinations}${httpsCard}${sourceRecoveryHtml}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
-      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
+      <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}${processedDvUpgradeCard(readiness)}
       <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E / SDR</h2><p>Per-shot L1 mapping for the viewer's reported HDR peak or explicit SDR capability. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
+      <div class="setsection" id="enable-indexing-while-serving"><h2>Indexing while serving</h2><p>Content analysis beside playback. Automatic; the rows are advisory.</p></div>${indexingWhileServingCard(readiness)}
+      <div class="setsection" id="enable-applied-view"><h2>Applied view</h2><p>Node-local reads of settings and playback routes. Automatic; the rows are advisory.</p></div>${appliedViewCard(readiness)}
+      <div class="setsection" id="create-plan"><h2>Create plan</h2><p>One source and settings snapshot per playback start. Automatic; the rows are advisory.</p></div>${createPlanCard(readiness)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
       <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}`;
 }

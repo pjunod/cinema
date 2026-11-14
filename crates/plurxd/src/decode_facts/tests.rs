@@ -341,16 +341,15 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
     }
 
     let source = include_str!("../decode_facts.rs");
-    for item in [
+    let descriptors =
+        include_str!("../../../plurx-core/src/process/source_lifetime/descriptors.rs");
+    let namespace = include_str!("pi_namespace.rs");
+    for (source, item) in [
         "command.pre_exec(move ||",
         "fn is_production(self)",
         "fn bootstrap_interrupts(self)",
         "fn export_socket_fd(self)",
         "fn start_probe_session(",
-        "fn duplicate_child_fd(",
-        "fn assign_child_fd(",
-        "fn install_child_fd(",
-        "fn install_probe_child_fds(",
         "fn consume_linux_bootstrap_interrupt(",
         "fn ensure_linux_probe_deadline(",
         "fn confirm_linux_probe_fork(",
@@ -361,7 +360,14 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
         "fn install(&self)",
         "fn install_listener(&self)",
         "fn execute_held_probe(&self)",
-    ] {
+    ]
+    .into_iter()
+    .map(|item| (source, item))
+    .chain([
+        (descriptors, "pub fn inherit(&self)"),
+        (descriptors, "pub fn inherit_target(&self"),
+        (namespace, "command.pre_exec(move ||"),
+    ]) {
         let body = item_body(source, item);
         for allocating in [
             "std::io::Error::new(",
@@ -1391,15 +1397,19 @@ async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
     // Long enough that a loaded runner's launch cannot reach it: whether
     // the stop signal or the deadline released the loop is read from the
     // loop's own exit counters below, not from how long the call took.
-    probe_version_with_deadline_on(
+    let result = probe_version_with_deadline_on(
         &identity.executable_snapshot,
         identity.executable(),
         ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilStop,
         Duration::from_secs(20),
         Arc::clone(&ownership),
     )
-    .await
-    .expect("the supervisor stop signal releases the response loop before deadline");
+    .await;
+    assert!(
+        matches!(result, Err(DecodeFactError::ProbeIdentity(ref message))
+            if message == "bounded version probe failed"),
+        "the injected stop denies the child's second exec without reaching the deadline"
+    );
     assert!(
         STEADY_RESPONSE_STOP_INTERRUPT_HITS.load(Ordering::Acquire) >= 1,
         "the stop-path proof must first consume a steady response interruption"
@@ -1680,18 +1690,25 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
         .await
         .expect("detached pidfd-read cleanup finishes")
         .expect("source ownership returns after reap");
+    // The caller's deadline cancels its detached collection. That collection
+    // reports cancellation only after its physical owner finishes cleanup.
     tokio::time::timeout(Duration::from_millis(250), async {
-            loop {
-                if cache.metrics().prometheus().contains(
-                    "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"deadline\"} 1"
-                ) {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        loop {
+            if cache.metrics().prometheus().contains(
+                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"cancelled\"} 1",
+            ) {
+                break;
             }
-        })
-        .await
-        .expect("the collection sample appears after the detached owner finishes cleanup");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the collection sample appears after the detached owner finishes cleanup: {}",
+            cache.metrics().prometheus()
+        )
+    });
     assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     assert_eq!(
         source
@@ -3178,28 +3195,24 @@ fn crossed_source_and_executable_fds_are_duplicated_before_assignment() {
     let executable = std::fs::File::open(executable_path).expect("executable");
     let source_fd = source.as_raw_fd();
     let executable_fd = executable.as_raw_fd();
+    // Cross the actual open descriptor numbers so either sequential dup2
+    // destroys the other input unless the shared builder pins both first.
+    let descriptors = crate::producer_spawn::Descriptors::from_mappings(
+        &[(source_fd, executable_fd), (executable_fd, source_fd)],
+        None,
+    )
+    .prepare_inline(crate::producer_spawn::StdioFacts::NULL)
+    .expect("prepare crossed descriptors");
     let mut command = std::process::Command::new("/bin/sh");
-    command.args([
-        "-c",
-        "test \"$(cat <&3)\" = bound-source && test \"$(cat <&4)\" = held-probe",
-    ]);
+    command.arg("-c").arg(format!(
+        "test \"$(cat /dev/fd/{executable_fd})\" = bound-source && test \"$(cat /dev/fd/{source_fd})\" = held-probe"
+    ));
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     unsafe {
-        command.pre_exec(move || {
-            let source_cross = duplicate_child_fd(source_fd)?;
-            let executable_cross = match duplicate_child_fd(executable_fd) {
-                Ok(duplicate) => duplicate,
-                Err(error) => {
-                    libc::close(source_cross);
-                    return Err(error);
-                }
-            };
-            let crossed = assign_child_fd(executable_cross, 3)
-                .and_then(|()| assign_child_fd(source_cross, HELD_PROBE_FD));
-            libc::close(source_cross);
-            libc::close(executable_cross);
-            crossed?;
-            install_probe_child_fds(HELD_PROBE_FD, 3)
-        });
+        command.pre_exec(move || descriptors.inherit());
     }
     assert!(command.status().expect("run descriptor check").success());
     drop((source, executable));
@@ -3566,6 +3579,26 @@ async fn strict_native_group_hold_never_excludes_outstanding_daemon_read_time() 
     strict_quota_stopped_thread_fixture(true).await;
 }
 
+/// The strict supervisor refuses any single read() above one service quantum,
+/// and FFmpeg's file protocol otherwise reads a whole large packet at once.
+#[cfg(target_os = "linux")]
+#[test]
+fn strict_parser_reads_are_capped_to_one_service_quantum() {
+    let input = strict_source_input();
+    assert_eq!(input[0], "-blocksize");
+    assert_eq!(
+        input[1]
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok()),
+        Some(1_048_576)
+    );
+    assert_eq!(input[2], "/dev/fd/3", "the cap precedes the held input");
+    assert!(idet_filter(0).starts_with(&format!(
+        "movie=/dev/fd/3:format_opts=blocksize={}:",
+        1_048_576
+    )));
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "requires exact packaged static parser PLURX_TEST_STRICT_FFPROBE and generated PLURX_TEST_STRICT_MEDIA"]
@@ -3608,5 +3641,94 @@ async fn packaged_static_ffprobe_uses_supported_bounded_source_read_syscalls() {
         budget.current_reserved_test_bytes().await.unwrap_or(0) > 0,
         "actual parser source reads must enter shared service accounting"
     );
+    active.finish().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tracked_raw_probe_retirement_survives_timeout_and_abandoned_collector() {
+    struct ReleaseWorker;
+    impl Drop for ReleaseWorker {
+        fn drop(&mut self) {
+            *COMPLETION_WORKER_RELEASE.0.lock().expect("worker gate") = true;
+            COMPLETION_WORKER_RELEASE.1.notify_all();
+        }
+    }
+    let root = crate::test_tempdir().expect("probe fixture");
+    let probe_path = root.path().join("static-ffprobe");
+    build_static_probe(&probe_path, 0);
+    let mut probe = DecodeProbeIdentity::discover(probe_path.to_str().expect("probe path"))
+        .await
+        .expect("actual production probe");
+    probe.launch_mode = ProbeLaunchMode::ProductionCompletionWorkerHeld;
+    COMPLETION_WORKER_STARTED.store(false, Ordering::Release);
+    COMPLETION_CLEANUP_STARTED.store(false, Ordering::Release);
+    *COMPLETION_WORKER_RELEASE.0.lock().expect("worker gate") = false;
+    let release_worker = ReleaseWorker;
+    let (_store, _job, active) = crate::background_jobs::tests::active().await;
+    let budget = active.fence().source_budget();
+    let mut original = tempfile::tempfile().expect("held original");
+    std::io::Write::write_all(&mut original, b"source").expect("real source bytes");
+    let source = Arc::new(original);
+    let operation = budget
+        .enroll_preparation(Arc::clone(&source))
+        .expect("audited operation");
+    let held = DecodeFactSource::new(
+        Arc::clone(&source),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        crate::process_control::ChildWork::background("tracked raw collector regression"),
+    )
+    .with_source_scope(None, Some(Arc::clone(&budget)));
+    let query = tokio::spawn(async move {
+        DecodeFactCache::new()
+            .get_or_probe(
+                &probe,
+                held,
+                None,
+                ProbeStreamSelection::LegacyVideoOrdinal(0),
+                Duration::from_millis(200),
+                None,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !COMPLETION_WORKER_STARTED.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual supervisor owns source-bearing child");
+    assert_eq!(budget.completion_observation(), Some((1, 1, false)));
+    // Abandon the caller while the existing owned collector handles deadline
+    // and actual child/worker cleanup. Its retirement guard must not disappear.
+    query.abort();
+    assert!(query.await.expect_err("abandoned waiter").is_cancelled());
+    drop((operation, source));
+    assert_eq!(
+        budget.completion_observation(),
+        Some((0, 1, false)),
+        "the detached collector still owns retirement"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !COMPLETION_CLEANUP_STARTED.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned collector reaches actual deadline cleanup");
+    assert_eq!(
+        budget.completion_observation(),
+        Some((0, 1, false)),
+        "worker remains charged during deadline child reap"
+    );
+    drop(release_worker);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while budget.completion_observation().expect("completion owner").1 != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("explicit child reap and worker join retire the collector");
+    assert_eq!(budget.completion_observation(), Some((0, 0, false)));
     active.finish().await;
 }

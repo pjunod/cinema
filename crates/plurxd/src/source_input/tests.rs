@@ -1,7 +1,8 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-struct UnlimitedBudget(AtomicU64);
+#[derive(Default)]
+pub(super) struct UnlimitedBudget(AtomicU64);
 impl SourceInputByteBudget for UnlimitedBudget {
     fn allowance(
         &self,
@@ -12,12 +13,20 @@ impl SourceInputByteBudget for UnlimitedBudget {
         Box::pin(async move { Ok(max) })
     }
 }
-pub(super) struct ReadGate {
+pub(crate) struct ReadGate {
     reached: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     released: std::sync::Mutex<bool>,
     changed: std::sync::Condvar,
 }
 impl ReadGate {
+    #[cfg(target_os = "linux")]
+    pub(super) fn new(reached: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            reached: std::sync::Mutex::new(Some(reached)),
+            released: std::sync::Mutex::new(false),
+            changed: std::sync::Condvar::new(),
+        }
+    }
     pub(super) fn park(&self) -> std::io::Result<()> {
         if let Some(reached) = self.reached.lock().expect("read gate").take() {
             let _ = reached.send(());
@@ -37,7 +46,7 @@ impl ReadGate {
         }
         Ok(())
     }
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         *self.released.lock().expect("read gate") = true;
         self.changed.notify_all();
     }
@@ -49,7 +58,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-async fn input(
+pub(super) async fn input(
     bytes: &[u8],
     window: usize,
     read_gate: Option<Arc<ReadGate>>,
@@ -63,17 +72,20 @@ async fn input(
     let allocator = Arc::new(UnlimitedBudget(AtomicU64::new(0)));
     let state = Arc::new(InputState {
         source: std::sync::Mutex::new(Some(source)),
+        _background_holder: None,
         custody: std::sync::Mutex::new(None),
         observer: None,
         purpose_budget: None,
         background_budget: Some(allocator.clone()),
-        pause: None,
+        pause: plurx_core::process::bounded::source_pause_controller(),
         budget: tokio::sync::Mutex::new(ByteBudget::default()),
         close: tokio_util::sync::CancellationToken::new(),
         read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         len: bytes.len() as u64,
         mime: "application/octet-stream",
         window_bytes: std::sync::atomic::AtomicUsize::new(window),
+        read_ceiling: AtomicU64::new(u64::MAX),
+        seek_bootstrap: std::sync::OnceLock::new(),
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -138,6 +150,7 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
     });
     let state = Arc::new(InputState {
         source: std::sync::Mutex::new(Some(source)),
+        _background_holder: None,
         custody: std::sync::Mutex::new(None),
         observer: None,
         purpose_budget: Some(budget.clone()),
@@ -149,6 +162,8 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
         len: bytes.len() as u64,
         mime: "application/octet-stream",
         window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
+        read_ceiling: AtomicU64::new(u64::MAX),
+        seek_bootstrap: std::sync::OnceLock::new(),
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
@@ -465,4 +480,134 @@ async fn processed_input_close_waits_for_actual_registered_child_reap() {
         .expect("close owner")
         .expect("joined input close");
     assert!(state.source.lock().expect("source state").is_none());
+}
+
+#[tokio::test]
+async fn census_input_ceiling_is_immutable_and_cannot_borrow_a_later_inputs_budget() {
+    let bytes = vec![7u8; 1024 * 1024];
+    let (census, _file, _budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
+    census
+        .seal_read_ceiling(SOURCE_HTTP_CHUNK as u64)
+        .expect("seal operation");
+    assert!(
+        census.seal_read_ceiling(u64::MAX).is_err(),
+        "no reset/remove API"
+    );
+    let first = read_source(&census.state, 0, bytes.len() as u64)
+        .await
+        .expect("bounded source read");
+    assert_eq!(first.len(), SOURCE_HTTP_CHUNK);
+    assert_eq!(census.observation().source_bytes, SOURCE_HTTP_CHUNK as u64);
+    assert!(
+        read_source(&census.state, SOURCE_HTTP_CHUNK as u64, bytes.len() as u64)
+            .await
+            .is_err()
+    );
+    let (primary, _primary_file, _primary_budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
+    assert_ne!(primary.url(), census.url());
+    assert_eq!(
+        read_source(&primary.state, 0, bytes.len() as u64)
+            .await
+            .expect("independent operation")
+            .len(),
+        SOURCE_HTTP_CHUNK
+    );
+    assert!(
+        read_source(&census.state, 0, bytes.len() as u64)
+            .await
+            .is_err(),
+        "late census URL never sees primary allowance"
+    );
+    census.close_and_wait().await.expect("join census input");
+    primary.close_and_wait().await.expect("join primary input");
+}
+
+#[tokio::test]
+async fn verified_seek_bootstrap_unlocks_only_its_fresh_primary_input() {
+    let bytes = vec![9u8; 1024 * 1024];
+    let (primary, _file, _budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
+    let token = primary
+        .seal_seek_bootstrap_limit(SOURCE_HTTP_CHUNK as u64)
+        .expect("source input fixture");
+    assert!(!token.is_verified());
+    assert!(primary.seal_seek_bootstrap_limit(u64::MAX).is_err());
+    assert_eq!(
+        read_source(&primary.state, 0, bytes.len() as u64)
+            .await
+            .expect("source input fixture")
+            .len(),
+        SOURCE_HTTP_CHUNK
+    );
+    assert!(
+        read_source(&primary.state, SOURCE_HTTP_CHUNK as u64, bytes.len() as u64)
+            .await
+            .is_err()
+    );
+    let (other, _other_file, _other_budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
+    let other_token = other
+        .seal_seek_bootstrap_limit(SOURCE_HTTP_CHUNK as u64)
+        .expect("source input fixture");
+    token.verified_landing();
+    assert!(token.is_verified());
+    assert!(!other_token.is_verified());
+    assert_eq!(
+        read_source(&primary.state, SOURCE_HTTP_CHUNK as u64, bytes.len() as u64)
+            .await
+            .expect("source input fixture")
+            .len(),
+        SOURCE_HTTP_CHUNK
+    );
+    assert_eq!(
+        read_source(&other.state, 0, bytes.len() as u64)
+            .await
+            .expect("source input fixture")
+            .len(),
+        SOURCE_HTTP_CHUNK
+    );
+    assert!(
+        read_source(&other.state, SOURCE_HTTP_CHUNK as u64, bytes.len() as u64)
+            .await
+            .is_err()
+    );
+    let (census, _census_file, _census_budget) = input(&bytes, SOURCE_WINDOW_MAX, None).await;
+    census
+        .seal_read_ceiling(SOURCE_HTTP_CHUNK as u64)
+        .expect("source input fixture");
+    assert!(census
+        .seal_seek_bootstrap_limit(SOURCE_HTTP_CHUNK as u64)
+        .is_err());
+    primary.close_and_wait().await.expect("reader closes");
+    other.close_and_wait().await.expect("reader closes");
+    census.close_and_wait().await.expect("reader closes");
+}
+
+#[tokio::test]
+async fn broker_verification_is_revoked_on_join_cleanup_and_drop() {
+    use plurx_core::process::source_lifetime::is_registered_broker;
+    let (input, _source, _budget) = input(b"broker lifetime", 16, None).await;
+    let url = input.url().to_owned();
+    assert!(is_registered_broker(&url));
+    input.close_and_wait().await.expect("joined input");
+    assert!(
+        !is_registered_broker(&url),
+        "joined listener cannot verify a later launch"
+    );
+
+    let (input, _source, _budget) = self::input(b"pending cleanup", 16, None).await;
+    let url = input.url().to_owned();
+    assert!(is_registered_broker(&url));
+    input.cleanup_pending();
+    assert!(
+        !is_registered_broker(&url),
+        "pending cleanup revokes before cancellation"
+    );
+
+    let (input, _source, _budget) = self::input(b"dropped input", 16, None).await;
+    let url = input.url().to_owned();
+    assert!(is_registered_broker(&url));
+    drop(input);
+    assert!(
+        !is_registered_broker(&url),
+        "Drop cannot leave a verifying bearer behind"
+    );
 }

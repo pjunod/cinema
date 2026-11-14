@@ -72,6 +72,8 @@ struct GenerationLifetime {
     identity: Arc<()>,
     writers: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     receipt: StdMutex<Option<ConfirmedProducerReap>>,
+    exit_status: StdMutex<Option<std::process::ExitStatus>>,
+    child_exited: Notify,
     settled: Notify,
     retirement: tokio_util::sync::CancellationToken,
 }
@@ -104,8 +106,12 @@ pub(crate) enum WriterSettlement {
 pub(crate) struct ConfirmedProducerReap {
     identity: Arc<()>,
     writers: WriterSettlement,
+    exit_status: std::process::ExitStatus,
 }
 impl ConfirmedProducerReap {
+    pub(crate) fn exit_success(&self) -> bool {
+        self.exit_status.success()
+    }
     pub(crate) fn matches(&self, generation: &ProducerRegistration) -> bool {
         Arc::ptr_eq(&self.identity, &generation.0.identity)
     }
@@ -116,6 +122,19 @@ impl ConfirmedProducerReap {
     }
 }
 impl ProducerRegistration {
+    /// Actual wait outcome only; this does not release writers, source input,
+    /// admission or the child job and is not a physical settlement receipt.
+    pub(crate) async fn wait_child_exit(&self) -> std::process::ExitStatus {
+        loop {
+            let changed = self.0.child_exited.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(status) = *self.0.exit_status.lock().expect("producer exit status") {
+                return status;
+            }
+            changed.await;
+        }
+    }
     /// Stops only acquisition of new publication locks. Actual writes must
     /// settle before the writer barrier releases this generation's resources.
     pub(crate) fn retirement(&self) -> tokio_util::sync::CancellationToken {
@@ -178,6 +197,7 @@ impl ProducerReapHooks for ActualProducerWait {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn owned_reap(
     mut child: Child,
     child_job: Option<crate::process_control::ChildJob>,
@@ -186,24 +206,36 @@ fn owned_reap(
     hooks: Arc<dyn ProducerReapHooks>,
     inner: Weak<Mutex<Inner>>,
     next: Producer,
+    kill_first: bool,
 ) -> Arc<ReapOperation> {
     let operation = Arc::new(ReapOperation {
         finished: AtomicBool::new(false),
         changed: Notify::new(),
     });
     let completed = Arc::clone(&operation);
-    if let Some(generation) = generation.as_ref() {
-        generation.0.retirement.cancel();
+    if kill_first {
+        if let Some(generation) = generation.as_ref() {
+            generation.0.retirement.cancel();
+        }
+        let _ = child.start_kill();
     }
-    let _ = child.start_kill();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move{
             // One owned task retains admission and descendant ownership across
             // retries and cancellation. Errors never mint a reap receipt.
             let mut failures=0u64;
-            loop {
-                match hooks.wait(&mut child).await {
-                    Ok(_)=>break,
+            let mut force_kill=kill_first;
+            let exit_status=loop {
+                let outcome=if !force_kill {
+                    if let Some(generation)=generation.as_ref() {
+                        tokio::select! { biased;
+                            ()=generation.0.retirement.cancelled()=>{force_kill=true;let _=child.start_kill();continue;},
+                            outcome=hooks.wait(&mut child)=>outcome,
+                        }
+                    } else { hooks.wait(&mut child).await }
+                } else { hooks.wait(&mut child).await };
+                match outcome {
+                    Ok(status)=>break status,
                     Err(error)=>{
                         if failures==0 {tracing::warn!(target:"plurxd::prodrun",%error,"producer wait failed; admission retained");}
                         failures=failures.saturating_add(1);
@@ -211,6 +243,10 @@ fn owned_reap(
                         let _=child.start_kill();
                     }
                 }
+            };
+            if let Some(generation)=generation.as_ref() {
+                *generation.0.exit_status.lock().expect("producer exit status")=Some(exit_status);
+                generation.0.child_exited.notify_waiters();
             }
             let mut writers=WriterSettlement::Settled;
             if let Some(generation)=generation.as_ref(){
@@ -239,7 +275,7 @@ fn owned_reap(
             drop(child_job);
             drop(resources);
             if let Some(generation)=generation {
-                *generation.0.receipt.lock().expect("producer receipt lock")=Some(ConfirmedProducerReap{identity:Arc::clone(&generation.0.identity),writers});
+                *generation.0.receipt.lock().expect("producer receipt lock")=Some(ConfirmedProducerReap{identity:Arc::clone(&generation.0.identity),writers,exit_status});
                 generation.0.settled.notify_waiters();
             }
             if let Some(inner)=inner.upgrade(){
@@ -307,6 +343,8 @@ fn registered_generation_with_source(
         identity: Arc::new(()),
         writers: Mutex::new(Some(receiver)),
         receipt: StdMutex::new(None),
+        exit_status: StdMutex::new(None),
+        child_exited: Notify::new(),
         settled: Notify::new(),
         retirement: tokio_util::sync::CancellationToken::new(),
     }));
@@ -337,6 +375,7 @@ impl Drop for Inner {
                 Arc::clone(&self.hooks),
                 Weak::new(),
                 self.belief,
+                true,
             );
         }
     }
@@ -596,6 +635,7 @@ impl ProducerSlot {
                     Arc::clone(&state.hooks),
                     Arc::downgrade(&self.inner),
                     next,
+                    true,
                 );
                 state.reaping = Some(Arc::clone(&operation));
                 drop(state);
@@ -615,6 +655,23 @@ impl ProducerSlot {
     pub(crate) async fn request_registered_retirement(
         &self,
         generation: &ProducerRegistration,
+    ) -> io::Result<bool> {
+        generation.0.retirement.cancel();
+        self.request_registered_reap(generation, true).await
+    }
+    /// Wait naturally after all output pipes reach EOF. The same retained
+    /// reaper can still be cancelled by exact-generation retirement. Successful
+    /// exit is observed before a caller may publish ENDLIST/complete evidence.
+    pub(crate) async fn request_registered_completion(
+        &self,
+        generation: &ProducerRegistration,
+    ) -> io::Result<bool> {
+        self.request_registered_reap(generation, false).await
+    }
+    async fn request_registered_reap(
+        &self,
+        generation: &ProducerRegistration,
+        kill: bool,
     ) -> io::Result<bool> {
         let mut state = self.inner.lock().await;
         if !state
@@ -646,6 +703,7 @@ impl ProducerSlot {
             Arc::clone(&state.hooks),
             Arc::downgrade(&self.inner),
             next,
+            kill,
         );
         state.reaping = Some(operation);
         Ok(true)
@@ -774,6 +832,7 @@ impl ProducerSlot {
                     Arc::clone(&inner.hooks),
                     Arc::downgrade(&self.inner),
                     next,
+                    true,
                 );
                 inner.reaping = Some(Arc::clone(&operation));
                 drop(inner);
@@ -813,6 +872,57 @@ fn no_child() -> io::Error {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[tokio::test]
+    async fn natural_exit_records_real_status_but_retains_input_and_writers_until_ack() {
+        for code in [0, 7] {
+            let slot = super::ProducerSlot::new();
+            let child = tokio::process::Command::new("/bin/sh")
+                .args(["-c", &format!("exit {code}")])
+                .kill_on_drop(true)
+                .spawn()
+                .expect("actual child");
+            let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+            let (registration, writers) =
+                slot.attach_registered_job_owned(child, job, 0, None).await;
+            slot.request_registered_completion(&registration)
+                .await
+                .expect("natural completion owner");
+            let status = registration.wait_child_exit().await;
+            assert_eq!(status.success(), code == 0);
+            assert!(
+                registration.confirmed_reap().is_none(),
+                "exit is not writer/input settlement"
+            );
+            assert!(
+                !registration.retirement().is_cancelled(),
+                "natural exit retains final publication fence"
+            );
+            writers.settled();
+            let receipt = registration.wait_confirmed_reap().await;
+            assert_eq!(receipt.exit_success(), code == 0);
+            assert_eq!(receipt.exit_status.code(), Some(code));
+        }
+    }
+    #[tokio::test]
+    async fn late_retirement_cancels_the_same_natural_reaper_and_joins_before_receipt() {
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (registration, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
+        slot.request_registered_completion(&registration)
+            .await
+            .expect("natural owner");
+        slot.request_registered_retirement(&registration)
+            .await
+            .expect("cancel existing owner");
+        assert!(!registration.wait_child_exit().await.success());
+        assert!(registration.confirmed_reap().is_none());
+        writers.settled();
+        let receipt = registration.wait_confirmed_reap().await;
+        assert!(receipt.matches(&registration));
+        assert!(!receipt.exit_success());
+    }
+
     #[tokio::test]
     async fn a_vod_generation_carries_a_child_job_until_reap() {
         let slot = super::ProducerSlot::new();
@@ -979,7 +1089,7 @@ mod tests {
     /// these tests is observing real process states, not a mock's.
     fn sleeper() -> Child {
         let mut command = tokio::process::Command::new("sleep");
-        command.arg("300").kill_on_drop(true);
+        command.arg("300").kill_on_drop(true).process_group(0);
         command.spawn().expect("spawn sleep")
     }
 

@@ -1,5 +1,8 @@
 //! Shared storage identities and all-or-none claim reservations.
 use super::background_jobs::{decode, encode, identifier, QueueSql};
+pub use super::storage_domain_pending_api::{
+    StorageDomainApply, StorageDomainPending, StorageDomainState, StorageDomainWait,
+};
 use crate::error::StoreError;
 use serde::{Deserialize, Serialize};
 
@@ -36,55 +39,6 @@ pub fn validate(mappings: &[StorageDomainMapping]) -> Result<(), StoreError> {
 pub(super) async fn list<T: QueueSql>(store: &T) -> Result<Vec<StorageDomainMapping>, StoreError> {
     store.queue_sql("SELECT json_object('library_id', library_id, 'root_path', root_path, 'domain_id', domain_id) AS result_json FROM background_storage_domains ORDER BY library_id, root_path LIMIT json_extract($1, '$.limit')".into(), "{\"limit\":256}".into(), false, true).await?
         .iter().map(|row| decode(row)).collect()
-}
-
-pub(super) async fn replace<T: QueueSql>(
-    store: &T,
-    mappings: Vec<StorageDomainMapping>,
-    now_ms: i64,
-) -> Result<bool, StoreError> {
-    validate(&mappings)?;
-    if now_ms < 0 {
-        return Err(StoreError::Task("invalid storage domain clock".into()));
-    }
-    let body = encode(
-        &serde_json::json!({"mappings":mappings,"now_ms":now_ms,"id":uuid::Uuid::new_v4().to_string()}),
-    )?;
-    if body.len() > 64 * 1024 {
-        return Err(StoreError::Task(
-            "storage domain configuration exceeds 64 KiB".into(),
-        ));
-    }
-    let rows = store
-        .queue_sql(
-            r#"
-INSERT INTO background_job_commands(id, operation, request_json, result_json)
-SELECT json_extract($1, '$.id'), 'storage_domains', $1,
-    CASE WHEN NOT EXISTS (SELECT 1 FROM background_jobs
-        WHERE state IN ('running','cancelling') AND lease_expires_ms > json_extract($1, '$.now_ms'))
-      AND NOT EXISTS (SELECT 1 FROM analysis_source_reservations
-        WHERE expires_at_ms > json_extract($1, '$.now_ms'))
-      AND NOT EXISTS (SELECT 1 FROM background_source_custody)
-      AND NOT EXISTS (SELECT 1 FROM foreground_source_owners WHERE lease_expires_at_ms>json_extract($1,'$.now_ms') OR json_extract(projection_json,'$.source_quiescent')!=1)
-      AND NOT EXISTS (SELECT 1 FROM background_source_pauses paused JOIN background_jobs job ON job.id=paused.job_id
-        AND job.fence=paused.fence WHERE job.state IN ('running','cancelling') AND job.lease_expires_ms>json_extract($1,'$.now_ms'))
-      AND NOT EXISTS (SELECT 1 FROM json_each($1, '$.mappings') mapping
-        WHERE NOT EXISTS (SELECT 1 FROM libraries library, json_each(library.paths) root
-            WHERE library.id = json_extract(mapping.value, '$.library_id')
-            AND root.value = json_extract(mapping.value, '$.root_path')))
-      THEN 'true' ELSE 'false' END
-RETURNING result_json
-"#
-            .into(),
-            body,
-            true,
-            true,
-        )
-        .await?;
-    decode(
-        rows.first()
-            .ok_or_else(|| StoreError::Task("missing domain replacement verdict".into()))?,
-    )
 }
 
 /// Both backends install the same foreground custody and continuation schema.
@@ -424,6 +378,50 @@ pub(super) async fn mark_foreground_settled<T: QueueSql>(
     Ok(!rows.is_empty())
 }
 
+/// A no-reader registration can still arm while its exact owner is live.
+/// Joined and aborted owners have already settled. Recheck both the proof
+/// and current authority in the writer because a sweep can race a renewal,
+/// activation, or a new registration.
+pub(super) async fn reap_settled_source_custody<T: QueueSql>(
+    store: &T,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let foreground = "SELECT owner_id FROM foreground_source_owners
+        WHERE settlement_proof IN ('joined','aborted')
+           OR (settlement_proof='no_reader' AND lease_expires_at_ms<=json_extract($1,'$.now_ms'))
+        ORDER BY started_at_ms,owner_id LIMIT 128";
+    let background = "SELECT custody_id FROM background_source_current_owners
+        WHERE settlement_proof IN ('joined','aborted')
+           OR (settlement_proof='no_reader' AND authority_expires_at_ms<=json_extract($1,'$.now_ms'))
+        ORDER BY started_at_ms,custody_id LIMIT 128";
+    let body = encode(&serde_json::json!({"now_ms": now_ms}))?;
+    let pending = store
+        .queue_sql(
+            format!(
+                "SELECT 'true' AS result_json WHERE EXISTS ({foreground}) OR EXISTS ({background})"
+            ),
+            body.clone(),
+            false,
+            true,
+        )
+        .await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    store
+        .queue_transaction(vec![
+            (
+                format!("DELETE FROM foreground_source_owners WHERE owner_id IN ({foreground})"),
+                body.clone(),
+            ),
+            (
+                format!("DELETE FROM background_source_custody WHERE custody_id IN ({background})"),
+                body,
+            ),
+        ])
+        .await
+}
+
 pub(super) async fn settled_foreground_custody<T: QueueSql>(
     store: &T,
 ) -> Result<Vec<ForegroundSourceToken>, StoreError> {
@@ -495,6 +493,9 @@ pub(super) async fn background_may_continue<T: QueueSql>(
 ) -> Result<bool, StoreError> {
     if now_ms < 0 {
         return Err(StoreError::Task("invalid source observation time".into()));
+    }
+    if super::analysis_coordination::is_coordinator_owner(store, &owner).await? {
+        return Ok(false);
     }
     background_owner_key(&owner)?;
     let identity = background_owner_identity(&owner);
@@ -607,23 +608,908 @@ mod source_tests {
           CREATE TABLE job_leases(resource TEXT PRIMARY KEY,owner_node_id TEXT,fence INTEGER,revision INTEGER,expires_at_ms INTEGER,updated_at_ms INTEGER);
           CREATE TABLE offline_packages(id TEXT PRIMARY KEY,node_id TEXT,file_id INTEGER,source_size INTEGER,source_mtime INTEGER,claim_generation INTEGER,state TEXT,expires_at INTEGER);
           CREATE TABLE background_storage_domains(library_id INTEGER,root_path TEXT,domain_id TEXT);
-          CREATE TABLE background_jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,fence INTEGER,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,priority INTEGER DEFAULT 0);
+          CREATE TABLE background_jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,fence INTEGER,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,priority INTEGER DEFAULT 0,result_ref TEXT,revision INTEGER NOT NULL DEFAULT 0,updated_at_ms INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE background_job_commands(id TEXT PRIMARY KEY,operation TEXT,request_json TEXT,result_json TEXT);
-          CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER,request_digest TEXT,job_id TEXT,consumer_kind TEXT,consumer_ref TEXT,priority INTEGER,deadline_ms INTEGER,target_node_id TEXT,PRIMARY KEY(request_scope,request_id));
+          CREATE TABLE background_job_waiters(request_scope TEXT,request_id TEXT,state TEXT,updated_at_ms INTEGER,request_digest TEXT,job_id TEXT,consumer_kind TEXT,consumer_ref TEXT,priority INTEGER,deadline_ms INTEGER,target_node_id TEXT,retry_deadline_ms INTEGER NOT NULL DEFAULT 0,last_error_code TEXT,result_ref TEXT,PRIMARY KEY(request_scope,request_id));
           CREATE TABLE media_session_requests(user_id INTEGER,playback_id TEXT,incarnation_id TEXT,state TEXT,claim_expires_at_ms INTEGER);
           CREATE TABLE media_sessions(user_id INTEGER,playback_id TEXT,incarnation_id TEXT,state TEXT,lease_expires_at_ms INTEGER,recipe_json TEXT);
           CREATE TABLE media_playback_pointers(user_id INTEGER,playback_id TEXT,current_incarnation_id TEXT);
           CREATE TABLE background_job_reservations(resource_key TEXT,slot INTEGER,job_id TEXT,fence INTEGER,expires_at_ms INTEGER,PRIMARY KEY(resource_key,slot));
           CREATE TABLE analysis_requests(request_id TEXT PRIMARY KEY,owner_node_id TEXT,fence INTEGER,state TEXT,cancel_requested INTEGER,lease_expires_ms INTEGER,
-            requested_generation TEXT,file_id INTEGER,source_size INTEGER,source_mtime INTEGER,priority TEXT,trigger TEXT,updated_at_ms INTEGER,force_rebuild INTEGER,component TEXT);
-          CREATE TABLE analysis_source_reservations(resource_key TEXT,request_id TEXT,fence INTEGER,expires_at_ms INTEGER);
+            requested_generation TEXT,file_id INTEGER,source_size INTEGER,source_mtime INTEGER,priority TEXT,trigger TEXT,updated_at_ms INTEGER,force_rebuild INTEGER,component TEXT,pipeline_version TEXT NOT NULL DEFAULT '',video_identity TEXT NOT NULL DEFAULT '',last_error_code TEXT,result_cache_key TEXT);
+          CREATE TABLE analysis_attempts(request_id TEXT,attempt INTEGER,claim_node_id TEXT,claim_epoch INTEGER,claim_expires_at_ms INTEGER,phase TEXT,started_at_ms INTEGER,phase_updated_at_ms INTEGER,terminal_code TEXT,PRIMARY KEY(request_id,claim_epoch));
+          CREATE TABLE analysis_source_reservations(resource_key TEXT,request_id TEXT,fence INTEGER,expires_at_ms INTEGER,PRIMARY KEY(request_id,resource_key));
           CREATE VIEW analysis_required_resources AS SELECT request_id,'source_io' AS resource_key FROM analysis_requests;
           INSERT INTO libraries VALUES(1,'[\"/media\"]'); INSERT INTO items VALUES(1,1);INSERT INTO files VALUES(1,1,100,1);").expect("existing arbiter");
         connection
             .execute_batch(SOURCE_ARBITRATION_SCHEMA)
             .expect("same new schema as both backends");
+        connection
+            .execute_batch(super::super::analysis_coordination::SCHEMA)
+            .expect("metadata role protocol");
         SourceSql(Mutex::new(connection))
     }
+    fn coordinator_fixture() -> (
+        SourceSql,
+        super::super::analysis_coordination::AnalysisCoordinationSource,
+    ) {
+        let store = fixture();
+        {
+            let connection = store.0.lock().expect("connection");
+            connection.execute_batch("ALTER TABLE analysis_requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+              ALTER TABLE analysis_requests ADD COLUMN not_before_ms INTEGER NOT NULL DEFAULT 0;
+              ALTER TABLE analysis_requests ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0;
+              ALTER TABLE analysis_requests ADD COLUMN expected_predecessor_generation TEXT NOT NULL DEFAULT '';
+              ALTER TABLE analysis_requests ADD COLUMN target_node_id TEXT NOT NULL DEFAULT 'worker';
+              ").expect("coordinator fixture columns");
+        }
+        let source = super::super::analysis_coordination::AnalysisCoordinationSource {
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 1,
+            origin_node_id: "worker".into(),
+            object_version: "held-origin-one".into(),
+            video_identity: "a".repeat(16),
+            contract_version: 1,
+            requested_generation: "source-contract-generation".into(),
+        };
+        {
+            let connection = store.0.lock().expect("connection");
+            connection.execute("INSERT INTO analysis_requests(request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,priority,trigger,state,fence,attempts,not_before_ms,updated_at_ms,cancel_requested,force_rebuild) VALUES('coordinator',1,100,1,'fragment_index',?1,?2,?3,'normal','background','queued',0,0,0,1000,0,0)",rusqlite::params![source.pipeline_marker(),source.video_marker(),source.requested_generation]).expect("queued coordinator");
+        }
+        (store, source)
+    }
+
+    #[tokio::test]
+    async fn metadata_coordination_never_reserves_or_borrows_physical_input() {
+        use super::super::analysis_coordination as coordinator;
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish")
+            .expect("role");
+        {
+            let connection = store.0.lock().expect("connection");
+            connection.execute("INSERT INTO analysis_source_reservations VALUES('source_io','peer-one',1,30000)",[]).expect("peer one");
+            connection.execute("INSERT INTO analysis_source_reservations VALUES('source_io','peer-two',1,30000)",[]).expect("peer two");
+        }
+        let claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("claim")
+        .expect("metadata claim with busy source");
+        let count: i64 = store
+            .0
+            .lock()
+            .expect("connection")
+            .query_row(
+                "SELECT count(*) FROM analysis_source_reservations WHERE request_id='coordinator'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            count, 0,
+            "metadata claim cannot double-charge the foreground input"
+        );
+        assert!(coordinator::begin_phase(
+            &store,
+            claim.clone(),
+            source.clone(),
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            1000
+        )
+        .await
+        .expect("capacity decision")
+        .is_none());
+        assert!(matches!(
+            register_background_typed(&store, claim.physical_owner(), 1000)
+                .await
+                .expect("generic registration"),
+            BackgroundSourceRegistration::LostOwnership
+        ));
+        assert!(
+            claim_background_service(&store, claim.physical_owner(), 1000)
+                .await
+                .expect("generic service")
+                .is_none()
+        );
+        let mut another_object = source;
+        another_object.object_version = "same-size-same-mtime-other-object".into();
+        assert!(coordinator::begin_phase(
+            &store,
+            claim,
+            another_object,
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            1000
+        )
+        .await
+        .expect("source decision")
+        .is_none());
+    }
+
+    async fn v3_seeded_head_fixture() -> (
+        SourceSql,
+        super::super::analysis_coordination::AnalysisCoordinationSource,
+        super::super::analysis_coordination::AnalysisCoordinationClaim,
+        String,
+    ) {
+        use super::super::{
+            analysis_coordination as coordinator, background_jobs::BackgroundJobStore,
+        };
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish role");
+        let claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("metadata claim")
+        .expect("current owner");
+        let head = store
+            .ensure_copy_index_v3_head("catalogue", source.clone(), claim.clone(), 1000)
+            .await
+            .expect("seed current metadata head")
+            .expect("pending head");
+        assert_eq!(
+            head.state,
+            super::super::copy_index_v3::CopyIndexV3HeadState::Pending
+        );
+        store.0.lock().expect("connection").execute(
+            "UPDATE copy_index_v3_heads SET state='healthy',head_epoch=7,contract_key=?1,blob_sha256=?2,published_generation=desired_generation WHERE source_key=?3",
+            rusqlite::params!["c".repeat(64),"b".repeat(64),head.source_key],
+        ).expect("fixture established published head");
+        (store, source, claim, head.source_key)
+    }
+
+    async fn v3_repair_head_claim(
+        store: &SourceSql,
+        original: &super::super::analysis_coordination::AnalysisCoordinationSource,
+        expected_epoch: i64,
+        bad_blob: &str,
+    ) -> (
+        super::super::analysis_coordination::AnalysisCoordinationSource,
+        super::super::analysis_coordination::AnalysisCoordinationClaim,
+    ) {
+        use super::super::{analysis_coordination as coordinator, copy_index_v3};
+        let mut source = original.clone();
+        let key =
+            copy_index_v3::copy_index_v3_source_key("catalogue", &source).expect("source key");
+        source.requested_generation =
+            copy_index_v3::copy_index_v3_rebuild_generation(&key, bad_blob, expected_epoch)
+                .expect("deterministic successor");
+        {
+            let connection = store.0.lock().expect("connection");
+            connection.execute("UPDATE analysis_requests SET state='ready',owner_node_id=NULL,lease_expires_ms=NULL WHERE request_id='coordinator'",[]).expect("old request completed, never revived");
+            connection.execute("INSERT INTO analysis_requests(request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,priority,trigger,state,fence,attempts,not_before_ms,updated_at_ms,cancel_requested,force_rebuild) VALUES('repair',1,100,1,'fragment_index',?1,?2,?3,'forced','background','queued',0,0,0,1000,0,1)",rusqlite::params![source.pipeline_marker(),source.video_marker(),source.requested_generation]).expect("new repair request");
+        }
+        coordinator::establish(store, "repair", source.clone(), 1000)
+            .await
+            .expect("new repair role");
+        let claim = coordinator::claim(store, "repair", source.clone(), "worker", 0, 1000, 30000)
+            .await
+            .expect("repair claim")
+            .expect("new generation metadata owner");
+        (source, claim)
+    }
+
+    #[tokio::test]
+    async fn v3_head_seed_read_and_existing_pointer_require_current_metadata_scope() {
+        use super::super::{
+            background_jobs::BackgroundJobStore, copy_index_v3::CopyIndexV3HeadState,
+        };
+        let (store, source, claim, key) = v3_seeded_head_fixture().await;
+        let before = store
+            .copy_index_v3_head(&key)
+            .await
+            .expect("read valid head")
+            .expect("healthy head");
+        let mut stale = claim.clone();
+        stale.fence += 1;
+        assert!(store
+            .ensure_copy_index_v3_head("other", source.clone(), stale, 1001)
+            .await
+            .expect("stale fence refused")
+            .is_none());
+        let mut other_object = source.clone();
+        other_object.object_version = "different object".into();
+        assert!(store
+            .ensure_copy_index_v3_head("catalogue", other_object, claim.clone(), 1001)
+            .await
+            .expect("unowned object refused")
+            .is_none());
+        store.0.lock().expect("connection").execute("INSERT INTO settings(key,value) VALUES('internal.cluster_job_owner_removed.worker','true')",[]).expect("removed owner");
+        assert!(store
+            .ensure_copy_index_v3_head("other", source.clone(), claim.clone(), 1001)
+            .await
+            .expect("removed owner refused")
+            .is_none());
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "DELETE FROM settings WHERE key='internal.cluster_job_owner_removed.worker'",
+                [],
+            )
+            .expect("restore fixture owner");
+        let (repair_source, repair) =
+            v3_repair_head_claim(&store, &source, 7, &"b".repeat(64)).await;
+        assert_eq!(
+            store
+                .ensure_copy_index_v3_head("catalogue", repair_source, repair, 1001)
+                .await
+                .expect("current successor may observe")
+                .expect("existing head"),
+            before,
+            "seed must not change old desired generation, epoch, healthy pointers or time"
+        );
+        assert!(store
+            .ensure_copy_index_v3_head("catalogue", source, claim, 1001)
+            .await
+            .expect("ready owner cannot be revived")
+            .is_none());
+        {
+            let connection = store.0.lock().expect("connection");
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM background_source_custody",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("physical custody"),
+                0
+            );
+            assert_eq!(connection.query_row("SELECT count(*) FROM analysis_source_reservations WHERE request_id IN ('coordinator','repair')",[],|row|row.get::<_,i64>(0)).expect("source reservations"),0);
+            connection
+                .execute(
+                    "UPDATE copy_index_v3_heads SET raw_video_identity=?1 WHERE source_key=?2",
+                    rusqlite::params!["d".repeat(16), key],
+                )
+                .expect("fixture corrupts identity tuple");
+        }
+        assert!(
+            store.copy_index_v3_head(&key).await.is_err(),
+            "decoded head must validate source-key binding"
+        );
+        assert_eq!(before.state, CopyIndexV3HeadState::Healthy);
+    }
+
+    #[tokio::test]
+    async fn v3_head_quarantine_is_atomic_convergent_and_keeps_the_bad_pointer() {
+        use super::super::{
+            background_jobs::{BackgroundJobStore, QuarantineCopyIndexV3Head},
+            copy_index_v3::CopyIndexV3HeadState,
+        };
+        let (store, source, old_claim, key) = v3_seeded_head_fixture().await;
+        let other = store
+            .ensure_copy_index_v3_head("unrelated", source.clone(), old_claim, 1000)
+            .await
+            .expect("other namespace")
+            .expect("other head");
+        let (source, claim) = v3_repair_head_claim(&store, &source, 7, &"b".repeat(64)).await;
+        let input = QuarantineCopyIndexV3Head {
+            catalog_namespace: "catalogue".into(),
+            source,
+            claim,
+            expected_epoch: 7,
+            bad_blob_sha256: "b".repeat(64),
+            code: "bad_blob".into(),
+            now_ms: 1001,
+        };
+        store.0.lock().expect("connection").execute_batch("CREATE TEMP TRIGGER reject_fixture_quarantine BEFORE UPDATE ON copy_index_v3_heads WHEN NEW.state='quarantined' BEGIN SELECT RAISE(ABORT,'fixture refuses head update'); END;").expect("atomicity fault");
+        assert!(store
+            .quarantine_copy_index_v3_head(input.clone())
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT count(*) FROM copy_index_v3_quarantines",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("rolled back ledger"),
+            0
+        );
+        assert_eq!(
+            store
+                .copy_index_v3_head(&key)
+                .await
+                .expect("unchanged head")
+                .expect("head")
+                .state,
+            CopyIndexV3HeadState::Healthy
+        );
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute_batch("DROP TRIGGER reject_fixture_quarantine")
+            .expect("remove fixture fault");
+        assert!(store
+            .quarantine_copy_index_v3_head(input.clone())
+            .await
+            .expect("exact current repair claim"));
+        let mut replay = input.clone();
+        replay.code = "different_observer_code".into();
+        replay.now_ms = 1002;
+        assert!(store
+            .quarantine_copy_index_v3_head(replay)
+            .await
+            .expect("convergent exact replay"));
+        let quarantined = store
+            .copy_index_v3_head(&key)
+            .await
+            .expect("quarantined metadata")
+            .expect("head");
+        assert_eq!(quarantined.state, CopyIndexV3HeadState::Quarantined);
+        assert_eq!(
+            quarantined.desired_generation,
+            input.source.requested_generation
+        );
+        assert_eq!(quarantined.head_epoch, 7);
+        assert_eq!(quarantined.blob_sha256, Some("b".repeat(64)));
+        assert_eq!(quarantined.contract_key, Some("c".repeat(64)));
+        assert_eq!(quarantined.updated_at_ms, 1001);
+        assert_eq!(
+            store
+                .copy_index_v3_head(&other.source_key)
+                .await
+                .expect("unrelated head")
+                .expect("present"),
+            other
+        );
+        let mut stale = input;
+        stale.claim.fence += 1;
+        assert!(!store
+            .quarantine_copy_index_v3_head(stale)
+            .await
+            .expect("replay still needs live exact owner"));
+        let connection = store.0.lock().expect("connection");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM copy_index_v3_quarantines",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("one ledger row"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT code FROM copy_index_v3_quarantines", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("first code retained"),
+            "bad_blob"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM analysis_requests WHERE request_id='coordinator'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .expect("old request remains completed"),
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_head_quarantine_rejects_stale_head_and_metadata_owners_without_mutation() {
+        use super::super::background_jobs::{BackgroundJobStore, QuarantineCopyIndexV3Head};
+        for refusal in [
+            "epoch", "blob", "fence", "lease", "removed", "file", "ready",
+        ] {
+            let (store, original, _, key) = v3_seeded_head_fixture().await;
+            let epoch = if refusal == "epoch" { 8 } else { 7 };
+            let blob = if refusal == "blob" {
+                "d".repeat(64)
+            } else {
+                "b".repeat(64)
+            };
+            let (source, claim) = v3_repair_head_claim(&store, &original, epoch, &blob).await;
+            let before = store
+                .copy_index_v3_head(&key)
+                .await
+                .expect("before")
+                .expect("head");
+            let mut input = QuarantineCopyIndexV3Head {
+                catalog_namespace: "catalogue".into(),
+                source,
+                claim,
+                expected_epoch: epoch,
+                bad_blob_sha256: blob,
+                code: "bad_blob".into(),
+                now_ms: 1001,
+            };
+            match refusal {
+                "fence" => input.claim.fence += 1,
+                "lease" => {
+                    store.0.lock().expect("connection").execute("UPDATE analysis_requests SET lease_expires_ms=1001 WHERE request_id='repair'",[]).expect("expired owner");
+                }
+                "removed" => {
+                    store.0.lock().expect("connection").execute("INSERT INTO settings(key,value) VALUES('internal.cluster_job_owner_removed.worker','true')",[]).expect("removed owner");
+                }
+                "file" => {
+                    store
+                        .0
+                        .lock()
+                        .expect("connection")
+                        .execute("UPDATE files SET size=101 WHERE id=1", [])
+                        .expect("source replaced");
+                }
+                "ready" => {
+                    store
+                        .0
+                        .lock()
+                        .expect("connection")
+                        .execute(
+                            "UPDATE analysis_requests SET state='ready' WHERE request_id='repair'",
+                            [],
+                        )
+                        .expect("claim completed");
+                }
+                _ => {}
+            }
+            assert!(
+                !store
+                    .quarantine_copy_index_v3_head(input)
+                    .await
+                    .expect("ordinary guard refusal"),
+                "{refusal}"
+            );
+            assert_eq!(
+                store
+                    .copy_index_v3_head(&key)
+                    .await
+                    .expect("after")
+                    .expect("same head"),
+                before,
+                "{refusal}"
+            );
+            assert_eq!(
+                store
+                    .0
+                    .lock()
+                    .expect("connection")
+                    .query_row(
+                        "SELECT count(*) FROM copy_index_v3_quarantines",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("no ledger mutation"),
+                0,
+                "{refusal}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_attestation_is_bound_immutable_and_survives_phase_close() {
+        use super::super::{
+            analysis_coordination as coordinator, background_jobs::BackgroundJobStore,
+            copy_index_v3::CopyIndexSourceAttestation,
+        };
+
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish");
+        let claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("claim")
+        .expect("claimed");
+        let phase = coordinator::begin_phase(
+            &store,
+            claim,
+            source.clone(),
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            1000,
+        )
+        .await
+        .expect("begin")
+        .expect("active phase");
+        assert!(activate_background_custody(
+            &store,
+            phase.custody.clone(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect("activate custody"));
+
+        let receipt = |phase: &super::super::analysis_coordination::AnalysisPhysicalPhase,
+                       hash: &str| {
+            CopyIndexSourceAttestation {
+                origin_node_id: phase.source.origin_node_id.clone(),
+                file_id: phase.source.file_id,
+                object_version: phase.source.object_version.clone(),
+                source_size: phase.source.source_size,
+                source_mtime: phase.source.source_mtime,
+                source_sha256: hash.into(),
+                regime_revision: 1,
+                completed_at_ms: 999,
+                analysis_request_id: phase.claim.request_id.clone(),
+                analysis_fence: phase.claim.fence,
+                phase_sequence: phase.phase_sequence,
+                custody_id: phase.custody.custody_id.clone(),
+            }
+        };
+        let original = receipt(&phase, &"a".repeat(64));
+        assert!(store
+            .record_copy_index_source_attestation(phase.clone(), original.clone(), 1000)
+            .await
+            .expect("record exact phase receipt"));
+        assert!(store
+            .record_copy_index_source_attestation(phase.clone(), original.clone(), 1000)
+            .await
+            .expect("exact replay is idempotent"));
+        assert_eq!(
+            store
+                .copy_index_source_attestation("worker", 1, "held-origin-one")
+                .await
+                .expect("read receipt"),
+            Some(original.clone())
+        );
+
+        let conflict = receipt(&phase, &"b".repeat(64));
+        assert!(!store
+            .record_copy_index_source_attestation(phase.clone(), conflict, 1000)
+            .await
+            .expect("conflicting hash cannot replace object receipt"));
+
+        let mut wrong_stamp = original.clone();
+        wrong_stamp.source_mtime += 1;
+        assert!(store
+            .record_copy_index_source_attestation(phase.clone(), wrong_stamp, 1000)
+            .await
+            .is_err());
+
+        let mut wrong_uuid_phase = phase.clone();
+        wrong_uuid_phase.custody.custody_id = uuid::Uuid::new_v4().to_string();
+        let wrong_uuid = receipt(&wrong_uuid_phase, &"c".repeat(64));
+        assert!(!store
+            .record_copy_index_source_attestation(wrong_uuid_phase, wrong_uuid, 1000)
+            .await
+            .expect("wrong physical phase UUID rejected"));
+
+        let mut wrong_fence_phase = phase.clone();
+        wrong_fence_phase.claim.fence += 1;
+        if let BackgroundSourceOwner::Analysis { fence, .. } = &mut wrong_fence_phase.custody.owner
+        {
+            *fence += 1;
+        }
+        let wrong_fence = receipt(&wrong_fence_phase, &"d".repeat(64));
+        assert!(!store
+            .record_copy_index_source_attestation(wrong_fence_phase, wrong_fence, 1000)
+            .await
+            .expect("wrong analysis fence rejected"));
+
+        let mut wrong_sequence_phase = phase.clone();
+        wrong_sequence_phase.phase_sequence += 1;
+        let wrong_sequence = receipt(&wrong_sequence_phase, &"e".repeat(64));
+        assert!(!store
+            .record_copy_index_source_attestation(wrong_sequence_phase, wrong_sequence, 1000)
+            .await
+            .expect("wrong phase sequence rejected"));
+
+        assert!(mark_background_settled(&store, phase.custody.clone())
+            .await
+            .expect("settle phase custody"));
+        let settled_phase_receipt = receipt(&phase, &"f".repeat(64));
+        assert!(!store
+            .record_copy_index_source_attestation(phase.clone(), settled_phase_receipt, 1000)
+            .await
+            .expect("settled phase cannot mint or update"));
+        assert!(
+            release_background_custody(&store, phase.custody.clone(), 1000)
+                .await
+                .expect("release settled custody")
+        );
+        assert!(coordinator::finish_phase(&store, phase.clone())
+            .await
+            .expect("finish phase"));
+        let finished_phase_receipt = receipt(&phase, &"9".repeat(64));
+        assert!(!store
+            .record_copy_index_source_attestation(phase.clone(), finished_phase_receipt, 1000)
+            .await
+            .expect("finished phase cannot update"));
+        assert_eq!(
+            store
+                .copy_index_source_attestation("worker", 1, "held-origin-one")
+                .await
+                .expect("cached read-only receipt remains valid"),
+            Some(original)
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_phases_use_exact_incarnations_and_cannot_resurrect() {
+        use super::super::analysis_coordination as coordinator;
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish");
+        let claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("claim")
+        .expect("claimed");
+        let first_id = uuid::Uuid::new_v4().to_string();
+        let first = coordinator::begin_phase(
+            &store,
+            claim.clone(),
+            source.clone(),
+            0,
+            first_id.clone(),
+            1000,
+        )
+        .await
+        .expect("begin")
+        .expect("first phase");
+        let replay = coordinator::begin_phase(
+            &store,
+            claim.clone(),
+            source.clone(),
+            0,
+            first_id.clone(),
+            1000,
+        )
+        .await
+        .expect("replay")
+        .expect("same phase");
+        assert_eq!(first.custody.custody_id, replay.custody.custody_id);
+        assert!(activate_background_custody(
+            &store,
+            first.custody.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("activate"));
+        assert!(coordinator::phase_current(&store, &first, 1000)
+            .await
+            .expect("current"));
+        assert!(claim_analysis_phase_service(&store, &first, 1000)
+            .await
+            .expect("exact service")
+            .is_some());
+        assert!(!coordinator::finish_phase(&store, first.clone())
+            .await
+            .expect("still reading"));
+        assert!(mark_background_settled(&store, first.custody.clone())
+            .await
+            .expect("joined proof"));
+        assert!(!coordinator::finish_phase(&store, first.clone())
+            .await
+            .expect("receipt still retained"));
+        assert!(
+            release_background_custody(&store, first.custody.clone(), 1000)
+                .await
+                .expect("release")
+        );
+        assert!(coordinator::begin_phase(
+            &store,
+            claim.clone(),
+            source.clone(),
+            0,
+            first_id.clone(),
+            1000
+        )
+        .await
+        .expect("registration after settlement cannot recreate receipt")
+        .is_none());
+        assert!(coordinator::finish_phase(&store, first.clone())
+            .await
+            .expect("close phase"));
+        assert!(
+            coordinator::begin_phase(&store, claim.clone(), source.clone(), 0, first_id, 1000)
+                .await
+                .expect("stale registration")
+                .is_none()
+        );
+        let second = coordinator::begin_phase(
+            &store,
+            claim,
+            source,
+            1,
+            uuid::Uuid::new_v4().to_string(),
+            1000,
+        )
+        .await
+        .expect("next begin")
+        .expect("second phase");
+        assert_ne!(first.custody.custody_id, second.custody.custody_id);
+        assert!(
+            !release_background_custody(&store, first.custody.clone(), 1000)
+                .await
+                .expect("stale release")
+        );
+        assert!(!coordinator::phase_current(&store, &first, 1000)
+            .await
+            .expect("old phase"));
+        assert!(claim_analysis_phase_service(&store, &first, 1000)
+            .await
+            .expect("old service")
+            .is_none());
+        assert_eq!(second.phase_sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn coordinator_takeover_keeps_old_physical_custody_charged_until_joined() {
+        use super::super::analysis_coordination as coordinator;
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish");
+        let first_claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("claim")
+        .expect("claimed");
+        let first = coordinator::begin_phase(
+            &store,
+            first_claim,
+            source.clone(),
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            1000,
+        )
+        .await
+        .expect("begin")
+        .expect("phase");
+        activate_background_custody(
+            &store,
+            first.custody.clone(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect("activate");
+        store.0.lock().expect("connection").execute("UPDATE analysis_requests SET state='queued',owner_node_id=NULL,lease_expires_ms=NULL,last_error_code='lease_expired' WHERE request_id='coordinator'",[]).expect("existing lease expiry");
+        let successor = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            1,
+            40000,
+            80000,
+        )
+        .await
+        .expect("takeover")
+        .expect("metadata successor");
+        assert!(!coordinator::phase_current(&store, &first, 40000)
+            .await
+            .expect("old authority fenced"));
+        assert!(coordinator::begin_phase(
+            &store,
+            successor.clone(),
+            source.clone(),
+            1,
+            uuid::Uuid::new_v4().to_string(),
+            40000
+        )
+        .await
+        .expect("still held")
+        .is_none());
+        mark_background_settled(&store, first.custody.clone())
+            .await
+            .expect("joined old child");
+        release_background_custody(&store, first.custody.clone(), 40000)
+            .await
+            .expect("settled old custody");
+        coordinator::finish_phase(&store, first)
+            .await
+            .expect("close old phase");
+        assert!(coordinator::begin_phase(
+            &store,
+            successor,
+            source,
+            1,
+            uuid::Uuid::new_v4().to_string(),
+            40000
+        )
+        .await
+        .expect("now free")
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn old_claims_and_reconciliation_cannot_acquire_or_rewrite_coordinator() {
+        use super::super::analysis_coordination as coordinator;
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish");
+        {
+            let connection = store.0.lock().expect("connection");
+            let engine = "b".repeat(64);
+            let old_some:i64=connection.query_row("SELECT count(*) FROM analysis_requests WHERE state='queued' AND component<>'subtitle_source' AND (component<>'fragment_index' OR pipeline_version=?1)",[&engine],|row|row.get(0)).expect("old engine filter");
+            assert_eq!(old_some, 0);
+            let old_none=connection.execute("UPDATE analysis_requests SET state='running',owner_node_id='old',fence=fence+1,lease_expires_ms=30000 WHERE request_id='coordinator' AND state='queued'",[]).expect("old unversioned claim is ignored");
+            assert_eq!(old_none, 0);
+            let original =
+                serde_json::json!({"request_id":"coordinator","fence":0,"updated_at_ms":1000})
+                    .to_string();
+            let replacement=serde_json::json!({"request_id":"old-replacement","source_size":100,"source_mtime":1,"pipeline_version":engine,"requested_generation":"old-generation","target_node_id":"worker"}).to_string();
+            for statement in include_str!("analysis_reconcile.sql")
+                .split("-- next\n")
+                .filter(|sql| !sql.trim().is_empty())
+            {
+                connection
+                    .execute(statement, rusqlite::params![original, replacement, 2000])
+                    .expect("old reconciliation SQL");
+            }
+            let state: String = connection
+                .query_row(
+                    "SELECT state FROM analysis_requests WHERE request_id='coordinator'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("state");
+            assert_eq!(state, "queued");
+            let clones: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM analysis_requests WHERE request_id='old-replacement'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("clones");
+            assert_eq!(clones, 0);
+            connection.execute("INSERT INTO analysis_requests(request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,state,fence,cancel_requested,force_rebuild) VALUES('different-legacy',1,100,1,'fragment_index',?1,'different-recipe','different-source-generation','queued',0,0,0)",["c".repeat(64)]).expect("materially different legacy request remains admissible");
+        }
+        assert!(
+            coordinator::claim(&store, "coordinator", source, "worker", 0, 1000, 30000)
+                .await
+                .expect("new protocol")
+                .is_some()
+        );
+    }
+
     fn owner(policy: ForegroundSourcePolicy) -> ForegroundSourceOwner {
         ForegroundSourceOwner {
             owner_id: uuid::Uuid::new_v4().to_string(),
@@ -871,10 +1757,83 @@ mod source_tests {
             .is_empty());
     }
 
+    #[test]
+    fn analysis_source_owner_preserves_bounded_queue_identity_and_fence_isolation() {
+        let request_id = "a".repeat(64);
+        let request_id = request_id.as_str();
+        let owner = |request: &str, node: &str, fence| BackgroundSourceOwner::Analysis {
+            request_id: request.into(),
+            node_id: node.into(),
+            fence,
+        };
+        let key = background_owner_key(&owner(request_id, "worker", 7))
+            .expect("digest ID is a queue identifier");
+        for other in [
+            owner(&"b".repeat(64), "worker", 7),
+            owner(request_id, "other-worker", 7),
+            owner(request_id, "worker", 8),
+        ] {
+            assert_ne!(key, background_owner_key(&other).expect("distinct owner"));
+        }
+        for valid in [
+            "request with spaces",
+            "../request/control:part?name='quoted'",
+            "字幕 / demande",
+            "request\0suffix\ncontrol",
+            &"é".repeat(32),
+            &"opaque / legacy ".repeat(8),
+            &"é".repeat(64),
+        ] {
+            assert!(background_owner_key(&owner(valid, "worker", 7)).is_ok());
+        }
+        assert!(
+            !super::super::fragment_index_cluster::new_analysis_request_id_is_valid(
+                &"a".repeat(65)
+            )
+        );
+        assert!(
+            super::super::fragment_index_cluster::new_analysis_request_id_is_valid(&"é".repeat(32))
+        );
+        assert!(
+            super::super::fragment_index_cluster::analysis_request_id_is_valid(&"é".repeat(64))
+        );
+        for invalid in [
+            owner("", "worker", 7),
+            owner(&"a".repeat(129), "worker", 7),
+            owner(&"é".repeat(65), "worker", 7),
+            owner(request_id, "", 7),
+            owner(request_id, "worker", 0),
+            owner(request_id, "worker", -1),
+        ] {
+            assert!(background_owner_key(&invalid).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn analysis_source_join_replays_only_its_fenced_receipt() {
+        let subtitle_request_id = crate::store::SubtitleSourceStamp {
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 1,
+            pipeline_version: "subtitle-pipeline".into(),
+        }
+        .generation(0);
+        assert_eq!(subtitle_request_id.len(), 64);
+        for request_id in [
+            uuid::Uuid::new_v4().to_string(),
+            subtitle_request_id,
+            "../字幕 / request?name='quoted'".to_owned(),
+            "request\0suffix\ncontrol".to_owned(),
+            "é".repeat(32),
+            "opaque / legacy ".repeat(8),
+            "é".repeat(64),
+        ] {
+            analysis_source_join_replays_exact_request(request_id).await;
+        }
+    }
+
+    async fn analysis_source_join_replays_exact_request(request_id: String) {
         let store = fixture();
-        let request_id = uuid::Uuid::new_v4().to_string();
         {
             let connection = store.0.lock().expect("connection");
             connection.execute("INSERT INTO analysis_requests(request_id,owner_node_id,fence,state,cancel_requested,lease_expires_ms,file_id,source_size,source_mtime) VALUES(?1,'worker',7,'running',0,30000,1,100,1)", [&request_id]).expect("analysis owner");
@@ -890,6 +1849,23 @@ mod source_tests {
             node_id: "worker".into(),
             fence: 7,
         };
+        for stale in [
+            BackgroundSourceOwner::Analysis {
+                request_id: request_id.clone(),
+                node_id: "different-worker".into(),
+                fence: 7,
+            },
+            BackgroundSourceOwner::Analysis {
+                request_id: request_id.clone(),
+                node_id: "worker".into(),
+                fence: 6,
+            },
+        ] {
+            assert!(register_background_custody(&store, stale, 1000)
+                .await
+                .expect("valid shape with stale authority")
+                .is_none());
+        }
         let receipt = register_background_custody(&store, owner, 1000)
             .await
             .expect("register")
@@ -914,6 +1890,98 @@ mod source_tests {
         assert!(release_background_custody(&store, receipt, 1002)
             .await
             .expect("exact receipt"));
+    }
+
+    #[tokio::test]
+    async fn settlement_replay_preserves_new_registrations_until_activation() {
+        let store = fixture();
+        let foreground =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 1000, 2000)
+                .await
+                .expect("register foreground")
+                .expect("foreground receipt");
+        let job = seed_job(&store);
+        let background = register_background_custody(
+            &store,
+            BackgroundSourceOwner::Job { token: job.clone() },
+            1000,
+        )
+        .await
+        .expect("register background")
+        .expect("background receipt");
+        let abandoned =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 1000, 1500)
+                .await
+                .expect("register abandoned owner")
+                .expect("abandoned receipt");
+
+        // Force a real sweep in the registration/activation interval.
+        reap_settled_source_custody(&store, 1500)
+            .await
+            .expect("sweep");
+        assert!(resolve_foreground(&store, abandoned)
+            .await
+            .expect("lookup expired unarmed")
+            .is_none());
+        assert!(activate_foreground_custody(
+            &store,
+            foreground.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("live foreground can still activate"));
+
+        // The physical registration retains the original lease snapshot. A
+        // job heartbeat extends its exact authority while activation is pending.
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "UPDATE background_jobs SET lease_expires_ms=120000 WHERE id=?1",
+                [&job.job_id],
+            )
+            .expect("renew job");
+        reap_settled_source_custody(&store, 60000)
+            .await
+            .expect("sweep after renewal");
+        assert!(activate_background_custody(
+            &store,
+            background.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("renewed background can still activate"));
+
+        // Losing authority after arming does not prove the input has stopped.
+        reap_settled_source_custody(&store, 120000)
+            .await
+            .expect("sweep expired active owners");
+        assert!(resolve_foreground(&store, foreground.clone())
+            .await
+            .expect("lookup armed foreground")
+            .is_some());
+        assert!(resolve_background_custody(&store, background.clone())
+            .await
+            .expect("lookup armed background")
+            .is_some());
+        assert!(mark_foreground_settled(&store, foreground.clone())
+            .await
+            .expect("foreground joined"));
+        assert!(mark_background_settled(&store, background.clone())
+            .await
+            .expect("background joined"));
+        reap_settled_source_custody(&store, 120000)
+            .await
+            .expect("sweep joined owners");
+        assert!(resolve_foreground(&store, foreground)
+            .await
+            .expect("lookup retired foreground")
+            .is_none());
+        assert!(resolve_background_custody(&store, background)
+            .await
+            .expect("lookup retired background")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1202,9 +2270,6 @@ mod source_tests {
             .expect("lost ack resolves old exact owner")
             .expect("receipt");
         assert_eq!(resolved.custody_id, receipt.custody_id);
-        assert!(!replace(&store, Vec::new(), 40001)
-            .await
-            .expect("mapping retains old physical identity"));
         let foreground = register_foreground(&store, owner_for_overlap(), 40002, 50000)
             .await
             .expect("foreground doesn't wait for failed reap")
@@ -1430,7 +2495,7 @@ mod source_tests {
             connection
                 .execute_batch(retired)
                 .expect("existing authority reduction");
-            connection.execute("INSERT INTO analysis_requests VALUES(?1,'worker',0,'queued',0,0,'generation',1,100,1,'foreground','playback',1000,0,'fragment_index')",[&analysis]).expect("durable preparation");
+            connection.execute("INSERT INTO analysis_requests(request_id,owner_node_id,fence,state,cancel_requested,lease_expires_ms,requested_generation,file_id,source_size,source_mtime,priority,trigger,updated_at_ms,force_rebuild,component) VALUES(?1,'worker',0,'queued',0,0,'generation',1,100,1,'foreground','playback',1000,0,'fragment_index')",[&analysis]).expect("durable preparation");
             for (consumer, user) in [("viewer-a", 1), ("viewer-b", 2)] {
                 connection.execute("INSERT INTO background_job_waiters(request_scope,request_id,state,updated_at_ms,request_digest,job_id,consumer_kind,consumer_ref,priority,deadline_ms) VALUES('playback-analysis',?1,'pending',1000,'generation',?2,'playback_analysis',?3,3,10000)",rusqlite::params![consumer,analysis,serde_json::json!({"user_id":user,"playback_id":"movie","file_id":1,"analysis_request_id":analysis}).to_string()]).expect("separate viewer");
             }
@@ -1958,7 +3023,12 @@ pub fn background_owner_key(owner: &BackgroundSourceOwner) -> Result<String, Sto
             node_id,
             fence,
         } => {
-            if uuid::Uuid::parse_str(request_id).is_err() || !identifier(node_id) || *fence <= 0 {
+            // The request ID is opaque, unlike the separate custody receipt's
+            // UUID. Include the wider IDs already admitted by analysis repair.
+            if !super::fragment_index_cluster::analysis_request_id_is_valid(request_id)
+                || !identifier(node_id)
+                || *fence <= 0
+            {
                 return Err(StoreError::Task("invalid analysis source custody".into()));
             }
             crate::segplan::argv_fingerprint(&[
@@ -2030,6 +3100,9 @@ pub(super) async fn register_background_custody<T: QueueSql>(
 ) -> Result<Option<BackgroundSourceCustodyToken>, StoreError> {
     if now_ms < 0 {
         return Err(StoreError::Task("invalid source custody clock".into()));
+    }
+    if super::analysis_coordination::is_coordinator_owner(store, &owner).await? {
+        return Ok(None);
     }
     let owner_key = background_owner_key(&owner)?;
     // Resolve a lost registration acknowledgement by exact physical owner even
@@ -2173,6 +3246,27 @@ pub(super) async fn claim_background_service<T: QueueSql>(
     owner: BackgroundSourceOwner,
     now_ms: i64,
 ) -> Result<Option<BackgroundSourceServiceGrant>, StoreError> {
+    if super::analysis_coordination::is_coordinator_owner(store, &owner).await? {
+        return Ok(None);
+    }
+    claim_background_service_inner(store, owner, now_ms, None).await
+}
+pub(super) async fn claim_analysis_phase_service<T: QueueSql>(
+    store: &T,
+    phase: &super::analysis_coordination::AnalysisPhysicalPhase,
+    now_ms: i64,
+) -> Result<Option<BackgroundSourceServiceGrant>, StoreError> {
+    if !super::analysis_coordination::phase_current(store, phase, now_ms).await? {
+        return Ok(None);
+    }
+    claim_background_service_inner(store, phase.custody.owner.clone(), now_ms, Some(phase)).await
+}
+async fn claim_background_service_inner<T: QueueSql>(
+    store: &T,
+    owner: BackgroundSourceOwner,
+    now_ms: i64,
+    exact_phase: Option<&super::analysis_coordination::AnalysisPhysicalPhase>,
+) -> Result<Option<BackgroundSourceServiceGrant>, StoreError> {
     if !(0..=i64::MAX - 5000).contains(&now_ms) {
         return Err(StoreError::Task("invalid source service epoch".into()));
     }
@@ -2185,7 +3279,13 @@ pub(super) async fn claim_background_service<T: QueueSql>(
     body["owner_key"] = owner_key.into();
     body["now_ms"] = now_ms.into();
     body["epoch_id"] = (now_ms / 5000).into();
-    let custody = if companion {
+    if let Some(phase) = exact_phase {
+        body["custody_id"] = phase.custody.custody_id.clone().into();
+        body["phase_sequence"] = phase.phase_sequence.into();
+    }
+    let custody = if exact_phase.is_some() {
+        "SELECT owned.resource_keys_json FROM background_source_custody owned JOIN analysis_coordination_roles role ON role.active_custody_id=owned.custody_id AND role.request_id=owned.work_id AND role.physical_fence=owned.fence WHERE owned.owner_key=json_extract($1,'$.owner_key') AND owned.custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.phase_sequence') AND owned.settlement_proof IS NULL AND owned.phase IN ('active','paused')"
+    } else if companion {
         "SELECT fg.resource_keys_json FROM foreground_source_owners fg WHERE fg.owner_id=json_extract($1,'$.token.owner.owner_id') AND fg.identity_json=json_extract($1,'$.token.owner') AND fg.settlement_proof IS NULL AND json_extract(fg.identity_json,'$.policy')='companion' AND fg.phase='transfer_service' AND fg.lease_expires_at_ms>json_extract($1,'$.now_ms') AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')"
     } else {
         "SELECT owned.resource_keys_json FROM background_source_custody owned WHERE owned.owner_key=json_extract($1,'$.owner_key') AND owned.phase IN ('active','paused')"
@@ -2296,6 +3396,9 @@ pub(super) async fn register_background_typed<T: QueueSql>(
 ) -> Result<BackgroundSourceRegistration, StoreError> {
     if now_ms < 0 {
         return Err(StoreError::Task("invalid source registration clock".into()));
+    }
+    if super::analysis_coordination::is_coordinator_owner(store, &owner).await? {
+        return Ok(BackgroundSourceRegistration::LostOwnership);
     }
     let owner_key = background_owner_key(&owner)?;
     let existing=store.queue_sql("SELECT json_object('custody_id',custody_id,'owner',json(owner_json)) AS result_json FROM background_source_custody WHERE owner_key=json_extract($1,'$.owner_key')".into(),encode(&serde_json::json!({"owner_key":owner_key}))?,false,true).await?;

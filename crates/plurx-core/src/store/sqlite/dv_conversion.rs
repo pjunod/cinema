@@ -1285,6 +1285,10 @@ mod tests {
                 "DROP TRIGGER IF EXISTS playback_settings_insert;
              DROP TRIGGER IF EXISTS playback_settings_update;
              DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_insert;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_update;
+             DROP TRIGGER IF EXISTS playback_input_keys_r1_delete;
+             DROP TABLE IF EXISTS playback_input_keys_schema;
              DROP TABLE IF EXISTS playback_input_generation;
              ",
             )
@@ -1600,7 +1604,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 77] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 87] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1745,6 +1749,32 @@ mod tests {
             // accepted artifact work still refuses and v111 reconstructs v1.
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=2))",
             "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=3))",
+            // v122-v124: the shared source fixture validates empty source and
+            // dispatch state, removes it, and restores exact managed v3 first.
+            "CREATE TABLE IF NOT EXISTS foreground_source_owners",
+            "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=4))",
+            "CREATE TABLE dispatch_turn_ready",
+            // v125: the shared queue helper drops every background_* object,
+            // the scan request sidecar and its marker among them.
+            "CREATE TABLE IF NOT EXISTS background_scan_request_v2_schema",
+            // v126: the shared managed rewind recognizes the exact coupled
+            // v126/v5 view and marker before removing the empty extension.
+            "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=5))",
+            // v127/v128: the shared coordination fixture validates the empty
+            // coordination and v3 copy index tail, removes it, restores the
+            // v124 claim reservation trigger, then managed v5 before the rest.
+            "CREATE TABLE IF NOT EXISTS analysis_coordination_schema",
+            "CREATE TABLE subtitle_managed_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=6))",
+            // v129: the shared queue helper drops every background_* object,
+            // the replaced triggers and their marker among them.
+            "CREATE TABLE IF NOT EXISTS background_custody_retention_schema",
+            // v130: offload's `items.offloaded_at` and its two clearing
+            // triggers; the shared source-extension fixture rewinds them
+            // first, so both fixtures reach v129 before the tails above.
+            "ADD COLUMN offloaded_at",
+            // v131: the shared queue helper drops every background_* object,
+            // including the pending storage-domain table, views and marker.
+            "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
         ];
 
         assert!(

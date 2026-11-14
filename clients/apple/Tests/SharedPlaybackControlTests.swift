@@ -80,6 +80,25 @@ final class SharedPlaybackControlTests: XCTestCase {
         let plan = try SharedPlaybackPlan(subject: subject, decision: try decision(method: copy == true ? "remux" : "transcode"), caps: caps, request: request)
         return (playback, plan, client)
     }
+    func testBoundedSharedStartAtNinetyMinutesRequiresTheImplementedCapability() async throws {
+        let context = try await context()
+        var wire = try JSONSerialization.jsonObject(with: reply()) as! [String: Any]
+        wire["vod"] = false
+        wire["start_seconds"] = 5_398.0
+        wire["media_origin_ms"] = 5_398_000
+        let start = try SharedStart.decode(JSONSerialization.data(withJSONObject: wire))
+        var request = CreateSessionRequest(playbackId: "bounded", requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            start: 5_400, caps: Caps.snapshot().document)
+        let bound = try start.bindInitial(context, request: request)
+        let response = bound.start.response
+        let timeline = SharedPlaybackTimeline(vod: response.vod, mediaOriginMs: response.mediaOriginMs,
+            startSeconds: response.startSeconds, requestedStartMs: 5_400_000)
+        XCTAssertEqual(timeline.itemPositionMs(filmPositionMs: 5_400_000), 2_000)
+        XCTAssertEqual(timeline.filmPositionMs(itemPositionMs: 2_000), 5_400_000)
+        request.caps = nil
+        XCTAssertThrowsError(try start.bindInitial(context, request: request))
+    }
+
     func testRejectedInitialRemoteStartAllowsFreshRequestAndExpiredRetryNeverDispatches() async throws {
         let (_, original, _) = try await started()
         let controller = SharedPlayerController(testConfiguration: configuration)
@@ -422,5 +441,64 @@ final class SharedPlaybackControlTests: XCTestCase {
         XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: wire), playback: playback))
         wire["session_id"] = session; wire["subject"] = "local"
         XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: wire), playback: playback))
+    }
+}
+
+
+@MainActor
+final class SharedBoundedRangeTimelineTests: XCTestCase {
+    func testSignedBoundedOriginMapsInitialSeekAndPreparedReplacement() {
+        let initial = SharedPlaybackTimeline(vod: false, mediaOriginMs: -83,
+            startSeconds: nil, requestedStartMs: 0)
+        XCTAssertEqual(initial.mediaOriginMs, -83)
+        XCTAssertEqual(initial.itemPositionMs(filmPositionMs: 0), 83)
+        XCTAssertEqual(initial.filmPositionMs(itemPositionMs: 83), 0)
+        XCTAssertEqual(initial.filmPositionMs(itemPositionMs: 0), 0)
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(filmPositionMs: 0,
+            mediaOriginMs: -83, ranges: [0...5]))
+        XCTAssertNotNil(PreparedCommitRendezvous.planLoaded(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: 0, mediaOriginMs: -83, playbackRate: 1,
+            overlapRemainingMs: 5_000, loadedItemRanges: [0...10]))
+        XCTAssertEqual(PlayerController.seekRoute(targetMs: 0, baseMs: -83,
+            usesDirectTimeline: false, isVOD: false, isChangingStream: false,
+            seekableRangesMs: [0...5_000]), .native(itemMs: 83))
+        let replacement = SharedPlaybackTimeline(vod: false, mediaOriginMs: -41,
+            startSeconds: nil, requestedStartMs: 0)
+        let film = initial.filmPositionMs(itemPositionMs: 1_083)
+        let rendezvous = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: film, mediaOriginMs: replacement.mediaOriginMs)
+        XCTAssertEqual(rendezvous.itemPositionMs, 1_041)
+        XCTAssertEqual(replacement.filmPositionMs(itemPositionMs: rendezvous.itemPositionMs), film)
+    }
+
+    func testBoundedSeekUsesTheExistingLocalWindowPolicy() {
+        let range = SharedPlaybackTimeline(vod: false, mediaOriginMs: 5_398_000,
+            startSeconds: 5_398, requestedStartMs: 5_400_000)
+        XCTAssertEqual(PlayerController.seekRoute(targetMs: 5_405_000, baseMs: range.mediaOriginMs,
+            usesDirectTimeline: false, isVOD: range.wholeTitle, isChangingStream: false,
+            seekableRangesMs: [0...30_000]), .native(itemMs: 7_000))
+        XCTAssertEqual(PlayerController.seekRoute(targetMs: 6_000_000, baseMs: range.mediaOriginMs,
+            usesDirectTimeline: false, isVOD: range.wholeTitle, isChangingStream: false,
+            seekableRangesMs: [0...30_000]), .reopen)
+    }
+
+    func testPreparedRangeAlignsFilmRendezvousThroughItsOwnOriginAndCompletionStaysBounded() {
+        let range = SharedPlaybackTimeline(vod: false, mediaOriginMs: 5_398_000,
+            startSeconds: nil, requestedStartMs: 5_400_000)
+        let rendezvous = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 5_400_000,
+            incumbentFilmPositionMs: 5_401_000, mediaOriginMs: range.mediaOriginMs, leadMs: 1_000)
+        XCTAssertEqual(rendezvous.filmPositionMs, 5_402_000)
+        XCTAssertEqual(rendezvous.itemPositionMs, 4_000)
+        let completedRange = SharedPlaybackTimeline(vod: true, mediaOriginMs: 5_398_000,
+            startSeconds: nil, requestedStartMs: 5_400_000)
+        XCTAssertFalse(completedRange.wholeTitle)
+        XCTAssertEqual(completedRange.filmPositionMs(itemPositionMs: 4_000), 5_402_000)
+        XCTAssertFalse(completedRange.reachedTitleEnd(filmPositionMs: 5_402_000, durationMs: 7_200_000))
+        XCTAssertTrue(completedRange.reachedTitleEnd(filmPositionMs: 7_200_000, durationMs: 7_200_000))
+        let whole = SharedPlaybackTimeline(vod: true, mediaOriginMs: 0, startSeconds: 0, requestedStartMs: 5_400_000)
+        XCTAssertTrue(whole.wholeTitle)
+        XCTAssertTrue(whole.reachedTitleEnd(filmPositionMs: 7_197_000, durationMs: 7_200_000))
+        XCTAssertFalse(completedRange.reachedTitleEnd(filmPositionMs: 7_197_000, durationMs: nil))
+        XCTAssertEqual(whole.itemPositionMs(filmPositionMs: 5_400_000), 5_400_000)
     }
 }

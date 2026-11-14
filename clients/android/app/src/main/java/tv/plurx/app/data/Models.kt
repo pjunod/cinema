@@ -99,6 +99,16 @@ data class Watch(
 data class Rollup(
     val leaves: Long = 0,
     val watched: Long = 0,
+    /** Leaves whose files Curator removed to free disk (absent before Offload). */
+    val offloaded: Long = 0,
+)
+
+/** `POST items/{id}/get-it-back` and `GET items/{id}/offload-status`. */
+@Serializable
+data class OffloadAnswer(
+    val matched: Boolean = false,
+    val state: String = "",
+    val message: String = "",
 )
 
 @Serializable
@@ -134,7 +144,14 @@ data class Item(
     val added_at: Long? = null,
     val watch: Watch? = null,
     val rollup: Rollup? = null,
+    /**
+     * Curator removed this title's files to free disk; the item, its metadata
+     * and its watch history stay. For a show or season, true only when every
+     * leaf is (`rollup.offloaded` counts a partial offload).
+     */
+    val offloaded: Boolean = false,
 ) {
+    val hasOffloadedLeaves get() = offloaded || (rollup?.offloaded ?: 0L) > 0L
     val isPlayableVideo get() = kind == "movie" || kind == "episode" || kind == "video"
     val isPlayable get() = isPlayableVideo || kind == "audiobook"
     val isBook get() = kind == "book"
@@ -812,6 +829,21 @@ data class EnhancementDetail(
     val text: String,
 )
 
+/** The owner-authored explanation for a skipped optional enhancement upgrade. */
+data class ProcessingSkip(val generation: String, val reason: String) {
+    fun matches(current: String?): Boolean = generation == current && generation.isNotEmpty() &&
+        reason.isNotBlank() && reason.codePointCount(0, reason.length) <= 512 && reason.none { it.isISOControl() }
+
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): ProcessingSkip? {
+            val obj = value as? kotlinx.serialization.json.JsonObject ?: return null
+            fun text(key: String) = (obj[key] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            return ProcessingSkip(text("generation") ?: return null, text("reason") ?: return null)
+                .takeIf { it.matches(it.generation) }
+        }
+    }
+}
+
 /**
  * The HLS create response's `enhancement`: what Dolby Vision enhancement the
  * delivered picture carries, computed once by the server
@@ -831,6 +863,15 @@ data class PlaybackEnhancement(
      */
     val requiresEffectiveProcessing: Boolean = false,
 ) {
+    fun explainingSkip(skip: ProcessingSkip?, generation: String?): PlaybackEnhancement {
+        if (skip?.matches(generation) != true) return this
+        return copy(details = details.map { detail ->
+            if (!detail.active && detail.badge in listOf(EnhancementBadge.FEL, EnhancementBadge.RPU) &&
+                detail.text.startsWith("${detail.badge}: not used"))
+                detail.copy(text = "${detail.badge}: not used for this play — ${skip.reason}") else detail
+        })
+    }
+
     /**
      * This enhancement as it may be shown right now, or null when it must not
      * be: a processed delivery whose report is missing, stale or for another

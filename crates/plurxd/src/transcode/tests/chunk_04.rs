@@ -909,6 +909,7 @@
                         since_ms: None,
                         event: None,
                         limit: 20,
+                        ..Default::default()
                     })
                     .await
                     .expect("segment-delivery telemetry query");
@@ -1004,6 +1005,7 @@
                         since_ms: None,
                         event: None,
                         limit: 20,
+                        ..Default::default()
                     })
                     .await
                     .expect("segment-stall telemetry query");
@@ -1085,6 +1087,7 @@
                         since_ms: None,
                         event: None,
                         limit: 20,
+                        ..Default::default()
                     })
                     .await
                     .expect("segment-delivery telemetry query")

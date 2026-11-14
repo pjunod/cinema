@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-six patches for clustered deployments. An
+Apache-2.0. Plurx carries twenty-seven patches for clustered deployments. An
 upstream release can retire the eight generic bugs and the one dependency-only
-constraint; it cannot retire the seventeen Plurx policies:
+constraint; it cannot retire the eighteen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -37,6 +37,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
+| 27 | Applied mark: registered-table revisions, applied index and image generation, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -372,7 +373,13 @@ made-up URL and prevents the fork from being declared fully tracked.
   `src/config.rs` validates chunk, overall-transfer and install budgets; chunk
   and transfer defaults are 30 and 1200 seconds, also carried by the
   `src/config_toml.rs` construction path. Completing a chunk does not renew the
-  overall transfer deadline. This policy does not satisfy the generic transport
+  overall transfer deadline. The soft-TTL timeout in
+  `NetworkConnectionStreaming::send` now returns `Unreachable` wrapping a
+  `TimedOut` error that names the target node, request kind, append entry
+  count, snapshot chunk bytes, elapsed and soft-TTL milliseconds, instead of
+  the bare `Elapsed`; it adds no serialization (an append's encoded size is
+  unknown at that point and is not reported) and changes no behaviour. This
+  policy does not satisfy the generic transport
   repairs' upstream drop conditions.
   Files: `src/transport_status.rs`, `src/config.rs`, `src/config_toml.rs`,
   `src/network/raft_client.rs`, `src/network/raft_server.rs`,
@@ -392,6 +399,38 @@ made-up URL and prevents the fork from being declared fully tracked.
   included, and `tests/operations/test_hiqlite_patch_ledger.py` pins that
   every listener is built from them. The proxy listener is not changed.
   Files: `src/start.rs`.
+- The applied mark (playback-start E1, `docs/streaming/PLAYBACK-START-E1-BUILD.md`
+  §4.1). `NodeConfig::applied_mark_tables` registers up to eight tables; the
+  writer installs an SQLite update hook (rusqlite `hooks`) that sets one bit
+  per registered table, and `publish_then_send` turns those bits into
+  revisions and stores the applied log index after the SQLite work has
+  committed or rolled back and before every reply of an arm that applies an
+  entry, early-`continue` paths included. The hook cannot attribute DDL or a
+  table rebuild (it reports the copy under its temporary name and the drop
+  and rename not at all), so the helper re-reads `PRAGMA schema_version`
+  before every publish and bumps every slot when it moved, whichever arm
+  carried the change; `Batch`, `Migrate` and a successful restore also bump
+  every slot. `MetadataRead` publishes the persisted applied index, so a
+  restarted node does not report 0 until its next apply. The state machine,
+  not the writer arm, owns image replacement: a guard makes the generation odd
+  before `SnapshotApply` is sent and even after the read pool is reconnected,
+  in `update_state_machine_` (start-up restore and pending recovery) and in
+  the install task; a failed restore leaves it odd until a later replacement
+  completes or the node restarts. The hook only sees statements this binary
+  applies; an unqualified `DELETE` replayed from an older binary's log entry
+  would not move a slot (the plurx census refuses one in current source).
+  `Client::local_db_applied_mark` is local only, with no remote fallback.
+  The same row times every read-pool checkout into a fixed process-wide
+  histogram (`db_read_pool_wait`), the baseline the E1 contract asks for.
+  Nothing crosses the wire. Tests: `applied_mark::tests`,
+  `writer::applied_mark_tests` (including the precommit-hold ordering test
+  under `validation-test-helpers` and a source test of the reply order),
+  the replacement tests in `state_machine::snapshot_metrics_contracts`, and
+  `mgmt::tests::local_applied_mark_accessor_has_no_remote_fallback`.
+  Files: `Cargo.toml`, `src/applied_mark.rs`, `src/config.rs`,
+  `src/config_toml.rs`, `src/store/state_machine/sqlite/writer.rs`,
+  `src/store/state_machine/sqlite/state_machine.rs`, `src/store/mod.rs`,
+  `src/app_state.rs`, `src/client/mgmt.rs`, `src/query/mod.rs`, `src/lib.rs`.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
 was accepted on 2026-10-05 as
@@ -444,7 +483,7 @@ Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19 and 26: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24 and 25) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25 and 27) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

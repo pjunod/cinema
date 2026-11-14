@@ -259,7 +259,7 @@ async function eachItemPage(libIds, sort, gen, onBatch){
     for(let offset=0;; offset+=LIB_PAGE){
       let page;
       try{
-        page=await api(`/libraries/${id}/items?limit=${LIB_PAGE}&offset=${offset}&sort=${sort}`);
+        page=await api(`/libraries/${id}/items?limit=${LIB_PAGE}&offset=${offset}&sort=${sort}&presence=${libPresence()}`);
       }catch(e){
         if(LIB_LOAD===gen) toast(e.message);
         return false;
@@ -297,6 +297,7 @@ function classicLibraryShell(m){
       <span class="lbl" style="margin-left:8px">Show</span>
       <select data-library-watch-filter aria-label="Watch status" onchange="LIB_FILTER=this.value;${m.reload}">
         ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select>
+      ${libPresenceSelect(m.reload)}
       ${libraryPageSize()}
     </div>
     <span class="muted" id="libcount" style="font-size:13px"></span></div>`;

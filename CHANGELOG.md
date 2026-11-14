@@ -10,11 +10,208 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **HDR:** fix the two remaining CM29 Smile outliers by measuring previously unreachable blue-gamut vertices with saturation-expanded synthetic probes. Existing observations retain priority; all six qualified frames stay below 0.05 dE, and every worsening coordinate is preserved. Docker CPU controls now preserve separate analytic/measured expectations and reject stale table receipts. See [qualification](docs/streaming/CM29-MEASURED-GAMUT.md).
+- Playback-control refusal logs retain the protocol code, route-read failure
+  stage and sanitized source location, distinguishing release reconciliation
+  from storage errors without exposing session capabilities.
+
+- The host source census can release a dead owner's custody after the host
+  has rebooted. It proves from the machine's own journal that the witness's
+  kernel boot ended. A host without the identity binds had no other way to
+  release such custody.
+- CM v2.9 uses measured gamut vertices for P3 600-, 1000- and 2000-nit
+  targets at 0.005-nit black, correcting near-black chroma and highlight
+  desaturation without changing the tone curve. Unsupported vertices and
+  targets retain the analytic mapping.
+
+- A plurxd restart no longer fences every source-reading job in the cluster
+  until a host reboot. A restart during a read left that owner's custody
+  stranded. A new daemon now releases it when the old daemon's whole PID
+  namespace is proven torn down.
+- A play waiting on its title's FEL measurement now counts as playback demand
+  for that title's scan. The scan no longer queues behind every library and
+  subtitle job: it reads whenever the viewer's own playback and the reader cap
+  allow, and the upgrade lands in the same play once it is measured.
+- A processed upgrade that lost the playback's preparation slot to another
+  preparation now waits for the free slot instead of being dropped. The
+  processed-upgrade metric now reports waiting-on-measurement and displaced
+  outcomes, which it previously counted as cancelled.
+- A resumed play, or one restarted after a stall, is now offered its
+  processed Dolby Vision upgrade. The upgrade waited for the client's
+  first-frame beacon, which only a fresh start sends, so a play that resumed
+  or recovered once stayed on DYN. The session's own accepted rendering
+  control exchange now also starts it.
+- Job retention no longer deletes a settled job whose source custody is still
+  charged. That job is the custody's only exact source binding, and a dead
+  owner's custody could not be released once it was gone. The job is kept
+  until the custody is released, then expires as usual (SQLite v129; a
+  shape-verified hiqlite extension).
+- CM v2.9 display mapping holds the picture to the display's range only once,
+  after the L2 trim and the detail pass, as the licensed reference does. The
+  tone curve was clamped to the target range before the trim, so pixels
+  brighter than the shot's L1 maximum lost their gradation under a darkening
+  trim (flat up to 2,280 16-bit codes below the reference), pixels darker than
+  the shot's L1 minimum were lifted to the display black the reference maps
+  under, and detail above the clip came out wrong (up to 33 dE ITP on
+  synthetic specks). Pixels inside the shot's own L1 range map as before.
+- CM v2.9 picks its L2 trim the way the licensed reference does when the RPU
+  has none for the display's peak: it interpolates between the nearest L2
+  targets below and above, including one at or above the mastering peak
+  (which was ignored, leaving such titles untrimmed below it), fades a trim
+  with nothing below it towards the mastering display's minimum instead of
+  absolute black, and applies an L2 authored for the mastering peak or above.
+  A title with no L2, or a display at or above the mastering peak with no L2
+  above it, still maps untrimmed.
+- The server image builds its Dolby Vision helper bundle from the same source
+  tree as the server it ships with. The bundle had been taken from a separately
+  published image, so helper changes never reached an image, and a server built
+  after them would have refused the older bundle and turned DV processing off.
+- A dead owner's source custody can be released by the host census even
+  after retention has deleted the owner's job row. The census then also proves
+  the owner's whole process tree gone: the daemon's PID namespace holds nothing
+  older than the owner, and nothing outside it touches the counted storage.
+- On Android TV, switching a playing title to its Dolby Vision-enhanced
+  version no longer freezes the picture and falls back. The prepared second
+  player no longer uses tunneled playback, so it can't take the television's
+  hardware audio/video sync from the player on screen.
+- On a laptop with NVIDIA beside Intel or AMD integrated graphics, VA-API now
+  uses the integrated GPU's render node instead of the NVIDIA one, which has
+  no VA-API driver. Dolby Vision processing there decodes on the GPU again
+  instead of in software, so reconstructed Profile 8.1 keeps up with playback.
+  Its Dolby Vision implementation identity names the new node, so that node
+  qualifies once after the upgrade. `PLURX_VAAPI_DEVICE` still overrides.
+- Dolby Vision on Safari, web and mobile no longer stops at dynamic metadata
+  when the server's GPU can do better: AMD, Intel and NVIDIA reconstruction is
+  qualified with each vendor's actual production encoder, and a recipe that
+  qualifies during a play upgrades that same play. Playback Info shows the real
+  reason an enhancement was skipped. Source custody left behind by a job whose
+  owner died before its join can now be released from a host source-open
+  census instead of holding the shared storage fence indefinitely (#1491).
+- The server's Dolby Vision helper reconstructs the same master as the native
+  player. It sampled every plane nearest-neighbour on an older libplacebo; it
+  now builds the player's release (7.387) and samples bilinearly from the same
+  10-bit plane storage, so HDR10-E, display-targeted output and the FEL to
+  Profile 8.1 picture start from the picture the player's mapping was
+  qualified on. On the two measured frames the server master is within one
+  16-bit code of the player's (it was up to 3293 codes away).
+- Master-grade HDR10-E declares the source's own mastering display; it carried
+  no static HDR10 metadata at all. It does not repeat the base layer's content
+  light levels, because the reconstructed picture can exceed them.
+- A display-targeted render's MaxCLL covers the rounding of its 10-bit export
+  (407 for a 400-nit target) instead of stating the target itself, which the
+  decoded picture could exceed.
+- CM v2.9 display mapping keeps its detail filter inside the L5 active picture,
+  as CM v4.0 does. Letterboxed CM v2.9 titles no longer blend the bars into the
+  first and last two picture rows; bars take the pointwise mapping. Titles
+  without L5, or with a zero or full-frame L5, render exactly as before.
+- CM4 display mapping evaluates the ST 2084 transfer functions in its point and
+  final passes with precise split-float helpers and the normative black and
+  white endpoints. On the measured Source16 frame no enhanced pixel is farther
+  from the licensed reference than the unenhanced picture; before, three were.
+- Preparation demand reads Local viewers on both admitted session layouts,
+  without requiring the optional principal-rebuild column or admitting Shared viewers.
+- Subtitle extraction and durable self-claim futures use heap storage at their
+  existing ownership boundaries, preventing debug-stack overflow without changing
+  extraction deadlines or cancellation cleanup.
+- The learner topology drill waits for locally applied schema before opening
+  a newly admitted learner, matching production startup readiness.
+- Apple CI startup cleanup now removes only valid simulators from an earlier
+  attempt of the same run, preserving devices whose ownership is ambiguous or
+  belongs to another active run.
+- Scan request status and replay stay bound to the creating credential after an
+  API key is deleted and its numeric ID is reused. Expected-file reports skip
+  paths outside their requested scope without probing their filesystem targets.
+- CM4 display mapping uses the RPU's active picture boundary for spatial
+  filtering, keeping letterbox bars from brightening the first and last
+  active rows or side edges. Pixels outside the boundary are still mapped,
+  so subtitles in the bars and picture under a wrong boundary are kept.
+- Titles with a pending Dolby Vision FEL request no longer fail source
+  verification ("the stored probe differs from the source at
+  /<unknown-field> missing"), which had declined their processed HDR10-E
+  upgrade. Application metadata in a stored probe is now excluded by its
+  `plurx_` namespace rather than a list a new field could miss.
+
+- Android TV devices whose HEVC decoder declares performance points (Google TV
+  Streamer) now report HLS fMP4 HEVC support, so processed Dolby Vision
+  (HDR10-E) upgrades reach them instead of being declined at every start.
+
+- Linux Cinema now defaults to the system mpv and no longer ships a duplicate
+  renderer, so qualified system HDR/DV updates reach Cinema. Explicit binary
+  overrides, isolated configuration and Cinema controls remain available.
+  Mapper diagnostics validate the shared renderer’s physical-target success
+  against its current eligibility and generation.
+
+- Cinema application images reuse a separately published, digest-pinned media
+  runtime instead of downloading Debian packages and recompiling bundled tools.
+
+- Dolby Vision FEL quality measurement supports Intel VA-API and NVIDIA
+  NVENC using each actual encoder/device recipe. Deferred enhancement failures
+  and pending measurements reach Playback Info on web, Apple and Android;
+  playback starts on the compatible stream while verified enhancements prepare.
+  Disabling the independent HDR10-processing preference no longer prevents
+  a Dolby Vision display's enabled FEL recipe from being measured.
+
+- Digest-keyed analysis requests can register their source custody,
+  allowing the index queue to progress instead of renewing a rejected request
+  indefinitely while holding its shared source-I/O slot.
+
+- A client releasing a rolling stream, or an operator stopping it from
+  Activity, now retires it as `released` / `stopped` instead of an authority
+  fence. Metrics and session-end events no longer report every ordinary
+  release as failover, and a control request racing the stop is answered with
+  the existing `deleted` / `admin_stop` reason rather than `authority_fenced`,
+  which clients treat as recoverable.
+- A targeted scan of a path under a library root that cannot be read right now
+  (an unmounted share, an empty mount point, `ENOTCONN`, `EIO`) answers
+  `503 {"code":"path_unreadable","retry_after_s":60}` with `Retry-After`,
+  instead of the permanent `422` that discarded a valid Curator notification.
+  A path under no root is `422 {"code":"path_outside_roots"}`, decided lexically
+  before the filesystem is consulted; the body still names every root.
+- New daemon-mediated source readers retain kernel lifetime witnesses on
+  native macOS, Linux and containers, allowing exact-owner recovery after
+  Cinema exits without rebooting the server. Legacy readers without this
+  evidence remain held pending a separate physical stop proof.
+- Jobs includes fresh CPU, GPU and heavy-worker capacity from learner nodes.
+  Worker observations use the member-scoped operations channel and remain
+  independent of voter-only playback and recording authority.
+- Pending native HLS segments advertise their bounded Retry-After interval.
+
+- Subtitle workers preserve a completed publication when a concurrent pressure
+  check observes that its source authority has retired. Changed original files
+  retain the existing not-found response instead of returning an internal error.
+- Source-retirement and deferred-companion diagnostics remain in their parent
+  operator log channels. Verified fleet publication checks the exact reviewed
+  image configuration before advancing the main tag.
+
+- Original HDR enhancements preserve their measured video bitrate budget, select
+  legal HEVC/Dolby Vision levels and bind quality receipts to the actual
+  encoder recipe instead of lowering the source budget.
+
+- Linux Dolby Vision reconstruction avoids inherited display adjustments and
+  preserves software planar 10-bit samples. Its final Vulkan RGB cache rounds
+  to the exact nearest 16-bit value. Shared PQ mapping retains small
+  intermediates, and RGB48 export avoids double rounding while preserving the
+  caller's rounding mode.
+
+- CI retains authenticated successful Android and Node command results when
+  their consumed sources are unchanged, preserving whole-command accounting.
+- Historical queue fixtures preserve managed receipts while rewinding the
+  published source and dispatch extensions, and source audits cover nested
+  replicated-store modules and their required authority reads.
+
+- Manual library scans and explicit refreshes get the next eligible shared
+  read slot across job types. A scan finishing under a pressure check can
+  release its reader and let the next scan start.
+- Activity shows blocked shared reads above both tabs, identifies the originating
+  worker and job when available, and reports overdue manual scans alongside
+  five-minute completion and failure rates for the cluster and each worker.
+
 - macOS source installs discover full Xcode when Command Line Tools are selected,
   find renamed or relocated copies through the macOS application index,
   preserve explicit developer-directory overrides, and install missing Xcode
   through Homebrew/xcodes. Apple authentication, license and first-launch setup
   stay in the terminal; the media build continues after setup completes.
+
 
 - Subtitle workers keep polling pending writes during pressure checks, avoiding
   a deadlock that retained source-reader reservations and blocked library scans.
@@ -61,6 +258,74 @@ bump may break compatibility and a **patch** bump never does.
 - Apple TV Settings enters each category at its first setting and restores the
   category when returning with Back. Picker controls expose their names and
   selected values to accessibility.
+
+### Added
+
+- Each cluster node keeps a lock-free account of what its own replica has
+  applied, and Settings → Developer shows an advisory Applied view card with
+  the node's replica proof, image state and view reads. `/metrics` adds the
+  route-read baseline by site, applied-view reads and reloads, table changes
+  and read-pool wait (playback-start E1a).
+- Settings that only choose how to serve or present a request are read from
+  the node's own replica when it can prove that replica current, instead of
+  a quorum read per request: the playback request path and the polled
+  Settings, System, Features and Developer pages. A node that saves a
+  setting reads it back from quorum until its replica has applied the save;
+  other nodes see it within about a second. Planning, encoder admission,
+  background workers, the save response, fences, auth, membership, ownership
+  and pre-mutation reads stay quorum reads (playback-start E1b).
+- `POST /api/v1/scan` accepts `removed_paths`, so Curator can say which media
+  files left a folder (a Re-match). Such a request probes exactly its expected
+  and removed paths, walks nothing else and never becomes a full scan; each
+  removed path is reported `gone` (its file record removed, and the item too
+  when that was its last file), `unknown`, `present` or `retained`. A missing
+  removed path is not `path_unreadable`; an unreadable chain or an empty mount
+  point is, and removes nothing. The connection test advertises
+  `"features": ["removed_paths"]`.
+- Offload: when Curator deletes a title's files to free disk, plurx keeps the
+  item, its metadata and its watch history, greyed out with an Offloaded badge.
+  `POST /api/v1/scan` accepts `offloaded_paths` (the `removed_paths` shape; the
+  connection test lists `offload`), an item is flagged `offloaded` only when no
+  file is left, and no prune ever deletes one. Library lists take
+  `presence=disk|offloaded|everything` (default on disk, remembered per viewer
+  in the web, Apple and Android clients); search always includes them, flagged.
+  An administrator's **Get it back** asks Curator for the title again
+  (`POST /api/v1/items/{id}/get-it-back`) and the page follows Curator's state
+  (`GET /api/v1/items/{id}/offload-status`). Files that return are placed on the
+  kept item by the request's ids and clear the flag. Deploy every cinema node
+  before Curator sends offload. [Contract](docs/INTEGRATION.md).
+- `POST /api/v1/scan` accepts `removed_paths` and `probe_only`, so Curator can
+  say which media files left a folder (a Re-match). Such a request probes
+  exactly its expected and removed paths, walks nothing else, never becomes a
+  full scan and is a job of its own that no walking request joins. Each removed
+  path is reported `gone` (file records removed, `item_ids` listed, the items
+  too when that left them empty), `unknown`, `present` (with a `reason`:
+  `exists`, `symlink_in_chain`, `case_variant`, `reappeared_before_removal`),
+  `retained` (with a machine `code` and `retryable`) or `skipped`. Nothing is
+  removed while an expected file is not placed. A missing removed path is not
+  `path_unreadable`; an unreadable chain, an empty mount point or a nested
+  mount on another filesystem is, and removes nothing. The connection test
+  advertises `"features": ["removed_paths", "probe_only"]`. Deploy every cinema
+  node before Curator sends `removed_paths` (docs/INTEGRATION.md §1.10).
+
+- Pipeline contract v2 at the scan seam (docs/features/PIPELINE-CONTRACT.md):
+  `POST /api/v1/scan` accepts `request_key` (a repeated key returns the same
+  request and result), `wait_ms` (hold the answer up to 15 s for a `200` with
+  the result), `expected_files` (probed whatever the size+mtime cache says, and
+  reported per file as `placed` with a fresh nanosecond mtime, `skipped` or
+  `missing`), and `probe_paths` (a connection test answering which library
+  roots plurx can see, without scanning).
+- The key that created a scan request may read it with `scan:trigger` alone;
+  the record carries `waiting_on` and the per-file `files`, and reports
+  `running` while a worker holds it.
+- Targeted scan requests run as their own job, claimed ahead of a pending full
+  scan with a probe admission (no heavy-lane permit) and never concurrently
+  with a running one; Activity shows what a waiting one is waiting on.
+- Activity labels a targeted library job "targeted scan" rather than "library
+  scan".
+- New libraries scan every six hours by default. Existing libraries keep their
+  schedule; a library at Never shows what that costs and offers a one-click
+  "Enable 6-hourly reconcile".
 
 ## [0.8.0] — 2026-10-29
 

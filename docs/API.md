@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-28, plurx has 409 routes declared by the ordinary listener's
+As of 2026-11-12, plurx has 415 routes declared by the ordinary listener's
 assembled router. The ordinary HTTP listener (`:32400` by default) and optional
 HTTPS listener (`:32443`, off by default) serve the identical five surfaces
 below. HTTPS requires restart and explicit client trust.
@@ -38,7 +38,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 409 routes across the registered routers.
+plurx has 415 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -183,7 +183,7 @@ calls `ScopedKey::require`:
 | Route | Scope |
 |---|---|
 | `POST /api/v1/scan` | `scan:trigger` |
-| `GET /api/v1/scan/requests/{id}` | `status:read` |
+| `GET /api/v1/scan/requests/{id}` | `status:read`, or `scan:trigger` for a request that key created |
 
 `POST /api/v1/keys` rejects an unknown scope at creation rather than storing
 it, because a typo'd scope would otherwise produce a key that looks correct in
@@ -510,12 +510,14 @@ of never storing it.
 | POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
 | GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
+| GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes. Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
 | GET | `/api/v1/scan/status` | bearer | Per-library scan status |
 | GET | `/api/v1/activity` | bearer | Flat list of what the server is doing |
 | GET | `/api/v1/activity/detail` | bearer; admin sees more | The activity page |
+| GET | `/api/v1/activity/starts` | admin | Query `limit`, `before`. One row per playback start across the cluster, newest first: each media-session create (route `vod` or `rolling`, a retry that replayed its owner's session included) and each direct or progressive request that opened a start (route `direct` or `progressive`, so a `vod_index_pending` fallback to the remux is its own row): time, title, client build, route, refusal, phases, owner node, time to first frame, outcome, index state and the `index now` action (from each title's own newest fragment-index request). `outcome` `unobserved` means no client report reached the node that handled the start (the report may have gone to another node). `before` is the `next_before` cursor of the previous page; a node's page never ends inside a millisecond, so rows sharing one are not skipped. Every committed member is asked, learners included; members that did not answer are listed under `unavailable`; their starts are missing, not absent |
 | DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
@@ -914,6 +916,28 @@ with the same labels and observation fields as `jobs`. `active_truncated`
 indicates more assignments exist. Lease expiration must still be checked;
 a durable running row does not prove a physical worker is alive.
 
+The same response includes `processing: {window_ms: 300000, nodes:
+[{node_id, succeeded, failed}]}` across all filters. Each row counts terminal
+worker attempts with a finish time in the five minutes ending at
+`observed_at_ms` (start exclusive, end inclusive). Sum the node counts for
+the cluster total and divide by five for jobs per minute. Nodes with zero
+qualifying attempts have no row. Yields, retries, cancellations and expired
+leases are excluded. Counts come from retained attempt history and are lower
+bounds if queue maintenance pruned records inside the window.
+
+Each job-count group includes `overdue_manual`. For queued library scans and
+metadata refreshes this counts jobs with a pending manual or targeted request
+that is at least five minutes old and whose job has been due for dispatch
+for at least five minutes. Joining an older scheduled job starts the clock at
+the time of the manual request. Other groups report zero.
+
+Admin Activity source-holder rows include the original reader's
+`origin_node_id` and, for retained durable jobs, `origin_job_kind` and
+`origin_job_state`. A succeeded job can still have a reader awaiting recovery.
+`plurx_background_source_recovery_pending` counts distinct background readers
+that still occupy shared capacity after authority expired; the metrics sampler
+also logs a warning while recovery is pending.
+
 `DELETE /api/v1/activity/processes/{pid}` kills one listed child through the
 pidfd taken when it was started, so a pid the kernel has since reused for an
 unrelated process cannot be signalled: `404` for a pid the list does not
@@ -957,8 +981,8 @@ node does not hold, `409` while a session is reading the published artifact.
 | POST | `/api/v1/libraries/{id}/refresh` | admin | Scans **and** forces metadata re-fetch |
 | POST | `/api/v1/libraries/{id}/root-identity/reset` | admin | Forgets the root fingerprint so replaced storage can re-establish |
 | GET | `/api/v1/libraries/{id}/items` | bearer | Paged, sorted, optionally genre-filtered grid |
-| POST | `/api/v1/scan` | scoped key: `scan:trigger` | "Index exactly this path", for another application |
-| GET | `/api/v1/scan/requests/{id}` | scoped key: `status:read` | Polls one targeted-scan request |
+| POST | `/api/v1/scan` | scoped key: `scan:trigger` | "Index exactly this path", for another application; also the `probe_paths` connection test |
+| GET | `/api/v1/scan/requests/{id}` | scoped key: `status:read`, or the creating `scan:trigger` key | Polls one targeted-scan request |
 | GET | `/api/v1/items/{id}` | bearer | Item detail: item, ancestors, children, files, editions, reading |
 | PATCH | `/api/v1/items/{id}` | admin | Hand-edits metadata — **home libraries only** |
 | POST | `/api/v1/items/{id}/reanalyze` | admin | Re-runs ffprobe over every file on the item |
@@ -984,6 +1008,7 @@ node does not hold, `409` while a session is reading the published artifact.
 | `limit` | `60` | clamped to `1..=200` |
 | `facts` | absent | only the literal `1` turns on the per-item `media` block |
 | `genre` | absent | trimmed; matched `COLLATE NOCASE` against the stored genres array. An unknown genre is an empty page, not an error |
+| `presence` | `disk` | `disk` (what plays now) · `offloaded` · `everything`; anything else is `400`. Offload (INTEGRATION §1.11) keeps a title whose files Curator deleted, flagged `offloaded: true` on its item (a show or season is flagged only when every leaf is) with `rollup.offloaded` counting a partial offload. A show with some offloaded episodes is listed under both `disk` and `offloaded`. Search ignores `presence` and always includes offloaded titles, flagged; Continue Watching and the Plex/Jellyfin surfaces never list them; Next Up stops at an offloaded next episode and returns it flagged |
 
 The response is `{items, total, offset, limit}`, where `offset` and `limit`
 echo the *clamped* values and `total` is computed with the same genre clause
@@ -1091,16 +1116,25 @@ clients must tolerate both absent-optional and unknown-extra keys.
 `POST /api/v1/scan` is how Curator says "index exactly this path". It is
 deliberately **not** under `/libraries/{id}`: the caller knows a filesystem
 path, not a plurx library id, and plurx resolving it is one less thing for two
-applications to keep in sync.
+applications to keep in sync. The seam's contract is
+[PIPELINE-CONTRACT.md](features/PIPELINE-CONTRACT.md) §4–§5; this section is
+the wire as built.
 
 ```jsonc
-{ "path": "/media/tv/Show/Season 01",   // required, must be ABSOLUTE
+{ "path": "/media/tv/Show/Season 01",   // must be ABSOLUTE; absent only with probe_paths
   "ids":  { "tmdb": 1234, "imdb": "tt0001234" },
   "hint": "movie" | "episode" | "season" | "book",
   "series": { "tmdb": 5678 },           // the SHOW's id, for episodes
   "book": { "title", "author", "medium", "work_id", "edition_id",
             "cover_url" },              // Books libraries only
-  "correlation_id": "…", "source": "…" }
+  "correlation_id": "…", "source": "…",
+  "request_key": "t-42-a3f9/1/9c2e/1",  // idempotency key, attempt suffix last
+  "wait_ms": 10000,                     // hold the answer up to this long; cap 15000
+  "expected_files": [{ "path": "…/Show.S01E01.mkv", "bytes": 8123456789,
+                       "mtime_ns": 1794076138123456789 }],   // at most 64
+  "removed_paths": ["…/Old Folder/Show.S01E01.mkv"],         // at most 64; probe-only
+  "probe_only": false,                  // true: record expected_files, walk nothing
+  "probe_paths": ["/media/tv", "/media/movies"] }           // connection test, no path
 ```
 
 `path` must be absolute, because the caller and plurx may not share a working
@@ -1115,22 +1149,111 @@ used as a fallback show ID for an episode or season request.
 `correlation_id` is echoed and logged, so one grep reconstructs a transfer
 across every application it passed through.
 
-Library resolution canonicalizes the path and matches component-wise against
-every root, **longest root wins** — so `/media` and `/media/kids` resolve to
-the more specific library, and `/data` never matches `/database`. Nothing
-matching is the one 422 in the API, and its body names every configured root:
+**Idempotency.** A `request_key` the same API key already used returns *that*
+request — the same `request_id`, and its result once it has one — so a lost
+response never becomes a second scan. A key with a new attempt suffix is a new
+request. Keys belong to the API key that created them: another key's identical
+`request_key` is its own request. A concurrent identical POST loses inside the
+admission transaction and is answered with the winner.
+
+**Expected files.** Each `expected_files` path is probed whatever its size and
+whole-second mtime say — the catalogue's cache cannot tell a same-path
+replacement with equal size from the file it replaced — and reported once the
+scan finishes, in `files`, as `placed {item_id, file_id, bytes, mtime_ns}`
+(from a fresh `stat`, mtime in nanoseconds), `skipped {reason}` or `missing`.
+Expected paths outside the requested directory or library, and paths containing
+a symlink below the configured root, are skipped without probing their targets.
+Existing and missing out-of-scope paths receive the same skip reason.
+Other files under `path` are scanned as before — unless the request names
+removed paths.
+
+**Removed paths.** `removed_paths` lists files, or emptied-and-removed folders,
+under `path` that no longer exist (a Curator Re-match moved them). Such a
+request is **probe-only**, as is any request sending `"probe_only": true`:
+plurx looks at exactly its `expected_files` and `removed_paths`, walks nothing
+else under `path` (which may be a library root, as the common parent of old and
+new folders), reconciles nothing else and admits no full scan. A probe-only
+request is its own job and never shares a pass with one that did not send the
+flag. When `path` itself no longer exists the request is scoped to its nearest
+existing ancestor under the root. After the expected files are placed, each
+removed path is reported in `files` as `gone {item_id, item_ids, item_removed}`
+(absent; its file records — for a folder, every file catalogued below it —
+removed, and the items too when that left them with no files), `unknown`
+(absent, never catalogued), `present {reason}` (nothing removed; `reason` is
+`exists`, `symlink_in_chain`, `case_variant` or `reappeared_before_removal`),
+`retained {item_id, code, retryable, reason}` (absent, but the record was
+kept) or `skipped` (outside the request path or library). `retained.code` is
+one of `root_identity_unset` (retryable), `root_identity_mismatch`,
+`root_identity_unavailable` (retryable), `prune_bound`, `record_kept`
+(retryable), `expected_not_placed` (retryable) or `chain_unreadable`
+(retryable); `retryable` is true when sending the same removal again later can
+succeed without anyone changing anything. Nothing is removed while an expected
+file of the same request is not `placed`. Removal is the full scan's reconcile
+step bounded to those files, under the library's mutation fence and root
+identity check. A missing removed path is not `path_unreadable`: plurx `lstat`s
+from the root down and treats `ENOENT`/`ENOTDIR` as absence; any other error on
+that chain, a root that cannot be listed or lists nothing and is not a mount
+point of its own, or a deepest existing folder on a different filesystem than
+the root, fails the whole request as `503 path_unreadable` before anything is
+placed or removed. [INTEGRATION.md](INTEGRATION.md) §1.10 has the wire, how
+Curator reads each state, and the mixed-cluster deploy order (every cinema node
+before Curator sends `removed_paths`).
+
+**Offloaded paths.** `offloaded_paths` is `removed_paths` for Offload: Curator
+deleted the files to free disk and wants the title kept. The request is
+probe-only and each path is reported like a removed path, except that a path
+whose files were removed is `offloaded {item_id, item_ids, offloaded_items}` and
+its items stay, flagged `offloaded` once they have no files left. `retained.code`
+adds `root_empty` (not retryable): the folder was emptied by the offload and
+sits on its parent's filesystem. The connection test's `features` lists
+`offload`. [INTEGRATION.md](INTEGRATION.md) §1.11 has the deploy order.
+
+**Containment is lexical first.** The request path, with `.` and `..` resolved
+and no symlink followed, is matched component-wise against every configured
+root, **longest root wins** — so `/media` and `/media/kids` resolve to the more
+specific library, and `/data` never matches `/database`. Under no root (or a
+symlink that resolves out of its root) is a permanent 422 that names every
+root; under a root that cannot be read right now — an unmounted share, an empty
+mount point, `ENOTCONN`, `EIO`, or the path missing beneath it — is a transient
+503 with `Retry-After: 60`:
 
 ```json
-{ "error": "path is not under any library root",
+{ "code": "path_outside_roots", "error": "path is not under any library root",
   "path": "/downloads/x", "roots": ["/media/movies", "/media/tv"] }
+{ "code": "path_unreadable", "error": "library root could not be read: …",
+  "path": "/media/tv/Show", "root": "/media/tv", "retry_after_s": 60 }
 ```
 
 | Status | Meaning |
 |---|---|
-| 200 `{"status":"scanned", …, "report", "items"}` | A durable result was already ready when the request was acknowledged |
+| 200 `{"status":"scanned", "request_id", "report", "items", "files", …}` | The request finished — within `wait_ms`, or before the handler re-read it, or it is a replay of a finished `request_key` |
 | 202 `{"status":"queued", "request_id", …}` | Durably accepted for an eligible cluster worker. Requests survive process restart; same-path requests share a scan while retaining each caller’s hints and result |
-| 400 | Relative path, nonpositive `series.tmdb`, or invalid `book` fields |
-| 422 | Path under no library root |
+| 200 `{"features", "roots", "visible", "missing", "outside_roots"}` | `probe_paths` with no `path`: which roots plurx can see, and in `features` the optional contract features this build implements (`["removed_paths", "probe_only", "offload"]`). Only a configured root or a path under one is looked at; a symlink beneath the root is found with `lstat` and listed as `outside_roots` without being followed; anything else is `outside_roots`. Nothing is scanned or queued |
+| 400 | Relative path, a `removed_paths` entry that is relative, not under `path`, or over the limits, nonpositive `series.tmdb`, invalid `book` fields, a malformed `request_key` or `expected_files`, `{"code":"path_required"}` (neither `path` nor `probe_paths`), or `{"code":"probe_paths_with_path"}` (both) |
+| 500 `{"code":"scan_failed", "status":"failed", "request_id", "error"}` | The request (or the finished request a replayed `request_key` names) failed for a reason other than an unreadable root; the same `request_id` the record carries |
+| 500 `{"code":"cancelled", "status":"failed", "request_id", "error"}` | The same failed shape for a request whose job was cancelled (Activity's Cancel); send a new attempt |
+| 422 `path_outside_roots` | Path under no library root — permanent |
+| 503 `path_unreadable` | Path under a root that cannot be read now — retry after 60 s. Also the answer when a waited-for or replayed request failed because its root dropped mid-scan; then it also carries `request_id` and `status: failed` |
+| 503 (`error` only) | The durable queue refused the request (full, or the same request is cancelling) |
+
+**The targeted job.** Targeted requests run as their own job, dedupe key
+`library:targeted:{library_id}`, separate from the library's full scan. It is
+claimed first among library work and with a probe admission — no heavy-lane
+permit, so a busy GPU or a running title scan never delays it, and playback
+does not preempt it. It takes the same per-library mutation fence
+(`scan:library:{id}`) as a full scan, so the two never run at once: beside a
+running full scan (or metadata refresh) the request waits with `waiting_on:
+full_scan:<library>`; its retry is due a quarter second after the refusal, and
+the holder's release wakes the releasing node's library loop, which claims it
+at once — any other node within its next idle poll (no preemption). Fragment
+index, Dolby Vision title scan and cache work for what it places still queue on
+the heavy lane. The job keeps the `library_scan` kind with its own payload
+generation (`library-targeted-v1`; whole-library work is `library-work-v1`),
+so older nodes in a rolling upgrade decode it and leave it alone — and any
+logic keyed on the `library_scan` kind must check the generation too. One
+consequence of its priority: on a node that keeps receiving imports, a
+scheduled full scan of the same library can stay queued behind them; the
+contract allows it.
 
 The id hints ride *on* the queued request so the drained job applies them
 later; an endpoint that applied them itself would drop them for every request
@@ -1139,14 +1262,28 @@ series hint once per resolved show. A series-ID conflict does not fail or roll
 back playable placement; it is a bounded diagnostic and never overwrites the
 known provider ID. Every call increments the integration
 notification counter *before* path resolution, so a request rejected for a
-path-mapping mistake still proves the caller reached plurx with a working key.
+path-mapping mistake still proves the caller reached plurx with a working key;
+a `probe_paths` test counts there too and never as a scan.
 
-`GET /api/v1/scan/requests/{id}` returns the record verbatim. `status` is
-`queued` · `done` · `failed` · `cancelled`; `report` and `items` appear only at
-a terminal state, `error` only on failure. Request receipts and results persist
-for seven days. The recent list is bounded to 256 records; an older record can
-still be read by ID until its receipt expires. A library admits at most 256
-pending requests; overload is an explicit rejection before acceptance.
+`GET /api/v1/scan/requests/{id}` returns the record. A `status:read` key reads
+any request; a `scan:trigger` key reads the requests it created and gets 403
+for any other id — including one that does not exist, so a scan key cannot
+probe which requests exist. `status` is `queued` · `running` · `done` · `failed`; `report` and
+`items` appear at `done`, `error` on failure, with `code: "path_unreadable"`
+when the root dropped mid-scan or `code: "cancelled"` when the request's job
+was cancelled (a cancelled request is `failed`, never a status of its own). A request made through this route also carries
+`waiting_on` — `full_scan:<library>` while a full scan or a metadata refresh of
+the request's own library holds that library's fence, `root_unreadable:<path>`
+while the claiming node cannot read a root, `queue_position:<n>` when it joined
+a targeted pass already running with `n` requests ahead of it, empty once its
+turn starts — and `files`, the per-file report above; their absence means a
+request from before contract v2. A targeted request takes no background source
+reader, so a scan of another library on the same storage does not hold it, and
+the contract's `heavy_lane:<holder>` is never produced for it.
+Request receipts and results persist for seven days. The recent list is bounded
+to 256 records; an older record can still be read by ID until its receipt
+expires. A library admits at most 256 pending requests; overload is an explicit
+rejection before acceptance.
 
 ### 6.4 Root identity, and why a scan refuses to prune
 
@@ -1880,10 +2017,30 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 | 410 | `live_presentation_removed` | `presentation` is anything but `"vod"` |
 | 410 | `media_session_ended` | the idempotent session was already released |
 | 422 | `hdr_subtitle_burn_refused` | the resolved plan delivers HDR without the burn, so burning would discard that grade. Judged after `resolve_plan`, against the no-burn delivered range — not against the source `hdr` column, and not exempted by a transcode verdict. The M6 preparation candidate is refused the same way |
-| 503 | `media_session_starting` | an identical request is still starting |
+| 503 | `startup_timeout` + `Retry-After` | the create's owner is still working, or an identical request (same `request_id`) is: re-post the same body; the retry joins that owner |
+| 503 | `transcode_capacity_pending` + `Retry-After` | a hardware slot, CPU share or queue position is taken; a retry of the same request can succeed |
+| 503 | `transcode_height_unavailable` | this worker cannot encode the requested height now; ask for a smaller one rather than re-posting (no shipped client re-asks yet: each ends the start on the `create_capacity_terminal` surface row) |
+| 503 | `transcode_scratch_exhausted` | this start's scratch grant is larger than the configured ceiling; no retry can succeed |
+| 503 | `replacement_expired` | the replacement start spent its own deadline before provisional work finished |
 | 503 | `media_session_handoff_pending` | the predecessor owner has not finished handoff |
 | 503 | `media_session_superseded` / `playback_target_superseded` | the client has since settled on a later destination |
-| 503 | — | too many session starts already active for this user |
+| 503 | `media_session_overloaded` + `Retry-After` | too many session starts already active for this user; the caps free as this user's other starts activate or end |
+| 503 | `media_owner_transition` + `Retry-After` | the ingress or the chosen worker lost serving authority, a worker did not answer, or the session's durable owner could not be committed in time; re-post the same body. Every create 503 carries a code; one with no more specific cause carries this one |
+
+**Start budget.** A client sends `X-Plurx-Startup-Remaining-Ms`: what its
+own start sequence has left, in milliseconds, on every attempt. The server
+answers within that or within **10 s, whichever is less** — it never holds one
+create longer than 10 s, whatever the header says — and a create without the
+header gets the 10 s. `0` is answered `startup_timeout` at once. When the
+allowance ends first, the answer is `startup_timeout` with `Retry-After`, but
+the start itself is not abandoned: once the create holds its durable
+`request_id` claim it runs on to activation for as long as the viewer can
+still take the answer — the header's whole remaining time (unclamped) plus one
+re-post, inside the claim's 60 s window — and a re-post of the same body with the same `request_id` — on any
+node — waits for that owner's activation (bounded by the new attempt's own
+allowance) and answers with it, rather than starting a second encoder. A
+client with more time left than 10 s therefore re-posts on `startup_timeout`;
+one with none left stops.
 
 **The deprecated bridge.** `GET /files/{id}/hls/start` accepts `height`,
 `start`, `audio`, `copy=1`, `aac=1`, builds a create body and calls the same
@@ -2139,6 +2296,17 @@ The owner relays this optional report in a bounded private response header
 (4096 bytes), keeping the internal control JSON body compatible with older
 peers. The ingress validates the incarnation and HDR10 selection before public
 projection; a missing or stale header omits the report.
+
+An accepted public response may also include
+`processing_skip: {generation, reason}` when the optional processed-DV upgrade
+kept the ordinary stream. `reason` is at most 512 Unicode characters and
+contains no control characters. It distinguishes unsupported hardware,
+waiting title/recipe qualification, quality refusal and preparation/admission
+failure. It does not establish that any processing was applied. The owner
+relays it through a private header bounded to 4096 bytes; ingress validates
+the generation before projection. Clients clear an omitted or stale report,
+retain the original enhancement facts and active badges, and explain only
+inactive enhancements for their current generation.
 
 The request reports what the client is doing — `demand` (`active` · `hold` ·
 `end`), `position_ms`, `buffered_from_ms` (absent means *no contiguity
@@ -2656,6 +2824,8 @@ valid URL, the only way forward is to release and start over.
 | GET | `/api/v1/items/{id}/reading-state?file_id=` | bearer | `{state, stale}` |
 | PUT | `/api/v1/items/{id}/reading-state` | bearer | Saves a revision-bound locator; body ≤ 64 KiB |
 | DELETE | `/api/v1/items/{id}/reading-state?file_id=` | bearer | Clears it. 204 |
+| POST | `/api/v1/items/{id}/get-it-back` | admin | Ask Curator to download an offloaded movie, episode, season or show again (synchronous `reacquire` webhook). 200 `{matched, state, message}`; 409 `not_offloaded` / `no_external_ids` / `curator_not_configured`; 502 `curator_unreachable` / `curator_too_old` / `curator_refused_key` |
+| GET | `/api/v1/items/{id}/offload-status` | bearer | Curator's current state for an offloaded title, read through and never stored (`reacquire_status` webhook). Same answer and errors as `get-it-back`; `state` also `offloading`, `offloaded`, and an unknown state is relayed as text |
 | GET | `/api/v1/items/{id}/annotations` | bearer | `{ratings, watchlist, favorite}`. `ratings` holds `{source, value, scale, votes?}` per source with a score (`imdb` /10, `rotten_tomatoes`, `metacritic`, `tmdb` /100), in that order, movies and shows only. It is fetched from TMDB and OMDb on first read and kept 14 days. `watchlist` is false once a listed movie is watched (or every episode of a listed show is) |
 | PUT / DELETE | `/api/v1/items/{id}/watchlist` | bearer | Put a movie or show on, or take it off, the reader's watchlist. 204; 400 for other kinds |
 | PUT / DELETE | `/api/v1/items/{id}/favorite` | bearer | The same for the reader's favorites |
@@ -2886,7 +3056,7 @@ The preparation status read requires an authenticated viewer; every other route 
 | GET | `/api/v1/analysis/jobs/{id}` | One job's exact durable state and attempt history |
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
 | POST | `/api/v1/analysis/jobs/{id}/retry` | Creates a successor for one terminal job |
-| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default** |
+| POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default**; optional `last_error_code` (one of the bounded `plurx_analysis_queue_failed_by_code` codes) selects one cause |
 | POST | `/api/v1/analysis/reconcile` | Preview and replace obsolete unfinished requests; **dry-run by default** |
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |
@@ -3604,8 +3774,8 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 |---|---|---|---|
 | POST | `/api/v1/cluster/join-tokens` | admin | Mints one single-use **voter** join token |
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
-| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots and persisted domain mappings; two shared readers per domain and two concurrent library workers per provider |
-| PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` replaces the mapping, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 409 while live work owns reservations or a root no longer exists; feature enable settings are independent |
+| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots, applied `mappings`, latest `pending` revision/state, `waiting_on` (at most 32 rows) and distinct `waiting_total`; two readers per domain and two library workers per provider |
+| PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` saves the desired revision immediately, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 200 with `saved`, `revision`, `applied`, latest `pending`, `waiting_on` and `waiting_total`; 400 for invalid input or a stale library root. Eligible nodes apply atomically when affected jobs and disturbed-domain readers no longer depend on the previous mapping. [Apply status](server/STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) |
 | GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, `node_id`, `limit` (1–100; default 100), and `cursor` query parameters; owner/destination filtering precedes pagination; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
 | GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
 | POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |
@@ -3976,6 +4146,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
 | GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
+| POST | `/_internal/v1/activity-starts` | — (signed exact request) | This node's own page of start-attempt rows for the fleet `activity/starts` read; response is signed by the node |
 | GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. The route itself only measures; since 2026-10-04 (#793) the observations it supplies feed the cluster clock guard, which refuses takeover, the expired-session scan, membership changes and readiness only while the Developer switch `cluster.clock_guard_enforced` is on (default off; see OPERATIONS.md). |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |
@@ -3986,6 +4157,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/api/v1/internal/media/shared-cache-canary` | 1 KiB | Proves shared-cache identity and generation |
 | GET | `/internal/media/cache-copy/{recipe}/{digest}/{object}` | — | A signed committed member may fetch the authenticated manifest (`object=manifest`) or one zero-based manifest object from a published local transcode. Full digest checks, bounded response permits and cache reader pins apply; this never starts an encoder. |
 | GET | `/internal/media/fragment-index/{cache_key}` | — | Streams the verified local fragment index |
+| GET | `/internal/media/copy-index-v3/{source_key}/{blob_sha256}` | — | Streams the variant a readable v3 copy-index head points at, when this node holds it, verified against its variant row by size and SHA-256. Signed cluster read request, the fragment-index read permits (four per node, two per peer) and the 32 MiB blob bound apply. A quarantined, superseded or unknown variant is a plain 404; only a 404 whose body is `copy-index-v3-variant-absent` says this node lacks the bytes, and only that lets the caller retire this node as a holder. The source video is never opened. |
 | GET | `/internal/media/subtitle-source/{file_id}/{ordinal}/{format}` | — | Streams a verified local subtitle-source representation (`sup`, `webvtt`, or `matroska`) named by this node's manifest. Requires a signed cluster read request and the subtitle-cluster-sources switch; returns 404 for a missing or corrupt object so the caller can try another published holder. The source video is never opened. |
 | POST | `/internal/media/subtitle-range` | Range identity (file ID, stamp, ordinal, anchor, span and sampled source attestation) | Produces one indexed Matroska text playback window. Exact signed request and response; 4 KiB request body, 8 MiB VTT bound, two workers per node and one per requesting peer, 25 s worker deadline. Source is resolved from the catalog and checked before and after extraction. Partial ranges never become whole-track publications. |
 | POST | `/_internal/v1/live-tv/snapshot` | 16 KiB | Tuner readiness and lineup for the current generation |
@@ -4294,9 +4466,9 @@ retain their copy semantics; H.264 remux can still build its index on demand.
 | GET | `/api/v1/shared/imports/{import}/continue-watching` | Hydrate this Source's current watch items; an unavailable Source is reported without stale title fallback. |
 | POST | `/api/v1/shared/imports/{import}/items/{item}/progress` | Ordered Shared progress `{session_id, sequence, position_ms, duration_ms, watched}` for the viewer's exact published Shared session; `409 sharing_progress_conflict` carries `current_sequence`, and `503 sharing_progress_session_binding_unavailable` answers when no live session binds the beat. |
 | POST | `/api/v1/shared/imports/{import}/items/{item}/watched` | B-private manual watched state `{watched: bool}` for a Shared movie or episode, after one fresh pinned Source membership read under current assignment. The Store write takes the next history sequence, so an earlier beat cannot restore the old position; Source history and Local watch state are untouched. Other item kinds answer `409 sharing_watch_unsupported`. |
-| GET | `/api/v1/shared/imports/{import}/art/{resource}` | Fetch an advertised signed recipient art alias after current account, import and Source-scope checks; no arbitrary Source URL is accepted. |
+| GET | `/api/v1/shared/imports/{import}/art/{resource}` | Signed recipient art alias under current viewer/import/Source scope. Verified snapshots reuse bytes; each delivery checks live scope. Variant or scope-capacity waits answer 429 with `Retry-After`; failed proofs remain 503.
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/decision` | Negotiate the complete existing decision DTO from runtime v2 capabilities, a signed file locator and current account/import/Source authority. The request body is bounded to 128 KiB. |
-| POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Start Shared HLS playback through B's receiver actor from the ordinary `CreateSession` body (at most 128 KiB, initial play/resume only). The answer is the ordinary Start envelope with B's own session, playlist and control URLs; the session then serves `/api/v1/hls/{session}/…`, `status` (the Shared grammar) and `control` (current rendition only). |
+| POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Shared HLS Start from a `CreateSession` body (at most 128 KiB, initial play/resume). The Start envelope uses B's session, playlist/control URLs and Shared status/control grammar.
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/playback` | The same Shared Start, at the typed playback alias. With `"presentation":"direct"` in the `CreateSession` body the Source recomputes the decision with the real caps and admits only direct play; the answer is `{presentation:"direct", session_id, url, length, mime}` where `url` is `{file_base}/direct?session=<B session>`. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{subtitle}` | One text subtitle track as WebVTT (`{n}` or `{n}.vtt`), read fresh from the pinned Source (at most 2 MiB, `text/vtt`, never cached on B). Caller: the signed-in viewer (header or `?token=`), or `?session=` naming a live Shared session that plays exactly this file revision; an account sent alongside a session must be that session's viewer. A bitmap track answers `422 sharing_asset_unsupported`. |
 | GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay.json` | The track's `pgs-v1` manifest with its generation, cue geometry, source-time intervals and relative object names preserved, the file ID replaced by the canonical Source string plus the full reference (Source body at most 1 MiB). `202 {"state":"preparing","retry_after_ms":1000}` while the Source prepares it. Same callers as the subtitle route. |
@@ -4305,29 +4477,30 @@ retain their copy semantics; H.264 remux can still build its index on demand.
 | any | `/api/v1/shared/imports/{import}/files/{locator}/stream.mp4` | Always `422 sharing_resource_unsupported`, for every method and before any import, account or Local lookup: progressive remux is not offered for shared files (Copy HLS covers it). |
 | GET/HEAD | `/api/v1/shared/imports/{import}/files/{locator}/direct` | Shared direct-play bytes. Requires exactly one `session=<B session>` query naming a live direct session bound to this file alias, login and delivery grant; account headers are optional and, when present, must name the session's viewer. Range, If-Range, 206 and 416 behave exactly as `/api/v1/files/{id}/direct`. Never admits a session; an unknown session is 404, a missing one 400. |
 
-Captured recipient scope is revalidated through accepted metadata and
-decision bodies; content fetched from a Source also retains its Source-scope
-checks. A file alias is not login or
-session authority: the decision route verifies its current import lifecycle
-and exact file/revision binding before contacting the pinned Source. Missing
-keys, revoked scope and unavailable Sources refuse delivery. Shared Start is
-registered on the authenticated media router and dispatches through B's
-receiver owner.
+Recipient metadata and decision bodies revalidate captured scope; Source
+content retains its Source-scope checks. File aliases are not login/session
+authority: decisions validate the current import and exact revision before
+dialling the pinned Source. Missing keys, revoked scope and unavailable
+Sources refuse delivery. Shared Start dispatches through B's receiver owner.
 
-Shared HLS accepts embedded subtitle burns and HDR10 requests. The Source
-recomputes the plan from the original capabilities and its own file facts;
-burn extraction and font preparation belong to its admitted operation. A
-burn sidecar is bounded to 64 MiB, and a burn always encodes. B verifies the
-returned HDR grade against the viewer's exact PQ or HLG presentation claim.
-An SDR display declaration overrides a decoder's HDR claim.
+Shared Start reads `x-plurx-startup-remaining-ms`. B forwards it only to peers
+advertising `start_budget_v1`; one ingress clock bounds discovery and answer
+waits. Typed 503 `startup_timeout` or `media_session_overloaded`, with
+`Retry-After`, preserves the request for rejoin. Owned preparation keeps its
+own budget. Ready results without an accepted Start writer retire at the
+fixed rejoin deadline through ordinary End. Clockless peers keep prior bounds.
 
-Dolby Vision preservation, conversion and re-encoding return `422
-sharing_start_dolby_vision_unsupported`. Direct play keeps the original bytes
-when the Source's direct-play decision permits them. Downloaded subtitle
-burns and native subtitle renditions beside HDR remain unsupported. A typed
-Start refusal is not an End receipt or proof that an earlier invocation owns
-no resources. Runtime qualification of these additions remains recorded
-separately in [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
+Shared HLS accepts embedded burns and HDR10. The Source recomputes the plan
+from original caps and its file facts; extraction and fonts belong to the
+admitted operation. Burns encode and sidecars are capped at 64 MiB. B checks
+returned HDR against the viewer's exact PQ/HLG claim; an SDR declaration
+overrides decoder HDR capability.
+
+Non-direct Dolby Vision returns 422 `sharing_start_dolby_vision_unsupported`.
+Direct keeps original bytes when the Source permits it. Downloaded burns and
+native subtitles beside HDR remain unsupported. A typed Start refusal proves
+neither End nor absence of earlier resources. Runtime qualification stays in
+[the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold
 no B cache; each body is file-scoped and the current login, import,

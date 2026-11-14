@@ -415,6 +415,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
                 h2,
                 SourceFixtureMode::Copy,
                 None,
+                false,
                 fixture_body_budget,
             )),
         )
@@ -430,6 +431,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
             false,
             SourceFixtureMode::Copy,
             Some(false),
+            false,
             fixture_body_budget,
         )),
     )
@@ -444,6 +446,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
             false,
             SourceFixtureMode::Copy,
             Some(true),
+            false,
             fixture_body_budget,
         )),
     )
@@ -470,6 +473,7 @@ async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b(
                     h2,
                     mode,
                     None,
+                    false,
                     fixture_body_budget,
                 )),
             )
@@ -477,6 +481,30 @@ async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b(
             .expect("bounded real playback fixture");
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_caption_busy_preserves_same_native_session() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    let budget = crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(330),
+        Box::pin(actual_pinned_playback(
+            address,
+            true,
+            SourceFixtureMode::NativeCopy,
+            None,
+            true,
+            budget,
+        )),
+    )
+    .await
+    .expect("bounded real native caption busy and recovery fixture");
 }
 
 /// The current-rendition control selection a client derives from its own
@@ -527,10 +555,13 @@ async fn actual_pinned_playback(
     h2: bool,
     mode: SourceFixtureMode,
     endpoint_failure: Option<bool>,
+    exercise_caption_busy: bool,
     fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
 ) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    let logs = Arc::new(crate::logbuf::LogBuffer::new(4096));
+    let _capture = crate::logbuf::capture_for_test(&logs);
     let fixture = build_receiver_fixture(address, mode, None, fixture_body_budget).await;
     let tls = Arc::new(
         LiveNodeTls::open(
@@ -555,6 +586,10 @@ async fn actual_pinned_playback(
     };
     // Actual HTTP-arrival diagnostics only, never no-admission/settlement proof.
     let source_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source_ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_ends = source_ends.clone();
+    let source_resource_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_resource_status = source_resource_status.clone();
     let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let stalled_end_release = tokio_util::sync::CancellationToken::new();
     let observed_stall_release = stalled_end_release.clone();
@@ -571,8 +606,13 @@ async fn actual_pinned_playback(
                 let refusal = observed_refusal.clone();
                 let end_bodies = observed_end_bodies.clone();
                 let starts = observed_starts.clone();
+                let ends = observed_ends.clone();
+                let resource_status = observed_resource_status.clone();
                 let status = observed_status.clone();
                 async move {
+                    if request.uri().path().ends_with("/end") {
+                        ends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if refusal.load(std::sync::atomic::Ordering::Relaxed)
                         && request.uri().path().ends_with("/end")
                     {
@@ -593,7 +633,14 @@ async fn actual_pinned_playback(
                     if is_start {
                         starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
+                    let is_resource = request.uri().path().ends_with("/resources");
                     let response = next.run(request).await;
+                    if is_resource {
+                        resource_status.store(
+                            usize::from(response.status().as_u16()),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                     if is_start {
                         status.store(
                             usize::from(response.status().as_u16()),
@@ -730,7 +777,13 @@ async fn actual_pinned_playback(
             Vec::new(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "actual pre-session WebVTT; H2={h2}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "actual pre-session WebVTT; H2={h2}: {}; Source warnings: {:?}",
+            String::from_utf8_lossy(&bytes),
+            logs.tail("warn", 8)
+        );
         assert_eq!(headers["content-type"], "text/vtt; charset=utf-8");
         assert_eq!(headers["cache-control"], "no-store");
         assert!(String::from_utf8_lossy(&bytes).contains("Actual HTTP Source caption"));
@@ -837,9 +890,10 @@ async fn actual_pinned_playback(
     .await;
     if status != StatusCode::OK {
         eprintln!(
-            "actual Source HTTP diagnostic starts={}, last_status={}",
+            "actual Source HTTP diagnostic mode={mode:?}, H2={h2}, starts={}, last_status={}; warnings={:?}",
             source_starts.load(std::sync::atomic::Ordering::Relaxed),
-            source_start_status.load(std::sync::atomic::Ordering::Relaxed)
+            source_start_status.load(std::sync::atomic::Ordering::Relaxed),
+            logs.tail("warn", 64)
         );
         eprintln!(
             "actual B diagnostic claim-stage counts: {}",
@@ -868,6 +922,157 @@ async fn actual_pinned_playback(
         4
     );
     let prefix = format!("/api/v1/hls/{session}/");
+    if exercise_caption_busy {
+        use plurx_core::store::keys::SW_POOL_THREADS;
+        use std::sync::atomic::Ordering;
+        // A permanent caption-only refusal must leave the movie live too.
+        // Track two is beyond this fixture's two actual native tracks.
+        let (unsupported, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{prefix}subs/2/seg00000.vtt"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            unsupported,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "actual caption track refusal remains resource-local through B: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            source_resource_status.load(Ordering::Relaxed),
+            422,
+            "the actual pinned Source rejected the unsupported caption track"
+        );
+        assert_eq!(source_starts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            source_ends.load(Ordering::Relaxed),
+            0,
+            "a permanently unsupported caption track must not retire the movie"
+        );
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+        let (video, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{prefix}init.mp4"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            video,
+            StatusCode::OK,
+            "video remains live after caption track refusal"
+        );
+        assert!(bytes.windows(4).any(|part| part == b"ftyp"));
+        // Ordinary policy now refuses the first actual caption window's CPU
+        // admission; no status/control request has warmed that window.
+        let previous = fixture
+            .source
+            .state
+            .store
+            .get_or_init_setting(
+                SW_POOL_THREADS,
+                &crate::admission::software_budget().to_string(),
+            )
+            .await
+            .expect("saved effective Source CPU policy");
+        fixture
+            .source
+            .state
+            .store
+            .put_setting(SW_POOL_THREADS, "0")
+            .await
+            .expect("temporarily disable Source software admission");
+        let caption_path = format!("{prefix}subs/0/seg00000.vtt");
+        let (busy, headers, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &caption_path,
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            busy,
+            StatusCode::TOO_MANY_REQUESTS,
+            "actual Source caption admission must remain retryable through B: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            source_resource_status.load(Ordering::Relaxed),
+            429,
+            "the actual pinned Source resource route refused admission"
+        );
+        assert_eq!(headers["retry-after"], "1");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).expect("local typed retry")["code"],
+            "sharing_resource_busy"
+        );
+        assert_eq!(source_starts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            source_ends.load(Ordering::Relaxed),
+            0,
+            "one busy caption window must not retire the movie"
+        );
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+        let (video, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{prefix}init.mp4"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            video,
+            StatusCode::OK,
+            "video remains live while caption admission is busy"
+        );
+        assert!(bytes.windows(4).any(|part| part == b"ftyp"));
+        fixture
+            .source
+            .state
+            .store
+            .put_setting(SW_POOL_THREADS, &previous)
+            .await
+            .expect("restore original Source CPU policy");
+        let (ready, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &caption_path,
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            ready,
+            StatusCode::OK,
+            "same caption window resumes on the same published session"
+        );
+        assert_eq!(source_resource_status.load(Ordering::Relaxed), 200);
+        assert!(std::str::from_utf8(&bytes)
+            .expect("actual native VTT")
+            .contains("Actual HTTP Source caption"));
+        assert_eq!(
+            source_starts.load(Ordering::Relaxed),
+            1,
+            "caption recovery must not Start another movie"
+        );
+        assert_eq!(
+            source_ends.load(Ordering::Relaxed),
+            0,
+            "ordinary confirmed End still belongs to the viewer"
+        );
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+    }
     let mut playlist_path = start["playlist_url"]
         .as_str()
         .expect("actual B playlist")
@@ -1155,6 +1360,234 @@ async fn actual_pinned_playback(
             .expect("replacement joined")
             .expect("replacement server result");
     }
+    let _ = b_stop.send(());
+    b_task
+        .await
+        .expect("actual B server joined")
+        .expect("B server result");
+    let _ = source_stop.send(());
+    source_task
+        .await
+        .expect("actual Source server joined")
+        .expect("Source server result");
+    fixture.shutdown().await;
+}
+
+/// S10: a viewer who leaves a shared start before it publishes gives the
+/// Source its slot back, and the Source logs the stage that start ended in,
+/// once. The client sends its start clock and is answered a typed not-yet;
+/// it never retries. When the attempt's rejoin window ends B's owner sends
+/// the Source an End. The Source start is held mid-preparation (its cold
+/// index scan has spawned) when the End arrives: the scan is not cancelled,
+/// it completes and persists for the next play, and only then does the
+/// start end at its stage boundary and free its slot.
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_abandoned_start_settles_the_source_entry_and_logs_one_stage()
+{
+    use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    let logs = Arc::new(crate::logbuf::LogBuffer::new(4096));
+    let _capture = crate::logbuf::capture_for_test(&logs);
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    let fixture = build_receiver_fixture(
+        address,
+        SourceFixtureMode::ColdCopy,
+        None,
+        fixture_body_budget,
+    )
+    .await;
+    let tls = Arc::new(
+        LiveNodeTls::open(
+            &fixture.directory().join("source-runtime-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual Source runtime TLS"),
+    );
+    let (pin, _) = tls.status().expect("actual Source runtime SPKI");
+    let source_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual Source CGNAT listener");
+    let endpoint = Endpoint {
+        ipv4: match address {
+            IpAddr::V4(ip) => ip,
+            _ => panic!("IPv4 CGNAT fixture"),
+        },
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: source_listener.local_addr().expect("Source bind").port(),
+        spki_sha256: pin,
+    };
+    // Counts the Ends B sends the Source.
+    let ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_ends = ends.clone();
+    let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let ends = observed_ends.clone();
+                async move {
+                    if request.uri().path().ends_with("/end") {
+                        ends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ),
+    );
+    let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+    let source_task = tokio::spawn(crate::serve_http(
+        SharingTlsListener::new(source_listener, tls.clone()),
+        source_app,
+        async move {
+            let _ = source_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    fixture.pair(endpoint).await;
+    let b_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual B CGNAT listener");
+    let b_address = b_listener.local_addr().expect("B bind");
+    let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
+    let b_task = tokio::spawn(crate::serve_http(
+        b_listener,
+        fixture_router(fixture.state.clone()),
+        async move {
+            let _ = b_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let (status, _, bytes) = b_request(
+        b_address,
+        false,
+        "GET",
+        &format!(
+            "/api/v1/shared/imports/{}/items/{}",
+            fixture.import_id,
+            fixture.source.reference.item_id.as_str(),
+        ),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "actual details");
+    let details: Value = serde_json::from_slice(&bytes).expect("detail JSON");
+    let base = details["files"][0]["file_base"]
+        .as_str()
+        .expect("signed file alias");
+    let original: Value = serde_json::from_slice(&fixture.source.request).expect("Source recipe");
+    let session = serde_json::to_vec(&original["session"]).expect("CreateSession body");
+
+    let transcode = Arc::clone(&fixture.source.state.transcode);
+    let file = fixture
+        .source
+        .state
+        .store
+        .get_file(1)
+        .await
+        .expect("Source file read")
+        .expect("Source file");
+    let indexed = || {
+        let store = Arc::clone(&fixture.source.state.store);
+        let (id, size, mtime) = (file.id, file.size, file.mtime);
+        async move {
+            store
+                .holds_fragment_index_for_source(id, size, mtime)
+                .await
+                .expect("Source node-local index read")
+        }
+    };
+    assert!(!indexed().await, "the fixture title starts cold");
+    // Keep a running scan held beyond the normal 20 s viewer window and
+    // re-post grace. Observe its spawn before awaiting the caller's answer;
+    // a 1 s clock could retire the attempt before this precondition existed.
+    let pause = transcode.pause_source_index_after_spawn(std::time::Duration::from_secs(40));
+    let client = tokio::spawn({
+        let path = format!("{base}/hls/sessions");
+        let login = fixture.original_login.clone();
+        async move {
+            b_raw_request(
+                b_address,
+                false,
+                "POST",
+                &path,
+                &[
+                    ("authorization", format!("Bearer {login}")),
+                    ("content-type", "application/json".to_owned()),
+                    (super::hls::STARTUP_REMAINING_HEADER, "20000".to_owned()),
+                ],
+                session,
+            )
+            .await
+        }
+    });
+    let held = pause.reached().await;
+    assert_eq!(
+        transcode.source_http_starts.live_entries(),
+        1,
+        "the Source start holds a registry slot while it prepares"
+    );
+    assert_eq!(transcode.source_worker_count(), 1);
+    let (status, headers, bytes) = client.await.expect("actual caller joined");
+    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).expect("not-yet JSON")["code"],
+        "startup_timeout",
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(headers["retry-after"], "1");
+    // The typed not-yet came and its actual driver closed; no retry follows.
+
+    let terminal = || {
+        logs.tail("trace", 4096)
+            .into_iter()
+            .filter(|entry| entry.message.contains("Source producer startup failed"))
+            .collect::<Vec<_>>()
+    };
+    let bound = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    // B's owner ends the attempt when the window ends, and the End reaches
+    // the Source while its scan is still held.
+    while ends.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < bound,
+            "B never ended the abandoned attempt"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        terminal().is_empty(),
+        "the End does not cancel a running index scan"
+    );
+    assert_eq!(transcode.source_http_starts.live_entries(), 1);
+    held.release();
+    while transcode.source_http_starts.live_entries() != 0 || transcode.source_worker_count() != 0 {
+        assert!(
+            tokio::time::Instant::now() < bound,
+            "the abandoned start still holds its Source slot: entries={} workers={}",
+            transcode.source_http_starts.live_entries(),
+            transcode.source_worker_count()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let ended = terminal();
+    assert_eq!(ended.len(), 1, "exactly one terminal stage: {ended:?}");
+    assert!(
+        ended[0].message.contains("stage=\"recipe_preparation\"")
+            && ended[0].message.contains("retirement_requested=true"),
+        "{ended:?}"
+    );
+    assert!(
+        indexed().await,
+        "the abandoned start's cold index persisted for the next play"
+    );
+    assert_eq!(fixture.source.active_source_sessions().await, 0);
+
     let _ = b_stop.send(());
     b_task
         .await
@@ -2289,3 +2722,452 @@ async fn b_raw_request(
 
 #[path = "shared_receiver_forwarding_fixture.rs"]
 mod forwarding_fixture;
+
+/// S6/S7/S11 through the real pinned B-to-Source relay. The viewer sends its
+/// start clock; with the Source unable to publish, the client is told a typed
+/// `startup_timeout` with `Retry-After` (the create ladder's code), the B
+/// attempt and the Source entry stay alive, and the client's retry with the
+/// same `request_id` is published from that one Source Start. Against a
+/// Source that does not advertise `start_budget_v1` (an older install), B
+/// sends no header and the Source sees exactly today's single Start.
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_source_not_yet_rejoins_the_same_source_start() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    for (older_source, unassigned) in [(false, false), (true, false), (false, true)] {
+        let fixture_body_budget =
+            crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            Box::pin(actual_pinned_not_yet(
+                address,
+                older_source,
+                unassigned,
+                false,
+                fixture_body_budget,
+            )),
+        )
+        .await
+        .expect("bounded relayed not-yet fixture");
+    }
+}
+
+/// Readiness after the final not-yet waiter left does not give any viewer
+/// the session capability. The ordinary owner must End that ready result at
+/// its fixed window, while the paired rejoin fixture keeps a claimed result.
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_ready_in_retry_gap_is_retired_without_delivery() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        Box::pin(actual_pinned_not_yet(
+            address,
+            false,
+            false,
+            true,
+            fixture_body_budget,
+        )),
+    )
+    .await
+    .expect("bounded undelivered-ready retirement fixture");
+}
+
+/// With `unassigned`, the viewer loses the library between the Source's
+/// "not yet" and B's re-post: B's pre-send authority check refuses the
+/// re-post, so the Source sees only the first Start and the viewer's retry
+/// is not published.
+async fn actual_pinned_not_yet(
+    address: IpAddr,
+    older_source: bool,
+    unassigned: bool,
+    abandon_after_ready: bool,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+) {
+    use axum::http::StatusCode;
+    use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    use std::time::{Duration, Instant};
+    let fixture = build_receiver_fixture(
+        address,
+        SourceFixtureMode::ColdCopy,
+        None,
+        fixture_body_budget,
+    )
+    .await;
+    let tls = Arc::new(
+        LiveNodeTls::open(
+            &fixture.directory().join("source-runtime-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual Source runtime TLS"),
+    );
+    let (pin, _) = tls.status().expect("actual Source runtime SPKI");
+    let source_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual Source CGNAT listener");
+    let endpoint = Endpoint {
+        ipv4: match address {
+            IpAddr::V4(ip) => ip,
+            _ => panic!("IPv4 CGNAT fixture"),
+        },
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: source_listener.local_addr().expect("Source bind").port(),
+        spki_sha256: pin,
+    };
+    // Each Source Start as it arrived: the clock header B sent, and the
+    // status and typed code the Source answered.
+    type Arrival = (Option<String>, u16, String);
+    let arrivals: Arc<std::sync::Mutex<Vec<Arrival>>> = Arc::default();
+    let observed = arrivals.clone();
+    let ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_ends = ends.clone();
+    let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let observed = observed.clone();
+                let ends = observed_ends.clone();
+                async move {
+                    let path = request.uri().path().to_owned();
+                    if path.ends_with("/end") {
+                        ends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    let is_start =
+                        request.method() == axum::http::Method::POST && path.ends_with("/sessions");
+                    let clock = request
+                        .headers()
+                        .get(super::hls::STARTUP_REMAINING_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let response = next.run(request).await;
+                    if older_source && path == "/sharing/v1/identity" {
+                        // An older Source install advertises no features.
+                        let (parts, body) = response.into_parts();
+                        let bytes = axum::body::to_bytes(body, 64 * 1024)
+                            .await
+                            .expect("identity body");
+                        let mut identity: Value =
+                            serde_json::from_slice(&bytes).expect("identity JSON");
+                        identity
+                            .as_object_mut()
+                            .expect("identity object")
+                            .remove("features");
+                        let mut parts = parts;
+                        parts.headers.remove("content-length");
+                        return axum::response::Response::from_parts(
+                            parts,
+                            Body::from(identity.to_string()),
+                        );
+                    }
+                    if !is_start {
+                        return response;
+                    }
+                    let (parts, body) = response.into_parts();
+                    if parts.status.is_success() {
+                        observed.lock().expect("arrivals").push((
+                            clock,
+                            parts.status.as_u16(),
+                            String::new(),
+                        ));
+                        return axum::response::Response::from_parts(parts, body);
+                    }
+                    let bytes = axum::body::to_bytes(body, 64 * 1024)
+                        .await
+                        .expect("bounded Start refusal");
+                    let code = serde_json::from_slice::<Value>(&bytes)
+                        .ok()
+                        .and_then(|value| value["code"].as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    observed
+                        .lock()
+                        .expect("arrivals")
+                        .push((clock, parts.status.as_u16(), code));
+                    axum::response::Response::from_parts(parts, Body::from(bytes))
+                }
+            },
+        ),
+    );
+    let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+    let source_task = tokio::spawn(crate::serve_http(
+        SharingTlsListener::new(source_listener, tls),
+        source_app,
+        async move {
+            let _ = source_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    fixture.pair(endpoint).await;
+    let b_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual B CGNAT listener");
+    let b_address = b_listener.local_addr().expect("B bind");
+    let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
+    let b_task = tokio::spawn(crate::serve_http(
+        b_listener,
+        fixture_router(fixture.state.clone()),
+        async move {
+            let _ = b_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let (status, _, bytes) = b_request(
+        b_address,
+        false,
+        "GET",
+        &format!(
+            "/api/v1/shared/imports/{}/items/{}",
+            fixture.import_id,
+            fixture.source.reference.item_id.as_str(),
+        ),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "actual details");
+    let details: Value = serde_json::from_slice(&bytes).expect("details");
+    let base = details["files"][0]["file_base"]
+        .as_str()
+        .expect("signed B file alias")
+        .to_owned();
+    let original: Value = serde_json::from_slice(&fixture.source.request).expect("recipe");
+    let session = serde_json::to_vec(&original["session"]).expect("CreateSession");
+    let request_id = original["session"]["request_id"]
+        .as_str()
+        .expect("request UUID")
+        .to_owned();
+    let start = |remaining: u64| {
+        let path = format!("{base}/hls/sessions");
+        let headers = vec![
+            (
+                "authorization",
+                format!("Bearer {}", fixture.original_login),
+            ),
+            ("content-type", "application/json".to_owned()),
+            (super::hls::STARTUP_REMAINING_HEADER, remaining.to_string()),
+        ];
+        let body = session.clone();
+        async move { b_raw_request(b_address, false, "POST", &path, &headers, body).await }
+    };
+    let code = |bytes: &[u8]| {
+        serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|value| value["code"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    // Park a running scan, after its fresh pre-spawn authority was checked.
+    // Holding before spawn across the 10 s answer would expire the 5 s
+    // membership proof and test an authority refusal instead of a rejoin.
+    // The web client's preparation owner has 20 s; the first answer comes
+    // at the local create's 10 s cap.
+    let pause = fixture
+        .source
+        .state
+        .transcode
+        .pause_source_index_after_spawn(Duration::from_secs(40));
+    let began = Instant::now();
+    let (status, headers, bytes) = start(20_000).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "older_source={older_source}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        code(&bytes[..]),
+        "startup_timeout",
+        "the create ladder's own code"
+    );
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(13),
+        "answered on the viewer's clock, not B's 305 s"
+    );
+    assert!(
+        pause.was_reached(),
+        "the Source Start is parked at its index"
+    );
+    if unassigned {
+        // Before B's re-post (one `Retry-After` after the Source's answer).
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .assign_share_viewers(fixture.import_id, 2, Vec::new(), crate::state::clock_ms())
+                .await
+                .expect("actual viewer unassignment"),
+            MutationOutcome::Applied
+        );
+        pause.release();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let (status, _, bytes) = start(5_000).await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "an unassigned viewer's Start is never published: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let arrivals = arrivals.lock().expect("arrivals").clone();
+        assert_eq!(
+            arrivals.len(),
+            1,
+            "B never re-posts for a viewer it no longer authorizes: {arrivals:?}"
+        );
+        let _ = b_stop.send(());
+        b_task.await.expect("B joined").expect("B result");
+        let _ = source_stop.send(());
+        source_task
+            .await
+            .expect("Source joined")
+            .expect("Source result");
+        fixture.shutdown().await;
+        return;
+    }
+    if !older_source && !abandon_after_ready {
+        // B's answer clock starts before its Source exchange. Observe the
+        // Source's own typed answer before releasing the scan, so this case
+        // proves an actual Source re-post rather than only B's retry gap.
+        loop {
+            let source_answered = arrivals
+                .lock()
+                .expect("arrivals")
+                .iter()
+                .any(|(_, status, code)| *status == 503 && code == "startup_timeout");
+            if source_answered {
+                break;
+            }
+            assert!(began.elapsed() < Duration::from_secs(20));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // Complete preparation inside the fixed retry window after the first
+    // waiter has left. No viewer owns a successful response yet.
+    pause.release();
+    if abandon_after_ready {
+        loop {
+            let claim: Value =
+                serde_json::from_str(&receiver_claim_observation(&fixture, &request_id).await)
+                    .expect("actual B publication observation");
+            if claim["published"] == 1 && fixture.source.active_source_sessions().await == 1 {
+                break;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(20),
+                "readiness must precede the fixed retry window: {claim}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(ends.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Do not send another Start or an explicit End: only the owner's
+        // retained deadline can retire this published, undelivered result.
+        loop {
+            if ends.load(std::sync::atomic::Ordering::SeqCst) > 0
+                && fixture.source.active_source_sessions().await == 0
+                && fixture
+                    .source
+                    .state
+                    .transcode
+                    .source_http_starts
+                    .live_entries()
+                    == 0
+                && fixture.source.state.transcode.source_worker_count() == 0
+            {
+                break;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(45),
+                "the undelivered result must settle through the ordinary Source End"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = b_stop.send(());
+        b_task.await.expect("B joined").expect("B result");
+        let _ = source_stop.send(());
+        source_task
+            .await
+            .expect("Source joined")
+            .expect("Source result");
+        fixture.shutdown().await;
+        return;
+    }
+    // The client's ladder rejoins that same ready result.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let bytes = loop {
+        let remaining = 20_000u64.saturating_sub(began.elapsed().as_millis() as u64);
+        let (status, _, bytes) = start(remaining).await;
+        if status == StatusCode::OK {
+            break bytes;
+        }
+        assert_eq!(
+            code(&bytes[..]),
+            "startup_timeout",
+            "older_source={older_source}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(22),
+            "published inside the viewer's window"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    let published: Value = serde_json::from_slice(&bytes).expect("B Start DTO");
+    assert!(published["session_id"].as_str().is_some());
+    // One B claim and one published B session for the request: every retry
+    // rejoined the attempt instead of meeting a retired tombstone.
+    assert_eq!(
+        serde_json::from_str::<Value>(&receiver_claim_observation(&fixture, &request_id).await)
+            .expect("claim counts")["published"],
+        1
+    );
+    assert_eq!(fixture.source.active_source_sessions().await, 1);
+    if !older_source {
+        // An accepted Start writer claimed the result. Completing its waiter
+        // must not End the healthy session at the original retry deadline.
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            began + Duration::from_secs(23),
+        ))
+        .await;
+        assert_eq!(fixture.source.active_source_sessions().await, 1);
+        assert_eq!(ends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    let arrivals = arrivals.lock().expect("arrivals").clone();
+    if older_source {
+        // Today's wire exactly: one Start, no clock, held until it published.
+        assert_eq!(arrivals.len(), 1, "{arrivals:?}");
+        assert_eq!(arrivals[0].0, None);
+        assert_eq!(arrivals[0].1, 200);
+    } else {
+        // The clock reached the Source on every post, bounded by the
+        // viewer's 20 s; the Source's own typed "not yet" came back at least
+        // once, and the same Start bytes were re-posted until published.
+        assert!(arrivals.len() >= 2, "{arrivals:?}");
+        assert!(arrivals.iter().all(|(clock, _, _)| clock
+            .as_deref()
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .is_some_and(|ms| ms <= 20_000)));
+        assert!(arrivals
+            .iter()
+            .any(|(_, status, code)| *status == 503 && code == "startup_timeout"));
+        assert_eq!(arrivals.last().expect("last").1, 200);
+    }
+    let _ = b_stop.send(());
+    b_task.await.expect("B joined").expect("B result");
+    let _ = source_stop.send(());
+    source_task
+        .await
+        .expect("Source joined")
+        .expect("Source result");
+    fixture.shutdown().await;
+}

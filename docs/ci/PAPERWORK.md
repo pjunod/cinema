@@ -16,9 +16,47 @@ beside every failure, and runs in three places so nobody has to remember it:
 |---|---|---|
 | Your checkout | `make paperwork` | never — it reports |
 | Your push | pre-push hook from `make hooks` | the push (bypass: `git push --no-verify`) |
-| Forgejo | first job of the main fast lane, the effort lane, and `paperwork.yml` for pull requests into effort branches; drafts included | every other job: they `needs:` it, and the gates require it to be `success` |
+| Forgejo | first job of the main fast lane, the effort lane, and `paperwork.yml` for pull requests into effort branches; drafts included | every other job: they `needs:` it, and the gates require it to be `success`. Derivable fixes are published separately (below) |
 
-The CI job is the guarantee; the hook only moves the failure earlier. A
+The CI job is the guarantee; the hook only moves the failure earlier.
+
+## What fixes itself
+
+Some rules have exactly one correct answer. `make paperwork-fix` applies
+those fixes to your working tree without committing. PR jobs check and report
+failures; they never execute a publisher with a persistent credential:
+
+| Rule | The fix it applies |
+|---|---|
+| Apple release counter | `make apple-build-bump` above the merge target (every generated surface, the branch's fragments) |
+| Android release counter | `versionCode` one above the merge target's, and the README status line's build |
+| Real host names | `scripts/scrub-infra-names --write`, kept only in Markdown files |
+| Missing index row | a row in `docs/<area>/README.md` with the doc's `# ` title and its `**Status:**` word (`open` if none); improve the wording later if you like |
+
+For main-bound PRs, the separate trusted publisher in `noirr/ci-fleet` can
+apply the same policy from an explicitly pinned approved commit. It runs that
+policy in a credential-free Linux sandbox, independently computes the exact
+edits and validates authoritative PR/run identities. A dedicated bot publishes
+one child with a lease on the original work-branch head. That ordinary bot push
+starts the replacement PR lane; the original failing run is never made green.
+A durable intent records the commit before publication, so an uncertain reply
+can be observed without creating another fix. Commit trailers are not authority.
+
+Only existing regular files and bounded canonical bookkeeping edits are allowed.
+Forks, protected/base/train refs, shared work refs and moved heads are refused.
+If the base advances during publication, replacement paperwork must recheck it.
+After a bot fix, `git pull --rebase` before your next push.
+
+Paul installs the dedicated publisher account, token and service outside PR
+runners. Source implementation and installation acceptance are distinct: until
+that installation and its disposable-PR canary pass, use the local fixer.
+Effort-bound PRs currently use the local fixer; their CI job checks without
+publishing. See the [ci-fleet publisher runbook](http://forge.lan:3000/noirr/ci-fleet/src/branch/main/docs/PAPERWORK-PUBLISHER.md).
+Never add `PAPERWORK_PUSH_TOKEN` to a PR workflow: adding a secret alone does
+not establish this trust boundary.
+
+Rules that need a decision (a `Regression-Test:` line, a functionality point,
+a doc split, a status move) still fail, with the fix printed under them. A
 session that never ran `make hooks` still meets the rules within a minute of
 opening its pull request, before any compiler job is allocated.
 
@@ -43,7 +81,8 @@ opening its pull request, before any compiler job is allocated.
 | Docs stay under 40 KB; the shrink-only list only shrinks (running `*_LOG.md` logs, STATUS-HISTORY files, the project backlog and tool-maintained docs are outside it) | `test_doc_size_budget` | move a status doc's dated log into a sibling `*_LOG.md`, or split the doc; never add to the allowlist |
 | A new web file is registered everywhere; Developer cards graduate | `tests/web/asset-*.test.js`, `settings-sections.test.js` (only when web files changed) | file + `WEB_ASSETS` row + shell tag + [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md) row, one commit |
 
-The full corrective-history audit (`make history-check`, ~80 s) and the
+The corrective-history audit (`make history-check`; in the PR lane it fails
+only on the PR's own gaps, [CI-THROUGHPUT.md](CI-THROUGHPUT.md) §2a) and the
 operations suite (~110 s) stay in the preflight job. Paperwork is the subset
 that fails for a missing piece of bookkeeping rather than a behavior.
 

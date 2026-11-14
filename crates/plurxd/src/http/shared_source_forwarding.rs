@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{FutureExt, StreamExt};
-use plurx_core::playback_principal::PlaybackPrincipal;
+use plurx_core::{cluster::membership::ActivityPeer, playback_principal::PlaybackPrincipal};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
@@ -65,7 +65,18 @@ fn credit_from(
     };
     Arc::clone(credits)
         .try_acquire_owned()
-        .map_err(|_| unavailable())
+        .map_err(|_| saturated())
+}
+
+/// A full credit pool is load, not an outage: typed 429 with `Retry-After`,
+/// which the client-facing retry path carries through.
+pub(super) fn saturated() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "sharing_capacity_busy",
+        message: "Shared playback capacity is busy; retry shortly".to_owned(),
+        retry_after_seconds: 1,
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -169,12 +180,14 @@ struct ForwardAuthentication {
     authority: ForwardAuthority,
     ingress: ForwardIngress,
     deadline: Instant,
+    receiver_range: bool,
 }
 #[derive(Clone)]
 pub(in crate::http) struct SourceHeaders {
     headers: HeaderMap,
     forwarded: Option<ForwardAuthentication>,
     fresh: Option<(String, PlaybackPrincipal, Instant)>,
+    receiver_range: Option<bool>,
 }
 impl From<HeaderMap> for SourceHeaders {
     fn from(headers: HeaderMap) -> Self {
@@ -182,6 +195,7 @@ impl From<HeaderMap> for SourceHeaders {
             headers,
             forwarded: None,
             fresh: None,
+            receiver_range: None,
         }
     }
 }
@@ -198,6 +212,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SourceHeaders {
             headers: parts.headers.clone(),
             forwarded: parts.extensions.get::<ForwardAuthentication>().cloned(),
             fresh: None,
+            receiver_range: None,
         })
     }
 }
@@ -212,7 +227,12 @@ impl SourceHeaders {
             headers: HeaderMap::new(),
             forwarded: None,
             fresh: Some((hash, principal, deadline)),
+            receiver_range: Some(false),
         }
+    }
+    pub(super) fn with_receiver_range(mut self, ready: bool) -> Self {
+        self.receiver_range = Some(ready);
+        self
     }
     pub(super) fn deadline(&self, budget: Duration) -> Instant {
         let local = Instant::now() + budget;
@@ -230,6 +250,9 @@ impl SourceHeaders {
     }
 }
 pub(crate) trait AuthenticationHeaders {
+    fn authenticated_receiver_presentation(&self) -> Option<bool> {
+        None
+    }
     fn raw_headers(&self) -> &HeaderMap;
     fn authenticated_hash(&self) -> Option<&str> {
         None
@@ -244,6 +267,12 @@ impl AuthenticationHeaders for HeaderMap {
     }
 }
 impl AuthenticationHeaders for SourceHeaders {
+    fn authenticated_receiver_presentation(&self) -> Option<bool> {
+        self.forwarded
+            .as_ref()
+            .map(|auth| auth.receiver_range)
+            .or(self.receiver_range)
+    }
     fn raw_headers(&self) -> &HeaderMap {
         &self.headers
     }
@@ -428,6 +457,8 @@ struct FreshPin {
     request: Uuid,
     reference: SourcePlaybackTarget,
     body_hash: [u8; 32],
+    recipe: Vec<u8>,
+    public_recipe_hash: [u8; 32],
     candidate: String,
     registry_boot: Option<Uuid>,
     credential_hash: String,
@@ -469,6 +500,30 @@ impl ForwardingRegistry {
         });
         Ok(gate)
     }
+    pub(super) fn pinned_recipe(
+        &self,
+        hash: &str,
+        viewer: &str,
+        input: &super::SourceStartInput,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let public = super::receiver_presentation::public_recipe_hash(&input.canonical_recipe)?;
+        Ok(self
+            .fresh
+            .lock()
+            .expect("Source candidate pins")
+            .iter()
+            .find(|pin| {
+                let PlaybackPrincipal::Sharing { viewer_key, .. } = &pin.principal else {
+                    return false;
+                };
+                pin.credential_hash == hash
+                    && viewer_key.as_str() == viewer
+                    && pin.request == input.request_id
+                    && pin.reference == input.reference
+                    && pin.public_recipe_hash == public
+            })
+            .map(|pin| pin.recipe.clone()))
+    }
     fn pin(&self, authority: &mut FreshAuthority, body: &[u8]) -> Result<(), ApiError> {
         use sha2::Digest;
         let body_hash: [u8; 32] = sha2::Sha256::digest(body).into();
@@ -491,6 +546,8 @@ impl ForwardingRegistry {
                 request: authority.request_id,
                 reference: authority.reference.clone(),
                 body_hash,
+                recipe: body.to_vec(),
+                public_recipe_hash: super::receiver_presentation::public_recipe_hash(body)?,
                 candidate: authority.candidate_node_id.clone(),
                 registry_boot: authority.expected_registry_boot,
                 credential_hash: authority.credential_hash.clone(),
@@ -548,6 +605,23 @@ impl ForwardingRegistry {
                     })
                     .flatten()
             })
+    }
+    fn unpin_unassigned_retarget(&self, authority: &FreshAuthority, recipe: &[u8]) -> bool {
+        use sha2::Digest;
+        let body_hash: [u8; 32] = sha2::Sha256::digest(recipe).into();
+        let mut pins = self.fresh.lock().expect("Source forwarding candidate pins");
+        let Some(at) = pins.iter().position(|pin| {
+            pin.principal == authority.principal
+                && pin.request == authority.request_id
+                && pin.reference == authority.reference
+                && pin.body_hash == body_hash
+                && pin.candidate == authority.candidate_node_id
+                && pin.registry_boot == authority.expected_registry_boot
+        }) else {
+            return false;
+        };
+        pins.remove(at);
+        true
     }
     fn unpin_assigned(&self, authority: &FreshAuthority) {
         self.fresh
@@ -996,6 +1070,30 @@ fn settled_cleanup_reply(authority: &FreshAuthority, body: &[u8]) -> bool {
                     .is_some_and(valid_uuid)
             })
 }
+// Only an authenticated response to this exact fresh PREPARE can reach the
+// remote caller. The code is emitted solely by the atomic no-claim result;
+// generic conflicts and unknown replies never authorize another candidate.
+fn is_unassigned_retarget(body: &[u8]) -> bool {
+    let Ok(reply) = serde_json::from_slice::<ControlReply>(body) else {
+        return false;
+    };
+    if reply.status != StatusCode::CONFLICT.as_u16() {
+        return false;
+    }
+    let Ok(bytes) = hex::decode(reply.body_hex) else {
+        return false;
+    };
+    if bytes.len() > 24 * 1024 {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .is_some_and(|value| {
+            value.get("code").and_then(serde_json::Value::as_str)
+                == Some("sharing_start_relocate_unassigned")
+        })
+}
+
 fn decode_control(body: &[u8]) -> Result<Response, ApiError> {
     let reply: ControlReply = serde_json::from_slice(body).map_err(|_| unavailable())?;
     let status = StatusCode::from_u16(reply.status).map_err(|_| unavailable())?;
@@ -1079,6 +1177,9 @@ pub(super) async fn route_to_owner(
 async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Response, ApiError> {
     let began = Instant::now();
     let (parts, body) = request.into_parts();
+    // Mint one absolute answer clock before body reads or discovery. Local
+    // fall-through receives this same clock, never a fresh header allowance.
+    let clock = super::SourceStartClock::new(&parts.headers);
     if parts.method != axum::http::Method::POST || parts.uri.query().is_some() {
         return Err(invalid());
     }
@@ -1087,6 +1188,7 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         .await
         .map_err(|_| invalid())?;
     let op = operation(&path, &bytes)?;
+    let clocked = op == Operation::Start && clock.clocked();
     let permit = credit(op)?;
     let deadline = began + op.budget();
     let headers = SourceHeaders::from(parts.headers.clone());
@@ -1095,67 +1197,99 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
         .get::<crate::SharingConnectionCancellation>()
         .cloned()
         .ok_or_else(unavailable)?;
-    let route = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline),
-    )
-    .await
-    .map_err(|_| {
-        #[cfg(test)]
-        eprintln!("Source forwarding route resolution timed out");
-        unavailable()
-    })?
-    .inspect_err(|_error| {
-        #[cfg(test)]
-        eprintln!("Source forwarding route resolution refused");
-    })?;
-    #[cfg(test)]
-    eprintln!("Source forwarding route resolution succeeded");
-    if matches!(route, ForwardRoute::Local) {
-        return Ok(next
-            .run(Request::from_parts(parts, Body::from(bytes)))
-            .await);
-    }
-    // A member envelope never carries the sharing bearer credential or public
-    // headers. The untouched complete recipe remains in the original body.
-    let canonical_body = String::from_utf8(bytes.to_vec()).map_err(|_| invalid())?;
-    if !remote_operation_allowed(&route, op) {
-        return Err(unavailable());
-    }
-    #[cfg(test)]
-    eprintln!(
-        "Source forwarding route resolved: {}",
-        match &route {
-            ForwardRoute::Fresh(_) => "fresh",
-            ForwardRoute::Pending(_) => "pending",
-            ForwardRoute::Retained(_) => "retained",
-            ForwardRoute::Local => "local",
+    let bytes = super::ingress::receiver_effective_body(&state, &headers, &path, &bytes).await?;
+    // Retargeting retains this operation's original deadline and request body.
+    // Only an affirmative pre-claim refusal may enter another iteration.
+    loop {
+        let route = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            #[cfg(test)]
+            state
+                .transcode
+                .source_http_starts
+                .discovery_pause
+                .hold()
+                .await;
+            super::resolve_forward_route(&state, &headers, &path, &bytes, &connection, deadline)
+                .await
+        });
+        // Discovery reads routing/locality only. Its filesystem inspections are
+        // already owned by the accepted driver's monitors; dropping this waiter
+        // cannot drop a Start dispatch, registration or physical cleanup debt.
+        let route = if clocked {
+            clock.answer(route).await?
+        } else {
+            route.await
         }
-    );
-    let fresh_choice = matches!(&route, ForwardRoute::Fresh(_));
-    let authority = match route {
-        ForwardRoute::Retained(authority) => *authority,
-        ForwardRoute::Fresh(mut fresh) | ForwardRoute::Pending(mut fresh) => {
-            if !fresh_choice && fresh.expected_registry_boot.is_none() {
-                return Err(unavailable());
+        .map_err(|_| {
+            #[cfg(test)]
+            eprintln!("Source forwarding route resolution timed out");
+            unavailable()
+        })?
+        .inspect_err(|_error| {
+            #[cfg(test)]
+            eprintln!("Source forwarding route resolution refused");
+        })?;
+        #[cfg(test)]
+        eprintln!("Source forwarding route resolution succeeded");
+        if matches!(route, ForwardRoute::Local) {
+            // Every local attempt, including a retarget, carries the one
+            // ingress clock minted above, never a fresh header allowance.
+            let mut local = parts.clone();
+            if op == Operation::Start {
+                local.extensions.insert(clock.clone());
             }
-            if !matches!(op, Operation::Start | Operation::Status | Operation::End) {
-                return Err(unavailable());
+            let response = next
+                .clone()
+                .run(Request::from_parts(local, Body::from(bytes.clone())))
+                .await;
+            if op == Operation::Start && response.status() == StatusCode::CONFLICT {
+                let control = pack_control(response, deadline).await?;
+                if is_unassigned_retarget(&control) {
+                    remaining(deadline)?;
+                    continue;
+                }
+                return decode_control(&control);
             }
-            if fresh_choice {
-                state
-                    .transcode
-                    .source_http_starts
-                    .forwarding
-                    .pin(&mut fresh, &routing_recipe(&path, &bytes)?)?;
+            return Ok(response);
+        }
+        // A member envelope never carries the sharing bearer credential or public
+        // headers. The untouched complete recipe remains in the original body.
+        let canonical_body = String::from_utf8(bytes.to_vec()).map_err(|_| invalid())?;
+        // Forwarded preparation keeps its own work deadline; all answer waits
+        // below use the original ingress clock minted before discovery.
+        if !remote_operation_allowed(&route, op) {
+            return Err(unavailable());
+        }
+        #[cfg(test)]
+        eprintln!(
+            "Source forwarding route resolved: {}",
+            match &route {
+                ForwardRoute::Fresh(_) => "fresh",
+                ForwardRoute::Pending(_) => "pending",
+                ForwardRoute::Retained(_) => "retained",
+                ForwardRoute::Local => "local",
             }
-            let driver =
-                capture_driver(&state, &connection, &fresh.candidate_node_id, deadline).await?;
-            let prepared = bounded(
-                &state,
-                &fresh.candidate_node_id,
-                PREPARE_PATH,
-                &FreshRequest {
+        );
+        let fresh_choice = matches!(&route, ForwardRoute::Fresh(_));
+        let authority = match route {
+            ForwardRoute::Retained(authority) => *authority,
+            ForwardRoute::Fresh(mut fresh) | ForwardRoute::Pending(mut fresh) => {
+                if !fresh_choice && fresh.expected_registry_boot.is_none() {
+                    return Err(unavailable());
+                }
+                if !matches!(op, Operation::Start | Operation::Status | Operation::End) {
+                    return Err(unavailable());
+                }
+                if fresh_choice {
+                    state
+                        .transcode
+                        .source_http_starts
+                        .forwarding
+                        .pin(&mut fresh, &routing_recipe(&path, &bytes)?)?;
+                }
+                let driver =
+                    capture_driver(&state, &connection, &fresh.candidate_node_id, deadline).await?;
+                let prepare = FreshRequest {
                     path: path.clone(),
                     canonical_body: canonical_body.clone(),
                     operation: op,
@@ -1167,115 +1301,146 @@ async fn route(state: AppState, request: Request<Body>, next: Next) -> Result<Re
                     authority: (*fresh).clone(),
                     remaining_ms: remaining(deadline)?,
                     hop: 1,
-                },
-                deadline,
-            )
-            .await?;
-            #[cfg(test)]
-            eprintln!(
-                "Source forwarding prepare reply status={} bytes={}",
-                prepared.status,
-                prepared.body.len()
-            );
-            if op != Operation::Start || !prepared.status.is_success() {
-                let response = decode_control(&prepared.body)?;
-                if op == Operation::End
-                    && prepared.status.is_success()
-                    && settled_cleanup_reply(&fresh, &prepared.body)
+                };
+                let prepared = bounded(
+                    &state,
+                    &fresh.candidate_node_id,
+                    PREPARE_PATH,
+                    &prepare,
+                    deadline,
+                );
+                let prepared = if clocked {
+                    clock.answer(prepared).await??
+                } else {
+                    prepared.await?
+                };
+                #[cfg(test)]
+                eprintln!(
+                    "Source forwarding prepare reply status={} bytes={}",
+                    prepared.status,
+                    prepared.body.len()
+                );
+                if fresh_choice
+                    && op == Operation::Start
+                    && prepared.status == StatusCode::CONFLICT
+                    && is_unassigned_retarget(&prepared.body)
                 {
-                    state
+                    if !state
                         .transcode
                         .source_http_starts
                         .forwarding
-                        .unpin_assigned(&fresh);
+                        .unpin_unassigned_retarget(&fresh, &routing_recipe(&path, &bytes)?)
+                    {
+                        return Err(unavailable());
+                    }
+                    remaining(deadline)?;
+                    continue;
                 }
-                return Ok(response);
+                if op != Operation::Start || !prepared.status.is_success() {
+                    let response = decode_control(&prepared.body)?;
+                    if op == Operation::End
+                        && prepared.status.is_success()
+                        && settled_cleanup_reply(&fresh, &prepared.body)
+                    {
+                        state
+                            .transcode
+                            .source_http_starts
+                            .forwarding
+                            .unpin_assigned(&fresh);
+                    }
+                    return Ok(response);
+                }
+                let assigned: ForwardAuthority =
+                    serde_json::from_slice(&prepared.body).map_err(|_| unavailable())?;
+                if assigned.owner_node_id != fresh.candidate_node_id
+                    || assigned.principal != fresh.principal
+                    || assigned.credential_hash != fresh.credential_hash
+                    || assigned.reference != fresh.reference
+                    || assigned.request_id != fresh.request_id
+                    || fresh
+                        .expected_registry_boot
+                        .is_some_and(|boot| assigned.expected_registry_boot != boot)
+                {
+                    return Err(unavailable());
+                }
+                state
+                    .transcode
+                    .source_http_starts
+                    .forwarding
+                    .unpin_assigned(&fresh);
+                assigned
             }
-            let assigned: ForwardAuthority =
-                serde_json::from_slice(&prepared.body).map_err(|_| unavailable())?;
-            if assigned.owner_node_id != fresh.candidate_node_id
-                || assigned.principal != fresh.principal
-                || assigned.credential_hash != fresh.credential_hash
-                || assigned.reference != fresh.reference
-                || assigned.request_id != fresh.request_id
-                || fresh
-                    .expected_registry_boot
-                    .is_some_and(|boot| assigned.expected_registry_boot != boot)
-            {
-                return Err(unavailable());
-            }
-            state
-                .transcode
-                .source_http_starts
-                .forwarding
-                .unpin_assigned(&fresh);
-            assigned
-        }
-        ForwardRoute::Local => return Err(unavailable()),
-    };
-    if !authority.valid()
-        || (authority.cleanup_only && !matches!(op, Operation::Status | Operation::End))
-    {
-        return Err(unavailable());
-    }
-    if matches!(op, Operation::Start | Operation::Status | Operation::End) {
-        reconcile_closed(
-            &state,
-            Some(authority.owner_identity()),
-            deadline.min(Instant::now() + Duration::from_secs(1)),
-        )
-        .await;
-    }
-    #[cfg(test)]
-    eprintln!("Source forwarding assignment validated; registering protected ingress");
-    let ingress = if op == Operation::End || (op == Operation::Status && authority.cleanup_only) {
-        // End never admits another media debt after seal. The actual driver
-        // tuple lets the retained End owner recognize its own response cycle.
-        let driver =
-            capture_driver(&state, &connection, &authority.owner_node_id, deadline).await?;
-        ForwardIngress {
-            node_id: state.node_id.clone(),
-            driver: driver.id().clone(),
-            registration_sequence: None,
-        }
-    } else {
-        register(&state, &authority, &connection, deadline).await?
-    };
-    #[cfg(test)]
-    eprintln!("Source forwarding ingress registered; dispatching owner operation");
-    let wire = ForwardRequest {
-        path,
-        canonical_body,
-        operation: op,
-        authority: authority.clone(),
-        ingress,
-        remaining_ms: remaining(deadline)?,
-        hop: 1,
-    };
-    if op.media() {
-        let response = state
-            .media_sessions
-            .source_forward_stream(
-                &authority.owner_node_id,
-                self::wire(&wire)?,
-                tokio::time::Instant::from_std(deadline),
-            )
-            .await
-            .map_err(|_| unavailable())?;
-        stream_response(response, permit, began)
-    } else {
-        let response = bounded(
-            &state,
-            &authority.owner_node_id,
-            CONTROL_PATH,
-            &wire,
-            deadline,
-        )
-        .await?;
-        if !response.status.is_success() {
+            ForwardRoute::Local => return Err(unavailable()),
+        };
+        if !authority.valid()
+            || (authority.cleanup_only && !matches!(op, Operation::Status | Operation::End))
+        {
             return Err(unavailable());
         }
-        decode_control(&response.body)
+        if matches!(op, Operation::Start | Operation::Status | Operation::End) {
+            reconcile_closed(
+                &state,
+                Some(authority.owner_identity()),
+                deadline.min(Instant::now() + Duration::from_secs(1)),
+            )
+            .await;
+        }
+        #[cfg(test)]
+        eprintln!("Source forwarding assignment validated; registering protected ingress");
+        let ingress = if op == Operation::End || (op == Operation::Status && authority.cleanup_only)
+        {
+            // End never admits another media debt after seal. The actual driver
+            // tuple lets the retained End owner recognize its own response cycle.
+            let driver =
+                capture_driver(&state, &connection, &authority.owner_node_id, deadline).await?;
+            ForwardIngress {
+                node_id: state.node_id.clone(),
+                driver: driver.id().clone(),
+                registration_sequence: None,
+            }
+        } else {
+            register(&state, &authority, &connection, deadline).await?
+        };
+        #[cfg(test)]
+        eprintln!("Source forwarding ingress registered; dispatching owner operation");
+        let wire = ForwardRequest {
+            path: path.clone(),
+            canonical_body,
+            operation: op,
+            authority: authority.clone(),
+            ingress,
+            remaining_ms: remaining(deadline)?,
+            hop: 1,
+        };
+        if op.media() {
+            let response = state
+                .media_sessions
+                .source_forward_stream(
+                    &authority.owner_node_id,
+                    self::wire(&wire)?,
+                    tokio::time::Instant::from_std(deadline),
+                )
+                .await
+                .map_err(|_| unavailable())?;
+            return stream_response(response, permit, began);
+        } else {
+            let response = bounded(
+                &state,
+                &authority.owner_node_id,
+                CONTROL_PATH,
+                &wire,
+                deadline,
+            );
+            let response = if clocked {
+                clock.answer(response).await??
+            } else {
+                response.await?
+            };
+            if !response.status.is_success() {
+                return Err(unavailable());
+            }
+            return decode_control(&response.body);
+        }
     }
 }
 async fn authenticate(
@@ -1395,6 +1560,25 @@ pub(crate) async fn receive_control(
     .await
     .unwrap_or_else(|error| error.into_response())
 }
+async fn trusted_receiver_range(
+    state: &AppState,
+    sender: &str,
+    ingress: &ForwardIngress,
+    body: &[u8],
+) -> Result<bool, ApiError> {
+    let range = super::receiver_presentation::internal_range(body)?;
+    if range
+        && (sender != ingress.node_id
+            || !state
+                .store
+                .source_copy_coordination_boot_capable(sender, ingress.driver.boot_id)
+                .await
+                .map_err(|_| unavailable())?)
+    {
+        return Err(unavailable());
+    }
+    Ok(range)
+}
 async fn receive_at(
     state: AppState,
     headers: HeaderMap,
@@ -1406,13 +1590,30 @@ async fn receive_at(
     let auth = authenticate(&state, &headers, path, &body).await?;
     let wire: ForwardRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
     let op = operation(&wire.path, wire.canonical_body.as_bytes())?;
-    let permit = credit(op)?;
     if !wire.valid_transport(&state.node_id, &auth.node_id, path, op) {
         return Err(unavailable());
     }
     let deadline = received_deadline(wire.remaining_ms, op.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    let permit = match credit(op) {
+        Ok(permit) => permit,
+        // A full owner pool is load: a control reply carries its typed 429
+        // and Retry-After in the signed envelope, which the ingress hands on
+        // unchanged, instead of an unsigned refusal it can only call 503.
+        Err(error) if !op.media() => {
+            return signed(
+                &state,
+                &auth,
+                path,
+                StatusCode::OK,
+                pack_control(error.into_response(), deadline).await?,
+                deadline,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
     tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::validate_retained_forward(
@@ -1426,6 +1627,17 @@ async fn receive_at(
     )
     .await
     .map_err(|_| unavailable())??;
+    let receiver_range = if wire.authority.cleanup_only || op == Operation::End {
+        false
+    } else {
+        trusted_receiver_range(
+            &state,
+            &auth.node_id,
+            &wire.ingress,
+            wire.canonical_body.as_bytes(),
+        )
+        .await?
+    };
     let mut request = Request::builder()
         .method("POST")
         .uri(&wire.path)
@@ -1435,6 +1647,7 @@ async fn receive_at(
         authority: wire.authority,
         ingress: wire.ingress,
         deadline,
+        receiver_range,
     });
     // The parent separately captures/registers this actual internal writer.
     // Its closure cannot substitute for the outer accepted driver's closure.
@@ -1499,10 +1712,24 @@ async fn prepare_inner(
     {
         return Err(unavailable());
     }
-    let _permit = credit(wire.operation)?;
     let deadline = received_deadline(wire.remaining_ms, wire.operation.budget())?
         .min(began + Duration::from_millis(u64::from(wire.remaining_ms - 100)));
     remaining(deadline)?;
+    // As at the control path: a full owner pool answers typed, signed.
+    let _permit = match credit(wire.operation) {
+        Ok(permit) => permit,
+        Err(error) => {
+            return signed(
+                &state,
+                &auth,
+                PREPARE_PATH,
+                StatusCode::CONFLICT,
+                pack_control(error.into_response(), deadline).await?,
+                deadline,
+            )
+            .await;
+        }
+    };
     if wire.operation != Operation::Start {
         let response = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
@@ -1527,6 +1754,19 @@ async fn prepare_inner(
         )
         .await;
     }
+    let fresh_headers = SourceHeaders::verified_fresh(
+        wire.authority.credential_hash.clone(),
+        wire.authority.principal.clone(),
+        deadline,
+    );
+    super::current_reference(&state, &fresh_headers, &wire.authority.reference).await?;
+    let receiver_range = trusted_receiver_range(
+        &state,
+        &auth.node_id,
+        &wire.ingress,
+        wire.canonical_body.as_bytes(),
+    )
+    .await?;
     match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         super::prepare_forward_start(
@@ -1534,6 +1774,7 @@ async fn prepare_inner(
             &wire.authority,
             wire.canonical_body.as_bytes(),
             deadline,
+            receiver_range,
         ),
     )
     .await
@@ -1641,6 +1882,7 @@ async fn custody_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
     #[test]
     fn public_headers_cannot_construct_forwarded_authority() {
         let mut raw = HeaderMap::new();
@@ -1730,18 +1972,53 @@ mod tests {
         }
     }
     #[test]
+    fn receiver_upgrade_preserves_unknown_legacy_pin_and_range_cleanup_keeps_mode() {
+        let registry = ForwardingRegistry::default();
+        let mut authority = fresh();
+        authority.expected_registry_boot = Some(Uuid::new_v4());
+        let body = serde_json::to_vec(&serde_json::json!({"reference":authority.reference,"session":{"playback_id":"normalizer-test","request_id":authority.request_id,"copy":true,"presentation":"vod","start":0,"caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","hls-bounded-range-v1"]}}})).expect("recipe");
+        registry.pin(&mut authority, &body).expect("legacy pin");
+        let input = super::super::parse_start_request(
+            &body,
+            authority.reference.item_id.as_str(),
+            authority.reference.file_id.as_str(),
+        )
+        .expect("valid start");
+        let selected = registry
+            .pinned_recipe(&authority.credential_hash, &"b".repeat(64), &input)
+            .expect("pin lookup")
+            .expect("same public request");
+        assert_eq!(selected, body);
+        assert!(
+            !super::super::receiver_presentation::internal_range(&selected)
+                .expect("legacy remains legacy")
+        );
+        let mut foreign = input;
+        foreign.request_id = Uuid::new_v4();
+        assert!(registry
+            .pinned_recipe(&authority.credential_hash, &"b".repeat(64), &foreign)
+            .expect("lookup")
+            .is_none());
+    }
+    #[test]
     fn uncertain_fresh_candidate_stays_pinned_without_assignment_authority() {
         let registry = ForwardingRegistry::default();
         let mut authority = fresh();
         let original_boot = Uuid::new_v4();
         authority.expected_registry_boot = Some(original_boot);
         registry
-            .pin(&mut authority, b"canonical complete recipe")
+            .pin(
+                &mut authority,
+                br#"{"session":{"kind":"canonical complete recipe"}}"#,
+            )
             .expect("initial pin");
         authority.candidate_node_id = "worker-b".into();
         authority.expected_registry_boot = Some(Uuid::new_v4());
         registry
-            .pin(&mut authority, b"canonical complete recipe")
+            .pin(
+                &mut authority,
+                br#"{"session":{"kind":"canonical complete recipe"}}"#,
+            )
             .expect("exact retry");
         assert_eq!(authority.candidate_node_id, "worker-a");
         assert_eq!(authority.expected_registry_boot, Some(original_boot));
@@ -1751,7 +2028,7 @@ mod tests {
                 &"b".repeat(64),
                 authority.request_id,
                 &authority.reference,
-                b"canonical complete recipe",
+                br#"{"session":{"kind":"canonical complete recipe"}}"#,
             )
             .expect("exact original cleanup pin");
         assert_eq!((cleanup.1, cleanup.2), ("worker-a".into(), original_boot));
@@ -1760,7 +2037,7 @@ mod tests {
                 &authority.principal,
                 authority.request_id,
                 &authority.reference,
-                b"canonical complete recipe"
+                br#"{"session":{"kind":"canonical complete recipe"}}"#
             ),
             Some(("worker-a".into(), Some(original_boot)))
         );
@@ -1769,10 +2046,12 @@ mod tests {
                 &authority.principal,
                 Uuid::new_v4(),
                 &authority.reference,
-                b"canonical complete recipe"
+                br#"{"session":{"kind":"canonical complete recipe"}}"#
             )
             .is_none());
-        assert!(registry.pin(&mut authority, b"changed recipe").is_err());
+        assert!(registry
+            .pin(&mut authority, br#"{"session":{"kind":"changed recipe"}}"#)
+            .is_err());
         let value = serde_json::to_value(&authority).expect("metadata wire");
         for forbidden in ["incarnation_id", "dispatch_generation", "owner_identity"] {
             assert!(value.get(forbidden).is_none());
@@ -1876,6 +2155,49 @@ mod tests {
         let _ack = credit_from(Operation::End, &media, &control, &cleanup).expect("Ack cleanup");
         assert!(credit_from(Operation::End, &media, &control, &cleanup).is_err());
     }
+    #[test]
+    fn locate_asks_only_reachable_addressable_other_peers() {
+        let peer = |id: &str, raft_id| ActivityPeer {
+            node_id: id.to_owned(),
+            raft_id,
+            http_base: Some(format!("http://{id}")),
+            reachable: true,
+        };
+        let targets = locate_targets(
+            vec![
+                ActivityPeer {
+                    reachable: false,
+                    ..peer("lab3", 7)
+                },
+                peer("lab6", 6),
+                peer("self", 1),
+                ActivityPeer {
+                    http_base: None,
+                    ..peer("lab4", 4)
+                },
+            ],
+            "self",
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .map(|p| p.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["lab6"]
+        );
+    }
+    #[tokio::test]
+    async fn full_credit_pool_answers_429_with_retry_after() {
+        let media = Arc::new(tokio::sync::Semaphore::new(1));
+        let control = Arc::new(tokio::sync::Semaphore::new(1));
+        let cleanup = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = credit_from(Operation::Direct, &media, &control, &cleanup).expect("held");
+        let response = credit_from(Operation::Direct, &media, &control, &cleanup)
+            .expect_err("pool is full")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+    }
     #[tokio::test]
     async fn bounded_control_response_refuses_oversize_and_expired_deadline() {
         let response = Response::new(Body::from(vec![0u8; 24 * 1024 + 1]));
@@ -1889,6 +2211,71 @@ mod tests {
         let headers = SourceHeaders::from(HeaderMap::new());
         assert!(headers.deadline(Duration::from_secs(1)) < Instant::now() + Duration::from_secs(2));
     }
+    #[test]
+    fn only_exact_unassigned_retarget_releases_a_fresh_candidate_pin() {
+        let registry = ForwardingRegistry::default();
+        let mut authority = fresh();
+        authority.expected_registry_boot = Some(Uuid::new_v4());
+        registry
+            .pin(
+                &mut authority,
+                br#"{"session":{"kind":"canonical-recipe"}}"#,
+            )
+            .expect("pin");
+        let mut other = authority.clone();
+        other.candidate_node_id = "other-worker".into();
+        assert!(!registry
+            .unpin_unassigned_retarget(&other, br#"{"session":{"kind":"canonical-recipe"}}"#));
+        assert!(!registry
+            .unpin_unassigned_retarget(&authority, br#"{"session":{"kind":"different-recipe"}}"#));
+        assert!(registry
+            .pending_candidate(
+                &authority.principal,
+                authority.request_id,
+                &authority.reference,
+                br#"{"session":{"kind":"canonical-recipe"}}"#
+            )
+            .is_some());
+        assert!(registry
+            .unpin_unassigned_retarget(&authority, br#"{"session":{"kind":"canonical-recipe"}}"#));
+        assert!(registry
+            .pending_candidate(
+                &authority.principal,
+                authority.request_id,
+                &authority.reference,
+                br#"{"session":{"kind":"canonical-recipe"}}"#
+            )
+            .is_none());
+    }
+    #[test]
+    fn generic_conflict_unknown_reply_and_pending_never_authorize_relocate() {
+        let reply = |status, code| {
+            serde_json::to_vec(&ControlReply {
+                status,
+                headers: vec![],
+                body_hex: hex::encode(serde_json::json!({"code":code}).to_string()),
+            })
+            .expect("control")
+        };
+        assert!(!is_unassigned_retarget(&reply(
+            409,
+            "sharing_start_conflict"
+        )));
+        assert!(!is_unassigned_retarget(&reply(
+            503,
+            "sharing_start_unresolved"
+        )));
+        assert!(!is_unassigned_retarget(&reply(
+            503,
+            "sharing_start_relocate_unassigned"
+        )));
+        assert!(!is_unassigned_retarget(b"lost or malformed reply"));
+        assert!(is_unassigned_retarget(&reply(
+            409,
+            "sharing_start_relocate_unassigned"
+        )));
+    }
+
     #[test]
     fn internal_envelope_refuses_unknown_fields() {
         let request = FreshRequest {
@@ -1942,6 +2329,15 @@ impl LocationReply {
     }
 }
 
+/// Peers worth asking to locate after the membership directory applies the
+/// route policy: reachable, addressable, and distinct from this node.
+fn locate_targets(peers: Vec<ActivityPeer>, own_node_id: &str) -> Vec<ActivityPeer> {
+    peers
+        .into_iter()
+        .filter(|peer| peer.node_id != own_node_id && peer.reachable && peer.http_base.is_some())
+        .collect()
+}
+
 /// Cold routing hints only. A timeout may try another read-only peer before
 /// any claim exists; once FreshPrepare is sent, its original candidate remains
 /// pinned and this collector must never be used to reconstruct its owner.
@@ -1954,15 +2350,19 @@ pub(super) async fn collect_fresh_location(
     deadline: Instant,
 ) -> Result<Option<(String, Uuid)>, ApiError> {
     let deadline = deadline.min(Instant::now() + Duration::from_secs(9));
-    let mut peers = tokio::time::timeout_at(
+    let peers = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        state.membership.media_peers(),
+        state
+            .membership
+            .media_peers_for_route(crate::http::learner_route_eligible(
+                &axum::http::Method::POST,
+                LOCATE_PATH,
+            )),
     )
     .await
     .map_err(|_| unavailable())?
     .map_err(|_| unavailable())?;
-    peers
-        .retain(|peer| peer.node_id != state.node_id && peer.reachable && peer.http_base.is_some());
+    let mut peers = locate_targets(peers, &state.node_id);
     peers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
     peers.dedup_by(|a, b| a.node_id == b.node_id);
     if peers.len() > 64 {
@@ -1975,6 +2375,14 @@ pub(super) async fn collect_fresh_location(
     eprintln!("Source locate current eligible peers={}", peers.len());
     let mut probes = futures_util::stream::FuturesUnordered::new();
     for peer in peers {
+        if !state
+            .store
+            .source_copy_coordination_capable(&peer.node_id)
+            .await
+            .map_err(|_| unavailable())?
+        {
+            continue;
+        }
         let wire = LocateEnvelope {
             hop: 1,
             remaining_ms: remaining(deadline)?,
@@ -2130,16 +2538,20 @@ mod locality_tests {
         let registry = ForwardingRegistry::default();
         let mut first = fresh();
         first.expected_registry_boot = Some(Uuid::new_v4());
-        registry.pin(&mut first, b"recipe").expect("first pin");
+        registry
+            .pin(&mut first, br#"{"session":{"kind":"recipe"}}"#)
+            .expect("first pin");
         for _ in 1..HELD_MAX {
             let mut next = fresh();
             next.expected_registry_boot = Some(Uuid::new_v4());
             registry
-                .pin(&mut next, b"recipe")
+                .pin(&mut next, br#"{"session":{"kind":"recipe"}}"#)
                 .expect("bounded pending pin");
         }
         let mut overflow = fresh();
-        assert!(registry.pin(&mut overflow, b"recipe").is_err());
+        assert!(registry
+            .pin(&mut overflow, br#"{"session":{"kind":"recipe"}}"#)
+            .is_err());
         let mut receipt = serde_json::json!({"reference": first.reference,
             "request_id": first.request_id,"incarnation_id":Uuid::new_v4(),
             "confirmation_id":Uuid::new_v4(),"state":"settled","settled":true});
@@ -2164,7 +2576,7 @@ mod locality_tests {
             registry.unpin_assigned(&first);
         }
         registry
-            .pin(&mut overflow, b"recipe")
+            .pin(&mut overflow, br#"{"session":{"kind":"recipe"}}"#)
             .expect("settled exact cache slot reclaimed");
         assert_eq!(registry.fresh.lock().expect("pins").len(), HELD_MAX);
     }

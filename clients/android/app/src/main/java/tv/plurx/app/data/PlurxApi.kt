@@ -15,6 +15,17 @@ import retrofit2.http.Streaming
 import retrofit2.http.Url
 
 /**
+ * What the running start sequence still allows, carried in the coroutine
+ * context so the session create it wraps sends it as
+ * `X-Plurx-Startup-Remaining-Ms`: the server then answers inside it (never
+ * waiting past its own 10 s clamp) instead of guessing.
+ */
+class StartupAllowance(val remainingMs: Long) :
+    kotlin.coroutines.AbstractCoroutineContextElement(StartupAllowance) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<StartupAllowance>
+}
+
+/**
  * plurx native API (`/api/v1`). Base URL is `<origin>/api/v1/`, so paths are
  * relative. The bearer token is added by an OkHttp interceptor (see [Net]).
  */
@@ -176,7 +187,17 @@ interface PlurxApi {
         @Query("limit") limit: Int = 200,
         @Query("offset") offset: Int = 0,
         @Query("sort") sort: String = "title",
+        /** `disk` (the server's default), `offloaded` or `everything`; null leaves it to the server. */
+        @Query("presence") presence: String? = null,
     ): Page
+
+    /** Admin: ask Curator to download an offloaded title again. */
+    @POST("items/{id}/get-it-back")
+    suspend fun getItBack(@Path("id") id: Long): Response<OffloadAnswer>
+
+    /** What Curator reports for an offloaded title right now (never stored). */
+    @GET("items/{id}/offload-status")
+    suspend fun offloadStatus(@Path("id") id: Long): OffloadAnswer
 
     @GET("hubs")
     suspend fun hubs(): Hubs
@@ -265,7 +286,9 @@ interface PlurxApi {
     }
     suspend fun createHlsSessionForContext(context: PlaybackFileContext, body: CreateSessionReq, linkReceipt: String? = null): HlsStart {
         context.localId()
-        return createHlsSessionPath(context.apiPath("hls/sessions"), body, linkReceipt)
+        val remaining = kotlin.coroutines.coroutineContext[StartupAllowance]
+            ?.remainingMs?.coerceAtLeast(0)?.toString()
+        return createHlsSessionPath(context.apiPath("hls/sessions"), body, linkReceipt, remaining)
     }
     @GET
     suspend fun decisionPath(@Url path: String, @QueryMap caps: Map<String, String>): Decision
@@ -276,7 +299,12 @@ interface PlurxApi {
     @GET
     suspend fun pgsOverlayObjectPath(@Url path: String): Response<ResponseBody>
     @POST
-    suspend fun createHlsSessionPath(@Url path: String, @Body body: CreateSessionReq, @Header("X-Plurx-Link-Receipt") linkReceipt: String? = null): HlsStart
+    suspend fun createHlsSessionPath(
+        @Url path: String,
+        @Body body: CreateSessionReq,
+        @Header("X-Plurx-Link-Receipt") linkReceipt: String? = null,
+        @Header("X-Plurx-Startup-Remaining-Ms") startupRemainingMs: String? = null,
+    ): HlsStart
 
     @GET("hls/{session}/status")
     suspend fun hlsSessionStatus(@Path("session") session: String): PlaybackSessionStatus

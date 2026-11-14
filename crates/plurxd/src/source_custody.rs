@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
+mod diagnostics;
 mod recovery;
 
 pub(crate) fn configure_recovery_backend(
@@ -33,6 +34,211 @@ pub(crate) async fn replay_verified_recovery(
     node: &str,
 ) -> Result<(), String> {
     recovery::replay(store, node).await
+}
+
+pub(crate) fn declared_background_spawn<T>(
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    spawn: impl FnOnce() -> T,
+) -> T {
+    recovery::declared_background_spawn(receipt, spawn)
+}
+/// How a live owner may publish its joined proof once every registered
+/// holder has retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveJoin {
+    /// The witness saw no unknown launch.
+    Clean,
+    /// An unknown launch at this boot tick could have handed a child the
+    /// source; every daemon descendant started since must exit first.
+    EscapedSince(u64),
+    /// No witness is kept on this backend; treat every child launched since
+    /// the owner started as a possible holder.
+    Unwitnessed,
+    Refused(&'static str),
+}
+
+pub(crate) fn live_background_join(
+    store: &Arc<dyn Store>,
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+) -> LiveJoin {
+    recovery::live_background_join(store, receipt)
+}
+
+static PROCESS_STARTED_MS: OnceLock<i64> = OnceLock::new();
+
+/// Record this daemon process's wall-clock start before any job can claim.
+/// Captured once, so a later wall-clock step cannot move it.
+pub(crate) fn note_process_start() {
+    PROCESS_STARTED_MS.get_or_init(crate::state::clock_ms);
+}
+
+/// Wall-clock start of this daemon process; `None` only before
+/// `note_process_start` (test binaries).
+#[cfg(target_os = "linux")]
+pub(crate) fn process_started_ms() -> Option<i64> {
+    PROCESS_STARTED_MS.get().copied()
+}
+
+/// Configure the process-wide verifier once from startup's canonical managed
+/// roots. Unit AppStates do not mutate this registry or inherit test roots.
+pub(crate) fn configure_access_roots(
+    config: &plurx_core::config::Config,
+    dirs: &crate::state::Dirs,
+) -> Result<(), String> {
+    let owned = vec![
+        config.storage.data_dir.clone(),
+        dirs.artwork.clone(),
+        dirs.transcode.clone(),
+        dirs.cache.clone(),
+        dirs.subs.clone(),
+        dirs.runtime_cache.clone(),
+        dirs.renditions.clone(),
+    ];
+    let mut tools = Vec::new();
+    for directory in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+        if let Ok(path) = std::fs::canonicalize(directory) {
+            tools.push(path);
+        }
+    }
+    let search: Vec<_> = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .collect();
+    for program in [
+        crate::ffmpeg::ffmpeg_bin(),
+        crate::ffmpeg::ffprobe_bin(),
+        crate::ffmpeg::bound_ffprobe_bin(),
+        "dovi_tool".into(),
+        "mkvmerge".into(),
+        "nvidia-smi".into(),
+        "vainfo".into(),
+        "vulkaninfo".into(),
+    ] {
+        let path = Path::new(&program);
+        let found = if path.components().count() > 1 {
+            std::fs::canonicalize(path).ok()
+        } else {
+            search
+                .iter()
+                .map(|directory| directory.join(path))
+                .find(|candidate| candidate.is_file())
+                .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+        };
+        if let Some(parent) = found.as_deref().and_then(Path::parent) {
+            tools.push(parent.to_owned());
+        }
+    }
+    if let Ok(executable) = std::env::current_exe().and_then(std::fs::canonicalize) {
+        if let Some(parent) = executable.parent() {
+            tools.push(parent.to_owned());
+        }
+    }
+    // Daemon-created executable snapshots live in this managed runtime cache.
+    tools.push(dirs.runtime_cache.clone());
+    plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
+        .map_err(|error| error.to_string())
+}
+
+/// Local observations only; source recovery never uses these diagnostics as proof.
+pub(crate) fn recovery_status(store: &Arc<dyn Store>) -> serde_json::Value {
+    recovery::status(store)
+}
+
+pub(crate) fn launch_prometheus() -> String {
+    diagnostics::prometheus()
+}
+
+/// Bind the exact inode an enrolled owner opened to its live witness, so a
+/// later host census can refuse a path that now names another file.
+pub(crate) fn record_background_source(
+    store: &Arc<dyn Store>,
+    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
+    source: &std::fs::File,
+) -> Result<(), String> {
+    recovery::record_background_source(store, receipt, source)
+}
+
+/// Monotonic boot-clock time in the kernel's process start-time units
+/// (`/proc/<pid>/stat` field 22), so it orders against child start times.
+pub(crate) fn boot_tick() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    #[cfg(target_os = "linux")]
+    let clock = libc::CLOCK_BOOTTIME;
+    #[cfg(not(target_os = "linux"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    // SAFETY: clock_gettime writes one initialized timespec.
+    unsafe { libc::clock_gettime(clock, &mut now) };
+    // SAFETY: sysconf has no pointer arguments.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    now.tv_sec as u64 * hz + now.tv_nsec as u64 * hz / 1_000_000_000
+}
+
+/// Every orphaned descendant is reparented to this process, so its own tree
+/// is the complete set of processes it ever launched that remain alive.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_tree_complete() -> bool {
+    let mut subreaper: libc::c_int = 0;
+    // SAFETY: PR_GET_CHILD_SUBREAPER writes one int through the pointer.
+    std::process::id() == 1
+        || unsafe {
+            libc::prctl(
+                libc::PR_GET_CHILD_SUBREAPER,
+                &mut subreaper as *mut libc::c_int,
+            )
+        } == 0
+            && subreaper != 0
+}
+
+/// Live (non-zombie) descendants of this process that started at or after
+/// `tick`. A zombie has already released every descriptor.
+#[cfg(target_os = "linux")]
+pub(crate) fn live_descendants_since(tick: u64) -> std::io::Result<Vec<u32>> {
+    let mut pending = vec![std::process::id()];
+    let mut found = Vec::new();
+    let mut visited = 0usize;
+    while let Some(pid) = pending.pop() {
+        visited += 1;
+        if visited > 65_536 {
+            return Err(std::io::Error::other("descendant census exceeds its bound"));
+        }
+        let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
+            Ok(tasks) => tasks,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for task in tasks {
+            let children = match std::fs::read_to_string(task?.path().join("children")) {
+                Ok(children) => children,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for child in children.split_whitespace() {
+                let child: u32 = child.parse().map_err(std::io::Error::other)?;
+                pending.push(child);
+                let stat = match std::fs::read_to_string(format!("/proc/{child}/stat")) {
+                    Ok(stat) => stat,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                let fields: Vec<&str> = stat
+                    .rsplit_once(')')
+                    .map(|(_, rest)| rest.split_whitespace().collect())
+                    .unwrap_or_default();
+                let started: u64 = fields
+                    .get(19)
+                    .and_then(|value| value.parse().ok())
+                    .ok_or_else(|| std::io::Error::other("unparsable child start time"))?;
+                // Tick resolution: a child started in the escape's tick counts.
+                if fields.first() != Some(&"Z") && started + 1 >= tick {
+                    found.push(child);
+                }
+            }
+        }
+    }
+    Ok(found)
 }
 
 const LEASE_MS: i64 = 30_000;
@@ -179,12 +385,23 @@ pub(crate) async fn activate_foreground_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
-    recovery::foreground(store, &token)?;
+    let reader = recovery::foreground(store, &token, activation_id)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_foreground_source_custody(token.clone(), activation_id.clone())
         .await;
+    let reader_armed = if activated.as_ref().is_ok_and(|value| *value) {
+        reader
+            .as_ref()
+            .map_or(Ok(()), |reader| reader.arm(activation_id))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = &reader_armed {
+        tracing::warn!(%error, "reader activation proof needs abort reconciliation");
+    }
     if activated.as_ref().is_ok_and(|value| *value)
+        && reader_armed.is_ok()
         && clear_settlement_receipt(store, &receipt).is_ok()
     {
         return Ok(());
@@ -253,12 +470,23 @@ pub(crate) async fn activate_background_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
-    recovery::background(store, &token)?;
+    let reader = recovery::background(store, &token, activation_id)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_background_source_custody(token.clone(), activation_id.clone())
         .await;
+    let reader_armed = if activated.as_ref().is_ok_and(|value| *value) {
+        reader
+            .as_ref()
+            .map_or(Ok(()), |reader| reader.arm(activation_id))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = &reader_armed {
+        tracing::warn!(%error, "reader activation proof needs abort reconciliation");
+    }
     if activated.as_ref().is_ok_and(|value| *value)
+        && reader_armed.is_ok()
         && clear_settlement_receipt(store, &receipt).is_ok()
     {
         return Ok(());

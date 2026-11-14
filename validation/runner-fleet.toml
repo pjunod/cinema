@@ -2,9 +2,8 @@
 #
 # This roster mirrors `pjunod/ansible`'s `github-runners/inventory/` —
 # `group_vars/all.yml` for the Incus guests and the macOS runner, and
-# `host_vars/<host>.yml` for the standalone Linux hosts — plus the two
-# hand-registered ARM64 laptop VMs (`gha-maca-linux-arm-01`,
-# `gha-macb-linux-arm-01`) that were provisioned outside that inventory. Only
+# `host_vars/<host>.yml` for the standalone Linux hosts — plus the
+# hand-registered ARM64 laptop VMs provisioned outside that inventory. Only
 # the runners registered to `pjunod/plurx` are listed; the same hosts also run
 # runner services scoped to other repositories, and those can never answer a
 # job in this one.
@@ -66,11 +65,12 @@ voter_hosts = ["lab6", "lab3", "lab4", "media1"]
 # `ci-store` slots rather than chosen freely: a surplus shard cannot be given a
 # second runner on a host that already holds one, so it serialises behind a
 # busy runner and buys a more complicated failure instead of wall time. The
-# fleet carries three slots today, on `lab1`, `lab5` and `lab2` — one per
-# physical non-voter host. That number is an eligibility fact rather than a
-# capacity decision: a runner counts as a slot only once the Store lane has
-# passed on it. See `gha-lab2-android-01` below for what that cost to learn.
-host_exclusive_labels = ["ci-store", "ci-topology"]
+# legacy `ci-store` rows below record the previously advertised labels on
+# `lab1`, `lab5` and `lab2`. Store workflows now request `ci-nonvoter-store`;
+# legacy labels grant no eligibility for that alias. Record its two physical
+# nonvoter carriers only after actual registration and Store qualification.
+# See `gha-lab2-android-01` below for what a false eligibility claim cost.
+host_exclusive_labels = ["ci-nonvoter-store", "ci-topology"]
 
 # --- lab1: Incus guest host, non-voter -------------------------------------
 [[runners]]
@@ -78,7 +78,27 @@ name = "gha-lab1-general-01"
 host = "lab1"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "ci-store"]
+implicit_labels = false
+labels = ["maintenance-lab1-exclusive"]
+
+[[runners]]
+name = "gha-lab1-plurx-heavy-01"
+host = "lab1"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store", "incus"]
+
+# A second heavy instance in the same VM and `plurx-heavy.slice`, registered
+# 2026-11-11 (Forgejo id 62) when six PRs queued behind one heavy slot. Same
+# per-service bounds as -01; no Store label (one Store slot per host).
+[[runners]]
+name = "gha-lab1-plurx-heavy-02"
+host = "lab1"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "incus"]
 
 # --- lab2: Incus guest host, non-voter --------------------------------------
 # A `ci-store` slot, and the entry to read before adding or removing one.
@@ -115,7 +135,7 @@ name = "gha-lab2-android-01"
 host = "lab2"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store"]
+labels = ["lab", "incus", "ubuntu-24.04", "android-kvm", "ci-store", "ci-nonvoter-store"]
 
 [[runners]]
 name = "gha-lab2-android-02"
@@ -124,8 +144,42 @@ os = "Linux"
 arch = "X64"
 labels = ["lab", "incus", "ubuntu-24.04", "android-kvm"]
 
-# --- lab5 (`asus` in the ansible inventory): baremetal, active voter -------
-# Do not place uncapped SDK builds here; nightly media jobs use lab1/lab2 VMs.
+# Heavy instance in the gha-lab2-android-02 guest, registered 2026-11-11
+# (Forgejo id 63). Its service carries the verified 4-CPU / 20 GiB / 4096-PID
+# bounds, but the guest has ~10 GiB: fit for the Rust gates and controller
+# proofs, not the full unit suite. No `incus` label, so the nightly
+# deep-validation lanes stay on lab1.
+[[runners]]
+name = "gha-lab2-plurx-heavy-01"
+host = "lab2"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64"]
+
+# --- lab5 (`asus` in the ansible inventory): baremetal, non-voter ---------
+# lab5 is not a plurx voter (it is absent from `voter_hosts`; this header
+# called it "active voter" until 2026-11-11, which was wrong). Do not place
+# uncapped SDK builds here; nightly media jobs use lab1/lab2 VMs.
+#
+# `gha-lab5-plurx-compile-01` is the second carrier of the nonvoter compile
+# pool (`ci-nonvoter-compile-amd64`). That pool runs only the jobs whose
+# container the workflow itself bounds (`--memory 20g --cpus 4
+# --cpuset-cpus 0-3 --pids-limit 4096`, re-checked by each job's first
+# step), so a job gets the same box on lab1 or here. Host-mode jobs, every
+# publishing job and the disk-gated `web_layout`/`vod_web` pair stay on
+# `ci-nonvoter-heavy-amd64`, which only lab1 carries: a release image must not
+# change build host with queue order. Registered 2026-11-11 (Forgejo runner
+# id 61); its worker adds `--oom-score-adj=500` so lab5's `plurxd` outlives a
+# CI container under memory pressure.
+[[runners]]
+name = "gha-lab5-plurx-compile-01"
+host = "lab5"
+os = "Linux"
+arch = "X64"
+implicit_labels = false
+labels = ["ci-nonvoter-compile-amd64"]
+
 [[runners]]
 name = "gha-lab5-general-01"
 host = "lab5"
@@ -266,6 +320,14 @@ host = "maca"
 os = "Linux"
 arch = "ARM64"
 labels = ["lab", "ubuntu-26.04", "release-arm64"]
+
+# Capacity-one native CI guest on the release runner's physical host.
+[[runners]]
+name = "gha-maca-linux-arm-02"
+host = "maca"
+os = "Linux"
+arch = "ARM64"
+labels = ["lab", "ubuntu-26.04", "ci-arm64"]
 
 [[runners]]
 name = "gha-macb-linux-arm-01"

@@ -270,6 +270,13 @@ internal const val RENDEZVOUS_MAX_REPARKS = 2
  * Not thread-safe: the controller drives it from the player's scope.
  */
 internal class RendezvousHold(
+    /**
+     * The successor's own start in film time, its `media_origin_ms`. Nothing
+     * before it exists in the successor, so no rendezvous is earlier: a
+     * successor staged ahead of the viewer (a processed upgrade begins at the
+     * window its trial already produced) is met where it begins.
+     */
+    private val floorFilmMs: Long = Long.MIN_VALUE,
     private val leadMs: Long = RENDEZVOUS_LEAD_MS,
     private val slackMs: Long = PREPARED_ALIGNMENT_SLACK_MS,
     private val maxReparks: Int = RENDEZVOUS_MAX_REPARKS,
@@ -386,7 +393,7 @@ internal class RendezvousHold(
         val wallLead = maxOf(leadMs, measuredWallLead)
         val rate = speed.takeIf { it.isFinite() && it > 0 }?.coerceAtMost(16.0) ?: 1.0
         val filmLead = kotlin.math.ceil(wallLead.toDouble() * rate).toLong().coerceAtLeast(1)
-        val target = incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead
+        val target = maxOf(incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead, floorFilmMs)
         rendezvousFilmMs = target
         parkIssuedAtMs = nowMs
         ready = false
@@ -830,9 +837,9 @@ internal data class PreparedReplacementRequirement(
  * [isTelevision] is the axis M5.5's only observed hard failure sat on: both
  * phones passed dual prime 20/20, and the tunneled Google TV failed it 0/3
  * with two successor-prime timeouts and an `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED`.
- * [tunnelingEnabled] is the suspected cause rather than a measured one: the
- * re-run that would name it (same-codec dual prime with tunneling forced off)
- * has not been taken.
+ * [tunnelingEnabled] is the successor's own tunneling: a tunneled successor
+ * was measured to invalidate the incumbent's hardware A/V sync audio on that
+ * Google TV, so successors are built untunneled.
  */
 internal fun preparedReplacementRequirements(
     isTelevision: Boolean,
@@ -857,13 +864,12 @@ internal fun preparedReplacementRequirements(
         label = "Tunneled decoding off",
         met = !tunnelingEnabled,
         detail = if (tunnelingEnabled) {
-            "Tunneling was on for the failure. Two identical tunneled pipelines " +
-                "appear to contend where two different codecs get distinct " +
-                "decoder instances. Suspected, not measured: the re-run that " +
-                "would settle it has not been taken."
+            "A tunneled successor claims the hardware A/V sync the incumbent " +
+                "holds. On the Google TV Streamer that invalidated the " +
+                "incumbent's audio and stalled it before the switch."
         } else {
-            "Not requested on this device, so two pipelines get distinct " +
-                "decoder instances."
+            "By construction: a successor primes and serves untunneled, so " +
+                "it never takes the incumbent's hardware A/V sync."
         },
     ),
     PreparedReplacementRequirement(

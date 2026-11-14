@@ -93,6 +93,27 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const PROBE_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+/// Every strict parser read is metered in whole source-service quanta and a
+/// single `read()` above one quantum is refused (`E2BIG`). FFmpeg's file
+/// protocol otherwise issues one direct read per large packet (a 2160p remux
+/// keyframe exceeds 1 MiB), so cap its block size at exactly one quantum.
+const STRICT_BLOCKSIZE: &str = "1048576";
+#[cfg(target_os = "linux")]
+const _: () = assert!(source_reads::MAX_READ == 1_048_576);
+
+/// The strict parser's source input: one-quantum reads, then the held fd.
+#[cfg(unix)]
+fn strict_source_input() -> [OsString; 3] {
+    [
+        OsString::from("-blocksize"),
+        OsString::from(STRICT_BLOCKSIZE),
+        OsString::from("/dev/fd/3"),
+    ]
+}
+
+fn idet_filter(input_video_stream: impl std::fmt::Display) -> String {
+    format!("movie=/dev/fd/3:format_opts=blocksize={STRICT_BLOCKSIZE}:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet")
+}
 const IDET_MEDIA_SECONDS: u8 = 10;
 const MAX_CACHE_ENTRIES: usize = 256;
 const DECODE_FACT_PHASE_BUCKETS: &[(u64, &str)] = &[
@@ -516,6 +537,8 @@ enum ProbeLaunchMode {
     #[cfg(all(test, target_os = "linux"))]
     ProductionSupervisorDelay,
     #[cfg(all(test, target_os = "linux"))]
+    ProductionCompletionWorkerHeld,
+    #[cfg(all(test, target_os = "linux"))]
     ProductionSupervisorReceiveFailure,
     #[cfg(all(test, target_os = "linux"))]
     ProductionBootstrapInterrupted,
@@ -568,6 +591,7 @@ impl ProbeLaunchMode {
             | Self::ProductionPidfdOpenFailure
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
+            | Self::ProductionCompletionWorkerHeld
             | Self::ProductionSupervisorReceiveFailure
             | Self::ProductionBootstrapInterrupted
             | Self::ProductionBootstrapInterruptedUntilDeadline(_)
@@ -1394,62 +1418,6 @@ fn resolve_executable(bin: &str) -> Result<PathBuf, DecodeFactError> {
         .ok_or_else(|| DecodeFactError::ProbeIdentity("executable is not on PATH".to_owned()))?;
     std::fs::canonicalize(resolved)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))
-}
-
-#[cfg(unix)]
-fn duplicate_child_fd(source: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
-    let duplicate = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10) };
-    if duplicate == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(duplicate)
-    }
-}
-
-#[cfg(unix)]
-fn assign_child_fd(
-    duplicate: std::os::fd::RawFd,
-    target: std::os::fd::RawFd,
-) -> std::io::Result<()> {
-    if unsafe { libc::dup2(duplicate, target) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let flags = unsafe { libc::fcntl(target, libc::F_GETFD) };
-    if flags == -1 || unsafe { libc::fcntl(target, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn install_child_fd(source: std::os::fd::RawFd, target: std::os::fd::RawFd) -> std::io::Result<()> {
-    let duplicate = duplicate_child_fd(source)?;
-    let result = assign_child_fd(duplicate, target);
-    unsafe { libc::close(duplicate) };
-    result
-}
-
-#[cfg(unix)]
-fn install_probe_child_fds(
-    source: std::os::fd::RawFd,
-    executable: std::os::fd::RawFd,
-) -> std::io::Result<()> {
-    let source_duplicate = duplicate_child_fd(source)?;
-    let executable_duplicate = match duplicate_child_fd(executable) {
-        Ok(duplicate) => duplicate,
-        Err(error) => {
-            unsafe { libc::close(source_duplicate) };
-            return Err(error);
-        }
-    };
-    let result = assign_child_fd(source_duplicate, 3)
-        .and_then(|()| assign_child_fd(executable_duplicate, HELD_PROBE_FD));
-    unsafe {
-        libc::close(source_duplicate);
-        libc::close(executable_duplicate);
-    }
-    result
 }
 
 #[cfg(target_os = "linux")]
@@ -2437,6 +2405,21 @@ fn supervise_linux_probe_execs(
         LinuxNotificationInterruptionHooks::default(),
     )?;
 
+    #[cfg(test)]
+    if launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
+        COMPLETION_WORKER_STARTED.store(true, Ordering::Release);
+        let released = COMPLETION_WORKER_RELEASE
+            .0
+            .lock()
+            .expect("completion worker gate");
+        let (released, _) = COMPLETION_WORKER_RELEASE
+            .1
+            .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+            .expect("completion worker release");
+        if !*released {
+            return Err(std::io::Error::other("completion test worker timed out"));
+        }
+    }
     while !stop.load(Ordering::Acquire) {
         let mut descriptor = libc::pollfd {
             fd: listener.as_raw_fd(),
@@ -2762,6 +2745,16 @@ static STEADY_RESPONSE_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
 static STEADY_RESPONSE_STOP_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(all(test, target_os = "linux"))]
+static COMPLETION_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, target_os = "linux"))]
+static COMPLETION_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, target_os = "linux"))]
+static COMPLETION_WORKER_RELEASE: std::sync::LazyLock<(
+    std::sync::Mutex<bool>,
+    std::sync::Condvar,
+)> = std::sync::LazyLock::new(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
 /// The detached reap of the steady-response deadline proof waits for one
 /// permit here, so the test can observe it still holding version ownership
 /// for as long as it likes — the slow reap it stands for is unbounded — and
@@ -2775,6 +2768,8 @@ static STEADY_RESPONSE_STOP_EXITS: std::sync::atomic::AtomicUsize =
 
 #[cfg(unix)]
 struct ProbeExecutionSupervisor {
+    descriptors: Option<Arc<crate::producer_spawn::DescriptorManifest>>,
+    retirement: Option<crate::background_jobs::RawRetirement>,
     #[cfg(target_os = "linux")]
     linux: Option<LinuxProbeExecSupervisor>,
 }
@@ -2783,6 +2778,8 @@ struct ProbeExecutionSupervisor {
 impl ProbeExecutionSupervisor {
     fn none() -> Self {
         Self {
+            descriptors: None,
+            retirement: None,
             #[cfg(target_os = "linux")]
             linux: None,
         }
@@ -2791,6 +2788,8 @@ impl ProbeExecutionSupervisor {
     #[cfg(target_os = "linux")]
     fn linux(supervisor: LinuxProbeExecSupervisor) -> Self {
         Self {
+            descriptors: None,
+            retirement: None,
             linux: Some(supervisor),
         }
     }
@@ -2800,6 +2799,16 @@ impl ProbeExecutionSupervisor {
         if let Some(supervisor) = self.linux.as_mut() {
             supervisor.parent_after_spawn();
         }
+    }
+
+    // Only call after the child/namespace exit route has reaped. A supervisor
+    // Drop or an exec error cannot assert that physical reader completion.
+    fn finish_joined(&mut self) -> Result<(), DecodeFactError> {
+        self.finish()?;
+        if let Some(retirement) = self.retirement.take() {
+            retirement.joined();
+        }
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), DecodeFactError> {
@@ -2848,7 +2857,22 @@ async fn spawn_configured_probe(
         // `configure_probe_execution` already registered the priority ahead
         // of its own exec-from-`pre_exec`; the launcher's second registration
         // lands after that closure and never runs.
-        let spawned = crate::process_control::spawn_job_owned(&mut command, work);
+        let launch = |command: &mut tokio::process::Command| match &supervisor.retirement {
+            Some(retirement) => {
+                retirement.spawn(|| crate::process_control::spawn_job_owned(command, work))
+            }
+            None => crate::process_control::spawn_job_owned(command, work),
+        };
+        let spawned = match supervisor.descriptors.as_ref() {
+            Some(descriptors) => {
+                crate::producer_spawn::with_manifest(descriptors, &mut command, launch)
+            }
+            None => launch(&mut command),
+        };
+        // The forked child owns its copied pins. Parent-side copies in both
+        // the hook and supervisor must close before control-socket EOF/reap.
+        drop(command);
+        supervisor.descriptors.take();
         supervisor.parent_after_spawn();
         match spawned {
             Ok((child, job)) => Ok((child, job, supervisor)),
@@ -3002,6 +3026,46 @@ fn configure_probe_execution(
     arg0: &Path,
     arguments: &[OsString],
     class: crate::process_control::ChildClass,
+    stdio: crate::producer_spawn::StdioFacts,
+) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    let retirement = if source_fd.is_some() && launch_mode.is_production() {
+        crate::background_jobs::source_budget()
+            .map(|budget| budget.raw_retirement())
+            .transpose()
+            .map_err(DecodeFactError::SourceService)?
+            .flatten()
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let retirement = None;
+    let mut supervisor = configure_probe_execution_untracked(
+        command,
+        launch_mode,
+        launch_deadline,
+        executable_fd,
+        source_fd,
+        arg0,
+        arguments,
+        class,
+        stdio,
+    )?;
+    supervisor.retirement = retirement;
+    Ok(supervisor)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_probe_execution_untracked(
+    command: &mut tokio::process::Command,
+    launch_mode: ProbeLaunchMode,
+    launch_deadline: std::time::Instant,
+    executable_fd: std::os::fd::RawFd,
+    source_fd: Option<std::os::fd::RawFd>,
+    arg0: &Path,
+    arguments: &[OsString],
+    class: crate::process_control::ChildClass,
+    stdio: crate::producer_spawn::StdioFacts,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     #[cfg(target_os = "linux")]
     if command.as_std().get_program() == OsStr::new("/usr/bin/bwrap") {
@@ -3014,6 +3078,7 @@ fn configure_probe_execution(
             arguments,
             class,
             launch_deadline,
+            stdio,
         );
     }
     command.args(arguments);
@@ -3065,15 +3130,28 @@ fn configure_probe_execution(
     let supervisor_receiver_fd = production_supervisor
         .as_ref()
         .map(LinuxProbeExecSupervisor::child_receiver_fd);
+    let mut mappings = vec![(executable_fd, HELD_PROBE_FD)];
+    if let Some(source_fd) = source_fd {
+        mappings.push((source_fd, 3));
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    if let Some(export_socket) = launch_mode.export_socket_fd() {
+        mappings.push((export_socket, 5));
+    }
+    let descriptors = crate::producer_spawn::Descriptors::from_mappings(&mappings, None)
+        .prepare_inline(stdio)
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let child_descriptors = Arc::clone(&descriptors);
     // Before the closure below: it execs the probe from inside itself, so a
     // `pre_exec` registered after it (the launcher's) never runs.
     crate::process_control::priority::apply(command, class);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
-            match source_fd {
-                Some(source_fd) => install_probe_child_fds(source_fd, executable_fd)?,
-                None => install_child_fd(executable_fd, HELD_PROBE_FD)?,
+            // Inline: a later pre_exec hook cannot run after our custom exec.
+            child_descriptors.inherit_target(HELD_PROBE_FD)?;
+            if source_fd.is_some() {
+                child_descriptors.inherit_target(3)?;
             }
             if !launch_mode.is_production() {
                 return Ok(());
@@ -3091,8 +3169,8 @@ fn configure_probe_execution(
                 libc::close(receiver_fd);
                 mark_unrelated_fds_close_on_exec()?;
                 #[cfg(test)]
-                if let Some(export_socket) = launch_mode.export_socket_fd() {
-                    install_child_fd(export_socket, 5)?;
+                if launch_mode.export_socket_fd().is_some() {
+                    child_descriptors.inherit_target(5)?;
                 }
                 install_linux_filesystem_execute_denial()?;
                 let Some(seccomp) = production_seccomp.as_ref() else {
@@ -3119,9 +3197,13 @@ fn configure_probe_execution(
     }
     #[cfg(target_os = "linux")]
     if let Some(supervisor) = production_supervisor {
-        return Ok(ProbeExecutionSupervisor::linux(supervisor));
+        let mut supervisor = ProbeExecutionSupervisor::linux(supervisor);
+        supervisor.descriptors = Some(descriptors);
+        return Ok(supervisor);
     }
-    Ok(ProbeExecutionSupervisor::none())
+    let mut supervisor = ProbeExecutionSupervisor::none();
+    supervisor.descriptors = Some(descriptors);
+    Ok(supervisor)
 }
 
 #[cfg(unix)]
@@ -3143,9 +3225,17 @@ async fn terminate_probe_session(
     // This potentially unbounded reap runs only inside an owned task. The
     // caller-facing deadline detaches that task while it retains every source
     // and admission guard needed for safe cleanup.
+    #[cfg(all(test, target_os = "linux"))]
+    if _launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
+        COMPLETION_CLEANUP_STARTED.store(true, Ordering::Release);
+    }
     session.kill_once();
-    let _ = wait_for_probe_reap(child, _launch_mode).await;
-    let _ = supervisor.finish();
+    if wait_for_probe_reap(child, _launch_mode).await.is_ok() {
+        let _ = supervisor.finish_joined();
+    } else {
+        // An attempted wait is not a physical exit proof.
+        let _ = supervisor.finish();
+    }
 }
 
 #[cfg(unix)]
@@ -3876,6 +3966,11 @@ async fn probe_version_with_deadline_on(
             &configured_path,
             &arguments,
             DECODE_FACT_VERSION_PROBE.class,
+            crate::producer_spawn::StdioFacts {
+                stdin: crate::producer_spawn::StdioMode::Null,
+                stdout: crate::producer_spawn::StdioMode::Piped,
+                stderr: crate::producer_spawn::StdioMode::Null,
+            },
         )?;
         let (mut child, _child_job, mut supervisor, pause_guard) =
             spawn_configured_probe(command, supervisor, DECODE_FACT_VERSION_PROBE, None).await?;
@@ -3943,7 +4038,11 @@ async fn probe_version_with_deadline_on(
                 return Err(DecodeFactError::Deadline);
             }
         };
-        let supervisor_result = supervisor.finish();
+        let supervisor_result = if status.is_ok() && exit_error.is_none() {
+            supervisor.finish_joined()
+        } else {
+            supervisor.finish()
+        };
         if let Some(error) = exit_error {
             return Err(error);
         }
@@ -4343,6 +4442,13 @@ impl DecodeFactCache {
         budget: Duration,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<(CollectedProbe, DecodeFactLookupResult), DecodeFactError> {
+        // Capture every held source Arc before identity/blocking/collector
+        // work can detach. The live owner holds the final original capability.
+        if let Some(owner) = &source.source_background {
+            owner
+                .register_source_file(Arc::clone(&source.handle))
+                .map_err(DecodeFactError::SourceService)?;
+        }
         let started = std::time::Instant::now();
         #[cfg(target_os = "linux")]
         let inherited_control = plurx_core::process::bounded::source_pause_controller();
@@ -4994,7 +5100,9 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
-    let mut scratch = [0_u8; 8 * 1024];
+    // Both pipe readers remain live across awaits in the probe and idet
+    // supervisors. Keep their buffers out of those nested futures.
+    let mut scratch = vec![0_u8; 8 * 1024];
     let mut overflow = false;
     loop {
         let count = reader
@@ -5133,8 +5241,7 @@ async fn collect_idet_verdict(
     cancelled: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
 ) -> Result<InterlaceVerdict, DecodeFactError> {
-    let filter =
-        format!("movie=/dev/fd/3:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet");
+    let filter = idet_filter(input_video_stream);
     let arguments = vec![
         OsString::from("-hide_banner"),
         OsString::from("-v"),
@@ -5222,6 +5329,7 @@ async fn collect_refinement_output(
         probe.executable(),
         &arguments,
         work.class,
+        crate::producer_spawn::StdioFacts::CAPTURED,
     )?;
     let (mut child, _child_job, mut supervisor, pause_guard) =
         spawn_configured_probe(command, supervisor, work, pause_guard).await?;
@@ -5300,7 +5408,11 @@ async fn collect_refinement_output(
             return Err(DecodeFactError::Deadline);
         }
     };
-    let supervisor_result = supervisor.finish();
+    let supervisor_result = if status.is_ok() && exit_error.is_none() {
+        supervisor.finish_joined()
+    } else {
+        supervisor.finish()
+    };
     if let Some(error) = exit_error {
         return Err(error);
     }
@@ -5336,10 +5448,10 @@ async fn refine_scan_type(
             "-show_data",
             "-of",
             "json",
-            "/dev/fd/3",
         ]
         .into_iter()
         .map(OsString::from)
+        .chain(strict_source_input())
         .collect();
         match collect_refinement_output(probe, source_fd, arguments, deadline, cancelled, work)
             .await
@@ -5501,7 +5613,7 @@ async fn collect_platform(
     #[cfg(target_os = "macos")]
     if probe.launch_mode.is_production() {
         let mut args = projection.arguments();
-        args.push("/dev/fd/3".into());
+        args.extend(strict_source_input().map(|arg| arg.into_string().expect("ASCII argument")));
         let output = run_macos_parser(
             &probe.executable_snapshot,
             Some(duplicate_macos_source(source_fd)?),
@@ -5544,7 +5656,7 @@ async fn collect_platform(
         .into_iter()
         .map(OsString::from)
         .collect::<Vec<_>>();
-    arguments.push(OsString::from("/dev/fd/3"));
+    arguments.extend(strict_source_input());
     let mut command = tokio::process::Command::new(probe_launch_path(
         &probe.executable_snapshot,
         probe.launch_mode,
@@ -5567,6 +5679,7 @@ async fn collect_platform(
         probe.executable(),
         &arguments,
         work.class,
+        crate::producer_spawn::StdioFacts::CAPTURED,
     )?;
     let (mut child, _child_job, mut supervisor, pause_guard) =
         spawn_configured_probe(command, supervisor, work, pause_guard).await?;
@@ -5655,7 +5768,11 @@ async fn collect_platform(
             return Err(DecodeFactError::Deadline);
         }
     };
-    let supervisor_result = supervisor.finish();
+    let supervisor_result = if status.is_ok() && exit_error.is_none() {
+        supervisor.finish_joined()
+    } else {
+        supervisor.finish()
+    };
     if let Some(error) = exit_error {
         return Err(error);
     }

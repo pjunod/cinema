@@ -10,43 +10,28 @@
 #include <emmintrin.h>
 #endif
 
-// Keep the native float upload identical to scalar division, including the
-// active rounding mode. Integer storage normalization can change FEL's exact
-// zero residual. A per-call table computes each code with the current rounding
-// mode once, then uploads those exact binary32 values without per-pixel division.
-static inline bool dv_unpack_10bit_plane(const uint16_t *input, size_t count,
-                                        float *output) {
-  float normalized[1024];
-  for (unsigned code = 0; code < 1024; code++)
-    normalized[code] = code / 1023.0f;
-  size_t at = 0;
-#if defined(__SSE2__)
-  const __m128i zero = _mm_setzero_si128();
-  const __m128i outside = _mm_set1_epi16((short)0xfc00);
-  for (; count - at >= 8; at += 8) {
-    __m128i codes = _mm_loadu_si128((const __m128i *)(input + at));
-    if (_mm_movemask_epi8(_mm_cmpeq_epi16(_mm_and_si128(codes, outside), zero)) != 0xffff)
-      return false;
-    for (size_t lane = 0; lane < 8; lane++)
-      output[at + lane] = normalized[input[at + lane]];
+// The software plane contract shared with the native player: each 10-bit code
+// sits in UNORM16 storage as code << 6 (bits 16/10/6). A bilinear tap between
+// two codes is then an exact quarter-code multiple of 64/65535, and the
+// renderer's 65535/64 code scale returns the resampled code.
+static inline bool dv_shift_10bit_plane(const uint16_t *input, size_t count,
+                                        uint16_t *output) {
+  uint16_t seen = 0;
+  for (size_t at = 0; at < count; at++) {
+    seen |= input[at];
+    output[at] = (uint16_t)(input[at] << 6);
   }
-#endif
-  for (; at < count; at++) {
-    if (input[at] > 1023)
-      return false;
-    output[at] = normalized[input[at]];
-  }
-  return true;
+  return (seen & 0xfc00) == 0;
 }
 
-// The caller validates finite input before conversion. Preserve lrintf's
-// rounding mode without paying for general NaN-aware fminf/fmaxf calls.
+// A binary32 significand times 65535 fits exactly in binary64. Round only
+// once, in the caller's active mode. The caller validates finite input.
 static inline uint16_t dv_pack_finite_rgb48(float value) {
   if (value < 0)
     value = 0;
   if (value > 1)
     value = 1;
-  return (uint16_t)lrintf(value * 65535);
+  return (uint16_t)lrint((double)value * 65535.0);
 }
 
 // Preserve the scalar conversion, including the active rounding mode and
@@ -56,6 +41,9 @@ static inline bool dv_pack_rgba_rgb48(const float *rgba, size_t pixels,
                                      uint8_t *rgb, size_t capacity) {
   if (pixels > SIZE_MAX / 6 || capacity < pixels * 6)
     return false;
+#if defined(__SSE2__)
+  const bool nearest = _MM_GET_ROUNDING_MODE() == _MM_ROUND_NEAREST;
+#endif
   for (size_t pixel = 0; pixel < pixels; pixel++) {
 #if defined(__SSE2__)
     __m128 value = _mm_loadu_ps(rgba + 4 * pixel);
@@ -66,7 +54,23 @@ static inline bool dv_pack_rgba_rgb48(const float *rgba, size_t pixels,
       return false;
     value = _mm_min_ps(_mm_set1_ps(1.0f),
                        _mm_max_ps(_mm_setzero_ps(), value));
-    __m128i code = _mm_cvtps_epi32(_mm_mul_ps(value, _mm_set1_ps(65535.0f)));
+    __m128 product = _mm_mul_ps(value, _mm_set1_ps(65535.0f));
+    __m128i code = _mm_cvtps_epi32(product);
+    // All integer and half-integer boundaries fit in binary32 here. Directed
+    // rounding composes. Nearest can double-round only at a half-integer.
+    if (nearest) {
+      __m128 delta = _mm_sub_ps(product, _mm_cvtepi32_ps(code));
+      __m128 magnitude = _mm_andnot_ps(_mm_set1_ps(-0.0f), delta);
+      __m128 halves = _mm_cmpeq_ps(magnitude, _mm_set1_ps(0.5f));
+      if (_mm_movemask_ps(halves) & 7) {
+        const __m128d scale = _mm_set1_pd(65535.0);
+        __m128d rg_values = _mm_cvtps_pd(value);
+        __m128d ba_values = _mm_cvtps_pd(_mm_movehl_ps(value, value));
+        __m128i rg_codes = _mm_cvtpd_epi32(_mm_mul_pd(rg_values, scale));
+        __m128i ba_codes = _mm_cvtpd_epi32(_mm_mul_pd(ba_values, scale));
+        code = _mm_unpacklo_epi64(rg_codes, ba_codes);
+      }
+    }
     code = _mm_sub_epi32(code, _mm_set1_epi32(32768));
     code = _mm_xor_si128(_mm_packs_epi32(code, code),
                          _mm_set1_epi16((short)0x8000));

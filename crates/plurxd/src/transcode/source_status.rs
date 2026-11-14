@@ -244,14 +244,43 @@ impl SourceViewerActor {
                 .manager
                 .upgrade()
                 .ok_or(SourceWorkerError::Unavailable)?;
-            let publication = manager
-                .vod
-                .status_publication(&response.session_id)
-                .await
-                .ok_or(SourceWorkerError::Unavailable)?;
+            #[cfg(unix)]
+            let growing = actor.growing_backing();
+            #[cfg(unix)]
+            let frozen = growing.is_none();
+            #[cfg(not(unix))]
+            let frozen = true;
+            let publication = if frozen {
+                Some(
+                    manager
+                        .vod
+                        .status_publication(&response.session_id)
+                        .await
+                        .ok_or(SourceWorkerError::Unavailable)?,
+                )
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            let status = if let Some(backing) = &growing {
+                backing.status_info().await?
+            } else {
+                publication
+                    .as_ref()
+                    .ok_or(SourceWorkerError::Unavailable)?
+                    .result
+                    .as_ref()
+                    .map_err(|_| SourceWorkerError::Unavailable)?
+                    .clone()
+            };
+            #[cfg(not(unix))]
             let status = publication
+                .as_ref()
+                .ok_or(SourceWorkerError::Unavailable)?
                 .result
-                .map_err(|_| SourceWorkerError::Unavailable)?;
+                .as_ref()
+                .map_err(|_| SourceWorkerError::Unavailable)?
+                .clone();
             if status.id != response.session_id {
                 return Err(SourceWorkerError::Unavailable);
             }
@@ -296,14 +325,35 @@ impl SourceViewerActor {
                     .source
                     .as_ref()
                     .is_none_or(|source| !source.unchanged())
-                || !manager
-                    .vod
-                    .source_status_owner_is_current(
-                        &response.session_id,
-                        &publication.owner,
-                        &actor.0.assignment,
-                    )
-                    .await
+                || !if let Some(publication) = &publication {
+                    manager
+                        .vod
+                        .source_status_owner_is_current(
+                            &response.session_id,
+                            &publication.owner,
+                            &actor.0.assignment,
+                        )
+                        .await
+                } else {
+                    #[cfg(unix)]
+                    {
+                        if let Some(backing) = &growing {
+                            let _lifecycle = backing.lifecycle.lock().await;
+                            backing.is_live()
+                                && backing.session_id == response.session_id
+                                && backing.owners.contains_live_assignment(&actor.0.assignment)
+                                && actor
+                                    .growing_backing()
+                                    .is_some_and(|current| Arc::ptr_eq(&current, backing))
+                        } else {
+                            false
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        false
+                    }
+                }
             {
                 return Err(SourceWorkerError::Unavailable);
             }
@@ -333,5 +383,158 @@ impl SourceViewerActor {
             .await
             .map_err(|_| SourceWorkerError::Deadline)?
             .map_err(|_| SourceWorkerError::Unresolved)?
+    }
+}
+
+#[cfg(unix)]
+impl SourceGrowingBacking {
+    /// An advisory snapshot of committed range media, never a whole-title plan.
+    pub(crate) async fn status_info(
+        &self,
+    ) -> Result<crate::vodserve::VodSessionInfo, SourceWorkerError> {
+        if !self.is_live() {
+            return Err(SourceWorkerError::Unavailable);
+        }
+        let demand = self.control.lock().await.snapshot.clone();
+        let files = self.production.files.lock().await;
+        let init = files
+            .canonical_init()
+            .ok_or(SourceWorkerError::Unavailable)?;
+        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(&init)
+            .map_err(|_| SourceWorkerError::Unavailable)?;
+        let origin = files
+            .media_origin_ms()
+            .ok_or(SourceWorkerError::Unavailable)?;
+        let seconds = files
+            .segments()
+            .iter()
+            .map(|segment| segment.seconds)
+            .sum::<f64>();
+        let (start, end) = growing_range_bounds(origin, seconds)?;
+        let bytes = files
+            .segments()
+            .iter()
+            .try_fold(0u64, |sum, segment| sum.checked_add(segment.bytes))
+            .ok_or(SourceWorkerError::Unavailable)?;
+        let demand = demand.as_ref();
+        let anchor = demand
+            .map(|demand| demand.buffer_anchor_ms())
+            .unwrap_or(start);
+        let ready = !files.segments().is_empty() && anchor >= start && anchor < end;
+        let demand_name = demand.map(|demand| match demand.demand {
+            crate::playback_control::PlaybackDemand::Active => "active",
+            crate::playback_control::PlaybackDemand::Hold => "hold",
+            crate::playback_control::PlaybackDemand::End => "end",
+        });
+        let render = demand.map(|demand| match demand.render_state {
+            crate::playback_control::RenderState::Starting => "starting",
+            crate::playback_control::RenderState::Rendering => "rendering",
+            crate::playback_control::RenderState::Waiting => "waiting",
+            crate::playback_control::RenderState::Stalled => "stalled",
+            crate::playback_control::RenderState::Seeking => "seeking",
+            crate::playback_control::RenderState::Ended => "ended",
+            crate::playback_control::RenderState::Failed => "failed",
+        });
+        let complete = files.complete();
+        Ok(crate::vodserve::VodSessionInfo {
+            stream_format: None,
+            active_encode_milli_realtime: None,
+            active_encode_age_ms: None,
+            active_encode_active_ms: None,
+            active_encode_segments: None,
+            active_encode_candidate_id: None,
+            id: self.session_id.clone(),
+            file_id: self.request.file_id,
+            target_height: i64::from(facts.height),
+            encoder: "copy",
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
+            playlist_shape: "event",
+            producer_state: if complete { "complete" } else { "running" },
+            producer_hold: None,
+            producer_failed: None,
+            producer_decision: None,
+            control_demand: demand_name,
+            reported_position_ms: demand.map(|demand| demand.position_ms),
+            client_runway_ms: demand.map(|demand| demand.runway_ms()),
+            render_state: render,
+            server_ready_state: if ready { "ready" } else { "missing" },
+            server_ready_anchor_ms: Some(anchor),
+            server_ready_end_ms: ready.then_some(end),
+            server_ready_seconds: Some(if ready {
+                (end - anchor) as f64 / 1000.0
+            } else {
+                0.0
+            }),
+            server_next_ready_start_ms: (anchor < start && end > start).then_some(start),
+            server_next_ready_end_ms: (anchor < start && end > start).then_some(end),
+            published_end_ms: (start == 0).then_some(end),
+            ready_ahead_end_ms: ready.then_some(end),
+            fetched_end_ms: 0,
+            fetched_segment: None,
+            ahead_seconds: None,
+            materialized_segments: files.segments().len(),
+            planned_segments: if complete { files.segments().len() } else { 0 },
+            materialized_bytes: bytes,
+            planned_bytes: if complete { bytes } else { 0 },
+            working_set_bytes: bytes,
+            working_set_budget_bytes: 0,
+            completed_cache_bytes: if complete { bytes } else { 0 },
+            admitted: true,
+            delivered_bytes: self.delivery.total_bytes(),
+            delivered_bps: self
+                .delivery
+                .recent_bps()
+                .and_then(|rate| rate.checked_mul(8)),
+            delivered_idle_ms: self.delivery.idle_for_ms(),
+            http_wait_count: 0,
+            http_wait_oldest_ms: None,
+            http_wait_segment: None,
+            status_generated_unix_ms: crate::media_sessions::unix_ms(),
+            suspended: demand.is_some_and(|demand| {
+                demand.demand == crate::playback_control::PlaybackDemand::Hold
+            }),
+            // Physical range completion, not a declaration that EVENT is a whole film.
+            final_: complete,
+        })
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn growing_range_bounds(
+    origin: i64,
+    seconds: f64,
+) -> Result<(i64, i64), SourceWorkerError> {
+    const MAX_SAFE: i64 = 9_007_199_254_740_991;
+    if !(-MAX_SAFE..=MAX_SAFE).contains(&origin) || !seconds.is_finite() || seconds < 0.0 {
+        return Err(SourceWorkerError::Unavailable);
+    }
+    let milliseconds = (seconds * 1000.0).floor();
+    if milliseconds > MAX_SAFE as f64 {
+        return Err(SourceWorkerError::Unavailable);
+    }
+    let end = origin
+        .checked_add(milliseconds as i64)
+        .filter(|end| *end <= MAX_SAFE)
+        .ok_or(SourceWorkerError::Unavailable)?;
+    Ok((origin.max(0), end.max(0)))
+}
+
+#[cfg(all(test, unix))]
+mod growing_status_tests {
+    use super::*;
+    #[test]
+    fn growing_bounds_preserve_signed_origin_and_reject_overflow() {
+        assert_eq!(
+            growing_range_bounds(-83, 1.0).expect("negative preroll origin"),
+            (0, 917)
+        );
+        assert_eq!(
+            growing_range_bounds(5_400_000, 16.0).expect("ninety-minute bounded range"),
+            (5_400_000, 5_416_000)
+        );
+        assert!(growing_range_bounds(9_007_199_254_740_991, 0.001).is_err());
+        assert!(growing_range_bounds(0, f64::INFINITY).is_err());
+        assert!(growing_range_bounds(0, -1.0).is_err());
     }
 }

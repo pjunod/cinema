@@ -1662,3 +1662,29 @@ fn every_drop_reason_is_rendered_with_a_fixed_label() {
     }
     assert!(!rendered.contains("session"));
 }
+
+/// D2 acceptance: `plurx_create_seconds` is a histogram by the create's
+/// answer — `ok`, a refusal's code, or `none` for a codeless one — so a
+/// codeless failed start is countable and timed-out creates are in it.
+#[test]
+fn create_seconds_is_a_histogram_by_answer_code() {
+    let count = |code: &str| -> u64 {
+        let prefix = format!("plurx_create_seconds_count{{code=\"{code}\"}} ");
+        prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .map_or(0, |value| value.parse().expect("count"))
+    };
+    let (timed_out, codeless) = (count("startup_timeout"), count("none"));
+    record_create_seconds(Some("startup_timeout"), Duration::from_millis(10_000));
+    record_create_seconds(None, Duration::from_millis(1));
+    assert_eq!(count("startup_timeout"), timed_out + 1);
+    assert_eq!(count("none"), codeless + 1);
+    let rendered = prometheus();
+    assert!(rendered.contains("# TYPE plurx_create_seconds histogram"));
+    assert!(
+        rendered.contains("plurx_create_seconds_bucket{code=\"startup_timeout\",le=\"10\"}"),
+        "the 10 s clamp is a bucket edge"
+    );
+    assert!(rendered.contains("plurx_create_seconds_bucket{code=\"none\",le=\"+Inf\"}"));
+}

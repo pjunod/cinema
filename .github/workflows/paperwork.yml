@@ -30,10 +30,12 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          # The description and title are read from the event payload file
+          # (validation/pr_event.py), never the environment: a long
+          # description made the runner unable to start this step at all.
           GITHUB_TOKEN: ${{ github.token }}
+          # Persistent publisher credentials must never enter a PR-controlled
+          # workflow. This job checks and fetches only; publication is external.
         run: |
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
@@ -41,5 +43,11 @@ jobs:
             "+refs/heads/main:refs/remotes/origin/main"
           # Release counters are judged against main: an effort that already
           # claimed its bump does not owe another one per task pull request.
-          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" \
-            --counter-target origin/main --body-env
+          if python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --counter-target origin/main --body-env; then
+            exit 0
+          fi
+          # PR code has no publisher credential. The separately installed
+          # ci-fleet service independently derives supported fixes and leases
+          # one commit to this head; its bot push starts the replacement lane.
+          echo "Paperwork failed. Use make paperwork-fix locally, or inspect the trusted publisher status; no compiler jobs started."
+          exit 1

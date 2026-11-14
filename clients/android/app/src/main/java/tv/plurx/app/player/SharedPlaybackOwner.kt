@@ -32,7 +32,7 @@ import java.util.UUID
 /** The renderer half of a Shared player. Only the owner below changes it. */
 internal interface SharedRenderer {
     /** Replace the current media with a Shared HLS playlist (account-bearing transport). */
-    fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean)
+    fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean, start: tv.plurx.app.data.HlsStart)
     /** Replace the current media with B's direct byte URL (no account headers). */
     fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean)
     fun seekTo(positionMs: Long)
@@ -43,11 +43,11 @@ internal interface SharedRenderer {
     fun release()
 
     // A prepared successor: a second pipeline, muted and without a surface
-    // until the switch. Shared sessions are VOD, so every position here is
-    // film time on both pipelines.
+    // until the switch. Positions crossing this interface are always film
+    // time; each renderer maps through its own attachment's explicit origin.
 
     /** Build the successor on [url] at [positionMs], parked (not playing). */
-    fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean)
+    fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean, start: tv.plurx.app.data.HlsStart)
     /** The successor's own readings, or null when there is none. */
     fun successorSnapshot(): SharedSuccessorSnapshot?
     /** Seek the parked successor to the rendezvous and leave it waiting there. */
@@ -67,6 +67,7 @@ internal data class SharedRendererSnapshot(
     val positionMs: Long, val bufferedMs: Long, val durationMs: Long?,
     val playing: Boolean, val renderState: RenderState, val playbackRate: Double = 1.0,
     val framePresented: Boolean = false,
+    val seekableFilmRangeMs: LongRange? = null,
 )
 
 internal data class SharedSuccessorSnapshot(
@@ -284,11 +285,22 @@ internal class SharedPlaybackOwner(
                 return@withLock
             }
         }
+        val hls = (session as? SharedStartedPlayback)?.start?.response
+        if (hls != null && !sharedFilmLocalVod(hls) && view.seekableFilmRangeMs?.contains(target) != true) {
+            reopen(requireNotNull(plan).selection, target, view.playing, allowDirect = false)
+            return@withLock
+        }
         when (val outcome = control(state(view).copy(renderState = RenderState.SEEKING, seekTargetMs = target))) {
             null, is SharedControlOutcome.Accepted -> renderer.seekTo(target)
             is SharedControlOutcome.Ended -> reopen(requireNotNull(plan).selection, target, view.playing, allowDirect = false)
             else -> refused(outcome)
         }
+    }
+
+    /** A finite range ending before the title is not a watched completion. */
+    suspend fun rangeEnded() = commands.withLock {
+        val view = renderer.snapshot()
+        reopen(requireNotNull(plan).selection, view.positionMs, view.playing, allowDirect = false)
     }
 
     suspend fun setPlaying(playing: Boolean) = commands.withLock {
@@ -415,7 +427,7 @@ internal class SharedPlaybackOwner(
             val plan = successorPlan(h, view.positionMs)
             val successor = SharedStart.successor(requireNotNull(h.offer), current, plan.request)
             h.successorPlan = plan; h.successor = successor; h.preparedAtMs = clock()
-            renderer.prepareSuccessor(client.playlistUrl(successor), view.positionMs, h.next.subtitle != null && !h.next.burn)
+            renderer.prepareSuccessor(client.playlistUrl(successor), view.positionMs, h.next.subtitle != null && !h.next.burn, successor.start.response)
         } catch (error: Exception) {
             if (error is kotlinx.coroutines.CancellationException) throw error
             // An offer this client cannot bind, or a device that cannot stand
@@ -664,7 +676,7 @@ internal class SharedPlaybackOwner(
         val started = client.start(next.subject.context, next.request)
         try {
             check(permitted())
-            renderer.attachHls(client.playlistUrl(started), positionMs, playWhenReady)
+            renderer.attachHls(client.playlistUrl(started), positionMs, playWhenReady, started.start.response)
             commit(next, started, SharedControlChannel(client, started, clientInstanceId,
                 sharedControlCapabilities(next.caps, preparedHandoff), prepared = preparedHandoff))
             return started

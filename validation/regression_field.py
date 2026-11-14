@@ -49,6 +49,7 @@ from validation.history import (
     resolve_regression_test,
     worktree_reader,
 )
+from validation import pr_event
 from validation.runner import REPO_ROOT
 
 
@@ -227,8 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.body is not None:
         body = args.body
     else:
-        body = os.environ.get("PR_BODY", "")
-    title = args.title if args.title is not None else os.environ.get("PR_TITLE", "")
+        body = pr_event.body() or ""
+    title = args.title if args.title is not None else (pr_event.title() or "")
     base = args.base or os.environ.get("PR_BASE_SHA", "")
     head = args.head or os.environ.get("PR_HEAD_SHA", "")
     say = (lambda *_args, **_kwargs: None) if args.landing_lines else print

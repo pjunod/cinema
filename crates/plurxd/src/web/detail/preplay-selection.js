@@ -192,12 +192,12 @@ function prePlayBurnNeeded(decision, index){
 // What a pre-play selection means for the cold start, decided in one place so
 // it can be reasoned about — and checked — without standing a player up.
 //
-// A transcode decision's default subtitle is part of its candidate recipe.
-// Carry it on the first create, while leaving defaults on copy routes to the
-// existing subtitle setup. An echoed `selection` alone is not a viewer choice.
-function prePlayApplication(decision, selection){
+// The decision's default belongs to the initial recipe on every route. A
+// delayed setSub() is a new viewer command and can cancel an in-flight create.
+// An echoed `selection` alone is not a viewer choice.
+function prePlayApplication(decision, selection, {skipDefaultSub=false}={}){
   const sub=selection&&selection.subtitle!=null?selection.subtitle:
-    decision.method==='transcode'?(decision.subtitles||[]).find(s=>s.default)?.index??null:null;
+    skipDefaultSub?-1:(decision.subtitles||[]).find(s=>s.default)?.index??null;
   const action=prePlayBurnNeeded(decision, sub)
     ? PlaybackPolicy.subtitleBurnAction({requiresBurn:true,
         deliveredRange:decision.delivered_dynamic_range})
@@ -212,8 +212,7 @@ function prePlayApplication(decision, selection){
     // re-buffer to satisfy a choice made before playback began.
     burnedSub:action==="burn"?sub:null,
     // A text track is handed to a <track> once the route knows its offset. Off
-    // (`-1`) and "no explicit choice" apply nothing here; the latter leaves the
-    // cold-start server default alone.
+    // (`-1`) and a decision with no selected subtitle apply nothing here.
     textSub:action==="native"&&sub!=null&&sub>=0?sub:null,
   };
 }
@@ -323,7 +322,7 @@ function episodeRow(ep){
       <div class="epmeta">${bits.join("")}</div>
       ${ep.overview?`<div class="epov">${esc(ep.overview)}</div>`:""}
     </div>
-    <button class="ghost sm epplay" title="Play" onclick="event.stopPropagation();AUTOPLAY='${itemId}';location.hash='#/item/${itemId}'">▶</button>
+    ${ep.offloaded?offloadedBadge(ep):`<button class="ghost sm epplay" title="Play" onclick="event.stopPropagation();AUTOPLAY='${itemId}';location.hash='#/item/${itemId}'">▶</button>`}
   </div>`;
 }
 // Set by an episode-row play button so the target item auto-plays on arrival.
@@ -794,7 +793,9 @@ function classicItemBody(p){
     const pmeta=p.meta, resume=p.resume;
     const watchBtn=watchControls(it);
     const playable=p.playable;
-    if(playable){
+    if(it.offloaded){
+      body+=offloadActions(it); watchOffload(exactWireId(it));
+    } else if(playable){
       body+=`<div class="actions">
         <button class="btnplay" onclick='${playCall(p,playable,resume)}'>▶ ${resume?`Resume · ${fmtDur(resume)}`:'Play'}</button>
         ${resume?`<button class="ghost" data-remote-start-over onclick='${playCall(p,playable,0)}'>Start over</button>`:''}
@@ -818,7 +819,7 @@ function classicItemBody(p){
   } else if(p.shape==="episodes"){
     // Season: episodes as a list.
     const acts=watchControls(it);
-    body+=`${acts?`<div class="actions">${acts}</div>`:''}
+    body+=`${acts?`<div class="actions">${acts}</div>`:''}${offloadContainerActions(it)}
       <h2 class="section" style="margin:18px 0 0">${d.children.length} episode${d.children.length>1?'s':''}</h2>
       <div class="eplist">${d.children.map(episodeRow).join("")}</div>`;
   } else if(p.shape==="children"){
@@ -827,7 +828,7 @@ function classicItemBody(p){
     const label = it.kind==='folder'? 'Contents'
                 : p.childLabel==='Seasons'? 'Seasons' : 'Episodes';
     const acts=watchControls(it);
-    body+=`${acts?`<div class="actions">${acts}</div>`:''}
+    body+=`${acts?`<div class="actions">${acts}</div>`:''}${offloadContainerActions(it)}
       <h2 class="section" style="margin:18px 0 12px">${label}</h2>${grid(d.children)}`;
   } else if(p.shape==="folder"){
     body+=`<div class="empty">This folder is empty.</div>`;

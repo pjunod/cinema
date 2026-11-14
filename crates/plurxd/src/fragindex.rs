@@ -920,28 +920,11 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
                     let fragment = fragment;
-                    let Some(video) = init.video() else {
-                        return IndexOutcome::Unsupported("the moov lost its video track".into());
+                    let row = match IndexRow::from_fragment(&fragment, init) {
+                        Ok(row) => row,
+                        Err(reason) => return IndexOutcome::Unsupported(reason.into()),
                     };
-                    let Some(track) = fragment.track(video.id) else {
-                        // A video-only pipe emitting a fragment with no video
-                        // in it describes nothing the plan can use.
-                        return IndexOutcome::Unsupported(
-                            "a fragment carried no video track".into(),
-                        );
-                    };
-                    let dts = track.base_decode_time;
-                    let duration = fragment.video_duration(init);
-                    covered_ticks = covered_ticks.saturating_add(duration);
-                    let bytes = u32::try_from(fragment.len()).unwrap_or(u32::MAX);
-                    // The landing matcher's quantity. Container overhead is
-                    // excluded deliberately: a production generation carries
-                    // audio, so its `moof` and `mdat` are tens of kilobytes
-                    // larger than this pipe's and vary with the audio track,
-                    // while the video samples themselves are copied and come
-                    // out byte for byte identical.
-                    let video_bytes = u32::try_from(track.byte_len()).unwrap_or(u32::MAX);
-                    let class = fmp4::classify(&fragment, init);
+                    covered_ticks = covered_ticks.saturating_add(row.duration);
 
                     // Only a clean fragment can begin a segment, so only a
                     // clean fragment can ever be a generation's first — which
@@ -953,7 +936,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     if hdr10.observe_fragment(&fragment, init).is_err() {
                         parameter_sets_constant = false;
                     }
-                    if class.is_clean() {
+                    if row.clean() {
                         let mut here = PromotionInputs::from_fragment(&fragment, init);
                         here.hdr10_sei.clear();
                         match promotion {
@@ -972,13 +955,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         }
                     }
 
-                    rows.push(IndexRow {
-                        dts,
-                        duration,
-                        bytes,
-                        video_bytes,
-                        class,
-                    });
+                    rows.push(row);
                 }
                 // ffmpeg's random-access index, written at EOF. Seeing it is
                 // the strongest evidence the pass was complete.
@@ -1964,6 +1941,14 @@ impl SourceIndexHookOwner {
     pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().after.arm("source_index_after_spawn")
     }
+    pub(crate) fn pause_after_spawn_for(
+        &self,
+        bound: std::time::Duration,
+    ) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks()
+            .after
+            .arm_for("source_index_after_spawn", bound)
+    }
     pub(crate) fn pause_after_wait_failure(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
             .failed_wait
@@ -2793,25 +2778,22 @@ async fn build_with_args_owned(
     }
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
-    {
+    let descriptors = {
         use std::os::fd::AsRawFd;
-        let mut inherited = InheritedFds::default();
+        let mut mappings = Vec::new();
         if let Some(source_fd) = source_fd {
-            inherited.push(source_fd, 3);
+            mappings.push((source_fd, 3));
         }
         for (at, (_, writer)) in sibling_pipes.iter().enumerate() {
-            inherited.push(writer.as_raw_fd(), 4 + at as SourceFd);
+            mappings.push((writer.as_raw_fd(), 4 + at as SourceFd));
         }
-        if inherited.len > 0 {
-            // SAFETY: `inherit` makes only async-signal-safe calls (`fcntl`,
-            // `dup2`, `close`) over a fixed-size array; it allocates nothing.
-            unsafe {
-                command.pre_exec(move || inherited.inherit());
-            }
-        }
-    }
+        crate::producer_spawn::Descriptors::from_mappings(&mappings, None)
+    };
     #[cfg(not(unix))]
-    let _ = source_fd;
+    let descriptors = {
+        let _ = source_fd;
+        crate::producer_spawn::Descriptors::default()
+    };
     command
         .args(&args)
         .stdin(Stdio::null())
@@ -2889,30 +2871,45 @@ async fn build_with_args_owned(
     if source_pause_guard.is_some() {
         command.process_group(0);
     }
-    let (mut child, _child_job) = match crate::process_control::spawn_job_owned(
-        &mut command,
-        crate::process_control::ChildWork::background("fragment index"),
-    ) {
-        Ok(owned) => owned,
-        Err(error) => {
-            let transient = matches!(
-                error.kind(),
-                std::io::ErrorKind::Interrupted
-                    | std::io::ErrorKind::TimedOut
-                    | std::io::ErrorKind::WouldBlock
-                    | std::io::ErrorKind::OutOfMemory
-            );
-            return all(IndexOutcome::Failed(Box::new(
-                IndexFailure::new(
-                    IndexFailureCode::IndexProcessFailed,
-                    format!("spawning the job-owned index pipe: {error}"),
-                    0,
-                )
-                .transient(transient),
-            )));
-        }
-    };
+    let manifest =
+        match descriptors.prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return all(IndexOutcome::Unsupported(format!(
+                    "preparing index descriptors: {error}"
+                )))
+            }
+        };
+    let (mut child, _child_job) =
+        match crate::producer_spawn::with_manifest(&manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(
+                command,
+                crate::process_control::ChildWork::background("fragment index"),
+            )
+        }) {
+            Ok(owned) => owned,
+            Err(error) => {
+                let transient = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::OutOfMemory
+                );
+                return all(IndexOutcome::Failed(Box::new(
+                    IndexFailure::new(
+                        IndexFailureCode::IndexProcessFailed,
+                        format!("spawning the job-owned index pipe: {error}"),
+                        0,
+                    )
+                    .transient(transient),
+                )));
+            }
+        };
     let source_pause_pid = source_pause_guard.as_ref().and_then(|_| child.id());
+    // Prepared plans and pre_exec closures pin the writers too. Retire all
+    // parent plan copies as soon as fork has installed the child's copies.
+    drop((command, manifest));
     // The child holds its own copies now. Ours must close, or a sibling's
     // reader would wait forever for the EOF our copy keeps from it.
     #[cfg(unix)]
@@ -3353,57 +3350,6 @@ fn sibling_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd
     Ok((reader.into(), writer.into()))
 }
 
-/// The descriptors an index child receives at fixed numbers: the held source
-/// at 3 and each sibling output's writer at 4, 5, …. Fixed-size, so the
-/// `pre_exec` hook that installs them allocates nothing.
-#[cfg(unix)]
-#[derive(Clone, Copy, Default)]
-struct InheritedFds {
-    from: [SourceFd; MAX_PASS_OUTPUTS + 1],
-    to: [SourceFd; MAX_PASS_OUTPUTS + 1],
-    len: usize,
-}
-
-#[cfg(unix)]
-impl InheritedFds {
-    fn push(&mut self, from: SourceFd, to: SourceFd) {
-        self.from[self.len] = from;
-        self.to[self.len] = to;
-        self.len += 1;
-    }
-
-    /// Runs in the child between `fork` and `exec`. Every source is first
-    /// duplicated above the target range, so installing one target can never
-    /// close another's source — a writer that happens to be fd 4 is not lost
-    /// when the held source lands on 3.
-    fn inherit(&self) -> std::io::Result<()> {
-        let mut high = [0 as SourceFd; MAX_PASS_OUTPUTS + 1];
-        for (slot, from) in high.iter_mut().zip(&self.from).take(self.len) {
-            // SAFETY: plain descriptor syscalls on descriptors this process
-            // holds; async-signal-safe.
-            let duplicate = unsafe { libc::fcntl(*from, libc::F_DUPFD_CLOEXEC, 10) };
-            if duplicate == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            *slot = duplicate;
-        }
-        for (duplicate, to) in high.iter().zip(&self.to).take(self.len) {
-            // SAFETY: as above.
-            unsafe {
-                if libc::dup2(*duplicate, *to) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(*duplicate);
-                let flags = libc::fcntl(*to, libc::F_GETFD);
-                if flags == -1 || libc::fcntl(*to, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Attach the pass's one HEVC header proof to every index it built. The
 /// trace was taken from the lead output, before any other filter in its
 /// chain, so it describes the source's parameter sets — which every output
@@ -3420,6 +3366,10 @@ fn finish_header_scans(
     {
         return;
     }
+    // `-xerror` is not on the index argv (it also aborts on a DTS head the muxer
+    // corrects), so a truncated or corrupt source no longer fails the child.
+    // FFmpeg's own messages for it are matched in the stderr scan instead.
+    let fault = trace.as_ref().and_then(|trace| trace.source_fault());
     let proof = trace.map(|trace| {
         trace.finish(
             expectation.source_object_version.clone(),
@@ -3428,7 +3378,13 @@ fn finish_header_scans(
     });
     for outcome in outcomes {
         if let IndexOutcome::Built(index) = outcome {
-            if hevc && proof.is_none() {
+            if let Some(fault) = fault {
+                *outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    format!("ffmpeg reported a damaged source packet ({fault}); the index is incomplete"),
+                    index.rows.len(),
+                )));
+            } else if hevc && proof.is_none() {
                 *outcome = IndexOutcome::Failed(Box::new(
                     IndexFailure::new(
                         IndexFailureCode::IndexProcessFailed,

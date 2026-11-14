@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -139,8 +140,40 @@ def resolve_manual_binding(environment: Mapping[str, str], repository: Path) -> 
                           git_object(repository, "HEAD^{commit}"), ancestry.returncode == 0)
 
 
+def _ensure_task_history_tips(environment: Mapping[str, str], repository: Path,
+                              tips: tuple[str, str]) -> None:
+    """Full checkout normally has both API tips. Fetch exact objects if a ref advanced."""
+    missing = [tip for tip in tips if subprocess.run(
+        ["git", "cat-file", "-e", tip + "^{commit}"], cwd=repository,
+        capture_output=True, timeout=15,
+    ).returncode != 0]
+    if not missing:
+        return
+    url = environment["GITHUB_SERVER_URL"].rstrip("/") + "/" + environment["GITHUB_REPOSITORY"] + ".git"
+    authorization = base64.b64encode(("x-access-token:" + environment["GITHUB_TOKEN"]).encode()).decode()
+    fetched = subprocess.run(
+        ["git", "-c", "http.followRedirects=false", "-c", "credential.helper=",
+         "--config-env=http." + url + ".extraHeader=PLURX_HISTORY_FETCH_AUTH",
+         "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", url, *missing],
+        cwd=repository, timeout=60, capture_output=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "http:https",
+             "PLURX_HISTORY_FETCH_AUTH": "Authorization: Basic " + authorization},
+    )
+    if fetched.returncode:
+        raise QualificationError("authenticated effort history Git objects unavailable")
+
+
+def _unique_merge_base(repository: Path, left: str, right: str) -> str:
+    result = subprocess.run(["git", "merge-base", "--all", left, right], cwd=repository,
+                            capture_output=True, text=True, timeout=15)
+    common = result.stdout.strip()
+    if result.returncode or not re.fullmatch(r"[0-9a-f]{40}", common):
+        raise QualificationError("effort history requires a unique local merge base")
+    return common
+
+
 def resolve_effort_history_binding(environment: Mapping[str, str], repository: Path) -> dict[str, object]:
-    """Authenticate a dispatched task's PR, live effort tips and actual main."""
+    """Bind the exact dispatched task to its authenticated effort and main ancestry."""
     from validation.python_unit_receipts import API, ReceiptError, identity
 
     if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
@@ -169,17 +202,21 @@ def resolve_effort_history_binding(environment: Mapping[str, str], repository: P
         assert head["ref"] == branch and head["sha"] == commit
         assert base["ref"] == scope["base"] and base["ref"].startswith("effort/")
         head_tip = api_document(environment, "/branches/" + urllib.parse.quote(branch, safe=""))["commit"]["id"]
-        base_tip = api_document(environment, "/branches/" + urllib.parse.quote(base["ref"], safe=""))["commit"]["id"]
+        # Forgejo reports the effort tip and task fork in one PR snapshot.
+        # A second read of the moving effort branch can see a later merge.
+        base_tip = base["sha"]
         main_tip = api_document(environment, "/branches/main")["commit"]["id"]
-        assert head_tip == commit and base["sha"] == base_tip
-        assert all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_tip, main_tip))
-        for ancestor, descendant in ((base_tip, "HEAD"), (main_tip, base_tip)):
-            check = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant],
-                                   cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
-            assert check.returncode == 0
-    except (ReceiptError, KeyError, TypeError, AssertionError) as exc:
-        raise QualificationError("effort task identity, live tips or main ancestry mismatch") from exc
-    return dict(base_sha=main_tip, effort_sha=base_tip, head_sha=commit, pull_request=scope["pr"])
+        assert head_tip == commit
+        task_base = pr["merge_base"]
+        assert all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base_tip, main_tip, task_base))
+        _ensure_task_history_tips(environment, repository, (base_tip, main_tip))
+        assert _unique_merge_base(repository, commit, base_tip) == task_base
+        # Audit the main history incorporated by this task's own effort fork.
+        # Main and the effort can both receive other merges after dispatch.
+        landed_base = _unique_merge_base(repository, task_base, main_tip)
+    except (ReceiptError, KeyError, TypeError, AssertionError, subprocess.TimeoutExpired) as exc:
+        raise QualificationError("effort task identity, live tips or fork ancestry mismatch") from exc
+    return dict(base_sha=landed_base, effort_sha=task_base, head_sha=commit, pull_request=scope["pr"])
 
 
 def build_receipt(

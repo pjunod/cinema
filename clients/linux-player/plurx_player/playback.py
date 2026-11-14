@@ -27,6 +27,17 @@ SEEK_MARGIN_MS = 2000
 EXPLICIT_MAPPER = re.compile(r"plurx mapper:\s*(.+?)\s*$")
 BARE_MAPPER = re.compile(r"\b((?:closed-form )?CM v\d+(?:\.\d+)*)\b")
 
+# The shared renderer emits this only after a valid mapped texture. The VO's
+# public target property describes its signal encoding, not this physical fit.
+_DV_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+NATIVE_TARGET = re.compile(
+    rf"automatic DV physical target {_DV_NUMBER}\.\.(?P<peak>{_DV_NUMBER}) nits; "
+    rf"encoding {_DV_NUMBER}\.\.{_DV_NUMBER}; reference {_DV_NUMBER}; "
+    rf"PQ transport gain {_DV_NUMBER} -> signal {_DV_NUMBER}\.\.{_DV_NUMBER}; "
+    r"generation (?P<generation>\d{1,20})")
+NATIVE_MAPPER = "shared native Dolby renderer"
+NATIVE_TARGET_STATE = "native-dovi-target-state"
+
 
 @dataclass
 class Timing:
@@ -87,6 +98,7 @@ class Playback:
         self.playback_id = f"plurx-player:{uuid.uuid4()}"
         self.client_instance_id = str(uuid.uuid4())
         self.sequence = 0
+        self.control_binding = None
         self.decision = None
         self.delivery = None
         self.mode = None
@@ -103,6 +115,8 @@ class Playback:
         self.seeking = False
         self.last_position_ms = None
         self.mapper = None
+        self.physical_target_nits = None
+        self.physical_target_generation = None
         self.mapper_logged = False
         # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
         self.vo_failed = False
@@ -238,7 +252,25 @@ class Playback:
 
     # -- mpv ----------------------------------------------------------------
 
+    def reset_renderer_facts(self):
+        self.mapper = self.physical_target_nits = self.facts = None
+        self.physical_target_generation = None
+
+    def read_native_target_state(self):
+        state = self.mpv.get(NATIVE_TARGET_STATE)
+        if not isinstance(state, dict) or type(state.get("active")) is not bool \
+                or type(state.get("generation")) is not int \
+                or not 0 <= state["generation"] < 2**63:
+            return None
+        return state["active"], state["generation"]
+
+    def invalidate_native_target(self, state):
+        if self.physical_target_generation is not None \
+                and state != (True, self.physical_target_generation):
+            self.reset_renderer_facts()
+
     def load(self, url, start_local_s):
+        self.reset_renderer_facts()
         if (self.mode == "direct" or self.sidecar) and not self._auth_header:
             # Over the private IPC socket, never argv: `ps` shows argv to everyone.
             self.mpv.set("http-header-fields", [f"Authorization: Bearer {self.http.token}"])
@@ -257,6 +289,10 @@ class Playback:
         self.mpv.command("observe_property", 1, "pause")
         self.mpv.command("observe_property", 2, "eof-reached")
         self.mpv.command("request_log_messages", "info")
+        try:
+            self.mpv.command("observe_property", 3, NATIVE_TARGET_STATE)
+        except MpvError:
+            pass  # Older/custom renderers retain their existing diagnostic fallback.
         if self.mode == "direct":
             self.origin_ms = 0
             url, start_local = self.http.url(self.delivery.get("url")), self.start_ms / 1000
@@ -271,13 +307,13 @@ class Playback:
             self.mpv.osd(self.notice, 4000)
 
     def show_film_timeline(self):
-        """Tell mpv's OSC the whole film's timeline when the stream holds only part of it.
+        """Tell Cinema the whole film's timeline when the stream holds only part of it.
 
         A live session (the server's fallback while a title's VOD index is
         not ready) starts at the session origin and grows, so mpv's own
-        duration is only what has been produced. The OSC patch (mpv patch
-        0005) draws user-data/osc/film instead, and hands a seek outside the
-        stream back as an "osc-film-seek" script message (on_event).
+        duration is only what has been produced. Cinema's Lua overlay reads
+        user-data/osc/film and hands a seek outside the stream back as an
+        "osc-film-seek" script message (on_event), using standard mpv APIs.
         """
         duration = self.duration_ms()
         live = self.session is not None and not self.session.get("vod")
@@ -431,7 +467,7 @@ class Playback:
         paused = bool(self.mpv.get("pause", self.paused))
         saved = {key: getattr(self, key) for key in (
             "quality", "decision", "delivery", "mode", "method", "sidecar", "burn", "notice",
-            "audio", "subtitle", "playback_id", "session", "origin_ms")}
+            "audio", "subtitle", "playback_id", "session", "origin_ms", "control_binding", "sequence")}
         self.changing, self.chrome_error = True, None
         self.publish_chrome()
         self.progress("seek")
@@ -595,6 +631,11 @@ class Playback:
         else:
             render = "rendering"
         control = self.session["control"]
+        binding = (self.session["session_id"], control.get("generation"), control.get("control_epoch"))
+        if binding != self.control_binding:
+            # Each advertised incarnation/owner starts at sequence 1. A seek
+            # replaces the session while retaining this Playback/controller.
+            self.control_binding, self.sequence = binding, 0
         self.sequence += 1
         subtitle = {"mode": "burn", "track": self.burn} if self.burn is not None else {"mode": "off"}
         # Passive: no supported_actions, so the server only ever answers `none`.
@@ -613,7 +654,9 @@ class Playback:
                                       else {"mode": "auto"}),
                           "audio_track": self.audio, "subtitle": subtitle, "audio_offset_ms": 0,
                           "codec": "auto", "dynamic_range": "auto"},
-            "capabilities": control_capabilities(), "observation": None, "acknowledgement": None,
+            "capabilities": control_capabilities(
+                native_dovi=self.caps.get("display", {}).get("dolby_vision") is True),
+            "observation": None, "acknowledgement": None,
         }
 
     def heartbeat(self):
@@ -654,7 +697,20 @@ class Playback:
 
     def on_log(self, event):
         text = event.get("text") or ""
+        if not isinstance(text, str):
+            return
         prefix = str(event.get("prefix") or "")
+        if prefix == "vo/gpu-next" and event.get("level") == "info" and len(text) <= 512:
+            native = NATIVE_TARGET.fullmatch(text.rstrip("\r\n"))
+            peak = _float(native["peak"]) if native else None
+            if peak is not None and 0 < peak <= 10000:
+                generation = int(native["generation"])
+                state = self.read_native_target_state()
+                self.invalidate_native_target(state)
+                if state == (True, generation):
+                    self.mapper, self.physical_target_nits = NATIVE_MAPPER, peak
+                    self.physical_target_generation = generation
+                return
         if prefix == "cplayer" and event.get("level") in ("fatal", "error") \
                 and text.startswith("Error opening/initializing the"):
             self.vo_failed = True
@@ -672,7 +728,9 @@ class Playback:
         video = next((t for t in tracks if isinstance(t, dict) and t.get("type") == "video"
                       and t.get("selected")), {})
         profile = _track(video.get("dolby-vision-profile"))
-        nits = _number(target.get("max-luma")) if isinstance(target, dict) else None
+        nits = self.physical_target_nits
+        if nits is None:
+            nits = _number(target.get("max-luma")) if isinstance(target, dict) else None
         self.facts = {"dv_profile": profile, "mapper": self.mapper or "unknown",
                       "target_nits": round(nits) if nits else None,
                       "target_gamma": target.get("gamma") if isinstance(target, dict) else None,
@@ -724,7 +782,13 @@ class Playback:
             return False
         if name == "playback-restart" and self.pending_quality is not None and not self.pending_quality["loaded"]:
             return True  # An already queued incumbent seek cannot commit its successor.
-        if name == "file-loaded":
+        if name == "start-file":
+            self.reset_renderer_facts()
+        elif name == "property-change" and event.get("name") == NATIVE_TARGET_STATE:
+            # A queued notification can predate a newer successful frame. Read
+            # current authoritative state once, instead of trusting its old data.
+            self.invalidate_native_target(self.read_native_target_state())
+        elif name == "file-loaded":
             self.on_file_loaded()
         elif name == "playback-restart":
             self.eof_handled, self.ended = False, False

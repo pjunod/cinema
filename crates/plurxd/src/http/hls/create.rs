@@ -87,15 +87,14 @@ pub(super) fn auto_bootstrap_encode_fallback(
         .max_by_key(|candidate| candidate.target_height)
 }
 
-/// Admission is for the exact prepared recipe, independent of its SDR/HDR grade.
-pub(crate) fn processed_candidate_is_admitted(
-    admitted: &[plurx_core::playback::candidate::QualityCandidate],
+/// The exact recipe's row among the rows the link filters kept, whatever its
+/// production proof: the same short id never stands for another recipe.
+pub(crate) fn processed_candidate_kept<'a>(
+    admitted: &'a [plurx_core::playback::candidate::QualityCandidate],
     candidate: &plurx_core::playback::candidate::QualityCandidate,
-) -> bool {
-    admitted.iter().any(|admitted| {
-        admitted.id == candidate.id
-            && admitted.recipe_digest == candidate.recipe_digest
-            && admitted.playable()
+) -> Option<&'a plurx_core::playback::candidate::QualityCandidate> {
+    admitted.iter().find(|admitted| {
+        admitted.id == candidate.id && admitted.recipe_digest == candidate.recipe_digest
     })
 }
 
@@ -197,7 +196,7 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CreateSession {
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
@@ -1878,15 +1877,31 @@ pub(super) fn preparation_catalog_workers(
 struct PlanScope<'a> {
     continuous: Option<&'a ContinuousFamilyStart>,
     auto_bootstrap_ceiling: Option<i64>,
+    /// Whether a processed Dolby Vision candidate may be selected. Only a
+    /// prepared successor of a processed predecessor may: its root is the
+    /// predecessor's own. A create resolves the ordinary plan and leaves
+    /// processing to the upgrade after its first frame (plan ruling 3).
+    processed_selectable: bool,
 }
 
 /// Internal preparation policy, never a create-body override. Ordinary creates
 /// retain their own selection and named-route admission rules.
+///
+/// `processed_predecessor` says whether the session being replaced is itself
+/// processed. Only then can a processed candidate be primed: its successor
+/// reuses that predecessor's verified root. For an ordinary predecessor no
+/// processed graph exists to prime from (the upgrade's own trial is the only
+/// thing that makes one), so a viewer who picks the processed rung there gets
+/// the ordinary rung it enhances, exactly as a create does, and the upgrade
+/// follows that successor's first presented frame. Selecting it anyway would
+/// stage a successor whose prime must fail, and spend the viewer's one reopen
+/// on it (review 3 S2).
 pub(super) async fn resolve_plan_for_preparation(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
     body: CreateSession,
     auto_bootstrap_ceiling: Option<i64>,
+    processed_predecessor: bool,
 ) -> Result<ResolvedPlan, ApiError> {
     resolve_plan_with_scope(
         inputs,
@@ -1895,6 +1910,7 @@ pub(super) async fn resolve_plan_for_preparation(
         PlanScope {
             continuous: None,
             auto_bootstrap_ceiling,
+            processed_selectable: processed_predecessor,
         },
     )
     .await
@@ -1913,6 +1929,7 @@ async fn resolve_plan_with_continuous(
         PlanScope {
             continuous,
             auto_bootstrap_ceiling: None,
+            processed_selectable: false,
         },
     )
     .await
@@ -1992,6 +2009,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
     let PlanScope {
         continuous,
         auto_bootstrap_ceiling,
+        processed_selectable,
     } = scope;
     if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
         || (auto_bootstrap_ceiling.is_some()
@@ -2097,8 +2115,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .is_some_and(|value| value.trim() == "1")
             } else {
                 state
-                    .store
-                    .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                    .applied
+                    .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
                     .await?
                     .is_some_and(|value| value.trim() == "1")
             };
@@ -2168,8 +2186,58 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     serde_json::json!({"clause": error.clause, "observed": error.observed, "limit": error.limit}),
                 ));
             }
+            // A peer's quorum read refuted the plan this node's view answered
+            // (`StaleSource`): the local catalog, built from that same plan, is
+            // complete and would still pick a candidate, so the refutation
+            // itself ends the attempt, before any pick. `replan_once_after_stale`
+            // then closes the view and plans once from Authority (D3b review B1,
+            // D3 review B1). A plan read from Authority is not ended here.
+            if crate::media_pool::create_plan_refuted() {
+                return Err(ApiError::typed_detail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "quality_catalog_unavailable",
+                    "quality discovery is incomplete; retry with the existing startup owner",
+                    serde_json::json!({"complete": false, "causes": catalogue_result.causes}),
+                ));
+            }
             let authority_refused = catalogue_result.authority_refused;
-            let worker_catalog = &catalogue_result.candidates;
+            // A create never dispatches a processed candidate: it has no
+            // qualified graph before the first frame. Nor does a prepared
+            // successor of an ordinary session, which has no processed root
+            // to prime from. One the viewer named (a reopen of a processed
+            // session, or the processed rung picked on an ordinary one) starts
+            // as the ordinary rung it enhances, and the upgrade runs after
+            // that session's first presented frame.
+            let unprocessed;
+            let worker_catalog = if processed_selectable {
+                &catalogue_result.candidates
+            } else {
+                unprocessed = catalogue_result
+                    .candidates
+                    .iter()
+                    .filter(|entry| !entry.candidate.processed_dv)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                &unprocessed
+            };
+            let requested = match requested {
+                Some(id) if !processed_selectable => catalogue_result
+                    .candidates
+                    .iter()
+                    .find(|entry| entry.candidate.id == id && entry.candidate.processed_dv)
+                    .map_or(Some(id), |processed| {
+                        worker_catalog
+                            .iter()
+                            .find(|entry| {
+                                entry.candidate.route == processed.candidate.route
+                                    && entry.candidate.target_height
+                                        == processed.candidate.target_height
+                                    && entry.candidate.decoder_compatible
+                            })
+                            .map(|ordinary| ordinary.candidate.id)
+                    }),
+                requested => requested,
+            };
             let initial_auto =
                 requested.is_none() && body.quality_auto == Some(true) && body.height != Some(1440);
             let eligible_workers = preparation_catalog_workers(
@@ -2182,6 +2250,15 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 .iter()
                 .map(|entry| entry.candidate.clone())
                 .collect();
+            // Unpinned selection must choose a route this request can execute.
+            // Copy may become Encode, but a Transcode carrier cannot acquire
+            // Copy flags by selecting a Remux row. Explicit identities retain
+            // their existing compatibility refusal below.
+            if requested.is_none() && body.copy != Some(true) {
+                catalog.retain(|candidate| {
+                    candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                });
+            }
             if body.candidate_auto_policy() {
                 catalog = super::candidate_recovery::auto_catalog(
                     state,
@@ -2592,13 +2669,25 @@ pub(super) async fn validate_hevc_copy_transport(
     source: &MediaFile,
     caps: &plurx_core::playback::DeviceCaps,
     request: &crate::transcode::SessionRequest,
+    plan: Option<&super::start_plan::StartPlan>,
 ) -> Result<(), ApiError> {
     if !matches!(request.kind, crate::transcode::SessionKind::Copy { .. })
         || caps.progressive_hevc_sample_entries.is_none()
     {
         return Ok(());
     }
-    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?;
+    // The create's plan read this revision's probe with the file (D3b).
+    let probe_json = match plan.and_then(|plan| plan.probe_for(source)) {
+        Some(probe) => {
+            crate::hevc_census::probe_json_for_copy_from(
+                state.store.as_ref(),
+                source,
+                probe.map(str::to_owned),
+            )
+            .await?
+        }
+        None => crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?,
+    };
     validate_hevc_copy_transport_from_probe(source, caps, request, probe_json.as_deref())
 }
 
@@ -2754,6 +2843,7 @@ pub(crate) async fn create_for_library_channel(
 }
 
 // The service caller chooses policy; the public create body cannot request it.
+#[derive(Clone)]
 enum ServiceCreatePurpose {
     Native,
     LibraryChannel(crate::http::library_channels::LibraryChannelPlaybackPurpose),
@@ -2864,7 +2954,7 @@ pub(crate) async fn preview_for_compatibility(
         body,
     )
     .await?;
-    validate_hevc_copy_transport(state, file, &caps, &resolved.request).await?;
+    validate_hevc_copy_transport(state, file, &caps, &resolved.request, None).await?;
     if burn_would_discard_this_session_hdr(
         state,
         Some(file),
@@ -2928,12 +3018,9 @@ async fn create_with_purpose(
     req: CreateSession,
     purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
-    let remaining = headers
-        .get("x-plurx-startup-remaining-ms")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(10_000);
+    let remaining = startup_allowance_ms(&headers);
     if remaining == 0 {
+        crate::telemetry::record_create_seconds(Some("startup_timeout"), std::time::Duration::ZERO);
         return Err(ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_timeout",
@@ -2943,18 +3030,37 @@ async fn create_with_purpose(
     let budget = crate::media_pool::CreateStartupBudget::new(remaining);
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
     let before = counts.snapshot();
+    let methods_before = counts.method_snapshot();
     let store_before = counts.store_time();
     let started = tokio::time::Instant::now();
     budget.begin_phases(before);
-    let result = budget
-        .scope(plurx_core::store::scope_http_store_operations(
-            counts.clone(),
-            tokio::time::timeout_at(
-                budget.deadline,
+    // The create runs as its own task. Until it holds its durable request
+    // claim it is this request and is cancelled with it; from the claim on it
+    // is the claim's one owner and runs on to activation, bounded by the
+    // claim's window, whether or not anyone is still waiting for the answer.
+    // A viewer whose allowance ends first is told `startup_timeout`, and its
+    // retry with the same `request_id` joins this owner through the claim
+    // row instead of starting a second producer.
+    //
+    // What the start record (G1, below) says about the caller is taken before
+    // the create consumes it; what the create says about itself comes back
+    // through the note, which the task fills and this boundary reads whether
+    // or not the viewer is still waiting.
+    let (user_id, store) = (user.id, Arc::clone(&state.store));
+    let client_build = client_build_label(req.caps.as_ref(), &headers);
+    let requested_id = req.request_id.clone();
+    let note = crate::playstart::CreateNote::shared();
+    let mut create = crate::media_pool::OwnedCreate::spawn(
+        &budget,
+        crate::playstart::scope_create_note(
+            Arc::clone(&note),
+            budget.scope(plurx_core::store::scope_http_store_operations(
+                counts.clone(),
                 create_with_purpose_inner(user, state, id, headers, remote, req, purpose),
-            ),
-        ))
-        .await;
+            )),
+        ),
+    );
+    let result = tokio::time::timeout_at(budget.deadline, create.join()).await;
     let after = counts.snapshot();
     // Whatever ran after the last mark: an early return, or the answer.
     budget.mark_phase("tail", after);
@@ -2969,73 +3075,210 @@ async fn create_with_purpose(
         store_ms = counts.store_time().saturating_sub(store_before).as_millis(),
         elapsed_ms = started.elapsed().as_millis(),
         phases = %budget.phases(),
+        // The same operations by the Store method that issued them, as
+        // `method=authority/local/write`: what D3 reads to say which method
+        // makes each count (PLAYBACK-START-D3-BUILD.md section 7.1).
+        methods = %plurx_core::store::format_method_counts(
+            &counts.method_snapshot_since(&methods_before),
+        ),
         "create startup read budget finished"
     );
-    result.map_err(|_| {
-        ApiError::typed(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "startup_timeout",
+    let result = match result {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => Err(ApiError::Internal(format!(
+            "the session create task failed: {error}"
+        ))),
+        Err(_) => Err(create_still_starting(
             "session creation exceeded its remaining startup allowance",
-        )
-    })?
+        )),
+    }
+    .map_err(coded_create_unavailable);
+    crate::telemetry::record_create_seconds(
+        result.as_ref().err().map_or(Some("ok"), ApiError::code),
+        started.elapsed(),
+    );
+    emit_start_attempt(
+        store,
+        StartAttemptContext {
+            user_id,
+            file_id: id,
+            requested_id,
+            client_build,
+            note: crate::playstart::CreateNote::take(&note),
+            phases: budget.phases(),
+            authority_reads: after[1].saturating_sub(before[1]),
+            local_reads: after[0].saturating_sub(before[0]),
+            mutations: after[2].saturating_sub(before[2]),
+            store_ms: counts
+                .store_time()
+                .saturating_sub(store_before)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        },
+        &result,
+    );
+    result
 }
 
-/// Duplicate compatibility entries wait on the exact existing native claim. This
-/// holds only the caller's bounded create context, not a task or a second owner.
-async fn wait_for_compatibility_activation(
-    state: &AppState,
+struct StartAttemptContext {
     user_id: i64,
-    playback_id: &str,
-    fingerprint: &str,
-    incarnation_id: &str,
-) -> Result<(), ApiError> {
-    let deadline = crate::media_pool::create_stage_deadline(std::time::Duration::from_secs(15));
-    let timeout = || {
-        ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "startup_timeout",
-            "the shared native start did not publish before its remaining deadline",
-        )
+    file_id: i64,
+    requested_id: Option<String>,
+    client_build: String,
+    note: crate::playstart::CreateNote,
+    phases: String,
+    authority_reads: u64,
+    local_reads: u64,
+    mutations: u64,
+    store_ms: u64,
+    elapsed_ms: u64,
+}
+
+/// One durable row per create, in this node's telemetry sidecar: the attempt
+/// (the create's claim id), what it cost, and why it was refused.
+fn emit_start_attempt(
+    store: Arc<dyn plurx_core::store::Store>,
+    context: StartAttemptContext,
+    outcome: &Result<Json<StartResponse>, ApiError>,
+) {
+    let (route, session_id, refusal, refusal_message) = match outcome {
+        Ok(Json(response)) => (
+            Some(if response.vod { "vod" } else { "rolling" }),
+            Some(response.session_id.clone()),
+            None,
+            None,
+        ),
+        Err(error) => (
+            None,
+            None,
+            Some(error.code().map_or_else(
+                || format!("http_{}", error.http_status().as_u16()),
+                str::to_owned,
+            )),
+            Some(error.refusal_text()),
+        ),
     };
-    let mut backoff = std::time::Duration::from_millis(25);
-    loop {
-        let route = tokio::time::timeout_at(
-            deadline,
-            state
-                .store
-                .media_session_route_by_incarnation(incarnation_id),
-        )
-        .await
-        .map_err(|_| timeout())?
-        .map_err(|error| session_store_error("observing the shared start", error))?;
-        if let Some(route) = route {
-            if route.principal.local_user_id() != Some(user_id)
-                || route.playback_id != playback_id
-                || route.request_fingerprint != fingerprint
-            {
-                return Err(ApiError::Conflict(
-                    "the shared native start changed identity".into(),
-                ));
-            }
-            if route.state == "ended" {
-                return Err(ApiError::typed(
-                    StatusCode::GONE,
-                    "media_session_ended",
-                    "the shared native start ended",
-                ));
-            }
-            if resolved_replay_is_live(&route, unix_ms()) {
-                return Ok(());
-            }
+    crate::telemetry::emit(
+        store,
+        crate::playstart::StartAttemptRecord {
+            at_unix_ms: unix_ms(),
+            user_id: context.user_id,
+            file_id: context.file_id,
+            attempt: context
+                .note
+                .attempt()
+                .map(str::to_owned)
+                .or(context.requested_id)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            session_id,
+            route,
+            refusal,
+            refusal_message,
+            client_build: context.client_build,
+            owner_node: context.note.owner_node().map(str::to_owned),
+            phases: context.phases,
+            authority_reads: context.authority_reads,
+            local_reads: context.local_reads,
+            mutations: context.mutations,
+            store_ms: context.store_ms,
+            elapsed_ms: context.elapsed_ms,
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(timeout());
-        }
-        tokio::time::sleep_until((tokio::time::Instant::now() + backoff).min(deadline)).await;
-        backoff = (backoff * 2).min(std::time::Duration::from_millis(500));
+        .into_event(),
+    );
+}
+
+/// What the viewer has left of its own start, from the client's
+/// `x-plurx-startup-remaining-ms`. The server waits at most 10 s for any one
+/// create answer whatever the client sends (`CreateStartupBudget::new`
+/// clamps); a client with more time left re-posts on `startup_timeout` and
+/// joins the same owner. Only a create with no header gets the 10 s default.
+pub(super) fn startup_allowance_ms(headers: &HeaderMap) -> u64 {
+    startup_allowance(headers).unwrap_or(10_000)
+}
+
+/// The viewer's remaining start as it sent it, or `None` when it sent no
+/// `x-plurx-startup-remaining-ms`. A shared create reads it through this so
+/// the receiver and the Source keep the local create's one clock, and a
+/// caller that sent none (an older client or peer) keeps its fixed bounds.
+pub(crate) fn startup_allowance(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(STARTUP_REMAINING_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+/// The header that carries a viewer's remaining start, from the client to its
+/// create and, on a shared create, from the receiver on to the Source.
+pub(crate) const STARTUP_REMAINING_HEADER: &str = "x-plurx-startup-remaining-ms";
+
+/// The answer for a create whose owner is still working: `startup_timeout`,
+/// which every client's create ladder re-posts with the same `request_id`,
+/// and that re-post joins the owner through the durable claim.
+pub(crate) fn create_still_starting(message: &'static str) -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "startup_timeout",
+        message: message.to_owned(),
+        retry_after_seconds: CREATE_STILL_STARTING_RETRY_AFTER_SECS,
     }
 }
 
+/// The answer for a create the cluster could not commit right now: this
+/// node's serving authority, the chosen worker or the session's durable owner
+/// is changing. `media_owner_transition` is on every client's create-retry
+/// ladder, and the re-post with the same `request_id` meets whichever owner
+/// holds the claim by then.
+fn create_owner_transition(message: impl Into<String>) -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "media_owner_transition",
+        message: message.into(),
+        retry_after_seconds: CREATE_STILL_STARTING_RETRY_AFTER_SECS,
+    }
+}
+
+/// A create's 503 always names its code: a bare one is a refusal no client
+/// retries, which for a start the next attempt would get is the one answer
+/// that cannot be right. The sites that know their cause say it; a refusal
+/// still bare here came from a step that could not settle a serving
+/// authority, a Store write, a shared-cache pin or a worker's activation in
+/// time, all of which are the cluster changing under this start.
+fn coded_create_unavailable(error: ApiError) -> ApiError {
+    match error {
+        ApiError::ServiceUnavailable(message) => {
+            tracing::debug!(target: "plurxd::http::hls", %message,
+                "create refusal carried no code; answering media_owner_transition");
+            create_owner_transition(message)
+        }
+        error => error,
+    }
+}
+
+/// How long a viewer told `startup_timeout` waits before re-posting: about
+/// one placement step of the owner it is about to join.
+pub(crate) const CREATE_STILL_STARTING_RETRY_AFTER_SECS: u64 = 1;
+/// How long a create's durable request claim lasts once acquired.
+const MEDIA_SESSION_REQUEST_CLAIM_MS: i64 = 60_000;
+/// The owner stops this long before its claim expires, so its last durable
+/// write (publication or settlement) lands while the claim is still its own
+/// and no second claimant can re-acquire the same request underneath it.
+const OWNED_CREATE_CLAIM_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long past its viewer's remaining start an owner keeps working: one
+/// re-post's `Retry-After` and its round trip, which is how the viewer's last
+/// retry reaches the owner and takes the answer.
+pub(crate) const OWNED_CREATE_REPOST_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(CREATE_STILL_STARTING_RETRY_AFTER_SECS + 1);
+/// How long a viewer told `media_session_overloaded` waits before re-posting:
+/// the per-user start caps free as this user's other starts activate or end.
+pub(crate) const MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS: u64 = 2;
+
+/// One create, re-planned at most once (D3b, review B1): when the catalog's
+/// quorum read refutes a plan this node's view answered, before the claim,
+/// the view closes and the create runs again from an Authority plan
+/// (`start_plan::replan_once_after_stale`). Nothing durable exists yet but
+/// the recorded ask, whose repeat is idempotent.
 async fn create_with_purpose_inner(
     user: plurx_core::domain::User,
     state: AppState,
@@ -3043,6 +3286,36 @@ async fn create_with_purpose_inner(
     headers: HeaderMap,
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
+    purpose: ServiceCreatePurpose,
+) -> Result<Json<StartResponse>, ApiError> {
+    let applied = state.applied.clone();
+    // The ask's arrival order, taken once here: a re-planned attempt is the
+    // same request and keeps its place (D3 review S2).
+    let arrived_at_ms = unix_ms();
+    super::start_plan::replan_once_after_stale(&applied, || {
+        Box::pin(create_with_purpose_attempt(
+            user.clone(),
+            state.clone(),
+            id,
+            headers.clone(),
+            remote,
+            req.clone(),
+            arrived_at_ms,
+            purpose.clone(),
+        ))
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_with_purpose_attempt(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    arrived_at_ms: i64,
     purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
     let library_channel = match &purpose {
@@ -3078,18 +3351,22 @@ async fn create_with_purpose_inner(
             "the growing live HLS presentation has been removed; request VOD",
         ));
     }
-    // The ask is made durable before anything is built for it, and before this
-    // request can be answered.
+    // The ask is made durable by the claim, not before it (D3c).
     //
-    // Placed here, above every other decision, rather than beside the response:
-    // a create that goes on to fail is still a viewer who asked, and the row
-    // records the asking, not the outcome. The order that matters is the one
-    // §1 names — canonical desired ownership persisted *before* an
-    // intent-changing request is reported accepted — and answering first would
-    // tell a client its selection was taken while nothing anywhere had recorded
-    // it. A restart or an owner change in that window loses the ask entirely.
+    // The order that matters is still the one §1 names: canonical desired
+    // ownership is persisted *before* an intent-changing request is reported
+    // accepted. The claim is the first write this create makes, so it carries
+    // the ask in its own transaction, under a predicate that matches only this
+    // attempt's claim row (`claim_media_session_request_recording`). The ask
+    // lands exactly when the create becomes its request's owner, which is
+    // what "a viewer who asked" has always meant for a create that goes on:
+    // a create refused before the claim (invalid intent or capabilities, the
+    // HDR burn guard, the HEVC copy-transport refusal, `quality_catalog_unavailable`,
+    // an overloaded or joined claim) records no ask, where it used to record
+    // one on the way to its refusal. None of those answers was ever reported
+    // accepted, and each is retryable (D3 contract §12-6).
     //
-    // A failed write refuses the create for the same reason the control
+    // A failed claim refuses the create for the same reason the control
     // exchange refuses: a retry costs one request, and a phantom acceptance
     // costs a viewer their selection with nothing to point at.
     // `None` for a body that carried no ask: a playback with nothing recorded
@@ -3097,61 +3374,37 @@ async fn create_with_purpose_inner(
     // A parser-floor create must not reinterpret a future route as ordinary
     // Auto or persist acceptance of a candidate it cannot dispatch.
     let mut recorded_ask_revision: Option<i64> = None;
-    if let Some(intent) = req.intent.as_ref() {
-        intent
-            .validate()
-            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
-        let selection = intent.selection;
-        recorded_ask_revision = Some(
-            state
-                .store
-                .record_desired_selection(
-                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                        user_id: user.id,
-                    },
-                    &req.playback_id,
-                    &intent.digest(),
-                    &selection.canonical_form(),
-                    unix_ms(),
-                )
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        target: "plurxd::http::hls",
-                        playback = %req.playback_id,
-                        "recording the viewer's selection on create failed: {error}"
-                    );
-                    ApiError::ServiceUnavailable(
-                        "this selection could not be recorded; retry shortly".to_owned(),
-                    )
-                })?
-                .revision,
-        );
-        state
-            .hls_route_hooks
-            .get()
-            .after_create_ask_recorded()
-            .await;
-    }
+    let mut ask_superseded = false;
+    let desired_ask: Option<(String, String)> = match req.intent.as_ref() {
+        Some(intent) => {
+            intent
+                .validate()
+                .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+            Some((intent.digest(), intent.selection.canonical_form()))
+        }
+        None => None,
+    };
     let ingress_serving_authority = state.serving.authority();
-    let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
-        ApiError::ServiceUnavailable("the ingress node has no serving authority".to_owned())
-    })?;
+    let ingress_serving_generation = ingress_serving_authority
+        .admit()
+        .ok_or_else(|| create_owner_transition("the ingress node has no serving authority"))?;
     // The source height answers three things now: Auto, the ladder in the
-    // response, and the snap's source-height escape. One Authority read: the
-    // file row, its probe and the planning settings in one statement.
-    let planning_snapshot = state
-        .store
-        .playback_planning_snapshot(id, &crate::transcode::QUALITY_PLANNING_KEYS)
+    // response, and the snap's source-height escape. The create's one plan
+    // (D3b): the file row, its probe and every planning setting in one
+    // statement, from this node's applied view behind its floors, else from
+    // Authority. Every chain below takes it instead of reading again.
+    let start_plan = super::start_plan::ingress_plan(&state.applied, id)
         .await
-        .map_err(|error| session_store_error("reading playback planning inputs", error))?;
-    if let Some(snapshot) = planning_snapshot.as_ref() {
-        crate::media_pool::capture_create_planning_binding(snapshot);
-    }
+        .map_err(|error| session_store_error("reading playback planning inputs", error))?
+        .map(Arc::new);
+    let planning_snapshot = start_plan.as_deref().map(|plan| &*plan.snapshot);
+    // Held for this attempt only: dropping it clears the budget's copy of the
+    // plan (D3 review N1).
+    let _captured_plan = start_plan
+        .as_deref()
+        .map(crate::media_pool::capture_create_plan);
     crate::media_pool::mark_create_phase("lookup");
-    let source = planning_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.file.clone());
+    let source = planning_snapshot.map(|snapshot| snapshot.file.clone());
     // The HDR subtitle-burn guard used to stand here, keyed on the source's
     // own `hdr` column. It now runs after `resolve_plan`, against the grade
     // this request actually resolves to — see
@@ -3226,7 +3479,7 @@ async fn create_with_purpose_inner(
             req.caps.as_ref(),
             req.overrides.as_ref(),
             file,
-            &match planning_snapshot.as_ref() {
+            &match planning_snapshot {
                 Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
                 None => super::super::stream::render_caps(&state).await,
             },
@@ -3247,7 +3500,7 @@ async fn create_with_purpose_inner(
     let source_height = source.as_ref().and_then(|f| f.height);
     // The HWACCEL preference is in the snapshot read above, in this task,
     // with nothing in between: decide from it rather than reading it again.
-    let ladder_ceiling = match planning_snapshot.as_ref() {
+    let ladder_ceiling = match planning_snapshot {
         Some(snapshot) => {
             state
                 .transcode
@@ -3274,16 +3527,19 @@ async fn create_with_purpose_inner(
             &user.password_hash,
         ));
     }
-    let network_prior =
-        super::super::network::stored_prior(state.store.as_ref(), identity.as_ref())
-            .await
-            .map_err(|error| {
-                ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
-            })?;
+    let network_prior = super::super::network::stored_prior(
+        state.store.as_ref(),
+        &state.applied,
+        identity.as_ref(),
+    )
+    .await
+    .map_err(|error| {
+        ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
+    })?;
     crate::media_pool::mark_create_phase("settings");
     let resolved = resolve_plan_with_continuous(
         PlanInputs {
-            snapshot: planning_snapshot.as_ref(),
+            snapshot: planning_snapshot,
             state: &state,
             user_id: user.id,
             file_id: id,
@@ -3334,9 +3590,9 @@ async fn create_with_purpose_inner(
         None
     };
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
-        validate_hevc_copy_transport(&state, source, caps, &request).await?;
+        validate_hevc_copy_transport(&state, source, caps, &request, start_plan.as_deref()).await?;
     }
-    let mut height = resolved.height;
+    let height = resolved.height;
     if burn_would_discard_this_session_hdr(
         &state,
         source.as_ref(),
@@ -3358,7 +3614,6 @@ async fn create_with_purpose_inner(
     let mut processing_decline: Option<String> = None;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
-    let now_ms = unix_ms();
     let mut incarnation_id = uuid::Uuid::new_v4().to_string();
     // Every create occupies a durable admission row. A caller-supplied key
     // keeps public idempotency; an ordinary create uses its unguessable
@@ -3368,169 +3623,173 @@ async fn create_with_purpose_inner(
         .request_id
         .clone()
         .unwrap_or_else(|| incarnation_id.clone());
+    crate::playstart::note_create_attempt(&request_claim_id);
     crate::media_pool::mark_create_phase("plan");
-    match state
-        .store
-        .claim_media_session_request(
-            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-            &request_claim_id,
-            &fingerprint,
-            &request.playback_id,
-            &incarnation_id,
-            now_ms,
-            now_ms.saturating_add(60_000),
-        )
-        .await
-        .map_err(|error| session_store_error("claiming the media-session request", error))?
-    {
-        MediaSessionRequestClaim::Acquired {
-            incarnation_id: acquired,
-        } => incarnation_id = acquired,
-        MediaSessionRequestClaim::Resolved(route) if resolved_replay_is_live(&route, unix_ms()) => {
-            let replay_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
-            let _response_publication = ingress_serving_authority
-                .commit_guard_before(ingress_serving_generation, replay_deadline.into_std())
+    // A retry of a request whose owner is still starting joins it through the
+    // replicated claim row, on any ingress, for as long as this viewer's
+    // allowance lasts: it answers with the owner's activation once that is
+    // published, or becomes the owner itself if the first one let go.
+    let join_deadline = crate::media_pool::create_stage_deadline(START_DEADLINE);
+    let mut join_backoff = std::time::Duration::from_millis(50);
+    let claim_principal =
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    // The in-flight owner this retry has joined. While it is set the retry
+    // waits on reads of the claim row and claims again only once the row says
+    // that owner let go, resolved, or ran out its claim.
+    let mut joined: Option<String> = None;
+    // From the claim on every early return must settle the exact durable
+    // claim; the guard is armed before the claim's await, because a create
+    // cancelled there may already hold it. Once worker placement returns, its
+    // StartedSessionGuard takes over the same responsibility together with
+    // exact worker ownership.
+    let mut request_guard = loop {
+        let claim = if let Some(owner_incarnation) = joined.as_deref() {
+            match state
+                .store
+                .media_session_request_progress(&claim_principal, &request_claim_id)
                 .await
-                .ok_or_else(|| {
-                    ApiError::ServiceUnavailable(
-                        "the ingress lost serving authority before resolved replay".to_owned(),
-                    )
-                })?;
-            let route = tokio::time::timeout_at(
-                replay_deadline,
-                state
-                    .store
-                    .media_session_route_by_incarnation(&route.incarnation_id),
+            {
+                Ok(Some(progress))
+                    if progress.state == "starting"
+                        && progress.incarnation_id == owner_incarnation
+                        && progress.claim_expires_at_ms > unix_ms() =>
+                {
+                    MediaSessionRequestClaim::InFlight {
+                        incarnation_id: progress.incarnation_id,
+                        owner_node_id: None,
+                        claim_expires_at_ms: progress.claim_expires_at_ms,
+                    }
+                }
+                // Resolved, let go, expired, re-owned or unreadable: the claim
+                // itself decides what this retry is now.
+                _ => {
+                    joined = None;
+                    continue;
+                }
+            }
+        } else {
+            let claim_now_ms = unix_ms();
+            let claim_window_ends = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(MEDIA_SESSION_REQUEST_CLAIM_MS as u64);
+            match MediaSessionRequestGuard::claim(
+                state.clone(),
+                claim_principal.clone(),
+                request_claim_id.clone(),
+                incarnation_id.clone(),
+                async {
+                    let desired_write = desired_ask.as_ref().map(|(digest, canonical_form)| {
+                        plurx_core::domain::DesiredSelectionWrite {
+                            digest,
+                            canonical_form,
+                            arrived_at_ms,
+                        }
+                    });
+                    let (claim, recorded) = state
+                        .store
+                        .claim_media_session_request_recording(
+                            &claim_principal,
+                            &request_claim_id,
+                            &fingerprint,
+                            &request.playback_id,
+                            &incarnation_id,
+                            claim_now_ms,
+                            claim_now_ms.saturating_add(MEDIA_SESSION_REQUEST_CLAIM_MS),
+                            desired_write.as_ref(),
+                        )
+                        .await?;
+                    if let Some(recorded) = recorded {
+                        // A newer arrival's ask stands: the upsert did not
+                        // replace it, so this create's ask is not the one
+                        // recorded (D3 review S2).
+                        ask_superseded = desired_ask
+                            .as_ref()
+                            .is_some_and(|(digest, _)| *digest != recorded.digest);
+                        recorded_ask_revision = Some(recorded.revision);
+                    }
+                    Ok(claim)
+                },
             )
             .await
-            .map_err(|_| {
-                ApiError::ServiceUnavailable(
-                    "resolved media-session replay freshness check timed out".to_owned(),
-                )
-            })?
-            .map_err(|error| session_store_error("rechecking the resolved replay", error))?
-            .filter(|current| {
-                replay_route_identity_matches(current, &route)
-                    && resolved_replay_is_live(current, unix_ms())
-            })
-            .ok_or_else(|| {
-                ApiError::ServiceUnavailable(
-                    "the resolved media-session replay is no longer current".to_owned(),
-                )
-            })?;
-            let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
-            response.effective_processing = state
-                .transcode
-                .dv_effective_report(&route.session_id, &route.incarnation_id)
-                .await;
-            // Same-session owner takeover advances only the control epoch.
-            // Replaying the persisted create must not hand a restarted client
-            // the stale epoch embedded when owner 1 first activated.
-            if let Some(control) = response.control.as_ref() {
-                response.control =
-                    control.refreshed(&route.session_id, &route.incarnation_id, route.owner_epoch);
+            .map_err(|error| session_store_error("claiming the media-session request", error))?
+            {
+                Ok((guard, acquired)) => {
+                    incarnation_id = acquired;
+                    if ask_superseded {
+                        // Dropping the armed guard settles this claim as failed.
+                        return Err(ApiError::typed(
+                            StatusCode::CONFLICT,
+                            "selection_superseded",
+                            "a newer selection for this playback arrived first",
+                        ));
+                    }
+                    // From here this create is the claim's owner, not the
+                    // viewer's request: it runs to activation for as long as
+                    // its viewer can still take the answer, inside the
+                    // claim's window.
+                    crate::media_pool::own_create_for_viewer(
+                        claim_window_ends
+                            .checked_sub(OWNED_CREATE_CLAIM_MARGIN)
+                            .unwrap_or(claim_window_ends),
+                        OWNED_CREATE_REPOST_GRACE,
+                    );
+                    if desired_ask.is_some() {
+                        state
+                            .hls_route_hooks
+                            .get()
+                            .after_create_ask_recorded()
+                            .await;
+                    }
+                    break guard;
+                }
+                Err(claim) => claim,
             }
-            return Ok(Json(response));
-        }
-        MediaSessionRequestClaim::Resolved(route)
-            if route.state == "active" && route.publication_ready_at_ms != 0 =>
-        {
-            if continuous.is_some() {
-                return Err(continuous_handoff_pending(&route.session_id));
+        };
+        match claim {
+            MediaSessionRequestClaim::Acquired { .. } => {
+                unreachable!("an acquired claim comes back with its armed guard")
             }
-            return Err(ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "media_session_handoff_pending",
-                "the predecessor owner has not completed session handoff yet; retry shortly",
-            ));
-        }
-        MediaSessionRequestClaim::Resolved(_) => {
-            return Err(ApiError::typed(
-                StatusCode::GONE,
-                "media_session_ended",
-                "this idempotent session was already released",
-            ));
-        }
-        MediaSessionRequestClaim::InFlight {
-            incarnation_id: in_flight_incarnation,
-            ..
-        } => {
-            if matches!(&purpose, ServiceCreatePurpose::PassiveCompatibility { .. }) {
-                wait_for_compatibility_activation(
-                    &state,
-                    user.id,
-                    &request.playback_id,
-                    &fingerprint,
-                    &in_flight_incarnation,
-                )
-                .await?;
-            }
-            let observed_at_ms = unix_ms();
-            let route = tokio::time::timeout(
-                ACTIVATION_STORE_DEADLINE,
-                state
-                    .store
-                    .media_session_route_by_incarnation(&in_flight_incarnation),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten()
-            .filter(|route| {
-                route.principal.local_user_id() == Some(user.id)
-                    && route.playback_id == request.playback_id
-                    && route.request_fingerprint == fingerprint
-                    && route.state == "active"
-                    && route.publication_ready_at_ms == 0
-                    && route.lease_expires_at_ms > observed_at_ms
-            });
-            if let Some(route) = route {
-                let publication_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+            MediaSessionRequestClaim::Resolved(route)
+                if resolved_replay_is_live(&route, unix_ms()) =>
+            {
+                let replay_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
                 let _response_publication = ingress_serving_authority
-                    .commit_guard_before(
-                        ingress_serving_generation,
-                        publication_deadline.into_std(),
-                    )
+                    .commit_guard_before(ingress_serving_generation, replay_deadline.into_std())
                     .await
                     .ok_or_else(|| {
                         ApiError::ServiceUnavailable(
-                            "the ingress lost serving authority before replay publication"
-                                .to_owned(),
+                            "the ingress lost serving authority before resolved replay".to_owned(),
                         )
                     })?;
                 let route = tokio::time::timeout_at(
-                    publication_deadline,
-                    state.store.publish_media_session_activation(
-                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                            user_id: user.id,
-                        },
-                        &request_claim_id,
-                        &in_flight_incarnation,
-                        unix_ms(),
-                    ),
+                    replay_deadline,
+                    state
+                        .store
+                        .media_session_route_by_incarnation(&route.incarnation_id),
                 )
                 .await
                 .map_err(|_| {
                     ApiError::ServiceUnavailable(
-                        "media-session replay publication exceeded its fixed deadline".to_owned(),
+                        "resolved media-session replay freshness check timed out".to_owned(),
                     )
                 })?
-                .map_err(|error| session_store_error("publishing the session replay", error))?
-                .filter(|published| replay_publication_matches(published, &route))
+                .map_err(|error| session_store_error("rechecking the resolved replay", error))?
+                .filter(|current| {
+                    replay_route_identity_matches(current, &route)
+                        && resolved_replay_is_live(current, unix_ms())
+                })
                 .ok_or_else(|| {
                     ApiError::ServiceUnavailable(
-                        "the media-session replay lost its exact activation".to_owned(),
+                        "the resolved media-session replay is no longer current".to_owned(),
                     )
                 })?;
-                state.media_sessions.cache_route(route.clone()).await;
-                if route.owner_node_id == state.node_id {
-                    state.media_sessions.seed_owned_lease(&route).await;
-                }
                 let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
                 response.effective_processing = state
                     .transcode
                     .dv_effective_report(&route.session_id, &route.incarnation_id)
                     .await;
+                // Same-session owner takeover advances only the control epoch.
+                // Replaying the persisted create must not hand a restarted client
+                // the stale epoch embedded when owner 1 first activated.
                 if let Some(control) = response.control.as_ref() {
                     response.control = control.refreshed(
                         &route.session_id,
@@ -3538,35 +3797,157 @@ async fn create_with_purpose_inner(
                         route.owner_epoch,
                     );
                 }
+                crate::playstart::note_create_owner(&route.owner_node_id);
+                crate::playstart::note_replayed_create(
+                    &state,
+                    &user,
+                    id,
+                    &request_claim_id,
+                    (&response.session_id, response.encoder == "copy"),
+                    library_channel.is_some(),
+                );
                 return Ok(Json(response));
             }
-            return Err(ApiError::typed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "media_session_starting",
-                "an identical session request is still starting; retry shortly",
-            ));
+            MediaSessionRequestClaim::Resolved(route)
+                if route.state == "active" && route.publication_ready_at_ms != 0 =>
+            {
+                if continuous.is_some() {
+                    return Err(continuous_handoff_pending(&route.session_id));
+                }
+                return Err(ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "media_session_handoff_pending",
+                    "the predecessor owner has not completed session handoff yet; retry shortly",
+                ));
+            }
+            MediaSessionRequestClaim::Resolved(_) => {
+                return Err(ApiError::typed(
+                    StatusCode::GONE,
+                    "media_session_ended",
+                    "this idempotent session was already released",
+                ));
+            }
+            MediaSessionRequestClaim::InFlight {
+                incarnation_id: in_flight_incarnation,
+                ..
+            } => {
+                let observed_at_ms = unix_ms();
+                let route = tokio::time::timeout(
+                    ACTIVATION_STORE_DEADLINE,
+                    state
+                        .store
+                        .media_session_route_by_incarnation(&in_flight_incarnation),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .filter(|route| {
+                    route.principal.local_user_id() == Some(user.id)
+                        && route.playback_id == request.playback_id
+                        && route.request_fingerprint == fingerprint
+                        && route.state == "active"
+                        && route.publication_ready_at_ms == 0
+                        && route.lease_expires_at_ms > observed_at_ms
+                });
+                if let Some(route) = route {
+                    let publication_deadline =
+                        tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+                    let _response_publication = ingress_serving_authority
+                        .commit_guard_before(
+                            ingress_serving_generation,
+                            publication_deadline.into_std(),
+                        )
+                        .await
+                        .ok_or_else(|| {
+                            ApiError::ServiceUnavailable(
+                                "the ingress lost serving authority before replay publication"
+                                    .to_owned(),
+                            )
+                        })?;
+                    let route = tokio::time::timeout_at(
+                        publication_deadline,
+                        state.store.publish_media_session_activation(
+                            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                user_id: user.id,
+                            },
+                            &request_claim_id,
+                            &in_flight_incarnation,
+                            unix_ms(),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ApiError::ServiceUnavailable(
+                            "media-session replay publication exceeded its fixed deadline"
+                                .to_owned(),
+                        )
+                    })?
+                    .map_err(|error| session_store_error("publishing the session replay", error))?
+                    .filter(|published| replay_publication_matches(published, &route))
+                    .ok_or_else(|| {
+                        ApiError::ServiceUnavailable(
+                            "the media-session replay lost its exact activation".to_owned(),
+                        )
+                    })?;
+                    state.media_sessions.cache_route(route.clone()).await;
+                    if route.owner_node_id == state.node_id {
+                        state.media_sessions.seed_owned_lease(&route).await;
+                    }
+                    let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
+                    response.effective_processing = state
+                        .transcode
+                        .dv_effective_report(&route.session_id, &route.incarnation_id)
+                        .await;
+                    if let Some(control) = response.control.as_ref() {
+                        response.control = control.refreshed(
+                            &route.session_id,
+                            &route.incarnation_id,
+                            route.owner_epoch,
+                        );
+                    }
+                    crate::playstart::note_create_owner(&route.owner_node_id);
+                    crate::playstart::note_replayed_create(
+                        &state,
+                        &user,
+                        id,
+                        &request_claim_id,
+                        (&response.session_id, response.encoder == "copy"),
+                        library_channel.is_some(),
+                    );
+                    return Ok(Json(response));
+                }
+                // The owner has not activated yet. Wait on the durable row rather
+                // than answer a code no client retries; past this viewer's
+                // allowance the claim stays and the next re-post joins again.
+                // The last look lands on the deadline itself, so a joiner
+                // spends its whole allowance on the owner before answering.
+                let now = tokio::time::Instant::now();
+                if now >= join_deadline {
+                    return Err(create_still_starting(
+                        "an identical session request is still starting; retry shortly",
+                    ));
+                }
+                joined = Some(in_flight_incarnation);
+                tokio::time::sleep_until((now + join_backoff).min(join_deadline)).await;
+                join_backoff = (join_backoff * 2).min(std::time::Duration::from_millis(500));
+            }
+            MediaSessionRequestClaim::Conflict => {
+                return Err(ApiError::Conflict(
+                    "request_id was already used for a different session intent".to_owned(),
+                ));
+            }
+            MediaSessionRequestClaim::Overloaded => {
+                return Err(ApiError::TypedRetry {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "media_session_overloaded",
+                    message: "too many session starts are already active for this user".to_owned(),
+                    retry_after_seconds: MEDIA_SESSION_OVERLOADED_RETRY_AFTER_SECS,
+                });
+            }
         }
-        MediaSessionRequestClaim::Conflict => {
-            return Err(ApiError::Conflict(
-                "request_id was already used for a different session intent".to_owned(),
-            ));
-        }
-        MediaSessionRequestClaim::Overloaded => {
-            return Err(ApiError::ServiceUnavailable(
-                "too many session starts are already active for this user".to_owned(),
-            ));
-        }
-    }
+    };
     crate::media_pool::mark_create_phase("admission");
-    // From this point every early return must settle the exact durable claim.
-    // Once worker placement returns, its StartedSessionGuard takes over the
-    // same responsibility together with exact worker ownership.
-    let mut request_guard = MediaSessionRequestGuard::new(
-        state.clone(),
-        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-        request_claim_id.clone(),
-        incarnation_id.clone(),
-    );
     // A typed cause is advisory evidence. Unknown, remote, expired or
     // replayed evidence leaves it unrecorded and the reopen proceeds as an
     // ordinary reopen; it is never a reason to refuse a stalled viewer.
@@ -3706,168 +4087,41 @@ async fn create_with_purpose_inner(
     } else {
         None
     };
-    // Every catalog start with a DV source is offered processing: Auto or a
-    // chosen rung, any route. The qualifier itself decides applicability and
-    // names every decline. Only a reopen pinned to another node's session is
-    // left to that node, which owns the producer.
-    if pinned_owner
+    // Processed Dolby Vision / HDR10-E is an upgrade after the first frame,
+    // never work before it (plan ruling 3). The create resolves the ordinary
+    // plan only. It runs the upgrade's request-only gates against the planning
+    // snapshot it already holds, so a declined upgrade is reported on this
+    // start's enhancement details; an applicable one is left waiting for the
+    // first frame on the node that owns the session (registered after
+    // activation, below). Only a reopen pinned to another node's session is
+    // left to that node.
+    let processed_upgrade_applies = if pinned_owner
         .as_ref()
         .is_none_or(|owner| owner == &state.node_id)
     {
-        let recovery = crate::transcode::SessionRecoveryIdentity {
-            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: user.id,
-            },
-            incarnation_id: incarnation_id.clone(),
-            recovery_epoch: recovery_epoch.clone(),
-        };
-        match state
-            .transcode
-            .prepare_processed_hdr10(&request, &recovery, hdr10_requested)
-            .await
-        {
-            Ok(Some((mut processed, candidate))) => {
-                if let Some(source) = source.as_ref() {
-                    // A distinct, strict processed-recipe check stays inside
-                    // the original create deadline. Ordinary catalog/advisory
-                    // allowances are never renewed by qualification.
-                    let advisory =
-                        crate::media_pool::create_stage_deadline(Duration::from_millis(500));
-                    let recovered = super::candidate_recovery::processed_candidate_admissible(
-                        &state,
-                        identity.as_ref(),
-                        source,
-                        &request.playback_id,
-                        &candidate,
-                        activation_predecessor.as_ref(),
-                        advisory,
-                    )
-                    .await;
-                    // Link evidence is Auto's bandwidth policy. A rung the
-                    // viewer chose is not second-guessed by it, exactly as the
-                    // ordinary start above is not.
-                    let link_admitted = !candidate_auto_policy
-                        || link_receipts::processed_candidate_admissible(
-                            &state,
-                            identity.as_ref(),
-                            source,
-                            &candidate,
-                            advisory,
-                        )
-                        .await;
-                    let mut admitted = if recovered && link_admitted {
-                        vec![candidate.clone()]
-                    } else {
-                        Vec::new()
-                    };
-                    if candidate_auto_policy {
-                        admitted = link_receipts::link_starved_catalog(
-                            network_prior.as_ref(),
-                            admitted,
-                            unix_ms(),
-                        );
-                    }
-                    if let Some(receipt) =
-                        link_receipts::requested_receipt(&headers).filter(|_| candidate_auto_policy)
-                    {
-                        admitted = link_receipts::positive_catalog(
-                            &state,
-                            identity.as_ref(),
-                            source,
-                            Some(receipt),
-                            Some(&request.playback_id),
-                            admitted,
-                            None,
-                            advisory,
-                        )
-                        .await;
-                    }
-                    // The processed candidate is an enhancement of the
-                    // ordinary start already resolved above. Whatever keeps it
-                    // from being adopted here leaves that start in place and
-                    // is reported with it, like every other declined
-                    // qualification.
-                    let adopted = if !processed_candidate_is_admitted(&admitted, &candidate) {
-                        Err(if recovered {
-                            "Auto's link evidence for this playback does not admit the \
-                             processed candidate's bitrate"
-                        } else {
-                            "this playback's recovery evidence rejects the processed recipe"
-                        }
-                        .to_owned())
-                    } else {
-                        let context = processed
-                            .candidate_context
-                            .as_ref()
-                            .ok_or_else(|| "qualified HDR context missing".to_owned());
-                        match context {
-                            Ok(context) => match quality_catalog.as_mut() {
-                                Some(catalog) => upsert_processed_worker_candidate(
-                                    catalog,
-                                    crate::media_pool::WorkerQualityCandidate {
-                                        node_id: state.node_id.clone(),
-                                        candidate: candidate.clone(),
-                                        binding: context.planning_binding.clone(),
-                                        partial: false,
-                                        dispatch_supported: true,
-                                    },
-                                )
-                                .map_err(|reason| {
-                                    format!("the quality catalog refused the candidate: {reason}")
-                                }),
-                                None => Ok(()),
-                            },
-                            Err(reason) => Err(reason),
-                        }
-                    };
-                    match adopted {
-                        Ok(()) => {
-                            processed.quality_catalog = quality_catalog
-                                .as_ref()
-                                .map(|catalog| Arc::new(catalog.clone()));
-                            state.transcode.remember_processed_candidate(&processed);
-                            height = i64::from(candidate.target_height);
-                            candidate_route = Some(candidate.route);
-                            ordinary_link_source_binding = link_source_binding.take();
-                            link_source_binding = if let (true, Some(identity)) =
-                                (candidate_auto_policy, identity.as_ref())
-                            {
-                                link_receipts::request_binding_until(
-                                    identity,
-                                    source,
-                                    candidate.recipe_digest,
-                                    candidate.route,
-                                    advisory,
-                                )
-                                .await
-                            } else {
-                                None
-                            };
-                            request = processed;
-                        }
-                        Err(reason) => {
-                            tracing::warn!(target: "plurxd::http::hls", %reason,
-                                "processed Auto candidate not adopted; retaining ordinary candidate");
-                            processing_decline.get_or_insert_with(|| reason.to_string());
-                            plan_notes.push(processing_declined_note(&reason));
-                        }
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(reason) => {
-                tracing::warn!(target: "plurxd::http::hls", %reason,
-                    "processed Auto qualification refused; retaining ordinary candidate");
+        match planning_snapshot.map(|snapshot| {
+            crate::transcode::TranscodeManager::processed_upgrade_gates(
+                &request,
+                snapshot,
+                hdr10_requested,
+            )
+        }) {
+            Some(Ok(Some(_))) => true,
+            Some(Ok(None)) | None => false,
+            Some(Err(reason)) => {
+                tracing::info!(target: "plurxd::http::hls", %reason,
+                    "processed upgrade declined; the ordinary start is unchanged");
                 processing_decline.get_or_insert_with(|| reason.to_string());
                 plan_notes.push(processing_declined_note(&reason));
+                false
             }
         }
-        crate::media_pool::mark_create_phase("processed_qualification");
-    }
+    } else {
+        false
+    };
 
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
-            .as_ref()
             .and_then(|snapshot| {
                 snapshot
                     .settings
@@ -3887,7 +4141,6 @@ async fn create_with_purpose_inner(
 
     let quality_enabled = continuous.is_some()
         || planning_snapshot
-            .as_ref()
             .and_then(|snapshot| {
                 snapshot
                     .settings
@@ -3941,11 +4194,13 @@ async fn create_with_purpose_inner(
         std::collections::HashSet::new()
     };
     let predecessor_owner = if let Some(previous) = request.previous_session_id.as_deref() {
-        state
-            .store
-            .media_session_route(previous)
-            .await?
-            .map(|route| route.owner_node_id)
+        crate::media_sessions::read_media_session_route(
+            &*state.store,
+            crate::media_sessions::RouteReadSite::Verdict,
+            previous,
+        )
+        .await?
+        .map(|route| route.owner_node_id)
     } else {
         None
     };
@@ -3965,6 +4220,7 @@ async fn create_with_purpose_inner(
         retained_output_receiver: Some(1),
         candidate_catalog: request.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
+                catalog_query: context.catalog_query.clone(),
                 caps: context.canonical_caps.clone()?,
                 candidate: context.selected_candidate.clone(),
                 binding: context.planning_binding.clone()?,
@@ -3992,7 +4248,10 @@ async fn create_with_purpose_inner(
         // Recorded from the same decision the worker will make, so a later
         // takeover can tell whether this URL was ever serving a shape a
         // successor is allowed to continue.
-        typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
+        typeless_playlist: state
+            .transcode
+            .cluster_playlist_is_typeless(start_plan.as_deref())
+            .await,
         library_channel: library_channel.as_ref().map(|purpose| {
             serde_json::to_value(purpose).expect("bounded Library-channel purpose serializes")
         }),
@@ -4024,7 +4283,11 @@ async fn create_with_purpose_inner(
         .and_then(|context| context.owner_node_id.clone());
     let mut owner_candidates = if let Some(owner) = candidate_owner.or(pinned_owner) {
         vec![owner]
-    } else if !state.media_pool.remote_placement_ready(&state).await {
+    } else if !state
+        .media_pool
+        .remote_placement_ready(&state, start_plan.as_deref())
+        .await
+    {
         vec![state.node_id.clone()]
     } else {
         match MediaOfferRequest::new(
@@ -4064,17 +4327,22 @@ async fn create_with_purpose_inner(
 
     let mut started = None;
     let mut last_error = None;
+    // A refused plan is refuted for every candidate (review S1); a start
+    // with no binding is confirmed at Authority once before a remote owner
+    // takes it (review S2).
+    let mut placement_ended = false;
+    let mut unbound_confirmed = false;
     for candidate in owner_candidates {
         if tokio::time::Instant::now() >= placement_deadline {
-            last_error = Some(ApiError::ServiceUnavailable(
-                "media worker placement exceeded its common deadline".to_owned(),
+            last_error = Some(create_still_starting(
+                "media worker placement exceeded its common deadline",
             ));
             break;
         }
         let result = if candidate == state.node_id {
             if !ingress_serving_authority.is_current(ingress_serving_generation) {
-                last_error = Some(ApiError::ServiceUnavailable(
-                    "the local media worker has no serving authority".to_owned(),
+                last_error = Some(create_owner_transition(
+                    "the local media worker has no serving authority",
                 ));
                 continue;
             }
@@ -4099,6 +4367,7 @@ async fn create_with_purpose_inner(
                 recovery_epoch: recovery_epoch.clone(),
             };
             let worker_serving_authority = ingress_serving_authority.clone();
+            let worker_plan = start_plan.clone();
             let mut start_task = crate::media_pool::spawn_create_worker(async move {
                 let started = transcode
                     .create_cluster_session(
@@ -4107,6 +4376,7 @@ async fn create_with_purpose_inner(
                         &user_name,
                         placement_deadline,
                         admitted_serving_generation,
+                        worker_plan.as_deref(),
                     )
                     .await?;
                 let crate::transcode::ClusterSessionStart {
@@ -4161,38 +4431,57 @@ async fn create_with_purpose_inner(
                     "local media worker task failed: {error}"
                 ))),
                 Err(_) => {
+                    // The placement deadline is the owner's, not the viewer's:
+                    // this create owns its claim, so it reaches here only when
+                    // the claim's own window is spent and no activation could
+                    // still land inside it. The late worker is abandoned — its
+                    // dropped guard stops it and settles the claim — and a
+                    // retry starts afresh rather than joining a dead owner.
                     tokio::spawn(async move {
                         // Dropping a successful output drops its armed guard.
                         let _ = start_task.await;
                     });
-                    // Deliberately still codeless, i.e. still not retried.
-                    //
-                    // Both 50-second failures on lab6 came through here rather
-                    // than through `session_start_error`, so naming it was
-                    // tempting. But with the burn sidecar bounded above, a cold
-                    // sidecar no longer reaches this arm at all — what does is
-                    // a start that spent 50 s queuing for an encoder slot, and
-                    // there the codeless 503 is correct back-pressure. Making
-                    // it retryable would add three more create posts per viewer
-                    // at exactly the moment the node is saturated, and the
-                    // abandoned start is detached rather than aborted, so the
-                    // node still pays for every one of them.
-                    Err(ApiError::ServiceUnavailable(
-                        "local media worker exceeded the placement deadline".to_owned(),
+                    Err(create_still_starting(
+                        "local media worker exceeded the placement deadline",
                     ))
                 }
             }
         } else {
+            if remote_request.candidate_catalog.is_none() && !unbound_confirmed {
+                if let Some(plan) = start_plan.as_deref() {
+                    if let Err(error) =
+                        super::start_plan::confirm_unbound_remote(&state.applied, plan).await
+                    {
+                        last_error = Some(error);
+                        break;
+                    }
+                }
+                unbound_confirmed = true;
+            }
             remote_request.retained_output_receiver = state
                 .media_pool
                 .retained_output_receiver(&candidate)
                 .await
                 .then_some(1);
-            match state
-                .media_sessions
-                .start_remote(&candidate, &remote_request, placement_deadline)
-                .await
-            {
+            // A reply lost in transit leaves the worker holding a session keyed
+            // by this create's incarnation (the worker request's id). Asking the
+            // same worker again recovers that session (`Recovered`) instead of
+            // placing a second producer elsewhere, so the claim keeps one owner.
+            let remote_start = crate::media_sessions::start_remote_recovering_lost_reply(
+                placement_deadline,
+                || {
+                    state.media_sessions.start_remote(
+                        &candidate,
+                        &remote_request,
+                        placement_deadline,
+                    )
+                },
+            )
+            .await;
+            if let Err(failure) = &remote_start {
+                placement_ended = super::start_plan::ends_placement(failure);
+            }
+            match remote_start {
                 Ok(started) => {
                     let target_generation = started.info.activation_generation;
                     let guard = match started.ownership {
@@ -4222,9 +4511,38 @@ async fn create_with_purpose_inner(
                     };
                     Ok((started.info, guard, Some(target_generation), (None, None)))
                 }
-                Err(error) => Err(ApiError::ServiceUnavailable(format!(
-                    "media worker {candidate} could not start the session: {error:?}"
-                ))),
+                // The worker cannot take this start now. Every 503 its start
+                // route answers is one a retry can outlive, so it is the
+                // waitable answer here too rather than a codeless one.
+                Err(crate::media_sessions::RemoteStartFailure::Unavailable) => {
+                    Err(ApiError::TypedRetry {
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        code: "transcode_capacity_pending",
+                        message: format!("media worker {candidate} cannot take this start now"),
+                        retry_after_seconds: crate::transcode::CAPACITY_RETRY_AFTER_MS
+                            .div_ceil(1_000),
+                    })
+                }
+                Err(crate::media_sessions::RemoteStartFailure::Terminal(code)) => {
+                    Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        code,
+                        format!("media worker {candidate} cannot take this start"),
+                    ))
+                }
+                Err(crate::media_sessions::RemoteStartFailure::Transport(error)) => {
+                    Err(create_owner_transition(format!(
+                        "media worker {candidate} could not start the session: {error:?}"
+                    )))
+                }
+                // The worker's plan at this create's binding differs from
+                // this node's even at Authority (D3b, contract §4.3): this
+                // replica may be the stale side, so its view closes, no
+                // further candidate is offered the refuted plan (placement
+                // ends below), and the viewer's retry plans from Authority.
+                Err(crate::media_sessions::RemoteStartFailure::PlanChanged) => Err(
+                    super::start_plan::remote_plan_refused(&state.applied, &candidate),
+                ),
             }
         };
         match result {
@@ -4250,6 +4568,9 @@ async fn create_with_purpose_inner(
                     owner_node_id = %candidate, "media worker start attempt failed"
                 );
                 last_error = Some(error);
+                if placement_ended {
+                    break;
+                }
             }
         }
     }
@@ -4262,9 +4583,8 @@ async fn create_with_purpose_inner(
         (degraded_processing, processing_note),
     )) = started
     else {
-        return Err(last_error.unwrap_or_else(|| {
-            ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
-        }));
+        return Err(last_error
+            .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
     };
     request_guard.disarm();
     if let Some(reason) = degraded_processing {
@@ -4292,6 +4612,7 @@ async fn create_with_purpose_inner(
         link_source_binding = ordinary_link_source_binding.take();
         remote_request.candidate_catalog = request.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
+                catalog_query: context.catalog_query.clone(),
                 caps: context.canonical_caps.clone()?,
                 candidate: context.selected_candidate.clone(),
                 binding: context.planning_binding.clone()?,
@@ -4451,7 +4772,7 @@ async fn create_with_purpose_inner(
             source,
             &catalog_request,
             &accepted,
-            planning_snapshot.as_ref(),
+            planning_snapshot,
             link_receipts::advisory_deadline(),
         )
         .await
@@ -4469,7 +4790,7 @@ async fn create_with_purpose_inner(
         info.processed_dv_profile,
         info.processed_fel,
         effective_processing.as_ref(),
-        planning_snapshot.as_ref(),
+        planning_snapshot,
         processing_decline.as_deref(),
     );
     let response = StartResponse {
@@ -4813,6 +5134,20 @@ async fn create_with_purpose_inner(
             .media_sessions
             .seed_owned_lease(&published_route)
             .await;
+        if processed_upgrade_applies && library_channel.is_none() {
+            super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
+                user_id: user.id,
+                playback_id: published_route.playback_id.clone(),
+                session_id: published_route.session_id.clone(),
+                incarnation_id: published_route.incarnation_id.clone(),
+                request: request.clone(),
+                hdr10_intent: hdr10_requested,
+                auto_policy: candidate_auto_policy,
+                network: identity.clone(),
+                network_prior: network_prior.clone(),
+                incumbent_receipt: link_receipts::requested_receipt(&headers).map(str::to_owned),
+            });
+        }
         if candidate_auto_policy {
             if let (Some(identity), Some(source), Some(context), Some(candidate_route)) = (
                 identity.as_ref(),
@@ -4841,7 +5176,17 @@ async fn create_with_purpose_inner(
             }
         }
     }
+    crate::playstart::note_create_owner(&published_route.owner_node_id);
     if library_channel.is_none() {
+        let tag = crate::playstart::AttemptTag {
+            attempt: request_claim_id.clone(),
+            session_id: response.session_id.clone(),
+        };
+        // Here, not in the detached task below: the client's first-frame
+        // report names this session and may not wait for that task.
+        state
+            .start_attempts
+            .tag_session(user.id, id, &tag, Instant::now());
         crate::playstart::note_playback_started(
             &state,
             user.id,
@@ -4849,6 +5194,7 @@ async fn create_with_purpose_inner(
             id,
             method,
             Some(&request.playback_id),
+            Some(tag),
         );
     }
     crate::media_pool::mark_create_phase("registration");
@@ -5937,18 +6283,6 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
             retry_after_seconds: SIDECAR_PENDING_RETRY_AFTER_SECS,
         };
     }
-    // This player's previous start has not let go yet — a wait, and a bounded
-    // one, so name it. Left as a bare `{error}` sentence this was a codeless
-    // 503, which every client correctly refuses to retry because a 503 nobody
-    // explained is not a "still building" answer. The viewer got a terminal
-    // overlay quoting an internal sentence, over a Retry button that re-posted
-    // into the same contention with no backoff. With a code it joins
-    // `create_503_not_yet` and the existing 1s/2s/4s ladder waits it out.
-    //
-    // Deliberately narrower than the whole capacity class. Sibling refusals in
-    // that class are not all waits: one tells the client to ask for a smaller
-    // height, and one reports a scratch ceiling above the configured budget
-    // that no retry can satisfy. Those keep the codeless 503 nothing retries.
     // This source's Dolby Vision pixel proof did not finish — a probe timed
     // out, failed to start or exited non-zero. Nothing was learned about the
     // source and nothing was remembered, so the next start measures again:
@@ -5963,17 +6297,33 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
             retry_after_seconds: SOURCE_PROOF_PENDING_RETRY_AFTER_SECS,
         };
     }
-    if crate::transcode::is_replacement_wait_error(&error) {
-        return ApiError::TypedRetry {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "transcode_capacity_pending",
-            message: error,
-            retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
+    // Every capacity refusal carries a code. Left as a bare `{error}` sentence
+    // a refusal was a codeless 503, which every client correctly refuses to
+    // retry because a 503 nobody explained is not a "still building" answer —
+    // so the one failure a retry would cure was the one never retried. A
+    // waitable one (a slot, a CPU
+    // share, a queue position or this player's previous start letting go) is
+    // the `create_503_not_yet` answer every client's ladder already retries,
+    // with the wait its class names. A terminal one (a height this worker
+    // cannot encode, a scratch grant above the ceiling, a replacement that
+    // spent its deadline) names itself so no client re-posts it unchanged.
+    if let Some((refusal, message)) = crate::transcode::capacity_refusal(&error) {
+        return match refusal {
+            crate::transcode::CapacityRefusal::Waitable { retry_after_ms } => {
+                ApiError::TypedRetry {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "transcode_capacity_pending",
+                    message: message.to_owned(),
+                    retry_after_seconds: retry_after_ms.div_ceil(1_000).max(1),
+                }
+            }
+            crate::transcode::CapacityRefusal::Terminal(code) => {
+                ApiError::typed(StatusCode::SERVICE_UNAVAILABLE, code, message)
+            }
         };
     }
     if crate::transcode::is_serving_fence_error(&error)
         || crate::transcode::is_start_infrastructure_error(&error)
-        || crate::transcode::is_retryable_capacity_error(&error)
     {
         return ApiError::ServiceUnavailable(error);
     }
@@ -6089,6 +6439,14 @@ pub(crate) struct SourcePlaybackTarget {
 /// Prepared by current Source authority and the actual shared planning engine.
 /// No wire constructor, serialization, local account, physical readiness or
 /// replicated-write authority is carried by this observation.
+/// Immutable presentation selected by authenticated Source normalization and
+/// bound with the exact durable invocation. Raw client capabilities cannot mint it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceCopyPresentation {
+    FullVod,
+    BoundedRange,
+}
+
 #[allow(dead_code)]
 pub(crate) struct PreparedSourcePlayback {
     target: SourcePlaybackTarget,
@@ -6097,6 +6455,8 @@ pub(crate) struct PreparedSourcePlayback {
     resolved: ResolvedPlan,
     source_fingerprint: String,
     source_invocation_fingerprint: Option<String>,
+    source_presentation: Option<SourceCopyPresentation>,
+    copy_head_caps: plurx_core::playback::DeviceCaps,
     decision: super::super::stream::DecisionResponse,
 }
 #[allow(dead_code)]
@@ -6125,8 +6485,16 @@ impl PreparedSourcePlayback {
     pub(crate) fn bind_source_invocation(
         &mut self,
         binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+        presentation: SourceCopyPresentation,
     ) -> Result<(), ()> {
-        if binding.principal() != &self.principal
+        if self
+            .source_presentation
+            .is_some_and(|current| current != presentation)
+            || self
+                .source_invocation_fingerprint
+                .as_deref()
+                .is_some_and(|current| current != binding.request_fingerprint())
+            || binding.principal() != &self.principal
             || binding.source_server_id() != self.target.server_id
             || binding.catalogue_epoch() != self.target.catalogue_epoch
             || binding.library_id() != &self.target.library_id
@@ -6139,7 +6507,39 @@ impl PreparedSourcePlayback {
             return Err(());
         }
         self.source_invocation_fingerprint = Some(binding.request_fingerprint().to_owned());
+        self.source_presentation = Some(presentation);
         Ok(())
+    }
+    pub(crate) fn source_presentation(&self) -> Option<SourceCopyPresentation> {
+        self.source_presentation
+    }
+    /// Validate declared bytes from this held object's selected copy head
+    /// against the exact prepared recipe and client. This does not certify
+    /// the whole elementary stream; the common kernel/Trace check each range.
+    pub(crate) fn validate_copy_head(&self, init: &plurx_core::fmp4::Init) -> Result<(), ApiError> {
+        let refused = || {
+            ApiError::typed(
+                StatusCode::CONFLICT,
+                "vod_source_rescan_required",
+                "The held Source copy head differs from its prepared playback facts",
+            )
+        };
+        let crate::transcode::SessionKind::Copy {
+            preserve_dolby_vision,
+            ..
+        } = self.resolved.request.kind
+        else {
+            return Err(refused());
+        };
+        let facts = plurx_core::fmp4::copy_video_sample_entry_facts(init).map_err(|_| refused())?;
+        validate_prepared_copy_head(
+            &self.file,
+            self.resolved.height,
+            &self.copy_head_caps,
+            preserve_dolby_vision,
+            &facts,
+        )
+        .map_err(|()| refused())
     }
     pub(crate) fn fingerprint(&self) -> &str {
         self.source_invocation_fingerprint
@@ -6170,14 +6570,17 @@ impl PreparedSourcePlayback {
                     && id.to_string() == value
             })
         };
+        let media_origin_ms = source_media_origin_ms(
+            self.source_presentation,
+            info.media_origin_seconds,
+            info.vod,
+        )
+        .ok_or_else(refused)?;
         if !canonical_uuid(&info.session_id)
             || !canonical_uuid(incarnation_id)
             || info.kind != self.resolved.request.kind
             || !info.start_seconds.is_finite()
             || info.start_seconds < 0.0
-            || !info.media_origin_seconds.is_finite()
-            || info.media_origin_seconds < 0.0
-            || info.media_origin_seconds * 1000.0 >= i64::MAX as f64
             || info.duration_ms.is_some_and(|duration| duration < 0)
             || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
         {
@@ -6245,7 +6648,7 @@ impl PreparedSourcePlayback {
             playlist_url,
             duration_ms: info.duration_ms,
             start_seconds: info.start_seconds,
-            media_origin_ms: Some((info.media_origin_seconds * 1000.0).round() as i64),
+            media_origin_ms: Some(media_origin_ms),
             height: info.target_height,
             encoder: info.encoder.to_owned(),
             vod: info.vod,
@@ -6467,12 +6870,126 @@ pub(crate) async fn prepare_source_playback<
     Ok(PreparedSourcePlayback {
         source_fingerprint,
         source_invocation_fingerprint: None,
+        source_presentation: None,
+        copy_head_caps: caps,
         target,
         principal,
         file,
         resolved,
         decision,
     })
+}
+
+/// Checks only declared decoder configuration/raster/color. Missing facts do
+/// not acquire an optimistic source or decoder qualification.
+fn validate_prepared_copy_head(
+    file: &MediaFile,
+    resolved_height: i64,
+    caps: &plurx_core::playback::DeviceCaps,
+    preserve_dolby_vision: bool,
+    facts: &plurx_core::fmp4::CopyVideoSampleEntryFacts,
+) -> Result<(), ()> {
+    use plurx_core::{
+        fmp4::VideoCodec,
+        playback::{PlaybackMethod, Transfer},
+        transcode::OutputGrade,
+    };
+    let (codec, profile) = match (facts.codec, facts.profile_idc) {
+        (VideoCodec::H264, 66) => ("h264", "baseline"),
+        (VideoCodec::H264, 77) => ("h264", "main"),
+        (VideoCodec::H264, 88) => ("h264", "extended"),
+        (VideoCodec::H264, 100) => ("h264", "high"),
+        (VideoCodec::H264, 110) => ("h264", "high10"),
+        (VideoCodec::Hevc, 1) => ("hevc", "main"),
+        (VideoCodec::Hevc, 2) => ("hevc", "main10"),
+        _ => return Err(()),
+    };
+    let normalized_profile = file.video_profile.as_deref().map(|profile| {
+        profile
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    });
+    // FFprobe names constrained-baseline separately although avcC carries
+    // profile_idc 66 plus constraints. Both name the same prepared family;
+    // constraint-bit admission remains the decoder's AVC contract.
+    let profile_matches = normalized_profile.as_deref().is_some_and(|value| {
+        value == profile || (profile == "baseline" && value == "constrainedbaseline")
+    });
+    if file.video_codec.as_deref() != Some(codec)
+        || !profile_matches
+        || file.width != Some(i64::from(facts.width))
+        || file.height != Some(i64::from(facts.height))
+        || resolved_height != i64::from(facts.height)
+        || file.bit_depth != Some(i64::from(facts.bit_depth))
+        || facts.chroma_format_idc != 1
+        || facts.width == 0
+        || facts.height == 0
+        || facts.dolby_vision_config
+            != (preserve_dolby_vision && plurx_core::playback::is_dolby_vision(file))
+    {
+        return Err(());
+    }
+    let (_, transfer, _, _) = facts.color.ok_or(())?;
+    let range = plurx_core::playback::delivered_dynamic_range(
+        file,
+        PlaybackMethod::Remux,
+        preserve_dolby_vision,
+        OutputGrade::Sdr,
+    );
+    let expected_transfer = match range {
+        "hdr10" => Transfer::Pq,
+        "hlg" => Transfer::Hlg,
+        "sdr" => Transfer::Sdr,
+        _ => return Err(()),
+    };
+    let actual_transfer = match transfer {
+        16 => Transfer::Pq,
+        18 => Transfer::Hlg,
+        1 | 6 | 13 | 14 | 15 => Transfer::Sdr,
+        _ => return Err(()),
+    };
+    if actual_transfer != expected_transfer {
+        return Err(());
+    }
+    if !caps.video.iter().any(|entry| {
+        entry.codec == codec
+            && (entry.profiles.is_empty() || entry.profiles.iter().any(|claim| claim == profile))
+            && entry.geometry_admission(u32::from(facts.width), u32::from(facts.height), None)
+                != Some(false)
+            && entry.present.contains(&actual_transfer)
+    }) {
+        return Err(());
+    }
+    if codec == "hevc" {
+        let tag = std::str::from_utf8(&facts.sample_entry).map_err(|_| ())?;
+        if caps
+            .hls_hevc_sample_entries
+            .as_ref()
+            .is_some_and(|entries| !entries.iter().any(|entry| entry == tag))
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn source_media_origin_ms(
+    presentation: Option<SourceCopyPresentation>,
+    seconds: f64,
+    vod: bool,
+) -> Option<i64> {
+    let millis = (seconds * 1000.0).round();
+    if !millis.is_finite() || millis.abs() > crate::playback_control::MAX_MEDIA_ORIGIN_MILLIS as f64
+    {
+        return None;
+    }
+    match presentation? {
+        SourceCopyPresentation::FullVod if !vod || seconds != 0.0 => None,
+        SourceCopyPresentation::BoundedRange if vod && seconds != 0.0 => None,
+        _ => Some(millis as i64),
+    }
 }
 
 // Source-only durable identity also freezes native presentation selection.
@@ -6498,3 +7015,137 @@ mod source_fingerprint_tests;
 
 #[cfg(test)]
 mod compatibility_service_policy_tests;
+
+#[cfg(test)]
+mod source_presentation_origin_tests {
+    use super::{source_media_origin_ms, SourceCopyPresentation};
+
+    #[test]
+    fn bound_range_preserves_negative_origin_but_full_vod_keeps_zero() {
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::BoundedRange), -0.083, false),
+            Some(-83)
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::FullVod), 0.0, true),
+            Some(0)
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::FullVod), -0.083, true),
+            None
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::FullVod), 0.0, false),
+            None
+        );
+        assert_eq!(
+            source_media_origin_ms(Some(SourceCopyPresentation::BoundedRange), -0.083, true),
+            None
+        );
+    }
+
+    #[test]
+    fn origin_requires_bound_mode_and_finite_safe_milliseconds() {
+        assert_eq!(source_media_origin_ms(None, 0.0, true), None);
+        for seconds in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            9_007_199_254_741.0,
+            -9_007_199_254_741.0,
+        ] {
+            assert_eq!(
+                source_media_origin_ms(Some(SourceCopyPresentation::BoundedRange), seconds, false),
+                None
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_copy_head_tests {
+    use super::*;
+    fn file() -> MediaFile {
+        MediaFile {
+            id: 1,
+            item_id: 1,
+            path: "/source".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(1000),
+            container: Some("mp4".into()),
+            video_codec: Some("h264".into()),
+            video_codec_tag: Some("avc1".into()),
+            field_order: Some("progressive".into()),
+            video_profile: Some("High".into()),
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            dolby_vision: Default::default(),
+            bitrate: None,
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            downloaded_subtitles: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+        }
+    }
+    fn caps() -> plurx_core::playback::DeviceCaps {
+        serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","profiles":["high"],"max_height":1080,"max_width":1920,"present":["sdr"]}]})).expect("capabilities fixture")
+    }
+    fn facts() -> plurx_core::fmp4::CopyVideoSampleEntryFacts {
+        plurx_core::fmp4::CopyVideoSampleEntryFacts {
+            codec: plurx_core::fmp4::VideoCodec::H264,
+            sample_entry: *b"avc1",
+            width: 1920,
+            height: 1080,
+            profile_idc: 100,
+            level_idc: 40,
+            bit_depth: 8,
+            chroma_format_idc: 1,
+            color: Some((1, 1, 1, false)),
+            dolby_vision_config: false,
+        }
+    }
+    #[test]
+    fn prepared_copy_head_rejects_changed_geometry_profile_depth_and_grade() {
+        let source = file();
+        let caps = caps();
+        let good = facts();
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_ok());
+        let mut changed = good.clone();
+        changed.width = 1280;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.profile_idc = 77;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.bit_depth = 10;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.color = Some((9, 16, 9, false));
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        let mut changed = good.clone();
+        changed.color = None;
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &changed).is_err());
+        assert!(validate_prepared_copy_head(&source, 720, &caps, false, &good).is_err());
+    }
+    #[test]
+    fn prepared_copy_head_rechecks_specific_decoder_profile_and_geometry_claim() {
+        let source = file();
+        let good = facts();
+        let mut caps = caps();
+        caps.video[0].max_width = Some(1280);
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+        caps.video[0].max_width = Some(1920);
+        caps.video[0].profiles = vec!["main".into()];
+        assert!(validate_prepared_copy_head(&source, 1080, &caps, false, &good).is_err());
+    }
+}

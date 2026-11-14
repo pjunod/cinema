@@ -27,6 +27,7 @@ impl JellyfinLoginStore for HiqliteAuthStore {
             .client()
             // authority: play and manual-edit origin must use current native token membership, never client-claimed device context.
             .query_consistent_map::<SwitchRow, _>(
+                "jellyfin_login_scope",
                 super::jellyfin_login::LOGIN_SCOPE,
                 params!(token_hash),
             )
@@ -44,7 +45,11 @@ impl JellyfinLoginStore for HiqliteAuthStore {
         let row = self
             .client()
             // authority: login admission observes enabled choice and generation from one committed snapshot.
-            .query_consistent_map::<SwitchRow, _>(super::jellyfin_login::SWITCH_STATE, params!())
+            .query_consistent_map::<SwitchRow, _>(
+                "jellyfin_compatibility_state",
+                super::jellyfin_login::SWITCH_STATE,
+                params!(),
+            )
             .await?
             .into_iter()
             .next()
@@ -58,16 +63,19 @@ impl JellyfinLoginStore for HiqliteAuthStore {
         let now = super::jellyfin_login::switch_save_time();
         let results = self
             .client()
-            .txn([
-                (
-                    super::jellyfin_login::SAVE_GENERATION,
-                    params!(generation, now),
-                ),
-                (
-                    super::jellyfin_login::SAVE_SWITCH,
-                    params!(if enabled { "1" } else { "0" }, now),
-                ),
-            ])
+            .txn(
+                "set_jellyfin_compatibility",
+                [
+                    (
+                        super::jellyfin_login::SAVE_GENERATION,
+                        params!(generation, now),
+                    ),
+                    (
+                        super::jellyfin_login::SAVE_SWITCH,
+                        params!(if enabled { "1" } else { "0" }, now),
+                    ),
+                ],
+            )
             .await?;
         for result in results {
             result.map_err(super::hiqlite::database_error)?;
@@ -81,20 +89,27 @@ impl JellyfinLoginStore for HiqliteAuthStore {
         generation: &str,
     ) -> Result<bool, StoreError> {
         super::jellyfin_login::validate_generation(generation)?;
-        self.replace_jellyfin_login_inner(w, claim, Some(generation))
-            .await
+        self.replace_jellyfin_login_inner(
+            "replace_jellyfin_login_if_enabled",
+            w,
+            claim,
+            Some(generation),
+        )
+        .await
     }
     async fn replace_jellyfin_login(
         &self,
         w: JellyfinLoginWrite,
         claim: Option<&CacheAdminMutationClaim>,
     ) -> Result<bool, StoreError> {
-        self.replace_jellyfin_login_inner(w, claim, None).await
+        self.replace_jellyfin_login_inner("replace_jellyfin_login", w, claim, None)
+            .await
     }
 }
 impl HiqliteAuthStore {
     async fn replace_jellyfin_login_inner(
         &self,
+        method: &'static str,
         w: JellyfinLoginWrite,
         claim: Option<&CacheAdminMutationClaim>,
         generation: Option<&str>,
@@ -150,7 +165,7 @@ impl HiqliteAuthStore {
             };
             statements[0].1.push(generation.to_owned().into());
         }
-        let changed = self.credential_mutation(statements).await?;
+        let changed = self.credential_mutation(method, statements).await?;
         Ok(changed[0] > 0 && changed[2] > 0)
     }
 }

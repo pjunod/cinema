@@ -6,17 +6,22 @@
 //! [`crate::http::extract::ScopedKey`] for why the wall runs both ways.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::request::Parts;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use plurx_core::domain::{scopes, Library};
+use plurx_core::domain::scopes;
+use plurx_core::scan::containment::{self, PathClass};
 use plurx_core::scan::TargetError;
+use plurx_core::store::scan_request_v2::{ExpectedFile, ScanRequestV2Seed};
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 use super::extract::ScopedKey;
-use crate::state::{AppState, BookHints, IdHints, ScanRequest};
+use crate::state::{AppState, BookHints, IdHints, ScanAdmission, ScanRequest};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Ids {
@@ -40,10 +45,58 @@ pub struct BookMetadataBody {
     pub cover_url: Option<String>,
 }
 
+/// One file the caller placed under `path` (contract v2 §4.2).
+#[derive(Debug, Deserialize)]
+pub struct ExpectedFileBody {
+    pub path: String,
+    pub bytes: i64,
+    pub mtime_ns: i64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ScanRequestBody {
-    /// Absolute path — a directory or a single file.
-    pub path: String,
+    /// Absolute path — a directory or a single file. Optional only so that a
+    /// `probe_paths` connection test can omit it; a scan without it is a 400
+    /// `path_required` from the handler, not the extractor's 422.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Curator's idempotency key, `<transfer>/<generation>/<dir>/<attempt>`.
+    /// A repeated key returns the request it created; a new attempt suffix
+    /// is a new request.
+    #[serde(default)]
+    pub request_key: Option<String>,
+    /// Hold the response up to this long (capped at 15 s) for the result.
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
+    /// The media files this import placed under `path`. Each is probed
+    /// whatever its size and mtime say, and reported per file.
+    #[serde(default)]
+    pub expected_files: Option<Vec<ExpectedFileBody>>,
+    /// Files, or folders once emptied and removed, under `path` that no
+    /// longer exist (contract amendment `removed_paths`). With any named the
+    /// request is probe-only: plurx looks at exactly `expected_files` and
+    /// these, walks nothing else, and reports each as `gone`, `unknown`,
+    /// `present` or `retained`.
+    #[serde(default)]
+    pub removed_paths: Option<Vec<String>>,
+    /// Like `removed_paths`, but the title is kept (contract amendment
+    /// `offload`): each path's file records are removed and the item stays,
+    /// marked offloaded once it has no files left. Probe-only. Send it only to
+    /// a cinema that advertises `offload`; an older node refuses the request
+    /// rather than deleting the title.
+    #[serde(default)]
+    pub offloaded_paths: Option<Vec<String>>,
+    /// Record exactly `expected_files` and walk nothing, even at a library
+    /// root, and never share a pass with a request that did not ask for it.
+    /// Default `false`; a request with `removed_paths` is always probe-only.
+    #[serde(default)]
+    pub probe_only: Option<bool>,
+    /// Connection test (contract v2 §5.3): with this set and `path` absent,
+    /// answer which of these library roots plurx can see. Each must be a
+    /// configured root or lie under one; anything else is listed under
+    /// `outside_roots` and never `stat`ed.
+    #[serde(default)]
+    pub probe_paths: Option<Vec<String>>,
     #[serde(default)]
     pub ids: Option<Ids>,
     /// `movie` | `episode` | `season` | `book`. Advisory: the library's own kind
@@ -75,27 +128,113 @@ pub struct ScanAccepted {
     pub correlation_id: Option<String>,
 }
 
+/// The longest a `POST /scan` holds its response for a result.
+pub const MAX_WAIT_MS: u64 = 15_000;
+/// How long a caller should wait before retrying a `path_unreadable`.
+pub const PATH_UNREADABLE_RETRY_S: u64 = 60;
+
 /// POST /api/v1/scan (scope `scan:trigger`)
 pub async fn scan(
     State(state): State<AppState>,
     parts: Parts,
     Json(body): Json<ScanRequestBody>,
-) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
+) -> Result<Response, ApiError> {
     let mut parts = parts;
-    let _key = ScopedKey::require(&mut parts, &state, scopes::SCAN_TRIGGER).await?;
+    let key = ScopedKey::require(&mut parts, &state, scopes::SCAN_TRIGGER).await?;
     // Counted here, before the path is resolved: a request rejected for a
     // path-mapping mistake still proves the other application reached plurx
     // with a working key, and that is the first thing anyone debugging this
     // needs to rule in or out.
     state.jobs.metrics().count_notification();
 
-    let path = PathBuf::from(&body.path);
+    if let Some(probe) = body.probe_paths.as_deref() {
+        if body.path.is_some() {
+            // A connection test and a scan are different requests; guessing
+            // which one the caller meant would silently drop the other.
+            return Err(ApiError::Typed {
+                status: StatusCode::BAD_REQUEST,
+                code: "probe_paths_with_path",
+                message: "`probe_paths` is a connection test and takes no `path`".into(),
+            });
+        }
+        return probe_paths(&state, probe).await;
+    }
+    let Some(raw_path) = body.path.clone() else {
+        return Err(ApiError::Typed {
+            status: StatusCode::BAD_REQUEST,
+            code: "path_required",
+            message: "`path` is required unless the request is a `probe_paths` test".into(),
+        });
+    };
+    let path = PathBuf::from(&raw_path);
     if !path.is_absolute() {
         return Err(ApiError::BadRequest(format!(
-            "`{}` is not an absolute path — plurx and the caller may not share a \
-             working directory, so relative paths cannot be resolved",
-            body.path
+            "`{raw_path}` is not an absolute path — plurx and the caller may not share a \
+             working directory, so relative paths cannot be resolved"
         )));
+    }
+    let request_key = body.request_key.clone().unwrap_or_default();
+    let expected_files = body
+        .expected_files
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|file| ExpectedFile {
+            path: file.path.clone(),
+            bytes: file.bytes,
+            mtime_ns: file.mtime_ns,
+        })
+        .collect::<Vec<_>>();
+    if expected_files
+        .iter()
+        .any(|file| !std::path::Path::new(&file.path).is_absolute())
+    {
+        return Err(ApiError::BadRequest(
+            "every `expected_files[].path` must be absolute".to_owned(),
+        ));
+    }
+    let removed_paths = body.removed_paths.clone().unwrap_or_default();
+    let scope = containment::lexical(&path);
+    if removed_paths.iter().any(|removed| {
+        let removed = std::path::Path::new(removed);
+        !removed.is_absolute() || !containment::lexical(removed).starts_with(&scope)
+    }) {
+        return Err(ApiError::BadRequest(
+            "every `removed_paths[]` entry must be absolute and under `path`".to_owned(),
+        ));
+    }
+    let offloaded_paths = body.offloaded_paths.clone().unwrap_or_default();
+    if offloaded_paths.iter().any(|offloaded| {
+        let offloaded = std::path::Path::new(offloaded);
+        !offloaded.is_absolute() || !containment::lexical(offloaded).starts_with(&scope)
+    }) {
+        return Err(ApiError::BadRequest(
+            "every `offloaded_paths[]` entry must be absolute and under `path`".to_owned(),
+        ));
+    }
+    let seed = ScanRequestV2Seed {
+        key_id: key.0.id,
+        key_hash: key.0.key_hash.clone(),
+        request_key,
+        expected_files,
+        removed_paths,
+        offloaded_paths,
+        probe_only: body.probe_only.unwrap_or(false),
+    };
+    let probe_only = seed.is_probe_only();
+    seed.validate()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let wait = Duration::from_millis(body.wait_ms.unwrap_or(0).min(MAX_WAIT_MS));
+
+    // Idempotency first: a lost response must not become a second request.
+    if !seed.request_key.is_empty() {
+        if let Some(existing) = state
+            .store
+            .scan_request_by_key(&seed.key_hash, &seed.request_key)
+            .await?
+        {
+            return answer(&state, &existing, wait, body.correlation_id.clone()).await;
+        }
     }
     if body
         .series
@@ -110,19 +249,41 @@ pub async fn scan(
 
     // plurx resolves the library, so the caller never needs to know plurx's
     // library ids — one less thing to keep in sync between two applications.
+    // Containment is lexical first, so "not ours" (permanent) is never
+    // confused with "ours, but the share is not mounted right now".
     let libraries = state.store.list_libraries().await?;
-    let Some(library) = library_for_path(&libraries, &path) else {
-        // Self-explaining on purpose: a path-mapping mistake between two
-        // containers is the likeliest cause by a wide margin, and naming the
-        // roots turns a support conversation into a glance.
-        return Err(ApiError::Unprocessable(serde_json::json!({
-            "error": "path is not under any library root",
-            "path": body.path,
-            "roots": libraries
-                .iter()
-                .flat_map(|l| l.paths.iter().map(|p| p.display().to_string()))
-                .collect::<Vec<_>>(),
-        })));
+    let classified = {
+        let libraries = libraries.clone();
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            // A removal-only request may name a folder that is itself gone
+            // as its common parent: scope it to the nearest folder that still
+            // exists, which every path it names lies under too.
+            let path = if probe_only {
+                containment::nearest_existing(&libraries, &path)
+            } else {
+                path
+            };
+            match containment::classify_path(&libraries, &path) {
+                PathClass::Outside { roots } => Err(Err(roots)),
+                PathClass::Unreadable { root, error } => Err(Ok((root, error))),
+                PathClass::Inside { library, .. } => Ok((library.id, path)),
+            }
+        })
+        .await
+        .map_err(|error| ApiError::Internal(format!("path classification: {error}")))?
+    };
+    let (classified, path) = match classified {
+        Ok((id, scoped)) => (Ok(id), scoped),
+        Err(error) => (Err(error), path),
+    };
+    let library = match classified {
+        Ok(id) => libraries
+            .iter()
+            .find(|library| library.id == id)
+            .ok_or_else(|| ApiError::Internal("classified library vanished".into()))?,
+        Err(Err(roots)) => return Err(outside_roots(&raw_path, roots)),
+        Err(Ok((root, error))) => return Ok(path_unreadable(&raw_path, &root, &error)),
     };
 
     let book = body.book.as_ref().map(validate_book_hints).transpose()?;
@@ -157,43 +318,232 @@ pub async fn scan(
         source: body.source.clone(),
     };
 
-    match state.jobs.request_scan(req).await {
-        Ok(Some(scan)) => Ok((
-            axum::http::StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "scanned",
-                "library_id": library.id,
-                "request_id": request_id,
-                "report": scan.report,
-                "items": scan.items,
-                "correlation_id": body.correlation_id,
-            })),
-        )),
-        // Busy: queued rather than dropped. 202 with an id to poll, because
-        // silently losing the request would leave a season half-indexed.
-        Ok(None) => Ok((
-            axum::http::StatusCode::ACCEPTED,
-            Json(serde_json::to_value(ScanAccepted {
-                status: "queued",
-                request_id,
-                correlation_id: body.correlation_id,
-            })?),
-        )),
-        Err(TargetError::OutsideRoots { path, roots }) => {
-            Err(ApiError::Unprocessable(serde_json::json!({
-                "error": "path is not under any library root",
-                "path": path,
-                "roots": roots,
-            })))
+    // The sidecar is written in the admission transaction itself, so even a
+    // worker that claims and finishes this request before the response is
+    // built probes the expected files (contract v2 §5.1).
+    let request_id = match state.jobs.request_scan_v2(req, seed).await {
+        Ok(ScanAdmission::Admitted(id) | ScanAdmission::Replay(id)) => id,
+        Err(TargetError::OutsideRoots { path, roots }) => return Err(outside_roots(&path, roots)),
+        Err(TargetError::Unreadable { path, root, error }) => {
+            return Ok(path_unreadable(&path, std::path::Path::new(&root), &error))
         }
         // Refused, not failed: the queue is full or the request is being
         // cancelled. 503 tells a caller like Monarr to retry later, where a
         // 500 would tell it plurx is broken.
         Err(error @ TargetError::Refused(_)) => {
-            Err(ApiError::ServiceUnavailable(error.to_string()))
+            return Err(ApiError::ServiceUnavailable(error.to_string()))
         }
-        Err(TargetError::Store(e)) => Err(ApiError::from(e)),
+        Err(TargetError::Store(e)) => return Err(ApiError::from(e)),
+    };
+    answer(&state, &request_id, wait, body.correlation_id).await
+}
+
+/// The answer for one request: `200 scanned` with its result and per-file
+/// report once it is done, `202 queued` while it is not (after waiting up to
+/// `wait` for it), and the failure a finished request recorded.
+async fn answer(
+    state: &AppState,
+    request_id: &str,
+    wait: Duration,
+    correlation_id: Option<String>,
+) -> Result<Response, ApiError> {
+    let record = if wait.is_zero() {
+        state.jobs.scan_request(request_id).await
+    } else {
+        state.jobs.await_scan_request(request_id, wait).await
+    };
+    let record = record.ok_or(ApiError::NotFound("scan request"))?;
+    let correlation_id = record.correlation_id.clone().or(correlation_id);
+    match record.status.as_str() {
+        "done" => {
+            let files = state
+                .store
+                .scan_request_v2(request_id)
+                .await?
+                .map(|row| row.files)
+                .unwrap_or_default();
+            Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "scanned",
+                    "library_id": record.library_id,
+                    "request_id": record.request_id,
+                    "report": record.report,
+                    "items": record.items,
+                    "files": files,
+                    "correlation_id": correlation_id,
+                })),
+            )
+                .into_response())
+        }
+        // A finished failure answers with the request it is — the same
+        // `request_id`, `status` and `error` the GET record carries — so a
+        // replayed `request_key` returns its result (contract v2 §5.1) and
+        // the caller can tell a transient root from any other failure.
+        "failed" => {
+            let error = record.error.unwrap_or_default();
+            if error.starts_with(PATH_UNREADABLE) {
+                // The share dropped between admission and the scan.
+                return Ok(path_unreadable_for(
+                    &record.path,
+                    std::path::Path::new(""),
+                    &error,
+                    Some(&record.request_id),
+                ));
+            }
+            let mut detail = serde_json::Map::new();
+            detail.insert("status".into(), serde_json::json!("failed"));
+            detail.insert("request_id".into(), serde_json::json!(record.request_id));
+            detail.insert("error".into(), serde_json::json!(error));
+            if let Some(correlation_id) = correlation_id {
+                detail.insert("correlation_id".into(), serde_json::json!(correlation_id));
+            }
+            // A cancelled request is a failure with its own code, so a
+            // replayed `request_key` answers it rather than `202 queued`
+            // forever, and the caller advances to a new attempt.
+            let (code, message) = if record.code == Some("cancelled") {
+                ("cancelled", "the scan request was cancelled; see `error`")
+            } else {
+                ("scan_failed", "the scan request failed; see `error`")
+            };
+            Err(ApiError::TypedDetail {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code,
+                message: message.into(),
+                detail,
+            })
+        }
+        // Busy: queued rather than dropped. 202 with an id to poll, because
+        // silently losing the request would leave a season half-indexed.
+        _ => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::to_value(ScanAccepted {
+                status: "queued",
+                request_id: record.request_id,
+                correlation_id,
+            })?),
+        )
+            .into_response()),
     }
+}
+
+/// Optional contract features this build implements, advertised on the
+/// connection-test answer.
+pub const FEATURES: &[&str] = &["removed_paths", "probe_only", "offload"];
+
+/// The most paths one connection test may name.
+pub const MAX_PROBE_PATHS: usize = 64;
+
+/// `probe_paths`: which of the caller's library roots plurx can see. A path
+/// is looked at only when it is a configured root or lexically under one —
+/// a scan key must not become a way to `stat` arbitrary host paths.
+async fn probe_paths(state: &AppState, probe: &[String]) -> Result<Response, ApiError> {
+    if probe.is_empty() || probe.len() > MAX_PROBE_PATHS {
+        return Err(ApiError::BadRequest(format!(
+            "`probe_paths` must name 1..={MAX_PROBE_PATHS} paths"
+        )));
+    }
+    let libraries = state.store.list_libraries().await?;
+    let probe = probe.to_vec();
+    let answer = tokio::task::spawn_blocking(move || {
+        let (mut visible, mut missing, mut outside) = (Vec::new(), Vec::new(), Vec::new());
+        for raw in probe {
+            let path = std::path::Path::new(&raw);
+            let Some((_, root)) = path
+                .is_absolute()
+                .then(|| containment::lexical_root(&libraries, path))
+                .flatten()
+            else {
+                outside.push(raw);
+                continue;
+            };
+            // Resolving the path would follow a symlink beneath the root to
+            // wherever it points before containment could refuse it: `lstat`
+            // each component under the root first and never follow one.
+            match containment::symlink_below_root(&root, path) {
+                Ok(true) => {
+                    outside.push(raw);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    missing.push(raw);
+                    continue;
+                }
+            }
+            match containment::classify_path(&libraries, path) {
+                PathClass::Inside { .. } => visible.push(raw),
+                PathClass::Unreadable { .. } => missing.push(raw),
+                // A symlink out of its root.
+                PathClass::Outside { .. } => outside.push(raw),
+            }
+        }
+        serde_json::json!({
+            // What this build understands beyond the base contract, so a
+            // caller can tell before it sends a request shape that an older
+            // plurx would mis-handle (contract amendment §5.3).
+            "features": FEATURES,
+            "roots": containment::configured_roots(&libraries),
+            "visible": visible,
+            "missing": missing,
+            "outside_roots": outside,
+        })
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("probe_paths: {error}")))?;
+    Ok((StatusCode::OK, Json(answer)).into_response())
+}
+
+/// The error prefix a request failed by an unreadable root records.
+const PATH_UNREADABLE: &str = "path_unreadable";
+
+/// `422 path_outside_roots` — permanent. Self-explaining on purpose: a
+/// path-mapping mistake between two containers is the likeliest cause by a
+/// wide margin, and naming the roots turns a support conversation into a
+/// glance. `error` and `roots` keep their old meaning for older callers.
+fn outside_roots(path: &str, roots: Vec<String>) -> ApiError {
+    ApiError::Unprocessable(serde_json::json!({
+        "code": "path_outside_roots",
+        "error": "path is not under any library root",
+        "path": path,
+        "roots": roots,
+    }))
+}
+
+/// `503 path_unreadable` — transient: the path is under a library root that
+/// cannot be read right now (an unmounted share, `ENOTCONN`, `EIO`), so the
+/// same request succeeds once it is back.
+fn path_unreadable(path: &str, root: &std::path::Path, error: &str) -> Response {
+    path_unreadable_for(path, root, error, None)
+}
+
+/// [`path_unreadable`] for a request that was admitted and then failed: the
+/// body also names it, as `status: failed` with its `request_id`.
+fn path_unreadable_for(
+    path: &str,
+    root: &std::path::Path,
+    error: &str,
+    request_id: Option<&str>,
+) -> Response {
+    let mut body = serde_json::json!({
+        "code": PATH_UNREADABLE,
+        "error": format!("library root could not be read: {error}"),
+        "path": path,
+        "retry_after_s": PATH_UNREADABLE_RETRY_S,
+    });
+    if !root.as_os_str().is_empty() {
+        body["root"] = serde_json::json!(root.display().to_string());
+    }
+    if let Some(request_id) = request_id {
+        body["request_id"] = serde_json::json!(request_id);
+        body["status"] = serde_json::json!("failed");
+    }
+    let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(PATH_UNREADABLE_RETRY_S),
+    );
+    response
 }
 
 fn validate_book_hints(body: &BookMetadataBody) -> Result<BookHints, ApiError> {
@@ -257,41 +607,31 @@ fn validate_book_hints(body: &BookMetadataBody) -> Result<BookHints, ApiError> {
     })
 }
 
-/// GET /api/v1/scan/requests/{id} (scope `status:read`)
+/// GET /api/v1/scan/requests/{id} — scope `status:read` for any request, or
+/// `scan:trigger` for a request this same key created (contract v2 §4.2): a
+/// caller can read back what it asked for without holding a wider scope.
 pub async fn request_status(
     State(state): State<AppState>,
     parts: Parts,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut parts = parts;
-    let _key = ScopedKey::require(&mut parts, &state, scopes::STATUS_READ).await?;
+    let key = ScopedKey::require_any(
+        &mut parts,
+        &state,
+        &[scopes::STATUS_READ, scopes::SCAN_TRIGGER],
+    )
+    .await?;
+    if !key.0.allows(scopes::STATUS_READ)
+        && state.jobs.scan_request_creator(&id).await? != Some(key.0.key_hash)
+    {
+        // Another key's request, one from before keys were recorded, or no
+        // such request: all 403 for a key without `status:read`, so a scan
+        // key cannot probe which request ids exist (review #1407, 12).
+        return Err(ApiError::Forbidden);
+    }
     match state.jobs.scan_request(&id).await {
         Some(rec) => Ok(Json(serde_json::to_value(rec)?)),
         None => Err(ApiError::NotFound("scan request")),
     }
-}
-
-/// The library whose roots contain `path`.
-///
-/// Longest matching root wins, so a library nested inside another (`/media`
-/// and `/media/kids`) resolves to the more specific one rather than to
-/// whichever happened to be created first.
-fn library_for_path<'a>(libraries: &'a [Library], path: &std::path::Path) -> Option<&'a Library> {
-    let canonical = path.canonicalize().ok()?;
-    libraries
-        .iter()
-        .filter_map(|lib| {
-            lib.paths
-                .iter()
-                .filter_map(|root| {
-                    let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-                    // Component-wise: `/data` must not match `/database`.
-                    (canonical == root || canonical.starts_with(&root))
-                        .then(|| root.components().count())
-                })
-                .max()
-                .map(|depth| (depth, lib))
-        })
-        .max_by_key(|(depth, _)| *depth)
-        .map(|(_, lib)| lib)
 }
