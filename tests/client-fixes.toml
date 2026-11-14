@@ -8583,3 +8583,60 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = '"origin_ms", "control_binding", "sequence")}'
 test = "clients/linux-player/tests/test_cinema_controls.py"
 test_anchor = "def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls"
+
+# Android prepared playback: preserve each correction's current production/test anchor.
+[[fixes]]
+id = "android.processed-route-candidate-seeks"
+commits = ["40359cf20ca78ca508371fef5b79adc91a69509e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun adoptCommittedAutomaticCandidate("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun processedCommitCarriesItsCandidateIntoTheNextSeekRequest()"
+
+[[fixes]]
+id = "android.prepared-control-after-accepted-commit"
+commits = ["9ec13d9041277d891b751cec525c23f5571ec90f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun acknowledgementDelivered(value: ActionAcknowledgement, response: ControlResponse)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedControlHandoffTest.kt"
+test_anchor = "fun acceptedWireCommitTransfersTheRealSessionCallbackAfterItsResponse()"
+
+[[fixes]]
+id = "android.prepared-vod-film-timeline"
+commits = ["f2da0d08884d9079d2dfc9ee1411c6f3d15d73ed"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun preparedFilmLocalVod("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedVodTimelineTest.kt"
+test_anchor = "fun serverDirectedFullVodUsesFilmTimeWithoutAnAutoCandidateRequest()"
+
+[[fixes]]
+id = "android.prepared-verified-acquisition-entry"
+commits = ["2f5a5f733f84eded03aaf98560323b647fc8d3c2"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun resolvePreparedAcquisition(successor: ExoPlayer, action: ControlAction)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedAcquisitionTest.kt"
+test_anchor = "fun zeroOriginUsesNativeVerifiedEntryRatherThanExplicitUncachedPredecessor()"
+
+[[fixes]]
+id = "android.prepared-playlist-origin-ownership"
+commits = ["412aa4fb3ec846aaa2a9bcf5ab692de591e95603"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun preparedPlaylistOwnership(url: String, credentialOrigin: String, sessionId: String)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedPlaylistOwnershipTest.kt"
+test_anchor = "fun foreignOriginOrSessionCannotOwnTheManifest()"
+
+[[fixes]]
+id = "android.prepared-native-seek-runway-settlement"
+commits = ["ee010d56ee8ce2d1684df558d85fe381aaeeeec6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "fun seekReady(nowMs: Long)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun bufferSupplyWaitDoesNotBecomeSeekLatencyOrAFiveSecondLead()"
+
+[[fixes]]
+id = "android.optional-auto-failure-retains-executing-choice"
+commits = ["8e1f830cbb6a4eb9cf3c559f6ee0e60a8e909c7d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun restoreOptionalAutomaticCandidate("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/OptionalAutoAttemptTest.kt"
+test_anchor = "fun failedOptionalTargetRestoresExecutingFrozenRecipeOnTheNextControlEnvelope()"

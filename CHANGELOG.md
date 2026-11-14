@@ -10,6 +10,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Android prepared Dolby Vision handoffs now keep the executing playback choice
+  and film position through optional Auto failures, later seeks, and the
+  accepted switch to the processed stream.
+- Canceled HDR preparation can retry when live playback resumes; genuine
+  staging refusals keep their failure result.
 - **HDR:** fix the two remaining CM29 Smile outliers by measuring previously unreachable blue-gamut vertices with saturation-expanded synthetic probes. Existing observations retain priority; all six qualified frames stay below 0.05 dE, and every worsening coordinate is preserved. Docker CPU controls now preserve separate analytic/measured expectations and reject stale table receipts. See [qualification](docs/streaming/CM29-MEASURED-GAMUT.md).
 - Playback-control refusal logs retain the protocol code, route-read failure
   stage and sanitized source location, distinguishing release reconciliation
