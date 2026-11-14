@@ -102,7 +102,8 @@ FROM (
   FROM foreground_source_owners owner JOIN foreground_source_required_resources resource ON resource.owner_id=owner.owner_id
   WHERE owner.lease_expires_at_ms>json_extract($1,'$.now_ms') OR json_extract(owner.projection_json,'$.source_quiescent')!=1
   UNION ALL
-  SELECT resource.value,custody.work_id,'background_source','maintenance',custody.started_at_ms,custody.authority_expires_at_ms,
+  SELECT resource.value,custody.work_id,'background_source','maintenance',custody.started_at_ms,
+    CASE WHEN custody.authority_expires_at_ms=0 THEN COALESCE(origin.updated_at_ms,custody.updated_at_ms) ELSE custody.authority_expires_at_ms END,
     CASE WHEN custody.phase='paused' THEN 'source_paused' WHEN custody.authority_expires_at_ms>json_extract($1,'$.now_ms')
       THEN CASE custody.owner_kind WHEN 'lease' THEN 'read_attestation' WHEN 'offline' THEN 'offline_source' ELSE custody.phase END ELSE 'cleanup_pending' END,custody.updated_at_ms,
     CASE WHEN custody.phase='paused' THEN 0 ELSE 1 END

@@ -28,6 +28,8 @@ pub(crate) struct Completion {
     /// can have received this owner's source.
     started_tick: u64,
 }
+/// How often a waiting ledger checks whether the sweep already released it.
+const REAP_CHECK: Duration = Duration::from_secs(5);
 pub(crate) struct Operation(Arc<Completion>);
 pub(crate) struct Holder(Arc<Completion>);
 pub(crate) struct RawRetirement {
@@ -164,8 +166,11 @@ impl Completion {
             () = self.authorize.cancelled() => {}
             () = self.abandoned() => return,
         }
+        let waiting = tokio::time::Instant::now();
+        let mut last_check = waiting;
+        let mut reported = false;
         loop {
-            let ready = {
+            let (ready, open) = {
                 let mut state = self
                     .state
                     .lock()
@@ -184,10 +189,31 @@ impl Completion {
                     // Close the last real descriptors BEFORE publishing proof.
                     state.files.clear();
                 }
-                ready
+                let shared = state
+                    .files
+                    .iter()
+                    .filter(|file| Arc::strong_count(file) != 1)
+                    .count();
+                (
+                    ready,
+                    (state.operations, state.holders, state.raw, shared),
+                )
             };
             if ready {
                 break;
+            }
+            if last_check.elapsed() >= REAP_CHECK {
+                last_check = tokio::time::Instant::now();
+                if self.reaped().await {
+                    return;
+                }
+                if !reported && waiting.elapsed() >= Duration::from_secs(60) {
+                    reported = true;
+                    let (operations, holders, raw, shared_files) = open;
+                    tracing::warn!(custody_id = %self.receipt.custody_id, operations, holders, raw,
+                        shared_files, "finished source owner still has open in-process holders; \
+                        its source capacity is released when its authority lapses");
+                }
             }
             // Arc<File> holders do not issue notifications when they close.
             tokio::select! { () = self.changed.notified() => {}, () = tokio::time::sleep(Duration::from_millis(25)) => {} }
@@ -213,6 +239,23 @@ impl Completion {
         }
         crate::background_jobs::settle_joined_source_custody(&store, self.receipt.clone()).await;
     }
+    /// The store sweep already released this custody because its authority
+    /// lapsed (lease expiry is the release). Nothing is left to settle, so the
+    /// ledger stops waiting instead of polling for the life of the daemon.
+    async fn reaped(&self) -> bool {
+        match self
+            .store
+            .resolve_background_source_custody(self.receipt.clone())
+            .await
+        {
+            Ok(None) => {
+                tracing::info!(custody_id = %self.receipt.custody_id,
+                    "source custody was released by lease expiry; ledger stops waiting");
+                true
+            }
+            Ok(Some(_)) | Err(_) => false,
+        }
+    }
     #[cfg(target_os = "linux")]
     async fn descendants_exited(&self, since: u64) -> bool {
         if !crate::source_custody::process_tree_complete() {
@@ -221,8 +264,15 @@ impl Completion {
             return false;
         }
         let waiting = tokio::time::Instant::now();
+        let mut last_check = waiting;
         let mut reported = false;
         loop {
+            if last_check.elapsed() >= REAP_CHECK {
+                last_check = tokio::time::Instant::now();
+                if self.reaped().await {
+                    return false;
+                }
+            }
             match crate::source_custody::live_descendants_since(since) {
                 Ok(live) if live.is_empty() => return true,
                 Ok(live) if !reported && waiting.elapsed() >= Duration::from_secs(60) => {

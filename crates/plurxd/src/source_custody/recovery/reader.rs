@@ -613,6 +613,24 @@ pub(super) fn prepare_at(
     }
 }
 
+/// Whether the store no longer holds this exact owner (settled elsewhere or
+/// released by lease expiry).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn record_released(store: &Arc<dyn Store>, record: &Record) -> Result<bool, String> {
+    match record {
+        Record::Background { token } => store
+            .resolve_background_source_custody(token.clone())
+            .await
+            .map(|current| current.is_none())
+            .map_err(|error| error.to_string()),
+        Record::Foreground { token } => store
+            .resolve_foreground_source(token.clone())
+            .await
+            .map(|current| current.is_none())
+            .map_err(|error| error.to_string()),
+    }
+}
+
 pub(super) fn complete_at(directory: &Path, record: &Record) -> Result<(), String> {
     let name = record.name()?.trim_end_matches(".json").to_owned();
     let evidence = directory.join(format!("{name}.json"));
@@ -911,6 +929,23 @@ pub(super) async fn replay_at_in(
             }
             let name = evidence.record.name()?.trim_end_matches(".json").to_owned();
             if path.file_name().and_then(|value| value.to_str()) != Some(&format!("{name}.json")) {
+                continue;
+            }
+            // The store sweep releases an owner once its authority has lapsed
+            // (lease expiry is the release). A witness whose owner is gone has
+            // nothing left to prove; collect it so dead owners never fill the
+            // inventory bound. A witness this process still holds is live.
+            let owned = OWNED
+                .lock()
+                .map_err(|_| "reader registry poisoned")?
+                .contains_key(&path);
+            if !owned && record_released(store, &evidence.record).await? {
+                clear_at(legacy, &evidence.record)?;
+                complete_at(directory, &evidence.record)?;
+                tracing::info!(
+                    witness = name,
+                    "collected the reader witness of a source owner released by lease expiry"
+                );
                 continue;
             }
             let armed = directory.join(format!("{name}.armed"));
