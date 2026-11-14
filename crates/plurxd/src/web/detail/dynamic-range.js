@@ -259,6 +259,17 @@ function playbackAudioChip(a){
   const channels=fmtChannels(a.channels), text=[mark,channels].filter(Boolean).join(' ');
   return {text,full:[full,channels].filter(Boolean).join(' ')};
 }
+// Session telemetry proves ordinary HDR-to-SDR mapping; a current execution
+// report also proves Dolby display-target mapping, including HDR-to-HDR.
+function playerToneMapping(p){
+  if(!p) return false;
+  const h=p.health;
+  if(p.sessionId&&h?.id===p.sessionId&&Number.isFinite(h.tone_map_peak_nits)
+    &&h.tone_map_peak_nits>0&&['cll','mdcv','default'].includes(h.tone_map_peak_source)) return true;
+  const report=playerEffectiveProcessing(p);
+  return !!report?.applied_operations.some(op=>op==='TargetMapping'||
+    (typeof op==='object'&&op?.DisplayTargetMapping));
+}
 function playerFactBadges(){
   if(!PLAYER) return '';
   const s=PLAYER.source||{}, b=[];
@@ -275,6 +286,7 @@ function playerFactBadges(){
   // qualify; the reasons for the inactive ones live in the details panel.
   const enhancement=enhancementPills(playerEnhancement(PLAYER));
   if(enhancement) b.push(enhancement);
+  if(playerToneMapping(PLAYER)) b.push('<span class="vbadge tonemap" title="Cinema is tone mapping this playback" aria-label="Cinema is tone mapping this playback">Tone mapping</span>');
   const au=playbackAudioChip(PLAYER.audio&&PLAYER.audio[PLAYER.curAudio]);
   if(au) b.push(`<span class="vbadge audio" title="${esc(au.full)}">${mediaIcon('audio')}${esc(au.text)}</span>`);
   return b.join('');

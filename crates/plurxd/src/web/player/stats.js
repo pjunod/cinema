@@ -551,7 +551,10 @@ async function pollSessionHealth(force){
   const current=()=>playbackOwnsAttachedMedia(p)&&p.sessionId===session&&p.streamId===stream
     &&p.mediaAttachment===attachment;
   const ov=document.getElementById("statsov");
-  if(!force&&(!ov||!ov.classList.contains("on"))&&!playbackWaitSurfaceLive()) return;
+  // Read each attached session once even with the stats panel closed so its
+  // processing pill can appear in the ordinary playback controls.
+  const needsSessionFacts=p.sessionId&&p.health?.id!==p.sessionId;
+  if(!force&&!needsSessionFacts&&(!ov||!ov.classList.contains("on"))&&!playbackWaitSurfaceLive()) return;
   // Two shapes of stream, one question. An HLS session answers from the
   // transcode manager; a progressive remux answers from its own registry (see
   // progressive.rs) — that path is Chrome's whole remux experience, and until
@@ -571,8 +574,10 @@ async function pollSessionHealth(force){
       // and bound to this session, so read them through the file context.
       const fileContext=playbackFileContextForPlayer(p);
       const previousRange=statsStreamFormat(p)?.dynamic_range;
+      const previousToneMapping=playerToneMapping(p);
       p.health=fileContext.source_ref.kind==="local"? h : sharedPlaybackStatusMetrics(fileContext,h);
-      if(previousRange!==statsStreamFormat(p)?.dynamic_range&&typeof renderPlayerInfo==="function")renderPlayerInfo();
+      if((previousRange!==statsStreamFormat(p)?.dynamic_range||previousToneMapping!==playerToneMapping(p))
+        &&typeof renderPlayerInfo==="function")renderPlayerInfo();
       p.healthObservedAt=performance.now();
       // No surface is raised or restated here: a fault is raised by the event
       // that caused it. A live media wait reads this sample through the
