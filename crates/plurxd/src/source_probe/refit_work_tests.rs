@@ -260,7 +260,7 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
         .expect("DV file");
     let scanner = "a".repeat(64);
     let demand = store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, now_ms())
         .await
         .expect("title demand")
         .into_iter()
