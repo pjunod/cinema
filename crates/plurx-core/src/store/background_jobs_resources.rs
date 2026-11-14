@@ -1566,11 +1566,18 @@ mod source_tests {
         coordinator::establish(&store, "coordinator", source.clone(), 1000)
             .await
             .expect("establish");
-        let first_claim =
-            coordinator::claim(&store, "coordinator", source.clone(), "worker", 0, 1000, 30000)
-                .await
-                .expect("claim")
-                .expect("claimed");
+        let first_claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("claim")
+        .expect("claimed");
         let first = coordinator::begin_phase(
             &store,
             first_claim,
