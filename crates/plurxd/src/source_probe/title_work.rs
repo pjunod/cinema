@@ -11,8 +11,8 @@ use plurx_core::{
     error::StoreError,
     store::{
         background_jobs::{
-            CandidateCursor, CandidateQuery, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind,
-            JobPayload, JobRequest, JobSettlement,
+            CandidateCursor, CandidateQuery, ClaimBlock, ClaimJob, EnqueueJob, EnqueueOutcome,
+            JobKind, JobPayload, JobRequest, JobSettlement,
         },
         dv_title_jobs::{TitleDemand, TitleOutput},
     },
@@ -98,6 +98,33 @@ impl TitleTask {
             // in that same read: do not read the file twice.
             if state.jobs.title_scan_awaits_index_pass(file.id) {
                 continue;
+            }
+            // A queued job whose claim this node's replica shows the claim
+            // statement refusing is not bound or claimed this pass: neither
+            // write would let it through (CLAIM-LOCAL-VERDICT-BUILD.md §3.5).
+            // Kind demand is what the bind itself repairs, so it binds on.
+            if let Some(id) = &demand.queued_job_id {
+                if let Some(queued) = state.store.background_job(id).await? {
+                    let now = now_ms();
+                    let verdict = state
+                        .store
+                        .claim_verdict(ClaimJob {
+                            job_id: id.clone(),
+                            expected_revision: queued.revision,
+                            node_id: state.node_id.clone(),
+                            boot_id: boot.into(),
+                            claim_id: uuid::Uuid::new_v4().to_string(),
+                            kind: JobKind::DvTitleScan,
+                            payload_version: 1,
+                            now_ms: now,
+                            dispatched_at_ms: now,
+                        })
+                        .await?;
+                    if let Some(block) = verdict.filter(|block| *block != ClaimBlock::KindDemand) {
+                        crate::background_jobs::claim_skipped(JobKind::DvTitleScan, block);
+                        continue;
+                    }
+                }
             }
             let Some(revision) = state
                 .store

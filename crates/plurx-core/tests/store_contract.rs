@@ -804,6 +804,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     // The same claim, reporting proposed / settled / skipped on the local
     // verdict: tests/claim_local_verdict.rs drives it on both backends.
     "claim_job_attempt",
+    // The verdict alone, for dv_title_scan before it binds (same test file).
+    "claim_verdict",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -21483,7 +21485,9 @@ fn contract_inventory_matches_every_store_method() {
     // exercised by the source-fenced DV title-job contracts.
     // Current main declares 591 distinct methods; save/apply/state replace
     // one storage-domain method, adding two names without hiding existing APIs.
-    assert_eq!(declared.len(), 593, "review the Store method count");
+    // +2: claim_job_attempt and claim_verdict, the claim local verdict
+    // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
+    assert_eq!(declared.len(), 595, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

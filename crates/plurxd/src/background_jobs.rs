@@ -9,8 +9,8 @@ use std::time::Duration;
 use plurx_core::cluster::coordination::ClusterJobAuthority;
 use plurx_core::error::StoreError;
 use plurx_core::store::background_jobs::{
-    BackgroundJob, ClaimJob, ClaimOutcome, ClaimResolution, JobPublishOutcome, JobSettlement,
-    JobToken, PublishTranscodeJob, RenewJobs, RenewOutcome, ResolveClaim, SettleJob,
+    BackgroundJob, ClaimJob, ClaimOutcome, ClaimPath, ClaimResolution, JobPublishOutcome,
+    JobSettlement, JobToken, PublishTranscodeJob, RenewJobs, RenewOutcome, ResolveClaim, SettleJob,
     TranscodeJobOutput, JOB_LEASE_MS, JOB_RENEW_INTERVAL_MS,
 };
 use plurx_core::store::Store;
@@ -28,7 +28,7 @@ pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
 use metrics::Event;
-pub(crate) use metrics::{accepted_claims, prometheus};
+pub(crate) use metrics::{accepted_claims, claim_skipped, prometheus};
 
 #[path = "background_jobs/analysis_reconcile.rs"]
 pub(crate) mod analysis_reconcile;
@@ -288,6 +288,11 @@ pub(crate) struct ActiveBackgroundJob {
 /// A failed RPC is not a failed claim. Resolve the same identity while the
 /// caller continues holding its local permit; do not try another candidate
 /// merely because the first acknowledgement disappeared.
+///
+/// `claim_write` counts proposals only. A claim this node's applied replica
+/// showed the claim statement refusing was never proposed: it counts
+/// `claim_skipped{reason}` instead, and none of the claim latency or refusal
+/// series.
 pub(crate) async fn claim_with_resolution(
     store: &dyn Store,
     candidate: &BackgroundJob,
@@ -295,12 +300,21 @@ pub(crate) async fn claim_with_resolution(
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let kind = request.kind;
     let issued = Instant::now();
-    metrics::event(kind, Event::ClaimWrite);
     let queue_age = request
         .now_ms
         .saturating_sub(candidate.created_at_ms)
         .max(0) as u64;
-    let result = claim_with_resolution_inner(store, request).await;
+    let mut path = None;
+    let result = claim_with_resolution_inner(store, request, &mut path).await;
+    match path {
+        Some(ClaimPath::Skipped(block)) => {
+            metrics::claim_skipped(kind, block);
+            return result;
+        }
+        Some(ClaimPath::Settled) => {}
+        // An error may follow a proposal whose acknowledgement was lost.
+        Some(ClaimPath::Proposed) | None => metrics::event(kind, Event::ClaimWrite),
+    }
     metrics::claim_latency(kind, issued.elapsed());
     match &result {
         Ok(Some(_)) => {
@@ -319,16 +333,19 @@ pub(crate) async fn claim_with_resolution(
 async fn claim_with_resolution_inner(
     store: &dyn Store,
     request: ClaimJob,
+    path: &mut Option<ClaimPath>,
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let issued = Instant::now();
     let deadline = issued + Duration::from_millis(JOB_LEASE_MS as u64);
-    let claimed = if request.kind.permits_artifact_execution() {
-        store.claim_artifact_job(request.clone()).await
-    } else {
-        store.claim_job(request.clone()).await
-    };
+    // `claim_artifact_job` is `claim_job` behind the same artifact-kind check
+    // this worker already branches on; the attempt form reports the path.
+    let claimed = store.claim_job_attempt(request.clone()).await;
     #[cfg(test)]
     let claimed = faults::after_commit(faults::CLAIM, claimed);
+    let claimed = claimed.map(|attempt| {
+        *path = Some(attempt.path);
+        attempt.outcome
+    });
     match claimed {
         Ok(ClaimOutcome::Claimed { job }) if Instant::now() < deadline => {
             let remaining = job.token.as_ref().map_or(0, |token| {
@@ -2020,6 +2037,10 @@ pub(crate) async fn claim_pretranscode(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Execution authority is read once per pass, for every kind this pass
+    // may claim; each claim is then the replicated statement's to admit, and
+    // an owned job keeps re-checking authority while it runs. (A learner's
+    // check is a quorum read: once per candidate it was one per refusal.)
     let mut kinds = Vec::new();
     for kind in [
         JobKind::TranscodePrepare,
@@ -2079,12 +2100,6 @@ pub(crate) async fn claim_pretranscode(
                 let Some(admission) = transcode.admit_encoded_preparation() else {
                     return Ok(None);
                 };
-                if !authority
-                    .may_execute_job(JobKind::EncodedOutputPrepare)
-                    .await
-                {
-                    continue;
-                }
                 let now_ms = unix_ms()?;
                 let request = ClaimJob {
                     job_id: candidate.id.clone(),
@@ -2129,9 +2144,6 @@ pub(crate) async fn claim_pretranscode(
                 let Some(admission) = transcode.admit_fragment().await else {
                     return Ok(None);
                 };
-                if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
-                    continue;
-                }
                 let now_ms = unix_ms()?;
                 let request = ClaimJob {
                     job_id: candidate.id.clone(),
@@ -2194,9 +2206,6 @@ pub(crate) async fn claim_pretranscode(
                     continue;
                 }
             };
-            if !authority.may_execute_job(JobKind::TranscodePrepare).await {
-                return Ok(None);
-            }
             let now_ms = unix_ms()?;
             let request = ClaimJob {
                 job_id: candidate.id.clone(),
@@ -2302,6 +2311,7 @@ pub(crate) async fn claim_fragment(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Authority once per pass, as in `claim_pretranscode`.
     let mut eligible_kinds = Vec::new();
     for kind in [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate] {
         if authority.may_execute_job(kind).await {
@@ -2354,9 +2364,6 @@ pub(crate) async fn claim_fragment(
             let Some(admission) = transcode.admit_fragment().await else {
                 return Ok(None);
             };
-            if !authority.may_execute_job(kind).await {
-                continue;
-            }
             let now_ms = unix_ms()?;
             let request = ClaimJob {
                 job_id: candidate.id.clone(),
@@ -3074,6 +3081,7 @@ pub(crate) async fn claim_subtitle(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Authority once per pass, as in `claim_pretranscode`.
     if !authority.may_execute_job(JobKind::SubtitleExtract).await {
         return Ok(None);
     }
@@ -3108,9 +3116,6 @@ pub(crate) async fn claim_subtitle(
             };
             if tokio::fs::File::open(&file.path).await.is_err() {
                 continue;
-            }
-            if !authority.may_execute_job(JobKind::SubtitleExtract).await {
-                return Ok(None);
             }
             let now_ms = unix_ms()?;
             let Some((job, deadline)) = claim_with_resolution(

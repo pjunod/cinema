@@ -10,8 +10,8 @@
 
 use hiqlite::{params, Client, Node, NodeConfig};
 use plurx_core::store::background_jobs::{
-    BackgroundJobStore, ClaimBlock, ClaimJob, ClaimOutcome, ClaimPath, EnqueueJob, JobKind,
-    JobPayload, JobRequest,
+    BackgroundJobStore, CandidateQuery, ClaimBlock, ClaimJob, ClaimOutcome, ClaimPath, EnqueueJob,
+    JobKind, JobPayload, JobRequest, MAX_PAGE_SIZE,
 };
 use plurx_core::store::{HiqliteAuthStore, SqliteStore};
 use std::{borrow::Cow, path::Path, time::Duration};
@@ -137,7 +137,8 @@ impl Pair {
     }
 }
 
-async fn scenario(root: &Path) {
+/// An embedded single voter and a SQLite store, side by side.
+async fn pair(root: &Path) -> Pair {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let listeners: Vec<_> = (0..2)
         .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
@@ -176,12 +177,22 @@ async fn scenario(root: &Path) {
     let path = root.join("standalone.db");
     let sqlite = SqliteStore::open(&path).expect("SQLite store");
     let db = rusqlite::Connection::open(&path).expect("SQLite raw connection");
-    let pair = Pair {
+    Pair {
         sqlite,
         db,
         raft,
         replica,
-    };
+    }
+}
+
+async fn shutdown(pair: Pair) {
+    let Pair { raft, replica, .. } = pair;
+    drop(replica);
+    raft.shutdown().await.expect("drain the embedded voter");
+}
+
+async fn scenario(root: &Path) {
+    let pair = pair(root).await;
     let fragment = JobKind::FragmentIndexBuild;
     let holders = [pair.job(1).await, pair.job(2).await];
 
@@ -256,9 +267,7 @@ async fn scenario(root: &Path) {
         assert!(matches!(replay.outcome, ClaimOutcome::Claimed { .. }));
     }
 
-    let Pair { raft, replica, .. } = pair;
-    drop(replica);
-    raft.shutdown().await.expect("drain the embedded voter");
+    shutdown(pair).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -267,4 +276,115 @@ async fn claim_verdict_skips_exactly_the_claims_the_statement_refuses() {
     tokio::time::timeout(Duration::from_secs(90), Box::pin(scenario(root.path())))
         .await
         .expect("bounded scenario");
+}
+
+/// A worker pass behind a held source slot (plan §5.3): the candidate
+/// listing is assembled from the claim statement's fragments, so a deep
+/// queue the statement would refuse lists nothing and the pass proposes
+/// nothing; once the slot is released, one pass claims one job.
+async fn blocked_queue(root: &Path) {
+    const DEPTH: i64 = 300;
+    let pair = pair(root).await;
+    let fragment = JobKind::FragmentIndexBuild;
+    // The holder: a claimed maintenance reader of the one source slot.
+    let holder = pair.job(1).await;
+    let request = claim(&holder, 0, fragment);
+    for store in [
+        &pair.sqlite as &dyn BackgroundJobStore,
+        &pair.replica as &dyn BackgroundJobStore,
+    ] {
+        let held = store
+            .claim_job_attempt(request.clone())
+            .await
+            .expect("holder claim");
+        assert!(matches!(held.outcome, ClaimOutcome::Claimed { .. }));
+    }
+    let mut queued = Vec::new();
+    for n in 0..DEPTH {
+        queued.push(pair.job(100 + n).await);
+    }
+    let query = || CandidateQuery {
+        node_id: "node-a".into(),
+        kinds: vec![fragment],
+        after: None,
+        now_ms: NOW + 1,
+        limit: MAX_PAGE_SIZE,
+    };
+    for (backend, store) in [
+        ("sqlite", &pair.sqlite as &dyn BackgroundJobStore),
+        ("replicated", &pair.replica as &dyn BackgroundJobStore),
+    ] {
+        let started = std::time::Instant::now();
+        let page = store.job_candidates(query()).await.expect("candidates");
+        let listing = started.elapsed();
+        let started = std::time::Instant::now();
+        let verdict = store
+            .claim_job_attempt(ClaimJob {
+                now_ms: NOW + 1,
+                dispatched_at_ms: NOW + 1,
+                ..claim(&queued[0], 0, fragment)
+            })
+            .await
+            .expect("blocked claim");
+        let claim_cost = started.elapsed();
+        eprintln!(
+            "{backend}: depth {DEPTH} behind a held slot: candidate page {listing:?} \
+             ({} jobs), one claim {claim_cost:?} ({:?})",
+            page.jobs.len(),
+            verdict.path
+        );
+        assert!(
+            page.jobs.is_empty(),
+            "{backend}: a queue the statement refuses lists no candidate"
+        );
+    }
+    pair.raw(&format!(
+        "DELETE FROM background_job_reservations WHERE job_id='{holder}'"
+    ))
+    .await;
+    for (backend, store) in [
+        ("sqlite", &pair.sqlite as &dyn BackgroundJobStore),
+        ("replicated", &pair.replica as &dyn BackgroundJobStore),
+    ] {
+        let started = std::time::Instant::now();
+        let page = store.job_candidates(query()).await.expect("candidates");
+        eprintln!(
+            "{backend}: depth {DEPTH} released: candidate page {:?} ({} jobs)",
+            started.elapsed(),
+            page.jobs.len()
+        );
+        assert!(
+            !page.jobs.is_empty(),
+            "{backend}: released, the queue lists again"
+        );
+        let first = &page.jobs[0];
+        let claimed = store
+            .claim_job_attempt(ClaimJob {
+                now_ms: NOW + 1,
+                dispatched_at_ms: NOW + 1,
+                ..claim(&first.id, first.revision, fragment)
+            })
+            .await
+            .expect("released claim");
+        assert_eq!(claimed.path, ClaimPath::Proposed, "{backend}");
+        assert!(
+            matches!(claimed.outcome, ClaimOutcome::Claimed { .. }),
+            "{backend}"
+        );
+        // One reader now holds the slot again: the rest list nothing.
+        let after = store.job_candidates(query()).await.expect("candidates");
+        assert!(after.jobs.is_empty(), "{backend}: {}", after.jobs.len());
+    }
+    shutdown(pair).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queue_behind_a_held_source_slot_lists_nothing_until_it_is_released() {
+    let root = tempfile::tempdir().expect("fixture directory");
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        Box::pin(blocked_queue(root.path())),
+    )
+    .await
+    .expect("bounded scenario");
 }

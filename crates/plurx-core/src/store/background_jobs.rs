@@ -855,6 +855,29 @@ WHERE id = json_extract($1, '$.job_id')
   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"#
 );
 
+/// The claim statement's row predicates for a listed job (plan §3.1): kind
+/// demand, state and the three source groups, evaluated for `job` without a
+/// claim request. A listing never offers a job the statement would refuse,
+/// so a queue blocked behind a held source lists nothing and its worker pass
+/// proposes nothing. The identity and attempt-ledger groups need the claim's
+/// own revision and id and stay with the statement. The job-level predicates
+/// the listing already spells out beside its interest join stay too; they
+/// are the same predicates, and they let SQLite narrow by index first.
+const CANDIDATE_ADMISSION_SQL: &str = concat!(
+    r#"EXISTS (SELECT 1 FROM background_jobs WHERE background_jobs.id = job.id
+  AND "#,
+    claim_kind_demand!(),
+    "\n  AND ",
+    claim_state!(),
+    "\n  AND ",
+    claim_foreground_window!("background_jobs.id"),
+    "\n  AND ",
+    claim_source_holders!("background_jobs.id"),
+    "\n  AND ",
+    claim_maintenance_reader!("background_jobs.id"),
+    ")"
+);
+
 /// How a claim attempt ended, beside its [`ClaimOutcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimPath {
@@ -880,7 +903,7 @@ pub struct ClaimAttempt {
 /// claim statement refusing. A stale verdict is safe either way (plan §3.3):
 /// a stale block is re-evaluated on the next pass, a stale admit costs the
 /// one refused proposal of today. A local read error is no verdict.
-async fn claim_verdict<T: QueueSql + ?Sized>(store: &T, body: &str) -> Option<ClaimBlock> {
+async fn local_claim_verdict<T: QueueSql + ?Sized>(store: &T, body: &str) -> Option<ClaimBlock> {
     match store
         .local_replica_sql(CLAIM_VERDICT_SQL.to_owned(), body.to_owned())
         .await
@@ -903,7 +926,7 @@ async fn claim_attempt<T: QueueSql + ?Sized>(
 ) -> Result<ClaimAttempt, StoreError> {
     request.validate()?;
     let body = encode(&request)?;
-    if let Some(block) = claim_verdict(store, &body).await {
+    if let Some(block) = local_claim_verdict(store, &body).await {
         return Ok(ClaimAttempt {
             outcome: ClaimOutcome::Contended,
             path: ClaimPath::Skipped(block),
@@ -3032,6 +3055,11 @@ pub trait BackgroundJobStore: Send + Sync {
     /// the authoritative pre-read, or skipped because this node's applied
     /// replica shows the claim statement refusing it.
     async fn claim_job_attempt(&self, request: ClaimJob) -> Result<ClaimAttempt, StoreError>;
+    /// The local claim verdict alone: `Some` when this node's applied replica
+    /// shows the claim statement refusing `request`, and which group refuses.
+    /// `None` when it would admit, when the pre-read answers the row itself,
+    /// on SQLite, and without a replica. Nothing is written.
+    async fn claim_verdict(&self, request: ClaimJob) -> Result<Option<ClaimBlock>, StoreError>;
     /// Narrow entry point shared by voter and learner artifact workers.
     async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
@@ -4565,12 +4593,7 @@ LIMIT 1
                 FROM background_jobs job JOIN interests interest ON interest.job_id = job.id
                 LEFT JOIN scope_usage usage ON usage.scheduling_scope = interest.scheduling_scope
                 WHERE job.kind IN (SELECT value FROM json_each($1, '$.kinds')) AND job.payload_version = 1
-                    AND (job.kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
-        AND file.size = request.source_size AND file.mtime = request.source_mtime
-      WHERE request.request_id = json_extract(job.payload_json, '$.source_generation')
-        AND request.file_id = json_extract(job.payload_json, '$.file_id')
-        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
-        AND request.cancel_requested = 0))
+                    AND {CANDIDATE_ADMISSION_SQL}
                     AND (job.target_node_id IS NULL OR job.target_node_id = json_extract($1, '$.node_id'))
                     AND (job.state = 'queued' OR (job.state = 'running' AND job.lease_expires_ms <= json_extract($1, '$.now_ms')))
                     AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > json_extract($1, '$.now_ms'))
@@ -5127,6 +5150,11 @@ LIMIT 1
 
     async fn claim_job_attempt(&self, request: ClaimJob) -> Result<ClaimAttempt, StoreError> {
         claim_attempt(self, request).await
+    }
+
+    async fn claim_verdict(&self, request: ClaimJob) -> Result<Option<ClaimBlock>, StoreError> {
+        request.validate()?;
+        Ok(local_claim_verdict(self, &encode(&request)?).await)
     }
 
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {

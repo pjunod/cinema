@@ -61,6 +61,20 @@ pub struct PublishTitleJob {
     pub now_ms: i64,
 }
 
+/// A terminal demand whose title needs a fresh exact FEL scan and has no
+/// live job: the reset's predicate, shared by its local check and its write.
+macro_rules! dv_title_demand_reset {
+    () => {
+        r#"terminal=1 AND json_type($1)='object'
+ AND EXISTS(SELECT 1 FROM files f WHERE f.id=dv_title_jobs_demand.file_id AND json_valid(f.probe_json)
+  AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_requests_v3')='object'
+   THEN json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r
+   WHERE json_extract(r.value,'$.source_size')=f.size AND json_extract(r.value,'$.source_mtime')=f.mtime))
+ AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
+  AND json_extract(j.payload_json,'$.file_id')=dv_title_jobs_demand.file_id)"#
+    };
+}
+
 pub(super) async fn demands<T: QueueSql>(
     store: &T,
     scanner: &str,
@@ -69,16 +83,38 @@ pub(super) async fn demands<T: QueueSql>(
     if !digest(scanner) || after < 0 {
         return Err(StoreError::Task("invalid title demand query".into()));
     }
-    store.queue_sql(r#"
-UPDATE dv_title_jobs_demand SET terminal=0 WHERE terminal=1 AND json_type($1)='object'
- AND EXISTS(SELECT 1 FROM files f WHERE f.id=dv_title_jobs_demand.file_id AND json_valid(f.probe_json)
-  AND EXISTS(SELECT 1 FROM json_each(CASE WHEN json_type(f.probe_json,'$.plurx_dv_fel_requests_v3')='object'
-   THEN json_extract(f.probe_json,'$.plurx_dv_fel_requests_v3') ELSE '{}' END) r
-   WHERE json_extract(r.value,'$.source_size')=f.size AND json_extract(r.value,'$.source_mtime')=f.mtime))
- AND NOT EXISTS(SELECT 1 FROM background_jobs j WHERE j.kind='dv_title_scan' AND j.state IN ('queued','running','cancelling')
-  AND json_extract(j.payload_json,'$.file_id')=dv_title_jobs_demand.file_id)
-RETURNING 'true' AS result_json
-"#.into(),"{}".into(),true,true).await?;
+    // The reset is a replicated write; propose it only when this process's
+    // replica shows a demand to reset (CLAIM-LOCAL-VERDICT-BUILD.md §3.5). A
+    // stale "nothing" is re-read on the next pass; a stale "something" is the
+    // same no-op update as before. SQLite reads its own authority.
+    let resettable = store
+        .queue_sql(
+            concat!(
+                "SELECT 'true' AS result_json FROM dv_title_jobs_demand WHERE ",
+                dv_title_demand_reset!(),
+                " LIMIT 1"
+            )
+            .into(),
+            "{}".into(),
+            false,
+            false,
+        )
+        .await?;
+    if !resettable.is_empty() {
+        store
+            .queue_sql(
+                concat!(
+                    "UPDATE dv_title_jobs_demand SET terminal=0 WHERE ",
+                    dv_title_demand_reset!(),
+                    "\nRETURNING 'true' AS result_json"
+                )
+                .into(),
+                "{}".into(),
+                true,
+                true,
+            )
+            .await?;
+    }
     let rows = store.queue_sql(r#"
 SELECT json_object('file_id',file.id,'probe_revision',d.revision,
  'source_size',file.size,'source_mtime',file.mtime,'probe_json',file.probe_json,
