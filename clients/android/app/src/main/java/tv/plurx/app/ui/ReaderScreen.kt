@@ -41,9 +41,8 @@ import java.net.URI
 
 internal object NativeReaderHandoff {
     fun shellUrl(origin: String): String? {
-        val parsed = runCatching { URI(origin) }.getOrNull() ?: return null
-        if (parsed.scheme !in setOf("http", "https") || parsed.host.isNullOrBlank()) return null
-        return origin.trimEnd('/') + "/?native-reader=1"
+        val canonical = readerOrigin(origin) ?: return null
+        return "$canonical/?native-reader=1"
     }
 
     fun startScript(token: String, itemId: Long, fileId: Long): String? {
@@ -56,18 +55,27 @@ internal object NativeReaderHandoff {
     fun permitsNavigation(candidate: String, origin: String): Boolean {
         if (candidate == "about:blank") return true
         val url = runCatching { URI(candidate) }.getOrNull() ?: return false
-        val base = runCatching { URI(origin) }.getOrNull() ?: return false
-        if (!url.scheme.equals(base.scheme, ignoreCase = true) ||
-            !url.host.equals(base.host, ignoreCase = true) || effectivePort(url) != effectivePort(base)
-        ) return false
+        val base = readerOrigin(origin) ?: return false
+        // URI.host is null for supported container names such as plurx_b.
+        // Compare the validated authority as well, so two such names cannot
+        // accidentally compare equal through their missing host fields.
+        val authority = url.rawAuthority ?: return false
+        val target = readerOrigin("${url.scheme}://$authority") ?: return false
+        if (target != base) return false
         val path = url.path.orEmpty()
+        if ('\\' in path || path.split('/').any { it == "." || it == ".." }) return false
         return path == "/" || path.startsWith("/assets/") || path.startsWith("/api/v1/publication/")
     }
 
-    private fun effectivePort(uri: URI): Int = when {
-        uri.port >= 0 -> uri.port
-        uri.scheme.equals("https", ignoreCase = true) -> 443
-        else -> 80
+    private fun readerOrigin(raw: String): String? {
+        val canonical = Session.canonicalOrigin(raw) ?: return null
+        // Canonicalization handles underscore hosts and explicit default
+        // ports; parsing its result also refuses malformed authorities.
+        val parsed = runCatching { URI(canonical) }.getOrNull() ?: return null
+        if (parsed.rawAuthority.isNullOrBlank() || parsed.rawUserInfo != null ||
+            !parsed.rawPath.isNullOrEmpty() || parsed.rawQuery != null || parsed.rawFragment != null
+        ) return null
+        return canonical
     }
 }
 
