@@ -21483,7 +21483,13 @@ fn contract_inventory_matches_every_store_method() {
     // exercised by the source-fenced DV title-job contracts.
     // Current main declares 591 distinct methods; save/apply/state replace
     // one storage-domain method, adding two names without hiding existing APIs.
-    assert_eq!(declared.len(), 593, "review the Store method count");
+    // +2: `dv_title_playback_demands` (owned live title interest, paged or by
+    // file) and `dv_title_can_preempt` (a queued live title may displace this
+    // node's running maintenance title), both in `RECENT_SOURCE_METHODS` and
+    // covered on both backends by `dv_title_jobs::title_live_paging_*` and
+    // `dv_title_jobs::title_live_preemption_rejects_running_and_backoff_candidates`.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 595, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
