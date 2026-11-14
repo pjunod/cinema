@@ -3359,8 +3359,8 @@ here (`make paperwork` checks this). Newest first:
 
 - 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
   `SessionRequest` media-worker envelope, combined with protocol10 catalog
-  provenance. Roll out in compatible placement cohorts and drain old ingress
-  using the procedure above; clients send no new platform signal.
+  provenance. Use the cohort/drain procedure above; clients send no new
+  platform signal.
 
 - 2026-11-13: protocol 10 — retain validated source, track and full-capability
   catalog-query provenance in `CandidateCatalogContext` so processed commits
