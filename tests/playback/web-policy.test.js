@@ -422,30 +422,38 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
 test("the health poll runs for a live media wait as well as for the panel", async () => {
   const build = (waitLive) => {
     const calls = [];
+    const player = { fileId: 1, sessionId: "s1", streamId: null, mediaAttachment: 1 };
     // The slice carries the module's own 2 s `setInterval` beside the
     // function; a real timer there would keep this process alive forever.
     const poll = new PlaybackContextFunction(
       "PLAYER", "playbackOwnsAttachedMedia", "document", "playbackWaitSurfaceLive", "api",
-      "updateStats", "performance", "setInterval",
+      "updateStats", "performance", "setInterval", "statsStreamFormat", "playerToneMapping",
       `${shippedSource("pollSessionHealth")}\nreturn pollSessionHealth;`,
     )(
-      { sessionId: "s1", streamId: null, mediaAttachment: 1 },
+      player,
       () => true,
       { getElementById: () => ({ classList: { contains: () => false } }) },
       () => waitLive,
-      async (url) => { calls.push(url); return { http_wait_count: 1 }; },
+      async (url) => { calls.push(url); return { id: "s1", http_wait_count: 1 }; },
       () => {},
       { now: () => 0 },
       () => 0,
+      () => null,
+      () => false,
     );
-    return { poll, calls };
+    return { poll, calls, player };
   };
   const waiting = build(true);
+  waiting.player.health = { id: "s1" };
   await waiting.poll();
   assert.deepEqual(waiting.calls, ["/hls/s1/status"]);
+  assert.equal(waiting.player.health.http_wait_count, 1, "the wait poll consumed fresh session facts");
   const idle = build(false);
+  // Cold sessions sample once for processing pills; this checks the idle
+  // steady state after that session-bound sample is already available.
+  idle.player.health = { id: "s1" };
   await idle.poll();
-  assert.deepEqual(idle.calls, [], "with the panel closed and no wait, nothing polls");
+  assert.deepEqual(idle.calls, [], "with known session facts, the panel closed and no wait, nothing polls");
 });
 
 test("a media wait renders the live detail; every other fault renders its own", () => {
