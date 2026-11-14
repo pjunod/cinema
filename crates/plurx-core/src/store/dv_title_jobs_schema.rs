@@ -2,12 +2,24 @@
 use crate::error::StoreError;
 use std::sync::LazyLock;
 pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dv_title_jobs_*' AND sql IS NOT NULL ORDER BY name";
-pub(crate) const MARKER_SQL: &str =
+#[cfg(feature = "hiqlite-store")]
+pub(crate) const MARKER_SQL_V1: &str =
     "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=1";
-const DEPENDENCIES: &str = "CREATE TABLE files(id INTEGER PRIMARY KEY,path TEXT,size INTEGER,mtime INTEGER,video_codec TEXT,dv_profile INTEGER,dv_rpu_present INTEGER,probe_json TEXT,scanned_at INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,result_ref TEXT,updated_at_ms INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(job_id TEXT,state TEXT,result_ref TEXT,updated_at_ms INTEGER);";
+pub(crate) const MARKER_SQL: &str =
+    "SELECT count(*) AS count FROM dv_title_jobs_schema WHERE singleton=1 AND version=2";
+const DEPENDENCIES: &str = "CREATE TABLE files(id INTEGER PRIMARY KEY,path TEXT,size INTEGER,mtime INTEGER,video_codec TEXT,dv_profile INTEGER,dv_rpu_present INTEGER,probe_json TEXT,scanned_at INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,result_ref TEXT,updated_at_ms INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(job_id TEXT,state TEXT,result_ref TEXT,updated_at_ms INTEGER,consumer_kind TEXT,consumer_ref TEXT);";
 #[cfg(feature = "hiqlite-store")]
 pub(crate) fn statements() -> Vec<String> {
     super::dv_title_jobs::SCHEMA
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn migration_statements() -> Vec<String> {
+    super::dv_title_jobs::MIGRATION_V2
         .split("-- next statement")
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -28,6 +40,13 @@ static SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
         .expect("title schema");
     rows(&conn).expect("title schema shape")
 });
+static LEGACY_SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    let conn = rusqlite::Connection::open_in_memory().expect("legacy title fixture");
+    conn.execute_batch(DEPENDENCIES).expect("dependencies");
+    conn.execute_batch(super::dv_title_jobs::SCHEMA_V1)
+        .expect("legacy schema");
+    rows(&conn).expect("legacy shape")
+});
 pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {
     let canonical = |rows: &[(String, String)]| {
         rows.iter()
@@ -42,6 +61,8 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
     if shape.is_empty() {
         Ok(None)
     } else if canonical(shape) == canonical(&SHAPE) {
+        Ok(Some(2))
+    } else if canonical(shape) == canonical(&LEGACY_SHAPE) {
         Ok(Some(1))
     } else {
         Err(StoreError::Migration(
@@ -50,7 +71,7 @@ pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreEr
     }
 }
 pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreError> {
-    if version(&rows(conn)?)? != Some(1)
+    if version(&rows(conn)?)? != Some(2)
         || conn.query_row(MARKER_SQL, [], |row| row.get::<_, i64>(0))? != 1
     {
         return Err(StoreError::Migration(
@@ -78,6 +99,70 @@ mod tests {
         conn.execute_batch("DROP TRIGGER dv_title_jobs_file_update")
             .expect("partial fixture");
         assert!(verify_sqlite(&conn).is_err());
+    }
+
+    #[test]
+    fn title_v2_repairs_only_current_pending_outbox_and_preserves_migration_parity() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture");
+        conn.execute_batch(DEPENDENCIES).expect("dependencies");
+        conn.execute_batch(super::super::dv_title_jobs::SCHEMA_V1)
+            .expect("legacy schema");
+        assert_eq!(
+            version(&rows(&conn).expect("shape")).expect("legacy"),
+            Some(1)
+        );
+        for (id, size) in [(1, 100), (2, 101), (3, 100)] {
+            let doc=serde_json::json!({"plurx_dv_fel_requests_v3":{"recipe":{"identity":"recipe","source_size":size,"source_mtime":1}}}).to_string();
+            conn.execute(
+                "INSERT INTO files VALUES(?1,'/media/title.mkv',100,1,'hevc',7,1,?2,1)",
+                rusqlite::params![id, doc],
+            )
+            .expect("source");
+        }
+        let cancelled: i64 = conn
+            .query_row(
+                "SELECT revision FROM dv_title_jobs_demand WHERE file_id=3",
+                [],
+                |r| r.get(0),
+            )
+            .expect("cancelled revision");
+        conn.execute("INSERT INTO background_jobs(id,kind,state,payload_json) VALUES('cancelled','dv_title_scan','cancelled',?1)",
+            [serde_json::json!({"probe_revision":cancelled}).to_string()]).expect("manual cancellation authority");
+        conn.execute("UPDATE dv_title_jobs_demand SET terminal=1", [])
+            .expect("stranded legacy demands");
+        conn.execute_batch(super::super::dv_title_jobs::MIGRATION_V2)
+            .expect("upgrade");
+        verify_sqlite(&conn).expect("current shape");
+        let mut query = conn
+            .prepare("SELECT terminal FROM dv_title_jobs_demand ORDER BY file_id")
+            .expect("query");
+        let states = query
+            .query_map([], |r| r.get::<_, i64>(0))
+            .expect("states")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("states");
+        assert_eq!(
+            states,
+            vec![0, 1, 1],
+            "only source-current, noncancelled pending recipes reopen"
+        );
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let replica = rusqlite::Connection::open_in_memory().expect("replica");
+            replica.execute_batch(DEPENDENCIES).expect("dependencies");
+            replica
+                .execute_batch(super::super::dv_title_jobs::SCHEMA_V1)
+                .expect("v1");
+            for sql in migration_statements() {
+                replica
+                    .execute_batch(&sql)
+                    .expect("replica upgrade statement");
+            }
+            assert_eq!(
+                rows(&replica).expect("replica shape"),
+                rows(&conn).expect("sqlite shape")
+            );
+        }
     }
 
     #[test]

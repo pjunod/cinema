@@ -52,16 +52,18 @@ The stage is six jobs (names are part of receipt authentication):
    real-FFmpeg restart tests serially. A shard fails only when it could not
    run; test failures go into its receipt.
 4. **`Rust units: verdict`** proves the shards ran every planned test exactly
-   once (a missing shard or test fails it; a test in two shards or one outside
-   the plan is an integrity failure), publishes one receipt per crate, and
-   lists failures.
+   once (a missing shard, missing test or skipped planned case fails it; a test
+   in two shards or one outside the plan is an integrity failure), publishes
+   one receipt per crate, and lists failures.
 5. **`Rust units: merge-base check of failures`** runs only when something
    failed. It checks the merge-base out in place (head's tools kept aside),
    runs exactly the failing tests there, and classifies each: **fails at the
-   merge-base too → pre-existing on main**, reported in the summary, not
-   blocking; passes there, is skipped there, or does not exist there →
-   **new**, blocking.
-6. **`Rust unit verdict`** is the stage's single result.
+   merge-base too → pre-existing on main**; passes there, is skipped there,
+   or does not exist there → **new**. This classification is diagnostic only.
+6. **`Rust unit verdict`** is the stage's single result. Every due case needs
+   an authenticated same-key historical PASS or a PASS from the current run.
+   A baseline failure cannot substitute for that positive evidence. Missing,
+   malformed or unknown required outputs fail closed.
 
 What `make unit` runs and this stage does not: doctests (nextest cannot run
 them; `make unit` runs them through `cargo test`), and `spike-lock-check` /
@@ -204,9 +206,9 @@ literal re-keys only its reader.
   stay in their ci.yml lanes.
 - Memory: two test threads per shard inside the 7 GiB general cap; the
   `unit-memory-*` labels remain reserved for coverage.
-- Pre-existing failures: never a list — always the merge-base check, so a
-  failure is "pre-existing" only if it fails on main's code too. A flaky test
-  that passes at the merge-base blocks; re-run as in §5.
+- Pre-existing failures: the merge-base check diagnoses their origin; it never
+  authorizes promotion. Every failing case remains due until a valid positive
+  pass exists under its current key; re-run as in §5.
 - Archived binaries run from the extraction directory: a test that spawns a
   sibling binary must read `CARGO_BIN_EXE_<name>` at run time (nextest sets
   it) with the compile-time value as the fallback, as

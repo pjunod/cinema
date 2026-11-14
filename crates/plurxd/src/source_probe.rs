@@ -51,6 +51,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let mut title: Option<title_work::TitleTask> = None;
     #[cfg(target_os = "linux")]
     let mut title_after = 0;
+    #[cfg(target_os = "linux")]
+    let mut live_title_after = 0;
     loop {
         if shutdown.is_cancelled() {
             #[cfg(target_os = "linux")]
@@ -76,6 +78,23 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 Err(error) => tracing::warn!(%error,"title priority observation unavailable"),
             }
         }
+        // An exact active playback request is considered before ordinary
+        // probe pagination, including when that pagination has more pages.
+        #[cfg(target_os = "linux")]
+        if title.is_none() && !shutdown.is_cancelled() {
+            match title_work::TitleTask::start(
+                &state,
+                &boot,
+                &mut title_after,
+                &mut live_title_after,
+                true,
+            )
+            .await
+            {
+                Ok(work) => title = work,
+                Err(error) => tracing::warn!(%error,"playback qualification demand unavailable"),
+            }
+        }
         #[cfg(target_os = "linux")]
         let ordinary_idle = title.is_none();
         #[cfg(not(target_os = "linux"))]
@@ -95,7 +114,15 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         #[cfg(target_os = "linux")]
         if title.is_none() && cursor.is_none() && !yielded && !published && !shutdown.is_cancelled()
         {
-            match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
+            match title_work::TitleTask::start(
+                &state,
+                &boot,
+                &mut title_after,
+                &mut live_title_after,
+                false,
+            )
+            .await
+            {
                 Ok(work) => title = work,
                 Err(error) => tracing::warn!(%error,"title demand unavailable"),
             }

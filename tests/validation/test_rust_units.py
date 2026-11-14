@@ -13,6 +13,8 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from types import SimpleNamespace
+import textwrap
 import unittest
 from unittest import mock
 import zipfile
@@ -21,6 +23,24 @@ from validation import rust_units as ru
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def workflow_gate(**outputs):
+    """Exercise the actual checked-in gate shell, not a copied predicate."""
+    workflow = (ROOT / ".github/workflows/rust-units.yml").read_text()
+    gate = workflow.split("\n  gate:\n", 1)[1]
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    values = dict(SELECT="success", BUILD="true", ARCHIVE="success", SHARDS="[1, 2]",
+                  SHARD="success", VERDICT="success", COMPLETE="true", FAILURES="false", BASELINE="success")
+    values.update(outputs)
+    environment = os.environ.copy()
+    for name, value in values.items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], env=environment,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
 
 CONFIG = """
 version = 1
@@ -350,6 +370,42 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         self.assertFalse(ru.fully_passed([listing], {self.passes[0]}))
         self.assertFalse(ru.fully_passed([], set(self.passes)))
 
+    def test_authenticated_same_key_passes_are_not_replayed_by_the_strict_gate(self):
+        adopted = self.adopted(self.forge())
+        self.assertEqual(adopted, set(self.passes))
+        current = listing(**{"app": [("aa::first", False), ("aa::second", False)]})
+        plan = ru.make_plan({"head": self.commit, "base": self.commit},
+                            {"crates": {"app": {"key": self.key, "passed": sorted(adopted)}}},
+                            current, self.config, run=42)
+        self.assertEqual(plan["crates"]["app"]["adopted"], sorted(adopted))
+        self.assertEqual(plan["crates"]["app"]["remaining"], [])
+        self.assertEqual(plan["crates"]["app"]["serial"], [])
+        self.assertEqual(plan["shards"], 1)  # Planner shape is fixed; the producer emits no runnable shards.
+        with mock.patch.object(ru, "read_json", side_effect=[
+                {"head": self.commit, "base": self.commit},
+                {"crates": {"app": {"key": self.key, "passed": sorted(adopted)}}}, current]), \
+                mock.patch.object(ru.Config, "load", return_value=self.config), \
+                mock.patch.object(ru, "write_json"), mock.patch.object(ru, "summarize"), \
+                mock.patch.object(ru, "emit") as emitted:
+            self.assertEqual(ru.command_plan(SimpleNamespace(selection="selection", pending="pending",
+                              listing="listing", output="plan")), 0)
+        produced = dict(call.args for call in emitted.call_args_list)
+        self.assertEqual(produced["shards"], [])
+        self.assertEqual(produced["tests"], "0")
+        result = workflow_gate(SHARDS=json.dumps(produced["shards"]), SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_valid_empty_selection_produces_explicit_false_without_a_workflow_default(self):
+        real_tree = ru.Tree
+        with mock.patch.object(ru, "read_json", return_value={"head": self.commit, "base": self.commit, "crates": {}}), \
+                mock.patch.object(ru, "Tree", side_effect=lambda ref: real_tree(ref, self.repo.root)), \
+                mock.patch.object(ru, "write_json"), mock.patch.object(ru, "emit") as emitted, \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ru.command_adopt(SimpleNamespace(selection="selection", output="pending")), 0)
+        produced = dict(call.args for call in emitted.call_args_list)
+        self.assertEqual(produced["build"], "false")
+        self.assertEqual(produced["crates"], [])
+
 
 def listing(**suites):
     return {"rust-suites": {binary: {"testcases": {name: {"ignored": ignored} for name, ignored in cases}}
@@ -374,6 +430,42 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(app["listing"]["count"], 4)
         self.assertEqual(plan["shards"], 1)
         self.assertNotIn("core", plan["crates"])
+
+    def test_ignored_cases_outside_required_ids_do_not_create_gate_failures(self):
+        plan = ru.make_plan(self.selection, {"crates": {"app": {"key": "1" * 64, "passed": []}}},
+                            self.listing, self.config, run=5)
+        required = plan["crates"]["app"]["remaining"] + plan["crates"]["app"]["serial"]
+        self.assertNotIn("app other::ignored", required)
+        self.assertIn("app slow::one", required)
+        receipt = {"schema": 1, "run": 5, "head": plan["head"], "shards": 1, "index": 1,
+                   "results": {"app": {"passed": required, "failed": [], "skipped": []}}}
+        outcome, problems = ru.collect(plan, [receipt])
+        self.assertEqual(problems, [])
+        self.assertTrue(all(outcome[test] == "passed" for test in required))
+        result = workflow_gate(SHARDS="[1]")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_malformed_listing_and_missing_pending_crate_cannot_become_zero_work(self):
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": []}}}
+        for document in ({}, {"rust-suites": None}, {"rust-suites": []}, {"rust-suites": {}},
+                         listing(other=[]), {"rust-suites": {"app": {}}},
+                         {"rust-suites": {"app": {"testcases": []}}},
+                         {"rust-suites": {"app": {"testcases": {"case": {}}}}},
+                         {"rust-suites": {"app": {"testcases": {"case": {"ignored": "false"}}}}}):
+            with self.subTest(document=document), self.assertRaises(ru.UnitsError):
+                ru.make_plan(self.selection, pending, document, self.config, run=5)
+
+    def test_explicit_zero_test_and_filtered_suites_remain_valid_zero_work(self):
+        config = ru.Config.load(CONFIG)
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": []}}}
+        for document in (listing(app=[]), {"rust-suites": {"app": {"testcases": {
+                "excluded": {"ignored": False, "filter-match": {"status": "mismatch", "reason": "default-filter"}}
+        }}}}):
+            with self.subTest(document=document):
+                plan = ru.make_plan(self.selection, pending, document, config, run=5)
+                self.assertEqual(plan["crates"]["app"]["listing"]["count"], 0)
+                self.assertEqual(plan["crates"]["app"]["remaining"], [])
+                self.assertEqual(plan["crates"]["app"]["serial"], [])
 
     def test_filters_select_exactly_the_remaining_tests(self):
         pending = {"crates": {"app": {"key": "1" * 64, "passed": ["app t::a"]}}}
@@ -435,6 +527,27 @@ class VerdictTests(unittest.TestCase):
                                                    self.receipt(2, failed=["app t::b"])])
         self.assertEqual(problems, [])
         self.assertEqual(outcome["app t::b"], "failed")
+
+    def test_all_actual_planned_passes_allow_the_strict_gate(self):
+        outcome, problems = ru.collect(self.plan, [self.receipt(1, ["app t::a", "app s::c"]),
+                                                   self.receipt(2, ["app t::b"])])
+        self.assertEqual(problems, [])
+        self.assertEqual(set(outcome.values()), {"passed"})
+        result = workflow_gate(COMPLETE="true", FAILURES="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_all_skipped_and_mixed_pass_skipped_cases_cannot_authorize(self):
+        for first_passes in ([], ["app t::a"]):
+            with self.subTest(first_passes=first_passes):
+                first = self.receipt(1, first_passes)
+                first["results"]["app"]["skipped"] = sorted({"app t::a", "app s::c"} - set(first_passes))
+                second = self.receipt(2)
+                second["results"]["app"]["skipped"] = ["app t::b"]
+                outcome, problems = ru.collect(self.plan, [first, second])
+                self.assertTrue(problems)
+                self.assertEqual(outcome["app t::b"], "skipped")
+                # There are no FAILs, but the required positive coverage is incomplete.
+                self.assertNotEqual(workflow_gate(COMPLETE="false", FAILURES="false").returncode, 0)
 
     def test_a_missing_shard_is_reported_and_its_tests_are_missing(self):
         _outcome, problems = ru.collect(self.plan, [self.receipt(1, ["app t::a"])])
@@ -551,6 +664,56 @@ class RepositoryContractTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text()
         unit = makefile.split("\nunit: ", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(list(self.config.excluded), re.findall(r"--exclude (\S+)", unit))
+
+
+class StrictGateTests(unittest.TestCase):
+    def test_actual_workflow_output_bindings_preserve_missing_producer_outputs(self):
+        workflow = (ROOT / ".github/workflows/rust-units.yml").read_text()
+        select = workflow.split("\n  select:\n", 1)[1].split("\n  rust_units_archive:\n", 1)[0]
+        archive = workflow.split("\n  rust_units_archive:\n", 1)[1].split("\n  shard:\n", 1)[0]
+        build_binding = re.search(r"^      build: (.+)$", select, re.MULTILINE).group(1)
+        shards_binding = re.search(r"^      shards: (.+)$", archive, re.MULTILINE).group(1)
+        self.assertEqual(build_binding, "${{ steps.adopt.outputs.build }}")
+        self.assertEqual(shards_binding, "${{ steps.plan.outputs.shards }}")
+        adopt = select.split("        id: adopt\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotRegex(adopt, r"(?m)^\s+if:")
+        # Direct bindings propagate absent output as empty; neither may turn
+        # a successful job with a missing producer result into an exemption.
+        missing_build = workflow_gate(BUILD="", ARCHIVE="skipped", SHARDS="", SHARD="skipped",
+                                      VERDICT="skipped", COMPLETE="", FAILURES="")
+        self.assertNotEqual(missing_build.returncode, 0)
+        missing_plan = workflow_gate(SHARDS="", SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="")
+        self.assertNotEqual(missing_plan.returncode, 0)
+
+    def test_baseline_failure_never_substitutes_for_a_positive_pass(self):
+        for baseline in ("success", "failure", "skipped", ""):
+            with self.subTest(baseline=baseline):
+                result = workflow_gate(FAILURES="true", BASELINE=baseline)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_missing_malformed_and_unknown_required_outputs_fail_closed(self):
+        for name in ("SELECT", "BUILD", "ARCHIVE", "SHARD", "VERDICT", "COMPLETE", "FAILURES"):
+            for value in (None, "", "unknown", "TRUE"):
+                with self.subTest(name=name, value=value):
+                    result = workflow_gate(**{name: value})
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        for value in (None, "", "null", "{}", "broken", "[0]", "[2]", "[1, true]", "[1, 1]", "[1,2,3,4,5,6,7]"):
+            with self.subTest(shards=value):
+                result = workflow_gate(SHARDS=value)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_missing_partition_and_incomplete_verdict_cannot_authorize(self):
+        for fields in ({"SHARD": "failure"}, {"VERDICT": "failure"}, {"COMPLETE": "false"}):
+            with self.subTest(fields=fields):
+                self.assertNotEqual(workflow_gate(**fields).returncode, 0)
+
+    def test_no_due_cases_require_literal_false_and_skipped_downstream_jobs(self):
+        fields = dict(BUILD="false", ARCHIVE="skipped", SHARDS="", SHARD="skipped", VERDICT="skipped",
+                      COMPLETE="", FAILURES="")
+        result = workflow_gate(**fields)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        fields["ARCHIVE"] = "failure"
+        self.assertNotEqual(workflow_gate(**fields).returncode, 0)
 
 
 if __name__ == "__main__":

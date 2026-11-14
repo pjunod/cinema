@@ -13,8 +13,8 @@ name: Rust units
 # shard    -> `nextest run --partition hash:i/N` on idle x64 runners.
 # verdict  -> proves every planned test ran exactly once, publishes receipts.
 # baseline -> only when something failed: runs the failures at the merge-base;
-#             a test that fails there too is pre-existing on main and does not
-#             block, anything else does.
+#             classifies failure provenance for diagnostics only.
+#             Every required case still needs a positive same-key pass.
 # gate     -> the one result the caller reads.
 on:
   workflow_call:
@@ -50,7 +50,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 15
     outputs:
-      build: ${{ steps.adopt.outputs.build || 'false' }}
+      build: ${{ steps.adopt.outputs.build }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -63,7 +63,6 @@ jobs:
         run: python3 -m validation.rust_units select --base "$BASE"
       - name: Drop tests that already passed under the same keys
         id: adopt
-        if: steps.select.outputs.any == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.rust_units adopt
@@ -95,7 +94,7 @@ jobs:
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 120
     outputs:
-      shards: ${{ steps.plan.outputs.shards || '[]' }}
+      shards: ${{ steps.plan.outputs.shards }}
     steps:
       - name: Verify effective nonvoter resource bounds
         shell: sh
@@ -293,6 +292,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       failures: ${{ steps.verdict.outputs.failures }}
+      complete: ${{ steps.verdict.outputs.complete }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -564,16 +564,39 @@ jobs:
           SHARD: ${{ needs.shard.result }}
           VERDICT: ${{ needs.verdict.result }}
           FAILURES: ${{ needs.verdict.outputs.failures }}
+          COMPLETE: ${{ needs.verdict.outputs.complete }}
           BASELINE: ${{ needs.rust_units_baseline.result }}
         run: |
-          echo "select=$SELECT build=$BUILD archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT failures=$FAILURES baseline=$BASELINE"
+          echo "select=$SELECT build=$BUILD archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT complete=$COMPLETE failures=$FAILURES baseline=$BASELINE"
           [ "$SELECT" = success ] || { echo "selection did not complete"; exit 1; }
-          if [ "$BUILD" != true ]; then echo "No due Rust unit test: every affected crate already passed under its key, or none is affected."; exit 0; fi
+          case "$BUILD" in
+            false)
+              [ "$ARCHIVE" = skipped ] && [ "$SHARD" = skipped ] && [ "$VERDICT" = skipped ] || { echo "unexpected jobs after no-build selection"; exit 1; }
+              [ -z "$SHARDS$COMPLETE$FAILURES" ] || { echo "unexpected outputs after no-build selection"; exit 1; }
+              echo "No due Rust unit test: all affected cases already have authenticated same-key passes, or none is affected."
+              exit 0 ;;
+            true) ;;
+            *) echo "missing or invalid build selection"; exit 1 ;;
+          esac
           [ "$ARCHIVE" = success ] || { echo "the archive job ended with $ARCHIVE"; exit 1; }
-          if [ "$SHARDS" = '[]' ]; then echo "Every due test already passed under the same keys."; exit 0; fi
+          if ! python3 - <<'PY'
+          import json, os
+          try:
+              shards = json.loads(os.environ["SHARDS"])
+              assert type(shards) is list and len(shards) <= 6
+              assert all(type(index) is int for index in shards)
+              assert shards == list(range(1, len(shards) + 1))
+          except (KeyError, ValueError, AssertionError):
+              raise SystemExit("missing or invalid shard plan")
+          PY
+          then exit 1; fi
+          if [ "$SHARDS" = '[]' ]; then
+            [ "$SHARD" = skipped ] && [ "$VERDICT" = skipped ] || { echo "unexpected jobs after an all-adopted plan"; exit 1; }
+            [ -z "$COMPLETE$FAILURES" ] || { echo "unexpected outputs after an all-adopted plan"; exit 1; }
+            echo "Every due test already passed under the same keys."
+            exit 0
+          fi
           [ "$SHARD" = success ] || { echo "a shard could not run its partition ($SHARD)"; exit 1; }
           [ "$VERDICT" = success ] || { echo "the verdict ended with $VERDICT"; exit 1; }
-          if [ "$FAILURES" = true ]; then
-            [ "$BASELINE" = success ] || { echo "new Rust unit failures (see the merge-base check)"; exit 1; }
-            echo "Only failures that also fail at the merge-base: pre-existing on main, reported, not blocking."
-          fi
+          [ "$COMPLETE" = true ] || { echo "missing or incomplete positive-pass coverage"; exit 1; }
+          [ "$FAILURES" = false ] || { echo "every required Rust case needs a positive pass; baseline failures cannot authorize promotion"; exit 1; }
