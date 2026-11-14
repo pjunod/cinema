@@ -14,6 +14,7 @@ pub(super) struct Group {
     jobs: Vec<ChildJob>,
 }
 impl Group {
+    #[cfg(test)]
     pub(super) async fn start(
         command: &mut Command,
         cancel: &CancellationToken,
