@@ -84,21 +84,19 @@ reads = [
     "crates/plurx-pgs/src/**",
     "crates/plurx-compat-plex/src/**",
 ]
-tests = ["process::census::every_production_spawn_goes_through_the_launcher"]
-reason = "The process-launch census walks the src trees of DAEMON_CRATES."
+tests = [
+    "process::census::every_production_spawn_goes_through_the_launcher",
+    "process::census::every_production_descriptor_install_uses_the_single_builder",
+]
+reason = "The process and descriptor censuses walk the src trees of DAEMON_CRATES."
 
 [[dynamic]]
 crate = "plurx-core"
 file = "crates/plurx-core/src/process/census.rs"
 function = "every_production_descriptor_install_uses_the_single_builder"
-reads = [
-    "crates/plurx-core/src/**",
-    "crates/plurxd/src/**",
-    "crates/plurx-pgs/src/**",
-    "crates/plurx-compat-plex/src/**",
-]
+reads = []
 tests = ["process::census::every_production_descriptor_install_uses_the_single_builder"]
-reason = "The descriptor-boundary census resolves workspace paths and inspects all DAEMON_CRATES source trees."
+reason = "Builds expected paths for comparison; daemon_production_sources declares its source-tree reads."
 
 [[dynamic]]
 crate = "plurx-core"

@@ -38,6 +38,11 @@ The completed effort must establish these invariants:
 6. SQLite and Hiqlite implement the same contract. No identity schema,
    backfill, persistent alias or migration is introduced.
 
+The 2026-11-13 follow-up in the [RCA](SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md#2026-11-13--curator-additional-copy-folders)
+extends recognized TV directory identity to the exact generated Curator
+manual-copy family. This is a narrow exception to the physical same-directory
+boundary below; it introduces no general provider-ID merger or media moves.
+
 Keep the scope finite: no general-purpose cross-directory merger, automatic
 bulk cleanup, provider search during placement, movie repair, media renaming,
 new metadata provider, native-client UI or playback redesign. Books/Home/DVR
