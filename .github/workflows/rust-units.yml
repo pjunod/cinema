@@ -1,0 +1,579 @@
+name: Rust units
+
+# The PR-time Rust unit stage: the relevant tests, compiled once, run across
+# idle runners, each passing at most once on the same inputs.
+# docs/ci/RUST-UNIT-FANOUT.md is the operating guide; validation/rust_units.py
+# implements every step, and validation/rust-unit-inputs.toml defines what a
+# crate's content key covers. This file is itself a key input: editing it
+# re-keys every crate, so a changed harness can never adopt old receipts.
+#
+# select   -> which crates' inputs differ from the merge-base, minus tests that
+#             already passed under the same content key (receipts).
+# archive  -> one cargo-nextest archive of those crates' test binaries.
+# shard    -> `nextest run --partition hash:i/N` on idle x64 runners.
+# verdict  -> proves every planned test ran exactly once, publishes receipts.
+# baseline -> only when something failed: runs the failures at the merge-base;
+#             a test that fails there too is pre-existing on main and does not
+#             block, anything else does.
+# gate     -> the one result the caller reads.
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: Commit the change is measured against; its merge-base with the head is used.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base commit or ref; its merge-base with the dispatched ref is used.
+        required: false
+        default: origin/main
+        type: string
+
+env:
+  CARGO_TERM_COLOR: never
+  PYTHONUNBUFFERED: "1"
+  # nextest gives every test a fresh process, so state that `cargo test`
+  # initializes once per binary is built on each test's own 2 MiB thread;
+  # debug-build futures in plurxd's source-actor tests then overflow it.
+  # 8 MiB is the stack the replicated Store shards already run with
+  # (validation/store_shard.py TEST_THREAD_STACK_BYTES).
+  RUST_MIN_STACK: "8388608"
+  # cargo-nextest, pinned with the release asset's SHA-256 (MIT OR Apache-2.0).
+  NEXTEST_VERSION: "0.9.151"
+  NEXTEST_SHA256: 1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4
+
+jobs:
+  select:
+    name: "Rust units: select"
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 15
+    outputs:
+      build: ${{ steps.adopt.outputs.build || 'false' }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select the crates whose content keys differ from the merge-base
+        id: select
+        env:
+          BASE: ${{ inputs.base }}
+        run: python3 -m validation.rust_units select --base "$BASE"
+      - name: Drop tests that already passed under the same keys
+        id: adopt
+        if: steps.select.outputs.any == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.rust_units adopt
+      - name: Hand the selection to the archive job
+        if: steps.adopt.outputs.build == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-select-${{ github.run_id }}
+          path: |
+            target/rust-units/selection.json
+            target/rust-units/pending.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  rust_units_archive:
+    name: "Rust units: build archive"
+    needs: select
+    if: needs.select.outputs.build == 'true'
+    runs-on: [ci-nonvoter-compile-amd64]
+    # The same private CI image as ci.yml's full Rust lane: Rust 1.97.1, the
+    # Jellyfin FFmpeg 8 build and the native libraries. Its digest is part of
+    # every crate's key through this file.
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 120
+    outputs:
+      shards: ${{ steps.plan.outputs.shards || '[]' }}
+    steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: rust-units
+      - name: Install the pinned cargo-nextest
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/nextest-$NEXTEST_VERSION"
+          mkdir -p "$dir"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --connect-timeout 20 --max-time 180 --max-filesize 33554432 \
+            --output "$dir/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "$NEXTEST_SHA256" "$dir/nextest.tar.gz" | sha256sum --check --status
+          tar -xzf "$dir/nextest.tar.gz" -C "$dir"
+          rm -- "$dir/nextest.tar.gz"
+          "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
+          echo "$dir" >> "$GITHUB_PATH"
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: rust-units-select-${{ github.run_id }}
+          path: target/rust-units
+      - name: Check the selector's workspace graph against cargo metadata
+        run: |
+          cargo metadata --locked --format-version 1 > target/rust-units/metadata.json
+          python3 -m validation.rust_units check-graph --metadata target/rust-units/metadata.json
+      # The whole unit workspace is built so feature unification is exactly
+      # `make unit`'s (plurx-core gets hiqlite-store from plurxd); the archive
+      # holds only the due crates' test binaries. Unchanged crates are fresh
+      # in the persistent target directory, so this costs what changed.
+      - name: Build the due crates' tests into one nextest archive
+        run: |
+          filter="$(python3 -m validation.rust_units archive-filter)"
+          echo "archive filterset: $filter"
+          cargo nextest archive --locked --workspace --exclude plurx-cluster-check \
+            -E "$filter" --zstd-level 3 --archive-file target/rust-units/archive.tar.zst
+          ls -l target/rust-units/archive.tar.zst
+      - name: Plan the shards
+        id: plan
+        run: |
+          cargo-nextest nextest list --archive-file target/rust-units/archive.tar.zst \
+            --workspace-remap . --profile ci --run-ignored all --message-format json \
+            > target/rust-units/listing.json
+          python3 -m validation.rust_units plan --listing target/rust-units/listing.json
+      - name: Hand the archive to the shards
+        if: steps.plan.outputs.shards != '[]'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-archive-${{ github.run_id }}
+          path: |
+            target/rust-units/archive.tar.zst
+            target/rust-units/plan.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+          compression-level: 0
+      - name: Keep the plan for the verdict
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plan-${{ github.run_id }}
+          path: target/rust-units/plan.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  shard:
+    name: "Rust units shard ${{ matrix.shard }}"
+    needs: rust_units_archive
+    if: needs.rust_units_archive.outputs.shards != '[]'
+    # Any idle x64 `general` runner. The container caps each shard at the
+    # fleet's general-job budget, so a shard on a production voter host is
+    # bounded exactly like every other general job (docs/ci/RUNNER-DISK.md).
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.rust_units_archive.outputs.shards) }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Provision the private D-Bus session runtime for unit tests
+        run: |
+          set -euo pipefail
+          if ! command -v dbus-run-session >/dev/null 2>&1; then
+            apt-get -o Acquire::Retries=3 update
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends dbus-daemon
+          fi
+          command -v dbus-run-session
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Install the pinned cargo-nextest
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/nextest-$NEXTEST_VERSION"
+          mkdir -p "$dir"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --connect-timeout 20 --max-time 180 --max-filesize 33554432 \
+            --output "$dir/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "$NEXTEST_SHA256" "$dir/nextest.tar.gz" | sha256sum --check --status
+          tar -xzf "$dir/nextest.tar.gz" -C "$dir"
+          rm -- "$dir/nextest.tar.gz"
+          "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
+          echo "$dir" >> "$GITHUB_PATH"
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: rust-units-archive-${{ github.run_id }}
+          path: target/rust-units
+      # Exits nonzero only when the shard could not run its tests. Test
+      # failures are recorded in the receipt and judged by the verdict.
+      - name: Run this shard's partition of the plan
+        run: >-
+          python3 -m validation.rust_units shard
+          --archive target/rust-units/archive.tar.zst
+          --index ${{ matrix.shard }} --threads 2
+      - name: Hand the shard receipt to the verdict
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-shard-${{ github.run_id }}-${{ matrix.shard }}
+          path: target/rust-units/shard/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  verdict:
+    name: "Rust units: verdict"
+    needs: [rust_units_archive, shard]
+    if: always() && needs.rust_units_archive.result == 'success' && needs.rust_units_archive.outputs.shards != '[]'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 15
+    outputs:
+      failures: ${{ steps.verdict.outputs.failures }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: rust-units-plan-${{ github.run_id }}
+          path: target/rust-units
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        # A shard that published nothing is reported by the verdict itself.
+        continue-on-error: true
+        with:
+          pattern: rust-units-shard-${{ github.run_id }}-*
+          path: target/rust-units/shards
+      # Receipts are published even when a shard is missing, so the passes
+      # that did run are never repeated; the job still fails afterwards.
+      - name: Prove every planned test ran once and write per-crate receipts
+        id: verdict
+        run: |
+          mkdir -p target/rust-units/shards
+          python3 -m validation.rust_units verdict --receipts target/rust-units/shards
+      - name: Publish the plurx-compat-jellyfin receipt
+        if: always() && steps.verdict.outputs.key_plurx_compat_jellyfin != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-compat-jellyfin-${{ steps.verdict.outputs.key_plurx_compat_jellyfin }}
+          path: target/rust-units/receipts/plurx-compat-jellyfin/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-compat-plex receipt
+        if: always() && steps.verdict.outputs.key_plurx_compat_plex != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-compat-plex-${{ steps.verdict.outputs.key_plurx_compat_plex }}
+          path: target/rust-units/receipts/plurx-compat-plex/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-core receipt
+        if: always() && steps.verdict.outputs.key_plurx_core != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-core-${{ steps.verdict.outputs.key_plurx_core }}
+          path: target/rust-units/receipts/plurx-core/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-desktop-control receipt
+        if: always() && steps.verdict.outputs.key_plurx_desktop_control != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-desktop-control-${{ steps.verdict.outputs.key_plurx_desktop_control }}
+          path: target/rust-units/receipts/plurx-desktop-control/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-notification-broker receipt
+        if: always() && steps.verdict.outputs.key_plurx_notification_broker != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-notification-broker-${{ steps.verdict.outputs.key_plurx_notification_broker }}
+          path: target/rust-units/receipts/plurx-notification-broker/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-pgs receipt
+        if: always() && steps.verdict.outputs.key_plurx_pgs != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-pgs-${{ steps.verdict.outputs.key_plurx_pgs }}
+          path: target/rust-units/receipts/plurx-pgs/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-support receipt
+        if: always() && steps.verdict.outputs.key_plurx_support != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-support-${{ steps.verdict.outputs.key_plurx_support }}
+          path: target/rust-units/receipts/plurx-support/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-tray receipt
+        if: always() && steps.verdict.outputs.key_plurx_tray != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-tray-${{ steps.verdict.outputs.key_plurx_tray }}
+          path: target/rust-units/receipts/plurx-tray/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurx-worker-control receipt
+        if: always() && steps.verdict.outputs.key_plurx_worker_control != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurx-worker-control-${{ steps.verdict.outputs.key_plurx_worker_control }}
+          path: target/rust-units/receipts/plurx-worker-control/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Publish the plurxd receipt
+        if: always() && steps.verdict.outputs.key_plurxd != ''
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plurxd-${{ steps.verdict.outputs.key_plurxd }}
+          path: target/rust-units/receipts/plurxd/receipt.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+      - name: Hand the failures to the merge-base check
+        if: always() && steps.verdict.outputs.failures == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-failures-${{ github.run_id }}
+          path: target/rust-units/failures.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+      - name: Fail when a shard's partition is missing
+        if: always() && steps.verdict.outputs.complete != 'true'
+        run: exit 1
+
+  rust_units_baseline:
+    name: "Rust units: merge-base check of failures"
+    needs: verdict
+    if: always() && needs.verdict.outputs.failures == 'true'
+    runs-on: [ci-nonvoter-compile-amd64]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    timeout-minutes: 120
+    steps:
+      - name: Verify effective nonvoter resource bounds
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Size Cargo parallelism from the container's limits
+        run: python3 scripts/ci-cargo-jobs >> "$GITHUB_ENV"
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: rust-units-failures-${{ github.run_id }}
+          path: target/rust-units
+      # The head's tools judge the merge-base: keep them outside the tree,
+      # then check the merge-base out in place so the persistent target
+      # directory rebuilds only what the change touched.
+      - name: Check out the merge-base beside the head's tools
+        run: |
+          tools="$RUNNER_TEMP/rust-units-tools-$GITHUB_RUN_ID"
+          rm -rf "$tools" && mkdir -p "$tools"
+          cp -R validation "$tools/validation"
+          cp .config/nextest.toml "$tools/nextest.toml"
+          cp target/rust-units/failures.json "$tools/failures.json"
+          base="$(python3 -c 'import json; print(json.load(open("target/rust-units/failures.json"))["base"])')"
+          git checkout --quiet --detach "$base"
+          echo "RUST_UNITS_TOOLS=$tools" >> "$GITHUB_ENV"
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
+      - name: Provision the private D-Bus session runtime for unit tests
+        run: |
+          set -euo pipefail
+          if ! command -v dbus-run-session >/dev/null 2>&1; then
+            apt-get -o Acquire::Retries=3 update
+            DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends dbus-daemon
+          fi
+          command -v dbus-run-session
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: rust-units
+      - name: Install the pinned cargo-nextest
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/nextest-$NEXTEST_VERSION"
+          mkdir -p "$dir"
+          curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --connect-timeout 20 --max-time 180 --max-filesize 33554432 \
+            --output "$dir/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "$NEXTEST_SHA256" "$dir/nextest.tar.gz" | sha256sum --check --status
+          tar -xzf "$dir/nextest.tar.gz" -C "$dir"
+          rm -- "$dir/nextest.tar.gz"
+          "$dir/cargo-nextest" nextest --version | grep -F "cargo-nextest $NEXTEST_VERSION"
+          echo "$dir" >> "$GITHUB_PATH"
+      # The tools run from their own directory: `python3 -m` puts the working
+      # directory first on the path, and the merge-base's validation package
+      # need not contain this module.
+      - name: Run the failing tests at the merge-base and classify them
+        run: |
+          mapfile -t filters < <(cd "$RUST_UNITS_TOOLS" && python3 -m validation.rust_units \
+            baseline-filter --failures "$RUST_UNITS_TOOLS/failures.json")
+          output="$RUST_UNITS_TOOLS/merge-base-nextest.log"
+          args=()
+          for expression in "${filters[@]}"; do args+=(-E "$expression"); done
+          set +e
+          cargo nextest run --locked --workspace --exclude plurx-cluster-check \
+            --config-file "$RUST_UNITS_TOOLS/nextest.toml" --profile ci --no-fail-fast \
+            --color never --run-ignored all --test-threads 2 "${args[@]}" 2>&1 | tee "$output"
+          echo "merge-base nextest exited ${PIPESTATUS[0]}"
+          set -e
+          cd "$RUST_UNITS_TOOLS"
+          python3 -m validation.rust_units classify \
+            --failures "$RUST_UNITS_TOOLS/failures.json" --log "$output"
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          rm -rf "${RUST_UNITS_TOOLS:-/nonexistent}"
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  gate:
+    name: "Rust unit verdict"
+    needs: [select, rust_units_archive, shard, verdict, rust_units_baseline]
+    if: always()
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 2
+    steps:
+      - name: Require every due test to have passed here or before
+        env:
+          SELECT: ${{ needs.select.result }}
+          BUILD: ${{ needs.select.outputs.build }}
+          ARCHIVE: ${{ needs.rust_units_archive.result }}
+          SHARDS: ${{ needs.rust_units_archive.outputs.shards }}
+          SHARD: ${{ needs.shard.result }}
+          VERDICT: ${{ needs.verdict.result }}
+          FAILURES: ${{ needs.verdict.outputs.failures }}
+          BASELINE: ${{ needs.rust_units_baseline.result }}
+        run: |
+          echo "select=$SELECT build=$BUILD archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT failures=$FAILURES baseline=$BASELINE"
+          [ "$SELECT" = success ] || { echo "selection did not complete"; exit 1; }
+          if [ "$BUILD" != true ]; then echo "No due Rust unit test: every affected crate already passed under its key, or none is affected."; exit 0; fi
+          [ "$ARCHIVE" = success ] || { echo "the archive job ended with $ARCHIVE"; exit 1; }
+          if [ "$SHARDS" = '[]' ]; then echo "Every due test already passed under the same keys."; exit 0; fi
+          [ "$SHARD" = success ] || { echo "a shard could not run its partition ($SHARD)"; exit 1; }
+          [ "$VERDICT" = success ] || { echo "the verdict ended with $VERDICT"; exit 1; }
+          if [ "$FAILURES" = true ]; then
+            [ "$BASELINE" = success ] || { echo "new Rust unit failures (see the merge-base check)"; exit 1; }
+            echo "Only failures that also fail at the merge-base: pre-existing on main, reported, not blocking."
+          fi

@@ -3,7 +3,9 @@
 
 Workflow runs and their current jobs supply job IDs for the Forgejo 17 retry
 API. Logs are read over SSH from `<task id>.log.zst` on the forge host,
-keeping job IDs (retry targets) distinct from task IDs (log files).
+keeping job IDs (retry targets) distinct from task IDs (log files). A retry
+requires a terminal run and a verified inventory with no unexpired artifacts:
+Forgejo 17 deletes the entire run's artifacts even for a single-job rerun.
 
     scripts/ci-failures                 # the checkout's HEAD commit
     scripts/ci-failures 045d92f04       # any commit (prefix ok)
@@ -33,6 +35,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "scripts" / "ci-failures.fleet.json"
+ARTIFACT_PAGE_SIZE = 50
+ARTIFACT_PAGES = 20
+TERMINAL_RUN_STATUSES = {"success", "failure", "cancelled", "skipped"}
 # Case-sensitive on purpose: "error" inside a branch name or a path is not a failure.
 SIGNAL = re.compile(
     r"(\berror(\[E\d+\])?:|\b\w*Error:|\bERROR\b|\bFAILED\b|\bFAIL\b|panicked at|Traceback|"
@@ -81,10 +86,61 @@ def jobs_for(config: dict, sha: str, pages: int) -> list[dict]:
     return found
 
 
+
+class UnsafeRetry(RuntimeError):
+    """The client cannot establish that a rerun will preserve published data."""
+
+
+def positive_id(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def check_retry_artifacts(config: dict, job_id: int, job: dict) -> None:
+    """Refuse Forgejo's run-wide deletion when data exists or metadata is unknown."""
+    run_id = job.get("run_id")
+    if job.get("id") != job_id or not positive_id(job.get("id")) or not positive_id(run_id):
+        raise UnsafeRetry("job/run identity is missing or inconsistent")
+    try:
+        run = api(config, f"actions/runs/{run_id}")
+        if (not isinstance(run, dict) or not positive_id(run.get("id"))
+                or run["id"] != run_id or run.get("status") not in TERMINAL_RUN_STATUSES):
+            raise UnsafeRetry(f"run {run_id} is not verifiably terminal; it may still publish artifacts")
+        seen = set()
+        for page in range(1, ARTIFACT_PAGES + 1):
+            artifacts = api(config, f"actions/runs/{run_id}/artifacts?limit={ARTIFACT_PAGE_SIZE}&page={page}")
+            if not isinstance(artifacts, list) or len(artifacts) > ARTIFACT_PAGE_SIZE:
+                raise UnsafeRetry(f"run {run_id} artifact inventory is malformed")
+            for artifact in artifacts:
+                if (not isinstance(artifact, dict) or not positive_id(artifact.get("id"))
+                        or not positive_id(artifact.get("run_id")) or artifact["run_id"] != run_id
+                        or type(artifact.get("expired")) is not bool or artifact["id"] in seen):
+                    raise UnsafeRetry(f"run {run_id} artifact identity or expiry is unknown")
+                seen.add(artifact["id"])
+                # Use the server's explicit expiry flag, never a name-based proof
+                # exception or a guessed expiry for missing metadata.
+                if not artifact["expired"]:
+                    raise UnsafeRetry(f"run {run_id} has unexpired artifact {artifact['id']}")
+            # A server may cap pages below the requested size. Only an empty
+            # page establishes completion; a short nonempty page is not enough.
+            if not artifacts:
+                return
+        raise UnsafeRetry(f"run {run_id} artifact inventory exceeds the complete-list page budget")
+    except UnsafeRetry:
+        raise
+    except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, TypeError) as error:
+        reason = type(error).__name__
+        if isinstance(error, urllib.error.HTTPError):
+            reason = f"HTTP {error.code}"
+            error.close()
+        raise UnsafeRetry(f"cannot verify run {run_id} artifact inventory ({reason})") from None
+
+
 def retry_job(config: dict, job_id: int, dry_run: bool) -> int:
     """Only retry the explicitly selected job if it is still failed."""
     try:
         job = api(config, f"actions/jobs/{job_id}")
+        if not isinstance(job, dict):
+            raise UnsafeRetry("job metadata is malformed")
         if job.get("status") != "failure":
             print(
                 f"ci-failures: refusing to retry job {job_id}: "
@@ -92,13 +148,19 @@ def retry_job(config: dict, job_id: int, dry_run: bool) -> int:
                 file=sys.stderr,
             )
             return 1
-        target = f"failed job {job_id} ({job['name']}); dependent jobs also rerun"
+        check_retry_artifacts(config, job_id, job)
+        target = f"failed job {job_id} ({job.get('name') or 'name unavailable'}); dependent jobs also rerun"
         if dry_run:
             print(f"Would retry {target}")
             return 0
         api(config, f"actions/jobs/{job_id}/rerun", method="POST")
         print(f"Retry requested for {target}")
         return 0
+    except UnsafeRetry as error:
+        print(f"ci-failures: refusing to retry job {job_id}: {error}", file=sys.stderr)
+        print("Forgejo 17 job reruns delete ALL artifacts of the workflow run. "
+              "Start a fresh lane and let authenticated adoption reuse finished evidence; "
+              "do not rerun this artifact-bearing or unverified run.", file=sys.stderr)
     except urllib.error.HTTPError as error:
         # Do not echo server bodies: authentication errors can contain credentials.
         error.close()
