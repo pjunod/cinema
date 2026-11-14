@@ -102,6 +102,7 @@ async fn served_copy_pipe(
     seek: Option<f64>,
     audio: Option<i64>,
     digest: &str,
+    source_probe: &plurx_core::domain::ProbeResult,
 ) -> Vec<u8> {
     let Some(audio) = audio else {
         return copy_pipe(ffmpeg, source, stream, seek, false).await;
@@ -112,6 +113,14 @@ async fn served_copy_pipe(
     );
     let mut file = super::tests::hevc_file(Some("dolby_vision"), None);
     file.path = source.into();
+    // Use the real scanner boundary: unknown generic DV facts select the
+    // Profile 5 recipe and retain EL/parameter-set NALs unlike this P7 index.
+    file.video_codec = source_probe.video_codec.clone();
+    file.hdr = source_probe.hdr.clone();
+    file.hdr_format = source_probe.hdr_format.clone();
+    file.dolby_vision = source_probe.dolby_vision;
+    assert_eq!(file.dolby_vision.profile, Some(7), "actual P7 source");
+    assert!(matches!(file.dolby_vision.bl_compat_id, Some(1 | 4 | 6)));
     file.audio_streams = vec![plurx_core::domain::AudioStream {
         index: audio,
         codec: "pcm_s16le".into(),
@@ -124,18 +133,36 @@ async fn served_copy_pipe(
         .expect("curve digest")
         .try_into()
         .expect("SHA256");
+    let video = transcode::CopyVideoOptions::new(false, false)
+        .with_dolby_vision_conversion(true)
+        .with_dolby_vision_refit(Some(digest));
+    let video_args = transcode::strip_plurx_markers(&transcode::copy_video_args(&file, video));
+    assert!(video_args.windows(2).any(|pair| pair == ["-tag:v", "hvc1"]));
+    let canonical_filter =
+        transcode::hevc_copy_bsf_for_copy_retaining(Some("dolby_vision"), false, true, true, false);
+    assert!(video_args
+        .windows(2)
+        .any(|pair| pair[0] == "-bsf:v" && pair[1] == canonical_filter));
     let args = transcode::copy_pipe_args_with_audio_delivery(
         &file,
         seek.unwrap_or(0.0),
         Some(audio),
         true,
         transcode::Pacing::unpaced(),
-        transcode::CopyVideoOptions::new(false, false)
-            .with_dolby_vision_conversion(true)
-            .with_dolby_vision_refit(Some(digest)),
+        video,
         None,
     );
-    output(ffmpeg, &args).await
+    let label = if seek.is_some() { "seek" } else { "whole" };
+    let receipt = PathBuf::from(required("PLURX_FEL_COPY_ACCEPTANCE_DIR"));
+    std::fs::write(
+        receipt.join(format!("producer-{label}-argv.json")),
+        serde_json::to_vec_pretty(&args).expect("production argv JSON"),
+    )
+    .expect("production argv receipt");
+    let feed = output(ffmpeg, &args).await;
+    std::fs::write(receipt.join(format!("producer-{label}-raw.mp4")), &feed)
+        .expect("raw production output receipt");
+    feed
 }
 
 // The production landing probe is private to vodserve. Use its independent
@@ -462,7 +489,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
             "-show_packets".into(),
             "-show_streams".into(),
             "-show_entries".into(),
-            "packet=dts,pts:stream=time_base".into(),
+            "packet=dts,pts:stream=time_base,codec_type,codec_name:stream_side_data".into(),
             "-of".into(),
             "json".into(),
             source.clone(),
@@ -471,6 +498,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
     .await;
     std::fs::write(dir.join("source-packets.json"), &probe_bytes).expect("packet receipt");
     let probe: Value = serde_json::from_slice(&probe_bytes).expect("ffprobe JSON");
+    let source_probe = plurx_core::scan::probe::parse_probe_json(&probe);
     let packet = &probe["packets"][0];
     let (num, den) = parse_time_base(
         probe["streams"][0]["time_base"]
@@ -689,8 +717,16 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         },
     );
     assert!(plan.len() >= 2, "fixture must offer a nonzero seek entry");
-    let served_feed =
-        served_copy_pipe(&ffmpeg, &source, stream, None, audio_index, table.digest()).await;
+    let served_feed = served_copy_pipe(
+        &ffmpeg,
+        &source,
+        stream,
+        None,
+        audio_index,
+        table.digest(),
+        &source_probe,
+    )
+    .await;
     if audio_index.is_some() {
         assert!(
             split(&served_feed)
@@ -792,6 +828,7 @@ async fn real_fitted_index_and_seek_publish_stored_curves() {
         Some(seek_seconds),
         audio_index,
         table.digest(),
+        &source_probe,
     )
     .await;
     let seek_init = publish(
