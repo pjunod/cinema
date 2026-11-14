@@ -18,6 +18,10 @@ bump may break compatibility and a **patch** bump never does.
 - Android reports its playhead in title time for streams that began at a
   resume point, so a processed HDR upgrade starts where the viewer is instead
   of minutes behind them.
+- Linearizable reads no longer time out when one TCP SYN is lost: the vendored Hiqlite Raft client
+  reuses an idle connection per voter instead of dialing a new TCP + WebSocket handshake inside
+  every 800 ms leadership read-confirm (Hiqlite patch 28,
+  [RCA](docs/cluster/RAFT-READ-CONFIRM-DIAL-RCA-2026-11-14.md)).
 - **HDR:** fix the two remaining CM29 Smile outliers by measuring previously unreachable blue-gamut vertices with saturation-expanded synthetic probes. Existing observations retain priority; all six qualified frames stay below 0.05 dE, and every worsening coordinate is preserved. Docker CPU controls now preserve separate analytic/measured expectations and reject stale table receipts. See [qualification](docs/streaming/CM29-MEASURED-GAMUT.md).
 - Playback-control refusal logs retain the protocol code, route-read failure
   stage and sanitized source location, distinguishing release reconciliation
