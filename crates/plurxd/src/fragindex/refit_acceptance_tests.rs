@@ -1050,9 +1050,16 @@ async fn missing_dts_probe_refuses_retention_lost_by_the_mp4_muxer() {
         first_sample_sha256: Some(cases[0].0),
         ..cases[1].3
     };
+    wrong
+        .resolve(&cases[1].1, &cases[1].2)
+        .expect("packet identity witnesses the stripped payload, not a retention policy");
+    let fitted_retaining = transcode::CopyVideoOptions::new(false, true)
+        .with_dolby_vision_conversion(true)
+        .with_parameter_set_retention(true)
+        .with_dolby_vision_refit(Some([1; 32]));
     assert!(
-        wrong.resolve(&cases[1].1, &cases[1].2).is_err(),
-        "stripped packet cannot qualify retained headers"
+        fitted_parameter_set_refusal(fitted_retaining).is_some(),
+        "a matching stripped payload cannot bypass the fitted retention refusal"
     );
 }
 
