@@ -2,6 +2,7 @@ package tv.plurx.app.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -40,6 +41,67 @@ class ReaderPolicyTest {
         assertTrue(NativeReaderHandoff.permitsNavigation("$origin/assets/reader.js", origin))
         assertFalse(NativeReaderHandoff.permitsNavigation("$origin/api/v1/items/9", origin))
         assertFalse(NativeReaderHandoff.permitsNavigation("https://attacker.invalid/chapter", origin))
+    }
+
+    @Test
+    fun shellUsesTheSameCanonicalServerIdentityAsTheSession() {
+        val origins = mapOf(
+            "http://plurx_b:32400" to "http://plurx_b:32400",
+            "HTTP://PLURX_B:80/" to "http://plurx_b",
+            "HTTPS://Cinema.Example:443/" to "https://cinema.example",
+            "https://[::1]:9443" to "https://[::1]:9443",
+            "http://[::1]:80/" to "http://[::1]",
+        )
+        origins.forEach { (origin, expected) ->
+            assertEquals("$expected/?native-reader=1", NativeReaderHandoff.shellUrl(origin))
+        }
+        listOf(
+            "file:///book.epub", "http:///missing-host", "http://viewer@plurx_b:32400",
+            "http://plurx_b:bad", "http://plurx_b:0", "http://plurx_b:65536",
+            "http://plurx_b:32400/other", "http://plurx_b:32400?token=secret",
+            "http://plurx_b:32400#fragment", "http://a:b:32400",
+        ).forEach { origin -> assertNull(origin, NativeReaderHandoff.shellUrl(origin)) }
+    }
+
+    @Test
+    fun underscoreServerNavigationComparesAuthoritiesRatherThanMissingHosts() {
+        val origin = "http://plurx_b:32400"
+        assertTrue(NativeReaderHandoff.permitsNavigation("$origin/?native-reader=1", origin))
+        assertTrue(NativeReaderHandoff.permitsNavigation("$origin/assets/reader.js", origin))
+        assertTrue(NativeReaderHandoff.permitsNavigation(
+            "HTTP://PLURX_B:32400/api/v1/publication/cap/chapter.xhtml", origin,
+        ))
+        listOf(
+            "http://other_server:32400/assets/reader.js",
+            "http://plurx_b:32401/assets/reader.js",
+            "https://plurx_b:32400/assets/reader.js",
+            "http://viewer@plurx_b:32400/assets/reader.js",
+            "$origin/api/v1/items/9", "$origin/assets/../private",
+            "$origin/assets/%2e%2e/private", "$origin/api/v1/publication/cap/%5cprivate",
+            "http://a:b:32400/assets/reader.js",
+        ).forEach { candidate ->
+            assertFalse(candidate, NativeReaderHandoff.permitsNavigation(candidate, origin))
+        }
+    }
+
+    @Test
+    fun readerNavigationPreservesDefaultPortAndIpv6OriginEquivalence() {
+        assertTrue(NativeReaderHandoff.permitsNavigation(
+            "https://CINEMA.EXAMPLE:443/assets/reader.js", "https://cinema.example/",
+        ))
+        assertTrue(NativeReaderHandoff.permitsNavigation(
+            "http://[::1]:80/assets/reader.js", "http://[::1]",
+        ))
+        assertTrue(NativeReaderHandoff.permitsNavigation(
+            "https://[::1]:9443/api/v1/publication/cap/chapter.xhtml", "https://[::1]:9443",
+        ))
+        assertFalse(NativeReaderHandoff.permitsNavigation(
+            "https://[::2]:9443/assets/reader.js", "https://[::1]:9443",
+        ))
+        assertFalse(NativeReaderHandoff.permitsNavigation(
+            "https://cinema.example/assets/reader.js", "https://cinema.example/other",
+        ))
+        assertFalse(NativeReaderHandoff.permitsNavigation("http:/assets/reader.js", "http://null"))
     }
 
     @Test
