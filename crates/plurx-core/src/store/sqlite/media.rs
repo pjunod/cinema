@@ -17,12 +17,13 @@ use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
-    item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
-    IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
-    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
-    RootFingerprintStatus, RootRemovalOutcome, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
-    IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
-    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
+    item_sort_order_by, normalized_directory, show_directory_identity, show_directory_path_bounds,
+    ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker, IdentityRepairFile,
+    IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch, MediaStore, MissingFieldOrder,
+    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, RootRemovalOutcome,
+    SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
+    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
+    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 
 pub(super) fn identity_repair_snapshot(
@@ -142,14 +143,15 @@ pub(super) fn identity_repair_snapshot(
                 })
                 .ok()
                 .and_then(|parsed| parsed.source_directory)
-                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| show_directory_identity(&path.to_string_lossy()))
         })
         .collect::<Vec<_>>();
     directories.sort();
     directories.dedup();
     let mut directory_owner_ids = Vec::new();
+    let mut directory_guard_rows = Vec::new();
     for directory in &directories {
-        let (lower, upper) = directory_path_bounds(directory)?;
+        let (lower, upper) = show_directory_path_bounds(directory)?;
         let mut statement = conn.prepare(
             "SELECT f.path, show.id
                FROM files f INDEXED BY sqlite_autoindex_files_1
@@ -163,6 +165,9 @@ pub(super) fn identity_repair_snapshot(
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })? {
             let (path, show_id) = row?;
+            directory_guard_rows.push(serde_json::to_string(&(&path, show_id)).map_err(
+                |error| StoreError::Task(format!("encode directory evidence: {error}")),
+            )?);
             if directory_matches_show_path(&path, directory) {
                 directory_owner_ids.push(show_id);
             }
@@ -170,6 +175,8 @@ pub(super) fn identity_repair_snapshot(
     }
     directory_owner_ids.sort_unstable();
     directory_owner_ids.dedup();
+    directory_guard_rows.sort_unstable();
+    directory_guard_rows.dedup();
 
     let retiring_ids = crate::store::plan_identity_repair(IdentityRepairSnapshot {
         library_id,
@@ -180,6 +187,7 @@ pub(super) fn identity_repair_snapshot(
         files: files.clone(),
         watches: watches.clone(),
         directory_owner_ids: directory_owner_ids.clone(),
+        directory_guard_rows: directory_guard_rows.clone(),
         dependency_rows: Vec::new(),
         blockers: Vec::new(),
     })?
@@ -317,6 +325,7 @@ pub(super) fn identity_repair_snapshot(
         files,
         watches,
         directory_owner_ids,
+        directory_guard_rows,
         dependency_rows: Vec::new(),
         blockers,
     })
@@ -688,7 +697,7 @@ impl MediaStore for SqliteStore {
         season_number: i32,
     ) -> Result<Vec<Item>, StoreError> {
         let directory = normalized_directory(directory)?.to_owned();
-        let (lower, upper) = directory_path_bounds(&directory)?;
+        let (lower, upper) = show_directory_path_bounds(&directory)?;
         self.with_conn(move |conn| {
             let item_columns = item_cols("show");
             let mut statement = conn.prepare(&format!(

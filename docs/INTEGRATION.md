@@ -144,6 +144,8 @@ with what Curator wrote ([contract](features/PIPELINE-CONTRACT.md) §4.2). One
 request per directory: a season pack that lands ten episodes in one folder is
 one request, naming ten files.
 
+See [TV copy grouping](features/SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md).
+
 The scan **enriches what it placed** before answering. It runs the same
 provider pass a full scan does, narrowed to the items this request produced
 and the seasons, shows and folders their artwork comes through. It is narrowed

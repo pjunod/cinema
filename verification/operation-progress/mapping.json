@@ -117,13 +117,13 @@
         "table": "19 atomic publication transaction",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "anchor": "pub(super) async fn atomic_publication(",
-        "sha256": "6d7479088d50b01adcbdf1800dcfa65fdc1fea1036351ddb693f13158a23a453"
+        "sha256": "0056deaf8c6c149cc26d0fad6a948d233180519891b24242652387ee64f914c2"
       },
       {
         "table": "20 fenced insert collision loop",
         "source": "crates/plurx-core/src/store/hiqlite_publication.rs",
         "anchor": "for attempt in 0..4 {",
-        "sha256": "6d7479088d50b01adcbdf1800dcfa65fdc1fea1036351ddb693f13158a23a453"
+        "sha256": "0056deaf8c6c149cc26d0fad6a948d233180519891b24242652387ee64f914c2"
       },
       {
         "table": "21 timed client transaction",
@@ -207,31 +207,31 @@
         "table": "34 scanner page capacity",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "const WALK_PAGES_IN_FLIGHT: usize = 4;",
-        "sha256": "53d80c85e600ee4d061103e00126a452484ede9c661b2893d308da89ffa2daaa"
+        "sha256": "b9164f7246b50c5b2d8cab3338506afea14ff8715221ce69e8daabd745e80d24"
       },
       {
         "table": "35 blocking walk cancellation",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "if tx.is_closed()",
-        "sha256": "53d80c85e600ee4d061103e00126a452484ede9c661b2893d308da89ffa2daaa"
+        "sha256": "b9164f7246b50c5b2d8cab3338506afea14ff8715221ce69e8daabd745e80d24"
       },
       {
         "table": "36 blocking page send",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": ".blocking_send(std::mem::replace(&mut page, next))",
-        "sha256": "53d80c85e600ee4d061103e00126a452484ede9c661b2893d308da89ffa2daaa"
+        "sha256": "b9164f7246b50c5b2d8cab3338506afea14ff8715221ce69e8daabd745e80d24"
       },
       {
         "table": "37 scanner joins walker",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "walker\n        .await",
-        "sha256": "53d80c85e600ee4d061103e00126a452484ede9c661b2893d308da89ffa2daaa"
+        "sha256": "b9164f7246b50c5b2d8cab3338506afea14ff8715221ce69e8daabd745e80d24"
       },
       {
         "table": "38 per-file I/O loop",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "async fn record_candidates(",
-        "sha256": "53d80c85e600ee4d061103e00126a452484ede9c661b2893d308da89ffa2daaa"
+        "sha256": "b9164f7246b50c5b2d8cab3338506afea14ff8715221ce69e8daabd745e80d24"
       },
       {
         "table": "39 bounded process cancellation",

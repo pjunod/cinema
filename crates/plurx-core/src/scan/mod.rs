@@ -2214,7 +2214,15 @@ async fn find_or_create_show(
     library: &Library,
     parsed: &parse::ParsedEpisode,
 ) -> Result<(Item, Option<DuplicateDirectory>), StoreError> {
-    if let Some(directory) = usable_source_directory(library, parsed.source_directory.as_deref()) {
+    let directory = usable_source_directory(library, parsed.source_directory.as_deref())
+        .map(|directory| crate::store::show_directory_identity(&directory))
+        .filter(|directory| {
+            !library
+                .paths
+                .iter()
+                .any(|root| Path::new(directory) == root)
+        });
+    if let Some(directory) = directory {
         let candidates = store
             .find_shows_by_directory(library.id, &directory, parsed.season)
             .await?;
