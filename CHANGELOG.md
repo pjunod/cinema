@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linearizable reads no longer time out when one TCP SYN is lost: the vendored Hiqlite Raft client
+  reuses an idle connection per voter instead of dialing a new TCP + WebSocket handshake inside
+  every 800 ms leadership read-confirm (Hiqlite patch 28,
+  [RCA](docs/cluster/RAFT-READ-CONFIRM-DIAL-RCA-2026-11-14.md)).
 - Source-custody census recovery requires proof that the exact old kernel
   ended before releasing either playback or job custody. Zero-open snapshots,
   replaced paths and mismatched file-row/object-version generations cannot

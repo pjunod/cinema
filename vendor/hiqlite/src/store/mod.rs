@@ -132,6 +132,7 @@ pub(crate) async fn start_raft_db(
             node_config,
         ),
         snapshot_transport: snapshot_transport.clone(),
+        idle_connections: Default::default(),
     };
 
     let shutdown_handle = log_store.shutdown_handle();
@@ -226,6 +227,7 @@ where
             node_config,
         ),
         snapshot_transport: snapshot_transport.clone(),
+        idle_connections: Default::default(),
     };
 
     let tx_caches = state_machine_store.tx_caches.clone();
