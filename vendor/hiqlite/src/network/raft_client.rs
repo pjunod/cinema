@@ -172,7 +172,15 @@ impl IdleConnections {
                 }
                 closed.push(candidate);
             }
-            parked.retain(|idle| idle.is_live());
+            let mut kept = Vec::with_capacity(parked.len());
+            for idle in parked.drain(..) {
+                if idle.is_live() {
+                    kept.push(idle);
+                } else {
+                    closed.push(idle);
+                }
+            }
+            *parked = kept;
             leased
         };
         drop(closed);
@@ -194,7 +202,7 @@ impl IdleConnections {
             }
             *parked = kept;
             if parked.len() < IDLE_CONNECTIONS_PER_TARGET {
-                idle.shutdown.park();
+                idle.shutdown.park(idle.parked_at + IDLE_CONNECTION_TTL);
                 parked.push(idle);
             } else {
                 rejected = Some(idle);
@@ -420,20 +428,62 @@ struct ConnectionShutdownState {
     /// Set while the connection waits in `IdleConnections`: a parked
     /// supervisor whose socket ends exits instead of reconnecting.
     parked: AtomicBool,
+    /// When a parked supervisor closes its socket and exits if still parked.
+    park_deadline: StdMutex<Option<time::Instant>>,
+    park_changed: Notify,
     notify: Notify,
 }
 
 impl ConnectionShutdownState {
-    fn park(&self) {
-        self.parked.store(true, Ordering::Release);
+    // `parked` and the reset state's `connected` flag form a store-then-load
+    // handshake between `IdleConnections::lease` and the supervisor (each
+    // writes one and reads the other), so both use `SeqCst`.
+    fn park(&self, deadline: time::Instant) {
+        if let Ok(mut park_deadline) = self.park_deadline.lock() {
+            *park_deadline = Some(deadline);
+        }
+        self.parked.store(true, Ordering::SeqCst);
+        self.park_changed.notify_one();
     }
 
     fn unpark(&self) {
-        self.parked.store(false, Ordering::Release);
+        self.parked.store(false, Ordering::SeqCst);
+        if let Ok(mut park_deadline) = self.park_deadline.lock() {
+            *park_deadline = None;
+        }
+        self.park_changed.notify_one();
     }
 
     fn is_parked(&self) -> bool {
-        self.parked.load(Ordering::Acquire)
+        self.parked.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once the connection has stayed parked past its deadline, so
+    /// an idle socket is closed by its own supervisor even when nothing
+    /// touches the pool again (a former leader never leases).
+    async fn park_expired(&self) {
+        loop {
+            let deadline = self
+                .park_deadline
+                .lock()
+                .ok()
+                .and_then(|deadline| *deadline)
+                .filter(|_| self.is_parked());
+            match deadline {
+                Some(deadline) => {
+                    select! {
+                        biased;
+                        () = self.park_changed.notified() => {}
+                        () = time::sleep_until(deadline) => {
+                            if self.is_parked() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                None => self.park_changed.notified().await,
+            }
+        }
     }
 
     fn request(&self) {
@@ -459,7 +509,7 @@ impl ConnectionResetState {
     }
 
     fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Acquire)
+        self.connected.load(Ordering::SeqCst)
     }
 
     fn socket_epoch(&self) -> u64 {
@@ -487,11 +537,11 @@ impl ConnectionResetState {
     }
 
     fn mark_connected(&self) {
-        self.connected.store(true, Ordering::Release);
+        self.connected.store(true, Ordering::SeqCst);
     }
 
     fn mark_disconnected(&self) {
-        self.connected.store(false, Ordering::Release);
+        self.connected.store(false, Ordering::SeqCst);
     }
 
     fn request_reset(&self, observed_epoch: u64) {
@@ -555,6 +605,7 @@ async fn next_connected_event(
     select! {
         biased;
         _ = shutdown.requested() => ConnectedEvent::Shutdown,
+        () = shutdown.park_expired() => ConnectedEvent::Shutdown,
         _ = reset.changed_since(socket_epoch) => ConnectedEvent::Reset,
         result = reader_finished => ConnectedEvent::ReaderFinished(
             result.unwrap_or_else(|_| Err("Raft reader task exited without reporting an outcome".into()))
@@ -661,7 +712,14 @@ async fn stop_stream_tasks(
 impl NetworkStreaming {
     fn lease_or_dial(&self, node: &Node, raft_group: &'static str) -> NetworkConnectionStreaming {
         let key: IdleKey = (raft_group, node.id, node.addr_raft.clone());
-        if let Some(mut idle) = self.idle_connections.lease(&key) {
+        // After Raft stops, a new client's supervisor exits at once (see the
+        // top of `ws_handler`); a parked live socket must not bypass that.
+        let raft_stopped = self.is_raft_stopped.load(Ordering::Relaxed)
+            && self.is_startup_finished.load(Ordering::Relaxed);
+        if let Some(mut idle) = (!raft_stopped)
+            .then(|| self.idle_connections.lease(&key))
+            .flatten()
+        {
             debug!("Reusing idle Raft {raft_group} client with target {node}");
             return NetworkConnectionStreaming {
                 node: node.clone(),
@@ -2611,12 +2669,234 @@ mod tests {
         );
         tokio::time::timeout(Duration::from_secs(2), async {
             while !connection.reset.is_connected() {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
         .expect("client must publish its connected socket");
         connection
+    }
+
+    /// Authenticates, then answers every `AppendDB` with `Success`, counting
+    /// the sockets it accepts.
+    #[cfg(feature = "sqlite")]
+    async fn answering_raft_server(
+        State(state): State<ReconnectServerState>,
+        ws: fastwebsockets::upgrade::IncomingUpgrade,
+    ) -> Result<impl IntoResponse, Error> {
+        let (response, socket) = ws.upgrade()?;
+        tokio::spawn(async move {
+            let mut socket = socket.await.expect("upgrade answering test WebSocket");
+            socket.set_auto_close(true);
+            crate::network::handshake::HandshakeSecret::server(&mut socket, b"test-secret")
+                .await
+                .expect("authenticate answering test WebSocket");
+            let sequence = state
+                .connection_sequence
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            let _ = state.accepted.send_async(sequence).await;
+            while let Ok(frame) = socket.read_frame().await {
+                match frame.opcode {
+                    OpCode::Binary => {
+                        let request: RaftStreamRequest =
+                            deserialize(&frame.payload).expect("decode test Raft request");
+                        let RaftStreamRequest::AppendDB((request_id, _)) = request else {
+                            continue;
+                        };
+                        let bytes = serialize(&RaftStreamResponse {
+                            request_id,
+                            payload: RaftStreamResponsePayload::AppendDB(Ok(
+                                AppendEntriesResponse::Success,
+                            )),
+                        })
+                        .expect("encode test Raft response");
+                        if socket
+                            .write_frame(Frame::binary(Payload::Owned(bytes)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    OpCode::Close => break,
+                    _ => {}
+                }
+            }
+        });
+        Ok(response)
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn answering_fixture() -> (
+        NetworkStreaming,
+        Node,
+        flume::Receiver<u64>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind answering server");
+        let address = listener.local_addr().expect("read answering endpoint");
+        let (accepted, accepted_rx) = flume::unbounded();
+        let app = Router::new()
+            .route("/stream/sqlite", get(answering_raft_server))
+            .with_state(ReconnectServerState {
+                accepted,
+                connection_sequence: Arc::new(AtomicU64::new(0)),
+                release_first: Arc::new(Notify::new()),
+                release_second: Arc::new(Notify::new()),
+            });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve answering route");
+        });
+        let (mut factory, _, _, _, unused) = idle_reuse_fixture().await;
+        unused.abort();
+        let _ = unused.await;
+        factory.idle_connections = Default::default();
+        let node = Node {
+            id: 2,
+            addr_raft: address.to_string(),
+            addr_api: "127.0.0.1:1".to_owned(),
+        };
+        (factory, node, accepted_rx, server)
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn empty_append() -> AppendEntriesRequest<TypeConfigSqlite> {
+        AppendEntriesRequest {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: None,
+            entries: vec![],
+            leader_commit: None,
+        }
+    }
+
+    /// The production read-confirm cycle: build a client, send one empty
+    /// append, drop it, repeat. Every round after the first reuses the socket.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn read_confirm_cycle_reuses_one_socket_across_answered_rpcs() {
+        let (mut factory, node, accepted_rx, server) = answering_fixture().await;
+        let mut first_reset = None;
+        for round in 0..5 {
+            let mut client =
+                <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+                    &mut factory,
+                    node.id,
+                    &node,
+                )
+                .await;
+            let response = client
+                .append_entries(empty_append(), RPCOption::new(Duration::from_secs(2)))
+                .await
+                .expect("answered empty append");
+            assert!(matches!(response, AppendEntriesResponse::Success));
+            match &first_reset {
+                None => first_reset = Some(Arc::clone(&client.reset)),
+                Some(reset) => assert!(Arc::ptr_eq(reset, &client.reset), "round {round}"),
+            }
+            drop(client);
+            assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 1);
+        }
+        assert_eq!(accepted_rx.try_recv().expect("first socket"), 1);
+        assert!(
+            accepted_rx.try_recv().is_err(),
+            "only one socket for five reads"
+        );
+
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// A real RPC timeout leaves the reset guard armed; that connection must
+    /// be closed, never parked for the next client.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn timed_out_rpc_closes_its_connection_instead_of_parking_it() {
+        let (mut factory, node, accepted_rx, _release_first, server) = idle_reuse_fixture().await;
+        let mut client = connected_client(&mut factory, &node, &accepted_rx, 1).await;
+        let shutdown = Arc::clone(&client.shutdown);
+        let result = client
+            .append_entries(empty_append(), RPCOption::new(Duration::from_millis(150)))
+            .await;
+        assert!(result.is_err(), "the silent server must time the RPC out");
+        drop(client);
+        assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 0);
+        assert!(shutdown.is_requested());
+
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// At most `IDLE_CONNECTIONS_PER_TARGET` connections are parked; the rest
+    /// are closed on drop.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn parking_beyond_the_per_target_cap_closes_the_extra_connection() {
+        let (mut factory, node, accepted_rx, server) = answering_fixture().await;
+        let mut clients = Vec::new();
+        for _ in 0..=IDLE_CONNECTIONS_PER_TARGET {
+            let mut client =
+                <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+                    &mut factory,
+                    node.id,
+                    &node,
+                )
+                .await;
+            client
+                .append_entries(empty_append(), RPCOption::new(Duration::from_secs(2)))
+                .await
+                .expect("answered empty append");
+            clients.push(client);
+        }
+        let last_shutdown = Arc::clone(&clients.last().expect("clients").shutdown);
+        drop(clients);
+        assert_eq!(
+            factory.idle_connections.parked(&idle_key(&node)),
+            IDLE_CONNECTIONS_PER_TARGET
+        );
+        assert!(last_shutdown.is_requested());
+        assert_eq!(accepted_rx.len(), IDLE_CONNECTIONS_PER_TARGET + 1);
+
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// The supervisor owns the idle deadline: a parked socket is closed when it
+    /// expires even though nothing touches the pool again.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn parked_supervisor_closes_its_socket_at_the_idle_deadline() {
+        let (mut factory, node, accepted_rx, _release_first, server) = idle_reuse_fixture().await;
+        let first = connected_client(&mut factory, &node, &accepted_rx, 1).await;
+        let reset = Arc::clone(&first.reset);
+        let shutdown = Arc::clone(&first.shutdown);
+        drop(first);
+        assert!(shutdown.is_parked());
+        shutdown.park(time::Instant::now() + Duration::from_millis(100));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while reset.is_connected() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expired parked socket must close without a pool access");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), accepted_rx.recv_async())
+                .await
+                .is_err(),
+            "an expired parked supervisor must not reconnect"
+        );
+
+        drop(factory);
+        server.abort();
+        let _ = server.await;
     }
 
     #[cfg(feature = "sqlite")]
@@ -2705,7 +2985,7 @@ mod tests {
         release_first.notify_one();
         tokio::time::timeout(Duration::from_secs(2), async {
             while first_reset.is_connected() {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await

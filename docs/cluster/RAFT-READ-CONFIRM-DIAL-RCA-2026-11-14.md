@@ -58,8 +58,12 @@ dropped client parks its connection when no reset, cancellation, queued
 request or snapshot attempt touched it. The next `new_client` for the same
 group and target leases it exclusively, so each socket still carries one
 client's RPCs at a time and nothing shares a socket with replication. At most
-eight connections are parked per target, for at most 30 s. A parked
-supervisor whose socket ends exits instead of reconnecting. No timeout,
+eight connections are parked per target. Each parked supervisor owns its
+30 s idle deadline and closes its socket when it passes, even if the pool is
+never touched again (a former leader). A parked supervisor whose socket ends
+exits instead of reconnecting, and nothing is leased after Raft stops. There
+is no client keepalive, so a peer or middlebox idle timeout under 30 s only
+closes parked sockets early, which falls back to dialing. No timeout,
 heartbeat, retry or watchdog changes. This is what OpenRaft 0.10 builds in
 as a dedicated heartbeat client; on 0.9 it belongs in the factory.
 

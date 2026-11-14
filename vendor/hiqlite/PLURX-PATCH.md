@@ -446,11 +446,16 @@ made-up URL and prevents the fork from being declared fully tracked.
   `IdleConnections` when no reset, cancellation, queued request or snapshot
   attempt touched it, and the next `new_client` for the same group and target
   leases it. A lease is exclusive, so each connection still carries one
-  client's RPCs; at most eight are kept per target, each for at most 30 s; a
-  parked supervisor whose socket ends exits instead of reconnecting. No
-  timeout, heartbeat or retry changes. Tests:
-  `raft_client::tests::dropped_healthy_client_is_leased_without_a_new_socket`,
+  client's RPCs; at most eight are kept per target. The parked supervisor owns
+  its 30 s idle deadline and closes its socket when it passes, and it exits
+  instead of reconnecting when its socket ends; nothing is leased after Raft
+  stops. No timeout, heartbeat or retry changes. Tests:
+  `raft_client::tests::read_confirm_cycle_reuses_one_socket_across_answered_rpcs`,
+  `dropped_healthy_client_is_leased_without_a_new_socket`,
   `client_reset_during_lease_is_closed_not_reused`,
+  `timed_out_rpc_closes_its_connection_instead_of_parking_it`,
+  `parking_beyond_the_per_target_cap_closes_the_extra_connection`,
+  `parked_supervisor_closes_its_socket_at_the_idle_deadline`,
   `parked_connection_whose_socket_ends_exits_and_is_not_leased`.
   Files: `src/network/raft_client.rs`, `src/store/mod.rs`.
 
