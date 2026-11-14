@@ -844,23 +844,16 @@ fn validated_title_rewind(connection: &rusqlite::Connection, version: i64) -> (S
         version, 114,
         "only the current title fixture may be rewound"
     );
-    let marker_version: i64 = connection
-        .query_row(
-            "SELECT version FROM dv_title_jobs_schema WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("published title marker version");
-    require_fixture_marker(connection, "dv_title_jobs_schema", marker_version);
+    require_fixture_marker(connection, "dv_title_jobs_schema", 1);
     let marker: i64 = connection
         .query_row(
-            "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version IN (1,2)",
+            "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
             [],
             |row| row.get(0),
         )
         .expect("title marker");
     let retained: i64 = connection.query_row("SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL))", [], |row| row.get(0)).expect("title fixture data");
-    let drops = validated_empty_title_rewind(&actual, marker_version, marker, retained);
+    let drops = validated_empty_title_rewind(&actual, 1, marker, retained);
     (format!("{};", drops.join(";")), 113)
 }
 
@@ -888,6 +881,26 @@ fn historical_title_rewind_refuses_partial_schema_without_mutation() {
     }))
     .is_err());
     assert_eq!(objects(), before, "refusal precedes every fixture mutation");
+}
+
+#[test]
+fn historical_title_rewind_refuses_v2_at_v114_without_mutation() {
+    use source_extensions_fixture::title_extension_fixture as title;
+    let dir = tempfile::tempdir().expect("mislabeled title fixture");
+    let path = dir.path().join("title-v114.db");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
+    let connection = rusqlite::Connection::open(path).expect("fixture connection");
+    title::assert_title_fixture_generation(&connection, 2);
+    connection
+        .execute_batch("PRAGMA user_version=114;")
+        .expect("mislabeled ordinal");
+    let before = title::title_fixture_objects(&connection);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        validated_title_rewind(&connection, 114)
+    }))
+    .is_err());
+    assert_eq!(title::title_fixture_objects(&connection), before);
+    title::assert_title_fixture_generation(&connection, 2);
 }
 
 #[test]
