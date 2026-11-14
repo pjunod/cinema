@@ -330,6 +330,58 @@ class Case(Helper, unittest.TestCase):
         self.assertIn("applicability=SourceApplicability(commit)", source)
         self.assertIn('"applicability_commit": commit', source)
 
+    def test_identical_revision_sources_share_the_bounded_ast_cache(self):
+        raw = b"import unittest\nclass Case(unittest.TestCase):\n def test_kept(self): self.assertTrue(True)\n"
+        path = "tests/validation/test_probe.py"
+        key = "validation:test_probe.Case.test_kept"
+        nodes = sum(1 for _ in receipts.ast.walk(receipts.ast.parse(raw)))
+        checker = receipts.SourceApplicability(COMMIT, lambda commit, name: raw, lambda name: raw)
+        with patch.object(receipts, "MAX_SOURCE_CACHE_AST_NODES", nodes):
+            self.assertTrue(checker(key, {"commit": "b" * 40, "run": 1}))
+        self.assertEqual(checker.node_count, nodes)
+        self.assertEqual(checker.byte_count, len(raw))
+        self.assertEqual(set(checker.files), {(COMMIT, path), ("b" * 40, path)})
+
+    def test_changed_revision_sources_still_invalidate_and_obey_the_ast_bound(self):
+        old = b"import unittest\nclass Case(unittest.TestCase):\n def test_kept(self): self.assertTrue(True)\n"
+        current = old.replace(b"assertTrue(True)", b"assertTrue(False)")
+        key = "validation:test_probe.Case.test_kept"
+        def checker():
+            return receipts.SourceApplicability(
+                COMMIT, lambda commit, name: current if commit == COMMIT else old,
+                lambda name: current)
+        self.assertFalse(checker()(key, {"commit": "b" * 40, "run": 1}))
+        nodes = sum(1 for _ in receipts.ast.walk(receipts.ast.parse(current)))
+        with patch.object(receipts, "MAX_SOURCE_CACHE_AST_NODES", nodes):
+            bounded = checker()
+            self.assertFalse(bounded(key, {"commit": "b" * 40, "run": 1}))
+        self.assertIn("aggregate AST bound", bounded.refusals[key])
+
+    def test_historical_content_cache_never_skips_current_worktree_integrity(self):
+        raw = b"import unittest\nclass Case(unittest.TestCase):\n def test_kept(self): pass\n"
+        path = "tests/validation/test_probe.py"
+        checker = receipts.SourceApplicability(
+            COMMIT, lambda commit, name: raw, lambda name: raw + b"# dirty\n")
+        checker.source("b" * 40, path)
+        with self.assertRaisesRegex(receipts.IntegrityError, "worktree differs"):
+            checker.source(COMMIT, path)
+        self.assertNotIn((COMMIT, path), checker.files)
+
+    def test_content_cache_preserves_commit_identity_and_source_path_bounds(self):
+        raw = b"import unittest\nclass Case(unittest.TestCase):\n def test_kept(self): pass\n"
+        path = "tests/validation/test_probe.py"
+        checker = receipts.SourceApplicability(COMMIT, lambda commit, name: raw, lambda name: raw)
+        for number in range(1, receipts.MAX_SOURCE_CACHE_FILES + 1):
+            checker.source(f"{number:040x}", path)
+        with self.assertRaisesRegex(receipts.ReceiptError, "source-cache file bound"):
+            checker.source(f"{receipts.MAX_SOURCE_CACHE_FILES + 1:040x}", path)
+        nodes = sum(1 for _ in receipts.ast.walk(receipts.ast.parse(raw)))
+        separate = receipts.SourceApplicability(COMMIT, lambda commit, name: raw, lambda name: raw)
+        with patch.object(receipts, "MAX_SOURCE_CACHE_AST_NODES", nodes):
+            separate.source(COMMIT, path)
+            with self.assertRaisesRegex(receipts.ReceiptError, "aggregate AST bound"):
+                separate.source(COMMIT, "tests/validation/test_other.py")
+
     def test_sibling_definition_metadata_binds_fixture_without_replaying_bodies(self):
         """ONE new local fixture edge; earlier combined success stays retained."""
         prefix = b'''import unittest
