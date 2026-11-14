@@ -155,7 +155,7 @@ impl Completion {
     async fn drive(self: Arc<Self>, store: Arc<dyn Store>) {
         tokio::select! {
             () = self.cancel.cancelled() => {}
-            () = self.abandoned() => return,
+            () = self.abandoned() => return self.retire_after_release().await,
         }
         if !self.owns_settlement() {
             return;
@@ -164,7 +164,7 @@ impl Completion {
         // first, exactly as the legacy explicit join did.
         tokio::select! {
             () = self.authorize.cancelled() => {}
-            () = self.abandoned() => return,
+            () = self.abandoned() => return self.retire_after_release().await,
         }
         let waiting = tokio::time::Instant::now();
         let mut last_check = waiting;
@@ -178,8 +178,9 @@ impl Completion {
                 state.closed = true;
                 if state.veto {
                     tracing::warn!(custody_id = %self.receipt.custody_id,
-                        "untracked source capability: live completion refuses; custody stays charged");
-                    return;
+                        "untracked source capability: no joined proof; capacity is released when its authority lapses");
+                    drop(state);
+                    return self.retire_after_release().await;
                 }
                 let ready = state.operations == 0
                     && state.holders == 0
@@ -202,7 +203,7 @@ impl Completion {
             if last_check.elapsed() >= REAP_CHECK {
                 last_check = tokio::time::Instant::now();
                 if self.reaped().await {
-                    return;
+                    return self.clear_witness();
                 }
                 if !reported && waiting.elapsed() >= Duration::from_secs(60) {
                     reported = true;
@@ -225,16 +226,36 @@ impl Completion {
             crate::source_custody::LiveJoin::Unwitnessed => Some(self.started_tick),
             crate::source_custody::LiveJoin::Refused(reason) => {
                 tracing::warn!(custody_id = %self.receipt.custody_id, reason,
-                    "live source completion refused; custody stays charged");
-                return;
+                    "live source completion refused; capacity is released when its authority lapses");
+                return self.retire_after_release().await;
             }
         };
         if let Some(since) = since {
             if !self.descendants_exited(since).await {
-                return;
+                return self.retire_after_release().await;
             }
         }
         crate::background_jobs::settle_joined_source_custody(&store, self.receipt.clone()).await;
+    }
+    /// A ledger that cannot publish a joined proof (dropped owner, untracked
+    /// capability, refused join, unprovable children) leaves the release to the
+    /// store sweep, then removes its local witness so it never pins the node's
+    /// reader inventory for the life of the daemon.
+    async fn retire_after_release(&self) {
+        loop {
+            if self.reaped().await {
+                return self.clear_witness();
+            }
+            tokio::time::sleep(REAP_CHECK).await;
+        }
+    }
+    fn clear_witness(&self) {
+        if let Err(error) =
+            crate::source_custody::clear_background_settlement(&self.store, &self.receipt)
+        {
+            tracing::warn!(custody_id = %self.receipt.custody_id, %error,
+                "released source witness cleanup will replay");
+        }
     }
     /// The store sweep already released this custody because its authority
     /// lapsed (lease expiry is the release). Nothing is left to settle, so the

@@ -939,14 +939,28 @@ pub(super) async fn replay_at_in(
                 .lock()
                 .map_err(|_| "reader registry poisoned")?
                 .contains_key(&path);
-            if !owned && record_released(store, &evidence.record).await? {
-                clear_at(legacy, &evidence.record)?;
-                complete_at(directory, &evidence.record)?;
-                tracing::info!(
-                    witness = name,
-                    "collected the reader witness of a source owner released by lease expiry"
-                );
-                continue;
+            if !owned {
+                match record_released(store, &evidence.record).await {
+                    Ok(true) => {
+                        match clear_at(legacy, &evidence.record)
+                            .and_then(|()| complete_at(directory, &evidence.record))
+                        {
+                            Ok(()) => tracing::info!(
+                                witness = name,
+                                "collected the reader witness of a source owner released by lease expiry"
+                            ),
+                            Err(error) => tracing::warn!(witness = name, %error,
+                                "released reader witness retained for the next pass"),
+                        }
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(witness = name, %error,
+                            "reader witness owner lookup failed; retried next pass");
+                        continue;
+                    }
+                }
             }
             let armed = directory.join(format!("{name}.armed"));
             let activation: String = match read_private_text(&armed, 64) {

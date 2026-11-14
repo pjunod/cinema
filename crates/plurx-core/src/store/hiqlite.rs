@@ -6543,6 +6543,8 @@ impl MetricsStore for HiqliteAuthStore {
     ) -> Result<PrometheusStoreSnapshot, StoreError> {
         let live = super::live_engines_param(live_fragment_engines);
         let request_health = super::analysis_request_health_sql("$2", "$3");
+        // Overdue = still charged three minutes after the shared lapse time.
+        let source_lapsed = super::background_jobs_resources::custody_lapsed_at_sql("c");
         let row = self
             .client()
             .query_consistent_map::<PrometheusStoreRow, _>("prometheus_store_snapshot_with", 
@@ -6670,7 +6672,9 @@ impl MetricsStore for HiqliteAuthStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
                             + (SELECT COUNT(*) FROM analysis_source_reservations \
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held LEFT JOIN background_jobs job ON held.owner_kind = 'job' AND job.id = held.work_id LEFT JOIN analysis_requests request ON held.owner_kind = 'analysis' AND request.request_id = held.work_id WHERE held.custody_id IS NOT NULL AND held.active_occupancy=1 AND CASE WHEN held.expires_at_ms = 0 THEN COALESCE(job.updated_at_ms, request.updated_at_ms, 0) ELSE held.expires_at_ms END <= $2 * 1000 - 180000), \
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND ")
+                    + &source_lapsed
+                    + " <= $2 * 1000 - 180000), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json, ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = $1",

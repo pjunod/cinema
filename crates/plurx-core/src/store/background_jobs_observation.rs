@@ -103,7 +103,8 @@ FROM (
   WHERE owner.lease_expires_at_ms>json_extract($1,'$.now_ms') OR json_extract(owner.projection_json,'$.source_quiescent')!=1
   UNION ALL
   SELECT resource.value,custody.work_id,'background_source','maintenance',custody.started_at_ms,
-    CASE WHEN custody.authority_expires_at_ms=0 THEN COALESCE(origin.updated_at_ms,custody.updated_at_ms) ELSE custody.authority_expires_at_ms END,
+    -- custody_lapsed_at_sql("custody"); not yet stamped reads as lapsing now.
+    COALESCE((CASE WHEN custody.authority_expires_at_ms>0 THEN custody.authority_expires_at_ms WHEN custody.phase='cleanup_pending' THEN custody.updated_at_ms WHEN custody.phase='paused' THEN 0 ELSE NULL END),json_extract($1,'$.now_ms')),
     CASE WHEN custody.phase='paused' THEN 'source_paused' WHEN custody.authority_expires_at_ms>json_extract($1,'$.now_ms')
       THEN CASE custody.owner_kind WHEN 'lease' THEN 'read_attestation' WHEN 'offline' THEN 'offline_source' ELSE custody.phase END ELSE 'cleanup_pending' END,custody.updated_at_ms,
     CASE WHEN custody.phase='paused' THEN 0 ELSE 1 END
@@ -261,4 +262,15 @@ pub(crate) fn background_job_metrics(
         }
     }
     Ok(metrics)
+}
+
+#[cfg(test)]
+mod lapse_tests {
+    /// The Activity panel, the recovery metric and the sweep must agree on when
+    /// an owner lapsed; the observation inlines the shared expression.
+    #[test]
+    fn source_holders_use_the_shared_custody_lapse_expression() {
+        assert!(super::SOURCE_IO_HOLDERS_SQL
+            .contains(&super::super::background_jobs_resources::custody_lapsed_at_sql("custody")));
+    }
 }

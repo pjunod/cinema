@@ -61,61 +61,61 @@
       },
       {
         "anchor": "pub trait BackgroundJobStore: Send + Sync {",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue protocol trait"
       },
       {
         "anchor": "pub struct JobToken {",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue token schema"
       },
       {
         "anchor": "impl<T: QueueSql> BackgroundJobStore for T {",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 shared queue adapter"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:1495"
       },
       {
         "anchor": "        if request.fence.is_none()",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3465"
       },
       {
         "anchor": "            if token.lease_expires_ms <= request.now_ms {",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3497"
       },
       {
         "anchor": "  AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:532"
       },
       {
         "anchor": "    AND job.lease_expires_ms > now_ms AND job.state = 'running'",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:630"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms)\n                  AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused,json_each(paused.resource_keys_json) resource\n                    WHERE paused.job_id=job.id AND paused.fence=job.fence AND paused.node_id=job.owner_node_id\n                      AND paused.boot_id=job.owner_boot_id AND paused.claim_id=job.claim_id AND paused.phase='paused'\n                      AND resource.value=required.resource_key))",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:636"
       },
       {
         "anchor": "pub const MAX_RETAINED_JOBS: usize = 10_000;",
-        "sha256": "b0f1a58ca4f6ce6b16c1e9f501616397cc475652b11b24f60f37b8ac634b83ca",
+        "sha256": "3e2ed12dc056c9f11ee02e30562c70f638dc1ba8bdf05b5a2b4b9984d10c8c09",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs.rs:50"
       },
@@ -193,7 +193,7 @@
       },
       {
         "anchor": "pub struct StorageDomainMapping {",
-        "sha256": "232f7d50c906d53e1735689d954b9c7b63ffac51185c41b9afdf5e9b8ebf39ac",
+        "sha256": "a1207767800aaa54ce1d6265877d931904e8f414fdaac2395418b4d34ae0b02e",
         "source": "crates/plurx-core/src/store/background_jobs_resources.rs",
         "table": "proposal \u00a74.1 resource mapping"
       },
@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "e956a7818564869cf2554972ae2188f25f1a089d0143fdf3a99b82d66b514e8f",
+        "sha256": "5493c36f3be0db090a3d36c1dfcc06e86b0c88ced17751031cede29922a47e86",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "e956a7818564869cf2554972ae2188f25f1a089d0143fdf3a99b82d66b514e8f",
+        "sha256": "5493c36f3be0db090a3d36c1dfcc06e86b0c88ced17751031cede29922a47e86",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },
@@ -409,37 +409,37 @@
       },
       {
         "anchor": "async fn with_fenced_conn<T, F>",
-        "sha256": "5201bb70cc2f27eb5eaa8cb6c286a0fac0e7a306ad9cd55d8a3203b4ce9e6f30",
+        "sha256": "67dcdb87df1e3c552dc5a7a9157ab9bd2276955ed11c9ae58b48f4ae6fd87a95",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "proposal \u00a74.1 SQLite fenced transaction"
       },
       {
         "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
-        "sha256": "5201bb70cc2f27eb5eaa8cb6c286a0fac0e7a306ad9cd55d8a3203b4ce9e6f30",
+        "sha256": "67dcdb87df1e3c552dc5a7a9157ab9bd2276955ed11c9ae58b48f4ae6fd87a95",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
       },
       {
         "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
-        "sha256": "5201bb70cc2f27eb5eaa8cb6c286a0fac0e7a306ad9cd55d8a3203b4ce9e6f30",
+        "sha256": "67dcdb87df1e3c552dc5a7a9157ab9bd2276955ed11c9ae58b48f4ae6fd87a95",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
       },
       {
         "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
-        "sha256": "5201bb70cc2f27eb5eaa8cb6c286a0fac0e7a306ad9cd55d8a3203b4ce9e6f30",
+        "sha256": "67dcdb87df1e3c552dc5a7a9157ab9bd2276955ed11c9ae58b48f4ae6fd87a95",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "5201bb70cc2f27eb5eaa8cb6c286a0fac0e7a306ad9cd55d8a3203b4ce9e6f30",
+        "sha256": "67dcdb87df1e3c552dc5a7a9157ab9bd2276955ed11c9ae58b48f4ae6fd87a95",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
       },
       {
         "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
-        "sha256": "5201bb70cc2f27eb5eaa8cb6c286a0fac0e7a306ad9cd55d8a3203b4ce9e6f30",
+        "sha256": "67dcdb87df1e3c552dc5a7a9157ab9bd2276955ed11c9ae58b48f4ae6fd87a95",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
       },

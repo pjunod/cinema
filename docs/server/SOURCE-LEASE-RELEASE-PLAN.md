@@ -52,7 +52,16 @@ correctness one. plurxd runs as its container's init, so its children die
 with it anyway.
 
 **Why 60 s:** the grace absorbs a renewal that races the sweep, plus clock
-skew between nodes. It is not a proof window. Playback renews every few
+skew between nodes. It is not a proof window.
+
+**When authority lapsed.** For a live owner, authority is its job, request,
+lease or package expiry. Once the owner stops running (finished,
+`cancelling`, re-fenced), authority reads 0, which carries no time. The
+sweep stamps such a row `cleanup_pending` with the time it first saw it, and
+the grace runs from that stamp. A cancelling job therefore gets its full
+grace to kill its child. A paused row holds no capacity and goes at once.
+The sweep, the recovery metric and the Activity panel share one expression
+for this, `custody_lapsed_at_sql`, so they cannot disagree. Playback renews every few
 seconds and loses its authority on any failed renewal. So reaping a row 60 s
 after its lease ended can never take capacity from a healthy playback.
 
@@ -79,9 +88,17 @@ after its lease ended can never take capacity from a healthy playback.
 
 ### 4.1 Step 1 — expiry releases (PR #1597)
 
-- `reap_settled_source_custody` deletes owners lapsed past the grace.
-- A waiting completion ledger stops once the sweep has released it, and logs
-  its open holders after 60 s.
+- `reap_settled_source_custody` deletes owners lapsed past the grace,
+  stamps newly ownerless rows, and clears analysis coordination roles still
+  pointing at released custody.
+- The claim paths (`background_jobs.rs` and the analysis capacity terms in
+  `fragment_index_cluster.rs`) no longer refuse every source claim while
+  any custody has lapsed. A lapsed owner counts as one ordinary reader until
+  the sweep releases it.
+- Every completion-ledger path that cannot publish a joined proof waits for
+  the sweep, then removes its local witness. That covers a dropped owner, a
+  vetoed capability, a refused join, and children that can't be proven
+  exited. The ledger logs its open holders after 60 s.
 - Replay collects v2 witnesses whose owner the store no longer holds.
 - The recovery metric, its warning and the Activity panel flag only owners
   still charged 3 minutes after their lease lapsed, meaning the sweep itself
@@ -105,6 +122,14 @@ Remove what step 1 made dead weight:
 
 Keep the store tables until step 3. The source-arbitration schema is pinned
 to its exact SQL, so changing it needs a versioned extension migration.
+Two schema texts still describe the old model and change with step 3:
+
+- the `dispatch_turn` view in `background_job_turns.sql` still lets an
+  unreaped lapsed custody stop a ready scan from displacing other work (it
+  clears when the sweep releases it);
+- the `background_source_custody` comments in
+  `background_jobs_foreground.sql` still say only a settlement receipt
+  deletes a row.
 
 **Acceptance:** `cargo clippy --all-targets -D warnings` is clean; the fast
 lane is green; Activity shows no recovery panel after a restart.
@@ -145,3 +170,4 @@ one node from serialising the cluster.
 |---|---|---|---|
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Incident | Custody `7c92c813` released on nynuc via the fresh-namespace restart |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 | PR #1597 opened as a draft |
+| 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 review | Fable review: 5 should-fix, 3 nits, all addressed (stamped grace, veto removed, witness retirement, role unpinning, shared lapse expression) |
