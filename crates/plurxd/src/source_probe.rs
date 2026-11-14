@@ -419,6 +419,16 @@ async fn execute(
                     }
                 }
             }
+            // FFprobe ran to completion and refused this exact file: that
+            // verdict holds until the file changes, and a changed file is a
+            // new generation with its own job. Retrying it only keeps every
+            // waiter (an admin reanalyze, a scan page) queued to its deadline.
+            Err(error) if error.is_file_verdict() => {
+                tracing::warn!(job=job.id,%error,"leaf probe refused the file");
+                Some(JobSettlement::Fail {
+                    error_code: "probe_refused".into(),
+                })
+            }
             Err(error) => {
                 tracing::warn!(job=job.id,%error,"leaf probe failed");
                 Some(JobSettlement::Retry {
