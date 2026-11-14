@@ -106,7 +106,7 @@ async fn title_with(store: &Arc<dyn Store>, name: &str, profile: i64, fel: bool)
         .expect("DV probe");
     let scanner = "a".repeat(64);
     let demand = store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, now())
         .await
         .expect("title demand")
         .into_iter()
