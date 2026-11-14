@@ -443,9 +443,12 @@ class NamedTestsTests(unittest.TestCase):
         self.assertEqual(doc["crates"]["app"]["exact"], [self.A, self.B])
         self.assertEqual(doc["crates"]["app"]["only"], ["m::c", "t::a"])
 
-    def test_an_unknown_crate_fails_closed(self):
+    def test_an_unknown_crate_is_carried_as_absent_not_a_select_failure(self):
+        doc = ru.restrict_to_tests(self.doc(), ["ghost t::a", self.A])
+        self.assertEqual(doc["absent"], ["ghost t::a"])
+        self.assertTrue(doc["crates"]["app"]["due"])
         with self.assertRaises(ru.UnitsError):
-            ru.restrict_to_tests(self.doc(), ["ghost t::a"])
+            ru.parse_test_ids("ghost")  # malformed still fails closed
 
     def test_the_plan_runs_exactly_the_named_ids_and_adopts_nothing(self):
         config = ru.Config.load(CONFIG)
@@ -513,9 +516,39 @@ class NamedVerdictTests(unittest.TestCase):
 
     def test_an_absent_named_test_is_reported_distinctly_and_is_never_a_pass(self):
         outputs, text = self.run_verdict(passed=["app t::a"], absent=["app t::b"])
-        self.assertIn("ABSENT app t::b", text)
+        self.assertIn("\nABSENT app t::b", "\n" + text)
         self.assertIn("named `app t::a`: PASS", text)
-        self.assertEqual(outputs["complete"], "false")  # the gate fails on an incomplete verdict
+        # The verdict job itself succeeds; only the gate fails on absent.
+        self.assertEqual(outputs["complete"], "true")
+        self.assertEqual(outputs["absent"], "true")
+
+    def test_a_mixed_probe_reports_absent_and_a_failing_present_test(self):
+        outputs, text = self.run_verdict(failed=["app t::a"], absent=["app t::b"])
+        self.assertIn("named `app t::a`: FAIL", text)
+        self.assertIn("\nABSENT app t::b", "\n" + text)
+        self.assertEqual((outputs["complete"], outputs["failures"], outputs["absent"]), ("true", "true", "true"))
+
+    def test_an_absent_id_of_a_missing_crate_is_reported_by_the_verdict(self):
+        plan = {"run": 9, "shards": 1, "head": "a" * 40, "base": "b" * 40, "crates": {},
+                "absent": ["ghost t::a"]}
+        receipt = {"schema": 1, "run": 9, "shards": 1, "head": "a" * 40, "index": 1, "results": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ru.write_json(root / "plan.json", plan)
+            ru.write_json(root / "shards" / "1" / "receipt.json", receipt)
+            captured = []
+            with mock.patch.object(ru, "STATE", root / "state"), mock.patch.object(ru, "emit") as emit, \
+                    mock.patch.object(ru, "summarize", side_effect=lambda lines: captured.append("\n".join(lines))):
+                ru.command_verdict(mock.Mock(plan=str(root / "plan.json"), receipts=str(root / "shards"),
+                                             output=str(root / "receipts")))
+            outputs = {c.args[0]: c.args[1] for c in emit.call_args_list}
+        self.assertIn("\nABSENT ghost t::a", "\n" + captured[0])
+        self.assertEqual((outputs["complete"], outputs["absent"]), ("true", "true"))
+
+    def test_the_gate_fails_on_absent_but_the_verdict_job_does_not(self):
+        stage = (ROOT / ".github/workflows/rust-units.yml").read_text()
+        self.assertIn("absent: ${{ steps.verdict.outputs.absent }}", stage)
+        self.assertIn('[ "$ABSENT" != true ]', stage)
 
     def test_the_absent_status_reaches_the_json_and_the_receipt(self):
         self.run_verdict(passed=["app t::a"], absent=["app t::b"])

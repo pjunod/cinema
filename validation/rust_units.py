@@ -492,14 +492,17 @@ def restrict_to_tests(doc, test_ids):
 
     Reuses the `only` mechanism (restrict a due crate to named tests) and adds
     `exact`, the full ids, so a test of the same name in another binary of the
-    crate is not pulled in. An id whose crate is not a unit crate fails closed
-    here; one the listing does not hold fails closed in `make_plan`.
+    crate is not pulled in. An id whose crate is not a unit crate of this tree
+    (or that the listing lacks, in `make_plan`) is carried as absent and
+    reported `ABSENT <id>` by the verdict; it never stops the other tests.
     """
-    named = {}
+    named, absent = {}, []
     for test_id in test_ids:
         crate = crate_of(test_id.split(" ", 1)[0])
-        require(crate in doc["crates"], f"unknown test id (no unit crate `{crate}`): {test_id}")
-        named.setdefault(crate, []).append(test_id)
+        if crate in doc["crates"]:
+            named.setdefault(crate, []).append(test_id)
+        else:
+            absent.append(test_id)
     for crate, entry in doc["crates"].items():
         if crate in named:
             ids = sorted(named[crate])
@@ -508,6 +511,7 @@ def restrict_to_tests(doc, test_ids):
         else:
             entry.update(due=False, only=None, exact=None, reason=[])
     doc["tests"] = sorted(test_ids)
+    doc["absent"] = sorted(absent)
     return doc
 
 
@@ -898,7 +902,7 @@ def make_plan(selection_doc, pending, listing, config, run):
         serial_all += remaining_serial
     count = shard_count(len(partitioned))
     return {"schema": SCHEMA, "run": run, "head": selection_doc["head"], "base": selection_doc["base"],
-            "shards": count, "crates": crates,
+            "shards": count, "crates": crates, "absent": list(pending.get("absent", [])),
             "filters": filter_expressions(partitioned, suites) if partitioned else [],
             "serial_filters": filter_expressions(serial_all, {}) if serial_all else []}
 
@@ -1096,14 +1100,15 @@ def command_select(args):
                      ", ".join(doc["crates"][name]["reason"]))
     summarize(lines)
     emit("due", due)
-    emit("any", "true" if due else "false")
+    emit("any", "true" if due or doc.get("absent") else "false")
     return 0
 
 
 def command_adopt(args):
     doc = read_json(args.selection)
     config = Config.load(Tree(doc["head"]).text(str(CONFIG)))
-    pending = {"schema": SCHEMA, "head": doc["head"], "base": doc["base"], "crates": {}, "adopted": {}}
+    pending = {"schema": SCHEMA, "head": doc["head"], "base": doc["base"], "crates": {}, "adopted": {},
+               "absent": doc.get("absent", [])}
     forge = forge_from_environment() if os.environ.get("GITHUB_TOKEN") else None
     authenticator = Authenticator(forge, int(os.environ.get("GITHUB_RUN_ID", "0")), config) if forge else None
     for crate, entry in sorted(doc["crates"].items()):
@@ -1124,7 +1129,7 @@ def command_adopt(args):
         pending["crates"][crate] = {"key": entry["key"], "passed": sorted(found["passed"]),
                                     "only": entry.get("only"), "exact": entry.get("exact")}
     write_json(args.output, pending)
-    emit("build", "true" if pending["crates"] else "false")
+    emit("build", "true" if pending["crates"] or pending["absent"] else "false")
     emit("crates", sorted(pending["crates"]))
     return 0
 
@@ -1142,7 +1147,7 @@ def command_plan(args):
               [f"- `{name}`: {len(c['remaining']) + len(c['serial'])} to run of {c['listing']['count']}"
                for name, c in sorted(plan["crates"].items())])
     # An all-absent named probe still needs its verdict to say so.
-    absent = sum(len(c.get("absent") or []) for c in plan["crates"].values())
+    absent = len(plan.get("absent", [])) + sum(len(c.get("absent") or []) for c in plan["crates"].values())
     emit("shards", list(range(1, plan["shards"] + 1)) if total or absent else [])
     emit("tests", str(total))
     return 0
@@ -1152,8 +1157,10 @@ def command_package_filter(args):
     """The archive filterset: binaries of the crates the plan may run."""
     pending = read_json(args.pending)
     crates = sorted(pending["crates"])
-    require(crates and all(CRATE_NAME.fullmatch(c) for c in crates), "no crates to archive")
-    print(" | ".join(f"package(={c})" for c in crates))
+    require(all(CRATE_NAME.fullmatch(c) for c in crates), "no crates to archive")
+    require(crates or pending.get("absent"), "no crates to archive")
+    # Only absent named tests: archive nothing, so the verdict can still say so.
+    print(" | ".join(f"package(={c})" for c in crates) or "none()")
     return 0
 
 
@@ -1183,17 +1190,18 @@ def command_verdict(args):
     for crate, tests in sorted(failures.items()):
         lines.append(f"- `{crate}` failed: " + ", ".join(f"`{t}`" for t in tests[:20])
                      + (f" … {len(tests) - 20} more" if len(tests) > 20 else ""))
-    named = sorted(t for entry in plan["crates"].values() for t in entry.get("exact") or [])
-    absent = {t for entry in plan["crates"].values() for t in entry.get("absent") or []}
+    named = sorted([t for entry in plan["crates"].values() for t in entry.get("exact") or []]
+                   + list(plan.get("absent", [])))
+    absent = set(plan.get("absent", [])) | {t for entry in plan["crates"].values() for t in entry.get("absent") or []}
     statuses = {}
     for test in named:
         state = "absent" if test in absent else outcome.get(test, "not run")
         statuses[test] = state
-        lines.append(f"- ABSENT {test}" if state == "absent" else f"- named `{test}`: " +
+        # ABSENT is a result, not an incomplete run: the verdict still succeeds
+        # and the gate alone fails on it (the train reads these lines).
+        lines.append(f"ABSENT {test}" if state == "absent" else f"- named `{test}`: " +
                      {"passed": "PASS", "failed": "FAIL"}.get(state, "NOT RUN"))
-        if state == "absent":
-            problems.append(f"named test absent from the archive listing: {test}")
-        elif state not in ("passed", "failed"):
+        if state not in ("passed", "failed", "absent"):
             problems.append(f"named test did not run: {test}")
     if named:
         write_json(STATE / "named.json", {"head": plan["head"], "tests": statuses})
@@ -1202,6 +1210,7 @@ def command_verdict(args):
     write_json(STATE / "failures.json", {"head": plan["head"], "base": plan["base"], "failures": failures})
     emit("failures", "true" if failures else "false")
     emit("complete", "false" if problems else "true")
+    emit("absent", "true" if absent else "false")
     emit("receipts", [receipt_name(r["crate"], r["key"]) for r in out])
     for receipt in out:
         emit(f"key_{receipt['crate'].replace('-', '_')}", receipt["key"])

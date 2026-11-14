@@ -302,6 +302,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       failures: ${{ steps.verdict.outputs.failures }}
+      absent: ${{ steps.verdict.outputs.absent }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -575,6 +576,7 @@ jobs:
           SHARD: ${{ needs.shard.result }}
           VERDICT: ${{ needs.verdict.result }}
           FAILURES: ${{ needs.verdict.outputs.failures }}
+          ABSENT: ${{ needs.verdict.outputs.absent }}
           BASELINE: ${{ needs.rust_units_baseline.result }}
           TRAIN_TESTS: ${{ inputs.tests }}
         run: |
@@ -585,6 +587,7 @@ jobs:
             [ "$BUILD" = true ] && [ "$SHARDS" != '[]' ] || { echo "named tests were not planned to run: $TRAIN_TESTS"; exit 1; }
             [ "$ARCHIVE" = success ] && [ "$SHARD" = success ] && [ "$VERDICT" = success ] || { echo "named tests did not all run and pass (archive=$ARCHIVE shard=$SHARD verdict=$VERDICT failures=$FAILURES)"; exit 1; }
             [ "$FAILURES" != true ] || { echo "a named test failed"; exit 1; }
+            [ "$ABSENT" != true ] || { echo "a named test is absent (see the verdict's ABSENT lines); absent is never a pass"; exit 1; }
             echo "Every named test ran and passed."; exit 0
           fi
           if [ "$BUILD" != true ]; then echo "No due Rust unit test: every affected crate already passed under its key, or none is affected."; exit 0; fi
