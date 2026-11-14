@@ -21,7 +21,8 @@ has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
 > Status: **v0.8.0**, build `205` — prepared Dolby Vision handoffs retain
-> the executing choice and film position after optional Auto failures.
+> the executing choice and film position after optional Auto failures, and
+> the control playhead stays in title time for streams that began mid-title.
 >
 > Build `203` — the rendezvous never precedes a prepared
 > successor's own start, so a processed upgrade staged at the window its trial

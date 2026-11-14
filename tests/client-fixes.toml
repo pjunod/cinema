@@ -8685,3 +8685,11 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = "def refresh_tone_mapping"
 test = "clients/linux-player/tests/test_cinema_controls.py"
 test_anchor = "def test_slow_tone_mapping_telemetry_keeps_input_loop_responsive(self):"
+
+[[fixes]]
+id = "android.control-playhead-title-duration"
+commits = ["979231239b9e4444947f571aefedc036317f3d2f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "titleDurationMs = plan.durationMs,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
+test_anchor = "fun controlDurationIsTitleTimeSoAnOriginSessionPlayheadIsNotClamped()"
