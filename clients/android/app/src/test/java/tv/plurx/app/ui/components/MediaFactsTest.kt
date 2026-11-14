@@ -13,6 +13,30 @@ import tv.plurx.app.player.renderedRange
 
 class MediaFactsTest {
     @Test
+    fun toneMappingPillRequiresActiveProcessingEvidence() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val report = tv.plurx.app.data.EffectiveProcessingReport(generation, true, false,
+            listOf("DisplayTargetMapping:600"))
+        fun pills(peak: Long? = null, source: String? = null,
+                  processing: tv.plurx.app.data.EffectiveProcessingReport? = null, active: String? = null) =
+            playerMediaFacts(null, null, delivered = "hdr10", effectiveProcessing = processing,
+                activeGeneration = active, toneMapPeakNits = peak, toneMapPeakSource = source)
+                .filter { it.kind == MediaFactKind.ToneMapping }
+        assertTrue(pills().isEmpty())
+        assertTrue(pills(0, "cll").isEmpty())
+        assertTrue(pills(1000, "unknown").isEmpty())
+        assertEquals(listOf("Tone mapping"), pills(1000, "cll").map { it.label })
+        assertEquals(listOf("Cinema tone mapping active"), pills(processing = report, active = generation).map { it.accessibilityLabel })
+        assertTrue(pills(processing = report, active = "22222222-2222-4222-8222-222222222222").isEmpty())
+        assertTrue(pills(processing = report.copy(appliedOperations = listOf("PolynomialReshape")), active = generation).isEmpty())
+        assertEquals(1, pills(1000, "default", report, generation).size)
+        val sdr = report.copy(hdr10Enhanced = false, sdrProcessed = true,
+            appliedOperations = listOf("Bt709Gamma24Conversion", "DisplayTargetMapping:100"))
+        assertTrue(playerMediaFacts(null, null, delivered = "sdr", effectiveProcessing = sdr,
+            activeGeneration = generation).any { it.kind == MediaFactKind.ToneMapping })
+    }
+
+    @Test
     fun hdr10EnhancedRequiresCurrentReportAndKeepsFelDetailSeparate() {
         val generation = "11111111-1111-4111-8111-111111111111"
         val report = tv.plurx.app.data.EffectiveProcessingReport(generation, true, true,

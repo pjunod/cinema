@@ -20,7 +20,9 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `204` — the rendezvous never precedes a prepared
+> Status: **v0.8.0**, build `205` — playback controls show when Cinema is tone mapping.
+>
+> Build `203` — the rendezvous never precedes a prepared
 > successor's own start, so a processed upgrade staged at the window its trial
 > already produced is met where it begins. Build 203 changes only the version
 > code so Google Play can deliver a fresh install to existing testers.
