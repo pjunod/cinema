@@ -23,8 +23,8 @@ through the fast lane on 2026-11-13. This does not qualify the whole project.
    It removes activation-time path stats and file-row/object-version
    reconstruction as authority. Same-kernel zero-open counts cannot confine
    unknown readers or recall transferred descriptors. The corrected candidate
-   still requires final review and focused qualification; the recovery ledger
-   records its outcome.
+   passes final review and focused local qualification; merge-train admission
+   and the main gate remain. The recovery ledger records its outcome.
 2. **B0 does not depend on that unsafe settlement path.** Existing main
    already names witness families. New sidecars report the first invalidating
    purpose and never authorize release. Existing settlement, live-ledger and

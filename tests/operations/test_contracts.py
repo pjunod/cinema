@@ -2404,14 +2404,19 @@ assert.equal(context.ACT_TIMER, null);
             self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
     def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
-        def enabled(expression, *, apple, desktop, retained, tv_adopted=False):
-            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained}
+        def enabled(expression, *, apple, desktop, retained, tv_adopted=False,
+                    preflight="success", train=False, scope_success=True, cancelled=False):
+            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained, "train_selected": train}
             expression = re.sub(
                 r"(steps\.native_receipts\.outputs\.tv_navigation != 'true')|"
-                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple) (==|!=) 'true'",
+                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple|train_selected) (==|!=) 'true'",
                 lambda match: str(not tv_adopted) if match[1] else
                 str(values[match[2]] if match[3] == "==" else not values[match[2]]),
                 expression)
+            expression = re.sub(r"needs\.preflight\.result == '(success|skipped)'",
+                                lambda match: str(preflight == match[1]), expression)
+            expression = expression.replace("needs.scope.result == 'success'", str(scope_success))
+            expression = expression.replace("!cancelled()", str(not cancelled))
             expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
             self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
             return eval(expression, {"__builtins__": {}}, {})
@@ -2425,7 +2430,10 @@ assert.equal(context.ACT_TIMER, null);
                 jobs = workflow_job_blocks(path)
                 self.assertIn("desktop_macos: ${{ steps.scope.outputs.desktop_macos }}", jobs["scope"])
                 job = jobs[job_name]
-                condition = re.search(r"(?m)^    if: (.+)$", job)[1]
+                scalar = re.search(r"(?m)^    if: ([^\n]+)\n((?:      [^\n]*\n)*)", job)
+                self.assertIsNotNone(scalar)
+                condition = (" ".join(line.strip() for line in scalar[2].splitlines())
+                             if scalar[1] in (">", ">-") else scalar[1])
                 steps = workflow_step_blocks(job)
                 desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
                                 else "Build and test native macOS server tray")
@@ -2440,6 +2448,14 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertFalse(enabled(workflow_step_scalar(desktop, "if"),
                                          apple=True, desktop=False, retained=False))
                 if path.endswith("main-fast-lane.yml"):
+                    self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
+                                             preflight="failure"))
+                    self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
+                                             preflight="skipped"))
+                    self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True,
+                                            preflight="skipped", train=True))
+                    self.assertFalse(enabled(condition, apple=False, desktop=True, retained=True,
+                                             cancelled=True))
                     receipts = steps["Authenticate compatible original native test receipts"]
                     self.assertNotIn("if:", receipts)
                     self.assertIn("run: python3 -m validation.native_receipts", receipts)

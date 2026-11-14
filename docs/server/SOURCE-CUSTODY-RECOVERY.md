@@ -144,7 +144,7 @@ proof described below.
 
 ### 1.3 Census recovery needs proof that the exact old kernel ended
 
-**Owner:** Codex · **PR:** #1561 · corrective implementation, qualification pending.
+**Owner:** Codex · **PR:** #1561 · reviewed and locally qualified; merge-train gate pending.
 
 A zero-open count describes one inode at one instant. Two zero counts do not
 prove that an unknown surviving child cannot reopen a path or read another
@@ -422,8 +422,13 @@ neither receives an invented successful join or retrospective witness.
 exact ended-kernel evidence for both custody families. It removes the
 unproven single-inode path and contradictory generation reconstruction,
 retains exact-token/lease/anchor/release checks, and removes obsolete scans.
-Final adversarial review, native Linux compile and focused fast-lane evidence
-are pending. Existing namespace replay and its deployment contract are unchanged.
+Final adversarial review found no P1/P2 issues; its stale sidecar sentence is
+corrected. Native Linux1.97.1 production Clippy and six census regressions pass;
+ten affected Python cases and the ownership structural count pass. The
+CI-only main integration retains unchanged source evidence; the merge-train
+fast lane remains pending. These are consumer/protocol tests, not a live
+host-reboot or fleet qualification. Existing namespace replay and its
+deployment contract are unchanged.
 
 
 | Date | Evidence | Scope / remaining work |
