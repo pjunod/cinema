@@ -70,6 +70,16 @@ class PreciseCm4(unittest.TestCase):
         self.assertTrue(result.stdout.rstrip().endswith("PASS"))
         self.assertEqual(result.stdout.count("max|GPU-CPU|"), len(CM4_REAL))
 
+    def test_cm4_l8_spatial_weight_matches_licensed_controls(self):
+        source = required_file("PLURX_DM_PARITY_SRC", "five 3840x2160 float32 BT.2020/PQ RGB frames")
+        cases = ("cm4_ms_exact", "cm4_ms_fade", "cm4_ms_mix", "cm4_ms_off", "cm4_ms_source1000", "cm4_ms_below_first")
+        result = subprocess.run([sys.executable, str(HERE / "run_dm_parity.py"), str(self.control), self.work,
+                                 str(source), *cases], capture_output=True, text=True,
+                                timeout=CASE_TIMEOUT * len(cases))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.rstrip().endswith("PASS"))
+        self.assertEqual(result.stdout.count("max|GPU-CPU|"), len(cases))
+
     def helper_check(self, *mutation):
         result = subprocess.run([sys.executable, str(HERE / "run_pq_helper_exact.py"), str(self.control),
                                  self.work, *mutation], capture_output=True, text=True, timeout=2 * CASE_TIMEOUT)

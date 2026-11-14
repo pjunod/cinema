@@ -185,6 +185,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
       dm_cm4_trim *t = &trims[n]; memset(t, 0, sizeof(*t));
       dv_dm_sop(x->trim_slope, x->trim_offset, x->trim_power, &t->lift, &t->gain, &t->gamma);
       t->cw = dv_dm_off(x->trim_chroma_weight, 2048); t->sg = dv_dm_off(x->trim_saturation_gain, 2048);
+      t->ms = dv_dm_off(x->ms_weight, 2048);
       if (x->length > 10) t->mcb = dv_dm_off(x->target_mid_contrast, 2048);
       if (x->length > 12) t->hc = dv_dm_off(x->clip_trim, 2048);
       if (x->length > 13) {
@@ -207,7 +208,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
     else memset(&tr, 0, sizeof(tr));
     dm_cm4_state s;
     if (!dm_cm4_prepare(&s, e, tmin, tmax, &tr, tprim, sprim)) return "degenerate CM4 shot";
-    f->weight = 0.0;
+    f->weight = tr.ms;
     f->trim_targets = applied ? n : 0; f->trim = applied ? "l8-interpolated" : "l1-only";
     f->c4 = s;
     dv_dm_pack_cm4(f, &s);

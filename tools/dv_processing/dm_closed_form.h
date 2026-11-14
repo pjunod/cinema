@@ -185,11 +185,11 @@ DM_STATIC int dm_detail(const double *Iin, const double *Ipw, int w, int h, doub
 
 /* ================================================================== CM v4 */
 typedef struct {
-  double lift, gain, gamma, cw, sg, mcb, hc, sat[6], hue[6];
+  double lift, gain, gamma, cw, sg, mcb, hc, ms, sat[6], hue[6];
 } dm_cm4_trim;
 
 /* Trim interpolation across target displays (L8 TIDs). trims[i] holds the trim for a target
- * of max PQ tpq[i] (any order). Tone trims (SOP, mcb, hc) are linear in target-max PQ, with SOP
+ * of max PQ tpq[i] (any order). Tone/spatial trims (SOP, mcb, hc, ms) are linear in target-max PQ, with SOP
  * interpolated in (gain, offset = lift(1+gain/2), power = (2-gamma)/(2+gamma)); colour trims
  * (cw, sg, six-vector) are linear in F(PQ) = |0.9669 - PQ|^2.027. Held below the lowest trim
  * target, faded to zero at the source mastering peak above the highest. */
@@ -201,6 +201,7 @@ DM_STATIC dm_cm4_trim dm_cm4_mix(const dm_cm4_trim *a, const dm_cm4_trim *b, dou
   o.gain = a->gain * (1 - t) + b->gain * t;
   o.mcb = a->mcb * (1 - t) + b->mcb * t;
   o.hc = a->hc * (1 - t) + b->hc * t;
+  o.ms = a->ms * (1 - t) + b->ms * t;
   o.cw = a->cw * (1 - tc) + b->cw * tc;
   o.sg = a->sg * (1 - tc) + b->sg * tc;
   for (int k = 0; k < 6; k++) { o.sat[k] = a->sat[k]*(1-tc) + b->sat[k]*tc; o.hue[k] = a->hue[k]*(1-tc) + b->hue[k]*tc; }
@@ -320,7 +321,7 @@ DM_STATIC double dm_cm4_C(const dm_cm4_state *s, double v) { return dm_cm4_sop(s
 DM_STATIC double dm_satscale(double Io, double Ii) { return (pow(Io - 1, 3) + 1) / (pow(Ii - 1, 3) + 1); }
 DM_STATIC double dm_c4meso(double I) { double c3 = (I * 4095 - 25) / (900 - 25); double t = dm_clampd(1 - c3, 0, 1); return 1 - t * t; }
 
-/* l1 = (min, avg, max) PQ including L3 offsets; tmin/tmax target PQ; tprim/sprim target/source primaries */
+/* l1 includes L3 offsets; tmin/tmax are PQ; tprim/sprim are target/source primaries. */
 DM_STATIC int dm_cm4_prepare(dm_cm4_state *s, const double l1[3], double tmin, double tmax,
                              const dm_cm4_trim *trim, enum dm_prim tprim, enum dm_prim sprim) {
   memset(s, 0, sizeof(*s));
@@ -355,10 +356,19 @@ DM_STATIC int dm_cm4_prepare(dm_cm4_state *s, const double l1[3], double tmin, d
   s->SR = SR;
   s->a = dm_mind(0.0, (ITR / IcR - 1) / (SR * SR * SR));
   s->b = dm_mind(0.0, (STR / (SR * dm_satscale(IcR, IR) * s->sgf) - 1) / (SR * SR * SR));
-  /* six-vector anchors: hues of BT.2020 R, Y, G, C, B, M at PQ 1 */
+  /* Six-vector labels use the L9 source gamut, with a fixed calibrated 4000-nit
+   * PQ normalization. Independent source/shot/target-peak probes keep this hue
+   * palette unchanged. A fixed BT.2020/PQ1 basis mislabels trims on P3 sources.
+   * The construction reproduces measured knots within about 0.02 degrees;
+   * it does not assert the reference's internal numerical implementation. */
   static const double PR[6][3] = {{1,0,0},{1,1,0},{0,1,0},{0,1,1},{0,0,1},{1,0,1}};
+  const double hue_reference_nits = 4000.0;
   for (int k = 0; k < 6; k++) {
-    double v[3]; dm_rgbpq_to_ictcp(PR[k], v);
+    double primary[3], lms[3], v[3];
+    for (int j = 0; j < 3; j++) primary[j] = PR[k][j] * hue_reference_nits;
+    dm_mat_vec(cs, primary, lin); dm_mat_vec(DM_RGB2LMS, lin, lms);
+    for (int j = 0; j < 3; j++) lms[j] = dm_pq_oetf(dm_maxd(lms[j], 0.0));
+    dm_mat_vec(DM_LMS2ICTCP, lms, v);
     double hdeg = atan2(v[2], v[1] / 2) * 180.0 / DM_PI; if (hdeg < 0) hdeg += 360; s->anc[k] = hdeg;
   }
   for (int k = 0; k < 6; k++) if (s->tr.sat[k] != 0 || s->tr.hue[k] != 0) s->six = 1;

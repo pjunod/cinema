@@ -1,7 +1,9 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-11-11 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+
+- **2026-11-13 · CM4 trim fidelity:** Owner Codex. Source implemented; reference qualification open. Six-vector knots used a fixed BT.2020 palette and L8 MS was ignored. Real-frame and independent synthetic CPU comparisons remove all observed pixels above0.05dE; every worsening coordinate is retained. [Root cause, evidence and remaining work](docs/streaming/CM4-TRIM-FIDELITY.md).
 
 - **2026-11-13 · Linux player session control:** Owner Codex (Sol implementation). [Ledger](docs/clients/LINUX-PLAYER-CINEMA-UI.md#session-control-sequence-repair-051). Session replacement reused a run-wide counter despite the fresh-session sequence-1 contract, causing stale controls and lease expiry. Source repaired and independently reviewed; final affected validation recorded in the PR. DV reset interpretation, deployment and physical acceptance remain distinct.
 - **2026-11-12 · Fast-lane throughput:** [throughput](docs/ci/CI-THROUGHPUT.md), [Rust gate image](docs/ci/RUST-GATE-IMAGE.md). Owner Claude (claude-opus-5-5, session 01BCWLA2), PR #1550. A push cancels the PR's in-flight run; derivable paperwork (counters, Markdown host names, index rows) is committed by the lane; the Rust gate runs once in a pinned image at `-j4` (8.2 min on a lab1 guest, was 22-25). The high-CPU pool stays unused until its runners apply the job's CPU, PID and swap limits.
