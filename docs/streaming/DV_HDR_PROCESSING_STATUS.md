@@ -12,21 +12,6 @@ remaining milestones stay in the build handoff. The
 
 ## 1. Current boundary
 
-**Android prepared playback follow-up (2026-11-14, local branch `8e1f830c`):**
-the source patch preserves the executing quality after an optional Auto failure,
-keeps processed-route selection across later seeks, adopts the prepared
-control channel only after the accepted commit, and resolves full-VOD film time
-without treating the acquisition hint as a new origin. The branch also checks
-successor playlist ownership and measures native seek settlement separately
-from buffer-readiness waiting. These are source changes only: there is no current-head Android
-test result recorded here, the physical Android row remains open, and no server
-deployment was performed. The current matrix is 7/18 accepted; the six processing-OFF cases on web and Android TV
-passed, along with Avatar web processing-ON. Apple hardware/UI remains pending. The
-three processing preferences are restored to on. Server staging source
-`cadfe4b4` distinguishes outside cancellation from genuine refusal and reuses the
-existing rendering-triggered retry lifecycle; native validation and deployment
-remain pending.
-
 **CM4 active area (2026-11-09, merged #1481):** checked L5 offsets bound the
 CM4 detail filter to the uncropped native active rectangle, with vertical
 neighbours clamped to the active rows. This matches all 54 sampled codes of
