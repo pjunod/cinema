@@ -73,12 +73,13 @@ increasing host resident allocations.
 ### Dedicated nonvoter compiler capacity
 
 Heavy host-mode jobs and AMD package and release builds use the
-repository-only `gha-lab1-plurx-heavy-01` worker with `ci-nonvoter-heavy-amd64`
-(it also carries the compile pool below). Since 2026-11-11 the heavy lane
-also has `gha-lab1-plurx-heavy-02` (same VM and slice, no Store label) and
-`gha-lab2-plurx-heavy-01` (lab2 guest, ~10 GiB: gates and proofs only). The same
-capacity-one worker and the existing `lab2` Store worker advertise
-`ci-nonvoter-store`; the Store fan-out has two physical nonvoter carriers.
+repository-only `gha-lab1-plurx-heavy-01` worker with `ci-nonvoter-heavy-amd64`.
+Forgejo registrations 62 (`gha-lab1-plurx-heavy-02`) and 63
+(`gha-lab2-plurx-heavy-01`) left CI eligibility on 2026-11-13: 62 shared
+`lab1`'s 20 GiB parent slice with 01; 63's service had a 20 GiB bound inside
+an Android guest with ~10 GiB actual memory. Both are stopped and disabled;
+registrations and caches remain. The capacity-one lab1 worker and existing
+lab2 Store worker remain the two physical `ci-nonvoter-store` carriers.
 The older `lab1` organization registration stays under maintenance labels,
 and its three previous GitHub/Forgejo schedulers remain stopped. Preserve
 those registrations and their private rollback backups.
