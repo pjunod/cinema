@@ -8,7 +8,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | File | Answers | |
 |---|---|---|
 | [Fleet acceptance](PLAYBACK-START-FLEET-ACCEPTANCE-2026-11-13.md) | Hour measurements and attribution limits. | done |
-| [CM4 trim fidelity](CM4-TRIM-FIDELITY.md) | Source-gamut hue and L8 spatial controls. | open |
+| [CM4 trim fidelity](CM4-TRIM-FIDELITY.md) | Source-gamut hue and L8 spatial controls. | built |
 | [CM29 gamut](CM29-MEASURED-GAMUT.md) | Measured vertices and qualification. | built |
 | [PLAYBACK-START-STATUS.md](PLAYBACK-START-STATUS.md) | Owner, merges, validation and acceptance. | open |
 | [PLAYBACK-START-BUILD.md](PLAYBACK-START-BUILD.md) | Phase 1 build contract: nine lanes. | open |

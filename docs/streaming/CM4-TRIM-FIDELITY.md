@@ -1,6 +1,6 @@
 # CM4 trim fidelity — source hue labels and spatial weights
 
-**Status:** built; focused/native qualification passed, main promotion pending · **Owner:** Codex · **Updated:** 2026-11-13
+**Status:** built; focused/native qualification passed · **Owner:** Codex · **Updated:** 2026-11-13
 
 Companion to the [processing ledger](DV_HDR_PROCESSING_STATUS.md) and
 [display-targeted build](DISPLAY-TARGETED-DV-BUILD.md). This records two
@@ -90,7 +90,7 @@ Adversarial review found no actionable issues. All four focused regressions
 passed. The native L8 MS unittest passed its six reference controls, including
 the below-first-target hold; ten affected hue/L5 parity cases also passed on
 CPU-only lavapipe. The pinned Linux control compiled with warnings as errors.
-Main promotion remains pending.
+Landing qualification is tracked in PR #1591.
 Bridged expanded-XML evidence retains its omitted/defaulted-field limits;
 it does not establish raw-RPU, full-title or physical-display acceptance.
 Existing backend identity includes renderer/source digests, so changed helper
