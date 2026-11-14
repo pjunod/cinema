@@ -7970,7 +7970,7 @@ test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
 id = "apple.dv-enhancement-pills"
 commits = ["3c4931f9faca91d0a50a97df390550274763babf"]
 source = "clients/apple/Sources/PlayerView.swift"
-source_anchor = 'case .enhancement: return "plus.circle"'
+source_anchor = 'case .enhancement, .toneMapping: return "plus.circle"'
 test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
 test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
 
