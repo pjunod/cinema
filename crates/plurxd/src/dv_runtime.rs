@@ -3356,14 +3356,33 @@ mod title_scanner_identity_tests {
             ("dv_title.rs", include_str!("source_probe/dv_title.rs")),
         ] {
             assert!(source.contains("title_scanner_digest()"), "{name}");
-            // The backend key appears only as the FEL identity it measures.
+            // The backend key belongs to FEL identity and worker eligibility,
+            // never to the title-demand scanner generation. Audit indirect
+            // eligibility calls and the task's retained eligibility key too.
+            let compact = source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            let eligibility_uses = [
+                "eligible_file(state,&demand,&tools.backend_digest())",
+                "eligible_file(state,&latest,&tools.backend_digest())",
+                "letbackend_digest=tools.backend_digest();",
+            ]
+            .iter()
+            .map(|call| compact.matches(call).count())
+            .sum::<usize>();
             assert_eq!(
-                source.matches("backend_digest()").count(),
-                source
-                    .matches("fel_identity(&tools.backend_digest())")
-                    .count(),
+                compact.matches("backend_digest()").count(),
+                compact.matches("fel_identity(&tools.backend_digest())").count()
+                    + eligibility_uses,
                 "{name}"
             );
+            if name == "title_work.rs" {
+                assert!(compact.contains("dv_title_demands(&scanner,"));
+                assert!(compact.contains("letscanner=tools.title_scanner_digest();"));
+                assert!(compact.contains("fel_identity(backend_digest)"));
+                assert!(compact.contains("eligible_file(state,&demand,&self.backend_digest)"));
+            }
         }
         let create = include_str!("transcode/manager/create.rs");
         assert!(create.contains("self.fel_identity(&tools.backend_digest())"));
