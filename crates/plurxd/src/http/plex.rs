@@ -220,10 +220,10 @@ pub async fn section_all(
         // Absent, or a library the façade doesn't expose — same answer.
         _ => return Err(ApiError::NotFound("section")),
     }
+    // Offloaded titles have no files to play, so a third-party app is
+    // never offered one.
     let page = state
         .catalogue
-        // Offloaded titles have no files to play, so a third-party app is
-        // never offered one.
         .list_top_items_filtered(
             id,
             Default::default(),
