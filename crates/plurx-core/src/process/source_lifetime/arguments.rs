@@ -1,6 +1,8 @@
 //! Audited argument grammars, not source-confinement capabilities.
 use super::descriptors::InheritedFd;
-use std::{fs::File, io};
+#[cfg(unix)]
+use std::fs::File;
+use std::io;
 
 /// Selects scalar/device operands in a caller-audited command protocol.
 /// Every nondefault profile remains ineligible for a clean recovery witness.
@@ -277,7 +279,7 @@ fn drm_render_file(file: &File) -> bool {
     let attribute = unsafe { File::from_raw_fd(fd) };
     attribute.take(65).read_to_string(&mut text).is_ok() && text.trim() == format!("226:{minor}")
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn drm_render_file(_file: &File) -> bool {
     false
 }
