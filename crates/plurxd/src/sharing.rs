@@ -587,10 +587,20 @@ impl SharingManager {
         };
         status.host_setup = setup;
     }
+    /// The listener's state is the only record of why peers are refused, so
+    /// every change is logged with the state it left.
     fn listener_status(&self, status: &'static str) {
         let mut current = self.status.write().expect("sharing status lock");
-        if current.listener != status {
-            current.listener = status;
+        let previous = current.listener;
+        if previous == status {
+            return;
+        }
+        current.listener = status;
+        drop(current);
+        if status == "listening" {
+            tracing::info!(target: "plurx::sharing", from = previous, to = status, "sharing listener status changed");
+        } else {
+            tracing::warn!(target: "plurx::sharing", from = previous, to = status, "sharing listener status changed");
         }
     }
     pub async fn run(self: Arc<Self>, state: AppState, shutdown: CancellationToken) {
@@ -778,7 +788,10 @@ impl SharingManager {
                 self.disable_bodies();
                 true
             }
-            Err(_) => {
+            Err(error) => {
+                if unreadable_since.is_none() {
+                    tracing::warn!(target: "plurx::sharing", %error, "sharing switch unreadable; serving within the session grace");
+                }
                 let since = *unreadable_since.get_or_insert(now);
                 if now.saturating_duration_since(since) < SERVING_FENCE_SESSION_GRACE {
                     self.listener_status("listening_switch_unreadable");
