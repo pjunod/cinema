@@ -4919,6 +4919,7 @@ class Controller internal constructor(
         var playlistUrl: String? = null, var immutableVod: Boolean = false)
     private var autoStagedObservation: AutoStagedObservation? = null
     private var autoStagedPlaylistJob: Job? = null
+    private var preparedTimelineOwner: PreparedTimelineOwner? = null
 
     private fun autoStagedObservationCurrent(observation: AutoStagedObservation, nowMs: Long): Boolean =
         nowMs >= observation.startedAtMs && nowMs < observation.deadlineMs &&
@@ -4928,6 +4929,37 @@ class Controller internal constructor(
             preparedLedger.action?.effectiveSelection?.candidateId == observation.candidateId &&
             autoDesiredCandidate?.id == observation.candidateId &&
             autoDesiredCandidate?.recipe_digest == observation.recipeDigest
+
+    /** Native parsed media belongs to this exact staged pipeline, independently of Auto policy. */
+    private fun preparedSuccessorVodTimeline(successor: ExoPlayer, action: ControlAction): PreparedVodTimelineProof {
+        val authorization = Session.playbackAuthorization()
+        val owner = preparedTimelineOwner
+        if (owner == null || controlObservationIsClosed || !playbackControlBootstrapFence.isActive() ||
+            preparedPlayer !== successor || preparedLedger.action !== action ||
+            !owner.isCurrent(successor, action.actionId, action.sessionId, action.mediaOriginMs,
+                mediaMutationEpoch, authorization.origin, authorization.generation)
+        ) return PreparedVodTimelineProof(PreparedVodProofReason.Owner)
+        val manifest = successor.currentManifest as? HlsManifest
+            ?: return PreparedVodTimelineProof(PreparedVodProofReason.Manifest)
+        val playlist = manifest.mediaPlaylist
+        val uri = Uri.parse(playlist.baseUri)
+        if (Session.canonicalOrigin(playlist.baseUri) != Session.canonicalOrigin(owner.credentialOrigin) ||
+            !uri.pathSegments.contains(owner.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true
+        ) return PreparedVodTimelineProof(PreparedVodProofReason.PlaylistOwner, playlist.durationUs)
+        val reason = preparedFilmLocalVodReason(owner.originMs,
+            playlist.playlistType == androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist.PLAYLIST_TYPE_VOD,
+            playlist.hasEndTag, playlist.mediaSequence, playlist.durationUs, plan.durationMs,
+            playlist.startOffsetUs.takeUnless { it == androidx.media3.common.C.TIME_UNSET },
+            playlist.hasPositiveStartOffset, playlist.preciseStart, playlist.trailingParts.isEmpty(),
+            playlist.segments.asSequence().map { PreparedVodSegment(it.url, it.relativeStartTimeUs, it.durationUs,
+                it.initializationSegment?.url, it.hasGapTag) }.asIterable())
+        val currentAuthorization = Session.playbackAuthorization()
+        if (preparedPlayer !== successor || preparedLedger.action !== action ||
+            !owner.isCurrent(successor, action.actionId, action.sessionId, action.mediaOriginMs,
+                mediaMutationEpoch, currentAuthorization.origin, currentAuthorization.generation)
+        ) return PreparedVodTimelineProof(PreparedVodProofReason.Owner, playlist.durationUs)
+        return PreparedVodTimelineProof(reason, playlist.durationUs)
+    }
 
     /** One received media-playlist lookup, bound to the stage and original deadline. */
     private fun captureAutoStagedVodPlaylist(observation: AutoStagedObservation) {
@@ -5155,6 +5187,11 @@ class Controller internal constructor(
         autoTransfersByPlayer[built.player] = built.autoTransfers
         val desired = autoDesiredCandidate
         val stagedSessionId = action.sessionId
+        val authorization = Session.playbackAuthorization()
+        preparedTimelineOwner = action.actionId?.let { actionId -> stagedSessionId?.let { session ->
+            PreparedTimelineOwner(built.player, actionId, session, originMs, mediaMutationEpoch,
+                authorization.origin, authorization.generation)
+        } }
         autoStagedObservation = if (autoPreparing && desired != null && desired.recipe_digest.size == 32 &&
             stagedSessionId != null && action.effectiveSelection?.candidateId == desired.id)
             AutoStagedObservation(built.player, built.autoTransfers, stagedSessionId, desired.id,
@@ -5452,9 +5489,6 @@ class Controller internal constructor(
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.COMMIT_OVERLAP)
             return false
         }
-        val stagedFilmLocalVod = autoStagedObservation?.let {
-            autoStagedObservationCurrent(it, monotonicNowMs()) && it.immutableVod && originMs == 0L
-        } == true
         if (autoPreparing && !autoTrialMayCommit(autoDesiredCandidate?.id, action.effectiveSelection?.candidateId,
                 autoPreparedTargetRevision, autoPresentationTarget?.revision,
                 autoPreparedMutationEpoch, mediaMutationEpoch,
@@ -5504,6 +5538,10 @@ class Controller internal constructor(
             }
             if (!margin) return false
         }
+        // Fold the already received plan before fresh alignment readings: a
+        // long title must not spend the frame window after those readings.
+        val timelineProof = preparedSuccessorVodTimeline(successor, action)
+        val stagedFilmLocalVod = timelineProof.isVod
         val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
         if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS ||
@@ -5653,6 +5691,11 @@ class Controller internal constructor(
         sessionStatus = null
         sessionStatusObservedAtMs = null
         establishedPlayback = false
+        runCatching {
+            playbackTelemetry.report(event = "prepared_transport_adopted", level = "info",
+                message = "Prepared successor transport timeline adopted.",
+                detail = preparedVodTimelineDetail(timelineProof, originMs, plan.durationMs))
+        }
         armTrackSelections()
         applyTextSelection()
         applyAudioSelection()
@@ -5946,6 +5989,7 @@ class Controller internal constructor(
         autoStagedPlaylistJob?.cancel()
         autoStagedPlaylistJob = null
         autoStagedObservation = null
+        preparedTimelineOwner = null
         autoStagedStatus = null
         autoStagedStatusObservedMs = null
         val successor = preparedPlayer ?: return
@@ -6474,6 +6518,88 @@ internal data class AutoTickState(
 
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
+
+/** An observation cannot migrate between pipeline, media mutation, or authenticated owner. */
+internal data class PreparedTimelineOwner(
+    val player: Any,
+    val actionId: String,
+    val sessionId: String,
+    val originMs: Long,
+    val mutationEpoch: Long,
+    val credentialOrigin: String,
+    val authorizationGeneration: Long,
+) {
+    fun isCurrent(currentPlayer: Any?, currentAction: String?, currentSession: String?, currentOriginMs: Long?,
+        currentMutation: Long, currentCredentialOrigin: String, currentAuthorizationGeneration: Long): Boolean =
+        player === currentPlayer && actionId == currentAction && sessionId == currentSession && originMs == currentOriginMs &&
+            mutationEpoch == currentMutation && credentialOrigin == currentCredentialOrigin &&
+            authorizationGeneration == currentAuthorizationGeneration
+}
+
+internal data class PreparedVodSegment(val url: String, val startUs: Long, val durationUs: Long,
+    val initializationUrl: String?, val gap: Boolean = false)
+
+internal enum class PreparedVodProofReason(val wire: String) {
+    FullVod("full_vod"), Owner("owner"), Manifest("manifest"), PlaylistOwner("playlist_owner"),
+    Origin("origin"), Type("type"), EndTag("end_tag"), Sequence("sequence"), TrailingParts("trailing_parts"),
+    SourceDuration("source_duration"), Duration("duration"), StartHint("start_hint"),
+    Empty("empty"), Layout("layout"), Coverage("coverage"),
+}
+
+internal data class PreparedVodTimelineProof(val reason: PreparedVodProofReason, val durationUs: Long? = null) {
+    val isVod: Boolean get() = reason == PreparedVodProofReason.FullVod
+}
+
+internal fun preparedVodTimelineDetail(proof: PreparedVodTimelineProof, originMs: Long, sourceDurationMs: Long): String =
+    "vod=${proof.isVod} o=$originMs d_us=${proof.durationUs ?: "unknown"} source_ms=$sourceDurationMs reason=${proof.reason.wire}"
+
+/** Full immutable film-time coverage; EXT-X-START is only an acquisition hint. */
+internal fun preparedFilmLocalVod(
+    originMs: Long, playlistTypeVod: Boolean, hasEndTag: Boolean, mediaSequence: Long,
+    durationUs: Long, sourceDurationMs: Long, startOffsetUs: Long?, positiveStartOffset: Boolean,
+    preciseStart: Boolean, noTrailingParts: Boolean, segments: Iterable<PreparedVodSegment>,
+): Boolean = preparedFilmLocalVodReason(originMs, playlistTypeVod, hasEndTag, mediaSequence, durationUs,
+    sourceDurationMs, startOffsetUs, positiveStartOffset, preciseStart, noTrailingParts, segments) == PreparedVodProofReason.FullVod
+
+internal fun preparedFilmLocalVodReason(
+    originMs: Long, playlistTypeVod: Boolean, hasEndTag: Boolean, mediaSequence: Long,
+    durationUs: Long, sourceDurationMs: Long, startOffsetUs: Long?, positiveStartOffset: Boolean,
+    preciseStart: Boolean, noTrailingParts: Boolean, segments: Iterable<PreparedVodSegment>,
+): PreparedVodProofReason {
+    if (originMs != 0L) return PreparedVodProofReason.Origin
+    if (!playlistTypeVod) return PreparedVodProofReason.Type
+    if (!hasEndTag) return PreparedVodProofReason.EndTag
+    if (mediaSequence != 0L) return PreparedVodProofReason.Sequence
+    if (!noTrailingParts) return PreparedVodProofReason.TrailingParts
+    if (sourceDurationMs !in 1..PlaybackControl.MAX_MEDIA_MILLIS) return PreparedVodProofReason.SourceDuration
+    if (durationUs <= 0) return PreparedVodProofReason.Duration
+    if (startOffsetUs != null && (!positiveStartOffset || preciseStart || startOffsetUs !in 0..durationUs))
+        return PreparedVodProofReason.StartHint
+    val sourceUs = sourceDurationMs * 1000
+    // The served plan is bounded by the protocol's title duration, not a
+    // completed-artifact segment-count policy. Never copy the latter's 8192
+    // cap into transport ownership: long titles remain ordinary VOD.
+    if (durationUs > sourceUs + 120_000_000L) return PreparedVodProofReason.Coverage
+    var throughUs = 0L
+    var count = 0L
+    var lastDurationUs = 0L
+    for (segment in segments) {
+        if (segment.url != "seg${count.toString().padStart(5, '0')}.m4s" || segment.initializationUrl != "init.mp4" ||
+            segment.gap || segment.startUs != throughUs || segment.durationUs !in 1..120_000_000L ||
+            throughUs > durationUs - segment.durationUs
+        ) return PreparedVodProofReason.Layout
+        throughUs += segment.durationUs
+        lastDurationUs = segment.durationUs
+        count += 1
+    }
+    if (count == 0L) return PreparedVodProofReason.Empty
+    // VodFrameGrid::duration_ticks rounds OUTWARD to a whole frame. The
+    // playlist cannot be a frame short; only six-decimal EXTINF formatting
+    // and integer-millisecond source metadata contribute this lower rounding.
+    val roundingUs = count + 1000L
+    return if (throughUs == durationUs && durationUs >= sourceUs - roundingUs &&
+        durationUs - sourceUs <= lastDurationUs) PreparedVodProofReason.FullVod else PreparedVodProofReason.Coverage
+}
 
 /** Compact clocks survive the client-log boundary's 200-character detail cap. */
 internal fun preparedPositionDetail(
