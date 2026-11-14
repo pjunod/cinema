@@ -38,6 +38,9 @@ SELECTABLE = {
 }
 SURFACES = ("rust_units", "rust", "web_layout", "apple", "desktop_macos", "android_jvm")
 TRAIN_JOBS = re.compile(r"(?m)^Train-Jobs: *(.*?) *$")
+TRAIN_TESTS = re.compile(r"(?m)^Train-Tests: *(.*?) *$")
+# `<binary id> <test path>`: binary ids look like `plurxd::bin/plurxd`; one space.
+TEST_ID = re.compile(r"[A-Za-z0-9_-]+(?:::[A-Za-z0-9_./-]+)* [A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*")
 
 
 def lane_enabled(event: dict, switch: str, bot: str) -> bool:
@@ -62,11 +65,37 @@ def selection(event: dict, bot: str) -> list[str] | None:
     return [job.strip() for job in match.group(1).split(",") if job.strip()]
 
 
-def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True) -> list[str]:
+def train_tests(event: dict, bot: str) -> list[str] | None:
+    """The unit test ids a probe names, or None when it names none.
+
+    Same authority as `selection`: only the bot's `train/` heads are believed.
+    """
+    pull = event.get("pull_request") if isinstance(event, dict) else None
+    if not isinstance(pull, dict):
+        return None
+    head = (pull.get("head") or {}).get("ref") or ""
+    author = (pull.get("user") or {}).get("login") or ""
+    matches = TRAIN_TESTS.findall(pull.get("body") or "")
+    if not (head.startswith("train/") and author == bot and matches):
+        return None
+    ids = [item.strip() for line in matches for item in line.split(",") if item.strip()]
+    if not ids:
+        raise SystemExit("merge-train: Train-Tests names no tests")
+    bad = [item for item in ids if not TEST_ID.fullmatch(item)]
+    if bad:
+        raise SystemExit(f"merge-train: Train-Tests ids must read `<binary id> <test path>`: {', '.join(bad)}")
+    return sorted(set(ids))
+
+
+def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True,
+          tests: list[str] | None = None) -> list[str]:
     values = dict(line.split("=", 1) for line in lines if "=" in line)
     # Rust tests can read files compile scope ignores; selection must see
     # every ordinary ready PR and no-op on unchanged content keys.
     values.setdefault("rust_units", "true")
+    values["train_tests"] = ""
+    if tests and (jobs is None or "rust_units" not in jobs):
+        raise SystemExit("merge-train: Train-Tests needs `rust_units` in Train-Jobs")
     if not enabled:
         for output in SURFACES + ("preflight", "worker_control"):
             values[output] = "false"
@@ -80,7 +109,8 @@ def scope(lines: list[str], jobs: list[str] | None, enabled: bool = True) -> lis
         wanted = {output for job in jobs for output in SELECTABLE[job]}
         for output in SURFACES + ("preflight", "worker_control"):
             values[output] = "true" if output in wanted else "false"
-        values.update(docs_only="false", train_selected="true", run_lane="true")
+        values.update(docs_only="false", train_selected="true", run_lane="true",
+                      train_tests=",".join(tests or []))
     return [f"{key}={value}" for key, value in values.items()]
 
 
@@ -93,9 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     bot = os.environ.get("MERGE_TRAIN_BOT") or "train-bot"
     enabled = lane_enabled(event, os.environ.get("MERGE_TRAIN", ""), bot)
     jobs = selection(event, bot)
+    tests = train_tests(event, bot)
     if jobs is not None:
         print(f"merge-train probe: running only {', '.join(jobs) or '(nothing)'}", file=sys.stderr)
-    print("\n".join(scope(sys.stdin.read().splitlines(), jobs, enabled)))
+    if tests:
+        print(f"merge-train probe: running only {len(tests)} named Rust unit test(s)", file=sys.stderr)
+    print("\n".join(scope(sys.stdin.read().splitlines(), jobs, enabled, tests)))
     return 0
 
 
