@@ -12,6 +12,8 @@ import subprocess
 import urllib.parse
 import uuid
 from dataclasses import dataclass
+from concurrent.futures import Future
+from threading import Thread
 
 from .caps import control_capabilities
 from .api import ApiError, error_text
@@ -118,6 +120,8 @@ class Playback:
         self.physical_target_nits = None
         self.physical_target_generation = None
         self.tone_mapping_session = None
+        self.tone_mapping_status_session = None
+        self._tone_mapping_probe = None
         self.mapper_logged = False
         # mpv's fatal "Error opening/initializing the ... (--vo) device" line.
         self.vo_failed = False
@@ -671,7 +675,7 @@ class Playback:
             return False
         delivered = session.get("delivered_dynamic_range")
         sdr = delivered == "sdr" and report.get("sdr_processed") is True and report.get("hdr10_enhanced") is False
-        hdr = delivered == "hdr10" and report.get("hdr10_enhanced") is True and report.get("sdr_processed") is False
+        hdr = delivered == "hdr10" and report.get("hdr10_enhanced") is True and report.get("sdr_processed", False) is False
         operations = report.get("applied_operations")
         if not (sdr or hdr) or report.get("generation") != generation or type(report.get("fel_contributed")) is not bool \
                 or not isinstance(operations, list) or not 0 < len(operations) <= 16:
@@ -690,22 +694,34 @@ class Playback:
             return False
         return mapped or "TargetMapping" in operations
 
-    def refresh_tone_mapping(self):
-        """Only current server processing evidence can light the playback pill."""
+    def _probe_tone_mapping(self, sid, result):
+        active = False
+        try:
+            status, body = self.http.request(
+                "GET", f"/api/v1/hls/{urllib.parse.quote(str(sid), safe='')}/status",
+                auth=False, timeout=3)
+            if status == 200 and isinstance(body, dict) and body.get("id") == sid:
+                peak = _number(body.get("tone_map_peak_nits"))
+                active = peak is not None and 0 < peak < float("inf") and body.get("tone_map_peak_source") in (
+                    "cll", "mdcv", "default")
+        except ApiError:
+            pass
+        result.set_result(active)
+
+    def refresh_tone_mapping(self, start_probe=True):
+        """Collect optional telemetry without blocking the mpv input loop."""
         sid = (self.session or {}).get("session_id")
-        active = sid if sid and self.effective_tone_mapping() else None
-        if sid and active is None:
-            try:
-                status, body = self.http.request(
-                    "GET", f"/api/v1/hls/{urllib.parse.quote(str(sid), safe='')}/status",
-                    auth=False, timeout=3)
-                if status == 200 and isinstance(body, dict) and body.get("id") == sid:
-                    peak = _number(body.get("tone_map_peak_nits"))
-                    if peak is not None and 0 < peak < float("inf") and body.get("tone_map_peak_source") in (
-                            "cll", "mdcv", "default"):
-                        active = sid
-            except ApiError:
-                pass
+        probe = self._tone_mapping_probe
+        if probe is not None and probe[1].done():
+            if probe[0] == sid:
+                self.tone_mapping_status_session = sid if probe[1].result() else None
+            self._tone_mapping_probe = None
+        effective = bool(sid and self.effective_tone_mapping())
+        if start_probe and sid and not effective and self._tone_mapping_probe is None:
+            result = Future()
+            self._tone_mapping_probe = (sid, result)
+            Thread(target=self._probe_tone_mapping, args=(sid, result), daemon=True).start()
+        active = sid if sid and (effective or self.tone_mapping_status_session == sid) else None
         if active != self.tone_mapping_session:
             self.tone_mapping_session = active
             self.publish_chrome()
@@ -904,6 +920,7 @@ class Playback:
                     return
             if self.mpv.closed:
                 return
+            self.refresh_tone_mapping(start_probe=False)
             now = self.clock()
             if self.pending_quality is not None and now >= self.pending_quality["deadline"]:
                 self.settle_quality("The quality change timed out; restored the previous quality")

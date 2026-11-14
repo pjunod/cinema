@@ -1,6 +1,7 @@
 """Library context and viewer intents through the real launcher and private IPC."""
 import json
 import tempfile
+from threading import Event
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -53,10 +54,16 @@ class CinemaModel(unittest.TestCase):
         http, mpv = mock.Mock(), mock.Mock()
         player = Playback(http, mpv, {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
         player.session = {'session_id': 'current'}
+        def refresh():
+            player.refresh_tone_mapping()
+            probe = player._tone_mapping_probe
+            if probe is not None:
+                probe[1].result(timeout=2)
+                player.refresh_tone_mapping(start_probe=False)
         for source in ('cll', 'mdcv', 'default'):
             http.request.return_value = (200, {'id': 'current', 'tone_map_peak_nits': 1000,
                                                'tone_map_peak_source': source})
-            player.refresh_tone_mapping()
+            refresh()
             player.publish_chrome()
             self.assertTrue(mpv.set.call_args.args[1]['tone_mapping'])
         player.session = {'session_id': 'replacement'}
@@ -67,7 +74,7 @@ class CinemaModel(unittest.TestCase):
                              (200, {'id': 'replacement', 'tone_map_peak_nits': 1000, 'tone_map_peak_source': 'unknown'}),
                              (503, {})):
             http.request.return_value = status, body
-            player.refresh_tone_mapping()
+            refresh()
             player.publish_chrome()
             self.assertFalse(mpv.set.call_args.args[1]['tone_mapping'])
         generation = '47b48458-a01e-4df2-9476-4d46892400b0'
@@ -75,10 +82,10 @@ class CinemaModel(unittest.TestCase):
                   'fel_contributed': False, 'applied_operations': [{'DisplayTargetMapping': {'nits': 100}}, 'Bt709Gamma24Conversion']}
         player.session.update(control={'generation': generation}, effective_processing=report,
                               delivered_dynamic_range='sdr')
-        player.refresh_tone_mapping()
+        refresh()
         self.assertTrue(mpv.set.call_args.args[1]['tone_mapping'])
         report['generation'] = 'stale'
-        player.refresh_tone_mapping()
+        refresh()
         self.assertFalse(mpv.set.call_args.args[1]['tone_mapping'])
         report['generation'] = generation
         player.session['control']['url'] = '/api/v1/hls/replacement/control'
@@ -86,10 +93,52 @@ class CinemaModel(unittest.TestCase):
         http.request.return_value = 200, {'protocol': 'plurx-playback-control-v1',
                                          'generation': generation, 'effective_processing': report}
         player.heartbeat()
+        refresh()
         self.assertTrue(mpv.set.call_args.args[1]['tone_mapping'])
         http.request.return_value = 200, {'protocol': 'plurx-playback-control-v1', 'generation': generation}
         player.heartbeat()
+        refresh()
         self.assertFalse(mpv.set.call_args.args[1]['tone_mapping'])
+
+    def test_slow_tone_mapping_telemetry_keeps_input_loop_responsive(self):
+        entered, release = Event(), Event()
+        http, mpv = mock.Mock(), mock.Mock()
+        def request(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return 200, {'id': 'retired', 'tone_map_peak_nits': 1000, 'tone_map_peak_source': 'cll'}
+        http.request.side_effect = request
+        player = Playback(http, mpv, {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
+        player.session = {'session_id': 'retired'}
+        try:
+            player.refresh_tone_mapping()
+            self.assertTrue(entered.wait(timeout=1))
+            self.assertFalse(player._tone_mapping_probe[1].done())
+            player.session = {'session_id': 'successor'}
+            player.on_event = mock.Mock(return_value=False)
+            mpv.events.return_value = [{'event': 'client-message', 'args': ['close']}]
+            player.loop()
+            player.on_event.assert_called_once()
+            self.assertFalse(player._tone_mapping_probe[1].done(), 'close handled while telemetry is blocked')
+        finally:
+            release.set()
+            player._tone_mapping_probe[1].result(timeout=2)
+        player.refresh_tone_mapping(start_probe=False)
+        self.assertIsNone(player.tone_mapping_session, 'retired response cannot light successor pill')
+
+    def test_hdr_tone_mapping_accepts_omitted_false_sdr_flag(self):
+        player = Playback(mock.Mock(), mock.Mock(), {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
+        generation = '47b48458-a01e-4df2-9476-4d46892400b0'
+        report = {'generation': generation, 'hdr10_enhanced': True, 'fel_contributed': False,
+                  'applied_operations': [{'DisplayTargetMapping': {'nits': 600}}]}
+        player.session = {'session_id': 'current', 'control': {'generation': generation},
+                          'delivered_dynamic_range': 'hdr10', 'effective_processing': report}
+        self.assertTrue(player.effective_tone_mapping(), 'server omits sdr_processed when false')
+        for value in (None, 0, 'false', True):
+            report['sdr_processed'] = value
+            self.assertFalse(player.effective_tone_mapping())
+        report['sdr_processed'] = False
+        self.assertTrue(player.effective_tone_mapping())
 
     def test_queued_incumbent_restart_cannot_commit_unloaded_quality(self):
         player = Playback(mock.Mock(), mock.Mock(), {'file_id': FILE_ID}, {}, lambda: 0, lambda _: None)
