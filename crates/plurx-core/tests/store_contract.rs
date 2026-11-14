@@ -21483,7 +21483,10 @@ fn contract_inventory_matches_every_store_method() {
     // exercised by the source-fenced DV title-job contracts.
     // Current main declares 591 distinct methods; save/apply/state replace
     // one storage-domain method, adding two names without hiding existing APIs.
-    assert_eq!(declared.len(), 593, "review the Store method count");
+    // +2: live title-demand paging and same-node title preemption. Both names
+    // are inventoried above and exercised by the title-job contracts; the
+    // name-set equality remains independent of this reviewed total.
+    assert_eq!(declared.len(), 595, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

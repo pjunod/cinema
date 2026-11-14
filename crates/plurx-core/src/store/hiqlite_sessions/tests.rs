@@ -233,7 +233,7 @@ fn preparation_abort_is_ledger_gated_in_every_statement() {
                 "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, layout, );"
             ) && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
-                && method.matches(".txn(statements)").count() == 1
+                && normalized_method.matches(".txn(\"abort_media_session_preparation\", statements)").count() == 1
                 && !method.contains("statements.push(")
                 && !method.contains("statements.extend(")
                 && !method.contains("statements.insert(")

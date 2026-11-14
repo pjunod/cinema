@@ -2245,7 +2245,7 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
     );
     assert_catalogue_methods(
         &compact_handler(plex, "pub async fn section_all", "pub async fn metadata"),
-        &["get_library", "list_top_items_in_genre"],
+        &["get_library", "list_top_items_filtered"],
     );
     assert_catalogue_methods(
         &compact_handler(plex, "pub async fn children", "pub async fn part"),
@@ -8766,6 +8766,8 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // the proof is met, the image is unobservable and there are no
             // readers yet.
             "applied_view",
+            // Source and ownership observations for the prepared start plan.
+            "create_plan",
             "cluster_backup",
             "windows_server",
             // D-01 adds the Android TV display-mode card. Its one row is
@@ -10356,7 +10358,8 @@ async fn activity_requires_auth_and_reports_idle() {
             "scans",
             "sessions",
             "trakt",
-            // Local worker observations are useful on SQLite too.
+            // Local worker observations include the nodes actually represented.
+            "worker_observed_nodes",
             "workers",
         ]
         .into_iter()
