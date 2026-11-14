@@ -5280,6 +5280,9 @@ class Controller internal constructor(
                 resolvePreparedAcquisition(built.player, action)
                 autoStagedObservation?.takeIf { it.player === built.player }?.let(::captureAutoStagedVodPlaylist)
             }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) notePreparedSeekReady(built.player, action)
+            }
             override fun onPlayerError(error: PlaybackException) {
                 // Posted, not called. Abandoning releases this very player, and
                 // re-entering `release()` from inside its own `ListenerSet`
@@ -5308,6 +5311,7 @@ class Controller internal constructor(
                     rendezvous?.rendezvousFilmMs != null
                 ) {
                     rendezvousSeekObserved = true
+                    notePreparedSeekReady(built.player, action)
                 }
             }
         }
@@ -5430,6 +5434,17 @@ class Controller internal constructor(
         beginRendezvous(hold, originMs)
     }
 
+    /** Native seek settlement is separate from the later three-second runway proof. */
+    private fun notePreparedSeekReady(successor: ExoPlayer, action: ControlAction) {
+        val hold = rendezvous ?: return
+        val target = hold.rendezvousFilmMs ?: return
+        if (preparedSeekReady(currentPreparedTimelineOwner(successor, action) != null,
+                rendezvousSeekObserved, successor.playbackState == Player.STATE_READY,
+                successorFilmPositionMs(action.mediaOriginMs ?: return, successor.currentPosition), target)) {
+            hold.seekReady(monotonicNowMs())
+        }
+    }
+
     /** Send the successor to the meeting point and leave it waiting there. */
     private fun parkSuccessor(
         park: RendezvousHold.Park,
@@ -5477,6 +5492,7 @@ class Controller internal constructor(
                     return@launch
                 }
                 sampleDecoderDropped(player)
+                preparedLedger.action?.let { notePreparedSeekReady(successor, it) }
                 if (!hold.isReady) {
                     delay(RENDEZVOUS_READY_POLL_MS)
                     val target = hold.rendezvousFilmMs ?: return@launch
@@ -6600,6 +6616,11 @@ internal data class AutoTickState(
 
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
+
+/** The existing park alignment, with native readiness rather than an intent-only seek callback. */
+internal fun preparedSeekReady(ownerCurrent: Boolean, seekObserved: Boolean, nativeReady: Boolean,
+    filmPositionMs: Long, targetFilmMs: Long): Boolean = ownerCurrent && seekObserved && nativeReady &&
+    kotlin.math.abs(filmPositionMs.toDouble() - targetFilmMs.toDouble()) <= PREPARED_ALIGNMENT_SLACK_MS
 
 internal enum class PreparedPlaylistOwnership(val wire: String) {
     Owned("owned"), Malformed("malformed"), Scheme("scheme"), UserInfo("userinfo"), Fragment("fragment"),
