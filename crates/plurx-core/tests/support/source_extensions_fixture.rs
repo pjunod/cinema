@@ -621,6 +621,7 @@ fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
     if version != 132 {
         return;
     }
+    super::require_fixture_marker(connection, "dv_title_jobs_schema", 2);
     let actual = connection
         .prepare(super::TITLE_FIXTURE_SHAPE_SQL)
         .expect("title v2 shape")
