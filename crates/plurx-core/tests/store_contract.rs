@@ -31953,6 +31953,106 @@ async fn scan_identity_repair_contract() {
             .await
             .expect("release empty-list repair lease"));
 
+        // A new physical copy after preview must invalidate the replicated
+        // owner preimage even though it is outside either original directory.
+        let family_a = tree(
+            store.as_ref(),
+            library.id,
+            "Family original",
+            "Family Show",
+            "",
+        )
+        .await;
+        let family_b = tree(
+            store.as_ref(),
+            library.id,
+            "Family copy",
+            "Family Show (Manual copy abcdef0123)",
+            ".2160p",
+        )
+        .await;
+        let family_c = tree(
+            store.as_ref(),
+            library.id,
+            "Existing neighboring owner",
+            "Family Show - Other",
+            ".1080p",
+        )
+        .await;
+        let family_snapshot = store
+            .identity_repair_snapshot(library.id, &[family_a.0, family_b.0])
+            .await
+            .expect("family snapshot");
+        let family_plan =
+            plurx_core::store::plan_identity_repair(family_snapshot.clone()).expect("family plan");
+        assert!(family_plan.ready(), "{backend}: {:?}", family_plan.blockers);
+        store.upsert_file(family_c.2,
+            "/contract/repair/Family Show (Manual copy 012345abcd)/Season 1/Family.Show.S01E01.mkv",
+            100, 10, &ProbeResult::default()).await.expect("neighbor gains family evidence");
+        let family_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("family repair fixture")
+            .as_millis() as i64;
+        let family_lease = acquired(
+            store
+                .acquire_lease(
+                    &format!("scan:library:{}", library.id),
+                    "family-owner",
+                    family_now,
+                    family_now + 90_000,
+                )
+                .await
+                .expect("family repair fixture"),
+            backend,
+        );
+        let family_successor = publication_successor(&family_lease);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &family_snapshot,
+                    &family_plan,
+                    &family_lease,
+                    &family_successor
+                )
+                .await
+                .expect("family stale apply"),
+            IdentityRepairOutcome::Stale,
+            "{backend}: new sibling invalidates preview"
+        );
+        let incomplete = store
+            .identity_repair_snapshot(library.id, &[family_a.0, family_b.0])
+            .await
+            .expect("incomplete snapshot");
+        let incomplete_plan =
+            plurx_core::store::plan_identity_repair(incomplete).expect("incomplete plan");
+        assert!(
+            incomplete_plan
+                .blockers
+                .iter()
+                .any(|b| b.code == "incomplete_directory_owner_set"),
+            "{backend}: omitted sibling {}",
+            family_c.0
+        );
+        assert!(store
+            .get_item(family_b.0)
+            .await
+            .expect("family repair fixture")
+            .is_some());
+        // SQLite commits the renewal on Ok(Stale); Hiqlite rolls back
+        // the failed guarded transaction, including its renewal.
+        let released_successor = store
+            .release_lease(&family_successor, family_now)
+            .await
+            .expect("family repair fixture");
+        let released_original = store
+            .release_lease(&family_lease, family_now)
+            .await
+            .expect("family repair fixture");
+        assert_ne!(
+            released_successor, released_original,
+            "{backend}: release the current lease exactly once"
+        );
+
         let first = tree(
             store.as_ref(),
             library.id,
@@ -31965,7 +32065,7 @@ async fn scan_identity_repair_contract() {
             store.as_ref(),
             library.id,
             "Metadata title",
-            "Synthetic Show",
+            "Synthetic Show (Manual copy 012345abcd)",
             ".2160p",
         )
         .await;
