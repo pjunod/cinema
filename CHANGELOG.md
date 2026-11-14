@@ -17,6 +17,9 @@ bump may break compatibility and a **patch** bump never does.
 - Android direct Dolby Vision playback lists preserved dynamic metadata, and
   native DYN indicators wait for a selected Dolby Vision decoder instead of
   claiming enhancement during HDR/SDR decoder fallback.
+- Curator's additional TV copies now join their existing series instead of
+  creating identical show cards. Consolidation recognizes the generated copy
+  folders while preserving physical files, versions and watch history.
 
 - The host source census can release a dead owner's custody after the host
   has rebooted. It proves from the machine's own journal that the witness's

@@ -506,9 +506,15 @@ class EvidenceWorkflowCase(unittest.TestCase):
         pipeline = android.split("private fun buildPipeline(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)", pipeline)
         self.assertIn("transferListener = autoTransfers,", pipeline)
+        self.assertIn("val videoDecoderEvidence = VideoDecoderEvidence()", pipeline)
+        self.assertIn("videoDecoderEvidence = videoDecoderEvidence,", pipeline)
         self.assertIn(
-            "return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput)",
+            "return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput, videoDecoderEvidence)",
             pipeline,
+        )
+        self.assertIn(
+            "PreparedFrameRenderersFactory(context, continuousOutput, videoDecoderEvidence)",
+            android_builder,
         )
         self.assertIn("autoTransfers.complete(loadEventInfo, mediaLoadData)", pipeline)
         self.assertIn("mediaLoadData.dataType == C.DATA_TYPE_MEDIA", pipeline)

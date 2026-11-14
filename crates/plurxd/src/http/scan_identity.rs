@@ -502,6 +502,7 @@ mod tests {
             files: Vec::new(),
             watches: Vec::new(),
             directory_owner_ids: Vec::new(),
+            directory_guard_rows: Vec::new(),
             dependency_rows: Vec::new(),
             blockers: Vec::new(),
         };
