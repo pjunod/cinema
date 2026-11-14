@@ -23,6 +23,14 @@ on:
         description: Commit the change is measured against; its merge-base with the head is used.
         required: true
         type: string
+      tests:
+        description: >-
+          A merge-train probe's Train-Tests: comma-separated nextest test ids.
+          When set, exactly those tests run, regardless of content keys, and
+          nothing is adopted or baselined for them.
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       base:
@@ -60,7 +68,8 @@ jobs:
         id: select
         env:
           BASE: ${{ inputs.base }}
-        run: python3 -m validation.rust_units select --base "$BASE"
+          TRAIN_TESTS: ${{ inputs.tests }}
+        run: python3 -m validation.rust_units select --base "$BASE" --tests "$TRAIN_TESTS"
       - name: Drop tests that already passed under the same keys
         id: adopt
         if: steps.select.outputs.any == 'true'
@@ -420,7 +429,9 @@ jobs:
   rust_units_baseline:
     name: "Rust units: merge-base check of failures"
     needs: verdict
-    if: always() && needs.verdict.outputs.failures == 'true'
+    # A named-test probe is judged by the train against main-alone probes: a
+    # failure there is never excused by this stage's own merge-base check.
+    if: always() && needs.verdict.outputs.failures == 'true' && inputs.tests == ''
     runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
@@ -565,9 +576,17 @@ jobs:
           VERDICT: ${{ needs.verdict.result }}
           FAILURES: ${{ needs.verdict.outputs.failures }}
           BASELINE: ${{ needs.rust_units_baseline.result }}
+          TRAIN_TESTS: ${{ inputs.tests }}
         run: |
           echo "select=$SELECT build=$BUILD archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT failures=$FAILURES baseline=$BASELINE"
           [ "$SELECT" = success ] || { echo "selection did not complete"; exit 1; }
+          if [ -n "$TRAIN_TESTS" ]; then
+            # Named tests must actually run: no "nothing due" or "already passed" exit.
+            [ "$BUILD" = true ] && [ "$SHARDS" != '[]' ] || { echo "named tests were not planned to run: $TRAIN_TESTS"; exit 1; }
+            [ "$ARCHIVE" = success ] && [ "$SHARD" = success ] && [ "$VERDICT" = success ] || { echo "named tests did not all run and pass (archive=$ARCHIVE shard=$SHARD verdict=$VERDICT failures=$FAILURES)"; exit 1; }
+            [ "$FAILURES" != true ] || { echo "a named test failed"; exit 1; }
+            echo "Every named test ran and passed."; exit 0
+          fi
           if [ "$BUILD" != true ]; then echo "No due Rust unit test: every affected crate already passed under its key, or none is affected."; exit 0; fi
           [ "$ARCHIVE" = success ] || { echo "the archive job ended with $ARCHIVE"; exit 1; }
           if [ "$SHARDS" = '[]' ]; then echo "Every due test already passed under the same keys."; exit 0; fi

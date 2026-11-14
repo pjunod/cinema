@@ -421,6 +421,97 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(ru.shard_count(10 ** 6), ru.MAX_SHARDS)
 
 
+class NamedTestsTests(unittest.TestCase):
+    """A merge-train probe's Train-Tests: exactly those tests, run now."""
+    A, B, C = "app t::a", "app::bin/app m::c", "core c::d"
+
+    def doc(self):
+        entry = lambda due: {"key": "1" * 64, "base_key": "1" * 64, "due": due, "only": None, "reason": []}
+        return {"head": "a" * 40, "base": "b" * 40, "crates": {"app": entry(False), "core": entry(True)}}
+
+    def test_ids_parse_as_nextest_prints_them(self):
+        self.assertEqual(ru.parse_test_ids(f"{self.B}, {self.A},{self.A}"), [self.A, self.B])
+        self.assertEqual(ru.parse_test_ids(""), [])
+        for bad in ("app", "app t::a extra", "app t::a;rm"):
+            with self.assertRaises(ru.UnitsError):
+                ru.parse_test_ids(bad)
+
+    def test_named_tests_make_exactly_their_crates_due_whatever_the_keys_say(self):
+        doc = ru.restrict_to_tests(self.doc(), [self.A, self.B])
+        self.assertTrue(doc["crates"]["app"]["due"])
+        self.assertFalse(doc["crates"]["core"]["due"])  # content-due, but not named
+        self.assertEqual(doc["crates"]["app"]["exact"], [self.A, self.B])
+        self.assertEqual(doc["crates"]["app"]["only"], ["m::c", "t::a"])
+
+    def test_an_unknown_crate_fails_closed(self):
+        with self.assertRaises(ru.UnitsError):
+            ru.restrict_to_tests(self.doc(), ["ghost t::a"])
+
+    def test_the_plan_runs_exactly_the_named_ids_and_adopts_nothing(self):
+        config = ru.Config.load(CONFIG)
+        listing_ = listing(**{"app": [("t::a", False), ("t::b", False), ("m::c", False)],
+                              "app::bin/app": [("m::c", False)]})
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": [], "only": ["m::c", "t::a"],
+                                      "exact": ["app::bin/app m::c", "app t::a"]}}}
+        plan = ru.make_plan({"head": "a" * 40, "base": "b" * 40}, pending, listing_, config, run=5)
+        self.assertEqual(plan["crates"]["app"]["remaining"], ["app t::a", "app::bin/app m::c"])  # not `app m::c`
+        self.assertEqual(plan["crates"]["app"]["adopted"], [])
+
+    def test_a_named_id_the_listing_lacks_fails_the_plan(self):
+        config = ru.Config.load(CONFIG)
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": [], "only": ["t::gone"],
+                                      "exact": ["app t::gone"]}}}
+        with self.assertRaises(ru.UnitsError):
+            ru.make_plan({"head": "a" * 40, "base": "b" * 40}, pending, listing(app=[("t::a", False)]), config, run=5)
+
+    def test_adopt_never_takes_a_pass_from_a_receipt_for_a_named_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sel, out = Path(tmp) / "sel.json", Path(tmp) / "pending.json"
+            doc = ru.restrict_to_tests(self.doc(), [self.A])
+            ru.write_json(sel, doc)
+            with mock.patch.object(ru, "Tree") as tree, mock.patch.object(ru, "history") as history, \
+                    mock.patch.dict(os.environ, {"GITHUB_TOKEN": "x", "GITHUB_RUN_ID": "1"}), \
+                    mock.patch.object(ru, "forge_from_environment", return_value=object()), \
+                    mock.patch.object(ru, "Authenticator"):
+                tree.return_value.text.return_value = CONFIG
+                ru.command_adopt(mock.Mock(selection=str(sel), output=str(out)))
+            history.assert_not_called()
+            pending = json.loads(out.read_text())
+            self.assertEqual(pending["crates"]["app"]["passed"], [])
+            self.assertEqual(pending["crates"]["app"]["exact"], [self.A])
+
+
+class NamedVerdictTests(unittest.TestCase):
+    def run_verdict(self, passed=(), failed=()):
+        plan = {"run": 9, "shards": 1, "head": "a" * 40, "base": "b" * 40, "crates": {
+            "app": {"key": "1" * 64, "listing": {"count": 2, "sha256": "2" * 64}, "adopted": [],
+                    "remaining": ["app t::a", "app t::b"], "serial": [], "exact": ["app t::a", "app t::b"]}}}
+        receipt = {"schema": 1, "run": 9, "shards": 1, "head": "a" * 40, "index": 1,
+                   "results": {"app": {"passed": list(passed), "failed": list(failed), "skipped": []}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ru.write_json(root / "plan.json", plan)
+            ru.write_json(root / "shards" / "1" / "receipt.json", receipt)
+            captured = []
+            with mock.patch.object(ru, "STATE", root / "state"), mock.patch.object(ru, "emit") as emit, \
+                    mock.patch.object(ru, "summarize", side_effect=lambda lines: captured.append("\n".join(lines))):
+                ru.command_verdict(mock.Mock(plan=str(root / "plan.json"), receipts=str(root / "shards"),
+                                             output=str(root / "receipts")))
+            return {c.args[0]: c.args[1] for c in emit.call_args_list}, captured[0]
+
+    def test_every_named_test_reports_its_actual_outcome(self):
+        outputs, text = self.run_verdict(passed=["app t::a"], failed=["app t::b"])
+        self.assertIn("named `app t::a`: PASS", text)
+        self.assertIn("named `app t::b`: FAIL", text)
+        self.assertEqual(outputs["failures"], "true")
+        self.assertEqual(outputs["complete"], "true")
+
+    def test_a_named_test_that_did_not_run_is_incomplete_and_never_a_pass(self):
+        outputs, text = self.run_verdict(passed=["app t::a"])
+        self.assertIn("named `app t::b`: NOT RUN", text)
+        self.assertEqual(outputs["complete"], "false")
+
+
 class VerdictTests(unittest.TestCase):
     plan = {"run": 9, "shards": 2, "head": "a" * 40, "base": "b" * 40, "crates": {
         "app": {"key": "1" * 64, "listing": {"count": 3, "sha256": "2" * 64}, "adopted": [],
