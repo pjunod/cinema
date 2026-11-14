@@ -765,12 +765,28 @@ def nextest_suites(listing):
     Tests the profile's `default-filter` excludes are left out entirely:
     nextest never runs them, so they are not part of any crate's listing.
     """
+    require(isinstance(listing, dict) and isinstance(listing.get("rust-suites"), dict),
+            "nextest listing must contain a rust-suites object")
     suites = {}
-    for binary_id, suite in listing.get("rust-suites", {}).items():
-        cases = suite.get("testcases", {})
-        suites[binary_id] = {
-            name: bool(case.get("ignored")) for name, case in cases.items()
-            if (case.get("filter-match") or {}).get("reason") != "default-filter"}
+    for binary_id, suite in listing["rust-suites"].items():
+        require(isinstance(binary_id, str) and binary_id and isinstance(suite, dict),
+                "nextest listing contains an invalid suite")
+        require(isinstance(suite.get("testcases"), dict),
+                f"{binary_id}: nextest suite must contain a testcases object")
+        suites[binary_id] = {}
+        for name, case in suite["testcases"].items():
+            require(isinstance(name, str) and name and isinstance(case, dict)
+                    and type(case.get("ignored")) is bool,
+                    f"{binary_id}: malformed nextest testcase")
+            match = case.get("filter-match")
+            require(match is None or isinstance(match, dict),
+                    f"{binary_id} {name}: malformed nextest filter result")
+            if match and match.get("reason") == "default-filter":
+                require(match.get("status") == "mismatch",
+                        f"{binary_id} {name}: invalid default-filter exclusion")
+                continue
+            suites[binary_id][name] = case["ignored"]
+
     return suites
 
 
@@ -827,6 +843,8 @@ def make_plan(selection_doc, pending, listing, config, run):
     suites = nextest_suites(listing)
     crates, partitioned, serial_all = {}, [], []
     for crate, entry in sorted(pending["crates"].items()):
+        require(any(crate_of(binary_id) == crate for binary_id in suites),
+                f"{crate}: pending crate is absent from the nextest listing")
         tests, serial = crate_tests(suites, crate, set(config.serial_ignored.get(crate, ())))
         missing = set(config.serial_ignored.get(crate, ())) - {t.split(" ", 1)[1] for t in serial}
         require(not missing, f"{crate}: declared serial ignored tests not found: {sorted(missing)}")

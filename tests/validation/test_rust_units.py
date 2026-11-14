@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import textwrap
 import unittest
 from unittest import mock
@@ -379,9 +380,31 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         self.assertEqual(plan["crates"]["app"]["adopted"], sorted(adopted))
         self.assertEqual(plan["crates"]["app"]["remaining"], [])
         self.assertEqual(plan["crates"]["app"]["serial"], [])
-        self.assertEqual(plan["shards"], 0)
-        result = workflow_gate(SHARDS="[]", SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="")
+        self.assertEqual(plan["shards"], 1)  # Planner shape is fixed; the producer emits no runnable shards.
+        with mock.patch.object(ru, "read_json", side_effect=[
+                {"head": self.commit, "base": self.commit},
+                {"crates": {"app": {"key": self.key, "passed": sorted(adopted)}}}, current]), \
+                mock.patch.object(ru.Config, "load", return_value=self.config), \
+                mock.patch.object(ru, "write_json"), mock.patch.object(ru, "summarize"), \
+                mock.patch.object(ru, "emit") as emitted:
+            self.assertEqual(ru.command_plan(SimpleNamespace(selection="selection", pending="pending",
+                              listing="listing", output="plan")), 0)
+        produced = dict(call.args for call in emitted.call_args_list)
+        self.assertEqual(produced["shards"], [])
+        self.assertEqual(produced["tests"], "0")
+        result = workflow_gate(SHARDS=json.dumps(produced["shards"]), SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_valid_empty_selection_produces_explicit_false_without_a_workflow_default(self):
+        real_tree = ru.Tree
+        with mock.patch.object(ru, "read_json", return_value={"head": self.commit, "base": self.commit, "crates": {}}), \
+                mock.patch.object(ru, "Tree", side_effect=lambda ref: real_tree(ref, self.repo.root)), \
+                mock.patch.object(ru, "write_json"), mock.patch.object(ru, "emit") as emitted, \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ru.command_adopt(SimpleNamespace(selection="selection", output="pending")), 0)
+        produced = dict(call.args for call in emitted.call_args_list)
+        self.assertEqual(produced["build"], "false")
+        self.assertEqual(produced["crates"], [])
 
 
 def listing(**suites):
@@ -421,6 +444,28 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(all(outcome[test] == "passed" for test in required))
         result = workflow_gate(SHARDS="[1]")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_malformed_listing_and_missing_pending_crate_cannot_become_zero_work(self):
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": []}}}
+        for document in ({}, {"rust-suites": None}, {"rust-suites": []}, {"rust-suites": {}},
+                         listing(other=[]), {"rust-suites": {"app": {}}},
+                         {"rust-suites": {"app": {"testcases": []}}},
+                         {"rust-suites": {"app": {"testcases": {"case": {}}}}},
+                         {"rust-suites": {"app": {"testcases": {"case": {"ignored": "false"}}}}}):
+            with self.subTest(document=document), self.assertRaises(ru.UnitsError):
+                ru.make_plan(self.selection, pending, document, self.config, run=5)
+
+    def test_explicit_zero_test_and_filtered_suites_remain_valid_zero_work(self):
+        config = ru.Config.load(CONFIG)
+        pending = {"crates": {"app": {"key": "1" * 64, "passed": []}}}
+        for document in (listing(app=[]), {"rust-suites": {"app": {"testcases": {
+                "excluded": {"ignored": False, "filter-match": {"status": "mismatch", "reason": "default-filter"}}
+        }}}}):
+            with self.subTest(document=document):
+                plan = ru.make_plan(self.selection, pending, document, config, run=5)
+                self.assertEqual(plan["crates"]["app"]["listing"]["count"], 0)
+                self.assertEqual(plan["crates"]["app"]["remaining"], [])
+                self.assertEqual(plan["crates"]["app"]["serial"], [])
 
     def test_filters_select_exactly_the_remaining_tests(self):
         pending = {"crates": {"app": {"key": "1" * 64, "passed": ["app t::a"]}}}
@@ -622,6 +667,24 @@ class RepositoryContractTests(unittest.TestCase):
 
 
 class StrictGateTests(unittest.TestCase):
+    def test_actual_workflow_output_bindings_preserve_missing_producer_outputs(self):
+        workflow = (ROOT / ".github/workflows/rust-units.yml").read_text()
+        select = workflow.split("\n  select:\n", 1)[1].split("\n  rust_units_archive:\n", 1)[0]
+        archive = workflow.split("\n  rust_units_archive:\n", 1)[1].split("\n  shard:\n", 1)[0]
+        build_binding = re.search(r"^      build: (.+)$", select, re.MULTILINE).group(1)
+        shards_binding = re.search(r"^      shards: (.+)$", archive, re.MULTILINE).group(1)
+        self.assertEqual(build_binding, "${{ steps.adopt.outputs.build }}")
+        self.assertEqual(shards_binding, "${{ steps.plan.outputs.shards }}")
+        adopt = select.split("        id: adopt\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotRegex(adopt, r"(?m)^\s+if:")
+        # Direct bindings propagate absent output as empty; neither may turn
+        # a successful job with a missing producer result into an exemption.
+        missing_build = workflow_gate(BUILD="", ARCHIVE="skipped", SHARDS="", SHARD="skipped",
+                                      VERDICT="skipped", COMPLETE="", FAILURES="")
+        self.assertNotEqual(missing_build.returncode, 0)
+        missing_plan = workflow_gate(SHARDS="", SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="")
+        self.assertNotEqual(missing_plan.returncode, 0)
+
     def test_baseline_failure_never_substitutes_for_a_positive_pass(self):
         for baseline in ("success", "failure", "skipped", ""):
             with self.subTest(baseline=baseline):

@@ -50,7 +50,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 15
     outputs:
-      build: ${{ steps.adopt.outputs.build || 'false' }}
+      build: ${{ steps.adopt.outputs.build }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -63,7 +63,6 @@ jobs:
         run: python3 -m validation.rust_units select --base "$BASE"
       - name: Drop tests that already passed under the same keys
         id: adopt
-        if: steps.select.outputs.any == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.rust_units adopt
@@ -95,7 +94,7 @@ jobs:
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 120
     outputs:
-      shards: ${{ steps.plan.outputs.shards || '[]' }}
+      shards: ${{ steps.plan.outputs.shards }}
     steps:
       - name: Verify effective nonvoter resource bounds
         shell: sh
