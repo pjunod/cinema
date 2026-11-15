@@ -1,5 +1,6 @@
 //! Immutable node roots and revocable, identity-bound daemon capabilities.
 //! Failures name the check, never a path, URL or bearer capability.
+use super::arguments::{ArgumentProfile, ArgumentRole};
 use super::descriptors::{DaemonFileRegistration, DescriptorManifest, StdioMode};
 use super::SourceAccess;
 use std::collections::BTreeMap;
@@ -196,6 +197,22 @@ pub fn register_broker(value: &str) -> io::Result<BrokerRegistration> {
 }
 
 pub(super) fn register_asset(file: &File, path: &Path) -> io::Result<DaemonFileRegistration> {
+    // Every child launch takes the registry lock, so the filesystem work that
+    // proves this descriptor is the named file happens before it.
+    let asset = held_asset(file, path)?;
+    let mut state = STATE
+        .lock()
+        .map_err(|_| io::Error::other("reader policy registry poisoned"))?;
+    register_asset_in(&mut state, asset)
+}
+/// Whether startup configured this process's reader roots. Diagnostic only:
+/// without them every launch runs unverified and nothing is refused.
+pub fn daemon_roots_configured() -> bool {
+    STATE.lock().is_ok_and(|state| state.roots.is_some())
+}
+/// The one hard failure of an otherwise advisory registration: a descriptor
+/// that is not the named file is refused whether or not roots exist.
+fn held_asset(file: &File, path: &Path) -> io::Result<Asset> {
     let canonical = path.canonicalize()?;
     let held = Arc::new(file.try_clone()?);
     let actual = identity(&held)?;
@@ -203,29 +220,28 @@ pub(super) fn register_asset(file: &File, path: &Path) -> io::Result<DaemonFileR
     if identity(&named)? != actual {
         return Err(io::Error::other("daemon asset and held descriptor differ"));
     }
-    let mut state = STATE
-        .lock()
-        .map_err(|_| io::Error::other("reader policy registry poisoned"))?;
-    let roots = state
-        .roots
-        .as_ref()
-        .ok_or_else(|| io::Error::other("reader roots are not configured"))?;
-    if !contained(&canonical, &roots.owned) {
+    Ok(Asset {
+        path: canonical,
+        file: held,
+        identity: actual,
+    })
+}
+fn register_asset_in(state: &mut State, asset: Asset) -> io::Result<DaemonFileRegistration> {
+    // An unconfigured registry verifies no launch (`roots_unconfigured` is
+    // never enforced), so it records no capability and the caller's work
+    // continues unverified. Failing here would make the advisory verifier a gate.
+    let Some(roots) = state.roots.as_ref() else {
+        return Ok(DaemonFileRegistration { id: None });
+    };
+    if !contained(&asset.path, &roots.owned) {
         return Err(io::Error::other("daemon asset is outside qualified roots"));
     }
     if state.assets.len() >= MAX_CAPABILITIES {
         return Err(io::Error::other("daemon asset registry full"));
     }
-    let id = next_id(&mut state)?;
-    state.assets.insert(
-        id,
-        Asset {
-            path: canonical,
-            file: held,
-            identity: actual,
-        },
-    );
-    Ok(DaemonFileRegistration { id })
+    let id = next_id(state)?;
+    state.assets.insert(id, asset);
+    Ok(DaemonFileRegistration { id: Some(id) })
 }
 pub(super) fn unregister_asset(id: u64) {
     STATE
@@ -285,13 +301,16 @@ fn descriptor_safe(state: &State, file: &File) -> bool {
 }
 
 fn manifest_safe(state: &State, manifest: &DescriptorManifest) -> Result<(), &'static str> {
+    manifest
+        .argument_profile
+        .validate_descriptors(manifest.inherited(), manifest.cwd_target)
+        .map_err(|_| "drm_device_identity")?;
     let _ = state; // Descriptor inspection is Unix-only; opaque stdio still refuses elsewhere.
     #[cfg(unix)]
-    if manifest
-        .inherited()
-        .iter()
-        .any(|entry| !descriptor_safe(state, entry.file()))
-    {
+    if manifest.inherited().iter().any(|entry| {
+        manifest.argument_profile.drm_device() != Some(entry.target())
+            && !descriptor_safe(state, entry.file())
+    }) {
         return Err("source_descriptor");
     }
     for (_number, mode) in [
@@ -403,6 +422,9 @@ fn fd_token(value: &str) -> Option<Result<i32, &'static str>> {
     None
 }
 fn registered_descriptor(value: i32, manifest: &DescriptorManifest) -> bool {
+    if manifest.argument_profile.drm_device() == Some(value) {
+        return false;
+    }
     if matches!(value, 1 | 2) {
         let mode = if value == 1 {
             manifest.stdio.stdout
@@ -808,6 +830,11 @@ fn verify_state(
         return Err(Refusal::unavailable("probe_program_not_absolute"));
     }
     if access == SourceAccess::MetadataOnly {
+        if manifest.argument_profile != ArgumentProfile::Default {
+            return Err(Refusal::unavailable(
+                "argument_profile_confinement_unqualified",
+            ));
+        }
         if program.file_name().is_none_or(|name| name != "find")
             || args.len() != 8
             || args[0] != "-H"
@@ -825,6 +852,10 @@ fn verify_state(
     if !contained(&cwd, &roots.owned) {
         return Err(Refusal::configured("cwd_outside_daemon_roots"));
     }
+    let roles = manifest
+        .argument_profile
+        .argument_roles(&args)
+        .map_err(Refusal::configured)?;
     let probe = program.file_name().is_some_and(|name| name == "ffprobe");
     let mut media_input = manifest.stdio.stdin != StdioMode::Null;
     let mut source_next = false;
@@ -832,7 +863,8 @@ fn verify_state(
     let mut format_next = false;
     let mut concat = false;
     let mut lavfi = false;
-    for arg in &args {
+    for (index, arg) in args.iter().enumerate() {
+        let role = roles.get(index).copied().unwrap_or(ArgumentRole::Ordinary);
         if format_next {
             concat = *arg == "concat";
             lavfi = *arg == "lavfi";
@@ -846,6 +878,9 @@ fn verify_state(
         let input =
             source_next || script_next || (probe && !arg.starts_with('-') && input_path.exists());
         if input {
+            if role != ArgumentRole::Ordinary {
+                return Err(Refusal::configured("argument_profile_input_role"));
+            }
             media_input = true;
             let list = script_next
                 || concat
@@ -872,7 +907,9 @@ fn verify_state(
         if FILTER_INPUTS.is_match(arg) {
             media_input = true;
         }
-        check_argument(arg, &cwd, context).map_err(Refusal::configured)?;
+        if role == ArgumentRole::Ordinary {
+            check_argument(arg, &cwd, context).map_err(Refusal::configured)?;
+        }
         if matches!(*arg, "-filter_script" | "-filter_complex_script") {
             script_next = true;
         }
@@ -900,6 +937,11 @@ fn verify_state(
     }
     if media_input {
         return Err(Refusal::unavailable("asset_input_confinement_unqualified"));
+    }
+    if manifest.argument_profile != ArgumentProfile::Default {
+        return Err(Refusal::unavailable(
+            "argument_profile_confinement_unqualified",
+        ));
     }
     if !no_input_profile(&program, &args) {
         return Err(Refusal::configured("no_input_profile"));
@@ -1353,6 +1395,30 @@ mod tests {
         );
     }
     #[test]
+    fn absent_roots_record_no_daemon_file_and_do_not_fail_its_owner() {
+        let fixture = Fixture::new();
+        let path = fixture.data.join("evidence.log");
+        let file = File::create(&path).expect("daemon file");
+        let mut absent = State::default();
+        let held = || held_asset(&file, &path).expect("the descriptor is the named file");
+        let unrecorded = register_asset_in(&mut absent, held())
+            .expect("an unconfigured registry leaves the work unverified, not failed");
+        assert!(unrecorded.id.is_none() && absent.assets.is_empty());
+        let other = File::open(fixture.tools.join("ffmpeg")).expect("another file");
+        assert!(
+            held_asset(&other, &path).is_err(),
+            "a descriptor that is not the named file is refused before any registry"
+        );
+        let mut configured = fixture.state;
+        let recorded = register_asset_in(&mut configured, held()).expect("owned file");
+        assert!(recorded.id.is_some() && asset_matches(&configured, &file));
+        std::mem::forget(recorded); // its identity belongs to this local state
+        let outside = fixture.media.join("movie.mkv");
+        let media = File::create(&outside).expect("media file");
+        let outside = held_asset(&media, &outside).expect("media identity");
+        assert!(register_asset_in(&mut configured, outside).is_err());
+    }
+    #[test]
     fn absent_roots_are_conservative_without_a_debug_assertion() {
         let fixture = Fixture::new();
         let command = fixture.command("ffmpeg", &["-version"]);
@@ -1383,5 +1449,122 @@ mod tests {
         assert!(is_registered_broker(&value));
         drop(second);
         assert!(!is_registered_broker(&value));
+    }
+    #[test]
+    fn typed_rates_preserve_capability_checks_and_never_approve_confinement() {
+        let mut fixture = Fixture::new();
+        let broker = "http://127.0.0.1:12345/source";
+        fixture.state.brokers.insert(1, broker.into());
+        let check = |fixture: &Fixture, command: &std::process::Command, access| {
+            let manifest = DescriptorManifest::new_with_profile(
+                vec![],
+                StdioFacts::CAPTURED,
+                None,
+                ArgumentProfile::Ffmpeg { drm_device: None },
+            )
+            .expect("typed manifest");
+            manifest.bind(command).expect("final binding");
+            verify_state(
+                &fixture.state,
+                command,
+                access,
+                Some(&manifest),
+                "typed protocol fixture",
+                &[],
+            )
+            .expect_err("syntax profile is not confinement proof")
+        };
+        let command = fixture.command(
+            "ffmpeg",
+            &["-hide_banner", "-r", "24000/1001", "-i", broker],
+        );
+        let refusal = check(&fixture, &command, SourceAccess::Brokered);
+        assert_eq!(refusal.check, "broker_confinement_unqualified");
+        assert!(!refusal.enforce);
+        fixture.state.brokers.clear();
+        assert_eq!(
+            check(&fixture, &command, SourceAccess::Brokered).check,
+            "unregistered_broker_url"
+        );
+        let input = fixture.command("ffmpeg", &["-r", "24000/1001", "-i", "0/1"]);
+        assert_eq!(
+            check(&fixture, &input, SourceAccess::Brokered).check,
+            "unregistered_file_input"
+        );
+        let probe = fixture.command("ffmpeg", &["-version"]);
+        let refusal = check(&fixture, &probe, SourceAccess::NoSource);
+        assert_eq!(refusal.check, "argument_profile_confinement_unqualified");
+        assert!(!refusal.enforce);
+    }
+
+    #[test]
+    fn typed_renderer_checks_bound_descriptors_brokers_and_command_mutation() {
+        let mut fixture = Fixture::new();
+        let data = fixture.data.clone();
+        fixture.asset(&data);
+        let directory = File::open(&data).expect("directory");
+        let (socket, _other) = std::os::unix::net::UnixStream::pair().expect("pipe-like output");
+        let output = File::from(std::os::fd::OwnedFd::from(socket));
+        let broker = "http://127.0.0.1:12345/source";
+        fixture.state.brokers.insert(1, broker.into());
+        let args = [
+            broker,
+            "/proc/self/fd/4",
+            "0",
+            "3",
+            "1920",
+            "1080",
+            "0",
+            "0",
+            "0",
+            "bt2020-pq-master-clip",
+            "/proc/self/fd/5",
+            "0/1",
+            "1/1",
+            "512",
+            "fel",
+            "1920",
+            "1080",
+            "pq-bilinear-rgb48-v1",
+            "--held-source-origin",
+            "0/1",
+        ];
+        let mut command = fixture.command("ffmpeg", &args);
+        let manifest = DescriptorManifest::new_with_profile(
+            vec![
+                InheritedFd::duplicate(&directory, 4).expect("directory pin"),
+                InheritedFd::duplicate(&output, 5).expect("output pin"),
+            ],
+            StdioFacts::CAPTURED,
+            None,
+            ArgumentProfile::FelRendererWindowV1,
+        )
+        .expect("typed manifest");
+        manifest.bind(&command).expect("final binding");
+        let refusal = verify_state(
+            &fixture.state,
+            &command,
+            SourceAccess::Brokered,
+            Some(&manifest),
+            "typed renderer fixture",
+            &[],
+        )
+        .expect_err("no confinement approval");
+        assert_eq!(refusal.check, "broker_confinement_unqualified");
+        assert!(!refusal.enforce);
+        command.env("LD_PRELOAD", "unregistered.so");
+        assert_eq!(
+            verify_state(
+                &fixture.state,
+                &command,
+                SourceAccess::Brokered,
+                Some(&manifest),
+                "typed renderer fixture",
+                &[]
+            )
+            .expect_err("command changed")
+            .check,
+            "descriptor_manifest_command_mismatch"
+        );
     }
 }

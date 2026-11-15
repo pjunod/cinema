@@ -314,9 +314,10 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   (`DvDisplayTarget::display_management`).
 - **CM v4.** Effective L1 = L1 + L3 offsets, anchors held one 12-bit code
   apart. Two-stage tone curve, SOP in target-normalised PQ, colour in ICtCp
-  (primary saturation, mesopic chroma, six-vector), MSWeight detail stage at
-  weight 0, clip in the target primaries. L8 trims (preset target displays,
-  or L10) are interpolated to the bucket peak: SOP linearly in PQ, colour
+  (primary saturation, mesopic chroma, six-vector), L8 MSWeight detail stage
+  (zero for L1-only metadata), clip in the target primaries. Six-vector labels
+  use the L9 source-gamut palette. L8 trims (preset target displays, or L10)
+  are interpolated to the bucket peak: SOP and MSWeight linearly in PQ, colour
   trims linearly in a per-gamut display size V = K_G + A_G·|c_G − PQ|^2.027
   (so a BT.709 trim weighs less on a P3 display of the same peak), held for
   displays smaller than the smallest trim target and faded to neutral at the
@@ -342,11 +343,15 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   vertical Gaussian / derivative-of-Gaussian detail; finish and gamut clip).
   `display_target.h` calls it and prints one `display_target_frame` row per
   frame (`curve`, `trim_targets`, `detail_weight`). Method identity:
-  `dolby-closed-form-cm4-cm29-v5` (CM4 unchanged; CM29 family v4). Earlier
+  `dolby-closed-form-cm4-cm29-v5` (CM4 closed-form family v1; measured CM29 family v5). Earlier
   versions served no trims (v1), added a fitted CM29 near-black gain (v3),
   and applied it at absolute output intensity (v4). The helper graph remains
   `dv-native-master-or-closed-form-dm-v1`.
-- **CM4 accuracy (retained private evidence, 2026-10-25).** The unchanged
+- **CM4 creative-trim correction (2026-11-13, qualification open).**
+  [Source-gamut hue labels and L8 spatial weights](CM4-TRIM-FIDELITY.md)
+  correct the two observed real-frame residuals. The old family label remains;
+  renderer/source content digests distinguish the corrected backend.
+- **CM4 accuracy (retained private evidence, 2026-10-25).** The then-qualified
   model reproduces 30/30 random30 shots (median mean ΔE_ITP 0.000, maximum
   0.055) and real P8 frames with original L8 metadata (mean ≤0.001 at
   300–1600 nits, ≤0.007 at 100 nits). This evidence retains its original source.

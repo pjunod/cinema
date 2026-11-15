@@ -3745,12 +3745,27 @@ static SOURCE_RECOVERY_SCAN: std::sync::LazyLock<std::sync::Arc<tokio::sync::Sem
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
 
 fn unavailable_source_recovery(node_name: &str, launches: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "error": "unavailable",
-        "poisoned": null,
-        "node_name": node_name,
-        "launches": launches,
-    })
+    local_source_diagnostics(
+        serde_json::json!({"error": "unavailable", "poisoned": null}),
+        node_name,
+        launches,
+        crate::source_custody::access_roots_fact(),
+    )
+}
+
+/// Process-local readings every answer carries, including an unavailable one.
+fn local_source_diagnostics(
+    mut reading: serde_json::Value,
+    node_name: &str,
+    launches: serde_json::Value,
+    roots: serde_json::Value,
+) -> serde_json::Value {
+    reading["node_name"] = serde_json::json!(node_name);
+    reading["launches"] = launches;
+    for key in ["roots_configured", "roots_unconfigured_reason"] {
+        reading[key] = roots[key].clone();
+    }
+    reading
 }
 
 pub async fn source_recovery(
@@ -3770,7 +3785,7 @@ pub async fn source_recovery(
         }
     };
     let store = std::sync::Arc::clone(&state.store);
-    let mut reading = match tokio::task::spawn_blocking(move || {
+    let reading = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         crate::source_custody::recovery_status(&store)
     })
@@ -3779,9 +3794,12 @@ pub async fn source_recovery(
         Ok(reading) => reading,
         Err(_) => return Json(unavailable_source_recovery(&node_name, launches)),
     };
-    reading["node_name"] = serde_json::json!(node_name);
-    reading["launches"] = launches;
-    Json(reading)
+    Json(local_source_diagnostics(
+        reading,
+        &node_name,
+        launches,
+        crate::source_custody::access_roots_fact(),
+    ))
 }
 
 #[cfg(test)]
@@ -3796,6 +3814,27 @@ mod tests {
         assert!(response["poisoned"].is_null());
         assert_eq!(response["node_name"], "media1");
         assert_eq!(response["launches"], launches);
+        assert!(response["roots_configured"].is_boolean());
+    }
+
+    #[test]
+    fn source_recovery_names_unconfigured_roots_and_their_reason() {
+        let roots = serde_json::json!({
+            "roots_configured": false,
+            "roots_unconfigured_reason": "reader roots cannot be empty",
+        });
+        let response = local_source_diagnostics(
+            serde_json::json!({"supported": true}),
+            "media1",
+            serde_json::json!({"unverified": 2}),
+            roots,
+        );
+        assert_eq!(response["supported"], true);
+        assert_eq!(response["roots_configured"], false);
+        assert_eq!(
+            response["roots_unconfigured_reason"],
+            "reader roots cannot be empty"
+        );
     }
 
     /// Review 2 of C1 (S9): the row counts readers the way the claim does --

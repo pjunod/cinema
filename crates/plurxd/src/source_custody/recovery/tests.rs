@@ -464,8 +464,11 @@ async fn recovery_old_identity_never_releases_replacement_custody() {
     assert_eq!(unsettled, 1);
 }
 
+/// Lease expiry is the release: an abandoned physical custody counts as one
+/// ordinary reader until the sweep (or replay) releases it, so it no longer
+/// refuses an already-accepted manual scan outright.
 #[tokio::test]
-async fn reboot_recovery_unblocks_an_already_accepted_manual_library_scan() {
+async fn abandoned_custody_does_not_block_an_already_accepted_manual_library_scan() {
     let fixture = Fixture::new();
     let library = fixture
         .store
@@ -513,24 +516,16 @@ async fn reboot_recovery_unblocks_an_already_accepted_manual_library_scan() {
         now_ms: 10_000,
         dispatched_at_ms: 10_000,
     };
-    assert!(matches!(
-        fixture
-            .store
-            .claim_job(claim())
-            .await
-            .expect("blocked claim"),
-        ClaimOutcome::Contended
-    ));
+    let ClaimOutcome::Claimed { job } = fixture.store.claim_job(claim()).await.expect("scan claim")
+    else {
+        panic!("an abandoned custody must not refuse an accepted scan")
+    };
+    assert_eq!(job.id, job_id);
+    assert_eq!(job.fence, 1);
     replay_at(&fixture.store, &fixture.dir, &identity(NEW_BOOT), NODE)
         .await
         .expect("verified physical reboot replay");
     assert!(!path.exists());
-    let ClaimOutcome::Claimed { job } = fixture.store.claim_job(claim()).await.expect("scan claim")
-    else {
-        panic!("accepted scan must run after abandoned physical custody settles")
-    };
-    assert_eq!(job.id, job_id);
-    assert_eq!(job.fence, 1);
 }
 
 #[test]

@@ -1768,6 +1768,7 @@ mod tests {
             "INSERT INTO background_job_commands(id,operation,request_json,result_json) \
              SELECT $1,'publish_dv_title',$2,$3",
             "INSERT INTO background_job_commands(id,operation) SELECT $1,'bind_dv_title'",
+            // offload-exempt: classifier input for the files floor; never executed.
             "DELETE FROM items WHERE library_id = $1 AND id NOT IN (SELECT item_id FROM files)",
             "delete from libraries where id = $1",
             // Synthetic classifier input only: no SQL here is executed. Keep
@@ -1850,6 +1851,7 @@ mod tests {
     fn a_write_guard_raises_only_its_own_floors() {
         let floor = SettingsWriteFloor::detached();
         let floors = floor.floors();
+        // offload-exempt: classifier input for the write guard; never executed.
         let guard = floor.guard(WrittenTables::of("DELETE FROM items WHERE id = $1"));
         assert_eq!(
             floors.get(AppliedTable::Files),

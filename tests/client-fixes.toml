@@ -1,6 +1,89 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1651: a malformed prepare probes origins outside the signed media range.
+[[fixes]]
+id = "apple.malformed-prepare-outside-signed-origin-range"
+commits = ["38b82fc01f99f5848e753c8cbe858a862c45cf7e"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "(-PlaybackControl.maximumMediaMs...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testAMalformedPrepareStopsTheReporterRatherThanBeingActedOn()"
+
+# PR #1587: retained source/test anchors after adding the active tone-map pill.
+[[fixes]]
+id = "apple.active-tone-mapping-pill"
+commits = []
+supplements = "web.tone-mapping-pill-current-processing-evidence"
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "static func toneMappingActive("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testToneMappingPillRequiresActiveProcessingEvidence()"
+
+[[fixes]]
+id = "linux-player.tone-map-telemetry-input-loop"
+commits = []
+supplements = "linux-player.tone-mapping-probe-off-input-loop"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "Thread(target=self._probe_tone_mapping, args=(sid, result), daemon=True).start()"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_slow_tone_mapping_telemetry_keeps_input_loop_responsive(self):"
+
+# PR #1588: the reader accepts the same supported server origins as the session.
+[[fixes]]
+id = "android.reader-canonical-server-origin"
+commits = ["0e946dcfee51af196e7b761e3823017d1d12bcc9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/ReaderScreen.kt"
+source_anchor = "val canonical = readerOrigin(origin) ?: return null"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/ReaderPolicyTest.kt"
+test_anchor = "fun shellUsesTheSameCanonicalServerIdentityAsTheSession()"
+
+# #1589: HDR tone mapping still applies when the server omits a false SDR flag.
+[[fixes]]
+id = "linux-player.hdr-tone-map-omitted-false-sdr"
+commits = []
+supplements = "linux-player.tone-mapping-probe-off-input-loop"
+source = "clients/linux-player/plurx_player/playback.py"
+source_anchor = "def effective_tone_mapping(self):"
+test = "clients/linux-player/tests/test_cinema_controls.py"
+test_anchor = "def test_hdr_tone_mapping_accepts_omitted_false_sdr_flag(self):"
+
+# PR #1589: original-file delivery and configured codec evidence own native DYN.
+[[fixes]]
+id = "android.direct-dolby-vision-enhancement"
+commits = ["fe632d11b89e94882d47767acd37b4d76d140cdd"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"
+source_anchor = "internal fun directPlaybackEnhancement("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun onlyOriginalDirectDolbyVisionBytesUseTheDecisionEnhancement()"
+
+[[fixes]]
+id = "android.direct-dolby-vision-decision-report"
+commits = []
+supplements = "android.direct-dolby-vision-enhancement"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "data class Decision("
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun directDecisionCarriesEnhancementWithoutAnHlsSession()"
+
+[[fixes]]
+id = "android.direct-dolby-vision-configured-codec-proof"
+commits = []
+supplements = "android.direct-dolby-vision-enhancement"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "val nativeCodec = selectedCodecMime?.lowercase()"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun nativeDynamicMetadataWaitsForTheAcceptedFormatAndRetractsOnFallback()"
+
+[[fixes]]
+id = "android.direct-dolby-vision-codec-ownership"
+commits = []
+supplements = "android.direct-dolby-vision-enhancement"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/VideoDecoderEvidence.kt"
+source_anchor = "if (current === claim) current = null"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/VideoDecoderEvidenceTest.kt"
+test_anchor = "fun aLateReleaseCannotClearAReinitializedCodecWithTheSameName()"
+
 # PR #1378: native media-wait retirement matches the existing shared fixture.
 [[fixes]]
 id = "apple.media-wait-intent-retirement-parity"
@@ -8584,6 +8667,63 @@ source_anchor = '"origin_ms", "control_binding", "sequence")}'
 test = "clients/linux-player/tests/test_cinema_controls.py"
 test_anchor = "def test_quality_rollback_resumes_incumbent_sequence_after_candidate_controls"
 
+# Android prepared playback: preserve each correction's current production/test anchor.
+[[fixes]]
+id = "android.processed-route-candidate-seeks"
+commits = ["40359cf20ca78ca508371fef5b79adc91a69509e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun adoptCommittedAutomaticCandidate("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun processedCommitCarriesItsCandidateIntoTheNextSeekRequest()"
+
+[[fixes]]
+id = "android.prepared-control-after-accepted-commit"
+commits = ["9ec13d9041277d891b751cec525c23f5571ec90f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun acknowledgementDelivered(value: ActionAcknowledgement, response: ControlResponse)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedControlHandoffTest.kt"
+test_anchor = "fun acceptedWireCommitTransfersTheRealSessionCallbackAfterItsResponse()"
+
+[[fixes]]
+id = "android.prepared-vod-film-timeline"
+commits = ["f2da0d08884d9079d2dfc9ee1411c6f3d15d73ed"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun preparedFilmLocalVod("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedVodTimelineTest.kt"
+test_anchor = "fun serverDirectedFullVodUsesFilmTimeWithoutAnAutoCandidateRequest()"
+
+[[fixes]]
+id = "android.prepared-verified-acquisition-entry"
+commits = ["2f5a5f733f84eded03aaf98560323b647fc8d3c2"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun resolvePreparedAcquisition(successor: ExoPlayer, action: ControlAction)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedAcquisitionTest.kt"
+test_anchor = "fun zeroOriginUsesNativeVerifiedEntryRatherThanExplicitUncachedPredecessor()"
+
+[[fixes]]
+id = "android.prepared-playlist-origin-ownership"
+commits = ["412aa4fb3ec846aaa2a9bcf5ab692de591e95603"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun preparedPlaylistOwnership(url: String, credentialOrigin: String, sessionId: String)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedPlaylistOwnershipTest.kt"
+test_anchor = "fun foreignOriginOrSessionCannotOwnTheManifest()"
+
+[[fixes]]
+id = "android.prepared-native-seek-runway-settlement"
+commits = ["ee010d56ee8ce2d1684df558d85fe381aaeeeec6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "fun seekReady(nowMs: Long)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun bufferSupplyWaitDoesNotBecomeSeekLatencyOrAFiveSecondLead()"
+
+[[fixes]]
+id = "android.optional-auto-failure-retains-executing-choice"
+commits = ["8e1f830cbb6a4eb9cf3c559f6ee0e60a8e909c7d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "internal fun restoreOptionalAutomaticCandidate("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/OptionalAutoAttemptTest.kt"
+test_anchor = "fun failedOptionalTargetRestoresExecutingFrozenRecipeOnTheNextControlEnvelope()"
+
 # PR #1587: tone-mapping pills require current server evidence on every client.
 [[fixes]]
 id = "web.tone-mapping-pill-current-processing-evidence"
@@ -8628,3 +8768,28 @@ source = "clients/linux-player/plurx_player/playback.py"
 source_anchor = "def refresh_tone_mapping"
 test = "clients/linux-player/tests/test_cinema_controls.py"
 test_anchor = "def test_slow_tone_mapping_telemetry_keeps_input_loop_responsive(self):"
+
+[[fixes]]
+id = "android.control-playhead-title-duration"
+commits = ["979231239b9e4444947f571aefedc036317f3d2f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "titleDurationMs = plan.durationMs,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
+test_anchor = "fun controlDurationIsTitleTimeSoAnOriginSessionPlayheadIsNotClamped()"
+
+[[fixes]]
+id = "android.optional-auto-withdraw-to-standing"
+commits = ["64fc34d63292dde9c24feae68d010bf3edda1a02"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun withdraw(intent: PlaybackIntent): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/OptionalAutoAttemptTest.kt"
+test_anchor = "fun failedOptionalTargetIsWithdrawnEvenAfterTheExecutionMovedUnderIt()"
+
+[[fixes]]
+id = "android.prepared-handoff-owns-its-acknowledgement"
+commits = []
+supplements = "android.optional-auto-withdraw-to-standing"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun owns(acknowledgement: ActionAcknowledgement): Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedControlHandoffTest.kt"
+test_anchor = "fun handoffOwnsOnlyItsActionAndAdoptsOnlyUnderItsOwnRevision()"

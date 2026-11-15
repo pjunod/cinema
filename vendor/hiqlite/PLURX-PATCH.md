@@ -450,7 +450,8 @@ made-up URL and prevents the fork from being declared fully tracked.
   `IdleConnections` when no reset, cancellation, queued request or snapshot
   attempt touched it, and the next `new_client` for the same group and target
   leases it. A lease is exclusive, so each connection still carries one
-  client's RPCs; at most eight are kept per target. The parked supervisor owns
+  client's RPCs; at most 64 are kept per target (sized to the measured read
+  bursts). The parked supervisor owns
   its 30 s idle deadline and closes its socket when it passes, and it exits
   instead of reconnecting when its socket ends; nothing is leased after Raft
   stops. No timeout, heartbeat or retry changes. Tests:

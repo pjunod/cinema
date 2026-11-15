@@ -2291,7 +2291,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // retire_subtitle_source_ready constructs its UPDATE beside its one five-value
 // execute. The former moved out of line in ee47539ed without updating the old
 // 107 inventory, so the observed 108-site set falls to 106 with both checked.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 106;
+// 106 -> 107: media::library_file_paths_under (48ebff9b5) prepares its ?1/?2
+// folder SELECT separately, then binds exactly [library_id, folder] in the
+// following query_map call.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 107;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

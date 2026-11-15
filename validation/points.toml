@@ -46,15 +46,6 @@ missing = "fail"
 timeout_seconds = 180
 
 [[checks]]
-id = "knowledge-contract"
-title = "Engineering knowledge schema and references"
-command = "scripts/knowledge lint --scope pilot"
-profiles = ["commit", "ci", "full", "nightly"]
-requires = ["python3", "git"]
-missing = "fail"
-timeout_seconds = 30
-
-[[checks]]
 id = "history-regressions"
 title = "Historical corrective commits have current validation evidence"
 command = "scripts/history-audit --report target/validation/history.json"
@@ -532,7 +523,7 @@ paths = [
   "crates/plurx-core/src/store/library_annotations.sql",
   "crates/plurx-core/src/store/library_annotations_schema.rs",
   "crates/plurx-core/src/store/dv_title_jobs{,_schema}.rs",
-  "crates/plurx-core/src/store/dv_title_jobs.sql",
+  "crates/plurx-core/src/store/dv_title_jobs{,_v2}.sql",
   "crates/plurx-core/src/store/sqlite/telemetry.rs",
   "crates/plurx-core/src/store/sqlite/fragindex.rs",
   "crates/plurx-core/src/store/sqlite/fragment_index_cluster.rs",
@@ -558,6 +549,7 @@ paths = [
   "crates/plurx-core/tests/store_contract/subtitle_text.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/support/source_extensions_fixture.rs",
+  "crates/plurx-core/tests/support/title_extension_fixture.rs",
   "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
   "crates/plurx-core/tests/fixtures/fragment-prune-retention.sql",
@@ -577,7 +569,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/tests.rs",
   "crates/plurx-core/src/cluster/migration.rs",
   "crates/plurx-core/src/store/dv_title_jobs{,_schema}.rs",
-  "crates/plurx-core/src/store/dv_title_jobs.sql",
+  "crates/plurx-core/src/store/dv_title_jobs{,_v2}.sql",
   "crates/plurx-core/src/cluster/migration/**",
   "crates/plurx-core/src/store/schema_lineage.rs",
   "crates/plurx-core/tests/schema_lineage_upgrade.rs",
@@ -687,7 +679,7 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/hiqlite_library_channels.rs",
   "crates/plurx-core/src/store/dv_title_jobs{,_schema}.rs",
-  "crates/plurx-core/src/store/dv_title_jobs.sql",
+  "crates/plurx-core/src/store/dv_title_jobs{,_v2}.sql",
   "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
@@ -738,6 +730,7 @@ paths = [
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/support/source_extensions_fixture.rs",
+  "crates/plurx-core/tests/support/title_extension_fixture.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
   "crates/plurx-core/tests/fixtures/fragment-prune-retention.sql",
   "crates/plurx-core/tests/fixtures/fragment-prune-worst.sql",
@@ -928,6 +921,7 @@ paths = [
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/support/source_extensions_fixture.rs",
+  "crates/plurx-core/tests/support/title_extension_fixture.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
   "crates/plurx-core/tests/fixtures/fragment-prune-retention.sql",
   "crates/plurx-core/tests/fixtures/fragment-prune-worst.sql",
@@ -1152,6 +1146,7 @@ paths = [
   "crates/plurx-core/tests/fixtures/dv-refit/**",
   "crates/plurxd/src/dv_runtime.rs",
   "crates/plurxd/src/dv_runtime/observe_tests.rs",
+  "crates/plurxd/src/dv_segment/stage_clock.rs",
   "crates/plurx-core/examples/dv_target_policy.rs",
   "crates/plurx-core/examples/dv_target_fixtures.rs",
   "crates/plurxd/src/dv_report_lifetime.rs",
@@ -1550,6 +1545,9 @@ paths = [
   "scripts/ci-cargo-jobs",
   "scripts/rust-gate-image",
   "Dockerfile.rust-gate",
+  "scripts/ci-image-probe",
+  "scripts/ci-toolchain-check",
+  "tests/ci-image-skips.toml",
   "scripts/ci-cargo-cache-refresh",
   "scripts/provision-hiqlite-upstream",
   "scripts/image-base-drift",
@@ -1934,19 +1932,3 @@ contract = "A plurx-player:// URL is played only when it is exactly play?server=
 paths = ["clients/linux-player/**"]
 checks = ["linux-player-launcher"]
 depends_on = ["server.api", "playback.pipeline"]
-
-[[points]]
-id = "knowledge.engineering"
-title = "Scoped engineering intent and evidence graph"
-contract = "Code and proposed changes trace to source-backed intent, scoped obligations and independently labeled execution evidence; unknown coverage and origin never become qualification."
-paths = [
-  "validation/knowledge/**",
-  "scripts/knowledge",
-  ".agents/skills/engineering-knowledge/**",
-  "tests/validation/test_knowledge_*.py",
-  "tests/operations/test_knowledge_pilot.py",
-  "docs/features/ENGINEERING-KNOWLEDGE-GRAPH-*.md",
-  "docs/ci/ENGINEERING-KNOWLEDGE.md",
-]
-checks = ["knowledge-contract", "catalog-contract", "operations-contract"]
-depends_on = ["validation.framework"]

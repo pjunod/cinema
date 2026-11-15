@@ -510,7 +510,7 @@ of never storing it.
 | POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
 | GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
-| GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes. Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
+| GET | `/api/v1/developer/source-recovery` | admin | Node-local reader support, bounded launch attempts and first-poisoning purposes, plus `roots_configured` and, when false, `roots_unconfigured_reason` (launches then run unverified; nothing is blocked). Diagnostic only; no field authorizes settlement. `poisoned: null` or `error` means unavailable, never a healthy zero. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
@@ -1550,6 +1550,7 @@ verdict for the same hardware.
 | `method` | **The verdict**: `direct_play` · `remux` · `transcode` |
 | `reasons` | Every dimension that failed. Empty ⇒ directly playable |
 | `delivery` | **The execution plan — execute this, not `play_url`** |
+| `enhancement` | Optional original-file Dolby Vision enhancement, in the HLS §9 shape. Present only for direct delivery preserving the source profile with a probed RPU. Describes metadata delivered to the device, not server processing; HLS sessions publish their own report. |
 | `play_url` | Legacy. For a transcode verdict it points at `stream.mp4`, the only progressive URL there is |
 | `transcode_audio` | Re-encode audio to AAC because the source codec is outside the profile |
 | `preserve_dolby_vision` / `convert_dolby_vision` | Keep DV signalling on a copy; rewrite Profile 7 RPUs to 8.1 in transit. The second is only ever true beside the first |
@@ -1950,7 +1951,10 @@ rest, in the groups that matter:
   priority before its first control exchange. Omission uses finite transfer
   service until actual accepted film telemetry permanently establishes rolling
   service. When ordinary control is off, the server clears the declaration; quality-ledger
-  receipts alone do not supply source-demand freshness. This field
+  receipts alone do not supply source-demand freshness. Successors the server
+  stages under control (a selection change, a processed Dolby Vision / HDR10-E
+  upgrade) declare it themselves, since the viewer's control stream commits
+  them. This field
   does not change media identity or enable a feature; unknown labels retain
   legacy transfer service.
 - **Evidence** — `caps` (the same v2 document), `overrides`, `presentation`

@@ -29,17 +29,20 @@ pub(super) struct AwaitingQualification {
 /// viewer that is not counted waits for every library and subtitle job ahead
 /// of its title. The demand does not lift the cap on concurrent readers or the
 /// viewer's own playback priority; upkeep cancels it once renewals stop.
+#[cfg(target_os = "linux")]
 const VIEWER_DEMAND_MS: i64 = 90_000;
+#[cfg(target_os = "linux")]
 const VIEWER_RENEWAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Hold (or renew) the live demand of `session_id`, awaiting its title's FEL
 /// measurement as `generation`, on that title's scan.
+#[cfg(target_os = "linux")]
 pub(in crate::http::hls) fn hold_viewer_demand(
     state: &AppState,
     session_id: &str,
     generation: &str,
 ) {
-    let file_id = {
+    let (file_id, request) = {
         let mut entries = lock();
         match entries.get_mut(session_id) {
             Some(Entry::AwaitingQualification(wait))
@@ -49,7 +52,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
                         .is_none_or(|renewed| renewed.elapsed() >= VIEWER_RENEWAL) =>
             {
                 wait.demand_renewed = Some(std::time::Instant::now());
-                wait.wait.file_id
+                (wait.wait.file_id, wait.wait.request.clone())
             }
             _ => return,
         }
@@ -58,9 +61,24 @@ pub(in crate::http::hls) fn hold_viewer_demand(
     let viewer = session_id.to_owned();
     tokio::spawn(async move {
         let now = crate::media_sessions::unix_ms();
+        let tools = match crate::vodencode::dv_runtime::ToolSet::capture().await {
+            Ok(Some(tools)) => tools,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "title viewer scanner unavailable");
+                return;
+            }
+        };
         match state
             .store
-            .attach_dv_title_viewer(file_id, &viewer, now.saturating_add(VIEWER_DEMAND_MS), now)
+            .attach_dv_title_viewer(plurx_core::store::dv_title_jobs::TitleViewerRequest {
+                file_id,
+                viewer,
+                request,
+                scanner_digest: tools.title_scanner_digest(),
+                deadline_ms: now.saturating_add(VIEWER_DEMAND_MS),
+                now_ms: now,
+            })
             .await
         {
             Ok(true) => {}
@@ -70,6 +88,15 @@ pub(in crate::http::hls) fn hold_viewer_demand(
                 "a waiting viewer's demand on its title scan was not recorded"),
         }
     });
+}
+
+// FEL measurement workers and their installed scanner exist only on Linux.
+#[cfg(not(target_os = "linux"))]
+pub(in crate::http::hls) fn hold_viewer_demand(
+    _state: &AppState,
+    _session_id: &str,
+    _generation: &str,
+) {
 }
 
 pub(super) fn retain(

@@ -113,6 +113,15 @@ jobs:
   pgs-fuzz:
     name: bounded PGS parser fuzz campaign
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 45
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -167,6 +176,11 @@ jobs:
           echo "The bounded PGS fuzz campaign found a reproducible failure." \
             >> "$GITHUB_STEP_SUMMARY"
           exit 1
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   # The four parser seams of docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
   # §3.6, on the same bounded budget and artefact upload as the PGS campaign.
@@ -182,6 +196,15 @@ jobs:
   parser-fuzz:
     name: bounded ${{ matrix.target }} fuzz campaign
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -192,6 +215,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - uses: ./.github/actions/rust-native-deps
       # One cache key for the whole matrix: the four targets share every
       # dependency, so whichever job saves first warms the other three.
       - uses: https://github.com/Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -227,6 +251,11 @@ jobs:
           echo "The bounded ${{ matrix.target }} fuzz campaign found a reproducible failure." \
             >> "$GITHUB_STEP_SUMMARY"
           exit 1
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   # Every other lane in this repository runs ffmpeg 6, which is how #380 —
   # ffmpeg 8 declaring `-readrate_initial_burst` and ignoring it — reached three
