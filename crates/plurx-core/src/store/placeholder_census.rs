@@ -3471,6 +3471,8 @@ fn applied_view_tables_never_escape_the_update_hook() {
 /// moving their revision. The store census never read these files. Once the
 /// mark registers the roster tables (`cluster::membership::directory`), this
 /// is also what keeps the directory's per-table stamp honest.
+/// `cluster/migration.rs` is not read: its table-clearing `DELETE`s run on a
+/// stopped restore image through rusqlite, before any mark exists.
 const MEMBERSHIP_SOURCES: &[(&str, &str)] = &[
     (
         "../cluster/membership.rs",
@@ -3487,10 +3489,6 @@ const MEMBERSHIP_SOURCES: &[(&str, &str)] = &[
     (
         "../cluster/membership/sharing_source_schema.rs",
         include_str!("../cluster/membership/sharing_source_schema.rs"),
-    ),
-    (
-        "../cluster/migration.rs",
-        include_str!("../cluster/migration.rs"),
     ),
 ];
 
