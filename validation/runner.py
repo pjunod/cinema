@@ -132,6 +132,55 @@ def _strings(value: object, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _with_path_fragments(points: list[Point], directory: Path) -> list[Point]:
+    """Add the governed paths recorded one file per change beside the catalog.
+
+    Most edits to the catalog add a path to an existing point's `paths` list,
+    and every such edit landed on the same few list tails, so open pull
+    requests conflicted there. A change now records its paths in a file of
+    its own under `validation/points.d/`:
+
+        [[paths]]
+        point = "playback.core"
+        add = ["scripts/vod-plan-probe", "tests/playback/**"]
+
+    A point's paths are its catalog list followed by every fragment's, in
+    file-name order, without repeats. Points, checks and settings stay in the
+    catalog itself.
+    """
+
+    if not directory.is_dir():
+        return points
+    added: dict[str, list[str]] = {}
+    known = {point.id for point in points}
+    for fragment in sorted(directory.glob("*.toml")):
+        where = f"{directory.name}/{fragment.name}"
+        try:
+            raw = tomllib.loads(fragment.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise CatalogError(f"cannot read {where}: {exc}") from exc
+        rows = raw.get("paths")
+        if set(raw) != {"paths"} or not isinstance(rows, list) or not rows:
+            raise CatalogError(f"{where} must contain only one or more [[paths]] tables")
+        for index, row in enumerate(rows):
+            at = f"{where} paths[{index}]"
+            if not isinstance(row, dict) or set(row) != {"point", "add"}:
+                raise CatalogError(f"{at} must contain exactly point and add")
+            if row["point"] not in known:
+                raise CatalogError(f"{at} names unknown point {row['point']!r}")
+            paths = _strings(row["add"], f"{at}.add")
+            if not paths:
+                raise CatalogError(f"{at}.add must not be empty")
+            added.setdefault(row["point"], []).extend(paths)
+    return [
+        dataclasses.replace(
+            point,
+            paths=tuple(dict.fromkeys((*point.paths, *added.get(point.id, ())))),
+        )
+        for point in points
+    ]
+
+
 def load_catalog(path: Path = DEFAULT_CATALOG) -> Catalog:
     try:
         with path.open("rb") as handle:
@@ -200,6 +249,8 @@ def load_catalog(path: Path = DEFAULT_CATALOG) -> Catalog:
                 depends_on=_strings(item.get("depends_on"), f"{where}.depends_on"),
             )
         )
+
+    points = _with_path_fragments(points, path.with_suffix(".d"))
 
     return Catalog(
         path=path,

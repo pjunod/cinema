@@ -1,0 +1,13 @@
+# The per-change bookkeeping directories and the tools that read them
+# (docs/ci/SHARED-BOOKKEEPING.md).
+[[paths]]
+point = "validation.framework"
+add = [
+  "tests/client-fixes.d/**",
+  "scripts/status",
+  "scripts/migrate-bookkeeping",
+]
+
+[[paths]]
+point = "playback.pipeline"
+add = ["tests/rolling-producer-owners.d/**"]

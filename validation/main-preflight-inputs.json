@@ -327,6 +327,7 @@
         "scripts/**",
         "Makefile",
         "validation/points.toml",
+        "validation/points.d/*.toml",
         "validation/rust_modules.py",
         "clients/apple/Sources/**",
         "clients/android/app/src/main/java/tv/plurx/app/**",
@@ -608,7 +609,8 @@
         "validation/mobile_versions.py",
         "validation/mobile_build.py",
         "validation/runner.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -683,7 +685,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -693,7 +696,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -703,7 +707,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -713,7 +718,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -723,7 +729,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -733,7 +740,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -743,7 +751,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -753,7 +762,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -763,7 +773,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -773,7 +784,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -783,7 +795,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -793,7 +806,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -803,7 +817,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Actual store path enumeration; content is not read.",
       "pathsets": [
@@ -817,7 +832,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -827,7 +843,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -837,7 +854,8 @@
         "validation/__init__.py",
         "validation/runner.py",
         "validation/ci_scope.py",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -1463,7 +1481,8 @@
         "validation/rust_modules.py",
         "tests/playback/routing-decisions.toml",
         "Makefile",
-        "validation/points.toml"
+        "validation/points.toml",
+        "validation/points.d/*.toml"
       ],
       "reason": "Reviewed exact repository input read sites."
     },
@@ -3700,6 +3719,7 @@
         "Cargo.toml",
         "scripts/pre-commit",
         "validation/points.toml",
+        "validation/points.d/*.toml",
         "tests/web/cluster-membership.test.js",
         "validation/main_preflight_adoption.py"
       ],
@@ -3756,6 +3776,7 @@
         "validation/ci_lane_receipt.py",
         "validation/qualification.py",
         "validation/points.toml",
+        "validation/points.d/*.toml",
         "rust-toolchain.toml",
         "Cargo.lock",
         ".cargo/config.toml",
@@ -4979,6 +5000,7 @@
         "validation/knowledge/coverage.toml",
         "validation/knowledge/conflicts.toml",
         "validation/points.toml",
+        "validation/points.d/*.toml",
         "validation/main-preflight-inputs.json",
         "tests/playback/routing-decisions.toml",
         "validation/python_unit_receipts.py",

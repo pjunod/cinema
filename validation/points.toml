@@ -1247,7 +1247,6 @@ paths = [
   "scripts/vod-probe-fixtures.sh",
   "scripts/vod-probe-stub",
   "tests/playback/**",
-  "tests/rolling-producer-owners.d/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff", "audio-synthetic-receipt"]
 depends_on = ["core.media", "server.api", "library.catalog"]
@@ -1674,7 +1673,6 @@ paths = [
   "scripts/paperwork-fix",
   "validation/pr_event.py",
   "scripts/outline",
-  "scripts/status",
   "scripts/quiet",
   "tests/operations/test_quiet.py",
   "scripts/ci-failures",
@@ -1701,7 +1699,6 @@ paths = [
   "scripts/split-identity",
   "scripts/validate",
   "tests/client-fixes.toml",
-  "tests/client-fixes.d/**",
   "tests/validation/**",
   "validation/**",
 ]

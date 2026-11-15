@@ -21,9 +21,12 @@ sys.path.insert(0, str(ROOT))
 
 from validation import changelog_fragments as changelog  # noqa: E402
 from validation.history import HistoryError, load_client_fixes  # noqa: E402
+from validation.runner import CatalogError, load_catalog  # noqa: E402
 
 BASE = os.environ.get("PLURX_VALIDATION_BASE")
 LEDGER = "tests/client-fixes.toml"
+OWNERS = "tests/playback/rolling-producer-owners.toml"
+CATALOG = "validation/points.toml"
 
 ROW = (
     '[[fixes]]\nid = "{id}"\ncommits = ["{sha}"]\nsource = "a.kt"\n'
@@ -64,6 +67,62 @@ class RepositoryCase(unittest.TestCase):
             [],
             f"{LEDGER} is closed to new rows: put each in "
             "tests/client-fixes.d/<slug>.toml (tests/client-fixes.d/README.md)",
+        )
+
+    def test_the_owner_ledger_totals_are_not_edited(self):
+        """A count changes through a `delta` row, never through the total.
+
+        Two branches that each raise the same `expected_occurrences` either
+        conflict or, worse, both write the same next number and merge clean.
+        """
+        if not BASE:
+            self.skipTest("no merge base given (PLURX_VALIDATION_BASE)")
+        before = base_file(OWNERS)
+        if before is None:
+            self.skipTest(f"{OWNERS} is not on the merge base")
+
+        def totals(text: str) -> dict[str, int]:
+            catalog = tomllib.loads(text)
+            return {
+                row["id"]: row["expected_occurrences"]
+                for table in ("symbols", "module_symbols", "module_structures")
+                for row in catalog[table]
+            }
+
+        base, now = totals(before), totals((ROOT / OWNERS).read_text(encoding="utf-8"))
+        edited = sorted(
+            f"{identifier}: {base[identifier]} -> {now[identifier]}"
+            for identifier in base.keys() & now.keys()
+            if base[identifier] != now[identifier]
+        )
+        self.assertEqual(
+            edited,
+            [],
+            f"{OWNERS} totals are closed to edits: record each difference as a delta row in "
+            "tests/rolling-producer-owners.d/<slug>.toml (`scripts/migrate-bookkeeping` does it)",
+        )
+
+    def test_the_catalog_gains_no_paths_on_an_existing_point(self):
+        if not BASE:
+            self.skipTest("no merge base given (PLURX_VALIDATION_BASE)")
+        before = base_file(CATALOG)
+        if before is None:
+            self.skipTest(f"{CATALOG} is not on the merge base")
+
+        def paths(text: str) -> dict[str, set[str]]:
+            return {point["id"]: set(point["paths"]) for point in tomllib.loads(text)["points"]}
+
+        base, now = paths(before), paths((ROOT / CATALOG).read_text(encoding="utf-8"))
+        added = sorted(
+            f"{identifier}: {path}"
+            for identifier in base.keys() & now.keys()
+            for path in now[identifier] - base[identifier]
+        )
+        self.assertEqual(
+            added,
+            [],
+            f"{CATALOG} is closed to new paths on an existing point: put them in "
+            "validation/points.d/<slug>.toml (`scripts/migrate-bookkeeping` does it)",
         )
 
     def test_client_fix_fragments_load_with_the_ledger(self):
@@ -128,6 +187,53 @@ class ChangelogFragmentCase(unittest.TestCase):
         self.assertEqual(changelog.added_to_unreleased(base, added), ("- Zero.",))
         elsewhere = base.replace("- Old.\n", "- Old, reworded.\n")
         self.assertEqual(changelog.added_to_unreleased(base, elsewhere), ())
+
+
+class CatalogPathFragmentCase(unittest.TestCase):
+    CATALOG_TEXT = (
+        'version = 1\n[settings]\nprofiles = ["commit"]\n'
+        '[[points]]\nid = "one"\ntitle = "One"\ncontract = "c"\npaths = ["a/**"]\nchecks = []\n'
+        '[[points]]\nid = "two"\ntitle = "Two"\ncontract = "c"\npaths = ["b/**"]\nchecks = []\n'
+    )
+
+    def catalog(self) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "points.toml").write_text(self.CATALOG_TEXT)
+        (root / "points.d").mkdir()
+        return root / "points.toml"
+
+    def test_fragment_paths_join_their_point_in_name_order_without_repeats(self):
+        path = self.catalog()
+        directory = path.with_suffix(".d")
+        (directory / "b.toml").write_text('[[paths]]\npoint = "one"\nadd = ["z/**", "a/**"]\n')
+        (directory / "a.toml").write_text(
+            '[[paths]]\npoint = "one"\nadd = ["y/**"]\n[[paths]]\npoint = "two"\nadd = ["x"]\n'
+        )
+        (directory / "README.md").write_text("# not a fragment\n")
+        points = load_catalog(path).point_map
+        self.assertEqual(points["one"].paths, ("a/**", "y/**", "z/**"))
+        self.assertEqual(points["two"].paths, ("b/**", "x"))
+
+    def test_a_catalog_without_fragments_is_unchanged(self):
+        path = self.catalog()
+        self.assertEqual(load_catalog(path).point_map["one"].paths, ("a/**",))
+
+    def test_a_malformed_fragment_is_refused(self):
+        cases = {
+            "unknown point": '[[paths]]\npoint = "three"\nadd = ["x"]\n',
+            "empty add": '[[paths]]\npoint = "one"\nadd = []\n',
+            "extra key": '[[paths]]\npoint = "one"\nadd = ["x"]\nchecks = []\n',
+            "other table": 'version = 1\n[[paths]]\npoint = "one"\nadd = ["x"]\n',
+            "no rows": "",
+        }
+        for name, text in cases.items():
+            with self.subTest(fragment=name):
+                path = self.catalog()
+                (path.with_suffix(".d") / "new.toml").write_text(text)
+                with self.assertRaises(CatalogError):
+                    load_catalog(path)
 
 
 class ClientFixFragmentCase(unittest.TestCase):
