@@ -1777,6 +1777,8 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
             // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
+            // v133: the empty delegation tail is removed first by the shared title rewind.
+            "CREATE TABLE IF NOT EXISTS delegation_schema",
         ];
 
         assert!(

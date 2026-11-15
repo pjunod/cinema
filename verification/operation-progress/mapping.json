@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "5111bdf316a6b8550a666b13d9d0b19cb77734c30d4fe7ab90844dc9160703cc"
+        "sha256": "0aad7704fd77b91a5df47fd921914bb92d053252ee1ddca1a677e5b2cb703ab5"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "5111bdf316a6b8550a666b13d9d0b19cb77734c30d4fe7ab90844dc9160703cc"
+        "sha256": "0aad7704fd77b91a5df47fd921914bb92d053252ee1ddca1a677e5b2cb703ab5"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "5111bdf316a6b8550a666b13d9d0b19cb77734c30d4fe7ab90844dc9160703cc"
+        "sha256": "0aad7704fd77b91a5df47fd921914bb92d053252ee1ddca1a677e5b2cb703ab5"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -189,13 +189,13 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "4b83e14a0559fe55b4be0a38f53c422c60ac9be059c671303c58cefc21b1aa68"
+        "sha256": "5f5116f68fbd3565e8e4eaa5a59372aea378655e5795f7d2b308d111791ab30d"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "4b83e14a0559fe55b4be0a38f53c422c60ac9be059c671303c58cefc21b1aa68"
+        "sha256": "5f5116f68fbd3565e8e4eaa5a59372aea378655e5795f7d2b308d111791ab30d"
       },
       {
         "table": "33 local raft metrics authority",
