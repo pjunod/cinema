@@ -3966,7 +3966,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # even after request cancellation; contention returns unavailable, never queues.
 # #1602: +1 joined test-only probe worker in http::tests::seeded_write_surface;
 # the test cancels its token and awaits the JoinHandle before asserting.
-expected_occurrences = 1154
+# +1 measured on main after #1609 (da8f9357d, processed-window stage
+# timings), which landed without updating this ledger: dv_segment's
+# stage clock and its handoff tests. Each runs on its owning task; no
+# new task or timer owner. Reconciled so main's inventory holds.
+expected_occurrences = 1155
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5877,7 +5881,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # closes that gate after deterministic admission. Expiry fails the test and
 # drops the joined observation futures; it proves no terminal mutation, child
 # reap or resource settlement. No production timer, task or process is added.
-expected_occurrences = 2212
+# +1 measured on main after #1609 (da8f9357d, processed-window stage
+# timings), which landed without updating this ledger: dv_segment's
+# stage clock and its handoff tests. Each runs on its owning task; no
+# new task or timer owner. Reconciled so main's inventory holds.
+expected_occurrences = 2213
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5923,7 +5931,11 @@ pattern = "use\\s+tokio::time"
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
 # PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
-expected_occurrences = 7
+# +1 measured on main after #1609 (da8f9357d, processed-window stage
+# timings), which landed without updating this ledger: dv_segment's
+# stage clock and its handoff tests. Each runs on its owning task; no
+# new task or timer owner. Reconciled so main's inventory holds.
+expected_occurrences = 8
 
 [[module_structures]]
 id = "process-command-construction"
