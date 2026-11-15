@@ -1,9 +1,15 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-eight patches for clustered deployments. An
-upstream release can retire the nine generic bugs and the one dependency-only
-constraint; it cannot retire the eighteen Plurx policies:
+Apache-2.0. Plurx carries twenty-eight numbered patches for clustered
+deployments. An upstream release can retire the nine generic bugs and the one
+dependency-only constraint among them; it cannot retire the eighteen Plurx
+policies.
+
+A patch added after 2026-11-15 is not a row here: it is a file of its own
+under [`patches.d/`](patches.d/README.md), keyed by name, with the same
+fields and rules. The numbered rows below are closed, and the total is
+derived (`python3 -m validation.vendor_patches`).
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -516,7 +522,8 @@ drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the
 owner decides Plurx no longer needs it, recorded as a change to that row. Until
-both halves hold this vendor stays. Meanwhile, the sparse-roster regression in
+both halves hold this vendor stays. A patch recorded under `patches.d/` joins
+the half its `kind` names. Meanwhile, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep
 the transport-recovery patches load-bearing.

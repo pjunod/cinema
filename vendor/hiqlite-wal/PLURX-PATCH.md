@@ -1,8 +1,13 @@
 # Vendored Hiqlite WAL 0.14.0
 
 This directory is the crates.io `hiqlite-wal` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries six patches for replicated SQLite: three
-restart-recovery repairs and three Plurx policies:
+Apache-2.0. Plurx carries six numbered patches for replicated SQLite: three
+restart-recovery repairs and three Plurx policies.
+
+A patch added after 2026-11-15 is not a row here: it is a file of its own
+under [`patches.d/`](patches.d/README.md), keyed by name, with the same
+fields and rules. The numbered rows below are closed, and the total is
+derived (`python3 -m validation.vendor_patches`).
 
 **Owner:** Paul Junod (repository owner). Rows 1-3 are generic bugs; rows 4-6
 are Plurx policies.
@@ -118,7 +123,8 @@ met their drop conditions in a release Plurx has upgraded to. Second, the
 `plurx policy` rows (rows 4, 5 and 6) no longer need a patch: their drop
 conditions are `Never` by design, so a row leaves only when upstream offers
 a way to express its policy without patching this source, or when the owner
-records that Plurx no longer needs it as a change to that row. Until then,
+records that Plurx no longer needs it as a change to that row. A patch
+recorded under `patches.d/` joins the half its `kind` names. Until then,
 `single_file_snapshot_tail_restores_its_missing_purge_boundary`,
 `interrupted_metadata_replacement_keeps_the_previous_record_readable`, and
 `full_purge_replaces_stale_mmap_and_memo_across_reused_wal_numbers` keep the

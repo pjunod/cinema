@@ -4,17 +4,39 @@ import hashlib
 import os
 import re
 import tomllib
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from validation import vendor_patches  # noqa: E402
+
+# Each ledger and its numbered rows. The numbers are closed, not current: a
+# patch added after 2026-11-15 is a file under the crate's `patches.d/`
+# (validation/vendor_patches.py), so nothing here changes when one is added
+# and two pull requests that each add a patch touch no common line. The total
+# is derived: these rows plus those files.
 LEDGERS = (
     (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 28),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 6),
 )
 
 NUMBER_WORDS = {6: "six", 28: "twenty-eight"}
+
+
+def patch_files(crate: Path) -> tuple[vendor_patches.Patch, ...]:
+    return vendor_patches.load(crate)
+
+
+def patch_texts(body: str, crate: Path) -> list[tuple[str, str]]:
+    """(patch title, explanatory text) for every numbered row and every file."""
+
+    numbered = [(row[1], bullet) for row, bullet in zip(table_rows(body), row_bullets(body))]
+    return numbered + [(patch.patch, patch.description) for patch in patch_files(crate)]
 
 # A path a row bullet names, relative to the vendored crate root, written in
 # backticks: `src/writer.rs`, `Cargo.toml`. A repository path such as
@@ -118,6 +140,10 @@ def banned_crates() -> list[tuple[str, str | None]]:
 
 class HiqlitePatchLedgerCase(unittest.TestCase):
     def test_upstream_disposition_inventory_includes_the_listener_fix(self):
+        # The numbered rows only: they are closed, so these sets do not move
+        # when a patch is added. A later generic patch is a file whose own
+        # `upstream` field is checked when it is loaded, and nothing restates
+        # how many there are.
         generic = {
             (path.parent.name, int(row[0])): row[3]
             for path, _expected in LEDGERS
@@ -141,7 +167,14 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
         plan = (ROOT / "docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("M6 two accepted mechanisms, ten generic rows pending", plan)
+        self.assertIn("M6 two accepted mechanisms, ten numbered generic rows pending", plan)
+        self.assertIn("python3 -m validation.vendor_patches", plan)
+        for _path, _expected in LEDGERS:
+            for patch in patch_files(_path.parent):
+                if patch.kind == "generic bug":
+                    self.assertTrue(
+                        patch.upstream == "pending M6" or patch.upstream.startswith("http")
+                    )
         self.assertIn("twelve generic rows", plan)
         self.assertIn("https://github.com/sebadob/hiqlite/pull/374", plan)
 
@@ -198,10 +231,16 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
                 rows = table_rows(body)
                 intro = body.split("**Owner:**", 1)[0]
                 self.assertIn(
-                    f"carries {NUMBER_WORDS[expected]} ",
+                    f"carries {NUMBER_WORDS[expected]} numbered ",
                     intro,
-                    "the intro's patch count must match the ledger table",
+                    "the intro's count is of the closed numbered rows",
                 )
+                # The total is never written down, so it cannot go stale or
+                # be claimed by two branches: it is the rows plus the files.
+                self.assertEqual(
+                    vendor_patches.count(path.parent), expected + len(patch_files(path.parent))
+                )
+                self.assertIn("`patches.d/`", intro)
                 removal = body.split("\nRemove this vendor", 1)[1].split("\n\n", 1)[0]
                 self.assertNotRegex(
                     removal,
@@ -239,6 +278,64 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
                     )
                     missing = sorted(p for p in named if not (crate / p).is_file())
                     self.assertEqual(missing, [], f"row {number} names files that do not exist")
+                for patch in patch_files(crate):
+                    named = named_paths(patch.description)
+                    self.assertTrue(
+                        named, f"patches.d/{patch.key} names no `src/...` or Cargo file"
+                    )
+                    missing = sorted(p for p in named if not (crate / p).is_file())
+                    self.assertEqual(
+                        missing, [], f"patches.d/{patch.key} names files that do not exist"
+                    )
+
+    def test_a_patch_file_obeys_the_rules_a_row_obeys(self):
+        good = {
+            "patch": "Lease idle connections", "kind": "generic bug", "upstream": "pending M6",
+            "drop": "Upstream release leases them.", "description": "Why.\nFiles: `src/a.rs`.",
+        }
+
+        def write(directory: Path, name: str, fields: dict) -> None:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_text(
+                "".join(f"{key} = {value!r}\n".replace("'", '"') for key, value in fields.items()),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            crate = Path(temporary) / "hiqlite"
+            crate.mkdir()
+            (crate / "PLURX-PATCH.md").write_text("| # | Patch |\n| 1 | a |\n| 2 | b |\n")
+            self.assertEqual(vendor_patches.count(crate), 2)
+            # Two branches each add a patch: two files, no number, and the
+            # count follows without either writing it.
+            write(crate / "patches.d", "lease-idle.toml", good)
+            write(crate / "patches.d", "another.toml", {
+                **good, "kind": "plurx policy", "upstream": "—", "drop": "Never; Plurx owns it.",
+            })
+            (crate / "patches.d" / "README.md").write_text("# not a patch\n")
+            self.assertEqual([p.key for p in vendor_patches.load(crate)], ["another", "lease-idle"])
+            self.assertEqual(vendor_patches.count(crate), 4)
+            refused = {
+                "unknown kind": {**good, "kind": "tweak"},
+                "generic without a marker": {**good, "upstream": "—"},
+                "policy with an upstream": {**good, "kind": "plurx policy", "drop": "Never; x."},
+                "policy that can drop": {**good, "kind": "plurx policy", "upstream": "—"},
+                "dependency-only that never drops": {
+                    **good, "kind": "dependency-only", "upstream": "—", "drop": "Never; x.",
+                },
+                "missing field": {key: value for key, value in good.items() if key != "drop"},
+                "extra field": {**good, "number": "29"},
+                "empty description": {**good, "description": " "},
+            }
+            for name, fields in refused.items():
+                with self.subTest(refused=name):
+                    write(crate / "patches.d", "bad.toml", fields)
+                    with self.assertRaises(vendor_patches.VendorPatchError):
+                        vendor_patches.load(crate)
+            (crate / "patches.d" / "bad.toml").unlink()
+            write(crate / "patches.d", "Bad_Name.toml", good)
+            with self.assertRaises(vendor_patches.VendorPatchError):
+                vendor_patches.load(crate)
 
     def test_unused_s3_edge_is_gated_and_the_override_is_scoped_to_the_fork(self):
         hiqlite = tomllib.loads((ROOT / "vendor/hiqlite/Cargo.toml").read_text())
@@ -388,7 +485,7 @@ class ForkSourceManifestCase(unittest.TestCase):
                     )
 
                 body = ledger.read_text(encoding="utf-8")
-                named = set().union(*(named_paths(b) for b in row_bullets(body)))
+                named = set().union(*(named_paths(text) for _, text in patch_texts(body, crate)))
                 self.assertEqual(
                     sorted(patched - named),
                     [],
@@ -410,9 +507,9 @@ class ForkSourceManifestCase(unittest.TestCase):
                 body = ledger.read_text(encoding="utf-8")
                 k06_named = set().union(
                     *(
-                        named_paths(bullet)
-                        for row, bullet in zip(table_rows(body), row_bullets(body))
-                        if row[1].startswith("K-06")
+                        named_paths(text)
+                        for title, text in patch_texts(body, crate)
+                        if title.startswith("K-06")
                     )
                 )
                 carrying = sorted(
