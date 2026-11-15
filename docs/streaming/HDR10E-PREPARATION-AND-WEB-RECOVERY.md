@@ -314,6 +314,29 @@ interruptions). Axel F and Air processing-ON did not yet reach their processed
 route; their causes are tracked in the owner's status page and are not claimed
 fixed here. Server changes are not deployed.
 
+## A processed trial claims its own viewer's encoder permit
+
+A Profile 5 source has no HDR10 base, so its ordinary route is an encoded
+rendition that holds a hardware slot and CPU threads. Its processed upgrade
+trial needs its own slot and threads; on a node whose budget cannot hold both,
+the trial was refused at once, because admission waits only for background
+work and never takes capacity from foreground work. The holder in that case is
+the same viewer's incumbent, the rendition the upgrade exists to replace.
+
+The trial now records the exact bundle it was refused for. The upgrade then
+asks that viewer's own incumbent to yield through the existing
+predecessor-yield handoff, and retries the trial once the capacity is reserved
+for it, so the wait never comes out of the window's own budget. The claim is
+taken only when the incumbent is read by this viewer alone, holds a permit,
+returning it would admit the trial, and its published runway covers a failed
+hand-back (`PROCESSED_UPGRADE_TRIAL_BUDGET + QUEUE_WAIT`). It never registers
+a pool waiter, so other viewers' encoders are not asked to yield. A failed or
+cancelled trial drops the claim and the incumbent re-admits. A seek past the
+runway, or a runway spent while parked, closes the claim and the upgrade
+gives back what it took. Once the successor is staged under the claim's
+incarnation, the preparation slot binds the handoff as for any staged
+successor, until commit, abort or rejection.
+
 ## Review and acceptance
 
 Astra independently reviewed causal claims and changes. Its rejected
