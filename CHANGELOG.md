@@ -315,6 +315,23 @@ bump may break compatibility and a **patch** bump never does.
   household-only grants on standalone and replicated storage. Cinema credentials,
   administrator permissions and watch history stay in Cinema.
 
+- `/metrics` attributes the daemon's steady-state replicated reads and writes
+  by the method that issued them.
+  `plurx_background_store_operations_by_method_total{class,method}` counts
+  those made outside an HTTP request (background loops, timers, workers),
+  which before were in `plurx_store_operations_total` with no method; a
+  request's split now joins its route group when the request and every task
+  it spawned in its scope have finished, so a dropped request is no longer
+  lost. The cluster membership manager's quorum reads, local reads, writes
+  and watermarks, and the 2 Hz quorum watermark sampler, which reached no
+  metric at all, now go through a counted client: they are in
+  `plurx_store_operations_total` and the request or background split, and the
+  manager's by issuing function in
+  `plurx_cluster_membership_operations_by_method_total{class,method}`.
+  Start-up schema installation, the start-up catch-up watermark and Hiqlite's
+  own Raft traffic stay uncounted. Per-route numbers such as
+  `plurx_http_store_reads_total` now include the membership reads a request
+  makes (peer authorization, `media_peers`, `activity_peers`).
 
 - Each cluster node keeps a lock-free account of what its own replica has
   applied, and Settings → Developer shows an advisory Applied view card with
@@ -381,6 +398,15 @@ bump may break compatibility and a **patch** bump never does.
 - New libraries scan every six hours by default. Existing libraries keep their
   schedule; a library at Never shows what that costs and offers a one-click
   "Enable 6-hourly reconcile".
+- Shared-library stream monitors and serving-read admission share one
+  advisory member-floor answer instead of each proving quorum: a ready answer
+  serves for up to five seconds, a not-ready one only the callers already
+  waiting on it, and a read survives the caller that gave up on it.
+- Shared-library monitors look again only when a table their authority rests
+  on changes on this replica, when the serving fence moves, or (receiver)
+  when the lease or the original login lapses, at most once a second, instead
+  of every second; an idle shared stream costs no authority reads. Stores
+  without an applied mark keep the one-second look.
 
 ## [0.8.0] — 2026-10-29
 

@@ -399,6 +399,8 @@ impl NodeConfig {
             snapshot_storage_deferral: std::time::Duration::from_secs(600),
             #[cfg(feature = "sqlite")]
             applied_mark_tables: Vec::new(),
+            #[cfg(feature = "sqlite")]
+            applied_mark_deletes_only: Vec::new(),
             tls_raft,
             tls_api,
             secret_raft,

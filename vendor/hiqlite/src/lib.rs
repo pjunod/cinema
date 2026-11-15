@@ -58,9 +58,13 @@ pub use crate::client::{
     DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbMembershipSnapshot,
     LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
 };
+/// The database Raft metrics [`Client::metrics_db`] returns (Raft ids are `u64`), named so a
+/// caller can forward them without depending on `openraft` itself (Plurx).
+#[cfg(feature = "sqlite")]
+pub type DbRaftMetrics = openraft::RaftMetrics<u64, Node>;
 #[cfg(feature = "sqlite")]
 pub use crate::applied_mark::{
-    APPLIED_MARK_MAX_TABLES, AppliedMarkHandle, AppliedMarkObservation, AppliedSlot,
+    APPLIED_MARK_MAX_TABLES, AppliedMarkHandle, AppliedMarkObservation, AppliedSlot, AppliedWatch,
     DB_READ_POOL_WAIT_BOUNDS_NANOS, DbReadPoolWait, db_read_pool_wait,
 };
 #[cfg(feature = "validation-test-helpers")]
