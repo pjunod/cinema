@@ -5506,6 +5506,21 @@ async fn settle() {
     }
 }
 
+/// Wait until no admitted scan request is queued or running.
+async fn settle_admitted_scans(state: &AppState) {
+    for _ in 0..200 {
+        let requests = state.jobs.scan_requests().await;
+        if !requests
+            .iter()
+            .any(|request| matches!(request.status.as_str(), "queued" | "running"))
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("an admitted scan never finished");
+}
+
 /// The counters that answer "is the fast path actually being used?".
 ///
 /// A plurx scanning 400 times a day tells you nothing. 398 scheduled and
@@ -5552,6 +5567,12 @@ async fn scans_and_notifications_are_counted_by_what_asked_for_them() {
     let (_, counts) = state.jobs.metrics().snapshot();
     assert_eq!(counts, 2, "both requests reached plurx, so both count");
 
+    // The library's own scan and the placed request are two durable jobs
+    // admitted before the worker has taken either, and nothing orders their
+    // claims: on a busy runner the targeted one runs first and settles while
+    // the manual scan is still queued. A scan is counted when it starts, so
+    // read the counters once every admitted scan has finished.
+    settle_admitted_scans(&state).await;
     let (by_trigger, _) = state.jobs.metrics().snapshot();
     let map: std::collections::HashMap<_, _> = by_trigger.into_iter().collect();
     assert!(map["manual"] >= 1, "creating a library is a manual scan");
