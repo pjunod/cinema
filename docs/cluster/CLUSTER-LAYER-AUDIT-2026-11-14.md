@@ -375,12 +375,43 @@ and 28 each work around something OpenRaft 0.10 provides (leader transfer, a
 read-index API, a dedicated heartbeat client). The upgrade is not tracked
 anywhere.
 
-### R7. Seen on the fleet, not explained
+### R7. Seen on the fleet — one explained, one not (updated 2026-11-15)
 
-- media1 logged 840 failed writes (3.4 %) in its first 30 minutes after
-  restart; the other nodes have 0–4 in 14 hours.
-- lab3 (the learner) is answering ~0.5 settings GETs per second with 5xx.
-  Something polls a learner for a route it cannot serve.
+- **lab3 answers ~0.5 GETs per second with 503 — explained.** The caller is
+  plurx's own Bonjour companion on the same host (`plurxd advertise`,
+  `plurxd/src/main.rs` `await_discovery_identity`), which asks
+  `GET /api/v1/server` every 2 s and retries forever. A learner's route
+  allowlist (`http/mod.rs` `learner_route_eligible`) does not contain that
+  path, so every poll is refused with `learner_route_ineligible`, the
+  companion never advertises the node, and the request log fills with
+  warnings. Measured again 2026-11-15: 17 refusals in 28 s.
+- **media1's 840 failed writes in its first 30 minutes — not explained.** The
+  counter is `plurx_store_operations_total{class="write",outcome="error"}`;
+  it has no method or error label, and it counts a statement error the same
+  as a timeout. All 840 came in the first 1,758 s and none in the next 63 s.
+  The container was recreated on 2026-11-15 and its log went with it. The
+  peers' logs for that window show a decaying backlog of slow state-machine
+  applies and lapsed fences, which fits a leader restart, and proves no more.
+  A2's method label (#1626) is what makes the next occurrence readable.
+
+### R8. A node whose Raft core has died stays up, fenced, until someone restarts it
+
+Seen on lab3, 2026-11-15. The host's root filesystem filled (free space fell
+about 50 MB a minute from 709 MB at 07:59 UTC). Snapshot admission deferred
+for its ten minutes, then "attempted the existing snapshot path"
+(`vendor/hiqlite/src/snapshot_admission.rs:70`); the build failed with
+`SQLITE_FULL` at 08:09:19 and OpenRaft's core task quit on the storage
+error. The filesystem has had 138 GB free since, but a quit core does not
+come back: the process kept running, self-fenced, refusing every append
+from the leader twice a second (22,444 error lines in twelve hours) and
+answering its health check with 503. Nothing in plurxd treats "my Raft
+core has exited" as the end of the process, so the container's restart
+policy never gets the chance to recover it. A voter in this state is a
+voter lost until a person notices.
+
+Two smaller things in the same event: admission that knows there is not
+enough room goes ahead anyway when its deferral expires, and the failed
+build left a 144 MB `.temp` snapshot behind.
 
 ## 6. Target design — one facade, six questions
 
@@ -493,7 +524,9 @@ classes that must stay linearizable.
 | C3 | The single timing module; derive lease, grace, `STORE_TIMEOUT` and feature timeouts from it. | R2, R4 |
 | C4 | Election behaviour under a starved voter: verify the mechanism against OpenRaft 0.9.25, then pre-vote if 0.10 is taken, otherwise a wider floor chosen from a measurement. | R1 |
 | C5 | Open a tracked item for OpenRaft 0.10 and retire patches 4, 6 and 28 against it. | R6 |
-| C6 | Explain R7's two observations. | R7 |
+| C6 | Explain R7's two observations. Done 2026-11-15 for the learner polling; the failed writes wait for A2's method label and the next leader restart. | R7 |
+| C7 | A plurxd whose Raft core has exited on a storage error exits non-zero, so the supervisor restarts it and the node recovers when the cause clears. Snapshot admission that still lacks room when its deferral expires skips the build instead of attempting it, and a failed build removes its `.temp` file. | R8 |
+| C8 | The Bonjour companion stops asking a learner for a route it refuses: either the learner answers `GET /api/v1/server` (it is node-local identity) or the companion reads a learner-eligible path. Decide whether a learner is advertised to clients at all. | R7 |
 
 A1 should remove more than half of the Raft log; A1b is what makes the
 cluster work the queue faster than one node would. How far A2–A6 take the

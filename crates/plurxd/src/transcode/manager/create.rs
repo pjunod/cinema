@@ -3779,9 +3779,9 @@ impl TranscodeManager {
                     let admission_deadline = crate::media_pool::create_stage_deadline(crate::admission::QUEUE_WAIT);
                     let admission_deadline = processing_deadline.map_or(admission_deadline, |absolute| admission_deadline.min(absolute));
                     let software_budget = self.software_budget().await;
-                    let bundle = crate::vodencode::admit_frozen_preparation(&self.admissions,
+                    let bundle = crate::vodencode::admit_processed_trial(&self.admissions,
                         self.max_hw_sessions().await, software_budget, &processed_resources,
-                        Some(1), admission_deadline.into_std()).await
+                        admission_deadline.into_std()).await
                         .map_err(|unadmittable| if unadmittable {
                             format!("DV processing needs {} CPU threads ({helper_threads} renderer, {} encoder) \
                                  and this server's software encoder budget is {software_budget}",

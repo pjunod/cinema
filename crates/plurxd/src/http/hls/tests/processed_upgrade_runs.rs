@@ -233,7 +233,7 @@ async fn a_late_qualification_resumes_once_with_fresh_authority_and_keeps_its_re
         snapshot.file.size,snapshot.file.mtime,snapshot.generation,"metadata:fixture");
     let encoded = crate::transcode::pending_fel_qualification_error(pending);
     assert_eq!(super::processed_upgrade::run_upgrade_with(&fixture.state,&intent,&run,
-        |_,_| std::future::ready(Err(encoded))).await,"qualification_pending");
+        move |_,_| std::future::ready(Err(encoded.clone()))).await,"qualification_pending");
     drop(run);
     assert!(fixture.state.transcode.validate_candidate_planning_binding(&intent.request,None,None).await.is_err(),
         "reusing the old intent would fail normal binding validation");
@@ -283,7 +283,7 @@ async fn a_viewer_change_cancels_a_pending_receipt_check_before_it_can_resume() 
     let encoded=crate::transcode::pending_fel_qualification_error(super::processed_upgrade::pending_qualification_fixture(
         intent.request.file_id,snapshot.file.size,snapshot.file.mtime,snapshot.generation,"metadata:fixture"));
     assert_eq!(super::processed_upgrade::run_upgrade_with(&fixture.state,&intent,&run,
-        |_,_|std::future::ready(Err(encoded))).await,"qualification_pending");drop(run);
+        move |_,_|std::future::ready(Err(encoded.clone()))).await,"qualification_pending");drop(run);
     let recipe:RemoteStartRequest=serde_json::from_str(&route.recipe_json).expect("recipe");
     let delivered=crate::playback_control::EffectiveSelection::from_recipe(&recipe,1080,Some("dolby_vision".into()));
     let (started_tx,started_rx)=tokio::sync::oneshot::channel();
@@ -746,4 +746,125 @@ async fn a_refused_upgrade_reservation_is_not_rearmed_by_its_cleanup() {
         "a real refusal has no rendering retry"
     );
     super::processed_upgrade::cancel_for_session(&session_id);
+}
+
+/// The Air (Profile 5) path end to end through the upgrade: the trial is
+/// refused for capacity its own viewer's incumbent holds (6 threads + slot of
+/// an 11-thread, 2-slot node, trial 9 + slot), the upgrade claims that permit,
+/// and only with it reserved runs the trial again, which then admits through
+/// the same `admit_processed_trial` the create path calls — with no pool
+/// waiter at any point.
+#[tokio::test]
+async fn a_trial_refused_by_its_own_incumbent_is_retried_with_that_permit() {
+    use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-incumbent-claim");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 600_000).await;
+    let admissions = Admissions::new();
+    let trial = TranscodeResourceEstimate { hardware_slot: true, cpu_threads: 9, decoder_threads: Some(1) };
+    let incumbent = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        admissions
+            .try_admit_bundle(2, 11, &TranscodeResourceEstimate {
+                hardware_slot: true, cpu_threads: 6, decoder_threads: None }, Priority::Live)
+            .expect("the viewer's encoded incumbent"),
+    )));
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let admitted = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let outcome = super::processed_upgrade::run_upgrade_with_incumbent(
+        &fixture.state,
+        &intent,
+        &run,
+        |_request, _recovery| {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (admissions, admitted) = (admissions.clone(), std::sync::Arc::clone(&admitted));
+            async move {
+                let result = crate::vodencode::admit_processed_trial(&admissions, 2, 11, &trial,
+                    std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
+                assert_eq!(admissions.snapshot().live_waiting, 0, "call {call}: no pool waiter");
+                match result {
+                    Ok(permit) => {
+                        *admitted.lock().expect("admitted") = Some(permit);
+                        Err("the test stops after admission".to_owned())
+                    }
+                    Err(_) => Err("DV processing needs a GPU slot and 9 CPU threads that other work holds".to_owned()),
+                }
+            }
+        },
+        |_incarnation, needed| {
+            assert_eq!(needed, trial, "the claim asks for exactly the refused bundle");
+            let (admissions, incumbent) = (admissions.clone(), std::sync::Arc::clone(&incumbent));
+            async move {
+                // The incumbent's driver yields and reserves its capacity.
+                drop(incumbent.lock().expect("incumbent").take());
+                let token = admissions.reserve_for_handoff(&needed, std::time::Duration::from_secs(5));
+                Some(crate::vodserve::IncumbentPermitClaim::detached_for_test(
+                    crate::vodserve::TrialClaim::reserved_for_test(token), admissions))
+            }
+        },
+    )
+    .await;
+    assert_eq!(outcome, "declined", "the test's own stop after admission");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "refused, then retried once");
+    assert!(admitted.lock().expect("admitted").is_some(), "the retry admitted with the claim");
+    assert_eq!(admissions.snapshot().reservations, 0, "the reservation was consumed");
+}
+
+/// A claim that closes during the retried trial (a seek past the incumbent's
+/// runway) drops the trial at once, so its capacity goes back now rather than
+/// at the trial's own deadline.
+#[tokio::test]
+async fn a_claim_closed_mid_trial_drops_the_retried_trial() {
+    use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-incumbent-closed");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 600_000).await;
+    let admissions = Admissions::new();
+    let trial = TranscodeResourceEstimate { hardware_slot: true, cpu_threads: 9, decoder_threads: Some(1) };
+    let _incumbent = admissions
+        .try_admit_bundle(2, 11, &TranscodeResourceEstimate {
+            hardware_slot: true, cpu_threads: 6, decoder_threads: None }, Priority::Live)
+        .expect("incumbent");
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let claimed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let upgrade = super::processed_upgrade::run_upgrade_with_incumbent(
+        &fixture.state,
+        &intent,
+        &run,
+        |_request, _recovery| {
+            let first = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let admissions = admissions.clone();
+            async move {
+                if first {
+                    let _ = crate::vodencode::admit_processed_trial(&admissions, 2, 11, &trial,
+                        std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
+                    Err("refused".to_owned())
+                } else {
+                    std::future::pending().await
+                }
+            }
+        },
+        |_incarnation, _needed| {
+            let (admissions, claimed) = (admissions.clone(), std::sync::Arc::clone(&claimed));
+            async move {
+                let claim = crate::vodserve::TrialClaim::reserved_for_test(0);
+                *claimed.lock().expect("claimed") = Some(std::sync::Arc::clone(&claim));
+                Some(crate::vodserve::IncumbentPermitClaim::detached_for_test(claim, admissions))
+            }
+        },
+    );
+    let closer = async {
+        loop {
+            if calls.load(std::sync::atomic::Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        claimed.lock().expect("claimed").as_ref().expect("claim").close_for_test();
+    };
+    let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(10),
+        async { tokio::join!(upgrade, closer) }).await.expect("the closed claim ends the trial");
+    assert_eq!(outcome, "declined");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
