@@ -2069,19 +2069,32 @@ async fn a_follower_whose_raft_core_dies_exits_non_zero_and_rejoins_after_restar
         .and_then(|port| port.parse::<u16>().ok())
         .expect("follower port");
     wait_ready(&client, cluster.daemon(follower), port).await;
-    let leader_base = cluster.leader_base.clone();
     let token = cluster.voters.token.clone();
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let rejoined = raft_view(&client, &cluster.bases[follower])
             .await
             .is_some_and(|view| view.leader_known && !view.is_leader);
-        let reachable = client
-            .get(format!("{leader_base}/api/v1/cluster/nodes"))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .ok();
+        // Whoever leads now: leadership may have moved since the fault.
+        let mut leader_base = None;
+        for base in &cluster.bases {
+            if raft_view(&client, base)
+                .await
+                .is_some_and(|view| view.is_leader)
+            {
+                leader_base = Some(base.clone());
+                break;
+            }
+        }
+        let reachable = match &leader_base {
+            Some(leader_base) => client
+                .get(format!("{leader_base}/api/v1/cluster/nodes"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .ok(),
+            None => None,
+        };
         let roster_ok = match reachable {
             Some(response) => response.json::<Value>().await.is_ok_and(|body| {
                 body["nodes"].as_array().is_some_and(|nodes| {
