@@ -719,14 +719,31 @@ async fn staged_trial_bound(shared: &Shared, rendition: &Rendition, incarnation:
 
 /// Published media contiguous from `playhead_ms`, in milliseconds.
 async fn trial_runway_ms(rendition: &Rendition, playhead_ms: i64) -> i64 {
-    let segment_ms = rendition.seconds_per_segment * 1_000.0;
-    if !segment_ms.is_finite() || segment_ms <= 0.0 {
+    // Published media from the playhead to the first gap, measured on the
+    // plan's own entry boundaries: segments vary in length, so a uniform
+    // segment duration would misstate the lead a hand-back has to cover.
+    let timescale = u64::from(rendition.timescale.max(1));
+    let end_ms = |index: u32| {
+        rendition
+            .plan
+            .entry(index)
+            .map(|entry| (entry.end_ticks().saturating_mul(1_000) / timescale) as i64)
+    };
+    let playhead = playhead_ms.max(0);
+    let Some(first) =
+        (0..rendition.plan.len() as u32).find(|index| end_ms(*index).is_some_and(|end| end > playhead))
+    else {
         return 0;
-    }
-    let index = (playhead_ms as f64 / segment_ms) as u32;
+    };
     let manifest = rendition.manifest.lock().await;
-    let end = manifest.next_gap(index).unwrap_or(manifest.len() as u32);
-    ((f64::from(end) * segment_ms) as i64).saturating_sub(playhead_ms)
+    let mut published = None;
+    for index in first..rendition.plan.len() as u32 {
+        if !manifest.state(index).is_some_and(|state| state.is_materialized()) {
+            break;
+        }
+        published = end_ms(index);
+    }
+    published.map_or(0, |end| end.saturating_sub(playhead))
 }
 
 /// What a yield woke: the staged successor rendition, or a trial's claim.
@@ -761,9 +778,12 @@ fn reserve_for_successor(rendition: &Rendition, request: &HandoffRequest) -> Opt
                 // Held for the claim's reserve: the trial plans before it
                 // admits, and an expired reservation would hand the capacity
                 // to whoever asked first. The claim's drop returns it unused.
+                // A claim that needs no runway still needs its reservation to
+                // outlive the hand-back, as a staged successor's does.
                 *token = Some(encoding.admissions.reserve_for_handoff(
                     &request.wanted,
-                    Duration::from_millis(claim.reserve_ms.max(0) as u64),
+                    Duration::from_millis(claim.reserve_ms.max(0) as u64)
+                        .max(HANDOFF_RESERVATION_TTL),
                 ));
             }
             claim.ready.notify_waiters();
