@@ -28,6 +28,8 @@ pub(crate) struct Completion {
     /// can have received this owner's source.
     started_tick: u64,
 }
+/// How often a waiting ledger checks whether the sweep already released it.
+const REAP_CHECK: Duration = Duration::from_secs(5);
 pub(crate) struct Operation(Arc<Completion>);
 pub(crate) struct Holder(Arc<Completion>);
 pub(crate) struct RawRetirement {
@@ -153,7 +155,7 @@ impl Completion {
     async fn drive(self: Arc<Self>, store: Arc<dyn Store>) {
         tokio::select! {
             () = self.cancel.cancelled() => {}
-            () = self.abandoned() => return,
+            () = self.abandoned() => return self.retire_after_release().await,
         }
         if !self.owns_settlement() {
             return;
@@ -162,32 +164,44 @@ impl Completion {
         // first, exactly as the legacy explicit join did.
         tokio::select! {
             () = self.authorize.cancelled() => {}
-            () = self.abandoned() => return,
+            () = self.abandoned() => return self.retire_after_release().await,
         }
+        let waiting = tokio::time::Instant::now();
+        let mut last_check = waiting;
+        let mut reported = false;
         loop {
-            let ready = {
+            let observed = {
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.closed = true;
                 if state.veto {
-                    tracing::warn!(custody_id = %self.receipt.custody_id,
-                        "untracked source capability: live completion refuses; custody stays charged");
-                    return;
+                    None
+                } else {
+                    Some(Self::observe(&mut state))
                 }
-                let ready = state.operations == 0
-                    && state.holders == 0
-                    && state.raw == 0
-                    && state.files.iter().all(|file| Arc::strong_count(file) == 1);
-                if ready {
-                    // Close the last real descriptors BEFORE publishing proof.
-                    state.files.clear();
-                }
-                ready
+            };
+            let Some((ready, open)) = observed else {
+                tracing::warn!(custody_id = %self.receipt.custody_id,
+                    "untracked source capability: no joined proof; capacity is released when its authority lapses");
+                return self.retire_after_release().await;
             };
             if ready {
                 break;
+            }
+            if last_check.elapsed() >= REAP_CHECK {
+                last_check = tokio::time::Instant::now();
+                if self.reaped().await {
+                    return self.clear_witness();
+                }
+                if !reported && waiting.elapsed() >= Duration::from_secs(60) {
+                    reported = true;
+                    let (operations, holders, raw, shared_files) = open;
+                    tracing::warn!(custody_id = %self.receipt.custody_id, operations, holders, raw,
+                        shared_files, "finished source owner still has open in-process holders; \
+                        its source capacity is released when its authority lapses");
+                }
             }
             // Arc<File> holders do not issue notifications when they close.
             tokio::select! { () = self.changed.notified() => {}, () = tokio::time::sleep(Duration::from_millis(25)) => {} }
@@ -202,16 +216,71 @@ impl Completion {
             crate::source_custody::LiveJoin::Unwitnessed => Some(self.started_tick),
             crate::source_custody::LiveJoin::Refused(reason) => {
                 tracing::warn!(custody_id = %self.receipt.custody_id, reason,
-                    "live source completion refused; custody stays charged");
-                return;
+                    "live source completion refused; capacity is released when its authority lapses");
+                return self.retire_after_release().await;
             }
         };
         if let Some(since) = since {
             if !self.descendants_exited(since).await {
-                return;
+                return self.retire_after_release().await;
             }
         }
         crate::background_jobs::settle_joined_source_custody(&store, self.receipt.clone()).await;
+    }
+    /// Whether every registered holder has closed, and what is still open
+    /// (operations, holders, raw children, shared file references).
+    fn observe(state: &mut State) -> (bool, (usize, usize, usize, usize)) {
+        let ready = state.operations == 0
+            && state.holders == 0
+            && state.raw == 0
+            && state.files.iter().all(|file| Arc::strong_count(file) == 1);
+        if ready {
+            // Close the last real descriptors BEFORE publishing proof.
+            state.files.clear();
+        }
+        let shared = state
+            .files
+            .iter()
+            .filter(|file| Arc::strong_count(file) != 1)
+            .count();
+        (ready, (state.operations, state.holders, state.raw, shared))
+    }
+    /// A ledger that cannot publish a joined proof (dropped owner, untracked
+    /// capability, refused join, unprovable children) leaves the release to the
+    /// store sweep, then removes its local witness so it never pins the node's
+    /// reader inventory for the life of the daemon.
+    async fn retire_after_release(&self) {
+        loop {
+            if self.reaped().await {
+                return self.clear_witness();
+            }
+            tokio::time::sleep(REAP_CHECK).await;
+        }
+    }
+    fn clear_witness(&self) {
+        if let Err(error) =
+            crate::source_custody::clear_background_settlement(&self.store, &self.receipt)
+        {
+            tracing::warn!(custody_id = %self.receipt.custody_id, %error,
+                "released source witness cleanup will replay");
+        }
+    }
+    /// The store sweep already released this custody because its authority
+    /// lapsed (lease expiry is the release). Nothing is left to settle, so the
+    /// ledger stops waiting instead of polling for the life of the daemon.
+    async fn reaped(&self) -> bool {
+        match self
+            .store
+            .resolve_background_source_custody(self.receipt.clone())
+            .await
+        {
+            Ok(None) => {
+                tracing::info!(custody_id = %self.receipt.custody_id,
+                    "source custody was released by lease expiry; ledger stops waiting");
+                true
+            }
+            Ok(Some(_)) | Err(_) => false,
+        }
     }
     #[cfg(target_os = "linux")]
     async fn descendants_exited(&self, since: u64) -> bool {
@@ -221,8 +290,15 @@ impl Completion {
             return false;
         }
         let waiting = tokio::time::Instant::now();
+        let mut last_check = waiting;
         let mut reported = false;
         loop {
+            if last_check.elapsed() >= REAP_CHECK {
+                last_check = tokio::time::Instant::now();
+                if self.reaped().await {
+                    return false;
+                }
+            }
             match crate::source_custody::live_descendants_since(since) {
                 Ok(live) if live.is_empty() => return true,
                 Ok(live) if !reported && waiting.elapsed() >= Duration::from_secs(60) => {

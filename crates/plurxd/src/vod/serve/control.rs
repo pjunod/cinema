@@ -38,7 +38,10 @@ impl VodServe {
         let (rendition, playback_id) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
-            (Arc::clone(session.live_rendition()?), session.playback_id.clone())
+            (
+                Arc::clone(session.live_rendition()?),
+                session.playback_id.clone(),
+            )
         };
         let encoding = rendition.recipe.encoding.as_ref()?;
         if rendition.closed.load(Relaxed)
