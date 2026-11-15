@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """Land a pull request on main with its Regression-Test lines in the landing commit.
 
-    scripts/land 1638 --head <full sha you reviewed>
+    scripts/land 1638 --head <full 40-character sha you reviewed>
     scripts/land 1638 --head <sha> --dry-run     # every check, the message, no merge
+    scripts/land 1638 --head <sha> --accept-untested 'Paul ordered it: <why>'
 
 The landing path while MERGE_TRAIN is off (AGENTS.md "Landing on main");
 never the raw merge API, which lands the title alone. It refuses a `WIP:`
-title, a head other than --head, a `fix(`/`perf(` pull request with no
-`Regression-Test:` line and any line that does not resolve in the tree the
-merge will produce; then it merges, reads the landing commit back and prints
-its SHA. The forge and repository come from the `origin` remote, the token
-from $FORGEJO_TOKEN or --token-file. validation/landing.py is the
+title, a head other than --head, a head whose `Main promotion gate` is not
+green (unless --accept-untested gives the reason, which is printed and
+recorded in the landing commit), a merge tree it cannot build, a
+`fix(`/`perf(` pull request with no `Regression-Test:` line and any line that
+does not resolve in the tree the merge will produce. Then it re-reads the
+pull request and main, merges with the merge train's message (the
+description and `Reviewed-on:`), deletes the branch as the train does, reads
+the landing commit back and prints its SHA.
+
+Exit codes: 0 landed; 1 refused or conflicting, nothing merged; 2 usage or
+forge error, nothing merged; 3 merged, but the landing commit is wrong and
+needs an errata row. The forge and repository come from the `origin` remote,
+the token from $FORGEJO_TOKEN or --token-file. validation/landing.py is the
 implementation.
 """
 

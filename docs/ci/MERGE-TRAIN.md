@@ -20,7 +20,7 @@ Nothing changes: open your PR, take `WIP:` off the title when it is ready, the
 `Main promotion gate` passes (AGENTS.md "Large efforts" for the merge message).
 The train service writes nothing to your PR while it is off.
 
-Merge it with `scripts/land <pr> --head <sha>`, never the raw merge API: the script puts the description's `Regression-Test:` lines in the landing commit and checks them there, and `.github/workflows/landing-check.yml` fails on `main` for a landing made any other way that lost them.
+Merge it with `scripts/land <pr> --head <sha>`, never the raw merge API: the script requires that head's `Main promotion gate` to be green, lands with the train's own message (the description, with its `Regression-Test:` lines, and `Reviewed-on:`) and checks the landing commit, and `.github/workflows/landing-check.yml` fails on `main` for a landing made any other way that lost its lines.
 
 ## Train on — what you do instead
 
