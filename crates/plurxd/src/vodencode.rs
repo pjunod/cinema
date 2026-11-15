@@ -2093,30 +2093,78 @@ mod source_copy_admission_tests {
     #[tokio::test]
     async fn a_processed_trial_records_its_refusal_and_admits_with_its_claim() {
         let admissions = Admissions::new();
-        let trial = TranscodeResourceEstimate { hardware_slot: true, cpu_threads: 9, decoder_threads: Some(1) };
+        let trial = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 9,
+            decoder_threads: Some(1),
+        };
         let incumbent = admissions
-            .try_admit_bundle(2, 11, &TranscodeResourceEstimate {
-                hardware_slot: true, cpu_threads: 6, decoder_threads: None }, Priority::Live)
+            .try_admit_bundle(
+                2,
+                11,
+                &TranscodeResourceEstimate {
+                    hardware_slot: true,
+                    cpu_threads: 6,
+                    decoder_threads: None,
+                },
+                Priority::Live,
+            )
             .expect("the viewer's incumbent");
         let scope = Arc::new(ProcessedTrialAdmission::default());
         let refused = PROCESSED_TRIAL_ADMISSION
-            .scope(Arc::clone(&scope), admit_processed_trial(&admissions, 2, 11, &trial,
-                Instant::now() + std::time::Duration::from_secs(1)))
+            .scope(
+                Arc::clone(&scope),
+                admit_processed_trial(
+                    &admissions,
+                    2,
+                    11,
+                    &trial,
+                    Instant::now() + std::time::Duration::from_secs(1),
+                ),
+            )
             .await;
-        assert!(matches!(refused, Err(false)), "foreground capacity is refused at once");
-        assert_eq!(scope.needed(), Some(trial), "the refusal names the exact bundle");
+        assert!(
+            matches!(refused, Err(false)),
+            "foreground capacity is refused at once"
+        );
+        assert_eq!(
+            scope.needed(),
+            Some(trial),
+            "the refusal names the exact bundle"
+        );
         drop(incumbent);
         let token = admissions.reserve_for_handoff(&trial, std::time::Duration::from_secs(5));
-        assert!(admissions.try_admit_bundle(2, 11, &trial, Priority::Live).is_none(), "reserved");
+        assert!(
+            admissions
+                .try_admit_bundle(2, 11, &trial, Priority::Live)
+                .is_none(),
+            "reserved"
+        );
         let claim = crate::vodserve::TrialClaim::reserved_for_test(token);
         let scope = Arc::new(ProcessedTrialAdmission::with_claim(Arc::clone(&claim)));
         let admitted = PROCESSED_TRIAL_ADMISSION
-            .scope(scope, admit_processed_trial(&admissions, 2, 11, &trial,
-                Instant::now() + std::time::Duration::from_secs(1)))
+            .scope(
+                scope,
+                admit_processed_trial(
+                    &admissions,
+                    2,
+                    11,
+                    &trial,
+                    Instant::now() + std::time::Duration::from_secs(1),
+                ),
+            )
             .await
             .expect("the trial admits with its own viewer's reservation");
-        assert_eq!(admissions.snapshot().live_waiting, 0, "no pool waiter at any point");
-        assert_eq!(admissions.snapshot().reservations, 0, "the reservation was consumed");
+        assert_eq!(
+            admissions.snapshot().live_waiting,
+            0,
+            "no pool waiter at any point"
+        );
+        assert_eq!(
+            admissions.snapshot().reservations,
+            0,
+            "the reservation was consumed"
+        );
         drop(admitted);
     }
 }

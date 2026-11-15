@@ -169,11 +169,13 @@ impl TrialClaim {
     /// The trial took its bundle with the reservation: the request is then
     /// kept to its deadline rather than its short refresh lifetime.
     pub(crate) fn mark_admitted(&self) {
-        self.admitted.store(true, std::sync::atomic::Ordering::Release);
+        self.admitted
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn close(&self) {
-        self.closed.store(true, std::sync::atomic::Ordering::Release);
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
         self.ready.notify_waiters();
     }
 
@@ -257,7 +259,11 @@ impl Drop for IncumbentPermitClaim {
         // After `close`, under the same lock `reserve_for_successor` reserves
         // under: no reservation can appear after this read.
         let token = *self.claim.token.lock().expect("trial claim token");
-        if !self.claim.admitted.load(std::sync::atomic::Ordering::Acquire) {
+        if !self
+            .claim
+            .admitted
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             if let Some(token) = token {
                 self.admissions.release_reservation(token);
             }
