@@ -144,7 +144,7 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         autoconf automake build-essential clang cmake curl dbus-daemon git jq libssl-dev lld llvm \
-        make nasm ninja-build libgtk-4-dev libdbus-1-dev pkg-config python3 \
+        make nasm ninja-build openssl libgtk-4-dev libdbus-1-dev pkg-config procps python3 \
     && ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     # One interpreter for every job in the image: the CPython the main fast
@@ -174,7 +174,7 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
     && docker --version | grep -F 'Docker version 27.5.1' \
     && docker compose version \
     && autoconf --version | sed -n '1p' && aclocal --version | sed -n '1p' \
-    && command -v dbus-run-session \
+    && command -v dbus-run-session pgrep openssl \
     && pkg-config --exists openssl 'gtk4 >= 4.0' dbus-1 \
     && ffmpeg -version | grep -E '^ffmpeg version n?8' \
     && apt-get clean \

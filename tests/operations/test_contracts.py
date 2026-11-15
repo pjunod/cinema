@@ -5171,6 +5171,9 @@ assert.equal(context.ACT_TIMER, null);
         for needed in (
             "autoconf automake ",
             " dbus-daemon ",
+            " openssl ",
+            " procps ",
+            "command -v dbus-run-session pgrep openssl",
             "COPY --from=ci-node-toolchain /usr/local/lib/node_modules/npm ",
             "COPY --from=ci-docker-cli /usr/local/bin/docker ",
             "/usr/local/libexec/docker/cli-plugins/docker-compose",

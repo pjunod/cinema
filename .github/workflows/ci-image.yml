@@ -65,7 +65,7 @@ jobs:
             docker compose version
             autoconf --version | sed -n 1p
             aclocal --version | sed -n 1p
-            command -v dbus-run-session
+            command -v dbus-run-session pgrep openssl
             pkg-config --exists openssl "gtk4 >= 4.0" dbus-1'
           test "$(docker image inspect "$tag" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
           docker push "$tag"
