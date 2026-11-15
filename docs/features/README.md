@@ -13,6 +13,7 @@ a document to this folder.
 | [PIPELINE-CONTRACT-REMOVED-PATHS.md](PIPELINE-CONTRACT-REMOVED-PATHS.md) | The scan request's removed-paths and probe-only detail: states, retained codes, retry rules, unreadable roots, mixed clusters. | built |
 | [PIPELINE-CONTRACT-OFFLOAD.md](PIPELINE-CONTRACT-OFFLOAD.md) | Offload and Get it back: `offloaded_paths`, kept titles, placement by ids, the reacquire webhook and its states. | built |
 | [PIPELINE-CONTRACT-RUNNER-CURATOR.md](PIPELINE-CONTRACT-RUNNER-CURATOR.md) | Pipeline contract v2 §2–§3, verbatim: Runner's terminal fact and Curator's reducer, which plurx does not implement. | open |
+| [CUSTOM-TAGS-PLAN.md](CUSTOM-TAGS-PLAN.md) | Custom household/private tags on titles, tag filter and search, suggestions review queue, grantable `manage_tags`, and configurable tag-driven Home rows; data model, API, permissions and build order. | open |
 | [SUBTITLE-COMPLETION-STATUS.md](SUBTITLE-COMPLETION-STATUS.md) | Live ownership, implementation and acceptance ledger for completing progressive generation, translation, native delivery and existing-file translation. | built |
 | [DESKTOP-TRAY-IMPLEMENTATION.md](DESKTOP-TRAY-IMPLEMENTATION.md) | macOS/Linux desktop server controls, separate startup policies, signed GitHub release upgrades, task ownership and native/package acceptance. | open |
 | [DESKTOP-TRAY-QUALIFICATION.md](DESKTOP-TRAY-QUALIFICATION.md) | Complete tray cohort, retained focused evidence, native qualification, review and promotion gaps. | open |
