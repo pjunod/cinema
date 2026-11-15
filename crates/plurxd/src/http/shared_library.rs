@@ -136,12 +136,16 @@ pub(super) async fn authority<
         return Err(missing());
     }
     // This is serving-read admission only. Future shared writes must carry
-    // their capability floor and effective grant predicate atomically.
+    // their capability floor and effective grant predicate atomically. The
+    // floor here is the shared advisory answer: a ready answer can admit for
+    // up to five seconds after a heartbeat, capability or join change the
+    // answer's key does not see; an error, a timeout or not-ready refuses.
     if state.membership.is_replicated() {
         let ready = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            state.membership.sharing_member_floor_ready(
+            state.membership.sharing_member_floor_advisory(
                 plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+                state.serving.advisory_epoch(),
             ),
         )
         .await
@@ -618,7 +622,24 @@ pub(super) fn attach_source_file_authority(
     });
 }
 
-/// Admission and in-memory responses: only a current authority passes.
+/// The tables a Source body's authority rests on (A6 M3): the switch, the
+/// grant and its libraries, the identity and catalogue revisions (an item's
+/// removal moves `sharing_catalogue_revisions`; `items` itself is not
+/// watched), and the files.
+const SOURCE_BODY_WATCH: &[&str] = &[
+    "settings",
+    "sharing_exports",
+    "sharing_identity",
+    "sharing_export_libraries",
+    "item_identity_watermark",
+    "sharing_catalogue_revisions",
+    "libraries",
+    "files",
+];
+
+/// Admission and in-memory responses (catalogue, artwork, body start): only a
+/// current authority passes. Its member floor is the shared advisory answer,
+/// with the same five-second bound as `authority()`.
 async fn source_content_current(state: &AppState, authority: &SourceContentAuthority) -> bool {
     source_content_observation(state, authority).await == SharingObservation::Current
 }
@@ -641,8 +662,9 @@ async fn source_content_observation(
             let floor = SharingObservation::of_floor(
                 state
                     .membership
-                    .sharing_member_floor_ready(
+                    .sharing_member_floor_advisory(
                         plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+                        state.serving.advisory_epoch(),
                     )
                     .await,
             );
@@ -755,6 +777,9 @@ pub(super) async fn guard_source_response(
     let Ok(permit) = CONTENT_MONITORS.clone().try_acquire_owned() else {
         return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
     };
+    // Armed before the admission look, so a revocation applied after the
+    // look's read wakes the monitor below (A6 M3).
+    let mut watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
     let observed = source_content_observation(&state, &authority).await;
     if observed != SharingObservation::Current {
         return content_refusal(observed).into_response();
@@ -766,27 +791,43 @@ pub(super) async fn guard_source_response(
     let live = connection.0.child_token();
     let body_live = live.clone();
     let monitored = connection.monitor(async move {
-        // Source media keeps producing bytes after the handler returns, and
-        // replicated revocation has no change feed, so authority is
-        // re-observed while this body is alive. Its drop ends the observation.
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Source media keeps producing bytes after the handler returns, so
+        // authority is re-observed while this body is alive: when a table it
+        // rests on changes or the serving fence moves, at most once a second
+        // (A6 M3). Its drop ends the observation.
         // One outage budget for this body's whole life (see `UnknownSpan`).
         let mut span = crate::serving_fence::UnknownSpan::default();
         let mut serving = state.serving.subscribe();
+        let mut looked = tokio::time::Instant::now();
         loop {
+            let mut floor = true;
+            while floor {
+                tokio::select! {
+                    // Retirement is decided before another observation is due.
+                    biased;
+                    () = body_live.cancelled() => break,
+                    () = source_guard.cancelled() => {
+                        let mode=source_guard.retirement_mode();
+                        match mode {crate::sharing_connection_custody::DriverCloseMode::Drain=>drain.cancel(),crate::sharing_connection_custody::DriverCloseMode::Revoke=>cancel.cancel()}
+                        let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),mode).await;
+                        break;
+                    },
+                    () = watch.changed() => floor = false,
+                    Ok(()) = serving.changed() => floor = false,
+                }
+            }
+            if floor {
+                break;
+            }
             tokio::select! {
-                // Retirement is decided before another observation is due.
                 biased;
                 () = body_live.cancelled() => break,
-                () = source_guard.cancelled() => {
-                    let mode=source_guard.retirement_mode();
-                    match mode {crate::sharing_connection_custody::DriverCloseMode::Drain=>drain.cancel(),crate::sharing_connection_custody::DriverCloseMode::Revoke=>cancel.cancel()}
-                    let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),mode).await;
-                    break;
-                },
-                _ = interval.tick() => {},
+                () = source_guard.cancelled() => continue,
+                () = tokio::time::sleep_until(looked + std::time::Duration::from_secs(1)) => {},
             }
+            // Re-armed before the look it follows.
+            watch = state.applied.sharing_watch(SOURCE_BODY_WATCH);
+            looked = tokio::time::Instant::now();
             tokio::select! {
                 () = body_live.cancelled() => break,
                 observed = source_content_observation(&state, &authority) => {

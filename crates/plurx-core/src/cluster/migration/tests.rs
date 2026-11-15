@@ -1555,9 +1555,11 @@ async fn restored_voter_join_fixture() {
         metrics.purged
     );
     assert!(
-        !super::super::membership::restored_image_lacks_join_snapshot(&restored_client)
-            .await
-            .expect("restored admission check")
+        !super::super::membership::restored_image_lacks_join_snapshot(
+            &crate::store::CountedClient::membership(restored_client.clone()),
+        )
+        .await
+        .expect("restored admission check")
     );
     let (restored_tables, restored_marker) = local_tables_and_marker(&restored_client).await;
     assert_eq!(restored_marker.as_deref(), Some("restored"));
