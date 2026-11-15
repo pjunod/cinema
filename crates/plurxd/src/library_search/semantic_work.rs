@@ -78,6 +78,7 @@ pub(super) async fn run(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 64,
+            admissible_only: false,
         })
         .await?;
     page.jobs.retain(|job| matches!(job.supported_payload(), Ok(JobPayload::SemanticEmbedding { model_digest, .. }) if model_digest == model_identity().digest()));

@@ -140,6 +140,7 @@ async fn pass(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 128,
+            admissible_only: false,
         })
         .await?;
     page.jobs
@@ -917,6 +918,7 @@ mod tests {
             after: None,
             now_ms: now_ms(),
             limit: 32,
+            admissible_only: false,
         };
         let first = state
             .store

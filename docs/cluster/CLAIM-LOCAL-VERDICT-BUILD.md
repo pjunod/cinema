@@ -78,7 +78,7 @@ unconditional demand-reset update and a bind insert
    ▼
  local verdict (same predicates, local read)
    │
-   ├─ Blocked(reason) ──▶ ClaimOutcome::ResourceUnavailable / Contended
+   ├─ Blocked(reason) ──▶ ClaimOutcome::Contended
    │                       no quorum read, no proposal, claim_skipped{reason}
    ▼ Admit
  quorum pre-read ─▶ CLAIM_SQL (proposal) ─▶ Claimed | Contended (a real race)
@@ -92,8 +92,9 @@ unconditional demand-reset update and a bind insert
    copied `subtitle_extract` block and nothing else.
 2. **The verdict is a local read that names the failing group.** One SELECT
    over the job row returning the first group that fails, as a fixed reason:
-   `state` · `kind_demand` · `source_recovery` · `foreground_window` ·
-   `source_holders` · `maintenance_reader`. It runs at the top of `claim_job`,
+   `state` · `kind_demand` · `foreground_window` · `source_holders` ·
+   `maintenance_reader` (lapsed foreground custody fails the foreground
+   group; it has no predicate of its own), with whether `kind_demand` holds. It runs at the top of `claim_job`,
    before the quorum pre-read, on the local replica.
 3. **A stale verdict is safe in both directions.** A stale "blocked" skips a
    claim that the replica will re-admit as soon as it applies the write that
@@ -146,9 +147,9 @@ contract suite for background jobs passes unchanged.
 ### 5.2 M2 — the verdict, and `claim_job` consulting it
 
 Add the verdict query and reason enum; call it first in `claim_job` on the
-replicated backend; map a blocked verdict to the existing `ClaimOutcome`
-variants (`ResourceUnavailable` for the source reasons, `Contended` for
-`state` and `kind_demand`) without a pre-read or a proposal.
+replicated backend; a blocked verdict returns `ClaimOutcome::Contended`,
+what the statement itself returns for the same refusal on either backend,
+without a pre-read or a proposal.
 
 **Acceptance:** a store-level test builds each blocking state (a held
 maintenance reader, two holders, expired custody, a foreground window, a
@@ -197,5 +198,6 @@ less than half its 2026-11-14 rate of 38/s under the same conditions.
 |---|---|---|---|---|
 | 2026-11-14 | Design | claude-fable-5-2 | session_01BCWLA3JD1HCNMEid3AZrc3 | this document |
 | 2026-11-14 | M1 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | `CLAIM_SQL` assembled from seven fragments (identity, kind demand, state, attempt ledger, foreground window, source holders, maintenance reader); equals the pre-split text modulo whitespace (23,847 bytes); the identity check rejects a changed `>=2` and a dropped predicate line. The pre-split literal stays test-only through M3: it is what holds the fragments that three queries now share |
-| 2026-11-14 | M2 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | `CLAIM_VERDICT_SQL` + `ClaimBlock`; `claim_job` consults it first on a process with an applied replica. All six blocking states and the admissible job pair verdict with the statement on an embedded voter beside SQLite; breaking the verdict's holders or foreground fragment fails the test. Blocked verdicts return `Contended` (not `ResourceUnavailable`): SQLite and the both-backend contract suite answer `Contended` for the same refusals. No `source_recovery` predicate exists on its own since custody retention: lapsed foreground custody fails the foreground group and the reason splits it out |
+| 2026-11-14 | M2 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | `CLAIM_VERDICT_SQL` + `ClaimBlock`; `claim_job` consults it first on a process with an applied replica. All six blocking states and the admissible job pair verdict with the statement on an embedded voter beside SQLite; breaking the verdict's holders or foreground fragment fails the test. Blocked verdicts return `Contended` (not `ResourceUnavailable`): SQLite and the both-backend contract suite answer `Contended` for the same refusals. No `source_recovery` predicate exists on its own since custody retention: lapsed foreground custody fails the foreground group (review round 2 folded the reason into `foreground_window`) |
 | 2026-11-14 | M3 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | `job_candidates` filters by kind demand, state and the three source fragments (copied `subtitle_extract` block dropped); depth 300 behind a held slot lists 0 jobs in 12–14 ms (was 127 jobs in 6.6 ms), one skipped claim 1.8 ms on the replica vs a 58–60 ms refused SQLite proposal; released, one claim wins and the rest list nothing again. Title demand reset proposes only when the replica shows a demand to reset; a queued title job blocked on its source is neither bound nor claimed. `claim_write` counts proposals only; `plurx_background_claim_skipped_total{kind,reason}`. Authority read once per pass in the pre-transcode, fragment and subtitle passes. plurxd tests not run here (memory) |
+| 2026-11-14 | Review r2 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | B1: the admissible listing is opt-in (`CandidateQuery::admissible_only`), honoured only on a replica (SQLite lists as before), set only in the pre-transcode, fragment and subtitle claim passes; library turns keep the unfiltered listing, and a scan behind a held reader keeps its ready turn and wins the freed slot on both backends. The verdict returns every group (`ClaimVerdict`); the title pass reads it from the replica alone and binds whenever kind demand fails. `source_recovery` folded into `foreground_window`. Differential test: 2,000 random SQLite states, verdict ⇔ statement and admissible listing ⇔ statement, rejects the verdict ignoring source holders at case 50. Depth 3,000 behind a held slot: admissible page 12.8 ms (0 jobs) on the replica, unfiltered SQLite page 6.1 ms, released 11.0 ms — flat against depth 300 (14.5 ms), so no per-resource rewrite. `CLAIM_SQL` is not byte-identical to the pre-split text: one space differs (offset 13,247, `$1, '` for `$1,'`); equality modulo whitespace was proven and the literal deleted |

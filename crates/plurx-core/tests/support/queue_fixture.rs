@@ -90,6 +90,7 @@ pub(crate) trait QueueFixture: Store {
                     after,
                     now_ms,
                     limit: 128,
+                    admissible_only: false,
                 })
                 .await?;
             for candidate in page.jobs {
@@ -293,6 +294,7 @@ pub(crate) trait QueueFixture: Store {
                     after,
                     now_ms,
                     limit: 128,
+                    admissible_only: false,
                 })
                 .await?;
             for candidate in page.jobs {

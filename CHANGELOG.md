@@ -14,10 +14,12 @@ bump may break compatibility and a **patch** bump never does.
   will be refused. A node with a local replica checks the claim statement's
   own conditions there first, and a claim held back by the source slot, a
   foreground window, missing demand or a stale row costs one local read
-  instead of a quorum read and a Raft proposal. Candidate lists apply the
-  same conditions, so a queue behind a held source lists nothing until the
-  slot frees. `plurx_background_claim_skipped_total{kind,reason}` counts the
-  skipped claims, and `claim_write` now counts proposals only
+  instead of a quorum read and a Raft proposal. The pre-transcode, fragment
+  and subtitle claim passes list only such admissible jobs there, so a queue
+  behind a held source lists nothing until the slot frees; library turns and
+  every other listing are unchanged. `plurx_background_claim_skipped_total{kind,reason}`
+  counts the skipped claims, and `claim_write`/`claim_refused` now count
+  proposals only
   ([plan](docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md)).
 - Linearizable reads no longer time out when one TCP SYN is lost: the vendored Hiqlite Raft client
   reuses an idle connection per voter instead of dialing a new TCP + WebSocket handshake inside

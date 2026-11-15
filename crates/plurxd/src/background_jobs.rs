@@ -289,10 +289,11 @@ pub(crate) struct ActiveBackgroundJob {
 /// caller continues holding its local permit; do not try another candidate
 /// merely because the first acknowledgement disappeared.
 ///
-/// `claim_write` counts proposals only. A claim this node's applied replica
-/// showed the claim statement refusing was never proposed: it counts
-/// `claim_skipped{reason}` instead, and none of the claim latency or refusal
-/// series.
+/// `claim_write` and `claim_refused` count proposals only, so their ratio is
+/// the share of proposals the statement refused. A claim this node's applied
+/// replica showed the statement refusing was never proposed: it counts
+/// `claim_skipped{reason}` and nothing else. A claim the authoritative
+/// pre-read settled, or one whose call failed before saying, is neither.
 pub(crate) async fn claim_with_resolution(
     store: &dyn Store,
     candidate: &BackgroundJob,
@@ -306,14 +307,13 @@ pub(crate) async fn claim_with_resolution(
         .max(0) as u64;
     let mut path = None;
     let result = claim_with_resolution_inner(store, request, &mut path).await;
-    match path {
-        Some(ClaimPath::Skipped(block)) => {
-            metrics::claim_skipped(kind, block);
-            return result;
-        }
-        Some(ClaimPath::Settled) => {}
-        // An error may follow a proposal whose acknowledgement was lost.
-        Some(ClaimPath::Proposed) | None => metrics::event(kind, Event::ClaimWrite),
+    if let Some(ClaimPath::Skipped(block)) = path {
+        metrics::claim_skipped(kind, block);
+        return result;
+    }
+    let proposed = path == Some(ClaimPath::Proposed);
+    if proposed {
+        metrics::event(kind, Event::ClaimWrite);
     }
     metrics::claim_latency(kind, issued.elapsed());
     match &result {
@@ -324,7 +324,8 @@ pub(crate) async fn claim_with_resolution(
                 metrics::event(kind, Event::Takeover);
             }
         }
-        Ok(None) => metrics::event(kind, Event::ClaimRefused),
+        Ok(None) if proposed => metrics::event(kind, Event::ClaimRefused),
+        Ok(None) => {}
         Err(_) => metrics::event(kind, Event::ClaimError),
     }
     result
@@ -2037,10 +2038,10 @@ pub(crate) async fn claim_pretranscode(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
-    // Execution authority is read once per pass, for every kind this pass
-    // may claim; each claim is then the replicated statement's to admit, and
-    // an owned job keeps re-checking authority while it runs. (A learner's
-    // check is a quorum read: once per candidate it was one per refusal.)
+    // Execution authority is read once per pass for every kind it may claim,
+    // and once more before its first claim, not once per candidate: a
+    // learner's check is a quorum read, and per candidate it was one per
+    // refusal. An owned job keeps re-checking authority while it runs.
     let mut kinds = Vec::new();
     for kind in [
         JobKind::TranscodePrepare,
@@ -2054,6 +2055,9 @@ pub(crate) async fn claim_pretranscode(
     if kinds.is_empty() {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -2063,6 +2067,8 @@ pub(crate) async fn claim_pretranscode(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -2112,6 +2118,15 @@ pub(crate) async fn claim_pretranscode(
                     now_ms,
                     dispatched_at_ms: now_ms,
                 };
+                if !authority_rechecked {
+                    if !authority
+                        .may_execute_job(JobKind::EncodedOutputPrepare)
+                        .await
+                    {
+                        return Ok(None);
+                    }
+                    authority_rechecked = true;
+                }
                 let Some((job, deadline)) =
                     claim_with_resolution(store.as_ref(), &candidate, request).await?
                 else {
@@ -2156,6 +2171,12 @@ pub(crate) async fn claim_pretranscode(
                     now_ms,
                     dispatched_at_ms: now_ms,
                 };
+                if !authority_rechecked {
+                    if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
+                        return Ok(None);
+                    }
+                    authority_rechecked = true;
+                }
                 let Some((job, deadline)) =
                     claim_with_resolution(store.as_ref(), &candidate, request).await?
                 else {
@@ -2218,6 +2239,12 @@ pub(crate) async fn claim_pretranscode(
                 now_ms,
                 dispatched_at_ms: now_ms,
             };
+            if !authority_rechecked {
+                if !authority.may_execute_job(JobKind::TranscodePrepare).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) =
                 claim_with_resolution(store.as_ref(), &candidate, request).await?
             else {
@@ -2321,6 +2348,9 @@ pub(crate) async fn claim_fragment(
     if eligible_kinds.is_empty() {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -2330,6 +2360,8 @@ pub(crate) async fn claim_fragment(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -2376,6 +2408,12 @@ pub(crate) async fn claim_fragment(
                 now_ms,
                 dispatched_at_ms: now_ms,
             };
+            if !authority_rechecked {
+                if !authority.may_execute_job(kind).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) =
                 claim_with_resolution(store.as_ref(), &candidate, request).await?
             else {
@@ -2470,6 +2508,7 @@ pub(crate) async fn fragment_siblings(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                admissible_only: false,
             })
             .await?;
         for candidate in page.jobs {
@@ -2846,6 +2885,7 @@ async fn library_candidates(
             after,
             now_ms: unix_ms()?,
             limit: MAX_PAGE_SIZE,
+            admissible_only: false,
         })
         .await
 }
@@ -3085,6 +3125,9 @@ pub(crate) async fn claim_subtitle(
     if !authority.may_execute_job(JobKind::SubtitleExtract).await {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -3094,6 +3137,8 @@ pub(crate) async fn claim_subtitle(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -3118,6 +3163,12 @@ pub(crate) async fn claim_subtitle(
                 continue;
             }
             let now_ms = unix_ms()?;
+            if !authority_rechecked {
+                if !authority.may_execute_job(JobKind::SubtitleExtract).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) = claim_with_resolution(
                 store.as_ref(),
                 &candidate,
@@ -3284,6 +3335,7 @@ pub(crate) mod tests {
                 after: None,
                 now_ms: unix_ms().expect("clock"),
                 limit: plurx_core::store::background_jobs::MAX_PAGE_SIZE,
+                admissible_only: false,
             })
             .await
             .expect("candidates");

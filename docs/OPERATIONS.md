@@ -4799,15 +4799,15 @@ requires the stopped-writer maintenance procedure in the
 [queue migration contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md#7-migration-and-rollback--one-ownership-system-after-cutover);
 do not perform a mixed-version rolling cutover or a binary-only downgrade.
 
-Queue count, oldest age, source-I/O reservations and legacy backlog gauges
-come from the existing cached Store sampler. Worker-event counters and claim,
-queue-wait and execution histograms are process-local; every metrics scrape is
-Store-free. Counts of acknowledged transitions can undercount lost replies and
-reset on restart; durable attempts remain the audit record. Increasing
+Queue, age, reservation and legacy backlog gauges come from the cached Store
+sampler. Worker counters and histograms are process-local; scrapes are
+Store-free. Transition counts can undercount lost replies and reset on
+restart; durable attempts are the audit record. Rising
 `plurx_background_legacy_pending` needs migration attention. Queued work with
-idle compatible workers suggests source/admission trouble; rising age with all
-reservations held suggests capacity pressure. `claim_write` events without
-eligible work indicate an idle-poll regression.
+idle workers suggests admission trouble; rising age with all reservations held
+suggests capacity pressure. `claim_write` counts proposals, `claim_refused`
+their refusals; a claim the local replica shows refused counts
+`plurx_background_claim_skipped_total{kind,reason}` instead.
 
 The cache bytes remain node-local. With P5 remote placement enabled, any
 ingress may select a voter that advertises the exact verified generation and

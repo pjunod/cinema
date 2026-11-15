@@ -1847,6 +1847,7 @@ async fn pass(
             after: None,
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         })
         .await?;
     for candidate in page.jobs {
@@ -3475,6 +3476,7 @@ mod tests {
                 after: None,
                 now_ms: now,
                 limit: 1,
+                admissible_only: false,
             })
             .await
             .expect("candidate")

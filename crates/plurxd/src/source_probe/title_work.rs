@@ -11,7 +11,7 @@ use plurx_core::{
     error::StoreError,
     store::{
         background_jobs::{
-            CandidateCursor, CandidateQuery, ClaimBlock, ClaimJob, EnqueueJob, EnqueueOutcome,
+            CandidateCursor, CandidateQuery, ClaimJob, ClaimVerdict, EnqueueJob, EnqueueOutcome,
             JobKind, JobPayload, JobRequest, JobSettlement,
         },
         dv_title_jobs::{TitleDemand, TitleOutput},
@@ -102,28 +102,21 @@ impl TitleTask {
             // A queued job whose claim this node's replica shows the claim
             // statement refusing is not bound or claimed this pass: neither
             // write would let it through (CLAIM-LOCAL-VERDICT-BUILD.md §3.5).
-            // Kind demand is what the bind itself repairs, so it binds on.
+            // Its kind demand is what the bind repairs (and the bind rotates
+            // the scanner), so while that group fails it binds as before. The
+            // verdict reads the replica only: no quorum read on this path.
             if let Some(id) = &demand.queued_job_id {
-                if let Some(queued) = state.store.background_job(id).await? {
-                    let now = now_ms();
-                    let verdict = state
-                        .store
-                        .claim_verdict(ClaimJob {
-                            job_id: id.clone(),
-                            expected_revision: queued.revision,
-                            node_id: state.node_id.clone(),
-                            boot_id: boot.into(),
-                            claim_id: uuid::Uuid::new_v4().to_string(),
-                            kind: JobKind::DvTitleScan,
-                            payload_version: 1,
-                            now_ms: now,
-                            dispatched_at_ms: now,
-                        })
-                        .await?;
-                    if let Some(block) = verdict.filter(|block| *block != ClaimBlock::KindDemand) {
-                        crate::background_jobs::claim_skipped(JobKind::DvTitleScan, block);
-                        continue;
-                    }
+                let verdict = state
+                    .store
+                    .claim_verdict(id, JobKind::DvTitleScan, &state.node_id, now_ms())
+                    .await?;
+                if let Some(ClaimVerdict {
+                    block: Some(block),
+                    kind_demand: true,
+                }) = verdict
+                {
+                    crate::background_jobs::claim_skipped(JobKind::DvTitleScan, block);
+                    continue;
                 }
             }
             let Some(revision) = state
@@ -274,6 +267,7 @@ impl TitleTask {
                 after: self.probe_after.clone(),
                 now_ms: now,
                 limit: 128,
+                admissible_only: false,
             })
             .await?;
         // Keep the keyset walk across scheduler ticks. A fixed first page can
