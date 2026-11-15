@@ -7,7 +7,9 @@
 //! it precedes a write or reservation in the same operation, sits under a
 //! lock a settings save takes, decides authentication, trust, membership or
 //! ownership, builds a save response, runs before the node serves, or runs in
-//! a background worker (§12-6). The tests pin, by function: every read
+//! a background worker (§12-6) — except a background loop's idle read of a
+//! switch or tunable, which A4 (`docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md`)
+//! moves and `IDLE_LOOP_READS` pins one by one. The tests pin, by function: every read
 //! through the view, every direct caller of a function that reads it, and
 //! that no fence, ownership, worker or boot file reads it or calls one. A new
 //! view read, one moved to another function, a new caller, or a renamed view
@@ -67,6 +69,10 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     ("http/hls/start_plan.rs", "confirm_unbound_remote", 1, true),
     ("http/hls/start_plan.rs", "ingress_plan", 2, true),
     ("http/hls/start_plan.rs", "owner_plan", 2, true),
+    // A4 (`docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md`): background loops
+    // that read a switch or tunable to decide their next tick. Each is in a
+    // stays file and is pinned again in `IDLE_LOOP_READS` below.
+    ("playback_cache.rs", "read_max_gb", 1, true),
 ];
 
 /// The direct callers of each helper above, `(helper file, helper,
@@ -230,6 +236,15 @@ const STAYS_CHAINS: &[(&str, &str, &str, &str)] = &[(
     "http/internal_media_sessions.rs",
     "start",
 )];
+
+/// The view reads a stays file may hold, by function (A4,
+/// `docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md` §3): a background loop's
+/// read of a switch or tunable that only decides what its next tick does.
+/// Each loop already tolerates acting one period late, and a view answer is
+/// stale by at most the proof lease plus apply lag, shorter than any of
+/// their periods. Every other read in these files, and every read before a
+/// write or a fence in them, stays a Store read. `(file, function)`.
+const IDLE_LOOP_READS: &[(&str, &str)] = &[("playback_cache.rs", "read_max_gb")];
 
 /// How a helper is called: bare in its own file and `module::name(`
 /// elsewhere, or as a method on a field of this name.
@@ -651,9 +666,21 @@ fn every_settings_view_read_and_its_callers_are_pinned_by_function() {
          HELPER_CALLERS\n{render_callers}"
     );
     for (path, function) in reads.keys() {
+        let idle_loop = IDLE_LOOP_READS
+            .iter()
+            .any(|(file, name)| (*file, *name) == (path.as_str(), function.as_str()));
         assert!(
-            !in_stays(path),
+            !in_stays(path) || idle_loop,
             "{path}::{function} reads the view in a stays file"
+        );
+    }
+    // Every idle-loop exception is a live view read, and names a stays file
+    // (anything else belongs in `VIEW_READS` alone).
+    for (file, function) in IDLE_LOOP_READS {
+        assert!(in_stays(file), "{file}::{function} is not in a stays file");
+        assert!(
+            reads.contains_key(&((*file).to_owned(), (*function).to_owned())),
+            "stale idle-loop read {file}::{function}"
         );
     }
     for (file, helper, path, caller) in &found_callers {

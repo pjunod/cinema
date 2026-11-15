@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use plurx_core::store::{keys, Store};
+use plurx_core::store::{keys, AppliedView};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -35,21 +35,30 @@ pub(crate) trait CacheOwner: Send + Sync {
 }
 
 /// Where the cache ceiling (`cache.max_gb`) is read from. The production
-/// source is the replicated Store, which needs a leader; only the settings
-/// task reads it, never a writer (C3 of
-/// `docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md`).
+/// source is this node's applied settings view; only the settings task reads
+/// it, never a writer (C3 of `docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md`).
 #[async_trait::async_trait]
 pub(crate) trait CacheCeilingSource: Send + Sync {
     async fn read_max_gb(&self) -> io::Result<Option<String>>;
 }
 
-struct StoreCeilingSource(Arc<dyn Store>);
+/// The ceiling as this node's applied settings view holds it.
+///
+/// The task reads once a second for as long as the cache is in use, and
+/// writers already act on the ceiling it last published, so a value one
+/// proof lease plus apply lag old is one the cache tolerates today. A save
+/// made on this node raises the settings floor and is read back from the
+/// authority until this replica holds it; without a serving proof the view
+/// asks the authority, as the Store read did. Idle, it is a local read.
+struct AppliedCeilingSource {
+    applied: AppliedView,
+}
 
 #[async_trait::async_trait]
-impl CacheCeilingSource for StoreCeilingSource {
+impl CacheCeilingSource for AppliedCeilingSource {
     async fn read_max_gb(&self) -> io::Result<Option<String>> {
-        self.0
-            .get_setting(keys::CACHE_MAX_GB)
+        self.applied
+            .setting(keys::CACHE_MAX_GB)
             .await
             .map_err(io::Error::other)
     }
@@ -523,8 +532,15 @@ impl std::fmt::Debug for PlaybackCacheBudget {
 }
 
 impl PlaybackCacheBudget {
-    pub(crate) fn new(store: Arc<dyn Store>, roots: Vec<PathBuf>) -> Arc<Self> {
-        Self::with_ceiling_source(Arc::new(StoreCeilingSource(store)), roots)
+    /// A budget whose ceiling is the store's own (a standalone view over
+    /// `store`), for fixtures that hold a store and no view.
+    #[cfg(test)]
+    pub(crate) fn new(store: Arc<dyn plurx_core::store::Store>, roots: Vec<PathBuf>) -> Arc<Self> {
+        Self::with_applied_settings(AppliedView::authority(store), roots)
+    }
+
+    pub(crate) fn with_applied_settings(applied: AppliedView, roots: Vec<PathBuf>) -> Arc<Self> {
+        Self::with_ceiling_source(Arc::new(AppliedCeilingSource { applied }), roots)
     }
 
     pub(crate) fn with_ceiling_source(
@@ -2538,6 +2554,68 @@ mod tests {
         assert!(reserve(&fixture.roots[0].join("disabled"), 1)
             .await
             .is_err());
+    }
+
+    /// A4: the settings task reads the ceiling every second while the cache
+    /// is in use. It reads it from the node's applied settings view, which a
+    /// replica answers locally under its serving proof; a saved change is
+    /// still published. (A standalone view answers from the store and counts
+    /// a `view` read; a direct Store read counts nothing here.)
+    #[tokio::test]
+    async fn the_ceiling_task_reads_the_applied_view_and_still_follows_a_save() {
+        use plurx_core::store::{AppliedTable, ViewSource};
+        let temporary = tempfile::tempdir().expect("temporary");
+        let root = std::fs::canonicalize(temporary.path()).expect("canonical temp");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let applied = AppliedView::authority(store.clone());
+        let budget =
+            PlaybackCacheBudget::with_applied_settings(applied.clone(), vec![root.clone()]);
+        *budget.test_space.lock().expect("space") = Some(DiskSpace {
+            free: 1024 * GIB,
+            total: 1024 * GIB,
+            allocation_unit: 1,
+        });
+        let published = |bytes: u64| {
+            let mut setting = budget.ceiling_setting.subscribe();
+            async move {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    setting.wait_for(|setting| *setting == CeilingSetting::Known(bytes)),
+                )
+                .await
+                .expect("the settings task publishes the ceiling")
+                .map(|_| ())
+                .expect("settings channel");
+            }
+        };
+        store
+            .put_setting(keys::CACHE_MAX_GB, "7")
+            .await
+            .expect("ceiling");
+        budget.sweep().await.expect("start the settings task");
+        published(7 * GIB).await;
+        let reads = applied.observation();
+        assert!(
+            reads.view_total(AppliedTable::Settings, ViewSource::View) >= 1,
+            "the ceiling is read through the applied view: {:?}",
+            reads.reads
+        );
+        assert_eq!(
+            reads.view_total(AppliedTable::Settings, ViewSource::Authority),
+            0,
+            "no tick asked the authority"
+        );
+        store
+            .put_setting(keys::CACHE_MAX_GB, "3")
+            .await
+            .expect("shrink");
+        published(3 * GIB).await;
+        assert_eq!(
+            applied
+                .observation()
+                .view_total(AppliedTable::Settings, ViewSource::Authority),
+            0
+        );
     }
 
     #[tokio::test]

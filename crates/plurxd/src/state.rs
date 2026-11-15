@@ -1214,8 +1214,8 @@ impl AppState {
         } = dirs;
         // Every regenerable playback namespace shares physical capacity and
         // outstanding write grants. Durable state and artwork are excluded.
-        let playback_cache = crate::playback_cache::PlaybackCacheBudget::new(
-            Arc::clone(&store),
+        let playback_cache = crate::playback_cache::PlaybackCacheBudget::with_applied_settings(
+            applied.clone(),
             vec![
                 cache_dir.clone(),
                 subs_dir.clone(),
