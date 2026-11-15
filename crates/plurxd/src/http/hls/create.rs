@@ -852,6 +852,64 @@ pub(super) fn processing_declined_note(reason: &str) -> String {
     format!("Dolby Vision processing declined: {reason}")
 }
 
+/// The ask a start sends to `owner`, another node: this create's verdict,
+/// and for Auto the owner's processed recipe this viewer's link admits. An
+/// Auto ask without an admitted recipe still travels, so the owner records
+/// the named skip the client's enhancement details show.
+pub(super) async fn handed_over_ask(
+    state: &AppState,
+    ask: Option<&crate::media_sessions::ProcessedUpgradeAsk>,
+    evidence: &super::processed_upgrade::ViewerEvidence,
+    request: &crate::transcode::SessionRequest,
+    source: Option<&plurx_core::domain::MediaFile>,
+    owner: &str,
+) -> Option<crate::media_sessions::ProcessedUpgradeAsk> {
+    let mut ask = ask?.clone();
+    if ask.auto_policy {
+        let admitted = match source {
+            Some(source) => {
+                super::processed_upgrade::admit_for_owner(state, evidence, request, source, owner)
+                    .await
+            }
+            None => Err("the source row is unavailable".to_owned()),
+        };
+        match admitted {
+            Ok(admitted) => ask.admitted = Some(admitted),
+            Err(reason) => tracing::info!(target: "plurxd::http::hls",
+                owner_node_id = %owner, %reason,
+                "processed upgrade for Auto handed over without an admitted recipe"),
+        }
+    }
+    Some(ask)
+}
+
+/// What a start placed on another node says about its processed upgrade:
+/// handed to the owner, or handed over knowing the owner will decline it
+/// (Auto with no admitted recipe). Logged on the ingress and returned as the
+/// start's plan note. `None` when no upgrade applied.
+pub(super) fn handed_over_note(
+    sent: Option<&crate::media_sessions::ProcessedUpgradeAsk>,
+    owner: &str,
+    session_id: &str,
+) -> Option<String> {
+    let ask = sent?;
+    let session = crate::transcode::session_log_id(session_id);
+    if ask.auto_policy && ask.admitted.is_none() {
+        tracing::info!(target: "plurxd::http::hls", owner_node_id = %owner, session = %session,
+            "processed upgrade cannot be handed off: Auto on another node needs an admitted recipe");
+        return Some(processing_declined_note(
+            super::processed_upgrade::HANDED_OVER_AUTO_UNADMITTED,
+        ));
+    }
+    tracing::info!(target: "plurxd::http::hls", owner_node_id = %owner, session = %session,
+        "processed upgrade handed to the session's owner; it runs there after the first frame");
+    Some(HANDED_OVER_NOTE.to_owned())
+}
+
+/// The plan note of a start whose processed upgrade its owner will run.
+pub(super) const HANDED_OVER_NOTE: &str =
+    "Dolby Vision processing is offered after the first frame by the node serving this session";
+
 /// Finish response notes from the request that dispatch actually served.
 /// Qualification may be declined at admission or degraded by the worker, so
 /// its display explanation must not escape before those choices are final.
@@ -4092,32 +4150,40 @@ async fn create_with_purpose_attempt(
     // plan only. It runs the upgrade's request-only gates against the planning
     // snapshot it already holds, so a declined upgrade is reported on this
     // start's enhancement details; an applicable one is left waiting for the
-    // first frame on the node that owns the session (registered after
-    // activation, below). Only a reopen pinned to another node's session is
-    // left to that node.
-    let processed_upgrade_applies = if pinned_owner
-        .as_ref()
-        .is_none_or(|owner| owner == &state.node_id)
-    {
-        match planning_snapshot.map(|snapshot| {
-            crate::transcode::TranscodeManager::processed_upgrade_gates(
-                &request,
-                snapshot,
-                hdr10_requested,
-            )
-        }) {
-            Some(Ok(Some(_))) => true,
-            Some(Ok(None)) | None => false,
-            Some(Err(reason)) => {
-                tracing::info!(target: "plurxd::http::hls", %reason,
-                    "processed upgrade declined; the ordinary start is unchanged");
-                processing_decline.get_or_insert_with(|| reason.to_string());
-                plan_notes.push(processing_declined_note(&reason));
-                false
-            }
+    // first frame on the node that owns the session. This node registers it
+    // when it owns the session (after activation, below); otherwise the
+    // verdict travels in the worker envelope's `processed_upgrade` ask and
+    // the owner registers it from the context it restores. A reopen pinned
+    // to another node's session is decided here like any other start.
+    let processed_upgrade_applies = match planning_snapshot.map(|snapshot| {
+        crate::transcode::TranscodeManager::processed_upgrade_gates(
+            &request,
+            snapshot,
+            hdr10_requested,
+        )
+    }) {
+        Some(Ok(Some(_))) => true,
+        Some(Ok(None)) | None => false,
+        Some(Err(reason)) => {
+            tracing::info!(target: "plurxd::http::hls", %reason,
+                "processed upgrade declined; the ordinary start is unchanged");
+            processing_decline.get_or_insert_with(|| reason.to_string());
+            plan_notes.push(processing_declined_note(&reason));
+            false
         }
-    } else {
-        false
+    };
+    // A channel play is never upgraded.
+    let processed_ask = (processed_upgrade_applies && library_channel.is_none()).then_some(
+        crate::media_sessions::ProcessedUpgradeAsk {
+            hdr10_intent: hdr10_requested,
+            auto_policy: candidate_auto_policy,
+            admitted: None,
+        },
+    );
+    let viewer_evidence = super::processed_upgrade::ViewerEvidence {
+        network: identity.clone(),
+        network_prior: network_prior.clone(),
+        incumbent_receipt: link_receipts::requested_receipt(&headers).map(str::to_owned),
     };
 
     let advertise_control = plurx_core::store::stored_switch(
@@ -4340,6 +4406,8 @@ async fn create_with_purpose_attempt(
             ));
             break;
         }
+        // The ask goes only to another owner: this node registers its own.
+        remote_request.processed_upgrade = None;
         let result = if candidate == state.node_id {
             if !ingress_serving_authority.is_current(ingress_serving_generation) {
                 last_error = Some(create_owner_transition(
@@ -4464,6 +4532,15 @@ async fn create_with_purpose_attempt(
                 .retained_output_receiver(&candidate)
                 .await
                 .then_some(1);
+            remote_request.processed_upgrade = handed_over_ask(
+                &state,
+                processed_ask.as_ref(),
+                &viewer_evidence,
+                &request,
+                source.as_ref(),
+                &candidate,
+            )
+            .await;
             // A reply lost in transit leaves the worker holding a session keyed
             // by this create's incarnation (the worker request's id). Asking the
             // same worker again recovers that session (`Recovered`) instead of
@@ -4588,6 +4665,24 @@ async fn create_with_purpose_attempt(
             .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
     };
     request_guard.disarm();
+    if owner_node_id != state.node_id {
+        if let Some(note) = handed_over_note(
+            remote_request.processed_upgrade.as_ref(),
+            &owner_node_id,
+            &info.session_id,
+        ) {
+            plan_notes.push(note);
+        }
+        if remote_request
+            .processed_upgrade
+            .as_ref()
+            .is_some_and(|ask| ask.auto_policy && ask.admitted.is_none())
+        {
+            processing_decline.get_or_insert_with(|| {
+                super::processed_upgrade::HANDED_OVER_AUTO_UNADMITTED.to_owned()
+            });
+        }
+    }
     if let Some(reason) = degraded_processing {
         // The worker served the ordinary request the processed candidate
         // enhanced. Everything written or answered from here describes that
@@ -5135,19 +5230,20 @@ async fn create_with_purpose_attempt(
             .media_sessions
             .seed_owned_lease(&published_route)
             .await;
-        if processed_upgrade_applies && library_channel.is_none() {
-            super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
-                user_id: user.id,
-                playback_id: published_route.playback_id.clone(),
-                session_id: published_route.session_id.clone(),
-                incarnation_id: published_route.incarnation_id.clone(),
-                request: request.clone(),
-                hdr10_intent: hdr10_requested,
-                auto_policy: candidate_auto_policy,
-                network: identity.clone(),
-                network_prior: network_prior.clone(),
-                incumbent_receipt: link_receipts::requested_receipt(&headers).map(str::to_owned),
-            });
+        if let Some(ask) = processed_ask.as_ref() {
+            super::processed_upgrade::register_owned(
+                super::processed_upgrade::OwnedSession {
+                    user_id: user.id,
+                    playback_id: &published_route.playback_id,
+                    session_id: &published_route.session_id,
+                    incarnation_id: &published_route.incarnation_id,
+                    request: &request,
+                },
+                ask,
+                super::processed_upgrade::RegistrationSource::Local(Box::new(
+                    viewer_evidence.clone(),
+                )),
+            );
         }
         if candidate_auto_policy {
             if let (Some(identity), Some(source), Some(context), Some(candidate_route)) = (

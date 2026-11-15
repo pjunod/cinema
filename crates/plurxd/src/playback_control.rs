@@ -15158,6 +15158,28 @@ pub(crate) fn processed_upgrade_count(outcome: &str) -> u64 {
         .map_or(0, |index| PROCESSED_UPGRADES[index].load(Ordering::Relaxed))
 }
 
+/// Where a processed upgrade's intent was registered from: this node's own
+/// create or successor (`local`), or another node's ingress through the
+/// start envelope's `processed_upgrade` ask (`handed_over`).
+pub(crate) const PROCESSED_UPGRADE_ORIGINS: [&str; 2] = ["local", "handed_over"];
+/// What the registration came to: left waiting for the first frame, or
+/// recorded as a named skip the client's enhancement details show.
+pub(crate) const PROCESSED_UPGRADE_REGISTRATIONS: [&str; 2] = ["registered", "skipped"];
+static PROCESSED_UPGRADE_REGISTERED: [[AtomicU64; 2]; 2] =
+    [const { [const { AtomicU64::new(0) }; 2] }; 2];
+
+/// Count one processed-upgrade registration on the node that owns the session.
+pub(crate) fn record_processed_upgrade_registration(handed_over: bool, registered: bool) {
+    PROCESSED_UPGRADE_REGISTERED[usize::from(handed_over)][usize::from(!registered)]
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn processed_upgrade_registration_count(handed_over: bool, registered: bool) -> u64 {
+    PROCESSED_UPGRADE_REGISTERED[usize::from(handed_over)][usize::from(!registered)]
+        .load(Ordering::Relaxed)
+}
+
 /// How a client's prepared switch ended at the seam, as that client reported
 /// it (`prepared_seam` beacons). Index order is [`PREPARED_SEAM_OUTCOMES`].
 pub(crate) const PREPARED_SEAM_OUTCOMES: [&str; 3] =
@@ -15694,6 +15716,18 @@ pub(crate) fn prometheus() -> String {
             "plurx_playback_preparation_processed_upgrades_total{{outcome=\"{outcome}\"}} {}\n",
             PROCESSED_UPGRADES[index].load(Ordering::Relaxed)
         ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_processed_upgrade_registrations_total Processed upgrades registered on the session's owner, by where the intent came from and outcome.\n\
+         # TYPE plurx_playback_preparation_processed_upgrade_registrations_total counter\n",
+    );
+    for (origin_index, origin) in PROCESSED_UPGRADE_ORIGINS.iter().enumerate() {
+        for (index, outcome) in PROCESSED_UPGRADE_REGISTRATIONS.iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_preparation_processed_upgrade_registrations_total{{origin=\"{origin}\",outcome=\"{outcome}\"}} {}\n",
+                PROCESSED_UPGRADE_REGISTERED[origin_index][index].load(Ordering::Relaxed)
+            ));
+        }
     }
     output.push_str(
         "# HELP plurx_playback_preparation_seams_total Prepared switches as the client reported their seam, by platform, whether the successor was processed, and outcome.\n\

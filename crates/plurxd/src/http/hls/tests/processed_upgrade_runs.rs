@@ -44,6 +44,7 @@ async fn upgrade_after_playing_to(
         network: None,
         network_prior: None,
         incumbent_receipt: None,
+        origin: super::processed_upgrade::IntentOrigin::Local,
     });
     let (intent, run) = super::processed_upgrade::take_on_first_frame(user_id, session_id)
         .expect("the session's first frame takes its upgrade");

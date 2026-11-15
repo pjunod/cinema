@@ -51,6 +51,7 @@ pub(super) fn waiting(user_id: i64) -> (String, String, String) {
         network: None,
         network_prior: None,
         incumbent_receipt: None,
+        origin: IntentOrigin::Local,
     });
     (playback, session, incarnation)
 }

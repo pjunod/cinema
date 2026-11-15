@@ -2793,7 +2793,49 @@ pub(super) async fn stage_prepared_successor_as(
             PreparationStageRefusal::PrincipalUnsupported,
         );
     };
+    // The processed upgrade an ordinary successor gets, as a create would
+    // have left it (review 3 S3): it waits for the successor's own first
+    // presented frame. The processed upgrade's own successor, and any
+    // processed successor, is already the upgrade. The upgrade's own
+    // request-only gates run where this successor's planning snapshot is in
+    // hand; a source with no Dolby Vision metadata a processed destination
+    // could use is never one. Without a snapshot the trial's own gates decide.
+    // The control exchange that asked for this successor carries no client
+    // HDR10 ask or Auto policy of its own; the successor's request is all
+    // there is.
+    let processed = staged_request.dv_processing_destination.is_some()
+        || staged_request
+            .candidate_context
+            .as_ref()
+            .is_some_and(|context| context.selected_candidate.processed_dv);
+    let applies = matches!(source.dolby_vision.profile, Some(5 | 7 | 8))
+        && staged_request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.planning_snapshot.as_deref())
+            .is_none_or(|snapshot| {
+                matches!(
+                    crate::transcode::TranscodeManager::processed_upgrade_gates(
+                        &staged_request,
+                        snapshot,
+                        staged_request.hdr10,
+                    ),
+                    Ok(Some(_))
+                )
+            });
+    let successor_ask = (!processed
+        && applies
+        && staged_request.presentation == crate::transcode::Presentation::Vod)
+        .then_some(crate::media_sessions::ProcessedUpgradeAsk {
+            hdr10_intent: staged_request.hdr10,
+            auto_policy: staged_request.automatic,
+            admitted: None,
+        });
     let staged_recipe = RemoteStartRequest {
+        // A successor another node owns is registered there, from its recipe.
+        processed_upgrade: successor_ask
+            .clone()
+            .filter(|_| successor_owner != state.node_id && predecessor.library_channel.is_none()),
         retained_output: None,
         retained_output_receiver: Some(1),
         candidate_catalog: candidate.candidate_context.as_ref().and_then(|context| {
@@ -2821,7 +2863,6 @@ pub(super) async fn stage_prepared_successor_as(
         // anything may ever take the successor over.
         typeless_playlist: predecessor.typeless_playlist,
         library_channel: predecessor.library_channel.clone(),
-        processed_upgrade: None,
         request: staged_request.clone(),
     };
     let Ok(recipe_json) = serde_json::to_string(&staged_recipe) else {
@@ -3305,57 +3346,26 @@ pub(super) async fn stage_prepared_successor_as(
                     .await;
                 }
             }
-            // A locally owned ordinary successor gets the processed upgrade a
-            // create would have left it (review 3 S3): it waits for the
-            // successor's own first presented frame, which its commit proves
-            // ([`super::processed_upgrade::note_presented`]). The processed
-            // upgrade's own successor, and any processed successor, is already
-            // the upgrade.
-            let processed = staged_request.dv_processing_destination.is_some()
-                || staged_request
-                    .candidate_context
-                    .as_ref()
-                    .is_some_and(|context| context.selected_candidate.processed_dv);
-            // The upgrade's own request-only gates, as the create runs them,
-            // where this successor's planning snapshot is in hand; a source
-            // with no Dolby Vision metadata a processed destination could use
-            // is never one. Without a snapshot the trial's own gates decide.
-            let applies = matches!(source.dolby_vision.profile, Some(5 | 7 | 8))
-                && staged_request
-                    .candidate_context
-                    .as_ref()
-                    .and_then(|context| context.planning_snapshot.as_deref())
-                    .is_none_or(|snapshot| {
-                        matches!(
-                            crate::transcode::TranscodeManager::processed_upgrade_gates(
-                                &staged_request,
-                                snapshot,
-                                staged_request.hdr10,
-                            ),
-                            Ok(Some(_))
-                        )
-                    });
-            if successor_owner == state.node_id
-                && !processed
-                && applies
-                && staged_request.presentation == crate::transcode::Presentation::Vod
-            {
-                super::processed_upgrade::register(super::processed_upgrade::UpgradeIntent {
-                    user_id: local_user_id,
-                    playback_id: active.preparation.playback_id.clone(),
-                    session_id: active.preparation.session_id.clone(),
-                    incarnation_id: active.preparation.incarnation_id.clone(),
-                    request: staged_request.clone(),
-                    hdr10_intent: staged_request.hdr10,
-                    auto_policy: staged_request.automatic,
-                    // The control exchange that asked for this successor
-                    // carries no network identity or link receipt; recovery
-                    // and link admission read none, as for a start without
-                    // them.
-                    network: None,
-                    network_prior: None,
-                    incumbent_receipt: None,
-                });
+            // A locally owned ordinary successor's upgrade waits for its
+            // commit, which proves its first presented frame
+            // ([`super::processed_upgrade::note_presented`]). The control
+            // exchange that asked for it carries no network identity or link
+            // receipt; recovery and link admission read none, as for a start
+            // without them.
+            if successor_owner == state.node_id {
+                if let Some(ask) = successor_ask.as_ref() {
+                    super::processed_upgrade::register_owned(
+                        super::processed_upgrade::OwnedSession {
+                            user_id: local_user_id,
+                            playback_id: &active.preparation.playback_id,
+                            session_id: &active.preparation.session_id,
+                            incarnation_id: &active.preparation.incarnation_id,
+                            request: &staged_request,
+                        },
+                        ask,
+                        super::processed_upgrade::RegistrationSource::Local(Box::default()),
+                    );
+                }
             }
             trace_auto_preparation_stage(candidate, "activated");
             crate::playback_control::record_preparation_staged(true);

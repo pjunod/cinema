@@ -3,8 +3,11 @@
 //! Plan ruling 3 (Paul, 2026-11-07): processed output is never work before the
 //! viewer's first frame. A create resolves the ordinary plan only; when that
 //! plan could be processed it leaves an [`UpgradeIntent`] here, on the node
-//! that owns the session, and so does the activation of a locally owned
-//! ordinary prepared successor. The first proof that the viewer is presenting
+//! that owns the session, and so does the activation of an ordinary prepared
+//! successor. Every intent is built by [`register_owned`]: for a start or
+//! successor this node placed on itself, and for one another node's ingress
+//! placed here, from the start envelope's `processed_upgrade` ask
+//! ([`crate::media_sessions::ProcessedUpgradeAsk`]). The first proof that the viewer is presenting
 //! the session takes the intent and runs one bounded trial: its `ttff`
 //! beacon, an accepted rendering control exchange from its own generation
 //! (the only proof for a resume or a stall recovery, which send no `ttff`),
@@ -49,13 +52,166 @@ pub(in crate::http) struct UpgradeIntent {
     pub(in crate::http) incarnation_id: String,
     /// The ordinary request the session was started with, including its
     /// process-private candidate context (catalog query, canonical caps,
-    /// planning binding), which no durable reconstruction can restore.
+    /// planning binding, snapshot). The context is not serialized: a local
+    /// create holds it from its own planning, and a remote owner holds it
+    /// because its start handler restored it from the envelope before the
+    /// worker started. Only a takeover from the bare durable recipe would
+    /// have to derive it again, and a takeover registers no upgrade.
     pub(in crate::http) request: crate::transcode::SessionRequest,
     pub(in crate::http) hdr10_intent: bool,
     pub(in crate::http) auto_policy: bool,
     pub(in crate::http) network: Option<crate::telemetry::NetworkIdentity>,
     pub(in crate::http) network_prior: Option<plurx_core::domain::NetworkPrior>,
     pub(in crate::http) incumbent_receipt: Option<String>,
+    pub(in crate::http) origin: IntentOrigin,
+}
+
+/// Where an intent's admission facts come from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::http) enum IntentOrigin {
+    /// This node answered the viewer (its create) or staged the successor,
+    /// and holds whatever viewer evidence there is.
+    Local,
+    /// Another node's ingress placed the session here and handed the upgrade
+    /// over in the envelope. There is no network identity on this node, so
+    /// Auto stages only the recipe that ingress admitted.
+    HandedOver {
+        admitted: Option<crate::media_sessions::AdmittedProcessedRecipe>,
+    },
+}
+
+/// What only the node that answered the viewer holds. Credential-derived, so
+/// it never crosses a node: a handed-over intent has none.
+#[derive(Clone, Default)]
+pub(in crate::http) struct ViewerEvidence {
+    pub(in crate::http) network: Option<crate::telemetry::NetworkIdentity>,
+    pub(in crate::http) network_prior: Option<plurx_core::domain::NetworkPrior>,
+    pub(in crate::http) incumbent_receipt: Option<String>,
+}
+
+/// The session a registration is for, on the node that owns it.
+pub(in crate::http) struct OwnedSession<'a> {
+    pub(in crate::http) user_id: i64,
+    pub(in crate::http) playback_id: &'a str,
+    pub(in crate::http) session_id: &'a str,
+    pub(in crate::http) incarnation_id: &'a str,
+    pub(in crate::http) request: &'a crate::transcode::SessionRequest,
+}
+
+/// Who is registering: the node that answered the viewer, with its evidence,
+/// or the owner of a start another node's ingress handed over.
+pub(in crate::http) enum RegistrationSource {
+    Local(Box<ViewerEvidence>),
+    HandedOver,
+}
+
+/// What a registration came to.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::http) enum Registration {
+    /// Waiting for the session's first presented frame.
+    Waiting,
+    /// Recorded as a named skip the client's enhancement details show.
+    Skipped(&'static str),
+    /// The registry is full; nothing was recorded.
+    Full,
+}
+
+/// Skip reason: the owner of a handed-over start could not restore the
+/// candidate context the trial plans from.
+pub(in crate::http) const HANDED_OVER_WITHOUT_CONTEXT: &str =
+    "the node serving this session could not restore the candidate context a processed upgrade plans from";
+/// Skip reason: Auto on a remote owner, and the ingress admitted no recipe.
+pub(in crate::http) const HANDED_OVER_AUTO_UNADMITTED: &str =
+    "Auto on another node stages only a processed recipe the ingress admitted for this viewer's link, and none was admitted";
+/// Skip reason: the trial on a remote owner froze another recipe than the
+/// one its ingress admitted for Auto.
+pub(in crate::http) const HANDED_OVER_AUTO_RECIPE_CHANGED: &str =
+    "the processed trial froze a recipe other than the one the ingress admitted for Auto";
+
+/// The one intent builder. Every registration goes through here: a local
+/// create, a locally owned prepared successor, and the owner of a start or a
+/// successor another node placed here. `ask` is what the ingress decided
+/// (or, for a successor, what its stage decided) and `source` says whose
+/// evidence the admission may read.
+pub(in crate::http) fn register_owned(
+    session: OwnedSession<'_>,
+    ask: &crate::media_sessions::ProcessedUpgradeAsk,
+    source: RegistrationSource,
+) -> Registration {
+    let handed_over = matches!(source, RegistrationSource::HandedOver);
+    let skip = match source {
+        RegistrationSource::HandedOver if session.request.candidate_context.is_none() => {
+            Some(HANDED_OVER_WITHOUT_CONTEXT)
+        }
+        RegistrationSource::HandedOver if ask.auto_policy && ask.admitted.is_none() => {
+            Some(HANDED_OVER_AUTO_UNADMITTED)
+        }
+        _ => None,
+    };
+    let log_session = crate::transcode::session_log_id(session.session_id);
+    if let Some(reason) = skip {
+        tracing::info!(target: "plurxd::http::hls", session = %log_session, handed_over,
+            reason, "processed upgrade not registered on this owner; the ordinary session is unchanged");
+        record_skipped(
+            session.session_id,
+            session.playback_id,
+            session.incarnation_id,
+            reason,
+        );
+        crate::playback_control::record_processed_upgrade_registration(handed_over, false);
+        return Registration::Skipped(reason);
+    }
+    let (evidence, origin) = match source {
+        RegistrationSource::Local(evidence) => (*evidence, IntentOrigin::Local),
+        RegistrationSource::HandedOver => (
+            ViewerEvidence::default(),
+            IntentOrigin::HandedOver {
+                admitted: ask.admitted.clone(),
+            },
+        ),
+    };
+    let registered = register(UpgradeIntent {
+        user_id: session.user_id,
+        playback_id: session.playback_id.to_owned(),
+        session_id: session.session_id.to_owned(),
+        incarnation_id: session.incarnation_id.to_owned(),
+        request: session.request.clone(),
+        hdr10_intent: ask.hdr10_intent,
+        auto_policy: ask.auto_policy,
+        network: evidence.network,
+        network_prior: evidence.network_prior,
+        incumbent_receipt: evidence.incumbent_receipt,
+        origin,
+    });
+    if !registered {
+        return Registration::Full;
+    }
+    tracing::info!(target: "plurxd::http::hls", session = %log_session, handed_over,
+        auto_policy = ask.auto_policy, admitted = ask.admitted.is_some(),
+        "processed upgrade registered; it waits for the session's first presented frame");
+    crate::playback_control::record_processed_upgrade_registration(handed_over, true);
+    Registration::Waiting
+}
+
+/// Leave a named skip for `session_id`'s generation, so the client's
+/// enhancement details say why it was not upgraded.
+fn record_skipped(session_id: &str, playback_id: &str, generation: &str, reason: &str) {
+    let mut entries = lock();
+    prune(&mut entries, std::time::Instant::now());
+    if entries.len() >= MAX_INTENTS {
+        return;
+    }
+    entries.insert(
+        session_id.to_owned(),
+        Entry::Skipped {
+            playback_id: playback_id.to_owned(),
+            report: ProcessingSkip {
+                generation: generation.to_owned(),
+                reason: reason.to_owned(),
+            },
+            recorded: std::time::Instant::now(),
+        },
+    );
 }
 
 enum Entry {
@@ -167,10 +323,7 @@ pub(in crate::http) fn processing_skip(session: &str, generation: &str) -> Optio
 
 static NEXT_CLAIM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Leave an upgrade waiting for `intent.session_id`'s first frame.
-pub(in crate::http) fn register(intent: UpgradeIntent) {
-    let now = std::time::Instant::now();
-    let mut entries = lock();
+fn prune(entries: &mut std::collections::HashMap<String, Entry>, now: std::time::Instant) {
     entries.retain(|_, entry| match entry {
         Entry::Waiting { registered, .. } => now.duration_since(*registered) < FIRST_FRAME_WINDOW,
         Entry::AwaitingQualification(wait) => wait.recorded.elapsed() < qualification::RETENTION,
@@ -179,8 +332,16 @@ pub(in crate::http) fn register(intent: UpgradeIntent) {
         }
         Entry::Running { .. } => true,
     });
+}
+
+/// Leave an upgrade waiting for `intent.session_id`'s first frame. False when
+/// the registry is full. Callers outside tests go through [`register_owned`].
+pub(in crate::http) fn register(intent: UpgradeIntent) -> bool {
+    let now = std::time::Instant::now();
+    let mut entries = lock();
+    prune(&mut entries, now);
     if entries.len() >= MAX_INTENTS {
-        return;
+        return false;
     }
     entries.insert(
         intent.session_id.clone(),
@@ -189,6 +350,7 @@ pub(in crate::http) fn register(intent: UpgradeIntent) {
             registered: now,
         },
     );
+    true
 }
 
 /// A first frame was reported for `session_id` by `user_id`. Returns the
@@ -429,6 +591,14 @@ pub(in crate::http) fn is_waiting(session_id: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(in crate::http) fn waiting_intent(session_id: &str) -> Option<UpgradeIntent> {
+    match lock().get(session_id) {
+        Some(Entry::Waiting { intent, .. }) => Some((**intent).clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 pub(in crate::http) fn is_running(session_id: &str) -> bool {
     matches!(lock().get(session_id), Some(Entry::Running { .. }))
 }
@@ -605,17 +775,28 @@ pub(in crate::http) fn projected_processed_candidate(
     intent: &UpgradeIntent,
     source: &plurx_core::domain::MediaFile,
 ) -> Option<plurx_core::playback::candidate::QualityCandidate> {
-    let ordinary = intent.request.candidate_context.as_ref()?;
+    processed_row_on(&intent.request, source, &state.node_id)
+}
+
+/// `node_id`'s processed row of `request`'s catalog at the height the trial
+/// renders, when that node has described one. The owner reads its own row
+/// before its trial; an ingress reads the chosen owner's row to admit Auto's
+/// recipe before it hands the upgrade over.
+pub(in crate::http) fn processed_row_on(
+    request: &crate::transcode::SessionRequest,
+    source: &plurx_core::domain::MediaFile,
+    node_id: &str,
+) -> Option<plurx_core::playback::candidate::QualityCandidate> {
+    let ordinary = request.candidate_context.as_ref()?;
     let source_height = source.height.filter(|height| *height > 0)?;
     let height = source_height.min(i64::from(ordinary.selected_candidate.target_height)) & !1;
-    intent
-        .request
+    request
         .quality_catalog
         .as_deref()?
         .candidates
         .iter()
         .find(|entry| {
-            entry.node_id == state.node_id
+            entry.node_id == node_id
                 && entry.candidate.processed_dv
                 && i64::from(entry.candidate.target_height) == height
         })
@@ -1215,27 +1396,58 @@ async fn admit_processed_candidate(
     if !intent.auto_policy {
         return Ok(recovered);
     }
+    // A handed-over Auto upgrade has no viewer link evidence on this node:
+    // the ingress read it, for one recipe, and only that recipe is admitted.
+    if let IntentOrigin::HandedOver { admitted } = &intent.origin {
+        return handed_over_auto_admission(admitted.as_ref(), candidate).map(|()| recovered);
+    }
+    let linked = auto_link_admission(
+        state,
+        network,
+        intent.network_prior.as_ref(),
+        intent.incumbent_receipt.as_deref(),
+        &intent.playback_id,
+        source,
+        candidate,
+        stage,
+        advisory,
+    )
+    .await?;
+    Ok(match (recovered, linked) {
+        (Admission::Proven, Admission::Proven) => Admission::Proven,
+        _ => Admission::Unproven,
+    })
+}
+
+/// Auto's link admission of one processed recipe for one viewer: the link
+/// memory for its bitrate, the network prior's measured starvation, and the
+/// incumbent's positive receipt.
+#[allow(clippy::too_many_arguments)]
+async fn auto_link_admission(
+    state: &AppState,
+    network: Option<&crate::telemetry::NetworkIdentity>,
+    network_prior: Option<&plurx_core::domain::NetworkPrior>,
+    incumbent_receipt: Option<&str>,
+    playback_id: &str,
+    source: &plurx_core::domain::MediaFile,
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+    stage: AdmissionStage,
+    advisory: tokio::time::Instant,
+) -> Result<Admission, String> {
     let evidence = super::link_receipts::processed_candidate_link_evidence(
         state, network, source, candidate, advisory,
     )
     .await;
-    let admission = match (recovered, link_admission(evidence, stage)?) {
-        (Admission::Proven, Admission::Proven) => Admission::Proven,
-        _ => Admission::Unproven,
-    };
+    let admission = link_admission(evidence, stage)?;
     let mut admitted = vec![candidate.clone()];
-    admitted = super::link_receipts::link_starved_catalog(
-        intent.network_prior.as_ref(),
-        admitted,
-        unix_ms(),
-    );
-    if let Some(receipt) = intent.incumbent_receipt.as_deref() {
+    admitted = super::link_receipts::link_starved_catalog(network_prior, admitted, unix_ms());
+    if let Some(receipt) = incumbent_receipt {
         admitted = super::link_receipts::positive_catalog(
             state,
             network,
             source,
             Some(receipt),
-            Some(&intent.playback_id),
+            Some(playback_id),
             admitted,
             None,
             advisory,
@@ -1250,6 +1462,50 @@ async fn admit_processed_candidate(
         Ok(admission)
     } else {
         Err("Auto's link evidence for this playback does not admit the processed candidate's bitrate".into())
+    }
+}
+
+/// The ingress's half of a handed-over Auto upgrade: admit `owner`'s
+/// processed row against this viewer's link, as the last word, because the
+/// owner has no link evidence to read after its trial. A row the owner has
+/// not described yet, an unreadable link memory or a refusal admits nothing,
+/// and the owner records the named skip. Reads share the create's one
+/// advisory deadline.
+pub(in crate::http) async fn admit_for_owner(
+    state: &AppState,
+    evidence: &ViewerEvidence,
+    request: &crate::transcode::SessionRequest,
+    source: &plurx_core::domain::MediaFile,
+    owner: &str,
+) -> Result<crate::media_sessions::AdmittedProcessedRecipe, String> {
+    let Some(row) = processed_row_on(request, source, owner) else {
+        return Err("the owner has not described a processed recipe for this query yet".into());
+    };
+    auto_link_admission(
+        state,
+        evidence.network.as_ref(),
+        evidence.network_prior.as_ref(),
+        evidence.incumbent_receipt.as_deref(),
+        &request.playback_id,
+        source,
+        &row,
+        AdmissionStage::AfterTrial,
+        super::link_receipts::advisory_deadline(),
+    )
+    .await?;
+    Ok(crate::media_sessions::AdmittedProcessedRecipe::of(&row))
+}
+
+/// Auto on a remote owner: exactly the recipe the ingress admitted, or a
+/// named refusal.
+pub(in crate::http) fn handed_over_auto_admission(
+    admitted: Option<&crate::media_sessions::AdmittedProcessedRecipe>,
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> Result<(), String> {
+    match admitted {
+        None => Err(HANDED_OVER_AUTO_UNADMITTED.to_owned()),
+        Some(admitted) if admitted.matches(candidate) => Ok(()),
+        Some(_) => Err(HANDED_OVER_AUTO_RECIPE_CHANGED.to_owned()),
     }
 }
 

@@ -388,6 +388,25 @@ pub(crate) async fn start(
                     "the node lost authority before remote activation confirmation",
                 ));
             }
+            // The ingress found a processed upgrade applies and placed the
+            // session here: register it from the request this handler
+            // restored, the context the trial plans from. A replayed start
+            // registered when it was created, and may be running it now.
+            if created {
+                if let Some(ask) = request.processed_upgrade.as_ref() {
+                    super::hls::processed_upgrade::register_owned(
+                        super::hls::processed_upgrade::OwnedSession {
+                            user_id,
+                            playback_id: &request.request.playback_id,
+                            session_id: &info.session_id,
+                            incarnation_id: &request.incarnation_id,
+                            request: &request.request,
+                        },
+                        ask,
+                        super::hls::processed_upgrade::RegistrationSource::HandedOver,
+                    );
+                }
+            }
             let mut response = RemoteStartResponse::from(info);
             if negotiated_ownership {
                 response.activation_generation = Some(admitted_serving_generation);
@@ -465,7 +484,10 @@ pub(crate) async fn start(
                     }
                 }
                 // Dropping the armed guard performs exact local cleanup and
-                // releases the replacement gate after an unconfirmed outcome.
+                // releases the replacement gate after an unconfirmed outcome;
+                // an upgrade registered for the start that never activated
+                // goes with it.
+                super::hls::processed_upgrade::cancel_for_session(&confirmation_session);
             });
             Ok::<(RemoteStartResponse, bool), String>((response, created))
         }
@@ -709,6 +731,34 @@ pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response
         .await
         && authority.is_current(admitted_generation)
     {
+        // An ordinary successor the origin placed here carries its processed
+        // upgrade in its recipe. Its context is restored off the prime's
+        // answer: the upgrade waits for the successor's first presented
+        // frame, which is after its commit.
+        if let Some(ask) = recipe.processed_upgrade.clone() {
+            let mut recipe = recipe;
+            let session_id = request.session_id.clone();
+            let playback_id = route.playback_id.clone();
+            tokio::spawn(async move {
+                // An unrestorable context is not an error here: the
+                // registration records it as the named skip.
+                let _ = state
+                    .transcode
+                    .restore_candidate_context_with_deadline(&mut recipe, deadline, None)
+                    .await;
+                super::hls::processed_upgrade::register_owned(
+                    super::hls::processed_upgrade::OwnedSession {
+                        user_id,
+                        playback_id: &playback_id,
+                        session_id: &session_id,
+                        incarnation_id: &recipe.incarnation_id,
+                        request: &recipe.request,
+                    },
+                    &ask,
+                    super::hls::processed_upgrade::RegistrationSource::HandedOver,
+                );
+            });
+        }
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::SERVICE_UNAVAILABLE.into_response()

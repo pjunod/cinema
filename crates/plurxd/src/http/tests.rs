@@ -10688,6 +10688,7 @@ async fn a_ttff_client_log_schedules_only_the_named_sessions_upgrade() {
             network: None,
             network_prior: None,
             incumbent_receipt: None,
+            origin: crate::http::hls::processed_upgrade::IntentOrigin::Local,
         });
         session
     };

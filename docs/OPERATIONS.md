@@ -6085,10 +6085,10 @@ playback's preparation slot, a release, a newer session — leaves the ordinary
 session playing untouched. A create that names a processed candidate (a reopen
 of a processed session), and a viewer who picks the processed rung on an
 ordinary session, get the ordinary rung it enhances, and are upgraded after
-that session's first frame. An ordinary prepared successor this node owns is
-upgraded the same way once committed (the commit proves the successor's
-frame). A start the ingress placed on another node is not upgraded: its owner
-lacks the create's catalog scope.
+that session's first frame; a prepared successor, once committed. A start or
+successor placed on another node carries a `processed_upgrade` ask its owner
+registers (Auto: only the ingress-admitted recipe), counted in
+`plurx_playback_preparation_processed_upgrade_registrations_total{origin,outcome}`.
 
 `plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
 upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
