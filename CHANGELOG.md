@@ -18,6 +18,11 @@ bump may break compatibility and a **patch** bump never does.
 - Android reports its playhead in title time for streams that began at a
   resume point, so a processed HDR upgrade starts where the viewer is instead
   of minutes behind them.
+- Signed node-to-node requests (`PeerTransport`) reuse connections: the membership manager owns
+  one pooled client with a two-second connect bound, and every peer transport takes it. Before, each of about twenty
+  call sites built its own client — the peer-status loop a new one every three seconds — so
+  requests redialled, and a peer that dropped packets consumed the caller's whole deadline
+  (cluster layer audit, item A5).
 - One stopped, slow or rate-limited voter no longer revokes the shared
   playback cache on every healthy node. The 30 s mount canary now admits the
   shared root when a majority of voters (counting this node when it is one)
