@@ -21,6 +21,7 @@ class FixtureListenerIsolationTests(unittest.TestCase):
             # Stop at the first boot: inspect exactly the config the daemon gets,
             # without invoking ffmpeg, compiling, or mutating any database.
             with patch.dict(fixture.start.__globals__, {"generate_media": lambda *_: None}), \
+                    patch.object(fixture, "server_bin", return_value=Path('test-plurxd')), \
                     patch.object(fixture, "spawn", side_effect=InterruptedError):
                 with self.assertRaises(InterruptedError):
                     fixture.start()
