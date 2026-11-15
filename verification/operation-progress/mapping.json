@@ -255,13 +255,13 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "68c6579c62f2ce47f01b9fabf7270c33ed061dfafb10c2c15e5afd769b80c752"
+        "sha256": "db1ad2b4dfeb79fbd5984832518cc47e880a8ac1240ec51f5e1712121bcc0cb4"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "68c6579c62f2ce47f01b9fabf7270c33ed061dfafb10c2c15e5afd769b80c752"
+        "sha256": "db1ad2b4dfeb79fbd5984832518cc47e880a8ac1240ec51f5e1712121bcc0cb4"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
@@ -345,7 +345,7 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "c20cd4961bbef84d7d67b889bfbf0912f30c2b613864baf84c8d5d1a674b42fb"
+        "sha256": "992c47217a0905d632e406e1b6f831bc4e0d9c3bdd3287da33d9b4fb10c328fc"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
