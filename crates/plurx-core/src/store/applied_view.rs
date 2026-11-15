@@ -77,8 +77,18 @@ use super::HiqliteAuthStore;
 use crate::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 
 /// Tables this node's applied mark counts, one revision each. Production
-/// registers exactly these (`production_hiqlite_defaults_with_read_pool`).
-pub const APPLIED_VIEW_TABLES: &[&str] = &["settings", "media_sessions"];
+/// registers exactly these (`production_hiqlite_defaults_with_read_pool`):
+/// the two stamped views below, then the four roster tables of the peer
+/// directory (`cluster::membership::directory::ROSTER_TABLES`). Six of the
+/// mark's eight slots; a seventh table needs the mark widened first.
+pub const APPLIED_VIEW_TABLES: &[&str] = &[
+    "settings",
+    "media_sessions",
+    "cluster_nodes",
+    "cluster_node_http",
+    "cluster_node_removals",
+    "cluster_node_progress",
+];
 
 /// One applied view, by the table it reads (and whose floor it keeps).
 ///
@@ -96,8 +106,8 @@ pub enum AppliedTable {
 impl AppliedTable {
     pub const ALL: [Self; 3] = [Self::Settings, Self::MediaSessions, Self::Files];
     /// The views whose answers are stamped by a table revision of the
-    /// applied mark: exactly the tables production registers
-    /// ([`APPLIED_VIEW_TABLES`]).
+    /// applied mark: the first two tables production registers
+    /// ([`APPLIED_VIEW_TABLES`]); the rest belong to the peer directory.
     pub const STAMPED: [Self; 2] = [Self::Settings, Self::MediaSessions];
 
     /// The replicated table behind this view.

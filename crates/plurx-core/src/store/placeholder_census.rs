@@ -3455,9 +3455,62 @@ fn production() { let _ = "SELECT $1 FROM b"; }
 /// applied as written (PLAYBACK-START-E1-BUILD.md §4.1).
 #[test]
 fn applied_view_tables_never_escape_the_update_hook() {
+    let (scanned, offenders) =
+        update_hook_offenders(STORE_SOURCES.iter().chain(SHARED_CONSTANT_SOURCES));
+    assert!(
+        scanned > 0,
+        "the census found no DELETE on an applied-view table; it is not looking"
+    );
+    assert_eq!(offenders, Vec::<String>::new());
+}
+
+/// The membership sources that write the peer directory's roster tables
+/// (`cluster::membership::directory`), read for the same two hazards as the
+/// store: an unqualified `DELETE` or a `WITHOUT ROWID` table would change the
+/// roster without moving its revision, and the directory would keep
+/// answering from a snapshot the replica no longer matches.
+const MEMBERSHIP_SOURCES: &[(&str, &str)] = &[
+    (
+        "../cluster/membership.rs",
+        include_str!("../cluster/membership.rs"),
+    ),
+    (
+        "../cluster/membership/directory.rs",
+        include_str!("../cluster/membership/directory.rs"),
+    ),
+    (
+        "../cluster/membership/lifecycle.rs",
+        include_str!("../cluster/membership/lifecycle.rs"),
+    ),
+    (
+        "../cluster/membership/sharing_source_schema.rs",
+        include_str!("../cluster/membership/sharing_source_schema.rs"),
+    ),
+    (
+        "../cluster/migration.rs",
+        include_str!("../cluster/migration.rs"),
+    ),
+];
+
+#[test]
+fn roster_tables_never_escape_the_update_hook_in_membership() {
+    let (scanned, offenders) = update_hook_offenders(MEMBERSHIP_SOURCES.iter());
+    assert!(
+        scanned > 0,
+        "the census found no DELETE on a roster table in membership; it is not looking"
+    );
+    assert_eq!(offenders, Vec::<String>::new());
+}
+
+/// Every statement literal in `sources` that would change an applied-mark
+/// table without the update hook seeing it, and how many `DELETE`s on those
+/// tables it judged.
+fn update_hook_offenders<'a>(
+    sources: impl Iterator<Item = &'a (&'a str, &'a str)>,
+) -> (usize, Vec<String>) {
     let mut offenders = Vec::new();
     let mut scanned = 0_usize;
-    for (name, source) in STORE_SOURCES.iter().chain(SHARED_CONSTANT_SOURCES) {
+    for (name, source) in sources {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         for literal in &literals {
@@ -3526,9 +3579,5 @@ fn applied_view_tables_never_escape_the_update_hook() {
             }
         }
     }
-    assert!(
-        scanned > 0,
-        "the census found no DELETE on an applied-view table; it is not looking"
-    );
-    assert_eq!(offenders, Vec::<String>::new());
+    (scanned, offenders)
 }
