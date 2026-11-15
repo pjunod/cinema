@@ -1,8 +1,8 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-eight patches for clustered deployments. An
-upstream release can retire the nine generic bugs and the one dependency-only
+Apache-2.0. Plurx carries twenty-nine patches for clustered deployments. An
+upstream release can retire the ten generic bugs and the one dependency-only
 constraint; it cannot retire the eighteen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -39,6 +39,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
 | 27 | Applied mark: registered-table revisions, applied index and image generation, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
+| 29 | Keep the SQLite writer alive when a reply's receiver is gone | generic bug | pending M6 | Upstream release delivers every writer reply without panicking when a cancelled Raft apply or a teardown has dropped its receiver. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -507,8 +508,51 @@ upstream maintainer disposition or the whole drop condition. The original
 patch description remains the historical/local contract; row 19 stays
 `generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
 
+- The SQLite writer no longer panics when the requester of a reply has
+  stopped waiting. Upstream sends every reply with
+  `.expect("oneshot tx to never be dropped")` (thirteen sites across
+  `Execute`, `ExecuteReturning`, `Transaction` and `Batch`) or `.unwrap()`
+  (`Migrate`, the metadata read, the membership update and the RTT probe),
+  and `.expect`s the shutdown acknowledgement. Every applying request comes
+  from the state machine's `apply`, which waits for its reply without a
+  bound, so a receiver is gone only when that Raft apply was cancelled or
+  torn down (the Raft core stopping, the runtime shutting down, a startup
+  cleanup aborting); no caller timeout reaches the writer. The reply then
+  panicked the writer thread: every later write on that node failed until
+  the process restarted, and the panic skipped the metadata persist and the
+  lock-file removal, so the next start rebuilt the database. All applying
+  replies now go through `send_reply`, which tolerates a closed receiver,
+  logs it at `warn` with the request kind, the applied log index and the
+  abandoned result's error text if it was one (several arms report a failed
+  statement, commit or migration only in the reply), and counts it by
+  request and outcome in `db_writer_abandoned_replies`, which plurxd renders
+  as `plurx_hiqlite_writer_abandoned_replies_total`. The metadata read
+  applies nothing and stays at `debug`, uncounted. `publish_then_send`
+  returns nothing, so no arm can make delivery a condition of the writer
+  staying alive. Nothing else changes: the commit or rollback has already
+  happened when the reply is sent and stays authoritative, the applied mark
+  is still published before the reply, and nothing is retried. Real-writer
+  tests abandon a transaction's success and constraint-error replies
+  (`dropped_transaction_success_reply_preserves_commit_and_writer`,
+  `dropped_transaction_error_reply_preserves_rollback_and_writer`); the
+  success and common error replies of `Execute`, `ExecuteReturning` and
+  `Batch`, a successful `Migrate`, the membership update, the applied
+  marker, the RTT probe and the metadata read
+  (`dropped_reply_on_other_arms_preserves_the_write_and_writer`); a failed
+  migration and a failed commit
+  (`dropped_migrate_and_commit_failure_replies_preserve_rollback_and_writer`);
+  and the shutdown acknowledgement
+  (`dropped_shutdown_reply_still_persists_metadata_and_releases_the_lock`).
+  Each reads the rows and the applied-log metadata back from the database
+  file. Parameter-bind errors, the `ExecuteReturning` column-mapping error, a
+  failed transaction open, `SnapshotApply` and `Backup` are held only by the
+  source pin in `every_applying_reply_publishes_first`. The same repair in
+  the WAL writer is `hiqlite-wal` row 7. First written for the transaction
+  arm in `f39353af2` and `8e2a8cb64` (#1261).
+  Files: `src/store/state_machine/sqlite/writer.rs`, `src/lib.rs`.
+
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 28: the
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28 and 29: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
 (rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25 and 27) still needs a patch. Their
