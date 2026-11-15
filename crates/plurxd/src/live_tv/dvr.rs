@@ -1560,16 +1560,19 @@ impl LiveTvManager {
         let mut last_retention = 0_i64;
         loop {
             // The applied view says whether this node records (Live TV and
-            // recording both on, A4). Only that case pays the Store's read,
-            // and the tick acts on the Store's answer; the other branches
-            // close what this process holds, and finalization re-reads the
-            // Store before it writes.
+            // recording both on, A4). Only that case, or a node that holds a
+            // transport, pays the Store's read, and the tick acts on the
+            // Store's answer: a view that has not applied an enable saved
+            // elsewhere must not close a transport or a capture started
+            // under it. A node holding nothing has nothing to close, and
+            // finalization re-reads the Store before it writes.
             let configs =
                 match crate::live_tv::viewed_configs(&self.applied_view(), &self.node_id).await {
                     Ok((live_tv, dvr))
-                        if live_tv.owner_node_id == self.node_id
+                        if (live_tv.owner_node_id == self.node_id
                             && live_tv.enabled
-                            && dvr.enabled =>
+                            && dvr.enabled)
+                            || self.holds_transports() =>
                     {
                         self.dvr_configs().await
                     }
@@ -2984,6 +2987,16 @@ impl LiveTvManager {
         // the orphan sweeper's once this transport is out of the registry.
         let _ = tokio::fs::remove_dir_all(&transport.scratch).await;
         transport.closed.cancel();
+    }
+
+    /// Whether this process holds any transport (and so any capture).
+    fn holds_transports(&self) -> bool {
+        !self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transports
+            .is_empty()
     }
 
     pub(crate) async fn close_all_transports(&self) {
