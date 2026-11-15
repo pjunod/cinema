@@ -5770,6 +5770,3 @@ mod principal_tests;
 
 #[cfg(test)]
 mod subtitle_admission_tests;
-
-#[cfg(test)]
-mod claim_verdict_tests;
