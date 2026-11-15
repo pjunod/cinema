@@ -77,7 +77,9 @@ BUILD_SPECS = {
     # fast-rust-gate/paperwork-fix targets and offload web-test registration.
     # Recipe changes still require review; project-counter normalization below
     # does not authorize different recipe bytes or transfer native passes.
-    'Makefile': '297cf73d69babf7880ffad1359cd5d71b07f1ec223aaf9e501fe758b03636758',
+    # PR #1586 adds only the web curator-login-browser-check target (Playwright,
+    # same shape as web-shared-library-browser-check); no native recipe changes.
+    'Makefile': 'c63fd67ea3e131a1ff4ce7371906ba718162710b969a3adf8cb84df94ee38257',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag
