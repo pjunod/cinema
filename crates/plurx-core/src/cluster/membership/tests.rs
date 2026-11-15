@@ -10279,6 +10279,249 @@ fn media_route_directory_excludes_learners_when_the_route_requires_a_voter() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn shutdown_handoff_without_a_replicated_store_returns_at_once() {
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        MembershipManager::unavailable()
+            .handoff_for_shutdown()
+            .await,
+        super::ShutdownHandoff::NotReplicated,
+        "a node without Raft has no leadership to move"
+    );
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "a node without Raft must not wait at all before it drains"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_handoff_wait_is_bounded() {
+    use super::{bounded_shutdown_handoff, ShutdownHandoff, SHUTDOWN_HANDOFF_WAIT};
+
+    assert_eq!(
+        SHUTDOWN_HANDOFF_WAIT,
+        Duration::from_secs(10),
+        "the survivor wait plus the trigger's and one probe round's second each"
+    );
+    let started = tokio::time::Instant::now();
+    let (outcome, error) = tokio::time::timeout(
+        SHUTDOWN_HANDOFF_WAIT + Duration::from_secs(1),
+        bounded_shutdown_handoff(std::future::pending()),
+    )
+    .await
+    .expect("an attempt that never finishes must end at the handoff's own bound");
+    assert_eq!(outcome, ShutdownHandoff::TimedOut);
+    assert!(error.is_none());
+    assert_eq!(
+        started.elapsed(),
+        SHUTDOWN_HANDOFF_WAIT,
+        "the stop waits exactly the one bound"
+    );
+
+    assert_eq!(
+        bounded_shutdown_handoff(async { Ok(7) }).await.0,
+        ShutdownHandoff::HandedOff { successor: 7 }
+    );
+    assert_eq!(
+        bounded_shutdown_handoff(async { Err(MembershipError::ElectionCandidateUnavailable) })
+            .await
+            .0,
+        ShutdownHandoff::NoCandidate
+    );
+    let (failed, error) = bounded_shutdown_handoff(async {
+        Err(MembershipError::Internal(
+            "leadership did not move".to_owned(),
+        ))
+    })
+    .await;
+    assert_eq!(failed, ShutdownHandoff::Failed);
+    assert!(
+        error.is_some(),
+        "a failure keeps its error for the log line"
+    );
+    for (outcome, settled) in [
+        (ShutdownHandoff::NotReplicated, true),
+        (ShutdownHandoff::NotLeader, true),
+        (ShutdownHandoff::SoleVoter, true),
+        (ShutdownHandoff::HandedOff { successor: 2 }, true),
+        (ShutdownHandoff::NoCandidate, false),
+        (ShutdownHandoff::TimedOut, false),
+        (ShutdownHandoff::Failed, false),
+    ] {
+        assert_eq!(outcome.settled(), settled, "{outcome:?}");
+    }
+}
+
+#[test]
+fn shutdown_handoff_reuses_the_one_handoff_and_writes_nothing() {
+    let source = include_str!("../membership.rs");
+    let entry = method_body(source, "pub async fn handoff_for_shutdown(");
+    let outcome = method_body(source, "async fn shutdown_handoff_outcome(");
+    assert!(entry.contains("self.shutdown_handoff_outcome().await"));
+    let disable = outcome
+        .find("inner.client.disable_local_db_elections()")
+        .expect("every replicated stopping node switches its own elections off");
+    let leader = outcome
+        .find("metrics.current_leader != Some(inner.identity.raft_id)")
+        .expect("a non-leader returns without touching the network");
+    let sole = outcome
+        .find("voter_ids().count() <= 1")
+        .expect("a sole voter returns without touching the network");
+    let bounded = outcome
+        .find("bounded_shutdown_handoff(")
+        .expect("the handoff runs under the one bound");
+    let handoff = outcome
+        .find("self.handoff_leadership(inner.identity.raft_id, &status)")
+        .expect("the stop reuses the one existing handoff");
+    assert!(
+        disable < leader && leader < sole && sole < bounded && bounded < handoff,
+        "switch elections off first, then the local checks, then the bounded handoff"
+    );
+    assert_eq!(outcome.matches("handoff_leadership(").count(), 1);
+    assert!(
+        !outcome.contains("trigger_election("),
+        "no second election path"
+    );
+    let mut bodies = vec![entry, outcome];
+    for signature in [
+        "async fn handoff_leadership(",
+        "async fn await_survivor_leader(",
+        "async fn trigger_election(",
+        "pub async fn status(",
+        "async fn protocol_status_for_committed_members(",
+        "async fn committed_unready_nodes(",
+    ] {
+        bodies.push(method_body(source, signature));
+    }
+    for body in &bodies {
+        for forbidden in [".execute", ".txn(", "query_consistent", "Read::Quorum"] {
+            assert!(
+                !body.contains(forbidden),
+                "a stopping node's handoff writes nothing and reads only local state: \
+                 found {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn handoff_candidate_is_the_first_eligible_voter_matching_the_leaders_last_entry() {
+    use super::matched_survivor;
+
+    let matched = |pairs: &'static [(u64, u64)]| {
+        move |raft_id: u64| {
+            pairs
+                .iter()
+                .find(|(id, _)| *id == raft_id)
+                .map(|(_, index)| *index)
+        }
+    };
+    assert_eq!(
+        matched_survivor(&[2, 3], Some(2), Some(40), matched(&[(2, 39), (3, 39)])),
+        None,
+        "nobody is triggered while every survivor is behind"
+    );
+    assert_eq!(
+        matched_survivor(&[2, 3], Some(2), Some(40), matched(&[(2, 39), (3, 40)])),
+        Some(3),
+        "a different eligible voter that matched first is used"
+    );
+    assert_eq!(
+        matched_survivor(&[2, 3], Some(3), Some(40), matched(&[(2, 40), (3, 40)])),
+        Some(3),
+        "the preferred voter wins when it has matched too"
+    );
+    assert_eq!(
+        matched_survivor(&[2, 3], None, Some(40), matched(&[(2, 40), (3, 40)])),
+        Some(2),
+        "otherwise the first eligible voter in order"
+    );
+    assert_eq!(
+        matched_survivor(&[3], Some(2), Some(40), matched(&[(2, 40), (3, 39)])),
+        None,
+        "an ineligible voter is never chosen, even preferred and matched"
+    );
+    assert_eq!(
+        matched_survivor(&[2], Some(2), None, matched(&[(2, 40)])),
+        None,
+        "no last entry known, no candidate"
+    );
+}
+
+#[test]
+fn handoff_holds_proposals_until_a_matched_survivor_is_triggered() {
+    let source = include_str!("../membership.rs");
+    let body = method_body(source, "async fn handoff_leadership(");
+    let order = [
+        "if eligible.is_empty() {",
+        "hold_local_db_proposals(acquire_deadline)",
+        "matched_survivor(&eligible, preferred, metrics.last_log_index",
+        ".map_err(|_| MembershipError::ElectionCandidateUnavailable)?;",
+        "within_hold(",
+        ".is_some_and(|leader| leader != departed)",
+        "drop(hold);",
+        "self.await_survivor_leader(",
+    ];
+    let mut previous = 0;
+    for step in order {
+        let at = body
+            .find(step)
+            .unwrap_or_else(|| panic!("the transfer is missing {step:?}"));
+        assert!(at >= previous, "{step:?} is out of order");
+        previous = at;
+    }
+    assert_eq!(
+        body.matches("trigger_election(").count(),
+        3,
+        "one trigger on each of the three paths, never in a loop"
+    );
+    assert!(!body.contains("loop {") && !body.contains("for ("));
+    assert!(
+        !body.contains("tokio::time::sleep"),
+        "the waits are woken by metrics, never by polling"
+    );
+    assert!(
+        body.contains("deadline.min(hold_started + PROPOSAL_HOLD_WAIT)")
+            && body.contains("hold_deadline.min(hold_started + PROPOSAL_HOLD_ACQUIRE)"),
+        "the hold's whole life, and its acquisition share, end inside the one deadline"
+    );
+    let leave = method_body(source, "async fn leave_voter_captured(");
+    assert!(
+        leave.contains(".handoff_leadership(inner.identity.raft_id, &status)")
+            && !leave.contains("trigger_election("),
+        "a leader's self-leave uses the same transfer"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_trigger_ends_at_the_hold_deadline() {
+    use super::within_hold;
+
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_millis(1_500);
+    let result = within_hold(deadline, std::future::pending()).await;
+    assert!(
+        matches!(result, Err(MembershipError::Internal(_))),
+        "an unanswered trigger fails the handoff"
+    );
+    assert_eq!(
+        started.elapsed(),
+        Duration::from_millis(1_500),
+        "and releases the hold exactly at its deadline"
+    );
+    assert!(within_hold(deadline, async { Ok(()) }).await.is_ok());
+    assert!(matches!(
+        within_hold(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            async { Err(MembershipError::ElectionCandidateUnavailable) }
+        )
+        .await,
+        Err(MembershipError::ElectionCandidateUnavailable)
+    ));
+}
+
 mod floor_advisory {
     use super::{FloorAdvisory, SharingMemberFloor};
     use std::sync::atomic::{AtomicUsize, Ordering};
