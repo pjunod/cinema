@@ -176,6 +176,9 @@ pub use scan_identity_repair::{
 
 pub mod applied_view;
 pub use applied_view::{
+    applied_mark_tables, SharingWatch, APPLIED_MARK_DELETES_ONLY, SHARING_WATCH_TABLES,
+};
+pub use applied_view::{
     AppliedRoute, AppliedSettings, AppliedSnapshot, AppliedTable, AppliedView, AppliedViewMetrics,
     AppliedViewObservation, FactInstant, SettingsDigest, SettingsWriteFloor, StampCheck,
     ViewFallback, ViewSource, ViewStamp, APPLIED_VIEW_TABLES,

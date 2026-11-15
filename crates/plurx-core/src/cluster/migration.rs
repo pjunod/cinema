@@ -4153,8 +4153,12 @@ pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> Node
         snapshot_transfer_timeout: snapshot_timeout_duration(
             DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
         ),
-        // Vendor patch 27: one applied-mark revision per applied-view table.
-        applied_mark_tables: crate::store::APPLIED_VIEW_TABLES
+        // Vendor patch 27: one applied-mark revision per applied-view table
+        // and per table a sharing monitor waits on.
+        applied_mark_tables: crate::store::applied_mark_tables()
+            .map(Cow::Borrowed)
+            .collect(),
+        applied_mark_deletes_only: crate::store::APPLIED_MARK_DELETES_ONLY
             .iter()
             .map(|table| Cow::Borrowed(*table))
             .collect(),
