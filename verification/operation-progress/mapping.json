@@ -189,13 +189,13 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "7c87cc564d8688f0a6b4cc814e54b19689db75507a2002537159727b5e9bb03d"
+        "sha256": "b743772348226054a8aa2ce6d50691de29a339d63073d7e74c27483f6d31bc0b"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "7c87cc564d8688f0a6b4cc814e54b19689db75507a2002537159727b5e9bb03d"
+        "sha256": "b743772348226054a8aa2ce6d50691de29a339d63073d7e74c27483f6d31bc0b"
       },
       {
         "table": "33 local raft metrics authority",
@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "c178f37f6791929ce9697ad5c0e2a5337d48a7875a2c623cec30cd6130f2c063"
+        "sha256": "d8c53bc60363190635a33e135e18753a0c9f70e39a68c4a95ddda5d4d78f2495"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "c178f37f6791929ce9697ad5c0e2a5337d48a7875a2c623cec30cd6130f2c063"
+        "sha256": "d8c53bc60363190635a33e135e18753a0c9f70e39a68c4a95ddda5d4d78f2495"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "6005810f3f8a63abe0ce2364ae1119085e0518d89cf6b2aa82f594a9958664e1"
+        "sha256": "af6d6afafe52a6c381480db0780bbeacb12cc9c75d2492326e83d7f92156f564"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -279,7 +279,7 @@
         "table": "FIFO lock contract pinned Tokio dependency",
         "source": "Cargo.lock",
         "anchor": "name = \"tokio\"\nversion = \"1.53.1\"",
-        "sha256": "c39e63b126a56a89cafb7c0ac4499fcaccb65130666c15de6f53dbc6de6a6905"
+        "sha256": "e695f3e56e76a60e3b6d63b521afb997be2537360bb1c9c51dc55cda35495bdd"
       },
       {
         "table": "production-consumed post-claim lifecycle controller; local safety only",
