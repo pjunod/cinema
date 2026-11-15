@@ -196,6 +196,19 @@ pub fn register_broker(value: &str) -> io::Result<BrokerRegistration> {
 }
 
 pub(super) fn register_asset(file: &File, path: &Path) -> io::Result<DaemonFileRegistration> {
+    let mut state = STATE
+        .lock()
+        .map_err(|_| io::Error::other("reader policy registry poisoned"))?;
+    register_asset_in(&mut state, file, path)
+}
+/// An unconfigured registry verifies no launch (`roots_unconfigured` is never
+/// enforced), so it records no capability and the caller's work continues
+/// unverified. Failing here would turn the advisory verifier into a gate.
+fn register_asset_in(
+    state: &mut State,
+    file: &File,
+    path: &Path,
+) -> io::Result<DaemonFileRegistration> {
     let canonical = path.canonicalize()?;
     let held = Arc::new(file.try_clone()?);
     let actual = identity(&held)?;
@@ -203,20 +216,16 @@ pub(super) fn register_asset(file: &File, path: &Path) -> io::Result<DaemonFileR
     if identity(&named)? != actual {
         return Err(io::Error::other("daemon asset and held descriptor differ"));
     }
-    let mut state = STATE
-        .lock()
-        .map_err(|_| io::Error::other("reader policy registry poisoned"))?;
-    let roots = state
-        .roots
-        .as_ref()
-        .ok_or_else(|| io::Error::other("reader roots are not configured"))?;
+    let Some(roots) = state.roots.as_ref() else {
+        return Ok(DaemonFileRegistration { id: None });
+    };
     if !contained(&canonical, &roots.owned) {
         return Err(io::Error::other("daemon asset is outside qualified roots"));
     }
     if state.assets.len() >= MAX_CAPABILITIES {
         return Err(io::Error::other("daemon asset registry full"));
     }
-    let id = next_id(&mut state)?;
+    let id = next_id(state)?;
     state.assets.insert(
         id,
         Asset {
@@ -225,7 +234,7 @@ pub(super) fn register_asset(file: &File, path: &Path) -> io::Result<DaemonFileR
             identity: actual,
         },
     );
-    Ok(DaemonFileRegistration { id })
+    Ok(DaemonFileRegistration { id: Some(id) })
 }
 pub(super) fn unregister_asset(id: u64) {
     STATE
@@ -1351,6 +1360,28 @@ mod tests {
                 .check,
             "unregistered_broker_url"
         );
+    }
+    #[test]
+    fn absent_roots_record_no_daemon_file_and_do_not_fail_its_owner() {
+        let fixture = Fixture::new();
+        let path = fixture.data.join("evidence.log");
+        let file = File::create(&path).expect("daemon file");
+        let mut absent = State::default();
+        let unrecorded = register_asset_in(&mut absent, &file, &path)
+            .expect("an unconfigured registry leaves the work unverified, not failed");
+        assert!(unrecorded.id.is_none() && absent.assets.is_empty());
+        let other = File::open(fixture.tools.join("ffmpeg")).expect("another file");
+        assert!(
+            register_asset_in(&mut absent, &other, &path).is_err(),
+            "a descriptor that is not the named file is refused either way"
+        );
+        let mut configured = fixture.state;
+        let recorded = register_asset_in(&mut configured, &file, &path).expect("owned file");
+        assert!(recorded.id.is_some() && asset_matches(&configured, &file));
+        std::mem::forget(recorded); // its identity belongs to this local state
+        let outside = fixture.media.join("movie.mkv");
+        let media = File::create(&outside).expect("media file");
+        assert!(register_asset_in(&mut configured, &media, &outside).is_err());
     }
     #[test]
     fn absent_roots_are_conservative_without_a_debug_assertion() {
