@@ -8,6 +8,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Removed
+
+- The engineering knowledge pilot (`scripts/knowledge`, `validation/knowledge/`,
+  its repository skill, AGENTS.md section, fast-lane lint and docs) is retired.
+  In the 224 merges after it landed, 17 touched its seven covered files and only
+  three acknowledged it; its records were never extended past the original 27,
+  and its evaluation never ran (the study PR #1262 is closed unmerged).
+
 ### Fixed
 
 - Linux replicated servers validate actual-host reboot identity before serving;
