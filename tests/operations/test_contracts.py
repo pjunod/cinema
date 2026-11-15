@@ -5214,6 +5214,11 @@ assert.equal(context.ACT_TIMER, null);
             publish,
         )
         self.assertNotIn("--pull", publish)
+        # An inspect error other than "no such manifest" fails the job, and the
+        # credential never rides an --insecure plain-HTTP fallback.
+        self.assertNotIn("--insecure", publish)
+        self.assertIn("no such manifest|manifest unknown", publish)
+        self.assertIn("could not tell whether $tag exists", publish)
         # A publication never moves a tag: a rerun gets its own, and an
         # existing one stops the job before anything is built.
         self.assertIn(
@@ -5224,7 +5229,7 @@ assert.equal(context.ACT_TIMER, null);
             publish.index(marker)
             for marker in (
                 "docker login",
-                'docker manifest inspect --insecure "$tag"',
+                'docker manifest inspect "$tag"',
                 "docker build ",
                 "docker run --rm",
                 "docker push",

@@ -44,8 +44,16 @@ jobs:
           mkdir -p "$DOCKER_CONFIG"
           trap 'docker image rm "$tag" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
           printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
-          if docker manifest inspect --insecure "$tag" >/dev/null 2>&1; then
+          # Only "the registry has no such manifest" lets the build go on. Any
+          # other failure (auth, network, a registry error) says nothing about
+          # the tag and fails the job. No insecure flag: it permits a plain HTTP
+          # fallback that would carry the fleet credential, and the push below
+          # relies on the same daemon registry configuration without it.
+          if inspected="$(docker manifest inspect "$tag" 2>&1)"; then
             echo "::error::$tag already exists; a publication never replaces a tag."
+            exit 1
+          elif ! printf '%s\n' "$inspected" | grep -qiE 'no such manifest|manifest unknown|name unknown|not found'; then
+            echo "::error::could not tell whether $tag exists: $inspected"
             exit 1
           fi
           # The media runtime base comes from the fleet registry, as in
