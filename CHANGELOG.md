@@ -10,6 +10,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- One stopped, slow or rate-limited voter no longer revokes the shared
+  playback cache on every healthy node. The 30 s mount canary now admits the
+  shared root when a majority of voters (counting this node when it is one)
+  confirms the same mount. A voter that is unreachable, busy or on a different
+  mount is not counted and cannot veto the rest; a voter on a different mount
+  is logged as a warning and fails its own canary. A peer's refusal now names
+  its cause; older peers' undistinguished refusals count as no evidence.
 - Linearizable reads no longer time out when one TCP SYN is lost: the vendored Hiqlite Raft client
   reuses an idle connection per voter instead of dialing a new TCP + WebSocket handshake inside
   every 800 ms leadership read-confirm (Hiqlite patch 28,

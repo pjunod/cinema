@@ -865,8 +865,8 @@ pub struct AppState {
     /// Explicit ffmpeg/cache-bookkeeping root. Kept separately because cache
     /// relocation may make it non-sibling to the finished-transcode root.
     pub(crate) runtime_cache_dir: PathBuf,
-    /// Optional shared-cache mount, admitted only while its all-voter canary
-    /// proof remains current.
+    /// Optional shared-cache mount, admitted only while its voter-majority
+    /// canary proof remains current.
     pub(crate) shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
     pub(crate) playback_cache: Arc<crate::playback_cache::PlaybackCacheBudget>,
     /// Where extracted subtitles are kept, keyed by file identity and source
