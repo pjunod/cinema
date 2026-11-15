@@ -229,19 +229,21 @@ export ASC_KEY_ID="your-key-id"        # identifies the .p8 file
 export ASC_ISSUER_ID="your-issuer-id"  # App Store Connect issuer UUID
 ```
 
-The values identify the credential; the `.p8` file is the credential and must
-never enter inventory or git. `xcodebuild` receives the key path directly and
-uploads during archive export, so no Apple ID password or interactive Organizer
-step remains.
+The `.p8` file is the credential and must never enter inventory or git;
+`xcodebuild` receives its path and uploads during archive export.
 
 Run one or both deployments from the repo root:
 
 ```bash
-scripts/ship --android             # test, build, and install on required devices
-scripts/ship --apple               # test, archive, and upload iOS + tvOS
-scripts/ship --apple --android     # both through one Ansible invocation
-scripts/ship --apple --dry-run     # print the exact invocation, change nothing
+scripts/ship --android             # build HEAD's commit, install on required devices
+scripts/ship --apple               # archive and upload iOS + tvOS (main only)
+scripts/ship --apple --android     # both in one Ansible invocation
+scripts/ship --apple --dry-run     # print the plan, change nothing
 ```
+
+The play builds a stamped checkout of the commit, never yours, and refuses
+one without a build number
+([why](ci/SHARED-BOOKKEEPING.md#every-build-path-gets-its-tree-from-one-place)).
 
 `PLURX_ANSIBLE_INVENTORY=/path/inventory.yml` selects a different inventory.
 `PLURX_ANSIBLE_DIR=/path/to/ansible/media` selects a different playbook
@@ -404,8 +406,8 @@ Two numbers, and they are not the same number:
 | `CURRENT_PROJECT_VERSION` | `project.yml` | The build number: `1` in the tree, assigned at release. **Must strictly increase on every upload**, including uploads that get rejected, expire, or that you delete |
 
 App Store Connect rejects a duplicate build number after the whole archive
-has finished, so never archive for upload from an unstamped checkout: use the
-release job, or `scripts/ship-physical`, which stamps its own worktree.
+has finished, so never archive from a working checkout: every path above
+builds a stamped one and refuses build `1`.
 
 ### 2.3 Archive and upload
 

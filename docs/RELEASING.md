@@ -17,7 +17,9 @@ Every crate inherits it with `version.workspace = true`. The native apps keep
 their store-facing marketing versions aligned with the workspace separately;
 their store build numbers are assigned when a build is released, from the
 commit it is built from, so no branch claims one
-([SHARED-BOOKKEEPING.md](ci/SHARED-BOOKKEEPING.md#store-build-numbers)).
+([SHARED-BOOKKEEPING.md](ci/SHARED-BOOKKEEPING.md#store-build-numbers)). A
+client hotfix lands on `main` like any change, sent next with `train:solo`,
+and that push publishes it ([the procedure](ci/SHARED-BOOKKEEPING.md#a-hotfix)).
 
 plurx follows [semantic versioning](https://semver.org/) under the 0.x rules,
 which are worth stating plainly because they are not what 1.x users expect:

@@ -51,10 +51,15 @@ ansible-playbook -i inventory.yml mobile-physical.yml
 ```
 
 **The gate that actually stops a run before anything is built** is the
-release-readiness assert in `roles/mobile_release/tasks/main.yml` — every
-client repo must have had its version and build number bumped since its last
-client change. That is the refusal you are most likely to meet, and no device
-is named in it.
+release-readiness assert in `roles/mobile_release/tasks/main.yml` — Curator
+and Runner must have had their version and build number bumped since their
+last client change. Cinema is never bumped: the role asks plurx's
+`validation/mobile_build.py` for `origin/main` stamped with its build number
+(the count of commits it contains) and builds that
+([SHARED-BOOKKEEPING.md](../ci/SHARED-BOOKKEEPING.md#store-build-numbers)).
+"Unstamped Cinema checkout" means the playbooks predate that step — update
+`~/code/plurx-agent/ansible` — or `~/code/plurx` does; never answer it by
+editing a build number.
 
 **The device roster is not that gate**, whatever the comments in
 `inventory.yml` and the role's `defaults/main.yml` say. `completeness.yml`

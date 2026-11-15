@@ -39,11 +39,13 @@ decides what a session costs. Every agent working here, Claude or GPT:
   entry is `changelog.d/<slug>.md`; an effort's status is
   `status.d/<date>-<slug>.md` (`scripts/status` lists them); a client fix
   anchor is `tests/client-fixes.d/<slug>.toml`; a changed task/timer count is
-  a `delta` row in `tests/rolling-producer-owners.d/<slug>.toml`. Do not edit
-  `CHANGELOG.md`, `STATUS.md`, a build number or a status line: every pull
-  request used to, and they conflicted on nearly every merge.
+  a `delta` row in `tests/rolling-producer-owners.d/<slug>.toml`; a file under
+  an existing functionality point is a row in `validation/points.d/<slug>.toml`.
+  Do not edit `CHANGELOG.md`, `STATUS.md`, a build number or a status line:
+  every pull request used to, and they conflicted on nearly every merge.
   [docs/ci/SHARED-BOOKKEEPING.md](docs/ci/SHARED-BOOKKEEPING.md) has each
-  format and what an open pull request does. The project backlog still
+  format. A branch cut before 2026-11-15 runs `scripts/migrate-bookkeeping`
+  once after merging `main`; it moves all of that for you. The project backlog still
   carries an `<!-- … insert … -->` anchor; add below it without reading the
   file.
 - **Delegate exploration** that spans many files to a sub-agent that returns a

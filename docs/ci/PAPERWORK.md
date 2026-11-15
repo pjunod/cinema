@@ -68,7 +68,7 @@ opening its pull request, before any compiler job is allocated.
 | Every governed file maps to a functionality point | `scripts/validate lint` | map the file in `validation/points.toml` |
 | A `fix(`/`perf(` commit carries `Regression-Test: <path>::<test>` in the PR description | `validation.regression_field` (locally a reminder; in CI against the description) | add the line; whoever merges copies it into the landing commit (`--landing-lines`) |
 | No branch claims a store build number | `validation.mobile_versions` | `make paperwork-fix` |
-| Changelog entries and client fix anchors are one file per change | `test_shared_bookkeeping` | move the entry into `changelog.d/` or `tests/client-fixes.d/` ([SHARED-BOOKKEEPING.md](SHARED-BOOKKEEPING.md)) |
+| Changelog entries, client fix anchors, count changes and governed paths are one file per change | `test_shared_bookkeeping` | `scripts/migrate-bookkeeping` moves them ([SHARED-BOOKKEEPING.md](SHARED-BOOKKEEPING.md)) |
 | Every doc under `docs/` has an index row; no reference names a missing `docs/` path | `test_docs_index` | add the row to the doc's folder index in the same commit |
 | The tree names no real host, address, home or SSH user | `test_infra_names` | `scripts/scrub-infra-names --write`, or an allow-list row with its reason |
 | `docs/API.md` lists every route | `test_api_doc_routes` | add or delete the route entry |

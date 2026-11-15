@@ -53,10 +53,11 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "test_shared_bookkeeping",
-        "changelog entries and client fix anchors are one file per change",
-        "move the entry out of CHANGELOG.md's [Unreleased] into changelog.d/<slug>.md, and a "
-        "new tests/client-fixes.toml row into tests/client-fixes.d/<slug>.toml "
-        "(docs/ci/SHARED-BOOKKEEPING.md)",
+        "changelog entries, client fix anchors, count changes and governed paths are one "
+        "file per change",
+        "run `scripts/migrate-bookkeeping`: it moves what the branch added to CHANGELOG.md, "
+        "tests/client-fixes.toml, the owner-count totals and validation/points.toml into "
+        "per-change files (docs/ci/SHARED-BOOKKEEPING.md)",
     ),
     (
         "test_apple_build_claims",
