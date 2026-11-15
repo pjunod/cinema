@@ -189,13 +189,13 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "8bd5ac3c7281f41f2c8bb0bb74db4a03d5be338f9381ac4603b1a4bd88c3214b"
+        "sha256": "4e8d634e3f168307d3f0f0fb2766cfcacfa318ade7e53cba51042aa565f556c8"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "8bd5ac3c7281f41f2c8bb0bb74db4a03d5be338f9381ac4603b1a4bd88c3214b"
+        "sha256": "4e8d634e3f168307d3f0f0fb2766cfcacfa318ade7e53cba51042aa565f556c8"
       },
       {
         "table": "33 local raft metrics authority",
