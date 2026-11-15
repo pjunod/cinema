@@ -6,7 +6,11 @@ pub use super::storage_domain_pending_api::{
 use crate::error::StoreError;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const SCHEMA: &str = include_str!("background_jobs_resources.sql");
+pub(crate) const SCHEMA: &str = concat!(
+    include_str!("background_jobs_resources.sql"),
+    "\n-- next statement\n",
+    include_str!("background_job_claim_effects.sql")
+);
 pub const SQLITE_INTRODUCED_SCHEMA: i64 = 74;
 pub const SOURCE_ARBITRATION_SQLITE_SCHEMA: i64 = 122;
 

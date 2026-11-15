@@ -1,3 +1,5 @@
+-- Frozen v122 history; superseded by source_leases_expand.sql. Change nothing
+-- here: this text is the installed catalogue the expand replaces.
 -- Foreground source custody extends the existing domain arbiter. A foreground
 -- registration never waits for an old maintenance reader to stop or reap.
 CREATE TABLE IF NOT EXISTS foreground_source_owners (

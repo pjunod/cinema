@@ -1365,6 +1365,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::storage_domain_pending::SCHEMA,
     // v132: exact FEL outbox continuity and independent quality waiters.
     super::dv_title_jobs::MIGRATION_V2,
+    // v133: source leases expand: one lease row per source reader.
+    super::source_leases::SQLITE_EXPAND,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1374,6 +1376,22 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 /// migration list prevents the import gate from drifting away from `open`.
 pub const SQLITE_SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
+/// The catalogue (`name`, `sql`) of a fresh database migrated through
+/// `version`: the shape oracle for extensions whose objects changed between
+/// versions.
+pub(crate) fn catalogue_through(version: usize) -> Result<Vec<(String, String)>, StoreError> {
+    catalogue(&SqliteStore::open_migrated_through(version)?)
+}
+
+/// Every named object of `conn` that has SQL text, by name.
+pub(crate) fn catalogue(conn: &Connection) -> Result<Vec<(String, String)>, StoreError> {
+    let mut statement =
+        conn.prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
 /// Column list matching [`item_from_row`]. Prefix with a table alias via
 /// [`item_cols`].
 const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, \
@@ -1856,6 +1874,18 @@ impl SqliteStore {
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// A fresh in-memory database migrated through `version`.
+    pub(crate) fn open_migrated_through(version: usize) -> Result<Connection, StoreError> {
+        let conn = Connection::open_in_memory()?;
+        for (index, sql) in MIGRATIONS.iter().enumerate().take(version) {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+            let applied = Self::apply_migration_step(&conn, index as i64 + 1, sql, false);
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            applied?;
+        }
+        Ok(conn)
     }
 
     pub(crate) fn migrate(conn: &Connection) -> Result<(), StoreError> {
