@@ -1,0 +1,10 @@
+# Tests that are meant to skip when the preflight suites run inside the CI
+# image. `scripts/ci-image-probe` (run by .github/workflows/ci-image.yml in a
+# freshly published image) fails on any skip that is not listed here, and on
+# any entry whose test did not skip. A skip for a missing tool is never
+# listed: the tool goes into the `ci` stage of Dockerfile instead.
+#
+# [[skip]]
+# suite = "tests/operations"            # or "tests/validation"
+# test = "<the id unittest reports>"
+# reason = "<why this test is meant to skip in the image>"

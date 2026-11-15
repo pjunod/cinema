@@ -1,9 +1,11 @@
 //! Verified optional shared-cache mount and fenced reclamation.
 //!
-//! A configured path is never treated as shared by itself. Every voter proves
-//! that it can read a peer-created canary and that the peer can read its own
-//! response through the same mount. Failure disables the fast path
-//! immediately; ordinary node-local cache routing remains available.
+//! A configured path is never treated as shared by itself. A node proves to
+//! each voter that the voter can read its canary and that it can read the
+//! voter's response through the same mount. Any voter that shows a different
+//! mount, or the lack of a voter majority that confirms the same one,
+//! disables the fast path immediately; ordinary node-local cache routing
+//! remains available. A voter that merely cannot answer is no evidence.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,6 +89,149 @@ pub(crate) struct CanaryResponse {
     pub storage_id: String,
     pub response_name: String,
     pub response_digest: String,
+}
+
+/// Why a peer refused a canary. Sent as the `409 Conflict` body so the asker
+/// can tell evidence of a different mount from a peer that simply could not
+/// take part. Older peers answer every refusal with an empty `409`; an asker
+/// therefore treats any `409` whose body does not parse as this type
+/// (including an unknown future reason) as no evidence either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CanaryRefusalReason {
+    /// This node has no shared cache configured.
+    NotConfigured,
+    /// The request's canary name or digest is malformed.
+    InvalidRequest,
+    /// The asker names a different shared storage identity.
+    StorageMismatch,
+    /// The asker's canary is absent or different on this node's mount.
+    CanaryNotVisible,
+    /// This node's shared mount could not be opened, read or written.
+    MountFailed,
+    /// This node's mount I/O pool is exhausted or past its deadline.
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CanaryRefusal {
+    pub refusal: CanaryRefusalReason,
+}
+
+/// What one voter's canary exchange proved about the shared mount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanaryOutcome {
+    /// Both directions crossed the same mount with the right identity.
+    Agrees,
+    /// Affirmative evidence that the voter sees a different mount.
+    Disagrees,
+    /// No evidence either way: unreachable, slow, refused or unparseable.
+    Unavailable,
+}
+
+impl CanaryRefusalReason {
+    fn outcome(self) -> CanaryOutcome {
+        match self {
+            // The peer looked on a working mount and this node's canary was
+            // not there, or it names another storage: a different mount.
+            Self::StorageMismatch | Self::CanaryNotVisible => CanaryOutcome::Disagrees,
+            // A peer whose own mount cannot be opened has proven nothing about
+            // this node's mount. It fails its own canary and stops publishing;
+            // it must not take the cache away from the voters that agree.
+            Self::NotConfigured | Self::InvalidRequest | Self::MountFailed | Self::Busy => {
+                CanaryOutcome::Unavailable
+            }
+        }
+    }
+}
+
+/// Map a peer's canary HTTP answer to the reply it claims to have written,
+/// or to the outcome when it wrote none. A success still has to be proven by
+/// reading the reply locally before it counts as agreement.
+fn classify_canary_response(
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<CanaryResponse, CanaryOutcome> {
+    if status.is_success() {
+        return serde_json::from_slice::<CanaryResponse>(body)
+            .map_err(|_| CanaryOutcome::Unavailable);
+    }
+    if status == reqwest::StatusCode::CONFLICT {
+        // An undistinguished (pre-refusal-body) 409 is not evidence.
+        return Err(serde_json::from_slice::<CanaryRefusal>(body)
+            .map_or(CanaryOutcome::Unavailable, |refusal| {
+                refusal.refusal.outcome()
+            }));
+    }
+    // Auth, rate limit, overload, bad request, server error: no evidence.
+    Err(CanaryOutcome::Unavailable)
+}
+
+/// Decide whether this node may publish the shared root from the voters'
+/// canary outcomes.
+///
+/// The voters that affirmatively agree, counting this node when it is a
+/// committed voter, must form a majority of `voter_count`. That is the whole
+/// rule. Two nodes that both publish each hold a voter majority, and two
+/// majorities of one voter set share a voter; an agreement is two-way, so
+/// that voter's one mount was proven against both, and the two nodes are on
+/// the same mount. Counting this node is sound because a majority of two or
+/// more voters needs at least one peer agreement.
+///
+/// A disagreeing voter does not veto. It is not counted, and it fails its own
+/// canary and stops publishing, which is what keeps a node on the wrong mount
+/// out. A veto would add nothing to that argument and would let one voter
+/// with an unmounted or wrong directory take the cache away from every voter
+/// that agrees, which is the failure this rule replaces.
+///
+/// The argument holds within one probe round and for nodes that read the same
+/// voter set. Proofs are not simultaneous: a node admitted on one mount keeps
+/// its admission until its next probe, up to `PROBE_INTERVAL` plus the mount
+/// deadline, even if a majority has since moved to another mount; and two
+/// nodes reading different voter sets across a membership change that
+/// replaces a majority at once do not share a voter. Requiring every voter,
+/// as before, closed both by refusing whenever any voter was away.
+fn canary_verdict(
+    local_is_voter: bool,
+    voter_count: usize,
+    outcomes: &[(&str, CanaryOutcome)],
+) -> Result<CanaryVerdict, String> {
+    let ids = |wanted: CanaryOutcome| {
+        outcomes
+            .iter()
+            .filter(|(_, outcome)| *outcome == wanted)
+            .map(|(node_id, _)| *node_id)
+            .collect::<Vec<_>>()
+    };
+    let agreed = ids(CanaryOutcome::Agrees);
+    let disagreed = ids(CanaryOutcome::Disagrees);
+    let unavailable = ids(CanaryOutcome::Unavailable);
+    let confirmed = agreed.len().saturating_add(usize::from(local_is_voter));
+    let majority = voter_count / 2 + 1;
+    let summary = format!(
+        "{confirmed} of {voter_count} voters confirmed the shared mount (majority {majority}); \
+         agreed={agreed:?} disagreed={disagreed:?} unavailable={unavailable:?} \
+         self_counted={local_is_voter}"
+    );
+    if confirmed < majority {
+        return Err(format!(
+            "no voter majority confirmed the shared mount: {summary}"
+        ));
+    }
+    Ok(CanaryVerdict {
+        summary,
+        dissent: !disagreed.is_empty(),
+    })
+}
+
+/// An admitted canary round: what to log, and whether a voter that answered
+/// saw a different mount. Dissent does not refuse the round; it is the
+/// operator's signal that one voter's mount is wrong.
+#[derive(Debug)]
+struct CanaryVerdict {
+    summary: String,
+    dissent: bool,
 }
 
 impl SharedCacheCoordinator {
@@ -435,25 +580,34 @@ impl SharedCacheCoordinator {
                 return Err("single-voter canary changed while read".to_owned());
             }
         } else {
-            let mut proofs = Vec::with_capacity(peers.len());
-            for peer in &peers {
-                if !peer.reachable {
-                    return Err(format!(
-                        "shared-cache peer {} is not reachable",
-                        peer.node_id
-                    ));
-                }
-                let base = peer.http_base.as_deref().ok_or_else(|| {
-                    format!("shared-cache peer {} has no HTTP base", peer.node_id)
-                })?;
-                proofs.push(self.verify_peer(&config.storage_id, &canaries, &peer.node_id, base));
-            }
+            let proofs = peers.iter().map(|peer| {
+                self.verify_peer(
+                    &config.storage_id,
+                    &canaries,
+                    &peer.node_id,
+                    peer.http_base.as_deref().filter(|_| peer.reachable),
+                )
+            });
             // Every voter has the same bounded proof deadline. Running the
             // independent canaries together keeps admission latency bounded
             // by the slowest voter rather than multiplying it by cluster
-            // size.
-            for proof in futures_util::future::join_all(proofs).await {
-                proof?;
+            // size. A voter that cannot answer is no evidence either way;
+            // only a voter majority's agreement admits the root.
+            let mut outcomes = Vec::with_capacity(peers.len());
+            for (peer, proof) in peers
+                .iter()
+                .zip(futures_util::future::join_all(proofs).await)
+            {
+                outcomes.push((peer.node_id.as_str(), proof?));
+            }
+            let verdict = canary_verdict(local_is_voter, voter_count, &outcomes)?;
+            if verdict.dissent {
+                tracing::warn!(
+                    summary = %verdict.summary,
+                    "shared cache canary held, but a voter sees a different shared mount"
+                );
+            } else {
+                tracing::debug!(summary = %verdict.summary, "shared cache canary proof held");
             }
         }
         self.publish_verified_root(path, identity, attempted_generation)
@@ -465,8 +619,12 @@ impl SharedCacheCoordinator {
         storage_id: &str,
         canaries: &SecureDirectory,
         peer_node_id: &str,
-        peer_base: &str,
-    ) -> Result<(), String> {
+        peer_base: Option<&str>,
+    ) -> Result<CanaryOutcome, String> {
+        // An unreachable voter, or one without an HTTP base, cannot be asked.
+        let Some(peer_base) = peer_base else {
+            return Ok(CanaryOutcome::Unavailable);
+        };
         let canary_name = canary_name("probe");
         let canary_bytes = random_canary_bytes();
         canaries
@@ -497,69 +655,91 @@ impl SharedCacheCoordinator {
         // failure too, otherwise a degraded peer can accumulate one orphan
         // every probe interval indefinitely.
         let _ = canaries.unlink_child(&canary_name).await;
-        let response =
-            response.map_err(|error| format!("peer canary request failed: {error:?}"))?;
-        if !response.status.is_success() {
-            return Err(format!("peer canary returned {}", response.status));
-        }
-        let response = serde_json::from_slice::<CanaryResponse>(&response.body)
-            .map_err(|error| error.to_string())?;
+        // Transport failure (unreachable, timed out, oversized) is no
+        // evidence about the peer's mount.
+        let Ok(response) = response else {
+            return Ok(CanaryOutcome::Unavailable);
+        };
+        let response = match classify_canary_response(response.status, &response.body) {
+            Ok(response) => response,
+            Err(outcome) => return Ok(outcome),
+        };
         if response.storage_id != storage_id || !safe_canary_name(&response.response_name, "reply")
         {
-            return Err("peer returned an invalid canary identity".to_owned());
+            return Ok(CanaryOutcome::Disagrees);
         }
-        let response_bytes = canaries
+        let Ok(response_bytes) = canaries
             .read_bounded_child(&response.response_name, CANARY_BYTES)
             .await
-            .map_err(|error| error.to_string())?;
+        else {
+            // The peer says it wrote a reply on the shared mount; not seeing
+            // it here is the evidence the canary exists to find.
+            return Ok(CanaryOutcome::Disagrees);
+        };
         let _ = canaries.unlink_child(&response.response_name).await;
         if digest(&response_bytes) != response.response_digest {
-            return Err("peer response canary was not visible on this mount".to_owned());
+            return Ok(CanaryOutcome::Disagrees);
         }
-        Ok(())
+        Ok(CanaryOutcome::Agrees)
     }
 
     pub(crate) async fn answer_canary(
         &self,
         request: &CanaryRequest,
-    ) -> Result<CanaryResponse, String> {
+    ) -> Result<CanaryResponse, CanaryRefusalReason> {
         let coordinator = self.clone();
         let request = request.clone();
+        // Capacity exhaustion or the hard deadline: this node revokes itself,
+        // but that says nothing about whether the mounts match.
         self.run_mount_io("canary_reply_mount_timeout", async move {
-            coordinator.answer_canary_inner(&request).await
+            Ok(coordinator.answer_canary_inner(&request).await)
         })
         .await
+        .unwrap_or(Err(CanaryRefusalReason::Busy))
     }
 
-    async fn answer_canary_inner(&self, request: &CanaryRequest) -> Result<CanaryResponse, String> {
+    async fn answer_canary_inner(
+        &self,
+        request: &CanaryRequest,
+    ) -> Result<CanaryResponse, CanaryRefusalReason> {
         let config = self
             .config
             .as_ref()
-            .ok_or_else(|| "shared cache is not configured".to_owned())?;
-        if request.storage_id != config.storage_id
-            || !safe_canary_name(&request.canary_name, "probe")
+            .ok_or(CanaryRefusalReason::NotConfigured)?;
+        if !safe_canary_name(&request.canary_name, "probe")
             || request.canary_digest.len() != 64
             || !request
                 .canary_digest
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err("shared cache canary identity does not match".to_owned());
+            return Err(CanaryRefusalReason::InvalidRequest);
         }
-        let (_, _, canaries) = prepare_canary_directory(&config.configured_root).await?;
+        if request.storage_id != config.storage_id {
+            return Err(CanaryRefusalReason::StorageMismatch);
+        }
+        let (_, _, canaries) = prepare_canary_directory(&config.configured_root)
+            .await
+            .map_err(|_| CanaryRefusalReason::MountFailed)?;
         let bytes = canaries
             .read_bounded_child(&request.canary_name, CANARY_BYTES)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    CanaryRefusalReason::CanaryNotVisible
+                } else {
+                    CanaryRefusalReason::MountFailed
+                }
+            })?;
         if digest(&bytes) != request.canary_digest {
-            return Err("request canary is not visible on this mount".to_owned());
+            return Err(CanaryRefusalReason::CanaryNotVisible);
         }
         let response_name = canary_name("reply");
         let response_bytes = random_canary_bytes();
         canaries
             .atomic_write_child(&response_name, &response_bytes)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| CanaryRefusalReason::MountFailed)?;
         // The requester normally removes this response after proving it. A
         // lost HTTP response must not leave one file per probe forever.
         let cleanup_directory = canaries.clone();
@@ -1571,6 +1751,272 @@ mod tests {
         }
     }
 
+    use super::CanaryOutcome::{Agrees, Disagrees, Unavailable};
+
+    fn verdict(local_is_voter: bool, voter_count: usize, outcomes: &[CanaryOutcome]) -> bool {
+        let ids = (0..outcomes.len())
+            .map(|index| format!("node-{index}"))
+            .collect::<Vec<_>>();
+        let outcomes = ids
+            .iter()
+            .map(String::as_str)
+            .zip(outcomes.iter().copied())
+            .collect::<Vec<_>>();
+        canary_verdict(local_is_voter, voter_count, &outcomes).is_ok()
+    }
+
+    #[test]
+    fn canary_publishes_when_every_voter_agrees() {
+        assert!(verdict(true, 3, &[Agrees, Agrees]));
+    }
+
+    // A7: one stopped, slow or rate-limited voter used to revoke the shared
+    // cache on every healthy node.
+    #[test]
+    fn canary_publishes_with_one_of_three_voters_unavailable() {
+        assert!(verdict(true, 3, &[Agrees, Unavailable]));
+        assert!(verdict(true, 3, &[Unavailable, Agrees]));
+    }
+
+    #[test]
+    fn canary_refuses_when_only_this_voter_confirms() {
+        assert!(!verdict(true, 3, &[Unavailable, Unavailable]));
+    }
+
+    #[test]
+    fn a_disagreeing_voter_is_not_counted_and_does_not_veto() {
+        // A majority agrees: the dissenter is reported, not obeyed.
+        assert!(verdict(true, 3, &[Agrees, Disagrees]));
+        assert!(verdict(true, 5, &[Agrees, Agrees, Agrees, Disagrees]));
+        assert!(verdict(false, 3, &[Agrees, Agrees, Disagrees]));
+        let held = canary_verdict(true, 3, &[("b", Agrees), ("c", Disagrees)]).expect("majority");
+        assert!(held.dissent);
+        assert!(
+            !canary_verdict(true, 3, &[("b", Agrees), ("c", Unavailable)])
+                .expect("majority")
+                .dissent
+        );
+        // A disagreement is never an agreement: without a majority it refuses.
+        assert!(!verdict(true, 3, &[Disagrees, Disagrees]));
+        assert!(!verdict(true, 3, &[Disagrees, Unavailable]));
+        assert!(!verdict(false, 3, &[Agrees, Disagrees, Disagrees]));
+    }
+
+    /// The safety claim itself, over every cluster of up to five voters with
+    /// an optional learner: give each node one of two mounts and each pair of
+    /// nodes a link that is up or down, derive what an honest canary would
+    /// report, and require that two nodes on different mounts are never both
+    /// admitted in the same round.
+    #[test]
+    fn no_two_mounts_are_admitted_in_one_round() {
+        for voters in 1_usize..=5 {
+            for learner in [false, true] {
+                // Six nodes is two million rounds; five voters are covered
+                // without the learner and the learner with up to four.
+                if learner && voters == 5 {
+                    continue;
+                }
+                let nodes = voters + usize::from(learner);
+                let pairs = nodes * (nodes - 1) / 2;
+                for mounts in 0_u32..(1 << nodes) {
+                    for links in 0_u32..(1 << pairs) {
+                        let mount = |node: usize| (mounts >> node) & 1;
+                        let up = |a: usize, b: usize| {
+                            let (low, high) = (a.min(b), a.max(b));
+                            let index = high * (high - 1) / 2 + low;
+                            (links >> index) & 1 == 1
+                        };
+                        let admitted = |node: usize| {
+                            let outcomes = (0..voters)
+                                .filter(|peer| *peer != node)
+                                .map(|peer| {
+                                    if !up(node, peer) {
+                                        Unavailable
+                                    } else if mount(peer) == mount(node) {
+                                        Agrees
+                                    } else {
+                                        Disagrees
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            // One voter alone proves its mount locally.
+                            if outcomes.is_empty() {
+                                return true;
+                            }
+                            verdict(node < voters, voters, &outcomes)
+                        };
+                        let on = |wanted: u32| {
+                            (0..nodes).any(|node| mount(node) == wanted && admitted(node))
+                        };
+                        assert!(
+                            !(on(0) && on(1)),
+                            "voters={voters} learner={learner} mounts={mounts:b} links={links:b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn learner_counts_zero_for_itself_and_needs_a_voter_majority() {
+        assert!(verdict(false, 3, &[Agrees, Agrees, Unavailable]));
+        assert!(!verdict(false, 3, &[Agrees, Unavailable, Unavailable]));
+    }
+
+    #[test]
+    fn five_voters_tolerate_two_unavailable() {
+        assert!(verdict(
+            true,
+            5,
+            &[Agrees, Agrees, Unavailable, Unavailable]
+        ));
+        assert!(!verdict(
+            true,
+            5,
+            &[Agrees, Unavailable, Unavailable, Unavailable]
+        ));
+    }
+
+    #[test]
+    fn two_voters_cannot_publish_without_the_peer() {
+        assert!(!verdict(true, 2, &[Unavailable]));
+        assert!(verdict(true, 2, &[Agrees]));
+    }
+
+    #[test]
+    fn canary_failure_names_each_voter_by_outcome() {
+        let error = canary_verdict(
+            true,
+            3,
+            &[("voter-b", Unavailable), ("voter-c", Unavailable)],
+        )
+        .expect_err("no majority");
+        assert!(error.contains("1 of 3 voters confirmed"), "{error}");
+        assert!(
+            error.contains(r#"unavailable=["voter-b", "voter-c"]"#),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn canary_responses_classify_every_handler_answer() {
+        use reqwest::StatusCode;
+        let refusal = |reason: CanaryRefusalReason| {
+            serde_json::to_vec(&CanaryRefusal { refusal: reason }).expect("refusal body")
+        };
+        let ok = serde_json::to_vec(&CanaryResponse {
+            storage_id: "shared:x".to_owned(),
+            response_name: canary_name("reply"),
+            response_digest: digest(b"x"),
+        })
+        .expect("response body");
+        assert!(classify_canary_response(StatusCode::OK, &ok).is_ok());
+        assert_eq!(
+            classify_canary_response(StatusCode::OK, b"not json").err(),
+            Some(Unavailable),
+        );
+        for (reason, expected) in [
+            (CanaryRefusalReason::StorageMismatch, Disagrees),
+            (CanaryRefusalReason::CanaryNotVisible, Disagrees),
+            (CanaryRefusalReason::MountFailed, Unavailable),
+            (CanaryRefusalReason::NotConfigured, Unavailable),
+            (CanaryRefusalReason::InvalidRequest, Unavailable),
+            (CanaryRefusalReason::Busy, Unavailable),
+        ] {
+            assert_eq!(
+                classify_canary_response(StatusCode::CONFLICT, &refusal(reason)).err(),
+                Some(expected),
+                "{reason:?}",
+            );
+            // Only the canary handler's 409 carries a refusal.
+            assert_eq!(
+                classify_canary_response(StatusCode::FORBIDDEN, &refusal(reason)).err(),
+                Some(Unavailable),
+                "{reason:?}",
+            );
+        }
+        // An older peer answers every refusal with an empty 409; a future
+        // peer may send a reason this build does not know.
+        for body in [
+            &b""[..],
+            &br#"{"refusal":"some_future_reason"}"#[..],
+            &b"conflict"[..],
+        ] {
+            assert_eq!(
+                classify_canary_response(StatusCode::CONFLICT, body).err(),
+                Some(Unavailable),
+            );
+        }
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert_eq!(
+                classify_canary_response(status, b"").err(),
+                Some(Unavailable),
+                "{status}",
+            );
+        }
+    }
+
+    #[test]
+    fn canary_refusal_wire_names_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&CanaryRefusal {
+                refusal: CanaryRefusalReason::CanaryNotVisible,
+            })
+            .expect("refusal json"),
+            r#"{"refusal":"canary_not_visible"}"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn canary_refusals_name_their_cause() {
+        let shared = crate::test_tempdir().expect("shared root");
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let peer = coordinator(shared.path(), "media-a", "peer", Arc::clone(&store));
+        let unconfigured = coordinator(Path::new(""), "media-a", "bare", Arc::clone(&store));
+        let request = CanaryRequest {
+            storage_id: peer.storage_id().expect("storage id").to_owned(),
+            canary_name: canary_name("probe"),
+            canary_digest: digest(b"never written"),
+        };
+        assert_eq!(
+            unconfigured.answer_canary(&request).await.err(),
+            Some(CanaryRefusalReason::NotConfigured),
+        );
+        assert_eq!(
+            peer.answer_canary(&request).await.err(),
+            Some(CanaryRefusalReason::CanaryNotVisible),
+        );
+        let malformed = CanaryRequest {
+            canary_name: "../probe".to_owned(),
+            ..request.clone()
+        };
+        assert_eq!(
+            peer.answer_canary(&malformed).await.err(),
+            Some(CanaryRefusalReason::InvalidRequest),
+        );
+        let missing_root = coordinator(
+            &shared.path().join("not-mounted"),
+            "media-a",
+            "missing",
+            Arc::clone(&store),
+        );
+        assert_eq!(
+            missing_root.answer_canary(&request).await.err(),
+            Some(CanaryRefusalReason::MountFailed),
+        );
+    }
+
     #[tokio::test]
     async fn two_way_canary_requires_the_same_writable_root_and_identity() {
         let shared = crate::test_tempdir().expect("shared root");
@@ -1607,8 +2053,15 @@ mod tests {
             canary_digest: digest(&canary_bytes),
         };
 
-        assert!(wrong_root.answer_canary(&request).await.is_err());
-        assert!(wrong_identity.answer_canary(&request).await.is_err());
+        assert_eq!(
+            wrong_root.answer_canary(&request).await.err(),
+            Some(CanaryRefusalReason::CanaryNotVisible),
+            "a different root is affirmative evidence, not a busy peer",
+        );
+        assert_eq!(
+            wrong_identity.answer_canary(&request).await.err(),
+            Some(CanaryRefusalReason::StorageMismatch),
+        );
         let response = peer
             .answer_canary(&request)
             .await
