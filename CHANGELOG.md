@@ -273,6 +273,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- `/metrics` attributes every replicated read and write by the method that
+  issued it, wherever it came from. `plurx_background_store_operations_by_method_total{class,method}`
+  counts the operations made outside an HTTP request (background loops,
+  timers, workers), which before were in `plurx_store_operations_total` with
+  no method. The cluster membership manager's own quorum reads, local reads,
+  writes and watermarks, which reached no metric at all, now go through a
+  counted client: they are in `plurx_store_operations_total`, in the request
+  or background split, and by issuing function in
+  `plurx_cluster_membership_operations_by_method_total{class,method}`.
+
 - Each cluster node keeps a lock-free account of what its own replica has
   applied, and Settings → Developer shows an advisory Applied view card with
   the node's replica proof, image state and view reads. `/metrics` adds the

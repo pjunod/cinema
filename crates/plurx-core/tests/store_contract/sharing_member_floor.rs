@@ -7,6 +7,11 @@ use plurx_core::cluster::membership::{
     SHARING_SESSION_PRINCIPAL_CAPABILITY,
 };
 
+/// The membership manager's counted client over a fixture's raw one.
+fn counted(client: &Client) -> plurx_core::store::CountedClient {
+    plurx_core::store::CountedClient::membership(client.clone())
+}
+
 async fn write(client: &Client, sql: &str) {
     client
         .execute(sql.to_owned(), hiqlite::params!())
@@ -15,7 +20,7 @@ async fn write(client: &Client, sql: &str) {
 }
 
 async fn ready(client: &Client) -> bool {
-    sharing_session_principal_floor_ready(client, 1)
+    sharing_session_principal_floor_ready(&counted(client), 1)
         .await
         .expect("quorum floor observation")
 }
@@ -73,9 +78,11 @@ async fn three_voter_floor_and_atomic_admission_refuse_incomplete_member_proofs(
     assert!(!ready(&client).await, "schema alone is not a binary floor");
     client.execute("INSERT INTO cluster_node_capabilities SELECT node_id,$1,last_seen_at FROM cluster_nodes", hiqlite::params!(SHARING_SESSION_PRINCIPAL_CAPABILITY)).await.expect("seed explicit binary proofs");
     assert!(ready(&client).await);
-    assert!(!sharing_session_principal_floor_ready(&client, 99)
-        .await
-        .expect("unknown serving identity"));
+    assert!(
+        !sharing_session_principal_floor_ready(&counted(&client), 99)
+            .await
+            .expect("unknown serving identity")
+    );
 
     write(
         &client,
@@ -237,7 +244,7 @@ async fn three_voter_floor_and_atomic_admission_refuse_incomplete_member_proofs(
     }
     let unavailable = tokio::time::timeout(
         Duration::from_secs(5),
-        sharing_session_principal_floor_ready(&client, 1),
+        sharing_session_principal_floor_ready(&counted(&client), 1),
     )
     .await;
     assert!(
@@ -300,9 +307,11 @@ async fn three_voter_allocator_floor_requires_independent_fresh_capabilities_in_
     }
     client.execute("INSERT INTO cluster_node_capabilities SELECT node_id,$1,last_seen_at FROM cluster_nodes",hiqlite::params!(SHARING_SESSION_PRINCIPAL_CAPABILITY)).await.expect("principal-only capabilities");
     assert!(ready(&client).await);
-    assert!(!sharing_catalogue_item_identity_floor_ready(&client, 1)
-        .await
-        .expect("independent allocator floor"));
+    assert!(
+        !sharing_catalogue_item_identity_floor_ready(&counted(&client), 1)
+            .await
+            .expect("independent allocator floor")
+    );
     let guard = format!(
         "INSERT INTO allocator_admission_receipts SELECT 1 WHERE {}",
         sharing_member_guard_predicate(SharingMemberFloor::PrincipalAndCatalogue, 1, 2, 3)
@@ -318,11 +327,13 @@ async fn three_voter_allocator_floor_requires_independent_fresh_capabilities_in_
         0
     );
     client.execute("INSERT INTO cluster_node_capabilities SELECT node_id,$1,last_seen_at FROM cluster_nodes",hiqlite::params!(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY)).await.expect("allocator capabilities");
-    assert!(
-        sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
-            .await
-            .expect("both independent floors")
-    );
+    assert!(sharing_member_floor_ready(
+        &counted(&client),
+        1,
+        SharingMemberFloor::PrincipalAndCatalogue
+    )
+    .await
+    .expect("both independent floors"));
     assert_eq!(
         client
             .execute(
@@ -349,11 +360,13 @@ async fn three_voter_allocator_floor_requires_independent_fresh_capabilities_in_
         ready(&client).await,
         "allocator proof cannot weaken principal wrapper"
     );
-    assert!(
-        !sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
-            .await
-            .expect("changed catalogue proof")
-    );
+    assert!(!sharing_member_floor_ready(
+        &counted(&client),
+        1,
+        SharingMemberFloor::PrincipalAndCatalogue
+    )
+    .await
+    .expect("changed catalogue proof"));
     client
         .execute(
             "UPDATE cluster_node_capabilities SET last_seen_at=$1",
@@ -366,11 +379,13 @@ async fn three_voter_allocator_floor_requires_independent_fresh_capabilities_in_
         "UPDATE cluster_nodes SET raft_id=99 WHERE node_id='voter-3'",
     )
     .await;
-    assert!(
-        !sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
-            .await
-            .expect("exact committed roster")
-    );
+    assert!(!sharing_member_floor_ready(
+        &counted(&client),
+        1,
+        SharingMemberFloor::PrincipalAndCatalogue
+    )
+    .await
+    .expect("exact committed roster"));
     assert_eq!(
         client
             .execute(
@@ -402,11 +417,13 @@ async fn three_voter_allocator_floor_requires_independent_fresh_capabilities_in_
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("commit stale proofs");
-    assert!(
-        !sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
-            .await
-            .expect("coupled proofs must still be fresh")
-    );
+    assert!(!sharing_member_floor_ready(
+        &counted(&client),
+        1,
+        SharingMemberFloor::PrincipalAndCatalogue
+    )
+    .await
+    .expect("coupled proofs must still be fresh"));
     assert_eq!(
         client
             .execute(guard, hiqlite::params!("[1,2,3]", now - 120000, now))

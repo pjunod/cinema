@@ -295,7 +295,9 @@ Add these families with fixed label vocabularies:
 | Metric | Type | Labels | Source and meaning |
 |---|---|---|---|
 | `plurx_store_operation_seconds` | histogram | `class`, `outcome` | `TimedClient`: local read · authority read · write latency |
-| `plurx_store_operations_total` | counter | `class`, `outcome` | `TimedClient`: volume and error rate by consistency cost |
+| `plurx_store_operations_total` | counter | `class`, `outcome` | `TimedClient` and the membership manager's `CountedClient`: volume and error rate by consistency cost |
+| `plurx_background_store_operations_by_method_total` | counter | `class`, `method` | replicated operations issued outside an HTTP request scope (background loops, timers, workers, the membership manager's own tasks), by the `&'static str` method that issued them; with `plurx_http_store_operations_by_method_total` (and its dropped counter) it accounts for every operation in `plurx_store_operations_total` once. Method cap 1024, past it `method="other"` |
+| `plurx_cluster_membership_operations_by_method_total` | counter | `class`, `method` | the membership manager's replicated SQL and quorum watermarks by issuing function, in either scope; a view across the two families above, not a third share |
 | `plurx_auth_activity_writes_total` | counter | `kind`, `result` | auth coalescer: token/key touch submitted · suppressed · failed |
 | `plurx_raft_commit_index` | gauge | none | most recent quorum-confirmed leader watermark; meaningful only while its validity gauge is `1` |
 | `plurx_raft_applied_index` | gauge | none | OpenRaft local metrics watch: latest entry applied on this node |

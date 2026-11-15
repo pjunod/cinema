@@ -3148,14 +3148,15 @@ async fn open_active_store_with_key(
         if read_readdress_record(&config.storage.data_dir)?.is_some() {
             materialize_join_snapshot(&client, &active, &identity.node_id, "sole-voter readdress")
                 .await?;
-        } else if super::membership::restored_image_lacks_join_snapshot(&client)
-            .await
-            .map_err(|error| {
-                StoreError::Database(format!(
-                    "checking whether the restored image can seed a joining node: {error}"
-                ))
-            })?
-        {
+        } else if super::membership::restored_image_lacks_join_snapshot(
+            &crate::store::CountedClient::membership(client.clone()),
+        )
+        .await
+        .map_err(|error| {
+            StoreError::Database(format!(
+                "checking whether the restored image can seed a joining node: {error}"
+            ))
+        })? {
             // `restore` installs the archive's image beneath a brand-new,
             // empty Raft log, exactly as readdress does, so that log cannot
             // reconstruct the restored rows for a later joiner either. The

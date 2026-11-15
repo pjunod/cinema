@@ -1157,7 +1157,12 @@ const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     END;";
 
 #[cfg(feature = "hiqlite-store")]
+mod counted_client;
+#[cfg(feature = "hiqlite-store")]
+pub use self::counted_client::{CountedClient, DbRaftMetrics};
+#[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
+    background_store_operations_by_method, cluster_membership_operations_by_method,
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
     AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION,
     AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
@@ -6380,9 +6385,14 @@ struct MethodOperationCounts {
 
 impl MethodOperationCounts {
     fn record(&mut self, method: &'static str, class_index: usize) {
-        let key = if self.by_method.contains_key(method)
-            || self.by_method.len() < MAX_METHODS_PER_REQUEST
-        {
+        self.record_capped(method, class_index, MAX_METHODS_PER_REQUEST);
+    }
+
+    /// [`Self::record`] with an explicit bound on distinct methods; past it
+    /// the operation is counted under [`METHOD_OVERFLOW_LABEL`], so the
+    /// counts always sum to the operations recorded.
+    fn record_capped(&mut self, method: &'static str, class_index: usize, cap: usize) {
+        let key = if self.by_method.contains_key(method) || self.by_method.len() < cap {
             method
         } else {
             METHOD_OVERFLOW_LABEL
@@ -6541,13 +6551,17 @@ where
     tokio::spawn(scope_http_store_operations(counts.clone(), make(counts)))
 }
 
+/// Count one replicated operation into the current request. Returns whether
+/// a request scope took it: an operation outside any scope is the caller's to
+/// attribute as background work.
 pub(super) fn record_http_store_operation(
     class_index: usize,
     method: &'static str,
     elapsed: std::time::Duration,
-) {
-    let _ =
-        HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index, method, elapsed));
+) -> bool {
+    HTTP_STORE_OPERATION_COUNTS
+        .try_with(|counts| counts.record(class_index, method, elapsed))
+        .is_ok()
 }
 
 /// Count one watch-state read into the current request, if any. Called by
