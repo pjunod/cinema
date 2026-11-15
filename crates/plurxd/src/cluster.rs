@@ -117,11 +117,6 @@ impl Cluster {
         self.directory.peers(purpose).await
     }
 
-    /// The other committed voters with the voter facts of one snapshot.
-    pub(crate) async fn voters(&self) -> Result<Voters, ClusterError> {
-        self.directory.voters().await
-    }
-
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
@@ -205,6 +200,7 @@ pub(crate) struct Directory {
 impl Directory {
     /// A directory with no applied mark: correct, never cached. For a
     /// subsystem a test wires to its own manager.
+    #[cfg(test)]
     pub(crate) fn new(membership: MembershipManager) -> Self {
         Self::with_mark(membership, None)
     }
@@ -504,7 +500,7 @@ pub(crate) mod tests {
             }
         );
         assert!(!cluster.role().is_clustered());
-        let voters = cluster.voters().await.expect("standalone");
+        let voters = cluster.directory().voters().await.expect("standalone");
         assert!(voters.peers().all().is_empty());
         assert_eq!(voters.voter_count(), 1);
         assert!(voters.local_is_voter().is_err());
