@@ -913,68 +913,10 @@ async fn sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end() {
     Box::pin(actual_source_resource_delivery(SourceFixtureMode::Hdr10)).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sharing_source_http_dolby_vision_refusal_fresh_claim_confirms_exact_end() {
+async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no_cleanup() {
     use axum::response::IntoResponse;
     let fixture = real_source_start_fixture_with(SourceFixtureMode::DolbyVisionEncoded, None).await;
-    let denied = fixture_start(
-        axum::extract::State((*fixture.state).clone()),
-        fixture.headers.clone(),
-        axum::extract::Path((
-            fixture.reference.item_id.as_str().to_owned(),
-            fixture.reference.file_id.as_str().to_owned(),
-        )),
-        axum::body::Body::from(fixture.request.clone()),
-    )
-    .await
-    .expect_err("DV encode has no Source-owned RPU preparation")
-    .into_response();
-    assert_eq!(denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let bytes = axum::body::to_bytes(denied.into_body(), 4096)
-        .await
-        .expect("typed refusal");
-    let body: Value = serde_json::from_slice(&bytes).expect("JSON refusal");
-    assert_eq!(body["code"], SHARING_START_DOLBY_VISION_UNSUPPORTED);
-    let entries = fixture
-        .state
-        .transcode
-        .source_http_starts
-        .entries
-        .lock()
-        .expect("registry")
-        .clone();
-    assert_eq!(
-        entries.len(),
-        1,
-        "retain the exact failed invocation for cleanup"
-    );
-    assert!(
-        matches!(
-            *entries[0].task.stage.lock().expect("stage"),
-            SourceStartTaskStage::Acquired(_)
-        ),
-        "fresh invocation is claimed before preparation but never dispatched"
-    );
-    let request = entries[0].identity.request_id.to_string();
-    let first = end(
-        axum::extract::State((*fixture.state).clone()),
-        fixture.headers.clone().into(),
-        axum::extract::Path((
-            fixture.reference.item_id.as_str().to_owned(),
-            fixture.reference.file_id.as_str().to_owned(),
-            request.clone(),
-        )),
-        None,
-        axum::body::Body::from(fixture.request.clone()),
-    )
-    .await
-    .expect("authenticated exact g0 cleanup")
-    .0;
-    assert!(first.session_id.is_none());
-    assert!(
-        entries[0].actual_finished(),
-        "accounting released only after exact cleanup"
-    );
-    for _ in 0..3 {
+    let start = || {
         fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
@@ -984,25 +926,198 @@ async fn sharing_source_http_dolby_vision_refusal_fresh_claim_confirms_exact_end
             )),
             axum::body::Body::from(fixture.request.clone()),
         )
+    };
+    let refused = |error: ApiError| async move {
+        let denied = error.into_response();
+        assert_eq!(denied.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(denied.into_body(), 4096)
+            .await
+            .expect("typed refusal");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON refusal");
+        assert_eq!(body["code"], SHARING_START_DOLBY_VISION_UNSUPPORTED);
+    };
+    refused(
+        start()
+            .await
+            .expect_err("DV encode has no Source-owned RPU preparation"),
+    )
+    .await;
+    let entries = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .entries
+        .lock()
+        .expect("registry")
+        .clone();
+    assert_eq!(entries.len(), 1, "the exact refused invocation is retained");
+    // Pure planning precedes owner designation (1ef67c7de): the refusal is
+    // decided from the prepared request before any claim, so the entry
+    // never acquired a binding, owns no durable or physical obligation and
+    // leaves admission capacity at once, with nothing for an End to clean.
+    assert!(
+        matches!(
+            *entries[0].task.stage.lock().expect("stage"),
+            SourceStartTaskStage::IntentReady { .. }
+        ),
+        "the refusal is decided before the claim"
+    );
+    assert!(
+        entries[0]
+            .task
+            .cleanup
+            .lock()
+            .expect("uninvoked Source custody")
+            .is_none(),
+        "no claimed invocation is left to fence"
+    );
+    assert!(
+        entries[0].actual_finished(),
+        "a pre-claim refusal releases its slot without a cleanup receipt"
+    );
+    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
+    for _ in 0..3 {
+        refused(start().await.expect_err("exact refusal retry")).await;
+        let registry = &fixture.state.transcode.source_http_starts;
+        assert!(
+            registry.entries.lock().expect("registry").is_empty(),
+            "a retry opens no second invocation"
+        );
+        let settled = registry.settled.lock().expect("settled receipts").clone();
+        assert_eq!(settled.len(), 1);
+        assert!(
+            std::sync::Arc::ptr_eq(&settled[0], &entries[0]),
+            "a retry replays the exact retained refusal"
+        );
+    }
+    fixture.shutdown().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_bound_invocation_projects_the_complete_start_response() {
+    use super::super::hls::{prepare_source_playback, CreateSession, SourceCopyPresentation};
+    use plurx_core::sharing_source_sessions::{
+        SourceClaimOutcome, SourceIntentRead, SourceSessionRequest,
+    };
+    let fixture = real_source_start_fixture_with(SourceFixtureMode::Copy, None).await;
+    let recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    let request_id = recipe["session"]["request_id"]
+        .as_str()
+        .expect("request id")
+        .to_owned();
+    let session_body: CreateSession =
+        serde_json::from_value(recipe["session"].clone()).expect("complete session");
+    let mut prepared = Box::pin(prepare_source_playback(
+        &fixture.state,
+        &fixture.headers,
+        fixture.reference.clone(),
+        session_body,
+    ))
+    .await
+    .expect("actual Source preparation");
+    let session = Uuid::new_v4().to_string();
+    let incarnation_id = Uuid::new_v4();
+    let incarnation = incarnation_id.to_string();
+    let info = crate::transcode::StartInfo {
+        processed_dv_profile: None,
+        processed_fel: None,
+        degraded_processing: None,
+        processing_note: None,
+        audio_delivery: prepared.request().audio_delivery.clone(),
+        retained_output: None,
+        session_id: session.clone(),
+        playlist_url: format!("/api/v1/hls/{session}/index.m3u8"),
+        duration_ms: Some(2_000),
+        start_seconds: 0.0,
+        media_origin_seconds: 0.0,
+        target_height: 180,
+        kind: prepared.request().kind,
+        encoder: "vod",
+        grade: plurx_core::transcode::OutputGrade::Sdr,
+        vod: true,
+        control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+    };
+    assert!(
+        prepared
+            .start_response(&fixture.state, &info, &incarnation, 7)
+            .await
+            .is_err(),
+        "an unbound preparation has no presentation to describe"
+    );
+    // Reach the bound invocation exactly as own_start does: current intent,
+    // the claim against the observed member floor, then the bind.
+    let (hash, _) = current_reference(&fixture.state, &fixture.headers, &fixture.reference)
         .await
-        .expect_err("exact refusal retry");
-        let replay = end(
-            axum::extract::State((*fixture.state).clone()),
-            fixture.headers.clone().into(),
-            axum::extract::Path((
-                fixture.reference.item_id.as_str().to_owned(),
-                fixture.reference.file_id.as_str().to_owned(),
-                request.clone(),
-            )),
-            None,
-            axum::body::Body::from(fixture.request.clone()),
+        .expect("current reference");
+    let now = crate::state::clock_ms();
+    let SourceIntentRead::Ready(intent) = fixture
+        .state
+        .store
+        .prepare_source_session_intent(
+            SourceSessionRequest {
+                principal: prepared.principal().clone(),
+                request_id,
+                request_fingerprint: prepared.fingerprint().into(),
+                playback_id: prepared.request().playback_id.clone(),
+                incarnation_id,
+                ingress_registry_boot_id: fixture.state.sharing.accepted_drivers.boot_id(),
+                now_ms: now,
+                claim_expires_at_ms: now + 60_000,
+                credential_hash: hash,
+                item_id: fixture.reference.item_id.clone(),
+                file_id: fixture.reference.file_id.clone(),
+                file_revision: fixture.reference.revision.clone(),
+            },
+            &fixture.state.sharing.key,
         )
         .await
-        .expect("same cleanup receipt")
-        .0;
-        assert_eq!(replay.confirmation_id, first.confirmation_id);
-        assert_eq!(replay.incarnation_id, first.incarnation_id);
-    }
+        .expect("current Source intent")
+    else {
+        panic!("ready Source intent")
+    };
+    let members = fixture
+        .state
+        .membership
+        .observe_source_admission_members()
+        .await
+        .expect("member observation")
+        .expect("member floor");
+    let SourceClaimOutcome::Acquired(binding) = fixture
+        .state
+        .store
+        .claim_source_media_session(&intent, &members)
+        .await
+        .expect("claim")
+    else {
+        panic!("fresh Source claim")
+    };
+    prepared
+        .bind_source_invocation(&binding, SourceCopyPresentation::FullVod)
+        .expect("bind the exact fresh invocation");
+    let response = prepared
+        .start_response(&fixture.state, &info, &incarnation, 7)
+        .await
+        .expect("complete Source response");
+    assert_eq!(response.session_id, session);
+    assert_eq!(response.playlist_url, info.playlist_url);
+    assert_eq!(response.duration_ms, info.duration_ms);
+    assert_eq!(response.height, info.target_height);
+    assert_eq!(response.encoder, info.encoder);
+    assert_eq!(response.media_origin_ms, Some(0));
+    assert!(response.vod);
+    assert_eq!(response.prior_kbps, None);
+    assert_eq!(response.plan_notes, prepared.plan_notes());
+    let control = response.control.as_ref().expect("private control");
+    assert_eq!(control.generation, incarnation);
+    assert_eq!(control.control_epoch, 7);
+    assert_eq!(control.url, format!("/api/v1/hls/{session}/control"));
+    assert!(prepared
+        .start_response(&fixture.state, &info, &incarnation, 0)
+        .await
+        .is_err());
+    assert!(prepared
+        .start_response(&fixture.state, &info, "not-an-incarnation", 7)
+        .await
+        .is_err());
     fixture.shutdown().await;
 }
 async fn actual_source_resource_delivery(mode: SourceFixtureMode) {

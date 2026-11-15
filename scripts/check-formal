@@ -1314,7 +1314,10 @@ def run(args: argparse.Namespace) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description=__doc__)
+    # A fixed name: argparse otherwise takes it from sys.argv[0], so a refusal raised while
+    # another program has this file loaded (a test runner, the image probe) is printed under
+    # that program's name and reads as its own failure.
+    result = argparse.ArgumentParser(prog="check-formal", description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check-mapping", help="offline source and input drift check")
     check.add_argument("--affected-base", help="base commit for changed-path impact reporting")

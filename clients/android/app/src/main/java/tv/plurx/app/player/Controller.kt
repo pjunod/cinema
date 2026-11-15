@@ -305,6 +305,12 @@ class Controller internal constructor(
     private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
     private var progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
+    private val videoDecodersByPlayer = java.util.WeakHashMap<ExoPlayer, VideoDecoderEvidence>().apply {
+        put(builtPlayer.player, builtPlayer.videoDecoderEvidence)
+    }
+    /** Actual configured codec MIME for the current player, including successor/rollback. */
+    val selectedVideoCodecMime: String? get() = videoDecodersByPlayer[player]?.codecMimeType
+
     private val autoTransfersByPlayer = java.util.WeakHashMap<ExoPlayer, AutoTransferEvidence>().apply {
         put(builtPlayer.player, builtPlayer.autoTransfers)
     }
@@ -558,6 +564,7 @@ class Controller internal constructor(
         continuousExecutedQuality = desired
         val current = currentRecipe()
         autoActiveCandidateId = id
+        optionalAutoAttempt = null
         planReplacement.presented(desired)
         stallReopenBudget.seed(row.number("height")?.toInt())
         if (autoDesiredCandidate?.id == id) {
@@ -689,18 +696,22 @@ class Controller internal constructor(
         private set
 
     /**
-     * The open session's server-computed Dolby Vision enhancement (FEL / RPU /
-     * DYN). Set by the session that reports it and cleared with the session
+     * The active delivery's server-computed Dolby Vision enhancement (FEL /
+     * RPU / DYN). Direct play starts from its decision; an HLS session replaces
+     * it with its own report, which is cleared with the session
      * wherever [effectiveProcessing] is cleared on a session change; a seek
      * leaves it standing, because a processed delivery's badges are already
      * gated on [effectiveProcessing] matching the current generation
      * ([tv.plurx.app.data.PlaybackEnhancement.shown]).
      */
-    private var baseEnhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(null)
+    private var baseEnhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(
+        directPlaybackEnhancement(plan.mode, plan.deliveredDynamicRange, plan.enhancement),
+    )
     private var processingSkip: tv.plurx.app.data.ProcessingSkip? by mutableStateOf(null)
     var enhancement: tv.plurx.app.data.PlaybackEnhancement?
         get() = baseEnhancement?.explainingSkip(processingSkip, effectiveProcessingGeneration)
         private set(value) { baseEnhancement = value; processingSkip = null }
+
     var deliveredRange: String? by mutableStateOf(plan.deliveredDynamicRange)
         private set
 
@@ -1009,9 +1020,9 @@ class Controller internal constructor(
     private class AutoBoundaryAttempt(val incumbent: ExoPlayer, val sessionId: String, val epoch: Long,
         val candidateId: String, val recipe: PlaybackMediaRecipe, val qualitySequence: Long?,
         val transportLifetime: Any, val audio: Long?, val subtitle: Long?, val audioOffsetMs: Long,
-        val previousCandidate: tv.plurx.app.data.QualityCandidate?, val previousId: String?,
-        val previousHeight: Int?)
+        val optional: OptionalAutoAttempt)
     private var autoBoundaryAttempt: AutoBoundaryAttempt? = null
+    private var optionalAutoAttempt: OptionalAutoAttempt? = null
     /** The viewer boundary the next ordinary Auto evaluation owes a re-plan. */
     private val autoBoundaryReplan = AutoBoundaryReplan()
 
@@ -2290,7 +2301,19 @@ class Controller internal constructor(
         playbackControl.playerChanged()
     }
 
+    internal fun reportExit(origin: PlaybackExitOrigin, input: PlayerContractInput? = null, repeats: Int = 0) {
+        playbackTelemetry.report(event = "playback_exit_requested", level = "info",
+            message = "Playback exit requested.", detail = playbackExitDetail(origin, input, repeats))
+    }
+
+    internal fun reportScreenDisposed() {
+        playbackTelemetry.report(event = "playback_screen_disposed", level = "info",
+            message = "Playback screen disposed.",
+            detail = "p=${realPosition()} s=${player.playbackState} handoff=${pendingPreparedControlHandoff != null}")
+    }
+
     fun release() {
+        optionalAutoAttempt = null
         effectiveProcessing = null
         effectiveProcessingGeneration = null
         enhancement = null
@@ -2500,7 +2523,7 @@ class Controller internal constructor(
         val recipe = currentRecipe()
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
-                leaveSessionPlayback()
+                leaveSessionPlayback(restoreDirectEnhancement = true)
                 activeMediaPath = relativeMediaPath(fileContext.translatedDeliveryPath(plan.playUrl))
                 player.setMediaItem(directMediaItem(fileContext.translatedDeliveryPath(plan.playUrl)), positionMs)
                 attachRecipe(recipe)
@@ -2552,6 +2575,8 @@ class Controller internal constructor(
         // rather than left for the server's 330 s deadline — which would hold
         // this session's one preparation slot for the rest of the film.
         abandonPreparedReplacement(failed = false)
+        optionalAutoAttempt = null
+        autoPreparing = false
         val requestVersion = stallGuard.beginRequest()
         val recipe = currentRecipe()
         val createBody = sessionBody(ms, recipe = recipe.recipe)
@@ -3018,7 +3043,7 @@ class Controller internal constructor(
             serverProtocol = Session.displayAwareAutoProtocol,
             planProtocol = plan.displayAwareAutoProtocol,
             displayAwareAuto = Session.displayAwareAuto,
-            selection = playbackControlSelection(),
+            selection = sessionCreateSelection(),
             presentationTarget = autoPresentationTarget,
         )
         return if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1" &&
@@ -3176,7 +3201,7 @@ class Controller internal constructor(
     private fun textTrackAt(ordinal: Int): Pair<TrackGroup, Int>? =
         trackAt(C.TRACK_TYPE_TEXT, ordinal)
 
-    private fun leaveSessionPlayback() {
+    private fun leaveSessionPlayback(restoreDirectEnhancement: Boolean = false) {
         stallGuard.invalidateForUserAction()
         val endingSession = sessionId
         // The final control exchange may release the session after the
@@ -3198,7 +3223,9 @@ class Controller internal constructor(
         // Both halves, for the same reason they are adopted together.
         effectiveProcessing = null
         effectiveProcessingGeneration = null
-        enhancement = null
+        enhancement = if (restoreDirectEnhancement) {
+            directPlaybackEnhancement(plan.mode, plan.deliveredDynamicRange, plan.enhancement)
+        } else null
         deliveredRange = plan.deliveredDynamicRange
         deliveredDolbyVisionProfile = plan.deliveredDolbyVisionProfile
     }
@@ -3408,6 +3435,10 @@ class Controller internal constructor(
         effectiveProcessingGeneration = bootstrap.generation
         effectiveProcessing = tv.plurx.app.data.EffectiveProcessingReport.fromJson(hls.effective_processing)
             ?.takeIf { it.matches(bootstrap.generation, hls.delivered_dynamic_range) }
+        startPlaybackControl(bootstrap, claim)
+    }
+
+    private fun startPlaybackControl(bootstrap: ControlBootstrap, claim: PlaybackControlBootstrapFence.Claim) {
         // Capabilities are the one input that has to be probed rather than
         // read, and the protocol requires them on the first request of a
         // generation, so reporting waits for that one probe. Until it lands
@@ -3482,6 +3513,8 @@ class Controller internal constructor(
         effectiveProcessingGeneration = null
         enhancement = null
         playbackControlBootstrapFence.invalidate()
+        pendingPreparedControlHandoff = null
+        pendingPreparedControlPlayer = null
         if (settling != null) {
             playbackControl.endAfterFinalExchange(
                 vm.viewModelScope,
@@ -3605,7 +3638,11 @@ class Controller internal constructor(
                 decoderCaps = DecoderCapabilitySnapshot.fromVideo(1L, decisionCaps.video),
             ) else baseCapabilities
         val position = realPosition()
-        val duration = player.duration
+        val duration = filmDurationMs(
+            titleDurationMs = plan.durationMs,
+            playerDurationMs = player.duration,
+            playerTimelineIsFilm = directTransport || sessionIsVod,
+        )
         // Only the runway *ahead* is protocol runway. Media3's bufferedPosition
         // is in player time while the protocol wants title time, so the range
         // is reported from the playhead forward rather than converted with an
@@ -3613,7 +3650,7 @@ class Controller internal constructor(
         val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
         return PlayerControlObservation(
             positionMs = position,
-            durationMs = if (duration > 0) duration else 0L,
+            durationMs = duration,
             bufferedFromMs = position,
             bufferedThroughMs = position + runway,
             rate = player.playbackParameters.speed.toDouble(),
@@ -3654,7 +3691,23 @@ class Controller internal constructor(
      * client forces neither, and saying otherwise would tell the server it had
      * made a choice it has not made.
      */
-    private fun playbackControlSelection(): ClientSelection {
+    private fun playbackControlSelection(): ClientSelection =
+        pendingPreparedControlHandoff?.standingSelection ?: intentSelection()
+
+    /**
+     * The selection a new session is created with. A presented prepared
+     * successor is what the viewer is watching, so its committed candidate is
+     * adopted first; the predecessor's standing selection belongs only to the
+     * predecessor reporter, which the new session's create ends anyway.
+     */
+    private fun sessionCreateSelection(): ClientSelection {
+        val handoff = pendingPreparedControlHandoff ?: return intentSelection()
+        if (!handoff.framePresented) return handoff.standingSelection
+        if (handoff.adoptInto(playbackIntent)) autoActiveCandidateId = handoff.action.effectiveSelection?.candidateId
+        return intentSelection()
+    }
+
+    private fun intentSelection(): ClientSelection {
         val mode = when {
             selectedSubtitle == null -> SubtitleMode.OFF
             subtitleDelivery == SubtitleDelivery.Burn -> SubtitleMode.BURN
@@ -3701,6 +3754,7 @@ class Controller internal constructor(
     }
 
     private fun refreshAutoCatalogForViewerRecipe() {
+        optionalAutoAttempt = null
         autoDesiredCandidate = null
         autoPreparing = false
         autoUpgradeSinceMs = null
@@ -3726,6 +3780,7 @@ class Controller internal constructor(
     }
 
     private fun resetAutoQualityBudgetForViewer() {
+        optionalAutoAttempt = null
         autoSwitchTimes.clear()
         autoLastSwitchMs = null
         autoUpgradeSinceMs = null
@@ -3798,6 +3853,7 @@ class Controller internal constructor(
                 sample.ageMs(monotonicNowMs()) > 15_000L) return
             autoLinkClaims[receipt] = Triple(sample.completedAtMs, true, current.id)
         }
+        optionalAutoAttempt = null
         reportAutoRecoveryCause(if (producer) tv.plurx.app.data.ReopenReason.Encode else tv.plurx.app.data.ReopenReason.Link)
         autoDesiredCandidate = next
         sessionId?.let { session -> autoRecoveryCause = AutoRecoveryCauseTicket(session, player,
@@ -3831,6 +3887,7 @@ class Controller internal constructor(
         if (autoDecodeQualityResponseUsed) return false
         val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return false
         autoDecodeQualityResponseUsed = true
+        optionalAutoAttempt = null
         autoRecoveryCause = AutoRecoveryCauseTicket(session, player, current.id, next.id,
             tv.plurx.app.data.ReopenReason.Decode, observedAt)
         autoDesiredCandidate = next
@@ -3956,10 +4013,10 @@ class Controller internal constructor(
             pick
         } ?: return
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
+        val attempt = requestOptionalAutoCandidate(chosen) ?: return
         autoDesiredCandidate = chosen
         if (!pressure) autoTransfersByPlayer[player]?.let { autoLastEvaluation = Triple(it, mediaMutationEpoch, now) }
         autoVoluntary = !pressure
-        playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
         autoPreparing = true
         autoPreparedTargetRevision = target.revision
         autoPreparedMutationEpoch = mediaMutationEpoch
@@ -3976,7 +4033,7 @@ class Controller internal constructor(
                 try {
                     if (!withTimeout(12_000) {
                         continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), true, continuousRequest)
-                    }) failAutoPreparation()
+                    }) failAutoPreparation(attempt)
                 } catch (_: TimeoutCancellationException) {
                     continuousAutoUncertain(continuousRequest, epoch, chosen.id)
                 }
@@ -3992,9 +4049,9 @@ class Controller internal constructor(
                         autoExecuting() &&
                         step.action.effectiveSelection?.candidateId == chosen.id) {
                         onPrepareAction(step.action)
-                    } else failAutoPreparation()
+                    } else failAutoPreparation(attempt)
                 }
-                else -> failAutoPreparation()
+                else -> failAutoPreparation(attempt)
             }
         }
     }
@@ -4157,17 +4214,17 @@ class Controller internal constructor(
      */
     private fun beginAutoBoundaryPreparation(chosen: tv.plurx.app.data.QualityCandidate, now: Long): Boolean {
         val currentSession = sessionId ?: return false
+        val executingRecipe = currentRecipe().recipe
+        val attempt = requestOptionalAutoCandidate(chosen) ?: return false
         val boundary = AutoBoundaryAttempt(player, currentSession, mediaMutationEpoch, chosen.id,
-            currentRecipe().recipe, playbackIntent.pendingQualityChange?.sequence, viewerTransportLifetime,
-            selectedAudio, selectedSubtitle, audioOffsetMs, autoDesiredCandidate,
-            playbackIntent.automaticCandidateId, playbackIntent.automaticCandidateHeight)
+            executingRecipe, playbackIntent.pendingQualityChange?.sequence, viewerTransportLifetime,
+            selectedAudio, selectedSubtitle, audioOffsetMs, attempt)
         autoBoundaryAttempt = boundary
         autoDesiredCandidate = chosen
         autoVoluntary = true
         autoPreparing = true
         autoPreparedTargetRevision = autoPresentationTarget?.revision
         autoPreparedMutationEpoch = mediaMutationEpoch
-        playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
         scope.launch {
             playbackControl.reportIntent()
             val step = playbackControl.awaitPreparedOffer(now)
@@ -4191,23 +4248,41 @@ class Controller internal constructor(
         return true
     }
 
-    /** Put Auto back where the boundary found it, if nothing newer owns it. */
-    private fun withdrawAutoBoundary(boundary: AutoBoundaryAttempt) {
-        if (autoBoundaryAttempt === boundary) autoBoundaryAttempt = null
-        if (autoDesiredCandidate?.id != boundary.candidateId) return
-        autoDesiredCandidate = boundary.previousCandidate
-        playbackIntent.requestAutomaticCandidate(boundary.previousId, boundary.previousHeight)
-        autoPreparing = false
-        playbackControl.reportEvidence()
+    /** Capture execution before publishing the independent optional target. */
+    private fun requestOptionalAutoCandidate(chosen: tv.plurx.app.data.QualityCandidate): OptionalAutoAttempt? {
+        // Its standing selection still belongs to the predecessor until the
+        // accepted ACK adopts execution. An optional offer cannot own it yet.
+        if (pendingPreparedControlHandoff != null) {
+            noteAutoGate("prepared_handoff_pending")
+            return null
+        }
+        val attempt = OptionalAutoAttempt.capture(playbackIntent,
+            autoActiveCandidateId, playbackControlSelection().quality, chosen.id, chosen.target_height)
+        if (attempt == null) noteAutoGate("execution_unknown") else optionalAutoAttempt = attempt
+        return attempt
     }
 
-    private fun failAutoPreparation() {
+    /** Put Auto back where execution stood, only while this attempt owns it. */
+    private fun withdrawAutoBoundary(boundary: AutoBoundaryAttempt) {
+        settleOptionalAutoFailure(boundary.optional, blockTarget = false)
+    }
+
+    private fun failAutoPreparation(attempt: OptionalAutoAttempt? = optionalAutoAttempt) {
+        if (attempt != null) settleOptionalAutoFailure(attempt, blockTarget = true)
+    }
+
+    private fun settleOptionalAutoFailure(attempt: OptionalAutoAttempt, blockTarget: Boolean) {
+        if (optionalAutoAttempt !== attempt) return
+        val restored = attempt.withdraw(playbackIntent)
+        // Even if a newer intent owns the wire, this ended attempt no longer
+        // owns pending policy. Clearing it cannot rewrite that newer choice.
+        optionalAutoAttempt = null
         autoBoundaryAttempt = null
-        autoDesiredCandidate?.let { autoBlockedUntil[it.id] = monotonicNowMs() + 300_000L }
+        if (restored && blockTarget) autoBlockedUntil[attempt.requestedId] = monotonicNowMs() + 300_000L
         autoDesiredCandidate = null
-        playbackIntent.requestAutomaticCandidate(null, null)
         autoPreparing = false
         autoUpgradeSinceMs = null
+        if (restored) playbackControl.reportEvidence()
     }
 
     private var continuousProbeLastMs: Long? = null
@@ -4901,6 +4976,9 @@ class Controller internal constructor(
         var playlistUrl: String? = null, var immutableVod: Boolean = false)
     private var autoStagedObservation: AutoStagedObservation? = null
     private var autoStagedPlaylistJob: Job? = null
+    private var preparedTimelineOwner: PreparedTimelineOwner? = null
+    private var preparedAcquisition: PreparedAcquisitionResolution? = null
+    private var preparedInitialLocalMs: Long? = null
 
     private fun autoStagedObservationCurrent(observation: AutoStagedObservation, nowMs: Long): Boolean =
         nowMs >= observation.startedAtMs && nowMs < observation.deadlineMs &&
@@ -4911,14 +4989,121 @@ class Controller internal constructor(
             autoDesiredCandidate?.id == observation.candidateId &&
             autoDesiredCandidate?.recipe_digest == observation.recipeDigest
 
+    private fun currentPreparedTimelineOwner(successor: ExoPlayer, action: ControlAction): PreparedTimelineOwner? {
+        val authorization = Session.playbackAuthorization()
+        val owner = preparedTimelineOwner ?: return null
+        return owner.takeIf {
+            !controlObservationIsClosed && playbackControlBootstrapFence.isActive() && preparedPlayer === successor &&
+                preparedLedger.action === action && owner.isCurrent(successor, action.actionId, action.sessionId,
+                    action.mediaOriginMs, mediaMutationEpoch, authorization.origin, authorization.generation)
+        }
+    }
+
+    /** Resolve the received acquisition entry once, before acknowledging metadata readiness. */
+    private fun resolvePreparedAcquisition(successor: ExoPlayer, action: ControlAction) {
+        if (preparedAcquisition != null) return
+        val owner = currentPreparedTimelineOwner(successor, action) ?: return
+        // Ownership gates only the native entry hint, which is the one fact
+        // read from the manifest. An explicit origin, or an origin-0 playlist
+        // that is not provably this session's (another node after failover, a
+        // redirect), resolves without it: the legacy incumbent attachment,
+        // never a stall until the readiness bound.
+        val manifest = successor.currentManifest
+        // An origin-0 entry hint is read once the manifest has loaded.
+        if (owner.originMs == 0L && manifest == null) return
+        val playlist = (manifest as? HlsManifest)?.mediaPlaylist?.takeIf {
+            preparedPlaylistOwnership(it.baseUri, owner.credentialOrigin, owner.sessionId) ==
+                PreparedPlaylistOwnership.Owned
+        }
+        val hintUs = playlist?.startOffsetUs?.takeUnless { it == androidx.media3.common.C.TIME_UNSET }
+        var entryMs: Long? = null
+        val timeline = successor.currentTimeline
+        if (playlist != null && owner.originMs == 0L && playlist.playlistType ==
+            androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist.PLAYLIST_TYPE_VOD && playlist.hasEndTag &&
+            playlist.mediaSequence == 0L && hintUs != null && playlist.hasPositiveStartOffset && !playlist.preciseStart &&
+            hintUs in 0..playlist.durationUs && playlist.segments.isNotEmpty() && !timeline.isEmpty
+        ) {
+            // HlsMediaSource::createTimelineForOnDemand resolves PRECISE=NO to
+            // this preceding segment. Read that native default, not a new origin.
+            var low = 0
+            var high = playlist.segments.lastIndex
+            var index = -1
+            while (low <= high) {
+                val middle = low + (high - low) / 2
+                if (playlist.segments[middle].relativeStartTimeUs <= hintUs) {
+                    index = middle
+                    low = middle + 1
+                } else high = middle - 1
+            }
+            if (index >= 0) {
+                val startUs = playlist.segments[index].relativeStartTimeUs
+                val window = timeline.getWindow(0, androidx.media3.common.Timeline.Window())
+                if (startUs >= 0 && window.defaultPositionUs == startUs) entryMs = startUs / 1000
+            }
+        }
+        val incumbentMs = realPosition()
+        val resolution = preparedAcquisitionResolution(currentPreparedTimelineOwner(successor, action) === owner,
+            owner.originMs, incumbentMs, entryMs) ?: return
+        preparedAcquisition = resolution
+        resolution.localSeekMs?.let(successor::seekTo)
+        runCatching {
+            playbackTelemetry.report(event = "prepared_successor_acquisition", level = "info",
+                message = "Prepared successor acquisition entry resolved.",
+                detail = preparedAcquisitionDetail(resolution, owner.originMs, preparedInitialLocalMs,
+                    hintUs?.div(1000), entryMs, incumbentMs))
+        }
+    }
+
+    /** One terminal diagnostic only; these facts never select a recovery action. */
+    private fun preparedAcquisitionFailureGate(successor: ExoPlayer?, action: ControlAction?): String {
+        if (controlObservationIsClosed) return "acq_closed"
+        if (!playbackControlBootstrapFence.isActive()) return "acq_released"
+        val owner = preparedTimelineOwner ?: return "acq_owner_absent"
+        if (successor == null || preparedPlayer !== successor || owner.player !== successor) return "acq_player"
+        if (action == null || preparedLedger.action !== action || owner.actionId != action.actionId) return "acq_action"
+        if (owner.sessionId != action.sessionId) return "acq_session"
+        if (owner.originMs != action.mediaOriginMs) return "acq_origin"
+        if (owner.mutationEpoch != mediaMutationEpoch) return "acq_mutation"
+        val authorization = Session.playbackAuthorization()
+        if (owner.credentialOrigin != authorization.origin) return "acq_credential_origin"
+        if (owner.authorizationGeneration != authorization.generation) return "acq_authorization"
+        val manifest = successor.currentManifest as? HlsManifest ?: return "acq_manifest"
+        val ownership = preparedPlaylistOwnership(manifest.mediaPlaylist.baseUri, owner.credentialOrigin, owner.sessionId)
+        return if (ownership == PreparedPlaylistOwnership.Owned) "acq_unresolved" else "acq_${ownership.wire}"
+    }
+
+    /** Native parsed media belongs to this exact staged pipeline, independently of Auto policy. */
+    private fun preparedSuccessorVodTimeline(successor: ExoPlayer, action: ControlAction): PreparedVodTimelineProof {
+        val owner = currentPreparedTimelineOwner(successor, action)
+            ?: return PreparedVodTimelineProof(PreparedVodProofReason.Owner)
+        val manifest = successor.currentManifest as? HlsManifest
+            ?: return PreparedVodTimelineProof(PreparedVodProofReason.Manifest)
+        val playlist = manifest.mediaPlaylist
+        if (preparedPlaylistOwnership(playlist.baseUri, owner.credentialOrigin, owner.sessionId) !=
+            PreparedPlaylistOwnership.Owned
+        ) return PreparedVodTimelineProof(PreparedVodProofReason.PlaylistOwner, playlist.durationUs)
+        val reason = preparedFilmLocalVodReason(owner.originMs,
+            playlist.playlistType == androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist.PLAYLIST_TYPE_VOD,
+            playlist.hasEndTag, playlist.mediaSequence, playlist.durationUs, plan.durationMs,
+            playlist.startOffsetUs.takeUnless { it == androidx.media3.common.C.TIME_UNSET },
+            playlist.hasPositiveStartOffset, playlist.preciseStart, playlist.trailingParts.isEmpty(),
+            playlist.segments.asSequence().map { PreparedVodSegment(it.url, it.relativeStartTimeUs, it.durationUs,
+                it.initializationSegment?.url, it.hasGapTag) }.asIterable())
+        val currentAuthorization = Session.playbackAuthorization()
+        if (preparedPlayer !== successor || preparedLedger.action !== action ||
+            !owner.isCurrent(successor, action.actionId, action.sessionId, action.mediaOriginMs,
+                mediaMutationEpoch, currentAuthorization.origin, currentAuthorization.generation)
+        ) return PreparedVodTimelineProof(PreparedVodProofReason.Owner, playlist.durationUs)
+        return PreparedVodTimelineProof(reason, playlist.durationUs)
+    }
+
     /** One received media-playlist lookup, bound to the stage and original deadline. */
     private fun captureAutoStagedVodPlaylist(observation: AutoStagedObservation) {
         if (!autoStagedObservationCurrent(observation, monotonicNowMs()) || observation.playlistUrl != null) return
         val manifest = observation.player.currentManifest as? HlsManifest ?: return
         val url = manifest.mediaPlaylist.baseUri
-        val uri = Uri.parse(url)
-        if (Session.canonicalOrigin(url) != Session.canonicalOrigin(observation.credentialOrigin) ||
-            !uri.pathSegments.contains(observation.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true) return
+        if (preparedPlaylistOwnership(url, observation.credentialOrigin, observation.sessionId) !=
+            PreparedPlaylistOwnership.Owned) return
         observation.playlistUrl = url
         val remaining = observation.deadlineMs - monotonicNowMs()
         if (remaining <= 0) return
@@ -4990,6 +5175,8 @@ class Controller internal constructor(
 
     /** Retained until a real successor frame makes rollback unnecessary. */
     private var preparedPredecessor: PreparedPredecessor? = null
+    private var pendingPreparedControlHandoff: PreparedControlHandoff? = null
+    private var pendingPreparedControlPlayer: ExoPlayer? = null
 
     /** Ordinary reopen to begin only after the surface has returned to A. */
     private var preparedRollbackReopen: Pair<Long, String>? = null
@@ -5112,6 +5299,8 @@ class Controller internal constructor(
             return
         }
         preparedPlayer = built.player
+        preparedAcquisition = null
+        preparedInitialLocalMs = null
         if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.CONSTRUCTION_OVERLAP)
             return
@@ -5132,9 +5321,15 @@ class Controller internal constructor(
             fallBackAfterPreparedFailure()
             return
         }
+        videoDecodersByPlayer[built.player] = built.videoDecoderEvidence
         autoTransfersByPlayer[built.player] = built.autoTransfers
         val desired = autoDesiredCandidate
         val stagedSessionId = action.sessionId
+        val authorization = Session.playbackAuthorization()
+        preparedTimelineOwner = action.actionId?.let { actionId -> stagedSessionId?.let { session ->
+            PreparedTimelineOwner(built.player, actionId, session, originMs, mediaMutationEpoch,
+                authorization.origin, authorization.generation)
+        } }
         autoStagedObservation = if (autoPreparing && desired != null && desired.recipe_digest.size == 32 &&
             stagedSessionId != null && action.effectiveSelection?.candidateId == desired.id)
             AutoStagedObservation(built.player, built.autoTransfers, stagedSessionId, desired.id,
@@ -5147,7 +5342,11 @@ class Controller internal constructor(
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                resolvePreparedAcquisition(built.player, action)
                 autoStagedObservation?.takeIf { it.player === built.player }?.let(::captureAutoStagedVodPlaylist)
+            }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) notePreparedSeekReady(built.player, action)
             }
             override fun onPlayerError(error: PlaybackException) {
                 // Posted, not called. Abandoning releases this very player, and
@@ -5177,6 +5376,7 @@ class Controller internal constructor(
                     rendezvous?.rendezvousFilmMs != null
                 ) {
                     rendezvousSeekObserved = true
+                    notePreparedSeekReady(built.player, action)
                 }
             }
         }
@@ -5187,9 +5387,10 @@ class Controller internal constructor(
         // removed, so the two seconds *after* the commit are on the same
         // series as the two before it.
         built.player.addAnalyticsListener(preparedSwitchAnalytics(built.player))
+        preparedInitialLocalMs = preparedInitialAttachPositionMs(originMs, realPosition())
         built.player.setMediaItem(
             MediaItem.fromUri(Session.url(playlist)),
-            successorAttachPositionMs(originMs, realPosition()),
+            preparedInitialLocalMs ?: androidx.media3.common.C.TIME_UNSET,
         )
         built.player.prepare()
     }
@@ -5279,7 +5480,8 @@ class Controller internal constructor(
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.READINESS_OVERLAP)
             return
         }
-        if (successor.playbackState != Player.STATE_READY) return
+        preparedLedger.action?.let { resolvePreparedAcquisition(successor, it) }
+        if (preparedAcquisition == null || successor.playbackState != Player.STATE_READY) return
         // Tracks known is what separates "playable" from "prepared": a player
         // at STATE_READY with no published tracks has nothing to switch to.
         if (successor.currentTracks.groups.isEmpty()) return
@@ -5289,12 +5491,23 @@ class Controller internal constructor(
         // From here the rendezvous owns this preparation. This tick keeps the
         // readiness bound and the terminal failures; it is far too coarse for
         // anything measured against a 250 ms window.
-        val hold = RendezvousHold(floorFilmMs = originMs)
+        val hold = RendezvousHold(floorFilmMs = preparedAcquisition?.floorFilmMs ?: originMs)
         rendezvous = hold
         // The incumbent is *not* touched here, and that is the change. It keeps
         // playing all the way to the meeting point.
         parkSuccessor(hold.park(monotonicNowMs(), realPosition(), player.playbackParameters.speed.toDouble()), originMs, successor)
         beginRendezvous(hold, originMs)
+    }
+
+    /** Native seek settlement is separate from the later three-second runway proof. */
+    private fun notePreparedSeekReady(successor: ExoPlayer, action: ControlAction) {
+        val hold = rendezvous ?: return
+        val target = hold.rendezvousFilmMs ?: return
+        if (preparedSeekReady(currentPreparedTimelineOwner(successor, action) != null,
+                rendezvousSeekObserved, successor.playbackState == Player.STATE_READY,
+                successorFilmPositionMs(action.mediaOriginMs ?: return, successor.currentPosition), target)) {
+            hold.seekReady(monotonicNowMs())
+        }
     }
 
     /** Send the successor to the meeting point and leave it waiting there. */
@@ -5309,6 +5522,16 @@ class Controller internal constructor(
         successor.playWhenReady = park.playWhenReady
         preparedVideoSurfaces?.invalidate(successor)
         successor.seekTo(successorAttachPositionMs(originMs, park.rendezvousFilmMs))
+        // At most the initial park and two reparks. Numeric local/film clocks
+        // explain a missed target without exposing media URLs or session tokens.
+        runCatching {
+            playbackTelemetry.report(event = "prepared_successor_park", level = "info",
+                message = "Prepared successor parked beside incumbent.",
+                detail = preparedPositionDetail("park", successor.playbackState, originMs,
+                    realPosition(), park.rendezvousFilmMs, successor.currentPosition,
+                    successor.bufferedPosition, rendezvous?.reparks ?: 0,
+                    monotonicNowMs() - preparedStartedAtMs))
+        }
     }
 
     /**
@@ -5334,6 +5557,7 @@ class Controller internal constructor(
                     return@launch
                 }
                 sampleDecoderDropped(player)
+                preparedLedger.action?.let { notePreparedSeekReady(successor, it) }
                 if (!hold.isReady) {
                     delay(RENDEZVOUS_READY_POLL_MS)
                     val target = hold.rendezvousFilmMs ?: return@launch
@@ -5422,9 +5646,6 @@ class Controller internal constructor(
             abandonPreparedReplacement(failed = true, reason = PreparedFailureReason.COMMIT_OVERLAP)
             return false
         }
-        val stagedFilmLocalVod = autoStagedObservation?.let {
-            autoStagedObservationCurrent(it, monotonicNowMs()) && it.immutableVod && originMs == 0L
-        } == true
         if (autoPreparing && !autoTrialMayCommit(autoDesiredCandidate?.id, action.effectiveSelection?.candidateId,
                 autoPreparedTargetRevision, autoPresentationTarget?.revision,
                 autoPreparedMutationEpoch, mediaMutationEpoch,
@@ -5474,6 +5695,10 @@ class Controller internal constructor(
             }
             if (!margin) return false
         }
+        // Fold the already received plan before fresh alignment readings: a
+        // long title must not spend the frame window after those readings.
+        val timelineProof = preparedSuccessorVodTimeline(successor, action)
+        val stagedFilmLocalVod = timelineProof.isVod
         val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
         if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS ||
@@ -5563,6 +5788,12 @@ class Controller internal constructor(
         successor.addListener(this.listener)
         externalListeners.forEach { successor.addListener(it) }
 
+        // Keep the predecessor's exact selection until its committed ACK is
+        // accepted. Adopting the processed candidate here changes that ACK's
+        // recipe before the server has committed the staged generation.
+        pendingPreparedControlHandoff = PreparedControlHandoff(action, playbackControlSelection(),
+            playbackIntent.automaticCandidateOwner())
+        pendingPreparedControlPlayer = successor
         player = successor
         // A different `ExoPlayer` with its own item is on the screen now, so
         // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
@@ -5617,6 +5848,11 @@ class Controller internal constructor(
         sessionStatus = null
         sessionStatusObservedAtMs = null
         establishedPlayback = false
+        runCatching {
+            playbackTelemetry.report(event = "prepared_transport_adopted", level = "info",
+                message = "Prepared successor transport timeline adopted.",
+                detail = preparedVodTimelineDetail(timelineProof, originMs, plan.durationMs))
+        }
         armTrackSelections()
         applyTextSelection()
         applyAudioSelection()
@@ -5680,6 +5916,7 @@ class Controller internal constructor(
         // A boundary preparation ends with its own first frame, exactly like
         // the mid-play upgrade it now is.
         autoBoundaryAttempt = null
+        pendingPreparedControlHandoff?.framePresented = true
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
         // The viewer is looking at the rung they asked for. The directed change
         // is honoured and owes nothing — least of all a reopen.
@@ -5739,6 +5976,11 @@ class Controller internal constructor(
         predecessor.player.addListener(this.listener)
         externalListeners.forEach { predecessor.player.addListener(it) }
 
+        pendingPreparedControlHandoff = null
+        pendingPreparedControlPlayer = null
+        preparedTimelineOwner = null
+        preparedAcquisition = null
+        preparedInitialLocalMs = null
         progressiveMediaOrigin = predecessor.progressiveMediaOrigin
         attachedModeOverride = predecessor.modeOverride
         attachedRequiresHlsOverride = predecessor.requiresHlsOverride
@@ -5862,7 +6104,11 @@ class Controller internal constructor(
                 )
                 playbackTelemetry.report(event = "prepared_successor_failure", level = "warn",
                     message = "Prepared successor failed; incumbent outcome is reported separately.",
-                    code = errorCode, detail = diagnostic.detail())
+                    code = errorCode, detail = preparedPositionDetail(reason.name, successor?.playbackState,
+                        originMs, realPosition(), target, successor?.currentPosition, successor?.bufferedPosition,
+                        rendezvous?.reparks ?: 0, monotonicNowMs() - preparedStartedAtMs,
+                        if (preparedAcquisition == null) preparedAcquisitionFailureGate(successor, action)
+                        else diagnostic.observedWaitGate))
             }
             surfaceOwner.logOnly(
                 mediaMutationEpoch,
@@ -5905,6 +6151,9 @@ class Controller internal constructor(
         autoStagedPlaylistJob?.cancel()
         autoStagedPlaylistJob = null
         autoStagedObservation = null
+        preparedTimelineOwner = null
+        preparedAcquisition = null
+        preparedInitialLocalMs = null
         autoStagedStatus = null
         autoStagedStatusObservedMs = null
         val successor = preparedPlayer ?: return
@@ -5940,16 +6189,50 @@ class Controller internal constructor(
         playbackControl.reportEvidence()
     }
 
-    /**
-     * The exchange that carried an acknowledgement came back accepted.
-     *
-     * A `200` is not proof the *server* accepted the settlement — an
-     * acknowledgement whose `action_id` does not match the bound staging is
-     * silently ignored — but it is proof this client does not have to send this
-     * one again, which is the only thing this slot decides.
-     */
-    private fun acknowledgementDelivered(value: ActionAcknowledgement) {
-        if (pendingAcknowledgement == value) pendingAcknowledgement = null
+    /** Preserve the offered recipe until the exact committed exchange is accepted. */
+    private fun acknowledgementDelivered(value: ActionAcknowledgement, response: ControlResponse) {
+        if (pendingAcknowledgement != value) return
+        val handoff = pendingPreparedControlHandoff
+        if (value.state == AcknowledgementState.COMMITTED) {
+            // Only a live handoff that owns this action may hold the
+            // acknowledgement for its accepting receipt. Without one (a reopen
+            // or rollback ended it) the exchange delivered it, as before.
+            if (handoff == null || !handoff.owns(value) || pendingPreparedControlPlayer !== player ||
+                !playbackControlBootstrapFence.isActive() || controlObservationIsClosed
+            ) {
+                pendingAcknowledgement = null
+                return
+            }
+            if (!handoff.receiptAccepted(value, response.delivery?.preparation,
+                    response.action.type, sessionId)) return
+            pendingAcknowledgement = null
+            optionalAutoAttempt = null
+            pendingPreparedControlHandoff = null
+            pendingPreparedControlPlayer = null
+            // The server has retired the predecessor. Stop its reporter without
+            // sending End, then claim the successor that actually rendered.
+            playbackControl.end()
+            playbackControlBootstrapFence.invalidate()
+            effectiveProcessing = null
+            effectiveProcessingGeneration = null
+            controlObservationOverride = null
+            controlRenderOverride = null
+            controlEvidencePositionMs = null
+            if (handoff.adoptInto(playbackIntent)) autoActiveCandidateId = handoff.action.effectiveSelection?.candidateId
+            val bootstrap = handoff.bootstrap
+            if (bootstrap == null) {
+                playbackTelemetry.report(event = "prepared_control_unavailable", level = "warn",
+                    message = "Prepared playback continues without a successor control bootstrap.",
+                    detail = if (handoff.action.control == null) "reason=missing_bootstrap" else "reason=invalid_bootstrap")
+                return
+            }
+            val attached = sessionId ?: return
+            val claim = playbackControlBootstrapFence.claim(attached)
+            effectiveProcessingGeneration = bootstrap.generation
+            startPlaybackControl(bootstrap, claim)
+        } else {
+            pendingAcknowledgement = null
+        }
     }
 }
 
@@ -6064,6 +6347,8 @@ interface PlanLike {
     val qualityCandidates: List<tv.plurx.app.data.QualityCandidate> get() = emptyList()
     val qualityCandidateId: String? get() = null
     val displayAwareAutoProtocol: String? get() = null
+    /** Server enhancement for the original direct delivery, never a replacement session. */
+    val enhancement: tv.plurx.app.data.PlaybackEnhancement? get() = null
     val title: String
     val isAudioOnly: Boolean get() = false
     val fileId: Long
@@ -6404,6 +6689,162 @@ internal data class AutoTickState(
 /** Auto owns quality only while Auto is the quality that executes. */
 internal fun autoExecuting(intent: PlaybackIntent): Boolean = intent.qualityForMedia() == PlaybackQuality.Auto
 
+/** The existing park alignment, with native readiness rather than an intent-only seek callback. */
+internal fun preparedSeekReady(ownerCurrent: Boolean, seekObserved: Boolean, nativeReady: Boolean,
+    filmPositionMs: Long, targetFilmMs: Long): Boolean = ownerCurrent && seekObserved && nativeReady &&
+    kotlin.math.abs(filmPositionMs.toDouble() - targetFilmMs.toDouble()) <= PREPARED_ALIGNMENT_SLACK_MS
+
+internal enum class PreparedPlaylistOwnership(val wire: String) {
+    Owned("owned"), Malformed("malformed"), Scheme("scheme"), UserInfo("userinfo"), Fragment("fragment"),
+    CredentialOrigin("credential_origin"), ResourceOrigin("resource_origin"), OriginMismatch("origin_mismatch"),
+    SessionPath("session_path"), PathEncoding("path_encoding"), Traversal("traversal"),
+}
+
+/** Resource paths are valid here; canonicalOrigin deliberately accepts authorities only. */
+internal fun preparedPlaylistOwnership(url: String, credentialOrigin: String, sessionId: String): PreparedPlaylistOwnership {
+    val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return PreparedPlaylistOwnership.Malformed
+    if (uri.scheme?.lowercase() !in setOf("http", "https")) return PreparedPlaylistOwnership.Scheme
+    if (uri.rawUserInfo != null) return PreparedPlaylistOwnership.UserInfo
+    if (uri.rawFragment != null) return PreparedPlaylistOwnership.Fragment
+    val expected = Session.canonicalOrigin(credentialOrigin) ?: return PreparedPlaylistOwnership.CredentialOrigin
+    val authority = uri.rawAuthority ?: return PreparedPlaylistOwnership.ResourceOrigin
+    val actual = Session.canonicalOrigin("${uri.scheme}://$authority") ?: return PreparedPlaylistOwnership.ResourceOrigin
+    if (actual != expected) return PreparedPlaylistOwnership.OriginMismatch
+    val path = uri.rawPath ?: return PreparedPlaylistOwnership.SessionPath
+    // The server's canonical scalar/child playlist routes contain no escapes.
+    // Reject encoded separators/dot segments rather than normalizing authority.
+    if (path != uri.path) return PreparedPlaylistOwnership.PathEncoding
+    val parts = path.split('/')
+    if (parts.drop(1).any { it.isEmpty() || it == "." || it == ".." }) return PreparedPlaylistOwnership.Traversal
+    if (parts.size < 6 || parts.take(4) != listOf("", "api", "v1", "hls") || parts[4] != sessionId ||
+        !parts.last().endsWith(".m3u8")) return PreparedPlaylistOwnership.SessionPath
+    return PreparedPlaylistOwnership.Owned
+}
+
+/** Null means use Media3's received playlist default, never an invented film zero. */
+internal fun preparedInitialAttachPositionMs(originMs: Long, incumbentFilmMs: Long): Long? =
+    if (originMs == 0L) null else successorAttachPositionMs(originMs, incumbentFilmMs)
+
+internal enum class PreparedAcquisitionKind(val wire: String) {
+    Hint("hint"), LegacyFallback("legacy_fallback"), ExplicitOrigin("explicit_origin"),
+}
+internal data class PreparedAcquisitionResolution(val kind: PreparedAcquisitionKind,
+    val floorFilmMs: Long, val localSeekMs: Long?)
+
+internal fun preparedAcquisitionResolution(ownerCurrent: Boolean, originMs: Long,
+    incumbentFilmMs: Long, hintEntryMs: Long?): PreparedAcquisitionResolution? {
+    if (!ownerCurrent) return null
+    if (originMs != 0L) return PreparedAcquisitionResolution(PreparedAcquisitionKind.ExplicitOrigin, originMs, null)
+    return if (hintEntryMs != null && hintEntryMs in 0..PlaybackControl.MAX_MEDIA_MILLIS)
+        PreparedAcquisitionResolution(PreparedAcquisitionKind.Hint, hintEntryMs, null)
+    else PreparedAcquisitionResolution(PreparedAcquisitionKind.LegacyFallback, 0,
+        successorAttachPositionMs(originMs, incumbentFilmMs))
+}
+
+internal fun preparedAcquisitionDetail(resolution: PreparedAcquisitionResolution, originMs: Long,
+    initialLocalMs: Long?, hintMs: Long?, entryMs: Long?, incumbentMs: Long): String =
+    ("kind=${resolution.kind.wire} o=$originMs initial_ms=${initialLocalMs ?: "default"} " +
+        "hint_ms=${hintMs ?: "none"} entry_ms=${entryMs ?: "none"} floor_ms=${resolution.floorFilmMs} " +
+        "seek_ms=${resolution.localSeekMs ?: "none"} i=$incumbentMs").take(200)
+
+/** An observation cannot migrate between pipeline, media mutation, or authenticated owner. */
+internal data class PreparedTimelineOwner(
+    val player: Any,
+    val actionId: String,
+    val sessionId: String,
+    val originMs: Long,
+    val mutationEpoch: Long,
+    val credentialOrigin: String,
+    val authorizationGeneration: Long,
+) {
+    fun isCurrent(currentPlayer: Any?, currentAction: String?, currentSession: String?, currentOriginMs: Long?,
+        currentMutation: Long, currentCredentialOrigin: String, currentAuthorizationGeneration: Long): Boolean =
+        player === currentPlayer && actionId == currentAction && sessionId == currentSession && originMs == currentOriginMs &&
+            mutationEpoch == currentMutation && credentialOrigin == currentCredentialOrigin &&
+            authorizationGeneration == currentAuthorizationGeneration
+}
+
+internal data class PreparedVodSegment(val url: String, val startUs: Long, val durationUs: Long,
+    val initializationUrl: String?, val gap: Boolean = false)
+
+internal enum class PreparedVodProofReason(val wire: String) {
+    FullVod("full_vod"), Owner("owner"), Manifest("manifest"), PlaylistOwner("playlist_owner"),
+    Origin("origin"), Type("type"), EndTag("end_tag"), Sequence("sequence"), TrailingParts("trailing_parts"),
+    SourceDuration("source_duration"), Duration("duration"), StartHint("start_hint"),
+    Empty("empty"), Layout("layout"), Coverage("coverage"),
+}
+
+internal data class PreparedVodTimelineProof(val reason: PreparedVodProofReason, val durationUs: Long? = null) {
+    val isVod: Boolean get() = reason == PreparedVodProofReason.FullVod
+}
+
+internal fun preparedVodTimelineDetail(proof: PreparedVodTimelineProof, originMs: Long, sourceDurationMs: Long): String =
+    "vod=${proof.isVod} o=$originMs d_us=${proof.durationUs ?: "unknown"} source_ms=$sourceDurationMs reason=${proof.reason.wire}"
+
+/** Full immutable film-time coverage; EXT-X-START is only an acquisition hint. */
+internal fun preparedFilmLocalVod(
+    originMs: Long, playlistTypeVod: Boolean, hasEndTag: Boolean, mediaSequence: Long,
+    durationUs: Long, sourceDurationMs: Long, startOffsetUs: Long?, positiveStartOffset: Boolean,
+    preciseStart: Boolean, noTrailingParts: Boolean, segments: Iterable<PreparedVodSegment>,
+): Boolean = preparedFilmLocalVodReason(originMs, playlistTypeVod, hasEndTag, mediaSequence, durationUs,
+    sourceDurationMs, startOffsetUs, positiveStartOffset, preciseStart, noTrailingParts, segments) == PreparedVodProofReason.FullVod
+
+internal fun preparedFilmLocalVodReason(
+    originMs: Long, playlistTypeVod: Boolean, hasEndTag: Boolean, mediaSequence: Long,
+    durationUs: Long, sourceDurationMs: Long, startOffsetUs: Long?, positiveStartOffset: Boolean,
+    preciseStart: Boolean, noTrailingParts: Boolean, segments: Iterable<PreparedVodSegment>,
+): PreparedVodProofReason {
+    if (originMs != 0L) return PreparedVodProofReason.Origin
+    if (!playlistTypeVod) return PreparedVodProofReason.Type
+    if (!hasEndTag) return PreparedVodProofReason.EndTag
+    if (mediaSequence != 0L) return PreparedVodProofReason.Sequence
+    if (!noTrailingParts) return PreparedVodProofReason.TrailingParts
+    if (sourceDurationMs !in 1..PlaybackControl.MAX_MEDIA_MILLIS) return PreparedVodProofReason.SourceDuration
+    if (durationUs <= 0) return PreparedVodProofReason.Duration
+    if (startOffsetUs != null && (!positiveStartOffset || preciseStart || startOffsetUs !in 0..durationUs))
+        return PreparedVodProofReason.StartHint
+    val sourceUs = sourceDurationMs * 1000
+    // The served plan is bounded by the protocol's title duration, not a
+    // completed-artifact segment-count policy. Never copy the latter's 8192
+    // cap into transport ownership: long titles remain ordinary VOD.
+    if (durationUs > sourceUs + 120_000_000L) return PreparedVodProofReason.Coverage
+    var throughUs = 0L
+    var count = 0L
+    var lastDurationUs = 0L
+    for (segment in segments) {
+        if (segment.url != "seg${count.toString().padStart(5, '0')}.m4s" || segment.initializationUrl != "init.mp4" ||
+            segment.gap || segment.startUs != throughUs || segment.durationUs !in 1..120_000_000L ||
+            throughUs > durationUs - segment.durationUs
+        ) return PreparedVodProofReason.Layout
+        throughUs += segment.durationUs
+        lastDurationUs = segment.durationUs
+        count += 1
+    }
+    if (count == 0L) return PreparedVodProofReason.Empty
+    // VodFrameGrid::duration_ticks rounds OUTWARD to a whole frame. The
+    // playlist cannot be a frame short; only six-decimal EXTINF formatting
+    // and integer-millisecond source metadata contribute this lower rounding.
+    val roundingUs = count + 1000L
+    return if (throughUs == durationUs && durationUs >= sourceUs - roundingUs &&
+        durationUs - sourceUs <= lastDurationUs) PreparedVodProofReason.FullVod else PreparedVodProofReason.Coverage
+}
+
+/** Compact clocks survive the client-log boundary's 200-character detail cap. */
+internal fun preparedPositionDetail(
+    reason: String,
+    state: Int?,
+    originMs: Long?,
+    incumbentMs: Long?,
+    targetMs: Long?,
+    localMs: Long?,
+    bufferedLocalMs: Long?,
+    reparks: Int,
+    elapsedMs: Long,
+    gate: String? = null,
+): String = ("r=${reason.take(24)} s=${state ?: "?"} o=${originMs ?: "?"} i=${incumbentMs ?: "?"} " +
+    "t=${targetMs ?: "?"} p=${localMs ?: "?"} b=${bufferedLocalMs ?: "?"} n=$reparks ms=$elapsedMs" +
+    (gate?.let { " g=$it" } ?: "")).take(200)
+
 /**
  * The control plane's effective selection names the session recipe's
  * candidate. A continuous family changes rung inside that one session, so for
@@ -6528,6 +6969,7 @@ class BuiltPlayer internal constructor(
     internal val autoTransfers: AutoTransferEvidence = AutoTransferEvidence(progressiveMediaOrigin),
     internal val continuousSources: ContinuousSourceRegistry = ContinuousSourceRegistry(),
     internal val continuousOutput: ContinuousOutputEvidence = ContinuousOutputEvidence(),
+    internal val videoDecoderEvidence: VideoDecoderEvidence = VideoDecoderEvidence(),
 )
 
 @UnstableApi
@@ -6572,12 +7014,14 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
     val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)
     val continuousSources = ContinuousSourceRegistry()
     val continuousOutput = ContinuousOutputEvidence()
+    val videoDecoderEvidence = VideoDecoderEvidence()
     val player = PlurxPlayerBuilder(context, role).build(
         dataSource = Net.dataSourceFactory(),
         audioLanguage = vm.audioLang,
         transferListener = autoTransfers,
         continuousSources = continuousSources,
         continuousOutput = continuousOutput,
+        videoDecoderEvidence = videoDecoderEvidence,
     )
     player.addAnalyticsListener(object : AnalyticsListener {
         override fun onMediaItemTransition(eventTime: AnalyticsListener.EventTime, mediaItem: MediaItem?, reason: Int) {
@@ -6593,7 +7037,7 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
             autoTransfers.discard(loadEventInfo.uri.toString())
         }
     })
-    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput)
+    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput, videoDecoderEvidence)
 }
 
 // Keep the pending language choice tied to one of the two supported caption tasks.

@@ -50,6 +50,22 @@ private fun playing(
 private fun map(observation: PlayerControlObservation) =
     PlaybackControlMapping.snapshot(observation)
 
+class PlaybackControlMappingOriginSessionTest {
+    // A copy-HLS session that began at a resume point: film 4:16 inside a
+    // title of 1:58:00. With the title duration the playhead is reported as
+    // it is, with runway, and is not an end. (The 2026-11-14 Axel F defect
+    // clamped it to the ~2 min window and reported 137 s of false runway.)
+    @Test
+    fun `an origin session playhead is reported in title time with its runway`() {
+        val duration = filmDurationMs(titleDurationMs = 7_080_000, playerDurationMs = 121_000,
+            playerTimelineIsFilm = false)
+        val snapshot = map(playing(position = 256_125, duration = duration))
+        assertEquals(256_125, snapshot.positionMs)
+        assertEquals(266_125, snapshot.bufferedThroughMs)
+        assertEquals(PlaybackDemand.ACTIVE, snapshot.demand)
+    }
+}
+
 class PlaybackControlMappingOrdinaryStateTest {
     @Test
     fun `a playing player is active and rendering`() {
