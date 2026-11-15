@@ -121,9 +121,51 @@ pub(super) async fn spawn_generation(
         recipe.encoding.is_some() || rendition.key.starts_with("source-"),
         permit.is_some(),
     );
+    // A processed rendition's live helper session produces this window when
+    // it is positioned for it; any other session is ended and reaped first,
+    // so no window runs beside an old helper. A session that can no longer
+    // read its source ends here too, and the window starts cold.
+    #[cfg(target_os = "linux")]
+    let mut warm_session = rendition.dv_session.take(at).await;
+    if !generation_current() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(cause) = warm_session.failure() {
+        if let Some(runtime) = recipe
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.dv_runtime.as_ref())
+        {
+            runtime.refuse_episode();
+        }
+        record_failure(
+            shared,
+            rendition,
+            crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+            format!("DV window refused before publication: {cause}"),
+        );
+        return;
+    }
     // A family may retain this reservation through several generations, but
     // only the exact unreaped process may use it. Refuse a duplicate launch
     // before opening inputs or spawning a second producer under one credit.
+    // A live session already is that process: it keeps the worker claim.
+    #[cfg(target_os = "linux")]
+    let permit = match (permit, warm_session.get()) {
+        (Some(reservation), Some(session)) => {
+            let reservation = rendition.retained_admission.bind(reservation);
+            if let Some(encoding) = recipe.encoding.as_ref() {
+                encoding.begin_processed_window(
+                    rendition.gen_epoch.load(Relaxed),
+                    at,
+                    &session.reservation().unwrap_or(reservation),
+                );
+            }
+            None
+        }
+        (permit, _) => permit,
+    };
     let permit = match permit {
         Some(reservation) => match rendition
             .retained_admission
@@ -164,18 +206,19 @@ pub(super) async fn spawn_generation(
         return;
     }
     #[cfg(target_os = "linux")]
-    let source_needed = !recipe
-        .encoding
-        .as_ref()
-        .and_then(|encoding| encoding.dv_runtime.as_ref())
-        .is_some_and(|runtime| {
-            runtime
-                .prepared
-                .lock()
-                .expect("DV prepared window")
-                .as_ref()
-                .is_some_and(|(index, _)| *index == at)
-        });
+    let source_needed = warm_session.get().is_none()
+        && !recipe
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.dv_runtime.as_ref())
+            .is_some_and(|runtime| {
+                runtime
+                    .prepared
+                    .lock()
+                    .expect("DV prepared window")
+                    .as_ref()
+                    .is_some_and(|(index, _)| *index == at)
+            });
     #[cfg(not(target_os = "linux"))]
     let source_needed = true;
     // Diagnostic only: the processed window's timing line reports it.
@@ -307,11 +350,19 @@ pub(super) async fn spawn_generation(
                 None
             }
         };
+        // Set when the window failed only because its helper session ended for
+        // an ordinary reason: the next window starts cold, and nothing failed.
+        let mut session_ended_ordinarily = false;
         let verified = if let Some(prepared) = prepared {
             // Prepared before attachment/control: a later seek must not award
             // this original interval new report authority.
             report_revision = 0;
             drop(permit);
+            if let Some(session) = warm_session.take() {
+                session
+                    .retire(crate::dv_segment::SessionEnd::Discontinuity)
+                    .await;
+            }
             rendition
                 .source_owners
                 .registered(&source_dispatch, &prepared.registration);
@@ -331,18 +382,45 @@ pub(super) async fn spawn_generation(
                 ))
             }
         } else {
-            let Some(worker) = permit else {
-                if !generation_current() {
-                    return;
+            let source = match warm_session.take() {
+                Some(session) => {
+                    // One custody serves the session's windows: this
+                    // generation observes it as its own.
+                    if let Some(observer) = session.observer() {
+                        rendition
+                            .source_owners
+                            .set_source_observer(generation_epoch, observer);
+                    }
+                    crate::vodencode::dv_runtime::WindowSource::Session(session)
                 }
-                runtime.refuse_episode();
-                record_failure(
-                    shared,
-                    rendition,
-                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                    "DV graph has no retained admission".into(),
-                );
-                return;
+                None => {
+                    let Some(worker) = permit else {
+                        if !generation_current() {
+                            return;
+                        }
+                        runtime.refuse_episode();
+                        record_failure(
+                            shared,
+                            rendition,
+                            crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                            "DV graph has no retained admission".into(),
+                        );
+                        return;
+                    };
+                    let Some(source_custody) = source_custody else {
+                        record_failure(
+                            shared,
+                            rendition,
+                            crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                            "processed generation has no original source read owner".into(),
+                        );
+                        return;
+                    };
+                    crate::vodencode::dv_runtime::WindowSource::Open {
+                        input: source_custody,
+                        admission: crate::dv_segment::SegmentAdmission::Retained(worker),
+                    }
+                }
             };
             let owners = Arc::clone(rendition);
             let hook = Box::new(move |registration: &crate::prodrun::ProducerRegistration| {
@@ -351,16 +429,7 @@ pub(super) async fn spawn_generation(
                     .registered(&source_dispatch, registration);
                 drop(source_dispatch);
             });
-            let Some(source_custody) = source_custody else {
-                record_failure(
-                    shared,
-                    rendition,
-                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-                    "processed generation has no original source read owner".into(),
-                );
-                return;
-            };
-            runtime
+            let run = runtime
                 .execute_with_source_input(
                     &recipe.file,
                     &encoding.plan,
@@ -368,36 +437,55 @@ pub(super) async fn spawn_generation(
                     encoding.grid,
                     entry,
                     &encoding.executable.path,
-                    crate::dv_segment::SegmentAdmission::Retained(worker),
+                    source,
                     Arc::clone(&rendition.slot),
                     tokio_util::sync::CancellationToken::new(),
                     Some(hook),
-                    source_custody,
                     None,
                     source_open,
                 )
-                .await
-                .and_then(|outcome| match outcome {
-                    crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
-                        Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
-                    }
-                    crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
-                        match &encoding.dv_processing {
-                            plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
-                                if actual.semantic_digest() == frozen.semantic_digest() =>
-                            {
-                                Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
-                                    window,
-                                ))
-                            }
-                            _ => Err("completed DV graph differs from frozen rendition".into()),
+                .await;
+            session_ended_ordinarily = run.ended_ordinarily();
+            let result = run.result.and_then(|outcome| match outcome {
+                crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                    Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled)
+                }
+                crate::vodencode::dv_runtime::WindowOutcome::Completed((window, actual)) => {
+                    match &encoding.dv_processing {
+                        plurx_core::transcode::dv_processing::DvSelection::Selected(frozen)
+                            if actual.semantic_digest() == frozen.semantic_digest() =>
+                        {
+                            Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(
+                                window,
+                            ))
                         }
+                        _ => Err("completed DV graph differs from frozen rendition".into()),
                     }
-                })
+                }
+            });
+            if let Some(session) = run.session {
+                if matches!(
+                    result,
+                    Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(_))
+                ) {
+                    warm_session.put(session).await;
+                } else {
+                    session
+                        .retire(crate::dv_segment::SessionEnd::WindowFailed)
+                        .await;
+                }
+            }
+            result
         };
         let verified = match verified {
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
             Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled) => return,
+            Err(_) if session_ended_ordinarily => {
+                // Its source authority ended or it needed another helper:
+                // the driver starts this window again, cold, on new custody.
+                rendition.kick();
+                return;
+            }
             Err(cause) => {
                 if !generation_current() {
                     return;

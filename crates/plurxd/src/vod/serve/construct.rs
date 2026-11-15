@@ -268,6 +268,8 @@ impl VodServe {
             slot: Arc::new(ProducerSlot::new()),
             source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
+            #[cfg(target_os = "linux")]
+            dv_session: Default::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),

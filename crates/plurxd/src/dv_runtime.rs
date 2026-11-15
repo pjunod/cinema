@@ -25,6 +25,134 @@ pub(crate) enum WindowOutcome<T> {
     Cancelled,
 }
 
+/// Where a processed window's helper comes from.
+#[cfg(target_os = "linux")]
+pub(crate) enum WindowSource {
+    /// A cold window: this custody and admission start a new helper session
+    /// and belong to it from then on.
+    Open {
+        input: crate::source_input::SourceInput,
+        admission: crate::dv_segment::SegmentAdmission,
+    },
+    /// The rendition's live session continues with its next window.
+    Session(crate::dv_segment::HelperSession),
+}
+
+/// A window that refused to run on a live session because the helper it
+/// needs is configured differently: ordinary lifecycle, not a backend failure.
+#[cfg(target_os = "linux")]
+const SESSION_CHANGED: &str = "DV helper session configuration changed";
+
+/// Why a window's session cannot go on to the next window, or `None` when
+/// it can: it completed its window and is still usable.
+#[cfg(target_os = "linux")]
+fn session_end<T>(
+    result: &Result<WindowOutcome<T>, String>,
+    unusable: Option<crate::dv_segment::SessionEnd>,
+) -> Option<crate::dv_segment::SessionEnd> {
+    use crate::dv_segment::SessionEnd;
+    match (result, unusable) {
+        (Ok(WindowOutcome::Completed(_)), None) => None,
+        // Its custody or read authority ended: whatever the window says,
+        // the next window opens new custody. Never an episode failure.
+        (_, Some(SessionEnd::SourceAuthority)) => Some(SessionEnd::SourceAuthority),
+        (Err(cause), _) if cause == SESSION_CHANGED => Some(SessionEnd::Changed),
+        (Ok(WindowOutcome::Completed(_)), Some(cause)) => Some(cause),
+        _ => Some(SessionEnd::WindowFailed),
+    }
+}
+
+/// One window's result, the session that can produce the next window when
+/// there is one, and why the session ended when it did.
+#[cfg(target_os = "linux")]
+pub(crate) struct WindowRun<T> {
+    pub(crate) result: Result<WindowOutcome<T>, String>,
+    pub(crate) session: Option<crate::dv_segment::HelperSession>,
+    pub(crate) ended: Option<crate::dv_segment::SessionEnd>,
+}
+
+#[cfg(target_os = "linux")]
+impl<T> WindowRun<T> {
+    /// Keep the session only after a completed window it can follow; retire
+    /// and reap it otherwise. A session whose source authority ended, or
+    /// that needed a different helper, ended for an ordinary reason: the
+    /// caller starts the next window cold and does not fail the episode.
+    async fn settle(
+        result: Result<WindowOutcome<T>, String>,
+        session: Option<crate::dv_segment::HelperSession>,
+    ) -> Self {
+        let Some(session) = session else {
+            return Self {
+                result,
+                session: None,
+                ended: None,
+            };
+        };
+        let Some(cause) = session_end(&result, session.unusable()) else {
+            return Self {
+                result,
+                session: Some(session),
+                ended: None,
+            };
+        };
+        session.retire(cause).await;
+        Self {
+            result,
+            session: None,
+            ended: Some(cause),
+        }
+    }
+
+    /// Whether the window failed only because its session ended for an
+    /// ordinary reason (see [`Self::settle`]).
+    pub(crate) fn ended_ordinarily(&self) -> bool {
+        matches!(
+            self.ended,
+            Some(
+                crate::dv_segment::SessionEnd::SourceAuthority
+                    | crate::dv_segment::SessionEnd::Changed
+            )
+        )
+    }
+}
+
+/// The soundtrack interval a window's encoder reads, on the source clock:
+/// from its decoder preroll start (the film time its lattice filter rebases
+/// on, `asetpts=PTS-seek/TB`) to half a second past the window's end,
+/// extended by any negative sync offset, so its AAC preroll, its trim and its
+/// last frame all have their samples. `[from, end)` as exact rationals.
+#[cfg(target_os = "linux")]
+pub(crate) fn window_soundtrack(
+    source_clock: plurx_core::transcode::VodSourceClock,
+    offset_ms: i64,
+    end_ticks: u64,
+    timescale: u32,
+    start_seconds: f64,
+) -> Result<((i64, u32), (i64, u32)), String> {
+    let origin = i128::from(source_clock.origin_microseconds());
+    let seek = i128::from(plurx_core::transcode::vod_audio_preroll_samples(
+        start_seconds,
+        offset_ms,
+    ));
+    // seek / 48000 s + origin / 1e6 s, over 6e6.
+    let from = (seek * 125 + origin * 6).max(0);
+    if timescale == 0 {
+        return Err("invalid window clock".into());
+    }
+    let end_us =
+        i128::try_from((u128::from(end_ticks) * 1_000_000).div_ceil(u128::from(timescale)))
+            .map_err(|_| "soundtrack interval overflow")?
+            + 500_000
+            + i128::from(offset_ms.min(0).unsigned_abs()) * 1_000
+            + origin;
+    let from = i64::try_from(from).map_err(|_| "soundtrack interval overflow")?;
+    let end = i64::try_from(end_us.max(0)).map_err(|_| "soundtrack interval overflow")?;
+    if i128::from(from) * 1_000_000 >= i128::from(end) * 6_000_000 {
+        return Err("empty carried soundtrack interval".into());
+    }
+    Ok(((from, 6_000_000), (end, 1_000_000)))
+}
+
 /// Capture retirement before our own cleanup retires this same registration.
 /// A deliberate stop/restart is not evidence that this backend failed.
 fn private_window_result<T>(
@@ -1037,6 +1165,11 @@ impl RuntimeRecipe {
         })
     }
 
+    /// One processed window on the rendition's helper session. A cold window
+    /// opens the session on its custody and admission; a warm one continues
+    /// it. The session comes back only when the window completed and the
+    /// session can produce the next one; otherwise it is retired and reaped
+    /// here, and `ended` says why.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_with_source_input(
         &self,
@@ -1046,23 +1179,17 @@ impl RuntimeRecipe {
         grid: plurx_core::transcode::VodFrameGrid,
         entry: &plurx_core::segplan::PlanEntry,
         encoder: &Path,
-        admission: crate::dv_segment::SegmentAdmission,
+        source: WindowSource,
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
         registration_hook: Option<RegistrationHook>,
-        source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
         source_open: Option<std::time::Duration>,
-    ) -> Result<
-        WindowOutcome<(
-            VerifiedWindow,
-            plurx_core::transcode::dv_processing::DvProcessingPlan,
-        )>,
-        String,
-    > {
-        let source_input =
-            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
-        let result = self
+    ) -> WindowRun<(
+        VerifiedWindow,
+        plurx_core::transcode::dv_processing::DvProcessingPlan,
+    )> {
+        let (result, session) = self
             .execute_policy_until_with_source(
                 file,
                 plan,
@@ -1070,24 +1197,16 @@ impl RuntimeRecipe {
                 grid,
                 entry,
                 encoder,
-                admission,
                 producer,
                 cancel,
                 registration_hook,
                 absolute_deadline,
                 self.display_target,
-                Arc::clone(&source_input),
+                source,
                 source_open,
             )
             .await;
-        // Early validation/spawn failures and every terminal graph result use
-        // this same join. Physical Resources retain their input use through
-        // helper and encoder reap; no caller can release it by returning early.
-        source_input
-            .close_and_wait()
-            .await
-            .map_err(|error| format!("DV original source cleanup: {error}"))?;
-        result
+        WindowRun::settle(result, session).await
     }
 
     /// Explicit immutable policy; live preparation freezes the title-qualified
@@ -1119,9 +1238,7 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        let source_input =
-            crate::dv_segment::SourceInputLease::new(source_input.without_prefetch());
-        let result = self
+        let (result, session) = self
             .execute_policy_until_with_source(
                 file,
                 plan,
@@ -1129,23 +1246,27 @@ impl RuntimeRecipe {
                 grid,
                 entry,
                 encoder,
-                admission,
                 producer,
                 cancel,
                 registration_hook,
                 absolute_deadline,
                 display_target,
-                Arc::clone(&source_input),
+                WindowSource::Open {
+                    input: source_input,
+                    admission,
+                },
                 None,
             )
             .await;
-        source_input
-            .close_and_wait()
-            .await
-            .map_err(|error| format!("DV qualification source cleanup: {error}"))?;
+        if let Some(session) = session {
+            session.retire(crate::dv_segment::SessionEnd::Single).await;
+        }
         result
     }
 
+    /// The window, and the session it ran on (or that it was given), in any
+    /// state. A cold window's custody that never started a session is
+    /// closed and joined here.
     #[allow(clippy::too_many_arguments)]
     async fn execute_policy_until_with_source(
         &self,
@@ -1155,13 +1276,71 @@ impl RuntimeRecipe {
         grid: plurx_core::transcode::VodFrameGrid,
         entry: &plurx_core::segplan::PlanEntry,
         encoder: &Path,
-        admission: crate::dv_segment::SegmentAdmission,
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
         registration_hook: Option<RegistrationHook>,
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
-        source_input: Arc<crate::dv_segment::SourceInputLease>,
+        source: WindowSource,
+        source_open: Option<std::time::Duration>,
+    ) -> (
+        Result<
+            WindowOutcome<(
+                VerifiedWindow,
+                plurx_core::transcode::dv_processing::DvProcessingPlan,
+            )>,
+            String,
+        >,
+        Option<crate::dv_segment::HelperSession>,
+    ) {
+        let mut source = Some(source);
+        let mut live = None;
+        let result = self
+            .execute_window(
+                file,
+                plan,
+                options,
+                grid,
+                entry,
+                encoder,
+                producer,
+                cancel,
+                registration_hook,
+                absolute_deadline,
+                display_target,
+                &mut source,
+                &mut live,
+                source_open,
+            )
+            .await;
+        match source.take() {
+            Some(WindowSource::Open { input, .. }) => {
+                if let Err(error) = input.close_and_wait().await {
+                    tracing::warn!(target: "plurxd::dv", %error, "DV original source cleanup");
+                }
+            }
+            Some(WindowSource::Session(session)) => live = Some(session),
+            None => {}
+        }
+        (result, live)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_window(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entry: &plurx_core::segplan::PlanEntry,
+        encoder: &Path,
+        producer: Arc<crate::prodrun::ProducerSlot>,
+        cancel: tokio_util::sync::CancellationToken,
+        registration_hook: Option<RegistrationHook>,
+        absolute_deadline: Option<tokio::time::Instant>,
+        display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+        source: &mut Option<WindowSource>,
+        live: &mut Option<crate::dv_segment::HelperSession>,
         source_open: Option<std::time::Duration>,
     ) -> Result<
         WindowOutcome<(
@@ -1270,41 +1449,92 @@ impl RuntimeRecipe {
                 &plurx_core::transcode::vaapi_device(),
                 &crate::ffmpeg::ffmpeg_bin(),
             );
-            let request = crate::dv_segment::StreamingSegmentRequest {
+            let audio_ordinal = plan
+                .options()
+                .input_has_audio
+                .then(|| u32::try_from(plan.options().audio_index.unwrap_or(0)))
+                .transpose()
+                .map_err(|_| "soundtrack ordinal out of range")?;
+            let helper = crate::dv_segment::SessionHelper {
+                renderer: self.tools.renderer.clone(),
+                renderer_env,
+                runtime_cache: self.runtime_cache.clone(),
+                video_index: u8::try_from(plan.decode().input_video_stream())
+                    .map_err(|_| "video stream index exceeds renderer bound")?,
+                bl: self.native_bl,
                 mode: self.mode,
                 decode: self.decode,
-                export_raster: Some(export_raster),
+                export_raster,
                 display_target: export_policy.display_target(),
-                master_metadata: export_policy.master_metadata(),
-                request: crate::dv_segment::SegmentRequest {
-                    source_input: Some(source_input),
-                    renderer: self.tools.renderer.clone(),
-                    renderer_env,
-                    muxer: self.tools.renderer.clone(),
-                    encoder: encoder.to_owned(),
-                    encoder_args: args,
-                    runtime_cache: self.runtime_cache.clone(),
-                    shape: crate::dv_segment::SegmentShape {
-                        video_index: u8::try_from(plan.decode().input_video_stream())
-                            .map_err(|_| "video stream index exceeds renderer bound")?,
-                        max_frames: u8::try_from(frames)
-                            .map_err(|_| "picture count exceeds renderer bound")?,
-                        bl: self.native_bl,
-                        el: (0, 0),
-                    },
-                    source: self.source.clone(),
-                    source_offsets: self.source_offsets.clone(),
-                    admission,
-                    producer,
-                    at: entry.index,
-                    preparation_deadline: deadline,
-                    cancel,
-                },
-                renderer_deadline: deadline,
-                window: Some(window),
+                source_origin: self.source_origin,
+                audio_ordinal,
+            };
+            let session = match source.take().ok_or("processed window has no source")? {
+                WindowSource::Open { input, admission } => {
+                    let observer = input.foreground_observer();
+                    let lease = crate::dv_segment::SourceInputLease::new(input.without_prefetch());
+                    match crate::dv_segment::HelperSession::spawn(
+                        helper,
+                        Arc::clone(&lease),
+                        observer,
+                        self.source.clone(),
+                        self.source_offsets.clone(),
+                        admission,
+                        deadline,
+                        &cancel,
+                        &stages,
+                    )
+                    .await
+                    {
+                        Ok(session) => live.insert(session),
+                        Err(cause) => {
+                            lease
+                                .close_and_wait()
+                                .await
+                                .map_err(|error| format!("DV original source cleanup: {error}"))?;
+                            return Err(cause);
+                        }
+                    }
+                }
+                WindowSource::Session(session) => {
+                    let session = live.insert(session);
+                    if !session.serves(&helper) {
+                        return Err(SESSION_CHANGED.into());
+                    }
+                    session
+                }
+            };
+            let request = crate::dv_segment::SessionWindowRequest {
+                encoder: encoder.to_owned(),
+                encoder_args: args,
+                producer,
+                at: entry.index,
+                window,
+                frames: u8::try_from(frames).map_err(|_| "picture count exceeds renderer bound")?,
+                audio: audio_ordinal
+                    .map(|_| {
+                        window_soundtrack(
+                            self.source_clock,
+                            plan.options().audio_offset_ms,
+                            entry.start_ticks + entry.duration_ticks,
+                            grid.numerator,
+                            start_seconds,
+                        )
+                    })
+                    .transpose()?,
+                deadline,
+                cancel,
                 stages: Arc::clone(&stages),
             };
-            let private = match run_private_window(request, registration_hook).await? {
+            let private = match run_session_window(
+                session,
+                request,
+                registration_hook,
+                export_policy.display_target(),
+                export_policy.master_metadata(),
+            )
+            .await?
+            {
                 WindowOutcome::Completed(private) => private,
                 WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
             };
@@ -1533,65 +1763,60 @@ impl RuntimeRecipe {
 }
 
 /// The stdout spool is private and bounded. Neither init nor a media sample is
-/// visible to VOD until helper completion, exact encoder success and confirmed
-/// owned-job retirement have all been observed. Cancellation drops the pipe
-/// owner and retires the same registered process, never a replacement PID.
+/// visible to VOD until the helper's acknowledgement of this window, exact
+/// encoder success and confirmed owned-job retirement have all been observed.
+/// Cancellation drops the pipe owner and retires the same registered process,
+/// never a replacement PID.
 #[cfg(target_os = "linux")]
-async fn run_private_window(
-    mut request: crate::dv_segment::StreamingSegmentRequest,
+async fn run_session_window(
+    session: &mut crate::dv_segment::HelperSession,
+    mut request: crate::dv_segment::SessionWindowRequest,
     registration_hook: Option<RegistrationHook>,
+    display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
 ) -> Result<WindowOutcome<PrivateWindow>, String> {
-    let slot = request.request.producer.clone();
-    let cancel = request.request.cancel.child_token();
+    let slot = request.producer.clone();
+    let cancel = request.cancel.child_token();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    request.request.cancel = cancel.clone();
-    let deadline = request.renderer_deadline;
+    request.cancel = cancel.clone();
+    let deadline = request.deadline;
     let stages = Arc::clone(&request.stages);
-    let display_target = request.display_target;
-    let master_metadata = request.master_metadata;
-    let mut producer = crate::dv_segment::spawn_streaming(request).await?;
-    let source_settlement = producer.take_source_settlement();
-    let result = async {
-        let evidence = producer
-            .take_evidence()
-            .ok_or("missing owned renderer evidence")?;
-        let helper = producer
-            .take_helper_completion()
-            .ok_or("missing helper completion")?;
-        let (registration, writers, stdout, stderr) = producer.into_parts();
-        if let Some(registered) = registration_hook {
-            registered(&registration);
-        }
-        let captured = capture_private_output(
-            &slot,
-            &registration,
-            writers,
-            stdout,
-            stderr,
-            helper,
-            &cancel,
-            deadline,
-            &stages,
-        )
-        .await;
-        // Both children are reaped here, so the helper's rows are final.
-        stages.helper_reported(evidence.helper_stages());
-        match captured? {
-            WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
-                encoded,
-                evidence,
-                registration,
-                display_target,
-                master_metadata,
-            })),
-            WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
-        }
+    let mut producer = session.window(request).await?;
+    let evidence = producer
+        .take_evidence()
+        .ok_or("missing owned renderer evidence")?;
+    let helper = producer
+        .take_helper_completion()
+        .ok_or("missing helper completion")?;
+    let (registration, writers, stdout, stderr) = producer.into_parts();
+    if let Some(registered) = registration_hook {
+        registered(&registration);
     }
+    let captured = capture_private_output(
+        &slot,
+        &registration,
+        writers,
+        stdout,
+        stderr,
+        helper,
+        &cancel,
+        deadline,
+        &stages,
+    )
     .await;
-    if let Some(source) = source_settlement {
-        source.settle().await?;
+    // The encoder is reaped and the helper acknowledged (or ended), so the
+    // helper's rows for this window are final.
+    stages.helper_reported(evidence.helper_stages());
+    match captured? {
+        WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
+            encoded,
+            evidence,
+            registration,
+            display_target,
+            master_metadata,
+        })),
+        WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
     }
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2642,6 +2867,135 @@ mod pinned_runtime_renderer_sources {
         assert!(recipe.contains("COPY tools/dv_processing /build-inputs/dv_processing"));
         assert!(recipe.contains("RUN [\"plurxd\", \"dv-helper-identity\"]"));
         assert!(!recipe.contains("PLURX_MEDIA_RUNTIME_DV_SOURCE_SHA256"));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod helper_session_lifecycle {
+    use super::{session_end, WindowOutcome, SESSION_CHANGED};
+    use crate::dv_segment::SessionEnd;
+
+    fn completed() -> Result<WindowOutcome<()>, String> {
+        Ok(WindowOutcome::Completed(()))
+    }
+
+    /// A session is kept only after a completed window it can follow. A lost
+    /// source authority is typed as such whatever the window reported, so
+    /// the generation never turns a lease expiry into an episode failure.
+    #[test]
+    fn only_a_completed_usable_session_is_kept_and_authority_loss_is_typed() {
+        assert_eq!(session_end(&completed(), None), None);
+        assert_eq!(
+            session_end(&completed(), Some(SessionEnd::SourceAuthority)),
+            Some(SessionEnd::SourceAuthority)
+        );
+        assert_eq!(
+            session_end::<()>(
+                &Err("DV source read: source authority lost".into()),
+                Some(SessionEnd::SourceAuthority)
+            ),
+            Some(SessionEnd::SourceAuthority)
+        );
+        assert_eq!(
+            session_end::<()>(&Err(SESSION_CHANGED.into()), None),
+            Some(SessionEnd::Changed)
+        );
+        assert_eq!(
+            session_end::<()>(&Err("streaming renderer refused segment".into()), None),
+            Some(SessionEnd::WindowFailed)
+        );
+        assert_eq!(
+            session_end::<()>(&Ok(WindowOutcome::Cancelled), None),
+            Some(SessionEnd::WindowFailed),
+            "a cancelled window's helper was interrupted"
+        );
+        assert_eq!(
+            session_end(&completed(), Some(SessionEnd::WindowFailed)),
+            Some(SessionEnd::WindowFailed),
+            "a helper that died after its acknowledgement serves nothing more"
+        );
+    }
+
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let from = source.find(start).unwrap_or_else(|| panic!("{start}"));
+        let to = source[from..].find(end).unwrap_or_else(|| panic!("{end}")) + from;
+        &source[from..to]
+    }
+
+    /// The generation's failure arm: an ordinary session end is handled
+    /// before, and instead of, the episode refusal.
+    #[test]
+    fn an_ordinary_session_end_never_reaches_refuse_episode() {
+        let generation = include_str!("vod/generation.rs");
+        let arms = between(
+            generation,
+            "let verified = match verified {",
+            "if let Some(authority) = &source_authority {",
+        );
+        let ordinary = arms
+            .find("Err(_) if session_ended_ordinarily =>")
+            .expect("ordinary session end arm");
+        let refusal = arms.find("runtime.refuse_episode()").expect("refusal arm");
+        assert!(ordinary < refusal, "{arms}");
+        assert!(
+            !arms[ordinary..refusal].contains("record_failure"),
+            "{arms}"
+        );
+        assert!(generation.contains("session_ended_ordinarily = run.ended_ordinarily();"));
+    }
+
+    /// Flow stop, reclaim and repositioning end the session at the points
+    /// where a running producer is stopped, killed or moved.
+    #[test]
+    fn flow_stop_idle_and_moves_end_the_session() {
+        let driver = include_str!("vod/driver.rs");
+        let decision = between(
+            driver,
+            "if matches!(decision.action, Action::Idle | Action::Suspend { .. })",
+            "// Record only this pass's decision.",
+        );
+        assert!(
+            decision.contains(".end(crate::dv_segment::SessionEnd::FlowStop)"),
+            "{decision}"
+        );
+        let step = between(
+            driver,
+            "pub(super) async fn perform_driver_step(",
+            "record_performed_step(",
+        );
+        assert!(
+            step.contains("Step::Stop | Step::Terminate { .. } => rendition"),
+            "{step}"
+        );
+        assert!(step.contains("Step::Restart { .. } => rendition"), "{step}");
+    }
+
+    /// The helper's per-process bounds are per window in a session, and a
+    /// session's evidence is opened relative to each window's directory.
+    #[test]
+    fn helper_bounds_and_evidence_are_per_window() {
+        let helper = include_str!("../../../tools/dv_processing/segment_decode_render.c");
+        let window = between(
+            helper,
+            "static void run_window(",
+            "static void close_source(",
+        );
+        for reset in [
+            "movie_io.read_limit = charged + WINDOW_READ_LIMIT;",
+            "movie_reader_source.limit = movie_io.read_limit;",
+            "unsigned packets = 0, video_packets = 0;",
+            "preroll = paired = coded_count = 0;",
+            "check_window_bounds",
+        ] {
+            assert!(window.contains(reset) || helper.contains(reset), "{reset}");
+        }
+        let session = between(helper, "static void session_loop(void) {", "int main(");
+        assert!(!session.contains("chdir"), "{session}");
+        assert!(
+            session.contains("openat(window_dir, \"renderer.jsonl\""),
+            "{session}"
+        );
+        assert!(!helper.contains("chdir(argv[2])"));
     }
 }
 

@@ -545,6 +545,10 @@ impl Shared {
                     // this request is cancelled during that await, the next
                     // key owner can resume the same removal transaction.
                     existing.closed.store(true, Relaxed);
+                    #[cfg(target_os = "linux")]
+                    existing
+                        .dv_session
+                        .end(crate::dv_segment::SessionEnd::Closed);
                     existing.gen_epoch.fetch_add(1, Relaxed);
                     existing.kick();
                     self.pool.close(key);
@@ -1025,6 +1029,8 @@ impl Shared {
             slot: Arc::new(ProducerSlot::new()),
             source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
+            #[cfg(target_os = "linux")]
+            dv_session: Default::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),
@@ -1197,6 +1203,10 @@ impl Shared {
                 .is_some_and(|current| Arc::ptr_eq(current, &rendition));
             if exact {
                 rendition.closed.store(true, Relaxed);
+                #[cfg(target_os = "linux")]
+                rendition
+                    .dv_session
+                    .end(crate::dv_segment::SessionEnd::Closed);
                 rendition.gen_epoch.fetch_add(1, Relaxed);
                 // A private processed instance remains discoverable and
                 // charged until its directory has physically disappeared.

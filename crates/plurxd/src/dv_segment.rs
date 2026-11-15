@@ -24,7 +24,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "linux")]
+mod session;
+#[cfg(target_os = "linux")]
 mod stage_clock;
+#[cfg(target_os = "linux")]
+pub(crate) use session::{
+    HelperSession, HelperSessionSlot, SessionEnd, SessionHelper, SessionWindowRequest,
+};
 #[cfg(target_os = "linux")]
 pub(crate) use stage_clock::{HelperStages, WindowStage, WindowStageClock};
 
@@ -130,7 +136,6 @@ impl SegmentAdmission {
 /// argv already selects encoder/output and keeps source time with -copyts. Its
 /// NUT video is fd3; original source audio remains fd4 (independent demux input).
 pub(crate) struct SegmentRequest {
-    pub(crate) source_input: Option<Arc<SourceInputLease>>,
     pub(crate) renderer: PathBuf,
     /// Trusted worker runtime configuration, scoped to the renderer child only.
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
@@ -314,8 +319,6 @@ pub(crate) fn supervise_streaming_helper(
 /// Same registered pipes/writer barrier the existing producer consumes. On
 /// unsuccessful handoff the detached owner retires this exact generation.
 pub(crate) struct SegmentProducer {
-    #[cfg(target_os = "linux")]
-    source_settlement: Option<SourceInputSettlement>,
     registration: ProducerRegistration,
     writers: Option<ProducerWriters>,
     stdout: Option<tokio::process::ChildStdout>,
@@ -327,11 +330,6 @@ pub(crate) struct SegmentProducer {
     evidence: Option<SegmentEvidence>,
 }
 impl SegmentProducer {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn take_source_settlement(&mut self) -> Option<SourceInputSettlement> {
-        self.source_settlement.take()
-    }
-
     #[cfg(target_os = "linux")]
     pub(crate) fn take_evidence(&mut self) -> Option<SegmentEvidence> {
         self.evidence.take()
@@ -392,6 +390,15 @@ impl SourceInputLease {
             settled: tokio::sync::Notify::new(),
         })
     }
+    /// Whether any read the input served failed: a session on it ends.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn read_failed(&self) -> bool {
+        self.input
+            .lock()
+            .expect("DV source input")
+            .as_ref()
+            .is_none_or(crate::source_input::SourceInput::source_read_failed)
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn physical_owner(self: &Arc<Self>) -> SourceInputUse {
         self.users.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -427,29 +434,7 @@ impl Drop for SourceInputUse {
         self.0.settled.notify_waiters();
     }
 }
-/// Minted only after the actual helper and encoder are registered. It is
-/// move-only: a cached receipt can never pretend another read owner settled.
-#[cfg(target_os = "linux")]
-pub(crate) struct SourceInputSettlement {
-    input: Arc<SourceInputLease>,
-    encoder: ProducerRegistration,
-    helper: HelperCompletion,
-}
-#[cfg(target_os = "linux")]
-impl SourceInputSettlement {
-    pub(crate) async fn settle(self) -> Result<(), String> {
-        self.encoder.wait_confirmed_reap().await;
-        let _ = self.helper.wait().await;
-        self.input
-            .close_and_wait()
-            .await
-            .map_err(|error| format!("DV source read join: {error}"))
-    }
-}
-
 struct Resources {
-    #[cfg(target_os = "linux")]
-    _source_input: Option<SourceInputUse>,
     source: Arc<SourceFence>,
     original_offset: u64,
     _offset_lane: Option<OwnedSemaphorePermit>,
@@ -777,13 +762,6 @@ async fn run(
     request: SegmentRequest,
     cancel: CancellationToken,
 ) -> Result<SegmentProducer, String> {
-    if let Some(input) = request.source_input {
-        input
-            .close_and_wait()
-            .await
-            .map_err(|error| error.to_string())?;
-        return Err("source input service requires an original movie window".into());
-    }
     let raw_limit = request.shape.validate()?;
     let admission = request.admission;
     let held = admission.resources();
@@ -829,8 +807,6 @@ async fn run(
         .tempdir_in(&request.runtime_cache)
         .map_err(|e| e.to_string())?;
     let resources = Arc::new(Resources {
-        #[cfg(target_os = "linux")]
-        _source_input: None,
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
@@ -966,8 +942,6 @@ async fn run(
         }, _ = watched.wait_confirmed_reap() => {} }
     });
     Ok(SegmentProducer {
-        #[cfg(target_os = "linux")]
-        source_settlement: None,
         registration,
         writers: Some(writers),
         stdout: Some(encoded.stdout),
@@ -1046,9 +1020,6 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) export_raster: Option<(u32, u32)>,
     /// Explicit producer policy only; this layer never reads client caps.
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
-    /// The source's static HDR10 metadata a master-grade HDR10 window carries.
-    /// The helper never sees it; it is authored onto the encoded window.
-    pub(crate) master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
     /// The window's diagnostic stage clock; nothing here reads it back.
     pub(crate) stages: Arc<WindowStageClock>,
 }
@@ -1203,9 +1174,7 @@ async fn run_streaming(
         .prefix("dv-stream-")
         .tempdir_in(&request.runtime_cache)
         .map_err(|e| e.to_string())?;
-    let source_input = request.source_input;
     let resources = Arc::new(Resources {
-        _source_input: source_input.as_ref().map(|input| input.physical_owner()),
         source: request.source,
         original_offset,
         _offset_lane: Some(lane),
@@ -1228,12 +1197,6 @@ async fn run_streaming(
     let read: std::fs::File = std::os::fd::OwnedFd::from(read).into();
     let write: std::fs::File = std::os::fd::OwnedFd::from(write).into();
     let mut args = request.shape.renderer_args();
-    if let Some(input) = &source_input {
-        if !windowed {
-            return Err("original source service requires windowed renderer input".into());
-        }
-        args[0] = input.url.clone();
-    }
     args.push(fd(5));
     if let Some(window_args) = window_args {
         args.extend(window_args);
@@ -1317,14 +1280,14 @@ async fn run_streaming(
                 &request.encoder_args,
                 std::path::Path::new(""),
                 &[4],
-                source_input.as_ref().map(|input| input.url.as_str()),
+                None,
             ),
             SpawnOptions {
                 runtime_cache: &request.runtime_cache,
                 progress: Progress::Stderr,
                 descriptors: Descriptors::from_files(
                     Some(&read),
-                    source_input.is_none().then_some(&resources.source.handle),
+                    Some(&resources.source.handle),
                     None,
                     false,
                 ),
@@ -1376,13 +1339,7 @@ async fn run_streaming(
         Arc::downgrade(&request.producer),
         registration.clone(),
     );
-    let source_settlement = source_input.map(|input| SourceInputSettlement {
-        input,
-        encoder: registration.clone(),
-        helper: completion.clone(),
-    });
     Ok(SegmentProducer {
-        source_settlement,
         registration,
         writers: Some(writers),
         stdout: Some(encoded.stdout),
@@ -1497,7 +1454,6 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
             stages: WindowStageClock::start(),
             export_raster: None,
             display_target: None,
-            master_metadata: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             // The probe passes no decode device: the renderer decodes in software.
             decode: RendererDecode::Software,
@@ -1732,7 +1688,6 @@ pub(crate) async fn physical_probe() {
         Duration::from_millis(500),
         probe_spawn(
             SegmentRequest {
-                source_input: None,
                 renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                     .expect("renderer")
                     .into(),
@@ -1790,7 +1745,6 @@ pub(crate) async fn physical_probe() {
     .expect("predecessor slot fully settled");
     let producer = probe_spawn(
         SegmentRequest {
-            source_input: None,
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
                 .into(),
@@ -1921,7 +1875,6 @@ pub(crate) async fn physical_probe() {
     let slot = Arc::new(ProducerSlot::new());
     let unaccepted = probe_spawn(
         SegmentRequest {
-            source_input: None,
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
                 .into(),
@@ -1983,7 +1936,6 @@ pub(crate) async fn physical_probe() {
         let slot = Arc::new(ProducerSlot::new());
         let mut refused = probe_spawn(
             SegmentRequest {
-                source_input: None,
                 renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                     .expect("renderer")
                     .into(),
@@ -2941,5 +2893,620 @@ mod tests {
     #[ignore = "requires reviewed Linux FEL helper and bounded timestamped source"]
     async fn actual_segment_helper_nut_encoder_preserves_owned_custody() {
         physical_probe().await;
+    }
+
+    /// A stand-in for `segment_decode_render --session`: it speaks the real
+    /// control protocol on descriptor 5, writes each window's evidence into
+    /// the directory it is handed, writes the command to the window's NUT
+    /// pipe and acknowledges. It logs one `exec` per process.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn session_helper_child() {
+        use std::io::Write as _;
+        use std::os::fd::FromRawFd as _;
+        let Ok(log) = std::env::var("PLURX_DV_SESSION_TEST_LOG") else {
+            return;
+        };
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(log)
+            .expect("session log");
+        writeln!(log, "exec").expect("log");
+        let refuse = std::env::var("PLURX_DV_SESSION_TEST_REFUSE").ok();
+        let exit_after = std::env::var("PLURX_DV_SESSION_TEST_EXIT_AFTER").ok();
+        loop {
+            let mut text = [0u8; 256];
+            let mut control = [0u64; 16];
+            let mut iov = libc::iovec {
+                iov_base: text.as_mut_ptr().cast(),
+                iov_len: text.len(),
+            };
+            // SAFETY: a zeroed msghdr pointing at the buffers above.
+            let (received, fds) = unsafe {
+                let mut message: libc::msghdr = std::mem::zeroed();
+                message.msg_iov = &mut iov;
+                message.msg_iovlen = 1;
+                message.msg_control = control.as_mut_ptr().cast();
+                message.msg_controllen = std::mem::size_of_val(&control) as _;
+                let received = libc::recvmsg(5, &mut message, 0);
+                let mut fds = Vec::new();
+                let header = libc::CMSG_FIRSTHDR(&message);
+                if received > 0 && !header.is_null() {
+                    let count = ((*header).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / 4;
+                    let data = libc::CMSG_DATA(header).cast::<i32>();
+                    for index in 0..count {
+                        fds.push(std::ptr::read_unaligned(data.add(index)));
+                    }
+                }
+                (received, fds)
+            };
+            if received <= 0 {
+                writeln!(log, "end").expect("log");
+                return;
+            }
+            let command = String::from_utf8_lossy(&text[..received as usize]).into_owned();
+            writeln!(log, "{command}").expect("log");
+            let directory = format!("/proc/self/fd/{}", fds[1]);
+            std::fs::write(
+                format!("{directory}/renderer.jsonl"),
+                format!("{{\"kind\":\"session_test\",\"command\":\"{command}\"}}\n"),
+            )
+            .expect("window observations");
+            std::fs::write(
+                format!("{directory}/stages.tsv"),
+                "started\t0\t0\t0\t0\ncomplete\t5\t0\t0\t48\n",
+            )
+            .expect("window stages");
+            // SAFETY: the received descriptors are owned by this process now.
+            unsafe {
+                std::fs::File::from_raw_fd(fds[0])
+                    .write_all(command.as_bytes())
+                    .expect("window NUT");
+                if let Some(audio) = fds.get(2) {
+                    std::fs::File::from_raw_fd(*audio)
+                        .write_all(b"soundtrack")
+                        .expect("window soundtrack");
+                }
+                drop(std::fs::File::from_raw_fd(fds[1]));
+            }
+            if refuse.as_deref().is_some_and(|word| command.contains(word)) {
+                eprintln!("Segment refused: session test refusal");
+                std::process::exit(1);
+            }
+            // SAFETY: send on the inherited control socket.
+            unsafe { libc::send(5, b"done".as_ptr().cast(), 4, 0) };
+            if exit_after
+                .as_deref()
+                .is_some_and(|word| command.contains(word))
+            {
+                eprintln!("helper ended between windows");
+                std::process::exit(3);
+            }
+        }
+    }
+
+    /// A stand-in encoder: it reads its NUT input (descriptor 3) and, when it
+    /// has one, its soundtrack input (descriptor 4) to their ends and writes
+    /// what it read.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn session_encoder_child() {
+        use std::io::Read as _;
+        use std::os::fd::FromRawFd as _;
+        if std::env::var("PLURX_DV_SESSION_TEST_ENCODER").is_err() {
+            return;
+        }
+        let read = |fd: i32| {
+            // SAFETY: F_GETFD only asks whether the descriptor exists.
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            // SAFETY: an inherited descriptor this process now owns.
+            unsafe { std::fs::File::from_raw_fd(fd) }
+                .read_to_end(&mut bytes)
+                .expect("encoder input");
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        };
+        let video = read(3).unwrap_or_default();
+        let audio = read(4);
+        print!(
+            "<<video={video}|audio={}>>",
+            audio.as_deref().unwrap_or("none")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    struct SessionFixture {
+        cache: tempfile::TempDir,
+        log: PathBuf,
+        renderer: PathBuf,
+        encoder: PathBuf,
+        admissions: crate::admission::Admissions,
+        binding: crate::vodencode::RetainedEncodeAdmission,
+        estimate: crate::admission::TranscodeResourceEstimate,
+        _source: std::fs::File,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SessionFixture {
+        fn new() -> Self {
+            use std::io::Write as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            let cache = tempfile::tempdir().expect("runtime cache");
+            let exe = std::env::current_exe().expect("test executable");
+            let script = |name: &str, body: String| {
+                let path = cache.path().join(name);
+                std::fs::write(&path, body).expect("script");
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("script mode");
+                path
+            };
+            let renderer = script(
+                "renderer",
+                format!(
+                    "#!/bin/sh\nexec '{}' --exact dv_segment::tests::session_helper_child --nocapture --test-threads 1\n",
+                    exe.display()
+                ),
+            );
+            let encoder = script(
+                "encoder",
+                format!(
+                    "#!/bin/sh\nexport PLURX_DV_SESSION_TEST_ENCODER=1\nexec '{}' --exact dv_segment::tests::session_encoder_child --nocapture --test-threads 1\n",
+                    exe.display()
+                ),
+            );
+            // A GPU-decoded base-RPU helper (4 threads) beside an encoder
+            // with its soundtrack scope (5).
+            let estimate = crate::admission::TranscodeResourceEstimate {
+                hardware_slot: true,
+                cpu_threads: 9,
+                decoder_threads: Some(2),
+            };
+            let source = tempfile::tempfile().expect("source");
+            (&source).write_all(b"source bytes").expect("source bytes");
+            Self {
+                log: cache.path().join("session.log"),
+                cache,
+                renderer,
+                encoder,
+                admissions: crate::admission::Admissions::new(),
+                binding: crate::vodencode::RetainedEncodeAdmission::default(),
+                estimate,
+                _source: source,
+            }
+        }
+
+        fn origin() -> plurx_core::transcode::dv_processing::DvSourceOrigin {
+            plurx_core::transcode::dv_processing::DvSourceOrigin::observed_common(
+                plurx_core::transcode::dv_processing::DvTimestamp::new(0, 1_000_000)
+                    .expect("origin"),
+                plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("held origin")
+        }
+
+        fn helper(&self, refuse: Option<&str>) -> SessionHelper {
+            let mut renderer_env = vec![(
+                "PLURX_DV_SESSION_TEST_LOG".to_owned(),
+                self.log.clone().into_os_string(),
+            )];
+            match refuse {
+                Some(word) if word.starts_with("exit:") => renderer_env.push((
+                    "PLURX_DV_SESSION_TEST_EXIT_AFTER".to_owned(),
+                    word["exit:".len()..].into(),
+                )),
+                Some(word) => {
+                    renderer_env.push(("PLURX_DV_SESSION_TEST_REFUSE".to_owned(), word.into()))
+                }
+                None => {}
+            }
+            SessionHelper {
+                renderer: self.renderer.clone(),
+                renderer_env,
+                runtime_cache: self.cache.path().to_owned(),
+                video_index: 0,
+                bl: (640, 360),
+                mode: plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu,
+                decode: RendererDecode::Gpu,
+                export_raster: (640, 360),
+                display_target: None,
+                source_origin: Self::origin(),
+                audio_ordinal: Some(0),
+            }
+        }
+
+        /// The retained credit and its exclusive worker, as a processed
+        /// rendition's generation claims them.
+        fn admission(&self) -> SegmentAdmission {
+            let bundle = self
+                .admissions
+                .try_admit_bundle(1, 9, &self.estimate, crate::admission::Priority::Live)
+                .expect("graph bundle");
+            let parent = self
+                .binding
+                .bind(crate::vodencode::EncodePermit::from(bundle));
+            SegmentAdmission::Retained(parent.try_claim_worker().expect("worker"))
+        }
+
+        fn claim_is_free(&self) -> bool {
+            self.binding
+                .current()
+                .is_none_or(|credit| credit.try_claim_worker().is_some())
+        }
+
+        async fn spawn(&self, refuse: Option<&str>) -> HelperSession {
+            let (input, file) =
+                crate::source_input::SourceInput::qualification_fixture(b"session source bytes")
+                    .await;
+            let source = Arc::new(
+                crate::fragment_index_cluster::SourceFence::clone_current_held(&file)
+                    .expect("held source"),
+            );
+            HelperSession::spawn(
+                self.helper(refuse),
+                SourceInputLease::new(input),
+                None,
+                source,
+                Arc::new(Semaphore::new(1)),
+                self.admission(),
+                Instant::now() + Duration::from_secs(10),
+                &CancellationToken::new(),
+                &WindowStageClock::start(),
+            )
+            .await
+            .expect("session helper")
+        }
+
+        fn encoder_args() -> Vec<String> {
+            use plurx_core::transcode::*;
+            let mut source = encoded_recipe_source(true);
+            source.duration_ms = Some(60_000);
+            source.audio_streams = vec![plurx_core::domain::AudioStream {
+                index: 1,
+                codec: "aac".into(),
+                channels: Some(2),
+                sample_rate: Some(48000),
+                ..Default::default()
+            }];
+            let options = TranscodeOptions {
+                pipeline: Pipeline::Hdr10Passthrough,
+                audio_index: Some(0),
+                ..Default::default()
+            };
+            let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
+            let output = plan
+                .completed_reconstructed_output(Encoder::Software)
+                .expect("typed Main10 output");
+            vod_completed_reconstructed_pipe_args(
+                &source,
+                &output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                2.0,
+                &fd(3),
+                &fd(4),
+                VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("production graph")
+        }
+
+        /// Run one window to its end, as the processed-window owner does, and
+        /// return what its encoder read and the helper's observations.
+        async fn window(
+            &self,
+            session: &mut HelperSession,
+            producer: &Arc<ProducerSlot>,
+            index: u32,
+        ) -> Result<(String, Vec<u8>), String> {
+            let start = i64::from(index) * 2;
+            let window = SegmentWindow {
+                start: (start, 1),
+                end: (start + 2, 1),
+                max_preroll: 512,
+                source_origin: Some(Self::origin()),
+            };
+            let mut produced = session
+                .window(SessionWindowRequest {
+                    encoder: self.encoder.clone(),
+                    encoder_args: Self::encoder_args(),
+                    producer: Arc::clone(producer),
+                    at: index,
+                    window,
+                    frames: 48,
+                    audio: Some((((start - 4).max(0), 1), (start * 2 + 5, 2))),
+                    deadline: Instant::now() + Duration::from_secs(20),
+                    cancel: CancellationToken::new(),
+                    stages: WindowStageClock::start(),
+                })
+                .await?;
+            let evidence = produced.take_evidence().expect("evidence");
+            let helper = produced.take_helper_completion().expect("completion");
+            let (registration, writers, mut stdout, stderr) = produced.into_parts();
+            drop(stderr);
+            let outcome = helper.wait().await;
+            let mut output = String::new();
+            stdout
+                .read_to_string(&mut output)
+                .await
+                .expect("encoder output");
+            writers.settled();
+            let _ = producer.request_registered_completion(&registration).await;
+            registration.wait_confirmed_reap().await;
+            match outcome {
+                HelperOutcome::Completed => {
+                    Ok((output, evidence.renderer_events().expect("observations")))
+                }
+                HelperOutcome::Failed(cause) => Err(cause),
+                HelperOutcome::Cancelled => Err("cancelled".into()),
+            }
+        }
+
+        fn log(&self) -> String {
+            std::fs::read_to_string(&self.log).unwrap_or_default()
+        }
+    }
+
+    /// Consecutive windows run on one helper process that holds the
+    /// rendition's worker claim between them; each window still has its own
+    /// encoder, NUT and soundtrack pipes and private evidence. Ending the
+    /// session reaps the helper and returns the claim and the capacity.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn consecutive_windows_run_on_one_helper_that_keeps_the_worker_claim() {
+        let fixture = SessionFixture::new();
+        let mut session = fixture.spawn(None).await;
+        let producer = Arc::new(ProducerSlot::new());
+        for index in 0..3 {
+            let (output, observations) = fixture
+                .window(&mut session, &producer, index)
+                .await
+                .expect("session window");
+            let start = index * 2;
+            let command = format!("window {start}/1 {}/1 48 512", start + 2);
+            assert!(
+                output.contains(&format!("<<video={command} ")),
+                "the window's own encoder read the window's own NUT: {output}"
+            );
+            assert!(output.contains("|audio=soundtrack>>"), "{output}");
+            assert!(
+                String::from_utf8_lossy(&observations).contains(&command),
+                "each window's evidence is its own"
+            );
+            assert_eq!(session.next_index(), Some(index + 1));
+            assert!(
+                !fixture.claim_is_free(),
+                "the live session holds the rendition's worker claim between windows"
+            );
+        }
+        let log = fixture.log();
+        assert_eq!(log.matches("exec").count(), 1, "one helper process: {log}");
+        assert_eq!(log.matches("window ").count(), 3, "{log}");
+        assert!(
+            fixture
+                .admissions
+                .try_admit_bundle(1, 9, &fixture.estimate, crate::admission::Priority::Live)
+                .is_none(),
+            "the session's graph keeps its capacity"
+        );
+        session.retire(SessionEnd::FlowStop).await;
+        assert!(
+            fixture.claim_is_free(),
+            "ending the session returns the claim"
+        );
+        assert!(
+            fixture
+                .admissions
+                .try_admit_bundle(1, 9, &fixture.estimate, crate::admission::Priority::Live)
+                .is_some(),
+            "and the capacity, once the helper is reaped"
+        );
+    }
+
+    /// A window that does not continue the session is not given to it: the
+    /// slot ends and reaps the old helper before the window can start cold,
+    /// so the cold helper can take the worker claim.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_discontinuous_window_reaps_the_session_before_starting_cold() {
+        let fixture = SessionFixture::new();
+        let slot = HelperSessionSlot::default();
+        let producer = Arc::new(ProducerSlot::new());
+        let mut taken = slot.take(0).await;
+        assert!(taken.get().is_none(), "no session yet");
+        let mut session = fixture.spawn(None).await;
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("first window");
+        taken.put(session).await;
+        drop(taken);
+        let mut continuing = slot.take(1).await;
+        let session = continuing.take().expect("positioned for window 1");
+        continuing.put(session).await;
+        drop(continuing);
+        assert!(!fixture.claim_is_free());
+        let seek = slot.take(5).await;
+        assert!(
+            seek.get().is_none(),
+            "a seek is never served by the old helper"
+        );
+        assert!(
+            fixture.claim_is_free(),
+            "the old helper is reaped before take returns"
+        );
+        assert_eq!(fixture.log().matches("exec").count(), 1);
+        // The cold window's own session can claim the worker.
+        let mut cold = fixture.spawn(None).await;
+        fixture
+            .window(&mut cold, &producer, 5)
+            .await
+            .expect("cold window after the seek");
+        assert_eq!(fixture.log().matches("exec").count(), 2);
+        cold.retire(SessionEnd::Closed).await;
+    }
+
+    /// A flow stop ends the session even while one of its windows runs: the
+    /// window's session is retired instead of kept, and the claim returns.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_flow_stop_during_a_window_ends_its_session() {
+        let fixture = SessionFixture::new();
+        let slot = HelperSessionSlot::default();
+        let producer = Arc::new(ProducerSlot::new());
+        let mut taken = slot.take(0).await;
+        let mut session = fixture.spawn(None).await;
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("window");
+        slot.end(SessionEnd::FlowStop);
+        taken.put(session).await;
+        drop(taken);
+        assert!(fixture.claim_is_free(), "the stopped session is reaped");
+        assert!(
+            slot.take(1).await.get().is_none(),
+            "the next window starts cold"
+        );
+    }
+
+    /// A helper that refuses a window ends the session with the window's
+    /// failure; the refusal is the cause the window reports.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_refused_window_fails_with_the_helper_cause_and_ends_the_session() {
+        let fixture = SessionFixture::new();
+        let mut session = fixture.spawn(Some("window 2/1")).await;
+        let producer = Arc::new(ProducerSlot::new());
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("first window");
+        let cause = fixture
+            .window(&mut session, &producer, 1)
+            .await
+            .expect_err("refused window");
+        assert!(cause.contains("session test refusal"), "{cause}");
+        assert_eq!(session.unusable(), Some(SessionEnd::WindowFailed));
+        session.retire(SessionEnd::WindowFailed).await;
+        assert!(fixture.claim_is_free());
+    }
+
+    /// A helper that exits between windows (stopped from Activity, or a
+    /// crash) is a failure the next window reports, not a silent cold
+    /// restart; its claim is returned once it is reaped.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_helper_that_ends_between_windows_fails_the_next_window() {
+        let fixture = SessionFixture::new();
+        let slot = HelperSessionSlot::default();
+        let producer = Arc::new(ProducerSlot::new());
+        let mut taken = slot.take(0).await;
+        let mut session = fixture.spawn(Some("exit:window 0/1")).await;
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("the window before the exit");
+        taken.put(session).await;
+        drop(taken);
+        let mut cause = None;
+        for _ in 0..200 {
+            let next = slot.take(1).await;
+            if let Some(failure) = next.failure() {
+                cause = Some(failure.to_owned());
+                break;
+            }
+            let mut next = next;
+            let session = next.take().expect("live session");
+            next.put(session).await;
+            drop(next);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let cause = cause.expect("the next window sees the ended helper");
+        assert!(cause.contains("helper ended between windows"), "{cause}");
+        assert!(fixture.claim_is_free(), "the ended helper is reaped");
+    }
+
+    /// The soundtrack a window carries starts exactly where its encoder's
+    /// lattice filter rebases (`asetpts=PTS-seek/TB`), on the source clock,
+    /// and the encoder reads it from the helper's Matroska pipe with no seek.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_carried_soundtrack_starts_where_the_encoder_rebases() {
+        use plurx_core::transcode::*;
+        let mut source = encoded_recipe_source(true);
+        source.duration_ms = Some(700_000);
+        source.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 1,
+            codec: "eac3".into(),
+            channels: Some(6),
+            sample_rate: Some(48000),
+            ..Default::default()
+        }];
+        for (offset_ms, origin) in [(0, 0), (-120, 41_708), (250, 0)] {
+            source.audio_offset_ms = offset_ms;
+            let options = TranscodeOptions {
+                pipeline: Pipeline::Hdr10Passthrough,
+                audio_index: Some(2),
+                start_seconds: 612.0,
+                ..Default::default()
+            };
+            let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
+            let output = plan
+                .completed_reconstructed_output(Encoder::Software)
+                .expect("typed Main10 output");
+            let clock = VodSourceClock::ReportedOrigin(origin);
+            let args = vod_completed_reconstructed_pipe_args(
+                &source,
+                &output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                614.0,
+                &fd(3),
+                &fd(4),
+                clock,
+            )
+            .expect("production graph");
+            assert!(!args.iter().any(|arg| arg == "-ss"), "{args:?}");
+            let audio = args
+                .windows(6)
+                .position(|scope| {
+                    scope[2..] == ["-f", "matroska", "-i", "/proc/self/fd/4"]
+                        && scope[0] == "-threads"
+                })
+                .expect("the soundtrack input is the helper's Matroska pipe");
+            assert_eq!(args[audio - 2], "-itsoffset", "{args:?}");
+            assert!(
+                args.windows(2).any(|pair| pair == ["-map", "1:a:0"]),
+                "the pipe carries exactly the selected soundtrack: {args:?}"
+            );
+            let filter = args
+                .windows(2)
+                .find(|pair| pair[0] == "-af")
+                .map(|pair| pair[1].clone())
+                .expect("lattice filter");
+            let seek: f64 = filter
+                .split_once("asetpts=PTS-")
+                .and_then(|(_, rest)| rest.split_once("/TB"))
+                .map(|(seek, _)| seek.parse().expect("seek"))
+                .expect("the filter rebases on its seek");
+            let ((from, from_den), (end, end_den)) =
+                crate::vodencode::dv_runtime::window_soundtrack(
+                    clock,
+                    plan.options().audio_offset_ms,
+                    614 * 24,
+                    24,
+                    612.0,
+                )
+                .expect("soundtrack interval");
+            let from_film = from as f64 / f64::from(from_den) - origin as f64 / 1e6;
+            assert!((from_film - seek).abs() < 1e-9, "{from_film} vs {seek}");
+            let end_film = end as f64 / f64::from(end_den) - origin as f64 / 1e6;
+            assert!(
+                end_film >= 614.5 + f64::from((-offset_ms).max(0) as i32) / 1000.0 - 1e-9,
+                "the soundtrack reaches past the window's end: {end_film}"
+            );
+        }
     }
 }

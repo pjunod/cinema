@@ -73,12 +73,12 @@ pub use macos::{
 pub use pipeline::{Pipeline, ReconstructedPqInput, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
-    vod_audio_anchor, vod_completed_reconstructed_pipe_args, vod_pipe_args,
-    vod_pipe_args_with_reorder, vod_pipe_args_with_source_clock, vod_reconstructed_pipe_args,
-    vod_reconstructed_video_origin, vod_shared_audio_args, vod_shared_audio_plan, VodFrameGrid,
-    VodPresentationFamily, VodRenditionBandwidth, VodSharedAudioRecipe, VodSharedAudioRendition,
-    VodSourceClock, VodVideoFamily, VodVideoRung, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
-    VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
+    vod_audio_anchor, vod_audio_preroll_samples, vod_completed_reconstructed_pipe_args,
+    vod_pipe_args, vod_pipe_args_with_reorder, vod_pipe_args_with_source_clock,
+    vod_reconstructed_pipe_args, vod_reconstructed_video_origin, vod_shared_audio_args,
+    vod_shared_audio_plan, VodFrameGrid, VodPresentationFamily, VodRenditionBandwidth,
+    VodSharedAudioRecipe, VodSharedAudioRendition, VodSourceClock, VodVideoFamily, VodVideoRung,
+    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
 };
 
 use crate::domain::MediaFile;

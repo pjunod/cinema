@@ -68,7 +68,9 @@ impl VodSourceClock {
         bytes
     }
 
-    fn origin_microseconds(self) -> i64 {
+    /// The source time of film zero, in microseconds: a source timestamp is
+    /// its film time plus this. The encoder's `-itsoffset` is its negation.
+    pub fn origin_microseconds(self) -> i64 {
         match self {
             Self::ReportedOrigin(value) => value,
             Self::ProducerDefaultZero => 0,
@@ -877,7 +879,17 @@ impl VodPresentationFamily {
 struct AudioClock {
     target: f64,
     seek: f64,
+    seek_samples: u64,
     relative_target_samples: i64,
+}
+
+/// Where a VOD generation starting at `start_seconds` begins decoding its
+/// soundtrack, in film samples at [`VOD_AUDIO_RATE`]: two seconds of decoder
+/// preroll before its AAC preroll, on the AAC frame lattice. A processed DV
+/// window carries the soundtrack from here; its encoder's lattice filter
+/// rebases on exactly this point.
+pub fn vod_audio_preroll_samples(start_seconds: f64, offset_ms: i64) -> u64 {
+    AudioClock::new(start_seconds, offset_ms).seek_samples
 }
 
 impl AudioClock {
@@ -893,6 +905,7 @@ impl AudioClock {
         Self {
             target,
             seek: seek_samples as f64 / f64::from(VOD_AUDIO_RATE),
+            seek_samples,
             relative_target_samples: target_samples
                 .saturating_sub(i64::try_from(seek_samples).unwrap_or(i64::MAX)),
         }
@@ -1475,8 +1488,31 @@ pub fn vod_completed_reconstructed_pipe_args(
             .nth(1)
             .map(|(i, _)| i)
             .ok_or("reconstructed audio input unavailable")?;
+        // The DV helper carries this window's soundtrack packets, unchanged,
+        // from its own read of the source in a Matroska pipe: the encoder
+        // never opens the source. The pipe starts at the soundtrack preroll
+        // and cannot seek, so the source seek is dropped; the lattice filter
+        // rebases on the same film time from the packets' own timestamps.
+        if input < 3 || args[input - 3] != "-noaccurate_seek" || args[input - 2] != "-ss" {
+            return Err("reconstructed audio input has no source seek");
+        }
+        args.drain(input - 3..input);
+        let input = input - 3;
         args[input + 1] = audio_fd.into();
-        args.splice(input..input, ["-threads".into(), "1".into()]);
+        args.splice(
+            input..input,
+            [
+                "-threads".into(),
+                "1".into(),
+                "-f".into(),
+                "matroska".into(),
+            ],
+        );
+        for index in 0..args.len().saturating_sub(1) {
+            if args[index] == "-map" && args[index + 1].starts_with("1:a:") {
+                args[index + 1] = "1:a:0".into();
+            }
+        }
     }
     let last_input = args
         .iter()

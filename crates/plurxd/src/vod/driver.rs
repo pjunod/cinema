@@ -245,6 +245,18 @@ pub(super) async fn perform_driver_step(
             }
         }
     }
+    // Stopping, reclaiming or moving the producer ends the helper session
+    // too; its next window starts cold.
+    #[cfg(target_os = "linux")]
+    match step {
+        Step::Stop | Step::Terminate { .. } => rendition
+            .dv_session
+            .end(crate::dv_segment::SessionEnd::FlowStop),
+        Step::Restart { .. } => rendition
+            .dv_session
+            .end(crate::dv_segment::SessionEnd::Discontinuity),
+        _ => {}
+    }
     let performed = rendition.slot.perform(step, || {}).await?;
     record_performed_step(shared, rendition, step);
     project_source_sharing(shared, rendition).await;
@@ -861,12 +873,20 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             if let Some(encoding) = &rendition.recipe.encoding {
                 encoding.cancel_wait();
             }
+            #[cfg(target_os = "linux")]
+            rendition
+                .dv_session
+                .end(crate::dv_segment::SessionEnd::Closed);
             return;
         }
         if rendition.failure().is_some() {
             if let Some(encoding) = &rendition.recipe.encoding {
                 encoding.cancel_wait();
             }
+            #[cfg(target_os = "linux")]
+            rendition
+                .dv_session
+                .end(crate::dv_segment::SessionEnd::Closed);
             rendition.gen_epoch.fetch_add(1, Relaxed);
             clear_marker_prewarm_dispatch(rendition);
             retire_failed_rendition(shared, rendition).await;
@@ -960,6 +980,13 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 || (bounded_processing && matches!(decision.action, Action::MakeRoom { .. }))
             {
                 encoding.reset_active_production(epoch, false);
+                // The same point is where a running producer is stopped or
+                // reclaimed: the helper session between windows gives back
+                // its GPU state and worker claim, and the next window is cold.
+                #[cfg(target_os = "linux")]
+                rendition
+                    .dv_session
+                    .end(crate::dv_segment::SessionEnd::FlowStop);
             }
         }
         // Record only this pass's decision. A later non-capacity decision

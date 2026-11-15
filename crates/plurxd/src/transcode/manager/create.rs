@@ -3806,10 +3806,17 @@ impl TranscodeManager {
                     let input=crate::source_input::SourceInput::open_current_held(
                         &runtime.source.handle,"processed-first-window").await?
                         .ok_or("processed first window has no original source read owner")?;
-                    let (verified, selected) = match runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
-                        entry, &executable.path, admission,
+                    // The trial window is a session of one: its helper is
+                    // retired and reaped here, before the credit moves on.
+                    let run = runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
+                        entry, &executable.path,
+                        crate::vodencode::dv_runtime::WindowSource::Open { input, admission },
                         Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None,
-                        input, processing_deadline, Some(source_open_started.elapsed())).await {
+                        processing_deadline, Some(source_open_started.elapsed())).await;
+                    if let Some(session) = run.session {
+                        session.retire(crate::dv_segment::SessionEnd::Single).await;
+                    }
+                    let (verified, selected) = match run.result {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.
