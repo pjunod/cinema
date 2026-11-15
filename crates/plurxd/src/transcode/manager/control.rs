@@ -1227,7 +1227,8 @@ impl TranscodeManager {
         incarnation: &str,
         wanted: crate::admission::TranscodeResourceEstimate,
     ) -> Option<crate::vodserve::IncumbentPermitClaim> {
-        let reserve = crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET + crate::admission::QUEUE_WAIT;
+        let reserve =
+            crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET + crate::admission::QUEUE_WAIT;
         let reserve_ms = i64::try_from(reserve.as_millis()).unwrap_or(i64::MAX);
         let hardware_limit = self.max_hw_sessions().await;
         let software_budget = self.software_budget().await;

@@ -593,10 +593,8 @@ WHERE id = json_extract($1, '$.job_id')
   -- The outer CAS already fixes id to this request. Bind resource lookup to
   -- that same value so SQLite pushes the identity into every UNION branch
   -- of the resource view instead of scanning all jobs under the Raft writer.
-  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required JOIN source_io_occupancy held
-      ON (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-    WHERE required.job_id=json_extract($1,'$.job_id') AND held.custody_id IS NOT NULL
-      AND held.active_occupancy=1 AND held.expires_at_ms<=json_extract($1,'$.now_ms'))
+  -- A lapsed custody counts as one ordinary reader below until the sweep
+  -- releases it; it no longer refuses every source claim on its own.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
     JOIN foreground_source_permissions fg ON required.resource_key LIKE 'source_io%'
       AND (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
@@ -2975,7 +2973,6 @@ impl AnalysisSourceAdmission {
             "admit" => Self::Admit,
             "not_owned" => Self::NotOwned,
             // The reasons `analysis_source_capacity_terms` names.
-            "source_custody_unsettled" => Self::Yield("source_custody_unsettled"),
             "foreground_source" => Self::Yield("foreground_source"),
             "domain_readers_full" => Self::Yield("domain_readers_full"),
             "background_reader_busy" => Self::Yield("background_reader_busy"),

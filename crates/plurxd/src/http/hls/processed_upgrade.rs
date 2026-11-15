@@ -697,12 +697,19 @@ where
     F: FnMut(crate::transcode::SessionRequest, crate::transcode::SessionRecoveryIdentity) -> Fut,
     Fut: std::future::Future<Output = TrialOutcome>,
 {
-    run_upgrade_with_claim(state, intent, run, None, run_trial, |incarnation, needed| async move {
-        state
-            .transcode
-            .claim_incumbent_permit(&intent.session_id, &incarnation, needed)
-            .await
-    })
+    run_upgrade_with_claim(
+        state,
+        intent,
+        run,
+        None,
+        run_trial,
+        |incarnation, needed| async move {
+            state
+                .transcode
+                .claim_incumbent_permit(&intent.session_id, &incarnation, needed)
+                .await
+        },
+    )
     .await
 }
 
@@ -878,9 +885,10 @@ where
                         );
                         let mut retry = intent.request.clone();
                         retry.start_seconds = verified_ms as f64 / 1_000.0;
-                        let scoped = Arc::new(crate::vodencode::ProcessedTrialAdmission::with_claim(
-                            Arc::clone(claim.claim()),
-                        ));
+                        let scoped =
+                            Arc::new(crate::vodencode::ProcessedTrialAdmission::with_claim(
+                                Arc::clone(claim.claim()),
+                            ));
                         // A claim closed mid-trial (a seek past the runway)
                         // means the incumbent must produce now: the trial is
                         // dropped at once rather than holding its capacity
