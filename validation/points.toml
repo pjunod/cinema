@@ -1551,6 +1551,7 @@ paths = [
   "scripts/rust-gate-image",
   "Dockerfile.rust-gate",
   "scripts/ci-image-probe",
+  "scripts/ci-toolchain-check",
   "tests/ci-image-skips.toml",
   "scripts/ci-cargo-cache-refresh",
   "scripts/provision-hiqlite-upstream",
