@@ -21,7 +21,10 @@ pub enum PacketClockError {
     SourceTime(super::ranges::RangeError),
 }
 
-/// Sizes/checksums are after FFmpeg filters, before post-mux Rust conversion.
+/// Sizes/checksums are after FFmpeg filters, before the MP4 muxer frames the
+/// packet and before post-mux Rust conversion. A CBS bitstream filter leaves
+/// HEVC as Annex B, so compare a size with a sample only through
+/// [`packet_size_frames_sample`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourcePacketObservation {
     pub sequence: u64,
@@ -45,6 +48,29 @@ pub struct SourceFragmentClock {
     pub canonical_dts: u64,
     pub duration: u64,
     pub next_packet_sequence: u64,
+}
+
+/// Whether a clock packet's size is that of the muxed sample's own units.
+///
+/// The packet reaches the MP4 muxer in one of two framings. Passed through
+/// unfiltered it is the source's length-prefixed sample, byte for byte. Out of
+/// a CBS bitstream filter (`filter_units`, `dovi_rpu`) it is the same NAL units
+/// as Annex B, which the muxer reframes with length prefixes; its size is then
+/// exactly [`crate::fmp4::hevc_sample_cbs_annex_b_len`] of the sample. Either
+/// equality is exact: a sample whose bytes are not inside its fragment, or
+/// that does not parse, matches only by the first.
+pub fn packet_size_frames_sample(
+    packet_size: u64,
+    sample: &crate::fmp4::Sample,
+    bytes: Option<&[u8]>,
+    video: &crate::fmp4::Track,
+) -> bool {
+    packet_size == u64::from(sample.size)
+        || (video.codec == Some(crate::fmp4::VideoCodec::Hevc)
+            && bytes.is_some_and(|bytes| {
+                crate::fmp4::hevc_sample_cbs_annex_b_len(bytes, video.nal_length_size)
+                    .is_ok_and(|len| u64::try_from(len).is_ok_and(|len| len == packet_size))
+            }))
 }
 
 /// Associate every selected-video sample with its same-input clock packet.
@@ -79,14 +105,15 @@ pub fn associate_fragment_clock(
     // DTS, as the mov muxer itself uses: each sample's duration must equal its
     // DTS delta. The fragment's last sample is closed by the next fragment's
     // first DTS, which range continuity checks against this row's end.
-    for (at, (sample, packet)) in track.samples().zip(packets).enumerate() {
+    let samples = fragment.samples_with_bytes(video.id);
+    for (at, (&(sample, bytes), packet)) in samples.iter().zip(packets).enumerate() {
         if packet.sequence != next_sequence
             || packet.time_base_num == 0
             || packet.time_base_den == 0
             || packet.time_base_num != first.time_base_num
             || packet.time_base_den != first.time_base_den
             || packet.duration == 0
-            || packet.size != u64::from(sample.size)
+            || !packet_size_frames_sample(packet.size, sample, bytes, video)
             || sample.duration == 0
         {
             return Err(PacketClockError::FragmentMismatch);
@@ -475,6 +502,105 @@ mod association_tests {
             ),
             Err(PacketClockError::FragmentMismatch)
         );
+    }
+
+    /// A CBS filter's Annex B packet counts the units FFmpeg reframed: a
+    /// four-byte start code for the first unit and VPS/SPS/PPS, three for
+    /// every other unit, where the muxed sample has a four-byte length each.
+    #[test]
+    fn an_annex_b_clock_packet_frames_the_same_units_as_its_muxed_sample() {
+        fn unit(kind: u8, payload: usize) -> Vec<u8> {
+            let len = 2 + payload;
+            let mut framed = u32::try_from(len)
+                .expect("small unit")
+                .to_be_bytes()
+                .to_vec();
+            framed.extend([kind << 1, 1]);
+            framed.extend(std::iter::repeat_n(0x55, payload));
+            framed
+        }
+        let sample: Vec<u8> = [unit(39, 5), unit(20, 9), unit(1, 3)].concat();
+        // 4 + 7, then 3 + 11 and 3 + 5: one byte less for each later unit.
+        assert_eq!(crate::fmp4::hevc_sample_cbs_annex_b_len(&sample, 4), Ok(33));
+        assert_eq!(sample.len(), 35);
+        let sets: Vec<u8> = [
+            unit(39, 5),
+            unit(32, 4),
+            unit(33, 4),
+            unit(34, 4),
+            unit(21, 9),
+        ]
+        .concat();
+        assert_eq!(
+            crate::fmp4::hevc_sample_cbs_annex_b_len(&sets, 4),
+            Ok(sets.len() - 1)
+        );
+        assert!(crate::fmp4::hevc_sample_cbs_annex_b_len(&[], 4).is_err());
+        assert!(crate::fmp4::hevc_sample_cbs_annex_b_len(&sample[..sample.len() - 1], 4).is_err());
+
+        let mut reader = FragmentReader::new();
+        reader.push(include_bytes!(
+            "../../tests/fixtures/dv-runtime/authored.mp4"
+        ));
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init") else {
+            panic!("missing init");
+        };
+        let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fixture fragment") else {
+            panic!("missing fragment");
+        };
+        let video = init.video().expect("fixture video");
+        let samples = fragment.samples_with_bytes(video.id);
+        let mut dts = 0i64;
+        let packets: Vec<_> = samples
+            .iter()
+            .enumerate()
+            .map(|(at, &(sample, bytes))| {
+                let size = crate::fmp4::hevc_sample_cbs_annex_b_len(
+                    bytes.expect("fixture sample bytes"),
+                    video.nal_length_size,
+                )
+                .expect("fixture sample units");
+                let packet = SourcePacketObservation {
+                    sequence: at as u64,
+                    dts,
+                    pts: dts + sample.cto,
+                    duration: u64::from(sample.duration),
+                    size: size as u64,
+                    checksum: 0,
+                    flags: 1,
+                    side_data_count: 0,
+                    time_base_num: 1,
+                    time_base_den: video.timescale,
+                };
+                dts += i64::from(sample.duration);
+                packet
+            })
+            .collect();
+        assert!(
+            packets
+                .iter()
+                .zip(&samples)
+                .any(|(packet, (sample, _))| packet.size != u64::from(sample.size)),
+            "the fixture has a multi-unit sample whose framings differ"
+        );
+        let origin = SourceTimestamp {
+            dts: 0,
+            time_base_num: 1,
+            time_base_den: video.timescale,
+        };
+        associate_fragment_clock(&fragment, &init, &packets, 0, origin, 0)
+            .expect("the Annex B framing of each sample associates");
+        for delta in [-1i64, 1] {
+            let mut wrong = packets.clone();
+            wrong[0].size = wrong[0].size.checked_add_signed(delta).expect("size");
+            if wrong[0].size == u64::from(samples[0].0.size) {
+                continue;
+            }
+            assert_eq!(
+                associate_fragment_clock(&fragment, &init, &wrong, 0, origin, 0),
+                Err(PacketClockError::FragmentMismatch)
+            );
+        }
     }
 }
 

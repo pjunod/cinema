@@ -18,6 +18,13 @@ bump may break compatibility and a **patch** bump never does.
 - Android reports its playhead in title time for streams that began at a
   resume point, so a processed HDR upgrade starts where the viewer is instead
   of minutes behind them.
+- One stopped, slow or rate-limited voter no longer revokes the shared
+  playback cache on every healthy node. The 30 s mount canary now admits the
+  shared root when a majority of voters (counting this node when it is one)
+  confirms the same mount. A voter that is unreachable, busy or on a different
+  mount is not counted and cannot veto the rest; a voter on a different mount
+  is logged as a warning and fails its own canary. A peer's refusal now names
+  its cause; older peers' undistinguished refusals count as no evidence.
 - Linearizable reads no longer time out when one TCP SYN is lost: the vendored Hiqlite Raft client
   reuses an idle connection per voter instead of dialing a new TCP + WebSocket handshake inside
   every 800 ms leadership read-confirm (Hiqlite patch 28,
@@ -274,6 +281,11 @@ bump may break compatibility and a **patch** bump never does.
 - Apple TV Settings enters each category at its first setting and restores the
   category when returning with Back. Picker controls expose their names and
   selected values to accessibility.
+- A brief serving-authority lapse no longer closes a node's shared-library listener. An
+  unreadable sharing switch is treated as unknown for up to the serving-fence session grace
+  (5 s): the listener keeps accepting peers (each request is still checked) and live shared
+  bodies continue; only a confirmed disable, or an unknown switch past the grace, closes it.
+  Recipients saw `sharing_start_unresolved` while the port refused them.
 
 - Android direct Dolby Vision playback lists preserved dynamic metadata, and
   native DYN indicators wait for a selected Dolby Vision decoder instead of

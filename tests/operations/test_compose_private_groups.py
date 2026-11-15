@@ -148,6 +148,13 @@ class ComposeGroupWriteTests(unittest.TestCase):
     def test_source_preflight_refuses_bad_yaml_before_build_or_installation(self):
         with self.inputs() as (checkout, deploy):
             (deploy / 'docker-compose.yml').chmod(0o666)
+            # install() refuses root before it looks at any source, and the CI image runs the
+            # suite as root. The caller is the ordinary login user who owns this checkout, as
+            # in the other install() tests; the ownership is real here because the stat is.
+            login = os.getuid() or 1000
+            if login != os.getuid():
+                for path in [checkout, *checkout.rglob('*')]:
+                    os.lchown(path, login, login)
             server, discovery = 'a' * 64, 'b' * 64
             def output(argv, **kwargs):
                 if 'ps' in argv:
@@ -156,7 +163,7 @@ class ComposeGroupWriteTests(unittest.TestCase):
                                    'working_dir': str(deploy), 'ports': [{'HostIp': '127.0.0.1', 'HostPort': '32400'}]})
             args = types.SimpleNamespace(checkout=checkout)
             helper = types.SimpleNamespace(eligible_session=lambda: None)
-            with mock.patch.object(installer.sys, 'platform', 'linux'), mock.patch.object(installer, 'native_helper', return_value=helper), mock.patch.object(installer.shutil, 'which', return_value='/usr/bin/docker'), mock.patch.dict(os.environ, {'DOCKER_HOST': 'unix:///run/docker.sock'}), mock.patch.object(installer, 'output', side_effect=output), mock.patch.object(installer, 'build_stage') as build, mock.patch.object(installer, 'private_dir') as state:
+            with mock.patch.object(installer.sys, 'platform', 'linux'), mock.patch.object(installer.os, 'getuid', return_value=login), mock.patch.object(installer, 'native_helper', return_value=helper), mock.patch.object(installer.shutil, 'which', return_value='/usr/bin/docker'), mock.patch.dict(os.environ, {'DOCKER_HOST': 'unix:///run/docker.sock'}), mock.patch.object(installer, 'output', side_effect=output), mock.patch.object(installer, 'build_stage') as build, mock.patch.object(installer, 'private_dir') as state:
                 with self.assertRaisesRegex(ValueError, 'docker-compose.yml.*mode=0666'):
                     installer.install(args)
                 build.assert_not_called()
