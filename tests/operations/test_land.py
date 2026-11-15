@@ -442,6 +442,14 @@ class PushCheckCase(unittest.TestCase):
 
 
 class WiringCase(unittest.TestCase):
+    def test_the_push_to_main_workflow_runs_the_landing_check_over_the_whole_push(self):
+        workflow = (ROOT / ".github/workflows/landing-check.yml").read_text(encoding="utf-8")
+        self.assertRegex(workflow, r"(?m)^on:\n  push:\n    branches: \[main\]\n")
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("LANDING_BEFORE: ${{ github.event.before }}", workflow)
+        self.assertIn("LANDING_SHA: ${{ github.sha }}", workflow)
+        self.assertIn("python3 -m validation.landing check", workflow)
+
     def test_scripts_land_is_the_documented_off_mode_path(self):
         script = ROOT / "scripts/land"
         self.assertTrue(script.stat().st_mode & 0o111, "scripts/land must be executable")
