@@ -139,6 +139,24 @@ pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
     Ok(stored_switch(result.as_deref(), false))
 }
+/// [`enabled`] as this node's applied settings view holds it, for the
+/// listener and claim loops' look at the switch between passes (A4).
+///
+/// Either loop acts at most one poll late on a save made elsewhere today, and
+/// a view answer is older by at most the proof lease plus apply lag; a save
+/// made here raises the settings floor and wakes both loops, and the view
+/// answers it from the authority until this replica holds it. Every step that
+/// acts on an import re-reads [`enabled`] from the Store first. Same bound,
+/// same parse and same error as [`enabled`].
+async fn loop_enabled(applied: &plurx_core::store::AppliedView) -> Result<bool, StoreError> {
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        applied.setting(setting_keys::SHARING_ENABLED),
+    )
+    .await
+    .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
+    Ok(stored_switch(result.as_deref(), false))
+}
 impl SharingManager {
     /// Dispatch only after B has committed its blocked owner and retained the
     /// Source request identity. A received Source handle must survive a later
@@ -587,7 +605,7 @@ impl SharingManager {
                 self.disable_bodies();
                 return;
             }
-            match enabled(state.store.as_ref()).await {
+            match loop_enabled(&state.applied).await {
                 Ok(false) => {
                     self.disable_bodies();
                     self.listener_status("disabled");
@@ -1259,7 +1277,7 @@ impl SharingManager {
             // Known only after a pass that read the imports; otherwise the
             // loop sleeps the bounded poll, never on a stale schedule.
             let mut next_due = None;
-            if matches!(enabled(state.store.as_ref()).await, Ok(true)) {
+            if matches!(loop_enabled(&state.applied).await, Ok(true)) {
                 if let Ok(imports) = state.store.sharing_imports().await {
                     self.status
                         .write()
@@ -2869,6 +2887,73 @@ mod loop_pacing_tests {
                 );
             }
         }
+    }
+    /// A4: with sharing off, the listener and claim loops look at the switch
+    /// every poll on every node. They look through the node's applied
+    /// settings view (a replica answers it locally under its serving proof;
+    /// a standalone view counts a `view` read and a direct Store read counts
+    /// nothing here), and an off switch is still acted on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sharing_idle_loops_read_the_switch_from_the_applied_view() {
+        use plurx_core::store::{AppliedTable, SqliteStore, ViewSource};
+        let directory = tempfile::tempdir().expect("idle loop fixture");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(setting_keys::SHARING_ENABLED, "false")
+            .await
+            .expect("sharing off");
+        let mut state = crate::state::AppState::new_unhooked(
+            "sharing-idle".to_owned(),
+            Arc::clone(&store),
+            crate::state::Dirs {
+                artwork: directory.path().join("artwork"),
+                transcode: directory.path().join("transcode"),
+                cache: directory.path().join("cache"),
+                subs: directory.path().join("subs"),
+                runtime_cache: directory.path().join("runtime"),
+                renditions: directory.path().join("renditions"),
+            },
+            "sharing-node".to_owned(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(16)),
+        );
+        // A view of its own, so no other component's reads land in its
+        // counters.
+        state.applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
+        let manager = Arc::new(SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([41; 32])),
+            directory.path().to_path_buf(),
+            Default::default(),
+        ));
+        let view_reads = || {
+            state
+                .applied
+                .observation()
+                .view_total(AppliedTable::Settings, ViewSource::View)
+        };
+        let before = view_reads();
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(Arc::clone(&manager).run(state.clone(), shutdown.clone()));
+        let claims = tokio::spawn(Arc::clone(&manager).claim_loop(state.clone(), shutdown.clone()));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.status().listener != "disabled" || view_reads() < before + 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both loops look at the switch through the view and act on it");
+        assert_eq!(
+            state
+                .applied
+                .observation()
+                .view_total(AppliedTable::Settings, ViewSource::Authority),
+            0,
+            "no idle look asked the authority"
+        );
+        shutdown.cancel();
+        run.await.expect("listener loop");
+        claims.await.expect("claim loop");
     }
     #[tokio::test(start_paused = true)]
     async fn sharing_local_enable_wakes_idle_loops_before_their_remote_polls() {

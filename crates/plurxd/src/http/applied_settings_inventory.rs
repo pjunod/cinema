@@ -73,6 +73,9 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // that read a switch or tunable to decide their next tick. Each is in a
     // stays file and is pinned again in `IDLE_LOOP_READS` below.
     ("playback_cache.rs", "read_max_gb", 1, true),
+    // The sharing listener and claim loops' switch between passes; every
+    // step that acts on an import re-reads `sharing::enabled` from the Store.
+    ("sharing.rs", "loop_enabled", 1, true),
 ];
 
 /// The direct callers of each helper above, `(helper file, helper,
@@ -205,6 +208,8 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "http/hls/create.rs",
         "create_with_purpose_attempt",
     ),
+    ("sharing.rs", "loop_enabled", "sharing.rs", "claim_loop"),
+    ("sharing.rs", "loop_enabled", "sharing.rs", "run"),
     (
         "http/hls/start_plan.rs",
         "ingress_plan",
