@@ -720,9 +720,15 @@ impl ServingFence {
     /// advances on every published loss, while the fence is ready with no
     /// loss pending; `None` otherwise, so nothing read then is kept.
     pub(crate) fn advisory_epoch(&self) -> Option<u64> {
-        let word = self.word.load();
-        (word.ready && self.loss_transitions_pending.load(Ordering::Acquire) == 0)
-            .then_some(word.loss_generation)
+        // The same coherent read as `ServingAuthority::observe`.
+        loop {
+            let pending_before = self.loss_transitions_pending.load(Ordering::Acquire);
+            let word = self.word.load();
+            let pending_after = self.loss_transitions_pending.load(Ordering::Acquire);
+            if pending_before == pending_after {
+                return (word.ready && pending_after == 0).then_some(word.loss_generation);
+            }
+        }
     }
 
     pub(crate) fn authority(&self) -> ServingAuthority {

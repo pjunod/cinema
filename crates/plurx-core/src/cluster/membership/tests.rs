@@ -10273,6 +10273,7 @@ mod floor_advisory {
                     reads.fetch_add(1, Ordering::SeqCst);
                     answer
                 },
+                || (),
             )
             .await
     }
@@ -10324,6 +10325,7 @@ mod floor_advisory {
                     reads.fetch_add(1, Ordering::SeqCst);
                     Ok(true)
                 },
+                || (),
             )
             .await;
         assert_eq!(unkeyed, Err(()));
@@ -10342,6 +10344,7 @@ mod floor_advisory {
                     }
                 },
                 async { Ok(true) },
+                || (),
             )
             .await;
         assert_eq!(late, Ok(true));
@@ -10360,6 +10363,7 @@ mod floor_advisory {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 Ok(false)
             },
+            || (),
         );
         let (first, second) = tokio::join!(slow, ask(&advisory, &key, &reads, Ok(true)));
         assert_eq!((first, second), (Ok(false), Ok(false)));
@@ -10379,6 +10383,7 @@ mod floor_advisory {
                     *key.lock().unwrap() = 2;
                     Ok(true)
                 },
+                || (),
             )
             .await;
         assert_eq!(moved, Ok(true));
@@ -10399,7 +10404,7 @@ mod floor_advisory {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 Ok(false)
             },
-            (),
+            || (),
         );
         assert!(tokio::time::timeout(Duration::from_millis(100), first)
             .await
@@ -10413,11 +10418,37 @@ mod floor_advisory {
                     counted.fetch_add(1, Ordering::SeqCst);
                     Ok(true)
                 },
-                (),
+                || (),
             )
             .await;
         assert_eq!(second, Ok(false));
         assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn callers_queued_behind_a_failed_floor_read_share_its_failure() {
+        let (advisory, key, reads) = fixture();
+        let failing = advisory.answer(
+            tokio::time::Instant::now(),
+            AGE,
+            || async { Ok::<_, ()>(*key.lock().unwrap()) },
+            async {
+                reads.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                Err(())
+            },
+            || (),
+        );
+        let (first, second, third) = tokio::join!(
+            failing,
+            ask(&advisory, &key, &reads, Ok(true)),
+            ask(&advisory, &key, &reads, Ok(true)),
+        );
+        assert_eq!((first, second, third), (Err(()), Err(()), Err(())));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        // A caller arriving after the failure reads again.
+        assert_eq!(ask(&advisory, &key, &reads, Ok(true)).await, Ok(true));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
     }
 
     #[test]

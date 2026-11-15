@@ -3254,9 +3254,9 @@ struct FloorAdvisoryKey {
     leader: Option<u64>,
 }
 
-/// One floor read and when it ran.
+/// One floor read and when it ran. `ready` is `None` for a read that failed.
 struct FloorAnswer<K> {
-    ready: bool,
+    ready: Option<bool>,
     started: tokio::time::Instant,
     completed: tokio::time::Instant,
     key: K,
@@ -3272,7 +3272,9 @@ struct FloorAnswer<K> {
 /// - A not-ready answer serves only the callers that were already waiting
 ///   while it was read. Keeping it would hold an outage past its recovery
 ///   and spend the monitors' whole outage grace on one stale answer.
-/// - Errors are never kept.
+/// - A failed read likewise answers only the callers already waiting on it,
+///   so callers queued behind a slow quorum share one failure rather than
+///   each reading again after its own caller has gone.
 ///
 /// Guarded writes take `observe_*_members` instead, which stay fresh reads:
 /// this is advisory evidence, never a readiness permission.
@@ -3295,6 +3297,7 @@ impl<K: PartialEq> FloorAdvisory<K> {
         max_age: Duration,
         key: KF,
         read: R,
+        failed: fn() -> E,
     ) -> Result<bool, E>
     where
         KF: Fn() -> KFut,
@@ -3303,40 +3306,44 @@ impl<K: PartialEq> FloorAdvisory<K> {
     {
         let mut held = self.held.lock().await;
         let before = key().await?;
+        // Strictly after: an answer that completed before this caller arrived
+        // never serves it unless it is ready and young. A not-ready or failed
+        // answer left in `held` is therefore never served to a later caller.
         if let Some(answer) = held.as_ref().filter(|answer| {
             answer.key == before
                 && (answer.completed > arrived
-                    || (answer.ready && answer.started.elapsed() < max_age))
+                    || (answer.ready == Some(true) && answer.started.elapsed() < max_age))
         }) {
-            return Ok(answer.ready);
+            return answer.ready.ok_or_else(failed);
         }
         *held = None;
         let started = tokio::time::Instant::now();
-        let ready = read.await?;
+        let read = read.await;
         // An answer read across a change of key answers this caller but is
         // not kept for the next.
         if key().await.is_ok_and(|after| after == before) {
             *held = Some(FloorAnswer {
-                ready,
+                ready: read.as_ref().ok().copied(),
                 started,
                 completed: tokio::time::Instant::now(),
                 key: before,
             });
         }
-        Ok(ready)
+        read
     }
 }
 
 impl<K: PartialEq + Send + Sync + 'static> FloorAdvisory<K> {
     /// The read runs on its own task, so a caller that gives up (its own
     /// timeout, a dropped request) leaves it running for the callers waiting
-    /// behind it. `lost` answers a caller whose task did not complete.
+    /// behind it. `failed` answers a caller served a failed read, or whose
+    /// task did not complete.
     async fn answer_detached<E, KF, KFut, R>(
         self: Arc<Self>,
         max_age: Duration,
         key: KF,
         read: R,
-        lost: E,
+        failed: fn() -> E,
     ) -> Result<bool, E>
     where
         E: Send + 'static,
@@ -3345,9 +3352,9 @@ impl<K: PartialEq + Send + Sync + 'static> FloorAdvisory<K> {
         R: Future<Output = Result<bool, E>> + Send + 'static,
     {
         let arrived = tokio::time::Instant::now();
-        tokio::spawn(async move { self.answer(arrived, max_age, key, read).await })
+        tokio::spawn(async move { self.answer(arrived, max_age, key, read, failed).await })
             .await
-            .unwrap_or(Err(lost))
+            .unwrap_or_else(|_| Err(failed()))
     }
 }
 
@@ -11790,7 +11797,7 @@ impl MembershipManager {
                     .await
                     .map_err(|_| MembershipError::Unavailable)?
                 },
-                MembershipError::Unavailable,
+                || MembershipError::Unavailable,
             )
             .await
     }
