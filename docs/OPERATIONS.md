@@ -3358,6 +3358,8 @@ separate placement cohorts. Build skew alone does not prevent placement.
 Strict media-pool envelope changes require a protocol bump and dated note
 here (`make paperwork` checks this). Newest first:
 
+- 2026-11-15: protocol 11 — optional `processed_upgrade` ask on
+  `RemoteStartRequest`.
 - 2026-11-13: protocol 10 — retain validated source, track and full-capability
   catalog-query provenance in `CandidateCatalogContext` so processed commits
   preserve Copy discovery after Encode normalization. This descriptive query
@@ -6077,9 +6079,7 @@ the successor is staged at the viewer's position when the trial ends, so the
 client's alignment finds it at the playhead. When this node has already
 described the processed recipe, this playback's recovery evidence and Auto's
 link evidence are read before the trial, and a refused recipe costs no GPU.
-The control exchange offers the successor like any other prepared switch; the
-client aligns it, proves a decoded frame and switches, or keeps the ordinary
-session. Every refusal — slot busy, trial failure, this playback's recovery
+The control exchange offers the successor like any prepared switch. Every refusal — slot busy, trial failure, this playback's recovery
 evidence, Auto's link evidence, a viewer's own quality change taking the
 playback's preparation slot, a release, a newer session — leaves the ordinary
 session playing untouched. A create that names a processed candidate (a reopen

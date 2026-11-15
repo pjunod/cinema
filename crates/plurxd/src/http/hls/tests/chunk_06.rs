@@ -4268,6 +4268,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
                 source_mtime: 0,
                 typeless_playlist: false,
                 library_channel: None,
+                processed_upgrade: None,
                 request: recipe,
             },
             planning_caps: None,
@@ -6354,6 +6355,7 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
         source_mtime: 1_700_000_000,
         typeless_playlist: false,
         library_channel: None,
+        processed_upgrade: None,
         request: staged_candidate_request(),
     };
     // Every `accepting_new_media` read now waits: the catalog cannot finish.

@@ -4889,6 +4889,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             source_mtime: file.mtime,
             typeless_playlist: true,
             library_channel: None,
+            processed_upgrade: None,
             request,
         };
         assert!(

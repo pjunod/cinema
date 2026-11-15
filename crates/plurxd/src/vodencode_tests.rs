@@ -896,6 +896,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         source_mtime: file.mtime,
         typeless_playlist: false,
         library_channel: None,
+        processed_upgrade: None,
         request: worker_request,
     };
     // A real start's route is owned by the node that serves it, and that node

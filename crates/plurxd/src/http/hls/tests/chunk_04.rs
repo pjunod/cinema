@@ -411,6 +411,7 @@ fn preparation_row(
             source_mtime: 1,
             typeless_playlist: false,
             library_channel: None,
+            processed_upgrade: None,
             request: staged_request,
         })
         .expect("recipe"),
@@ -502,6 +503,7 @@ async fn activate_superseding_route(
         source_mtime: 1,
         typeless_playlist: false,
         library_channel: None,
+        processed_upgrade: None,
         request: request.clone(),
     };
     let start = StartResponse {
@@ -2224,6 +2226,7 @@ fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
         source_mtime: 1_700_000_000,
         typeless_playlist: false,
         library_channel: None,
+        processed_upgrade: None,
         request: staged_candidate_request(),
     }
 }

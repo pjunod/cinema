@@ -314,6 +314,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         source_mtime: 1_700_000_000,
         typeless_playlist: true,
         library_channel: None,
+        processed_upgrade: None,
         request: SessionRequest {
             source_telemetry: None,
             dv_processing_destination: None,
@@ -4678,4 +4679,119 @@ fn owner_base_answers_as_the_media_peers_lookup_did() {
         was(Some(Err(())), "up"),
         Err(PeerTransportError::Unreachable)
     );
+}
+
+fn processed_upgrade_ask(admitted: bool) -> ProcessedUpgradeAsk {
+    ProcessedUpgradeAsk {
+        hdr10_intent: true,
+        auto_policy: admitted,
+        admitted: admitted.then_some(AdmittedProcessedRecipe {
+            recipe_digest: [0x5a; 32],
+            average_bps: Some(18_000_000),
+            peak_bps: Some(30_000_000),
+        }),
+    }
+}
+
+/// Protocol 11: the start envelope carries the ingress's processed-upgrade
+/// ask through the wire and the durable recipe, with and without an
+/// admitted Auto recipe, and an envelope without it says nothing at all.
+#[test]
+fn the_start_envelope_round_trips_with_and_without_the_processed_upgrade_ask() {
+    for ask in [
+        None,
+        Some(processed_upgrade_ask(false)),
+        Some(processed_upgrade_ask(true)),
+    ] {
+        let mut start = valid_start_request();
+        start.processed_upgrade = ask.clone();
+        assert!(start.is_valid(), "{ask:?}");
+        let json = serde_json::to_value(&start).expect("serialize the envelope");
+        assert_eq!(
+            json.get("processed_upgrade").is_some(),
+            ask.is_some(),
+            "absent is omitted, never null: {json}"
+        );
+        let parsed: RemoteStartRequest =
+            serde_json::from_value(json).expect("the envelope parses back");
+        assert_eq!(parsed.processed_upgrade, ask);
+        assert!(parsed.is_valid());
+    }
+}
+
+/// A recipe written before protocol 11 has no ask: it parses as none, so a
+/// session created before the deploy simply gets no upgrade.
+#[test]
+fn an_older_recipe_without_the_ask_parses_with_none() {
+    let mut json = serde_json::to_value(valid_start_request()).expect("serialize");
+    json.as_object_mut()
+        .expect("envelope object")
+        .remove("processed_upgrade");
+    let parsed: RemoteStartRequest = serde_json::from_value(json).expect("older recipe parses");
+    assert_eq!(parsed.processed_upgrade, None);
+}
+
+/// The ask is strict like its envelope: an unknown field inside it is a
+/// different protocol, refused rather than half-read.
+#[test]
+fn an_ask_with_an_unknown_field_is_refused() {
+    let mut start = valid_start_request();
+    start.processed_upgrade = Some(processed_upgrade_ask(true));
+    let mut json = serde_json::to_value(&start).expect("serialize");
+    json["processed_upgrade"]["network"] = serde_json::json!("viewer");
+    assert!(serde_json::from_value::<RemoteStartRequest>(json.clone()).is_err());
+    json["processed_upgrade"]
+        .as_object_mut()
+        .expect("ask object")
+        .remove("network");
+    json["processed_upgrade"]["admitted"]["receipt"] = serde_json::json!("x");
+    assert!(serde_json::from_value::<RemoteStartRequest>(json).is_err());
+}
+
+/// A channel play is never upgraded, so an envelope pairing the two is not
+/// one any ingress sends.
+#[test]
+fn a_channel_play_envelope_with_an_ask_is_invalid() {
+    let mut start = valid_start_request();
+    start.processed_upgrade = Some(processed_upgrade_ask(false));
+    assert!(start.is_valid(), "the ask alone is valid");
+    start.library_channel = Some(serde_json::json!({"kind": "channel"}));
+    assert!(!start.is_valid());
+}
+
+/// Placement is exact-protocol: the ask changes the strict envelope, so the
+/// protocol rose, and an owner refuses an envelope from the protocol before
+/// (an un-upgraded ingress), with or without an ask.
+#[test]
+fn the_ask_rides_a_protocol_bump_and_an_older_protocol_envelope_is_refused() {
+    assert_eq!(crate::media_pool::PROTOCOL_VERSION, 11);
+    for ask in [None, Some(processed_upgrade_ask(true))] {
+        let mut start = valid_start_request();
+        start.processed_upgrade = ask;
+        start.protocol_version = 10;
+        assert!(!start.is_valid());
+        let json = serde_json::to_vec(&start).expect("serialize");
+        assert!(serde_json::from_slice::<RemoteStartRequest>(&json)
+            .ok()
+            .filter(RemoteStartRequest::is_valid)
+            .is_none());
+    }
+}
+
+#[test]
+fn an_admitted_recipe_matches_only_its_own_digest_and_rates() {
+    let mut candidate = crate::transcode::continuous_test_candidate_context(
+        plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x5a; 32]),
+        [0x5a; 32],
+        2160,
+    )
+    .selected_candidate;
+    let admitted = AdmittedProcessedRecipe::of(&candidate);
+    assert!(admitted.matches(&candidate));
+    candidate.average_bps = candidate.average_bps.map(|bps| bps + 1).or(Some(1));
+    assert!(!admitted.matches(&candidate));
+    let mut other = candidate.clone();
+    other.average_bps = admitted.average_bps;
+    other.recipe_digest = [0x5b; 32];
+    assert!(!admitted.matches(&other));
 }

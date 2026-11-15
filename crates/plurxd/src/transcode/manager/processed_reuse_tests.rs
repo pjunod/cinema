@@ -1703,6 +1703,7 @@ printf '%s\n' '{}'
         source_mtime: file.mtime,
         typeless_playlist: true,
         library_channel: None,
+        processed_upgrade: None,
         request,
     };
     let wire: crate::media_sessions::RemoteStartRequest =

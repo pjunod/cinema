@@ -3310,6 +3310,7 @@ async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get()
         source_mtime: file.mtime,
         typeless_playlist: false,
         library_channel: None,
+        processed_upgrade: None,
         request: request.clone(),
     };
     let now = unix_ms();

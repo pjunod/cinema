@@ -398,6 +398,7 @@
                 source_mtime: 1,
                 typeless_playlist: false,
                 library_channel: None,
+                processed_upgrade: None,
                 request: staged_request,
             })
             .expect("recipe"),
@@ -666,6 +667,7 @@
                     source_mtime: 0,
                     typeless_playlist: false,
                     library_channel: None,
+                    processed_upgrade: None,
                     request: recipe,
                 },
                 planning_caps: None,

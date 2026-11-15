@@ -27,11 +27,13 @@ pub(crate) const QUALITY_CANDIDATES_V2_PATH: &str = "/internal/v2/media/quality-
 pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
+/// Protocol 11 adds the optional `processed_upgrade` ask to RemoteStartRequest,
+/// so the owner of a remote start registers its processed upgrade.
 /// Protocol 10 retains the original descriptive catalog query in the strict
 /// CandidateCatalogContext. Protocol 9 added resolved audio facts. Exact-version
 /// placement excludes older workers, so rolling upgrades retain an eligible
 /// owner in each cohort and drain old ingress/sessions before the last old node.
-pub(crate) const PROTOCOL_VERSION: i64 = 10;
+pub(crate) const PROTOCOL_VERSION: i64 = 11;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);

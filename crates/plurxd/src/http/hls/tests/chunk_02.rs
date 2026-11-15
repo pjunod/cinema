@@ -2529,6 +2529,7 @@ async fn staging_route_with_incumbent_on(
         source_mtime,
         typeless_playlist: false,
         library_channel: None,
+        processed_upgrade: None,
         request: predecessor_request.clone(),
     };
     let predecessor_start = StartResponse {

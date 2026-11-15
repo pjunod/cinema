@@ -1628,6 +1628,52 @@ impl CandidateCatalogContext {
     }
 }
 
+/// The ingress's processed-upgrade verdict for a start another node owns
+/// (protocol 11). The ingress ran the upgrade's request-only gates and found
+/// they apply; the owner, which restores the candidate context the upgrade
+/// needs, registers the upgrade from this. It carries only what the owner
+/// cannot recompute: the client's HDR10 ask (not `request.hdr10`), the Auto
+/// policy (not `request.automatic`), and for Auto the one processed recipe
+/// the ingress admitted against the viewer's link. It holds no network
+/// identity, so it may live in the durable recipe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProcessedUpgradeAsk {
+    pub hdr10_intent: bool,
+    pub auto_policy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted: Option<AdmittedProcessedRecipe>,
+}
+
+/// The processed recipe an ingress admitted for Auto on the owner's row:
+/// the digest and rates its link evidence was read under. A remote owner
+/// stages only a trial that froze exactly this recipe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdmittedProcessedRecipe {
+    pub recipe_digest: [u8; 32],
+    pub average_bps: Option<u64>,
+    pub peak_bps: Option<u64>,
+}
+
+impl AdmittedProcessedRecipe {
+    pub(crate) fn of(candidate: &plurx_core::playback::candidate::QualityCandidate) -> Self {
+        Self {
+            recipe_digest: candidate.recipe_digest,
+            average_bps: candidate.average_bps,
+            peak_bps: candidate.peak_bps,
+        }
+    }
+
+    /// Whether `candidate` is exactly this recipe: same digest, same rates.
+    pub(crate) fn matches(
+        &self,
+        candidate: &plurx_core::playback::candidate::QualityCandidate,
+    ) -> bool {
+        *self == Self::of(candidate)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "RemoteStartRequestWire", into = "RemoteStartRequestWire")]
 pub(crate) struct RemoteStartRequest {
@@ -1665,6 +1711,11 @@ pub(crate) struct RemoteStartRequest {
     /// ordinary VOD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_channel: Option<serde_json::Value>,
+    /// Present only when the ingress found a processed upgrade applies to a
+    /// start it hands to this owner; see [`ProcessedUpgradeAsk`]. A recipe
+    /// written before protocol 11 has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_upgrade: Option<ProcessedUpgradeAsk>,
     pub request: SessionRequest,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -1694,6 +1745,8 @@ struct RemoteStartRequestWire {
     pub typeless_playlist: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_channel: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_upgrade: Option<ProcessedUpgradeAsk>,
     pub request: SessionRequest,
 }
 impl TryFrom<RemoteStartRequestWire> for RemoteStartRequest {
@@ -1714,6 +1767,7 @@ impl TryFrom<RemoteStartRequestWire> for RemoteStartRequest {
             source_mtime: wire.source_mtime,
             typeless_playlist: wire.typeless_playlist,
             library_channel: wire.library_channel,
+            processed_upgrade: wire.processed_upgrade,
             request: wire.request,
         })
     }
@@ -1741,6 +1795,7 @@ impl From<RemoteStartRequest> for RemoteStartRequestWire {
             source_mtime: request.source_mtime,
             typeless_playlist: request.typeless_playlist,
             library_channel: request.library_channel,
+            processed_upgrade: request.processed_upgrade,
             request: request.request,
         }
     }
@@ -1775,6 +1830,8 @@ fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
             })
     })
         && (request.request.continuous_media.is_none() || request.library_channel.is_none())
+        // A channel play is never upgraded, on any node.
+        && (request.processed_upgrade.is_none() || request.library_channel.is_none())
         && request.retained_output_receiver.is_none_or(|version| version == 1)
         && (request.retained_output.is_none() || request.retained_output_receiver == Some(1))
         && request.retained_output.as_ref().is_none_or(crate::transcode::RetainedOutputFacts::valid)

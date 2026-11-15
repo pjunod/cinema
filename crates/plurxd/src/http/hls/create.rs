@@ -4255,6 +4255,7 @@ async fn create_with_purpose_attempt(
         library_channel: library_channel.as_ref().map(|purpose| {
             serde_json::to_value(purpose).expect("bounded Library-channel purpose serializes")
         }),
+        processed_upgrade: None,
         request: worker_request,
     };
     let mut recipe_json = serde_json::to_string(&remote_request)?;

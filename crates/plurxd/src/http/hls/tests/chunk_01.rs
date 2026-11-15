@@ -1023,6 +1023,7 @@
             source_mtime: 1,
             typeless_playlist: true,
             library_channel: None,
+            processed_upgrade: None,
             request: crate::transcode::SessionRequest {
                 source_telemetry: None,
                 dv_processing_destination: None,
@@ -2211,6 +2212,7 @@
             source_mtime: 1,
             typeless_playlist: true,
             library_channel: None,
+            processed_upgrade: None,
             request: crate::transcode::SessionRequest {
                 source_telemetry: None,
                 dv_processing_destination: None,
@@ -2493,6 +2495,7 @@
                 source_mtime: 1,
                 typeless_playlist: true,
                 library_channel: None,
+                processed_upgrade: None,
                 request: crate::transcode::SessionRequest {
                     source_telemetry: None,
                     dv_processing_destination: None,

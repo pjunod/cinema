@@ -2821,6 +2821,7 @@ pub(super) async fn stage_prepared_successor_as(
         // anything may ever take the successor over.
         typeless_playlist: predecessor.typeless_playlist,
         library_channel: predecessor.library_channel.clone(),
+        processed_upgrade: None,
         request: staged_request.clone(),
     };
     let Ok(recipe_json) = serde_json::to_string(&staged_recipe) else {

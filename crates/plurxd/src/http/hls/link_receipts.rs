@@ -2006,6 +2006,7 @@ mod tests {
             source_mtime: file.mtime,
             typeless_playlist: false,
             library_channel: None,
+            processed_upgrade: None,
             request: request.clone(),
         };
         let response = serde_json::json!({"session_id":session,"playlist_url":"owned.m3u8","duration_ms":12000,
