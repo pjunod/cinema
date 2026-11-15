@@ -14,6 +14,7 @@ mod background_jobs;
 mod cache;
 mod classification;
 mod coordination;
+mod curation;
 mod dv_conversion;
 mod dvr;
 mod file_grants;
@@ -1367,6 +1368,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_title_jobs::MIGRATION_V2,
     // v133: optional scoped application login, separate from native sessions.
     super::delegation::SCHEMA,
+    // v134: person-curated tags, saved rows, Home layouts and curation grants.
+    super::library_curation_schema::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1935,6 +1938,7 @@ impl SqliteStore {
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
+        super::library_curation_schema::verify_sqlite(conn)?;
         super::dv_title_jobs_schema::verify_sqlite(conn)?;
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;

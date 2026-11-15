@@ -634,6 +634,30 @@ const ANNOTATION_METHODS: &[&str] = &[
     "listed_items",
     "items_on_list",
 ];
+const CURATION_METHODS: &[&str] = &[
+    "user_grants",
+    "set_user_grant",
+    "visible_tags",
+    "curation_tag",
+    "create_tag",
+    "update_tag",
+    "delete_tag",
+    "merge_tags",
+    "item_tag_ids",
+    "set_tag_members",
+    "rule_items",
+    "tag_suggestions",
+    "set_suggestion_rejections",
+    "rejected_items",
+    "visible_rows",
+    "curation_row",
+    "rows_naming_tag",
+    "create_row",
+    "update_row",
+    "delete_row",
+    "home_layout",
+    "put_home_layout",
+];
 const TRAKT_METHODS: &[&str] = &[
     "get_trakt_auth",
     "list_trakt_auth",
@@ -21313,6 +21337,7 @@ fn contract_inventory_matches_every_store_method() {
         WATCH_METHODS,
         READING_METHODS,
         ANNOTATION_METHODS,
+        CURATION_METHODS,
         TRAKT_METHODS,
         API_KEY_METHODS,
         OUTBOX_METHODS,
@@ -21494,7 +21519,10 @@ fn contract_inventory_matches_every_store_method() {
     // covered on both backends by `dv_title_jobs::title_live_paging_*` and
     // `dv_title_jobs::title_live_preemption_rejects_running_and_backoff_candidates`.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 595, "review the Store method count");
+    // +22: `CurationStore` (custom tags, rows, Home layouts, curation grants),
+    // a new supertrait of `Store`, every method named in `CURATION_METHODS`
+    // and exercised on both backends by `curation_contract_runs_through_dyn_store`.
+    assert_eq!(declared.len(), 617, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -34419,6 +34447,642 @@ async fn home_preview_contract_runs_through_dyn_store() {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["book", "audiobook"]),
             "book roots drifted on {backend}"
+        );
+    })
+    .await;
+}
+
+/// Custom tags, rows, Home layouts and grants (docs/features/CUSTOM-TAGS-PLAN.md
+/// §7) behave the same on SQLite and the three-voter store: visibility never
+/// leaks a private tag, keys are unique per scope, merges move memberships,
+/// rejected suggestions never come back, and rules evaluate identically.
+#[tokio::test]
+async fn curation_contract_runs_through_dyn_store() {
+    use plurx_core::curation::{
+        Grant, HomeEntry, HomeLayout, NewTag, RowSort, RowSpec, RuleQuery, TagEdit, TagSource,
+        Term, Unwatched,
+    };
+    use plurx_core::{metadata::classification, store::classification::Record};
+    for_each_backend(|store, backend| async move {
+        let owner = store
+            .create_user("curation-owner", "hash", false)
+            .await
+            .expect("owner");
+        let other = store
+            .create_user("curation-other", "hash", false)
+            .await
+            .expect("other");
+        let movies = store
+            .create_library(&NewLibrary {
+                name: "Curation Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/curation/movies")],
+                anime: false,
+            })
+            .await
+            .expect("movies");
+        let mut ids = Vec::new();
+        for title in ["Harbor Lights", "Night Tide", "Salt Harvest", "Iron Reef"] {
+            ids.push(
+                store
+                    .insert_item(&NewItem {
+                        library_id: movies.id,
+                        kind: ItemKind::Movie,
+                        parent_id: None,
+                        title: title.into(),
+                        year: Some(2024),
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("movie"),
+            );
+        }
+        let (harbor, tide, salt, reef) = (ids[0], ids[1], ids[2], ids[3]);
+
+        // Grants: none, granted (idempotent), revoked.
+        assert!(
+            store
+                .user_grants(other.id)
+                .await
+                .expect("grants")
+                .is_empty(),
+            "{backend}"
+        );
+        store
+            .set_user_grant(other.id, Grant::ManageTags, true, owner.id, 1)
+            .await
+            .expect("grant");
+        store
+            .set_user_grant(other.id, Grant::ManageTags, true, owner.id, 2)
+            .await
+            .expect("again");
+        assert_eq!(
+            store.user_grants(other.id).await.expect("grants"),
+            vec![Grant::ManageTags],
+            "{backend}"
+        );
+        store
+            .set_user_grant(other.id, Grant::ManageTags, false, owner.id, 3)
+            .await
+            .expect("revoke");
+        assert!(
+            store
+                .user_grants(other.id)
+                .await
+                .expect("grants")
+                .is_empty(),
+            "{backend}"
+        );
+
+        // Household tag; the same key in the same scope is refused, a private
+        // tag of the same name is a different tag.
+        let household = store
+            .create_tag(
+                &NewTag {
+                    name: "Gay-Themed".into(),
+                    owner_user_id: None,
+                    color: "violet".into(),
+                    created_by: owner.id,
+                },
+                10,
+            )
+            .await
+            .expect("create")
+            .expect("new household tag");
+        assert!(
+            store
+                .create_tag(
+                    &NewTag {
+                        name: "  gay-themed ".into(),
+                        owner_user_id: None,
+                        color: "blue".into(),
+                        created_by: other.id
+                    },
+                    11
+                )
+                .await
+                .expect("dup")
+                .is_none(),
+            "{backend}: one key per scope"
+        );
+        let private = store
+            .create_tag(
+                &NewTag {
+                    name: "gay-themed".into(),
+                    owner_user_id: Some(owner.id),
+                    color: "red".into(),
+                    created_by: owner.id,
+                },
+                12,
+            )
+            .await
+            .expect("create")
+            .expect("private tag is its own scope");
+
+        // Visibility: `other` never sees owner's private tag, anywhere.
+        let theirs: Vec<i64> = store
+            .visible_tags(other.id)
+            .await
+            .expect("tags")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(theirs, vec![household.id], "{backend}");
+        let mine: Vec<i64> = store
+            .visible_tags(owner.id)
+            .await
+            .expect("tags")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(
+            mine.contains(&household.id) && mine.contains(&private.id),
+            "{backend}"
+        );
+
+        store
+            .set_tag_members(
+                household.id,
+                &[harbor, tide, 9_999_999],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                100,
+            )
+            .await
+            .expect("tag");
+        store
+            .set_tag_members(private.id, &[salt], &[], owner.id, TagSource::Manual, 101)
+            .await
+            .expect("tag");
+        assert_eq!(
+            store.item_tag_ids(other.id, salt).await.expect("ids"),
+            Vec::<i64>::new(),
+            "{backend}"
+        );
+        assert_eq!(
+            store.item_tag_ids(owner.id, salt).await.expect("ids"),
+            vec![private.id],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .curation_tag(household.id)
+                .await
+                .expect("tag")
+                .expect("exists")
+                .item_count,
+            2,
+            "{backend}: missing items are skipped"
+        );
+
+        // Rules: a private tag id in someone else's rule matches nothing.
+        let spec = RowSpec {
+            any_of: vec![Term::Tag(household.id), Term::Tag(private.id)],
+            sort: RowSort::Title,
+            ..Default::default()
+        };
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: other.id,
+                    spec: &spec,
+                    only_items: None,
+                    day: 0,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(
+            (page.item_ids.clone(), page.total),
+            (vec![harbor, tide], 2),
+            "{backend}"
+        );
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &spec,
+                    only_items: None,
+                    day: 0,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(
+            page.item_ids,
+            vec![harbor, tide, salt],
+            "{backend}: title order"
+        );
+        // none_of and only_items narrow; a page past the end keeps the total.
+        let spec = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            none_of: vec![Term::Tag(private.id)],
+            ..Default::default()
+        };
+        let only = [tide, salt];
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &spec,
+                    only_items: Some(&only),
+                    day: 0,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(page.item_ids, vec![tide], "{backend}");
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &spec,
+                    only_items: None,
+                    day: 0,
+                },
+                5,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!((page.item_ids.len(), page.total), (0, 2), "{backend}");
+        // Unwatched: only and first.
+        store
+            .set_watched(owner.id, harbor, true)
+            .await
+            .expect("watched");
+        let only_unwatched = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            unwatched: Unwatched::Only,
+            ..Default::default()
+        };
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &only_unwatched,
+                    only_items: None,
+                    day: 0,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(page.item_ids, vec![tide], "{backend}");
+        let first = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            unwatched: Unwatched::First,
+            sort: RowSort::Title,
+            ..Default::default()
+        };
+        let page = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &first,
+                    only_items: None,
+                    day: 0,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(page.item_ids, vec![tide, harbor], "{backend}");
+        // Shuffle is stable within a day on every backend.
+        let shuffle = RowSpec {
+            all_of: vec![Term::Tag(household.id)],
+            sort: RowSort::ShuffleDaily,
+            ..Default::default()
+        };
+        let a = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &shuffle,
+                    only_items: None,
+                    day: 20_400,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        let b = store
+            .rule_items(
+                &RuleQuery {
+                    viewer: owner.id,
+                    spec: &shuffle,
+                    only_items: None,
+                    day: 20_400,
+                },
+                0,
+                20,
+            )
+            .await
+            .expect("rule");
+        assert_eq!(a, b, "{backend}");
+
+        // Suggestions: classifier terms match suggestion terms case-
+        // insensitively; tagged and rejected titles are left out.
+        for (id, keywords) in [
+            (reef, vec!["Gay Theme".to_owned()]),
+            (salt, vec!["lgbt".to_owned()]),
+            (harbor, vec!["gay theme".to_owned()]),
+        ] {
+            let entry = store
+                .classification_page(0, 100)
+                .await
+                .expect("page")
+                .into_iter()
+                .find(|e| e.input().expect("input").id == id)
+                .expect("classification entry");
+            let record = Record {
+                classification: classification::classify(
+                    &entry.input().expect("input").metadata(),
+                    keywords,
+                ),
+                source_json: entry.source_json,
+                overrides: Default::default(),
+                revision: 0,
+            };
+            assert!(
+                store
+                    .write_classification(id, &record)
+                    .await
+                    .expect("classify"),
+                "{backend}"
+            );
+        }
+        store
+            .update_tag(
+                household.id,
+                &TagEdit {
+                    suggest_terms: Some(vec!["gay theme".into(), "lgbt".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("terms");
+        let page = store
+            .tag_suggestions(household.id, 0, 10)
+            .await
+            .expect("suggestions");
+        let found: Vec<i64> = page.suggestions.iter().map(|s| s.item_id).collect();
+        assert_eq!(
+            (found, page.total),
+            (vec![reef, salt], 2),
+            "{backend}: harbor is already tagged"
+        );
+        assert_eq!(
+            page.suggestions[0].matched,
+            vec!["Gay Theme".to_owned()],
+            "{backend}"
+        );
+        store
+            .set_suggestion_rejections(household.id, &[salt], &[], owner.id, 200)
+            .await
+            .expect("reject");
+        let page = store
+            .tag_suggestions(household.id, 0, 10)
+            .await
+            .expect("suggestions");
+        assert_eq!(
+            page.suggestions
+                .iter()
+                .map(|s| s.item_id)
+                .collect::<Vec<_>>(),
+            vec![reef],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .rejected_items(household.id, 0, 10)
+                .await
+                .expect("rejected"),
+            vec![salt],
+            "{backend}"
+        );
+        store
+            .set_tag_members(
+                household.id,
+                &[reef],
+                &[],
+                owner.id,
+                TagSource::Suggestion,
+                201,
+            )
+            .await
+            .expect("accept");
+        assert_eq!(
+            store
+                .tag_suggestions(household.id, 0, 10)
+                .await
+                .expect("s")
+                .total,
+            0,
+            "{backend}"
+        );
+
+        // Rows and Home layout.
+        let row = store
+            .create_row(
+                Some(owner.id),
+                "Gay-themed",
+                &RowSpec {
+                    all_of: vec![Term::Tag(household.id)],
+                    ..Default::default()
+                },
+                owner.id,
+                300,
+            )
+            .await
+            .expect("row");
+        let shared = store
+            .create_row(
+                None,
+                "Household picks",
+                &RowSpec {
+                    any_of: vec![Term::Tag(household.id)],
+                    ..Default::default()
+                },
+                owner.id,
+                301,
+            )
+            .await
+            .expect("household row");
+        assert_eq!(
+            store
+                .visible_rows(other.id)
+                .await
+                .expect("rows")
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![shared.id],
+            "{backend}"
+        );
+        assert_eq!(
+            store.visible_rows(owner.id).await.expect("rows").len(),
+            2,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .rows_naming_tag(household.id)
+                .await
+                .expect("rows")
+                .len(),
+            2,
+            "{backend}"
+        );
+        assert!(
+            store
+                .update_row(row.id, "Renamed", &row.spec, 302)
+                .await
+                .expect("update"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .curation_row(row.id)
+                .await
+                .expect("row")
+                .expect("exists")
+                .title,
+            "Renamed",
+            "{backend}"
+        );
+        assert_eq!(
+            store.home_layout(owner.id).await.expect("layout"),
+            None,
+            "{backend}"
+        );
+        let layout = HomeLayout {
+            entries: vec![
+                HomeEntry {
+                    key: format!("row:{}", row.id),
+                    hidden: false,
+                },
+                HomeEntry {
+                    key: "next_up".into(),
+                    hidden: true,
+                },
+            ],
+        };
+        store
+            .put_home_layout(owner.id, Some(&layout), 303)
+            .await
+            .expect("put");
+        assert_eq!(
+            store.home_layout(owner.id).await.expect("layout"),
+            Some(layout),
+            "{backend}"
+        );
+        store
+            .put_home_layout(owner.id, None, 304)
+            .await
+            .expect("clear");
+        assert_eq!(
+            store.home_layout(owner.id).await.expect("layout"),
+            None,
+            "{backend}"
+        );
+
+        // Merge moves memberships and rejections, then the source is gone.
+        let other_tag = store
+            .create_tag(
+                &NewTag {
+                    name: "queer".into(),
+                    owner_user_id: None,
+                    color: "blue".into(),
+                    created_by: owner.id,
+                },
+                400,
+            )
+            .await
+            .expect("create")
+            .expect("new");
+        store
+            .set_tag_members(
+                other_tag.id,
+                &[salt, harbor],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                401,
+            )
+            .await
+            .expect("tag");
+        assert!(
+            store
+                .merge_tags(other_tag.id, household.id)
+                .await
+                .expect("merge"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .curation_tag(other_tag.id)
+                .await
+                .expect("gone")
+                .is_none(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .curation_tag(household.id)
+                .await
+                .expect("t")
+                .expect("t")
+                .item_count,
+            4,
+            "{backend}"
+        );
+
+        // Archive and cascades.
+        let archived = store
+            .update_tag(
+                household.id,
+                &TagEdit {
+                    archived_at_ms: Some(Some(500)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("archive")
+            .expect("t");
+        assert_eq!(archived.archived_at_ms, Some(500), "{backend}");
+        assert!(
+            store.delete_tag(private.id).await.expect("delete"),
+            "{backend}"
+        );
+        assert_eq!(
+            store.item_tag_ids(owner.id, salt).await.expect("ids"),
+            vec![household.id],
+            "{backend}"
+        );
+        assert!(
+            store.delete_row(shared.id).await.expect("delete row"),
+            "{backend}"
+        );
+        store.delete_user(other.id).await.expect("delete user");
+        assert!(
+            store.delete_tag(household.id).await.expect("delete"),
+            "{backend}"
+        );
+        assert!(
+            store.visible_tags(owner.id).await.expect("tags").is_empty(),
+            "{backend}"
         );
     })
     .await;
