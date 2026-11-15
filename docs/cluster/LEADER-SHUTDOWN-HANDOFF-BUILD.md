@@ -83,7 +83,7 @@ One mechanism, one call site.
    - One log line, target `plurx::cluster`: outcome, successor, elapsed
      ms. Info for the first four outcomes, warn for the last three.
    It never returns an error: the caller always continues its drain.
-2. **Fork patch 29: `Client::disable_local_db_elections()`**, local-only
+2. **Fork patch 30: `Client::disable_local_db_elections()`**, local-only
    like patch 5, calling `raft.runtime_config().elect(false)`. Process
    state, not persisted; the next start campaigns normally. A lost handoff
    then costs one election, not two.
@@ -95,7 +95,7 @@ One mechanism, one call site.
    change.
 4. **A real transfer inside `handoff_leadership`** (added at build), used
    by shutdown, maintenance enter and exit, and a leader's self-leave.
-   Fork patch 30 gates every database Raft proposal. With no eligible voter
+   Fork patch 31 gates every database Raft proposal. With no eligible voter
    it answers `NoCandidate` at once, holding nothing. Otherwise:
    (a) it holds proposals: new ones wait, and the hold gets 0.5 s;
    (b) it waits on the metrics watch until an eligible voter's matched
@@ -144,8 +144,8 @@ leader's sessions is still maintenance's job.
 
 Each test is shown failing with its subject removed (hand-back reports).
 
-- **M1, core call and patch 29** (planned as 30; the ledger is
-  contiguous): `membership/tests.rs` `shutdown_handoff_*`, the real-voter
+- **M1, core call and patch 30** (built as 29; renumbered when main's
+  ledger gained its own row 29): `membership/tests.rs` `shutdown_handoff_*`, the real-voter
   `membership_api.rs::a_sole_voter_shutdown_handoff_returns_at_once`, and
   `mgmt.rs::local_election_switch_has_no_remote_fallback`.
 - **M2, three processes:** the `leader-shutdown` mode, also in
@@ -180,8 +180,8 @@ Each test is shown failing with its subject removed (hand-back reports).
 | Date | Milestone | Agent-Model | Result |
 |---|---|---|---|
 | 2026-11-15 | Design | claude-fable-5-2 | this document |
-| 2026-11-15 | M1–M4 | claude-opus-5-5 | As planned; patch 29 (not 30). |
-| 2026-11-15 | Transfer | claude-opus-5-5 | §3 step 4, patch 30. |
+| 2026-11-15 | M1–M4 | claude-opus-5-5 | As planned; patch 30 (built as 29, renumbered after main's row 29). |
+| 2026-11-15 | Transfer | claude-opus-5-5 | §3 step 4, patch 31. |
 | 2026-11-15 | Review fixes | claude-opus-5-5 | Learner catch-up outside the gate; the hold bounds the trigger; `NoCandidate` at once; self-leave uses the transfer. |
 
 Session `session_01BCWLA3JD1HCNMEid3AZrc3` throughout.

@@ -286,8 +286,12 @@ CREATE TABLE IF NOT EXISTS _metadata
         // turns its bits into revisions once the work has committed.
         let hook_mark = Arc::clone(&mark);
         conn.update_hook(Some(
-            move |_action, database: &str, table: &str, _rowid: i64| {
-                hook_mark.note_row_change(database, table);
+            move |action, database: &str, table: &str, _rowid: i64| {
+                hook_mark.note_row_change(
+                    action == rusqlite::hooks::Action::SQLITE_DELETE,
+                    database,
+                    table,
+                );
             },
         ))
         .expect("the writer owns its connection, so installing the update hook succeeds");

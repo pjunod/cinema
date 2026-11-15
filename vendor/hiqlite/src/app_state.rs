@@ -107,11 +107,11 @@ pub struct StateRaftDB {
     pub log_statements: bool,
     pub is_raft_stopped: Arc<AtomicBool>,
     pub is_startup_finished: Arc<AtomicBool>,
-    /// Plurx patch 30: the one gate every proposal on this Raft passes.
+    /// Plurx patch 31: the one gate every proposal on this Raft passes.
     pub(crate) proposals: crate::proposal_gate::ProposalGate,
 }
 
-/// Plurx patch 30: the only places this node proposes to its database Raft.
+/// Plurx patch 31: the only places this node proposes to its database Raft.
 /// Each takes a shared proposal permit for the whole call, so a
 /// [`crate::ProposalHold`] stops this node's log from growing.
 #[cfg(feature = "sqlite")]
@@ -179,7 +179,7 @@ impl StateRaftDB {
     }
 }
 
-/// Plurx patch 30: OpenRaft 0.9's private `check_replication_upto_date`, as
+/// Plurx patch 31: OpenRaft 0.9's private `check_replication_upto_date`, as
 /// the blocking `add_learner` applies it.
 #[cfg(feature = "sqlite")]
 fn learner_caught_up(

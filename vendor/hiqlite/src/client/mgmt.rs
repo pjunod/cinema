@@ -155,7 +155,7 @@ impl LocalDbRaftMetrics {
         self.receiver.changed().await.is_ok()
     }
 
-    /// Plurx patch 31: wait until this node's database Raft core stops, and
+    /// Plurx patch 32: wait until this node's database Raft core stops, and
     /// say how. OpenRaft's core publishes its terminal state as
     /// `running_state`: `Err(Fatal::Stopped)` after an ordinary
     /// `Raft::shutdown`, any other `Err` when it quit on a storage error or
@@ -181,7 +181,7 @@ impl LocalDbRaftMetrics {
     }
 }
 
-/// Plurx patch 31: how this node's database Raft core stopped.
+/// Plurx patch 32: how this node's database Raft core stopped.
 #[cfg(feature = "sqlite")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalDbCoreStop {
@@ -350,7 +350,7 @@ impl Client {
         Ok(state.raft_db.applied_mark.handle())
     }
 
-    /// Plurx patch 29: stop this node's database Raft from starting an
+    /// Plurx patch 30: stop this node's database Raft from starting an
     /// election on its own timer, for the rest of this process. A stopping
     /// node calls it first so that it never campaigns again; it still votes,
     /// replicates and answers an explicit election trigger. Not persisted:
@@ -608,7 +608,7 @@ impl Client {
         }
     }
 
-    /// Plurx patch 30: stop new database proposals on this node until the
+    /// Plurx patch 31: stop new database proposals on this node until the
     /// returned hold drops. The hold waits for in-flight permits; new
     /// proposals wait rather than fail. A cancelled caller's entry may still
     /// be queued in the Raft core, so callers must not treat the hold as proof
@@ -626,7 +626,7 @@ impl Client {
         Ok(state.raft_db.proposals.hold_until(deadline).await)
     }
 
-    /// Plurx patch 30: wait, by `deadline`, for this node's own database Raft
+    /// Plurx patch 31: wait, by `deadline`, for this node's own database Raft
     /// metrics to satisfy `condition`, woken by each metrics change rather than
     /// by polling. Local clients only.
     #[cfg(feature = "sqlite")]
@@ -876,7 +876,7 @@ impl Client {
                 tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
             }
             state.raft_db.raft.shutdown().await?;
-            // Plurx patch 31: the SQL writer's shutdown removes the lock file,
+            // Plurx patch 32: the SQL writer's shutdown removes the lock file,
             // so it runs whatever the WAL's shutdown returns (a WAL whose
             // writer died on an IO error fails here) and a clean stop is not
             // mistaken for a crash by the next start's auto-heal.
@@ -1159,7 +1159,7 @@ impl Client {
             }
             state.raft_db.raft.shutdown().await?;
             info!("Shutting down sqlite logs writer");
-            // Plurx patch 31: the SQL writer's shutdown removes the lock file,
+            // Plurx patch 32: the SQL writer's shutdown removes the lock file,
             // so it runs whatever the WAL's shutdown returns (a WAL whose
             // writer died on an IO error fails here) and a clean stop is not
             // mistaken for a crash by the next start's auto-heal.

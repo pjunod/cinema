@@ -1,4 +1,4 @@
-//! Plurx patch 30: one gate in front of every database Raft proposal on this
+//! Plurx patch 31: one gate in front of every database Raft proposal on this
 //! node.
 //!
 //! Every leader-side append on the SQLite Raft — `client_write` from the local

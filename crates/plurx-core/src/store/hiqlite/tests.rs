@@ -2461,3 +2461,243 @@ fn daemon_schema_gate_accepts_the_complete_supported_chain() {
         SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE)
     );
 }
+
+fn class_totals(metrics: &StoreOperationMetrics) -> [u64; 3] {
+    std::array::from_fn(|class| {
+        let class = StoreOperationClass::ALL[class];
+        StoreOperationOutcome::ALL
+            .iter()
+            .map(|outcome| metrics.cell(class, *outcome).count.load(Ordering::Relaxed))
+            .sum()
+    })
+}
+
+fn method_totals(methods: &[(&'static str, [u64; 3])]) -> [u64; 3] {
+    methods.iter().fold([0; 3], |mut sum, (_, counts)| {
+        for (total, count) in sum.iter_mut().zip(counts) {
+            *total += count;
+        }
+        sum
+    })
+}
+
+/// Every counted operation lands, by method, in exactly one of the request's
+/// split or the process-wide background table: together they are the class
+/// counters. A membership operation is in the membership table as well,
+/// whichever scope it ran in; a Store operation never is.
+#[tokio::test]
+async fn background_and_request_attribution_partition_every_counted_operation() {
+    let metrics: &'static StoreOperationMetrics =
+        Box::leak(Box::new(StoreOperationMetrics::default()));
+    let store = |class: StoreOperationClass, method: &'static str| {
+        time_store_operation(
+            metrics,
+            class,
+            method,
+            async { Ok::<_, StoreError>(()) },
+            |_| true,
+        )
+    };
+    let member = |class: StoreOperationClass, label: &'static str, ok: bool| {
+        time_counted_operation_with(
+            metrics,
+            class,
+            label,
+            true,
+            async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err("refused")
+                }
+            },
+            |_| true,
+        )
+    };
+    store(StoreOperationClass::LocalRead, "get_settings")
+        .await
+        .expect("store");
+    store(StoreOperationClass::AuthorityRead, "get_settings")
+        .await
+        .expect("store");
+    let _ = member(StoreOperationClass::AuthorityRead, "heartbeat", false).await;
+    // An operation dropped mid-flight still counts, as cancelled.
+    drop(StoreOperationTimer::start(
+        metrics,
+        StoreOperationClass::Write,
+        "claim_job",
+    ));
+    let request = super::super::HttpStoreOperationCounts::default();
+    super::super::scope_http_store_operations(request.clone(), async {
+        store(StoreOperationClass::AuthorityRead, "get_file")
+            .await
+            .expect("store");
+        store(StoreOperationClass::Write, "get_settings")
+            .await
+            .expect("store");
+        member(
+            StoreOperationClass::AuthorityRead,
+            "verify_live_peer_authority",
+            true,
+        )
+        .await
+        .expect("member");
+    })
+    .await;
+
+    assert_eq!(
+        metrics.background_snapshot(),
+        vec![
+            ("claim_job", [0, 0, 1]),
+            ("get_settings", [1, 1, 0]),
+            ("heartbeat", [0, 1, 0]),
+        ],
+        "only the operations outside a request are background work"
+    );
+    assert_eq!(
+        request.method_snapshot(),
+        vec![
+            ("get_file", [0, 1, 0]),
+            ("get_settings", [0, 0, 1]),
+            ("verify_live_peer_authority", [0, 1, 0]),
+        ],
+        "a request's operations, the membership manager's included, stay in the request"
+    );
+    assert_eq!(
+        metrics.membership_snapshot(),
+        vec![
+            ("heartbeat", [0, 1, 0]),
+            ("verify_live_peer_authority", [0, 1, 0])
+        ],
+        "the membership table sees the manager's operations in both scopes, and nothing else"
+    );
+    let partition: [u64; 3] = std::array::from_fn(|class| {
+        method_totals(&metrics.background_snapshot())[class]
+            + method_totals(&request.method_snapshot())[class]
+    });
+    assert_eq!(partition, class_totals(metrics));
+    assert_eq!(class_totals(metrics), [1, 4, 2]);
+}
+
+/// The background and membership tables are process-wide, so their bound is
+/// a fixed number of methods; past it the rest are counted, not dropped.
+#[test]
+fn the_process_wide_method_tables_are_capped_and_overflow_is_counted() {
+    let mut table = super::super::MethodOperationCounts::default();
+    for method in ["a", "b", "c", "a", "d"] {
+        table.record_capped(method, 1, 2);
+    }
+    assert_eq!(
+        table
+            .by_method
+            .iter()
+            .map(|(m, c)| (*m, *c))
+            .collect::<Vec<_>>(),
+        vec![("a", [0, 2, 0]), ("other", [0, 3, 0])],
+        "the cap counts the overflow label: known methods keep counting, new ones fold into it"
+    );
+    assert_eq!(table.by_method.len(), 2, "never more keys than the cap");
+
+    let metrics: &'static StoreOperationMetrics =
+        Box::leak(Box::new(StoreOperationMetrics::default()));
+    let extra = 5;
+    for index in 0..MAX_ATTRIBUTED_METHODS + extra {
+        let label: &'static str = Box::leak(format!("method_{index:05}").into_boxed_str());
+        metrics.attribute(StoreOperationClass::LocalRead, label, Duration::ZERO, true);
+    }
+    for snapshot in [metrics.background_snapshot(), metrics.membership_snapshot()] {
+        assert_eq!(
+            snapshot.len(),
+            MAX_ATTRIBUTED_METHODS,
+            "exactly the cap, overflow included"
+        );
+        assert!(snapshot.contains(&(
+            super::super::METHOD_OVERFLOW_LABEL,
+            [extra as u64 + 1, 0, 0]
+        )));
+        assert_eq!(
+            method_totals(&snapshot),
+            [(MAX_ATTRIBUTED_METHODS + extra) as u64, 0, 0],
+            "the table still sums to every operation it was given"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_by_method_families_render_each_class_under_its_own_label() {
+    let metrics: &'static StoreOperationMetrics =
+        Box::leak(Box::new(StoreOperationMetrics::default()));
+    time_store_operation(
+        metrics,
+        StoreOperationClass::LocalRead,
+        "list_libraries",
+        async { Ok::<_, StoreError>(()) },
+        |_| true,
+    )
+    .await
+    .expect("store");
+    for class in [
+        StoreOperationClass::Write,
+        StoreOperationClass::AuthorityRead,
+    ] {
+        time_counted_operation_with(
+            metrics,
+            class,
+            "commit_heartbeat",
+            true,
+            async { Ok::<_, ()>(()) },
+            |_| true,
+        )
+        .await
+        .expect("member");
+    }
+    let text = metrics.render();
+    for line in [
+        "# TYPE plurx_background_store_operations_by_method_total counter",
+        "# TYPE plurx_cluster_membership_operations_by_method_total counter",
+        "plurx_background_store_operations_by_method_total{class=\"local_read\",method=\"list_libraries\"} 1",
+        "plurx_background_store_operations_by_method_total{class=\"authority_read\",method=\"commit_heartbeat\"} 1",
+        "plurx_background_store_operations_by_method_total{class=\"write\",method=\"commit_heartbeat\"} 1",
+        "plurx_cluster_membership_operations_by_method_total{class=\"authority_read\",method=\"commit_heartbeat\"} 1",
+        "plurx_cluster_membership_operations_by_method_total{class=\"write\",method=\"commit_heartbeat\"} 1",
+    ] {
+        assert!(text.lines().any(|candidate| candidate == line), "missing {line}:\n{text}");
+    }
+    // A class a method never used has no series, and a Store method is not
+    // a membership operation.
+    assert!(!text.contains("class=\"local_read\",method=\"commit_heartbeat\""));
+    assert!(!text.contains(
+        "plurx_cluster_membership_operations_by_method_total{class=\"local_read\",method=\"list_libraries\"}"
+    ));
+}
+
+/// A scope nobody claimed (made outside any request, as
+/// `spawn_in_http_store_scope` does when there is no request) is background
+/// work: its operations reach the background table when it is dropped,
+/// instead of no family at all.
+#[tokio::test]
+async fn an_unclaimed_scope_folds_into_the_background_table_when_dropped() {
+    const LABEL: &str = "background_test_unclaimed_scope";
+    let counted = |label: &str| {
+        background_store_operations_by_method()
+            .into_iter()
+            .find(|(method, _)| *method == label)
+            .map(|(_, counts)| counts)
+    };
+    let counts = super::super::HttpStoreOperationCounts::default();
+    super::super::scope_http_store_operations(counts.clone(), async {
+        time_store_operation(
+            &TEST_STORE_OPERATION_METRICS,
+            StoreOperationClass::AuthorityRead,
+            LABEL,
+            async { Ok::<_, StoreError>(()) },
+            |_| true,
+        )
+        .await
+        .expect("store");
+    })
+    .await;
+    assert_eq!(counted(LABEL), None, "still held: in no family yet");
+    drop(counts);
+    assert_eq!(counted(LABEL), Some([0, 1, 0]));
+}

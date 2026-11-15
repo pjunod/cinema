@@ -71,7 +71,7 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
         let timer = SnapshotTimer::start(SnapshotOperation::Build);
         // Storage-only admission owns no publication state. Incoming receive
         // and install must remain live throughout a deferral.
-        // Plurx patch 31: a deferred build ends once the SQL writer has
+        // Plurx patch 32: a deferred build ends once the SQL writer has
         // stopped, instead of outliving its node.
         let write_tx = self.write_tx.clone();
         let admission = crate::snapshot_admission::wait_for_storage(
@@ -120,7 +120,7 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
             .await
             .map_err(|_| writer_gone())?;
 
-        // Plurx patch 31: a build that fails before its image is renamed into
+        // Plurx patch 32: a build that fails before its image is renamed into
         // place removes what it wrote, the image and SQLite's rollback
         // journal, so a full disk is not kept full by a dead build.
         let written = async {
@@ -174,7 +174,7 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
     }
 }
 
-/// Plurx patch 31: the SQL writer has stopped, so the node is shutting down.
+/// Plurx patch 32: the SQL writer has stopped, so the node is shutting down.
 fn writer_gone() -> StorageError<NodeId> {
     let error = std::io::Error::new(
         std::io::ErrorKind::BrokenPipe,
@@ -185,7 +185,7 @@ fn writer_gone() -> StorageError<NodeId> {
     }
 }
 
-/// Plurx patch 31: remove one build's temporary image and its SQLite
+/// Plurx patch 32: remove one build's temporary image and its SQLite
 /// rollback journal. Best effort: a file that is already gone is fine, and a
 /// failure is logged rather than hiding the build's own error.
 pub(crate) async fn remove_build_temp(path_temp: &str) {
@@ -198,7 +198,7 @@ pub(crate) async fn remove_build_temp(path_temp: &str) {
     }
 }
 
-/// Plurx patch 31: at startup no build is running, so any `<uuid>.temp` or
+/// Plurx patch 32: at startup no build is running, so any `<uuid>.temp` or
 /// `<uuid>.temp-journal` left in the snapshots directory belongs to a build a
 /// crash or a full disk abandoned. Peer receive's `temp` and the pointers'
 /// `current.temp` / `pending.temp` are not build temporaries and stay.

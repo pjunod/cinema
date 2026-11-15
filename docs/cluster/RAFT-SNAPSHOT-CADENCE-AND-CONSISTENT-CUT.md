@@ -298,7 +298,7 @@ it sleeps 10 s and re-checks, incrementing
 `plurx_raft_snapshot_deferrals_total{reason="storage"}` and logging once per
 minute with both numbers. The builder task is openraft's own spawned task
 (§0 correction 2), so waiting there does not block apply; it does delay log
-purge. Superseded by Hiqlite patch 31 (`DEAD-RAFT-CORE-EXIT-BUILD.md`): below
+purge. Superseded by Hiqlite patch 32 (`DEAD-RAFT-CORE-EXIT-BUILD.md`): below
 `S + max(WAL, 32 MiB) + 64 MiB` the build cannot fit and waits with no bound,
 because attempting it would end the Raft core. Between that and `required`,
 or when storage is unknown, the wait is bounded (default 10 min) and then
@@ -343,7 +343,7 @@ last known exact local floor. Its absence is unknown, not zero.
   it is not a cut (§3.3, correction 4).
 - **No new `StorageError` variant, no "retryable" builder result** —
   openraft 0.9.25 has none; F-sc-5. Deferral is a wait, bounded unless
-  the build cannot fit (patch 31).
+  the build cannot fit (patch 32).
 - **No blanket threshold.** N is chosen per §3.2 from measured B, E, W, A.
 - **No `probe_json` side table as a snapshot-size remedy.** Row-access
   wins belong to [SQLITE-READ-PATH-AND-QUERY-PLANS.md](SQLITE-READ-PATH-AND-QUERY-PLANS.md).
@@ -424,7 +424,7 @@ retained recovery cases. The implemented focused names are:
 
 Acceptance: `snapshot_admission::tests` proves the exact floor, ten-second
 insufficient-space retries, passive counter increments, successful release,
-and a ten-minute bound when the filesystem is unknown (patch 31 adds an
+and a ten-minute bound when the filesystem is unknown (patch 32 adds an
 unbounded wait for a build that cannot fit). The builder
 awaits that admission before creating/sending its writer request. Core's
 `voter_snapshot_storage_floor_is_target_local_known_fresh_and_at_least_512_mib`
@@ -460,7 +460,7 @@ target's fresh floor capability, so an old target needs upgrading before
 promotion. M3's deferral affects builds only under insufficient or unknown
 storage, with ten-second rechecks. A build that can fit, or unknown storage,
 waits at most ten minutes, then the original fatal-error semantics remain
-visible; patch 31 never attempts a build that cannot fit.
+visible; patch 32 never attempts a build that cannot fit.
 
 ## 7. Open questions
 

@@ -117,7 +117,7 @@ pub struct NodeConfig {
     pub snapshot_transfer_timeout: Duration,
     /// Storage admission wait, at most ten minutes, for a build that can fit but is
     /// short of the comfortable floor, or whose storage is unknown; 0 attempts it at
-    /// once. Plurx patch 31: a build that cannot fit waits without this bound.
+    /// once. Plurx patch 32: a build that cannot fit waits without this bound.
     pub snapshot_storage_deferral: Duration,
     /// Plurx patch 27: up to [`crate::APPLIED_MARK_MAX_TABLES`] table names
     /// whose committed changes this node's applied mark counts, one dedicated
@@ -125,6 +125,10 @@ pub struct NodeConfig {
     /// applied index and the image generation.
     #[cfg(feature = "sqlite")]
     pub applied_mark_tables: Vec<Cow<'static, str>>,
+    /// Plurx patch 27: registered tables whose revision moves on a deleted
+    /// row only. Each must also be in `applied_mark_tables`.
+    #[cfg(feature = "sqlite")]
+    pub applied_mark_deletes_only: Vec<Cow<'static, str>>,
     /// Specific TLS certificates for the Raft traffic. Overwrites `tls_auto_certificates`.
     pub tls_raft: Option<ServerTlsConfig>,
     /// Specific TLS certificates for the API traffic. Overwrites `tls_auto_certificates`.
@@ -190,6 +194,8 @@ impl Default for NodeConfig {
             snapshot_storage_deferral: Duration::from_secs(600),
             #[cfg(feature = "sqlite")]
             applied_mark_tables: Vec::new(),
+            #[cfg(feature = "sqlite")]
+            applied_mark_deletes_only: Vec::new(),
             tls_raft: None,
             tls_api: None,
             secret_raft: String::default(),
@@ -363,6 +369,8 @@ impl NodeConfig {
             snapshot_storage_deferral: Duration::from_secs(600),
             #[cfg(feature = "sqlite")]
             applied_mark_tables: Vec::new(),
+            #[cfg(feature = "sqlite")]
+            applied_mark_deletes_only: Vec::new(),
             tls_raft: ServerTlsConfig::from_env("RAFT"),
             tls_api: ServerTlsConfig::from_env("API"),
             secret_raft: env::var("HQL_SECRET_RAFT").expect("HQL_SECRET_RAFT not found"),
@@ -467,6 +475,16 @@ impl NodeConfig {
             }) {
                 return Err(Error::Config(
                     "'applied_mark_tables' contains an empty or duplicate table name".into(),
+                ));
+            }
+            if self
+                .applied_mark_deletes_only
+                .iter()
+                .any(|table| !tables.contains(table))
+            {
+                return Err(Error::Config(
+                    "'applied_mark_deletes_only' names a table 'applied_mark_tables' does not register"
+                        .into(),
                 ));
             }
         }

@@ -1042,8 +1042,31 @@ async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+/// Attest the FFmpeg engine, then pause the clock for a wake-path test.
+///
+/// The analysis worker attests the engine before its first claim: `ffmpeg
+/// -version`, `ldd`, and a hash of every object the engine loads. Those are
+/// child processes, and tokio's paused clock runs on while the runtime waits
+/// for one, so under `start_paused` the two virtual seconds these tests allow
+/// were spent on the engine's real size, not on the wake path: with the CI
+/// image's Jellyfin FFmpeg 8 the bound expired before the first claim. The
+/// engine identity is per process and a daemon holds it long before a viewer
+/// asks, so the tests establish it first. What follows is Store work on
+/// blocking tasks, which holds the paused clock still; the bound is then a
+/// comparison of virtual time against the worker's polling delay alone.
+async fn pause_clock_with_engine_attested() {
+    plurx_core::testfixtures::require_ffmpeg();
+    crate::ffmpeg::fragment_index_engine_digest().await;
+    assert!(
+        crate::ffmpeg::fragment_index_engine_is_current().await,
+        "the fixture FFmpeg engine attests before the clock is paused"
+    );
+    tokio::time::pause();
+}
+
+#[tokio::test]
 async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() {
+    pause_clock_with_engine_attested().await;
     use plurx_core::store::{
         BackgroundJobStore as _, ClusterFragmentIndexStore as _, UserStore as _,
     };
@@ -1215,8 +1238,9 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
     assert!(!lost.is_cancelled(), "viewer departure is not claim loss");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
+    pause_clock_with_engine_attested().await;
     use plurx_core::store::ClusterFragmentIndexStore as _;
     use plurx_core::transcode::CopyVideoOptions;
 
@@ -1272,9 +1296,15 @@ async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let consumer =
         tokio::spawn(Arc::clone(&jobs).background_work_loop_with_ready(transcode, Some(ready_tx)));
-    // Measure the wake path from an idle subscribed worker. CI can spend
-    // wall time scheduling this test among thousands of concurrent tests.
+    // Measure the wake path from an idle subscribed worker. `ready` fires as
+    // the worker subscribes, before its first pass, and a request enqueued
+    // during that pass is claimed by it with no wake at all. With the clock
+    // paused this sleep returns only once every task is parked, so the first
+    // pass is over and the worker is inside its polling delay (five seconds
+    // or more) when the request arrives: only the wake can admit it within
+    // two.
     ready_rx.await.expect("analysis worker subscribed");
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let request = enqueue_copy_preparation(
         store.as_ref(),
         "test-node",

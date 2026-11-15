@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirty-one patches for clustered deployments. An
+Apache-2.0. Plurx carries thirty-two patches for clustered deployments. An
 upstream release can retire the nine generic bugs and the one dependency-only
-constraint; it cannot retire the twenty-one Plurx policies:
+constraint; it cannot retire the twenty-two Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -37,11 +37,12 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
-| 27 | Applied mark: registered-table revisions, applied index and image generation, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
+| 27 | Applied mark: registered-table revisions, applied index, image generation and change watches, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
-| 29 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
-| 30 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
-| 31 | A dead database Raft core is reported, and a snapshot build that cannot fit is never started | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
+| 29 | `DbRaftMetrics` type re-export | plurx policy | — | Never; it only names a type Plurx's counted membership client forwards. |
+| 30 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
+| 31 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
+| 32 | A dead database Raft core is reported, and a snapshot build that cannot fit is never started | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -308,7 +309,7 @@ made-up URL and prevents the fork from being declared fully tracked.
   its cut through the forwarding `WriteAck` write (row 21) on whichever voter
   holds the backup lease. Target-local storage admission runs
   before the writer request with a size-based floor and ten-second retries.
-  A build that cannot fit keeps waiting (row 31); one that can fit but is
+  A build that cannot fit keeps waiting (row 32); one that can fit but is
   short of the floor, or unmeasurable storage, is bounded at ten minutes
   (then the existing path), exposed through
   passive fixed-label metrics. This changes no replicated enum ordinal,
@@ -406,7 +407,7 @@ made-up URL and prevents the fork from being declared fully tracked.
   every listener is built from them. The proxy listener is not changed.
   Files: `src/start.rs`.
 - The applied mark (playback-start E1, `docs/streaming/PLAYBACK-START-E1-BUILD.md`
-  §4.1). `NodeConfig::applied_mark_tables` registers up to eight tables; the
+  §4.1). `NodeConfig::applied_mark_tables` registers up to sixteen tables; the
   writer installs an SQLite update hook (rusqlite `hooks`) that sets one bit
   per registered table, and `publish_then_send` turns those bits into
   revisions and stores the applied log index after the SQLite work has
@@ -426,9 +427,13 @@ made-up URL and prevents the fork from being declared fully tracked.
   applies; an unqualified `DELETE` replayed from an older binary's log entry
   would not move a slot (the plurx census refuses one in current source).
   `Client::local_db_applied_mark` is local only, with no remote fallback.
+  `applied_mark_deletes_only` names registered tables whose slot moves on a
+  deleted row only. `AppliedMarkHandle::watch` arms an `AppliedWatch` that
+  wakes when its slots or the generation move (sharing A6 M3); `publish`
+  notifies only for a slot a live watch counts, after bumping revisions.
   The same row times every read-pool checkout into a fixed process-wide
   histogram (`db_read_pool_wait`), the baseline the E1 contract asks for.
-  Nothing crosses the wire. Tests: `applied_mark::tests`,
+  Nothing crosses the wire. Tests: `applied_mark::tests`, `applied_mark::watch_tests`,
   `writer::applied_mark_tests` (including the precommit-hold ordering test
   under `validation-test-helpers` and a source test of the reply order),
   the replacement tests in `state_machine::snapshot_metrics_contracts`, and
@@ -464,6 +469,12 @@ made-up URL and prevents the fork from being declared fully tracked.
   `parked_supervisor_closes_its_socket_at_the_idle_deadline`,
   `parked_connection_whose_socket_ends_exits_and_is_not_leased`.
   Files: `src/network/raft_client.rs`, `src/store/mod.rs`.
+- `hiqlite::DbRaftMetrics` names `openraft::RaftMetrics<NodeId, Node>`, the
+  type `Client::metrics_db` returns. Plurx's counted membership client
+  (`plurx_core::store::CountedClient`) forwards that call by name, and this
+  alias lets it do so without a direct `openraft` dependency. A type alias
+  only; no behaviour.
+  Files: `src/lib.rs`.
 - `Client::disable_local_db_elections` calls OpenRaft's
   `runtime_config().elect(false)` on the database Raft of a local client. A
   plurxd told to stop calls it first, leader or not, before it hands
@@ -577,7 +588,7 @@ Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 28: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30 and 31) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30, 31 and 32) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the
