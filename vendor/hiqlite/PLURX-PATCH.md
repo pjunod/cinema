@@ -37,7 +37,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
-| 27 | Applied mark: registered-table revisions, applied index and image generation, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
+| 27 | Applied mark: registered-table revisions, applied index, image generation and change watches, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
@@ -401,7 +401,7 @@ made-up URL and prevents the fork from being declared fully tracked.
   every listener is built from them. The proxy listener is not changed.
   Files: `src/start.rs`.
 - The applied mark (playback-start E1, `docs/streaming/PLAYBACK-START-E1-BUILD.md`
-  §4.1). `NodeConfig::applied_mark_tables` registers up to eight tables; the
+  §4.1). `NodeConfig::applied_mark_tables` registers up to sixteen tables; the
   writer installs an SQLite update hook (rusqlite `hooks`) that sets one bit
   per registered table, and `publish_then_send` turns those bits into
   revisions and stores the applied log index after the SQLite work has
@@ -421,9 +421,13 @@ made-up URL and prevents the fork from being declared fully tracked.
   applies; an unqualified `DELETE` replayed from an older binary's log entry
   would not move a slot (the plurx census refuses one in current source).
   `Client::local_db_applied_mark` is local only, with no remote fallback.
+  `applied_mark_deletes_only` names registered tables whose slot moves on a
+  deleted row only. `AppliedMarkHandle::watch` arms an `AppliedWatch` that
+  wakes when its slots or the generation move (sharing A6 M3); `publish`
+  notifies only for a slot a live watch counts, after bumping revisions.
   The same row times every read-pool checkout into a fixed process-wide
   histogram (`db_read_pool_wait`), the baseline the E1 contract asks for.
-  Nothing crosses the wire. Tests: `applied_mark::tests`,
+  Nothing crosses the wire. Tests: `applied_mark::tests`, `applied_mark::watch_tests`,
   `writer::applied_mark_tests` (including the precommit-hold ordering test
   under `validation-test-helpers` and a source test of the reply order),
   the replacement tests in `state_machine::snapshot_metrics_contracts`, and

@@ -24,11 +24,11 @@
 //! Nothing here crosses the wire; revisions are meaningless on another node.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Registered tables a node may name in [`crate::NodeConfig::applied_mark_tables`].
-pub const APPLIED_MARK_MAX_TABLES: usize = 8;
+pub const APPLIED_MARK_MAX_TABLES: usize = 16;
 
 #[derive(Debug)]
 pub(crate) struct AppliedMark {
@@ -43,7 +43,16 @@ pub(crate) struct AppliedMark {
     names: Vec<String>,
     /// Writer-local: set by the update hook on the writer thread, taken by
     /// `publish` on the same thread.
-    pending: AtomicU8,
+    pending: AtomicU16,
+    /// Registered tables whose slot moves on a deleted row only (a table
+    /// rewritten in place by routine activity, whose removal is the event).
+    deletes_only: u16,
+    /// Live [`AppliedWatch`]es per slot. `publish` notifies only when a slot
+    /// it bumped has one, so a busy table nobody waits on costs a mask test.
+    interest: [AtomicUsize; APPLIED_MARK_MAX_TABLES],
+    /// Woken after a publish that moved a watched slot, and on every
+    /// generation change.
+    changed: tokio::sync::Notify,
     /// Replacements that were begun and never completed.
     failed_replacements: AtomicU64,
     /// Writer-local: the `PRAGMA schema_version` seen at the last publish,
@@ -55,39 +64,63 @@ pub(crate) struct AppliedMark {
 const SCHEMA_UNKNOWN: i64 = i64::MIN;
 
 impl AppliedMark {
+    #[cfg(test)]
     pub(crate) fn new<S: AsRef<str>>(tables: &[S]) -> Arc<Self> {
+        Self::with_deletes_only(tables, &[] as &[&str])
+    }
+
+    /// `deletes_only` names registered tables whose slot moves only when a
+    /// row is deleted.
+    pub(crate) fn with_deletes_only<S: AsRef<str>, D: AsRef<str>>(
+        tables: &[S],
+        deletes_only: &[D],
+    ) -> Arc<Self> {
         assert!(
             tables.len() <= APPLIED_MARK_MAX_TABLES,
             "NodeConfig::is_valid bounds the registered applied-mark tables"
         );
+        let names: Vec<String> = tables.iter().map(|name| name.as_ref().to_owned()).collect();
+        let deletes_only = deletes_only.iter().fold(0_u16, |mask, table| {
+            let slot = names
+                .iter()
+                .position(|name| name == table.as_ref())
+                .expect("NodeConfig::is_valid keeps delete-only tables registered");
+            mask | (1 << slot)
+        });
         Arc::new(Self {
             generation: AtomicU64::new(0),
             applied_index: AtomicU64::new(0),
             tables: Default::default(),
-            names: tables.iter().map(|name| name.as_ref().to_owned()).collect(),
-            pending: AtomicU8::new(0),
+            names,
+            pending: AtomicU16::new(0),
+            deletes_only,
+            interest: Default::default(),
+            changed: tokio::sync::Notify::new(),
             failed_replacements: AtomicU64::new(0),
             schema_version: AtomicI64::new(SCHEMA_UNKNOWN),
         })
     }
 
-    fn all_bits(&self) -> u8 {
-        if self.names.len() >= 8 {
-            u8::MAX
+    fn all_bits(&self) -> u16 {
+        if self.names.len() >= 16 {
+            u16::MAX
         } else {
-            (1_u8 << self.names.len()) - 1
+            (1_u16 << self.names.len()) - 1
         }
     }
 
     /// The update hook: one short compare per registered table, no hashing.
-    /// Unregistered tables cost the compares and nothing else.
-    pub(crate) fn note_row_change(&self, database: &str, table: &str) {
+    /// Unregistered tables cost the compares and nothing else. A delete-only
+    /// table ignores inserts and updates.
+    pub(crate) fn note_row_change(&self, deleted: bool, database: &str, table: &str) {
         if database != "main" {
             return;
         }
         for (slot, name) in self.names.iter().enumerate() {
             if name == table {
-                self.pending.fetch_or(1 << slot, Ordering::Relaxed);
+                if deleted || self.deletes_only & (1 << slot) == 0 {
+                    self.pending.fetch_or(1 << slot, Ordering::Relaxed);
+                }
                 return;
             }
         }
@@ -120,13 +153,19 @@ impl AppliedMark {
     /// after commit or rollback and before the reply, from the writer only.
     pub(crate) fn publish(&self, applied_index: Option<u64>) {
         let pending = self.pending.swap(0, Ordering::Relaxed);
+        let mut watched = false;
         for (slot, revision) in self.tables.iter().enumerate().take(self.names.len()) {
             if pending & (1 << slot) != 0 {
                 revision.fetch_add(1, Ordering::Release);
+                watched |= self.interest[slot].load(Ordering::Acquire) > 0;
             }
         }
         if let Some(index) = applied_index {
             self.applied_index.store(index, Ordering::Release);
+        }
+        // Revisions first, then the wake: a woken watch sees what moved.
+        if watched {
+            self.changed.notify_waiters();
         }
     }
 
@@ -142,6 +181,7 @@ impl AppliedMark {
                     generation.wrapping_add(2)
                 })
             });
+        self.changed.notify_waiters();
         ImageReplacement {
             mark: Arc::clone(self),
             completed: false,
@@ -167,6 +207,7 @@ impl ImageReplacement {
     pub(crate) fn complete(mut self) {
         self.completed = true;
         self.mark.generation.fetch_add(1, Ordering::AcqRel);
+        self.mark.changed.notify_waiters();
     }
 }
 
@@ -232,6 +273,23 @@ impl AppliedMarkHandle {
         self.mark.tables[slot.0].load(Ordering::Acquire)
     }
 
+    /// Watch `slots` and the image generation from now. Arm the watch before
+    /// the read it guards: a change applied after this call wakes it.
+    #[must_use]
+    pub fn watch(&self, slots: &[AppliedSlot]) -> AppliedWatch {
+        for slot in slots {
+            self.mark.interest[slot.0].fetch_add(1, Ordering::AcqRel);
+        }
+        AppliedWatch {
+            mark: Arc::clone(&self.mark),
+            revisions: slots
+                .iter()
+                .map(|slot| (*slot, self.revision(*slot)))
+                .collect(),
+            generation: self.generation(),
+        }
+    }
+
     #[must_use]
     pub fn observation(&self) -> AppliedMarkObservation {
         AppliedMarkObservation {
@@ -245,6 +303,57 @@ impl AppliedMarkHandle {
                 .zip(&self.mark.tables)
                 .map(|(name, revision)| (name.clone(), revision.load(Ordering::Acquire)))
                 .collect(),
+        }
+    }
+}
+
+/// A set of slot revisions and the image generation captured by
+/// [`AppliedMarkHandle::watch`].
+#[derive(Debug)]
+pub struct AppliedWatch {
+    mark: Arc<AppliedMark>,
+    revisions: Vec<(AppliedSlot, u64)>,
+    generation: u64,
+}
+
+impl AppliedWatch {
+    /// Whether a watched slot or the image generation moved since capture.
+    #[must_use]
+    pub fn moved(&self) -> bool {
+        self.mark.generation.load(Ordering::Acquire) != self.generation
+            || self
+                .revisions
+                .iter()
+                .any(|(slot, revision)| self.mark.tables[slot.0].load(Ordering::Acquire) != *revision)
+    }
+
+    /// Whether the image was trusted (even generation) when captured.
+    #[must_use]
+    pub fn trusted(&self) -> bool {
+        self.generation & 1 == 0
+    }
+
+    /// Returns once a watched slot or the generation moved since capture.
+    pub async fn changed(&self) {
+        loop {
+            // Registered before the compare: `notify_waiters` stores no
+            // permit, so a publish between the compare and the await would
+            // otherwise be lost.
+            let notified = self.mark.changed.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if self.moved() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for AppliedWatch {
+    fn drop(&mut self) {
+        for (slot, _) in &self.revisions {
+            self.mark.interest[slot.0].fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -335,8 +444,8 @@ mod tests {
         let sessions = handle.slot("media_sessions").unwrap();
         assert!(handle.slot("items").is_none());
 
-        mark.note_row_change("main", "items");
-        mark.note_row_change("temp", "settings");
+        mark.note_row_change(false, "main", "items");
+        mark.note_row_change(false, "temp", "settings");
         mark.publish(Some(4));
         assert_eq!(
             (handle.revision(settings), handle.revision(sessions)),
@@ -344,8 +453,8 @@ mod tests {
         );
         assert_eq!(handle.applied_index(), 4);
 
-        mark.note_row_change("main", "media_sessions");
-        mark.note_row_change("main", "media_sessions");
+        mark.note_row_change(false, "main", "media_sessions");
+        mark.note_row_change(false, "main", "media_sessions");
         mark.publish(Some(5));
         assert_eq!(
             (handle.revision(settings), handle.revision(sessions)),
@@ -425,5 +534,116 @@ mod tests {
         // 700 µs is above the 100 µs and 500 µs bounds, inside the 1 ms one.
         assert!(after.cumulative_buckets[2] > before.cumulative_buckets[2]);
         assert!(after.cumulative_buckets[7] > before.cumulative_buckets[7]);
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::AppliedMark;
+    use std::time::Duration;
+
+    const TABLES: [&str; 10] = [
+        "settings", "media_sessions", "t2", "t3", "t4", "t5", "t6", "t7", "sharing_imports",
+        "tokens",
+    ];
+
+    fn mark() -> std::sync::Arc<AppliedMark> {
+        AppliedMark::with_deletes_only(&TABLES, &["tokens"])
+    }
+
+    fn revisions(mark: &std::sync::Arc<AppliedMark>) -> Vec<u64> {
+        let handle = mark.handle();
+        TABLES
+            .iter()
+            .map(|table| handle.revision(handle.slot(table).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_slot_past_the_eighth_moves_alone() {
+        let mark = mark();
+        mark.note_row_change(false, "main", "sharing_imports");
+        mark.publish(Some(1));
+        let mut expected = vec![0; TABLES.len()];
+        expected[8] = 1;
+        assert_eq!(revisions(&mark), expected);
+    }
+
+    #[test]
+    fn a_delete_only_slot_moves_on_a_delete_alone() {
+        let mark = mark();
+        mark.note_row_change(false, "main", "tokens");
+        mark.publish(Some(1));
+        assert_eq!(revisions(&mark)[9], 0);
+        mark.note_row_change(true, "main", "tokens");
+        mark.publish(Some(2));
+        assert_eq!(revisions(&mark)[9], 1);
+        mark.note_every_table();
+        mark.publish(Some(3));
+        // A schema change still moves it: the table may have been rebuilt.
+        assert_eq!(revisions(&mark)[9], 2);
+    }
+
+    #[tokio::test]
+    async fn a_watch_wakes_on_its_slot_and_not_on_another() {
+        let mark = mark();
+        let handle = mark.handle();
+        let watch = handle.watch(&[handle.slot("sharing_imports").unwrap()]);
+        mark.note_row_change(false, "main", "media_sessions");
+        mark.publish(Some(1));
+        assert!(!watch.moved());
+        assert!(tokio::time::timeout(Duration::from_millis(50), watch.changed())
+            .await
+            .is_err());
+        let waker = std::sync::Arc::clone(&mark);
+        let publisher = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            waker.note_row_change(true, "main", "sharing_imports");
+            waker.publish(Some(2));
+        });
+        tokio::time::timeout(Duration::from_secs(5), watch.changed())
+            .await
+            .expect("the watched slot's publish wakes the watch");
+        publisher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_change_before_the_await_is_never_lost() {
+        let mark = mark();
+        let handle = mark.handle();
+        let watch = handle.watch(&[handle.slot("settings").unwrap()]);
+        mark.note_row_change(false, "main", "settings");
+        mark.publish(Some(1));
+        tokio::time::timeout(Duration::from_millis(50), watch.changed())
+            .await
+            .expect("a change between arming and waiting returns at once");
+    }
+
+    #[test]
+    fn interest_is_counted_per_watch() {
+        let mark = mark();
+        let handle = mark.handle();
+        let slot = handle.slot("settings").unwrap();
+        let first = handle.watch(&[slot]);
+        let second = handle.watch(&[slot]);
+        drop(first);
+        assert_eq!(mark.interest[0].load(std::sync::atomic::Ordering::Acquire), 1);
+        drop(second);
+        assert_eq!(mark.interest[0].load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn an_image_replacement_wakes_every_watch_and_untrusts_the_next() {
+        let mark = mark();
+        let handle = mark.handle();
+        let watch = handle.watch(&[handle.slot("settings").unwrap()]);
+        assert!(watch.trusted());
+        let replacement = mark.begin_replacement();
+        tokio::time::timeout(Duration::from_millis(50), watch.changed())
+            .await
+            .expect("a replacement wakes the watch");
+        assert!(!handle.watch(&[]).trusted());
+        replacement.complete();
+        assert!(handle.watch(&[]).trusted());
     }
 }
