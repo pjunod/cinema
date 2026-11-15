@@ -113,6 +113,7 @@ FROM docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87
 
 FROM runtime-assets AS ci
 ARG PLURX_CI_SOURCE_SHA=""
+ARG TARGETARCH
 LABEL org.opencontainers.image.revision="${PLURX_CI_SOURCE_SHA}"
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
@@ -143,16 +144,32 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         autoconf automake build-essential clang cmake curl dbus-daemon git jq libssl-dev lld llvm \
-        make nasm ninja-build libgtk-4-dev libdbus-1-dev pkg-config python3 python3-venv \
+        make nasm ninja-build libgtk-4-dev libdbus-1-dev pkg-config python3 \
     && ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
-    && python3 -m venv /opt/playwright-venv \
+    # One interpreter for every job in the image: the CPython the main fast
+    # lane used to download per job, checksummed, with the Playwright venv
+    # built from it so `python3` is this 3.12 wherever it is called.
+    && case "$TARGETARCH" in \
+         amd64) python_arch=x86_64; python_sha=731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91 ;; \
+         arm64) python_arch=aarch64; python_sha=6541297dd1798dec8b98c3ad7492808a5b9d1c126801ceb2011e7754cd20d1ce ;; \
+         *) echo "the ci image has no pinned Python for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -q --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+         --connect-timeout 20 --max-time 180 --output /tmp/python.tgz \
+         "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.12.15%2B20261003-${python_arch}-unknown-linux-gnu-install_only_stripped.tar.gz" \
+    && printf '%s  %s\n' "$python_sha" /tmp/python.tgz | sha256sum --check --strict \
+    && mkdir -p /opt/python \
+    && tar -xzf /tmp/python.tgz -C /opt/python --strip-components=1 --no-same-owner \
+    && rm /tmp/python.tgz \
+    && /opt/python/bin/python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
     && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \
     && rustup toolchain install 1.97.1 --profile minimal \
         --component rustfmt --component clippy --component llvm-tools-preview \
     && rustc +1.97.1 --version | grep -F 'rustc 1.97.1' \
     && node --version | grep -Fx 'v22.23.4' \
+    && python3 -c 'import sys, tomllib, playwright; assert sys.version_info[:3] == (3, 12, 15), sys.version' \
     && npm --version \
     && docker --version | grep -F 'Docker version 27.5.1' \
     && docker compose version \

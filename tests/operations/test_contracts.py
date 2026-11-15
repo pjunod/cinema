@@ -2183,18 +2183,12 @@ assert.equal(context.ACT_TIMER, null);
             ("effort-ci", effort_preflight, "run: python3 -m validation.python_unit_receipts run"),
             ("main-fast-lane", main_preflight, "run: python3 -m validation.main_unit_receipts run"),
         ):
-            self.assertIn(
-                "uses: https://data.forgejo.org/actions/setup-node@"
-                "49933ea5288caeca8642d1e84afbd3f7d6820020",
-                contract_preflight,
-            )
-            self.assertIn('node-version: "22.23.4"', contract_preflight)
-            self.assertLess(
-                contract_preflight.index(
-                    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
-                ),
-                contract_preflight.index(unit_command),
-            )
+            # Node comes from the CI image the job runs in, not from a
+            # per-run download.
+            self.assertNotIn("actions/setup-node@", contract_preflight)
+            self.assertIn("/noirr/plurx-ci@sha256:", contract_preflight.split("    steps:\n", 1)[0])
+            self.assertIn(unit_command, contract_preflight)
+            self.assertIn("node --version | grep -Fx 'v22.23.4'", read("Dockerfile"))
             # The shared player-input fixtures compile into no Rust and no
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
@@ -2662,7 +2656,9 @@ assert.equal(context.ACT_TIMER, null);
         # Main must also finish the cold full-unit fallback when prior receipts
         # cannot authenticate; effort retains its separate finite budget.
         self.assertIn("timeout-minutes: 30", fast_jobs["preflight"])
-        self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
+        # 30 since the job runs in the CI image: the budget also has to cover
+        # a first pull of the image (docs/ci/GENERAL-LANE-IMAGE.md).
+        self.assertIn("timeout-minutes: 30", effort_jobs["preflight"])
         self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
         self.assertNotIn("CARGO_BUILD_JOBS", effort_rust_header.split("    runs-on:", 1)[1])
@@ -4284,30 +4280,33 @@ assert.equal(context.ACT_TIMER, null);
         for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
             self.assertIn("cluster-transport-recovery", points[point]["checks"])
 
-    def test_main_preflight_runtime_is_job_local_bounded_and_precedes_receipts(self):
+    def test_main_preflight_runtime_is_the_image_pinned_python_and_precedes_receipts(self):
+        # The receipt runtime used to be downloaded into every preflight job
+        # because host Pythons differed. The job now runs in the CI image, and
+        # the image carries that same checksummed CPython as `python3`.
         preflight = workflow_job_blocks('.github/workflows/main-fast-lane.yml')['preflight']
-        steps = workflow_step_blocks(preflight)
-        bootstrap = '\n'.join(workflow_step_literal(steps['Install the job-local Python receipt runtime'], 'run'))
-        cleanup = '\n'.join(workflow_step_literal(steps['Remove the exact job-local Python receipt runtime'], 'run'))
-        self.assertIn('mktemp -d "$RUNNER_TEMP/plurx-python312.XXXXXXXX"', bootstrap)
-        self.assertIn('curl -q --fail --location', bootstrap)
-        self.assertIn("--proto '=https' --proto-redir '=https'", bootstrap)
-        self.assertIn('--max-time 180 --max-filesize 34285590', bootstrap)
-        self.assertIn('731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91', bootstrap)
-        self.assertIn('sha256sum --check --status', bootstrap)
-        self.assertIn('sys.version_info[:2] == (3, 12)', bootstrap)
-        self.assertIn('sys.platform == "linux"', bootstrap)
-        self.assertIn('platform.machine() == "x86_64"', bootstrap)
-        self.assertNotIn('GITHUB_TOKEN', bootstrap)
-        self.assertLess(preflight.index('Install the job-local Python receipt runtime'),
-                        preflight.index('Restore attributable main Python successes'))
+        self.assertIn('/noirr/plurx-ci@sha256:', preflight.split('    steps:\n', 1)[0])
+        for gone in ('python-build-standalone', 'plurx-python312', 'PLURX_PYTHON_DIRECTORY',
+                     'job-local Python receipt runtime', 'GITHUB_PATH'):
+            self.assertNotIn(gone, preflight)
+        ci_stage = read('Dockerfile').split('FROM runtime-assets AS ci', 1)[1].split(
+            'FROM runtime-assets AS runtime', 1)[0]
+        self.assertIn('curl -q --fail --location', ci_stage)
+        self.assertIn("--proto '=https' --proto-redir '=https'", ci_stage)
+        self.assertIn('https://github.com/astral-sh/python-build-standalone/releases/download/20261003/'
+                      'cpython-3.12.15%2B20261003-${python_arch}-unknown-linux-gnu-install_only_stripped.tar.gz',
+                      ci_stage)
+        self.assertIn('amd64) python_arch=x86_64; '
+                      'python_sha=731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91', ci_stage)
+        self.assertIn('sha256sum --check --strict', ci_stage)
+        self.assertIn('/opt/python/bin/python3 -m venv /opt/playwright-venv', ci_stage)
+        self.assertIn('PATH=/usr/local/cargo/bin:/opt/playwright-venv/bin:${PATH}', ci_stage)
+        self.assertIn('assert sys.version_info[:3] == (3, 12, 15)', ci_stage)
+        self.assertLess(ci_stage.index('sha256sum --check --strict'), ci_stage.index('tar -xzf /tmp/python.tgz'))
+        self.assertLess(preflight.index('Restore attributable main Python successes'),
+                        preflight.index('Publish preflight attempt-start journal'))
         self.assertLess(preflight.index('Publish preflight attempt-start journal'),
                         preflight.index('Audit corrective-history evidence'))
-        self.assertIn('if: always()', steps['Remove the exact job-local Python receipt runtime'])
-        self.assertIn('test "$(dirname "$PLURX_PYTHON_DIRECTORY")" = "$RUNNER_TEMP"', cleanup)
-        self.assertIn('test ! -L "$PLURX_PYTHON_DIRECTORY"', cleanup)
-        self.assertIn('rm -rf -- "$PLURX_PYTHON_DIRECTORY"', cleanup)
-        self.assertIn('plurx-python312.????????', cleanup)
 
     def test_workflow_cancellation_preserves_qualification_and_python_receipts(self):
         workflow = read(".github/workflows/ci.yml")
@@ -4545,7 +4544,7 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                budget = {"ci": 30, "effort-ci": 15, "main-fast-lane": 30}[workflow]
+                budget = {"ci": 30, "effort-ci": 30, "main-fast-lane": 30}[workflow]
                 self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
@@ -5053,14 +5052,16 @@ assert.equal(context.ACT_TIMER, null);
         # failed on the next (a C fixture under -Werror on one host's gcc;
         # Ubuntu 24.04 guests retired because host jobs behaved differently
         # there). Every such job runs in the one image the Rust unit shards
-        # use, with the general-job resource cap. The reference is read from
-        # the shard job, so the digest is written in the workflows only.
+        # use, with the general-job resource cap and bash as its shell (a job
+        # container's default is `sh`). The reference is read from the shard
+        # job, so the digest is written in the workflows only.
         general = ("self-hosted", "Linux", "X64", "lab", "general")
         shard = workflow_job_blocks(".github/workflows/rust-units.yml")["shard"]
         expected = re.search(
             r"(?m)^    container:\n      image: (.+)\n      options: (.+)\n"
             r"      credentials:\n        username: noirr\n"
-            r"        password: \$\{\{ secrets\.CI_REGISTRY_PULL_TOKEN \}\}\n",
+            r"        password: \$\{\{ secrets\.CI_REGISTRY_PULL_TOKEN \}\}\n"
+            r"    defaults:\n      run:\n        shell: bash\n",
             shard.split("    steps:\n", 1)[0],
         )
         self.assertIsNotNone(expected, "the shard job no longer pins the CI image")
@@ -5073,16 +5074,17 @@ assert.equal(context.ACT_TIMER, null);
             "--memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096", expected.group(2)
         )
         # The only general-lane jobs outside the image, each with the reason
-        # it cannot be inside yet. A job leaves this table by entering the
-        # image; nothing is added to it without a reason of the same kind.
+        # it is outside. A job leaves this table by entering the image;
+        # nothing is added to it without a reason of the same kind.
         outside = {
-            # Their subject is the runner host's Docker daemon; the image has
-            # no Docker client (Dockerfile, stage `ci`).
+            # Their subject is the runner host's Docker daemon (manifest
+            # push, registry copy, buildx inspect); a job container is given
+            # no daemon socket.
             (".github/workflows/media-runtime.yml", "index"),
             (".github/workflows/media-runtime-public.yml", "copy"),
             (".github/workflows/publish-release.yml", "resolve"),
             # Runs the image `ci-image.yml` has just published, before any
-            # lane pins it, with the same options and credential.
+            # lane pins it, with the same options, credential and shell.
             (".github/workflows/ci-image.yml", "probe"),
             # `cargo audit`: the image carries no cargo-audit.
             (".github/workflows/rust-audit.yml", "workspace"),
@@ -5092,6 +5094,30 @@ assert.equal(context.ACT_TIMER, null);
             # container; the image carries the Jellyfin build instead.
             (".github/workflows/validation-nightly.yml", "ffmpeg8-pacing"),
         }
+
+        def label_sets(where: str, block: str) -> list[tuple[str, ...]]:
+            """Every label set the job can select; an unreadable selector fails."""
+            if re.search(r"(?m)^    uses: \./\.github/workflows/[a-z0-9-]+\.yml$", block):
+                return []  # a call; the called workflow's own jobs are read
+            values = re.findall(r"(?m)^    runs-on: (.+)$", block)
+            self.assertEqual(1, len(values), f"{where}: no single-line runs-on")
+            value = values[0]
+            if re.fullmatch(r"\[[^\]]+\]", value):
+                return [tuple(part.strip().strip("\"'") for part in value[1:-1].split(","))]
+            if value == "${{ fromJSON(matrix.runs_on) }}":
+                found = [
+                    tuple(json.loads(literal))
+                    for literal in re.findall(r"(?m)^ +runs_on: '(\[[^']*\])'$", block)
+                ]
+            elif value == "${{ matrix.runner }}":
+                found = [(name,) for name in re.findall(r"(?m)^ +runner: (\S+)$", block)]
+            elif re.fullmatch(r"(?:ubuntu|macos|windows)-[0-9a-z.-]+", value):
+                found = [(value,)]
+            else:
+                self.fail(f"{where}: runs-on {value!r} cannot be read as label sets")
+            self.assertTrue(found, f"{where}: runs-on {value!r} names no matrix value")
+            return found
+
         seen = set()
         inside = set()
         digests = set()
@@ -5099,20 +5125,34 @@ assert.equal(context.ACT_TIMER, null);
             relative = path.relative_to(ROOT).as_posix()
             digests.update(re.findall(r"/noirr/plurx-ci@sha256:[0-9a-f]{64}", read(relative)))
             for name, block in workflow_job_blocks(relative).items():
-                runs_on = re.search(r"(?m)^    runs-on: (.+)$", block)
-                if runs_on is None or general not in self_hosted_label_sets(
-                    runs_on.group(0) + "\n"
-                ):
+                where = f"{relative}:{name}"
+                selected = label_sets(where, block)
+                if not any(set(labels) == set(general) for labels in selected):
                     continue
                 header = block.split("    steps:\n", 1)[0]
-                with self.subTest(job=f"{relative}:{name}"):
+                with self.subTest(job=where):
+                    # A matrix or reordered selector would hide the job from
+                    # the rest of this test's reader.
+                    self.assertIn("    runs-on: [" + ", ".join(general) + "]\n", header)
                     if (relative, name) in outside:
                         seen.add((relative, name))
                         self.assertNotIn(image, header, "this job entered the image; drop its row")
                         continue
-                    self.assertEqual("    runs-on: [" + ", ".join(general) + "]", runs_on.group(0))
                     self.assertIn(expected.group(0), header)
                     self.assertEqual(1, len(re.findall(r"(?m)^    container:", block)))
+                    # The image is the environment: nothing a job needs is
+                    # downloaded into it per run.
+                    self.assertNotIn("actions/setup-node@", block)
+                    self.assertNotIn("python-build-standalone", block)
+                    self.assertTrue(
+                        re.sub(r"(?:\n *#.*|\n)+\Z", "", block).endswith(
+                            "      - name: Restore persistent runner workspace ownership\n"
+                            "        if: always()\n"
+                            "        run: |\n"
+                            "          owner=\"$(stat -c '%u:%g' \"$GITHUB_WORKSPACE\")\"\n"
+                            "          chown -R \"$owner\" \"$GITHUB_WORKSPACE\""
+                        )
+                    )
                     inside.add((relative, name))
         self.assertEqual(outside, seen, "a row names a job that is no longer on the general lane")
         self.assertEqual(1, len(digests), "the workflows pin more than one plurx-ci digest")
@@ -5120,10 +5160,12 @@ assert.equal(context.ACT_TIMER, null);
             self.assertIn((".github/workflows/main-fast-lane.yml", job), inside)
         for job in ("select", "shard", "verdict", "gate"):
             self.assertIn((".github/workflows/rust-units.yml", job), inside)
+
         # The image has one definition and one publication path: the `ci`
-        # stage, built and pushed by ci-image.yml, which then runs the
-        # tool-dependent contract tests inside it and fails on a skip.
-        ci_stage = read("Dockerfile").split("FROM runtime-assets AS ci", 1)[1].split(
+        # stage, built and pushed by ci-image.yml, which then runs both
+        # preflight suites inside it and fails on an unreviewed skip.
+        dockerfile = read("Dockerfile")
+        ci_stage = dockerfile.split("FROM runtime-assets AS ci", 1)[1].split(
             "FROM runtime-assets AS runtime", 1
         )[0]
         for needed in (
@@ -5134,33 +5176,76 @@ assert.equal(context.ACT_TIMER, null);
             "/usr/local/libexec/docker/cli-plugins/docker-compose",
             "&& docker compose version",
             "&& npm --version",
+            # The interpreter the main fast lane used to download per job.
+            "/20261003/cpython-3.12.15%2B20261003-${python_arch}-unknown-linux-gnu-install_only_stripped.tar.gz",
+            "python_sha=731af898886c5f821890dc901eca3c651cca8e51fa7308c159d12a1194aeac91",
+            "sha256sum --check --strict",
+            "/opt/python/bin/python3 -m venv /opt/playwright-venv",
+            "assert sys.version_info[:3] == (3, 12, 15)",
         ):
             self.assertIn(needed, ci_stage)
+        self.assertNotIn("&& python3 -m venv", ci_stage)
         self.assertRegex(
-            read("Dockerfile"),
+            dockerfile,
             r"(?m)^FROM docker:[0-9.]+-cli@sha256:[0-9a-f]{64} AS ci-docker-cli$",
         )
+        workflow = read(".github/workflows/ci-image.yml")
+        self.assertRegex(workflow, r"(?m)^on:\n  workflow_dispatch:\n\n")
         image_jobs = workflow_job_blocks(".github/workflows/ci-image.yml")
         publish = image_jobs["publish"]
         self.assertIn("--target ci", publish)
         self.assertIn('--build-arg "PLURX_CI_SOURCE_SHA=$GITHUB_SHA"', publish)
-        self.assertIn("/noirr/plurx-ci:source-$GITHUB_SHA-run$GITHUB_RUN_ID", publish)
-        self.assertLess(publish.index("docker run --rm"), publish.index("docker push"))
+        self.assertIn(
+            '--build-arg "PLURX_MEDIA_RUNTIME_REPOSITORY=$REGISTRY/noirr/plurx-media-runtime"',
+            publish,
+        )
+        self.assertNotIn("--pull", publish)
+        # A publication never moves a tag: a rerun gets its own, and an
+        # existing one stops the job before anything is built.
+        self.assertIn(
+            "/noirr/plurx-ci:source-$GITHUB_SHA-run$GITHUB_RUN_ID-attempt$GITHUB_RUN_ATTEMPT",
+            publish,
+        )
+        order = [
+            publish.index(marker)
+            for marker in (
+                "docker login",
+                'docker manifest inspect --insecure "$tag"',
+                "docker build ",
+                "docker run --rm",
+                "docker push",
+            )
+        ]
+        self.assertEqual(sorted(order), order)
+        self.assertIn("docker image rm \"$tag\"", publish)
+        self.assertIn("        shell: bash\n", publish)
         probe = image_jobs["probe"]
         self.assertIn("      image: ${{ needs.publish.outputs.image }}\n", probe)
         self.assertIn("      options: " + expected.group(2) + "\n", probe)
-        for module in (
-            "test_docker_https_ports",
-            "test_docker_hardware",
-            "test_compose_inspection",
-            "test_ffmpeg_support_matrix",
-        ):
-            self.assertIn("tests.operations." + module, probe)
-        self.assertIn("grep -E ' \\.\\.\\. skipped '", probe)
-        self.assertRegex(
-            read(".github/workflows/ci-image.yml"), r"(?m)^on:\n  workflow_dispatch:\n\n"
-        )
-        # What the retained image lacks is supplied the way ci.yml's own
+        self.assertIn("    defaults:\n      run:\n        shell: bash\n", probe)
+        self.assertIn("          fetch-depth: 0\n", probe)
+        self.assertIn("python3 scripts/provision-hiqlite-upstream", probe)
+        self.assertIn("        run: python3 scripts/ci-image-probe\n", probe)
+        probe_script = read("scripts/ci-image-probe")
+        self.assertIn('SUITES = ("tests/validation", "tests/operations")', probe_script)
+        # The reviewed skips: every entry has a reason, and none excuses a
+        # missing tool or the suite running as root.
+        skips = tomllib.loads(read("tests/ci-image-skips.toml")).get("skip", [])
+        for row in skips:
+            self.assertEqual({"suite", "test", "reason"}, set(row))
+            self.assertGreaterEqual(len(row["reason"].strip()), 20, row)
+            for module in (
+                "test_docker_https_ports",
+                "test_docker_hardware",
+                "test_compose_inspection",
+                "test_ffmpeg_support_matrix",
+                "test_ci_janitor",
+                "test_desktop_release",
+            ):
+                self.assertNotIn(module, row["test"])
+        self.assertNotIn("os.geteuid() == 0:\n            self.skipTest", read("tests/operations/test_ci_janitor.py"))
+
+        # What the retained digest lacks is supplied the way ci.yml's own
         # image jobs supply it, before the first compile.
         for relative, name, desktop in (
             (".github/workflows/lint.yml", "lint", True),

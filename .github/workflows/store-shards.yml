@@ -155,6 +155,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     continue-on-error: ${{ inputs.execution-mode == 'shadow' }}
     steps:

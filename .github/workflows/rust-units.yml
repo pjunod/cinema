@@ -62,6 +62,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 15
     outputs:
       build: ${{ steps.adopt.outputs.build || 'false' }}
@@ -94,12 +97,6 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
-      - name: Restore persistent runner workspace ownership
-        if: always()
-        run: |
-          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
-          chown -R "$owner" "$GITHUB_WORKSPACE"
-
       # Only absent named tests: no archive or shard; the verdict reads this plan.
       - name: Hand the all-absent plan to the verdict
         if: steps.adopt.outputs.absent_only == 'true'
@@ -110,6 +107,11 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   rust_units_archive:
     name: "Rust units: build archive"
@@ -257,6 +259,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -330,6 +335,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 15
     outputs:
       failures: ${{ steps.verdict.outputs.failures }}
@@ -607,6 +615,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - name: Require every due test to have passed here or before

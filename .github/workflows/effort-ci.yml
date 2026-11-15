@@ -30,15 +30,15 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.4"
       - name: Check index rows, release counters, names and Regression-Test reminders
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -63,6 +63,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
@@ -117,9 +120,12 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     # Allows the 5-minute worker witness smoke, other package smokes, toolchain
     # provisioning and preflight validation to finish with headroom.
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -148,10 +154,6 @@ jobs:
       - name: Check validation catalog and contract unit tests
         run: |
           make validation-lint
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        if: ${{ !inputs.compile_only }}
-        with:
-          node-version: "22.23.4"
       - name: Check formal protocol source mapping
         id: formal-inputs
         env:
@@ -324,14 +326,14 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.4"
       - name: Lint current web source and shape contracts
         # No behavioral, mutation, VM-load or Chromium fixtures in this lane.
         # Focused behavior units have once-per-PR receipts; web-check is retained
@@ -427,6 +429,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - name: Require policy and every affected compile surface

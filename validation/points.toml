@@ -1550,6 +1550,8 @@ paths = [
   "scripts/ci-cargo-jobs",
   "scripts/rust-gate-image",
   "Dockerfile.rust-gate",
+  "scripts/ci-image-probe",
+  "tests/ci-image-skips.toml",
   "scripts/ci-cargo-cache-refresh",
   "scripts/provision-hiqlite-upstream",
   "scripts/image-base-drift",

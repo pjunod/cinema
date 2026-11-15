@@ -27,6 +27,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     outputs:
       publish: ${{ steps.scope.outputs.publish }}

@@ -86,6 +86,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     # Complete retained-evidence authentication exceeds the old two-minute budget.
     # Use a literal bound instead of relying on expression-level fallback semantics.
     timeout-minutes: 10
@@ -212,6 +215,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -276,6 +282,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     # Match the fast lane's cold Python/history budget. Run 6887 spent over
     # four minutes before units and was still progressing at the 10m cutoff.
     # Keep all validation and receipt publication within a finite 30m limit.
@@ -315,9 +324,6 @@ jobs:
           else
             python3 -m unittest discover -s tests/validation -p 'test_*.py'
           fi
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.4"
       - name: Check formal protocol source mapping
         id: formal-inputs
         env:
@@ -773,6 +779,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - name: Select the required Store graph
@@ -2469,6 +2478,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     # The exact-tree receipt repeats complete live evidence authentication.
     timeout-minutes: 10
     steps:
@@ -2593,6 +2605,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

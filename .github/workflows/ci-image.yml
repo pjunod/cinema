@@ -2,9 +2,9 @@ name: ci image
 
 # Builds the `ci` stage of Dockerfile, publishes it to the fleet registry, and
 # then runs, inside the image it just published and on the general lane's own
-# label and limits, the contract tests that skip when a tool is missing: a
-# skip there fails the run. Dispatch only, on the branch that changed the
-# stage; pin the digest it prints in every job that names plurx-ci.
+# label and limits, both preflight Python suites: a failure, or a skip without
+# a reviewed reason, fails the run. Dispatch only, on the branch that changed
+# the stage; pin the digest it prints in every job that names plurx-ci.
 # docs/ci/GENERAL-LANE-IMAGE.md is the reference.
 on:
   workflow_dispatch:
@@ -29,26 +29,38 @@ jobs:
         env:
           REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          # One tag per publication, named by the source it was built from: a
-          # pinned digest must never lose the only tag that keeps it from
-          # registry cleanup when a later publication lands.
-          tag="$REGISTRY/noirr/plurx-ci:source-$GITHUB_SHA-run$GITHUB_RUN_ID"
+          # One tag per publication attempt, named by the source it was built
+          # from. The build is not reproducible, so a tag that moved would
+          # leave an already pinned digest untagged and open to registry
+          # cleanup: the attempt is part of the name and an existing tag is
+          # never overwritten.
+          tag="$REGISTRY/noirr/plurx-ci:source-$GITHUB_SHA-run$GITHUB_RUN_ID-attempt$GITHUB_RUN_ATTEMPT"
           # A job-local Docker config: the registry login never lands in the
           # runner user's ~/.docker on a shared host.
-          export DOCKER_CONFIG="$RUNNER_TEMP/ci-image-docker-$GITHUB_RUN_ID"
+          export DOCKER_CONFIG="$RUNNER_TEMP/ci-image-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$DOCKER_CONFIG"
-          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-          DOCKER_BUILDKIT=1 docker build --pull --platform linux/amd64 --target ci \
+          trap 'docker image rm "$tag" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
+          if docker manifest inspect --insecure "$tag" >/dev/null 2>&1; then
+            echo "::error::$tag already exists; a publication never replaces a tag."
+            exit 1
+          fi
+          # The media runtime base comes from the fleet registry, as in
+          # ci.yml's runtime build; the three toolchain images are pinned by
+          # digest and reused from the host's store when it holds them.
+          DOCKER_BUILDKIT=1 docker build --platform linux/amd64 --target ci \
+            --build-arg "PLURX_MEDIA_RUNTIME_REPOSITORY=$REGISTRY/noirr/plurx-media-runtime" \
             --build-arg "PLURX_CI_SOURCE_SHA=$GITHUB_SHA" -t "$tag" .
           docker run --rm "$tag" sh -ec '
+            python3 -c "import sys, tomllib, playwright; assert sys.version_info[:3] == (3, 12, 15), sys.version"
             rustc +1.97.1 --version | grep -F "rustc 1.97.1 "
             node --version | grep -Fx v22.23.4
             npm --version
             ffmpeg -version | grep -E "^ffmpeg version n?8"
             test "$(readlink -f "$(command -v ffmpeg)")" = /usr/lib/jellyfin-ffmpeg/ffmpeg
-            python3 -c "import tomllib, playwright"
             docker --version
             docker compose version
             autoconf --version | sed -n 1p
@@ -56,7 +68,6 @@ jobs:
             command -v dbus-run-session
             pkg-config --exists openssl "gtk4 >= 4.0" dbus-1'
           test "$(docker image inspect "$tag" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
-          printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
           docker push "$tag"
           image="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" \
             | grep -F "$REGISTRY/noirr/plurx-ci@sha256:" | head -n 1)"
@@ -70,10 +81,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The image just published, where the general lane runs it and with the
-  # lane's limits, before any lane is pointed at it. These are the modules
-  # whose tests skip when Docker, compose, autoconf or a compiler is absent.
+  # lane's limits, before any lane is pointed at it: both preflight suites,
+  # whole, on the image's own interpreter. A failure, an error, or a skip that
+  # tests/ci-image-skips.toml does not carry with a reason fails the run.
   probe:
-    name: tool-dependent contract tests on the published image
+    name: preflight suites on the published image, no unreviewed skip
     needs: publish
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
@@ -82,33 +94,25 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 45
     steps:
+      # Full history and every branch, as the lane's preflight checks out:
+      # tests that compare against origin/main skip on a shallow clone.
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Run the tool-dependent contract tests; a skip is a failure
+          fetch-depth: 0
+      - name: Provision checksummed public K08 oracle sources
         run: |
-          set -euo pipefail
-          mkdir -p target/ci-image
-          set +e
-          python3 -m unittest -v \
-            tests.operations.test_docker_https_ports \
-            tests.operations.test_docker_hardware \
-            tests.operations.test_compose_inspection \
-            tests.operations.test_ffmpeg_support_matrix \
-            tests.operations.test_cm29_gamut_tables \
-            tests.operations.test_dv_dm_pq_precision \
-            tests.operations.test_dv_dm_closed_form \
-            tests.operations.test_linux_dolby_package \
-            2>&1 | tee target/ci-image/probe.log
-          status=$?
-          set -e
-          if grep -E ' \.\.\. skipped ' target/ci-image/probe.log; then
-            echo "::error::A tool-dependent contract test skipped inside the published image; add the tool to the ci stage of Dockerfile."
-            exit 1
-          fi
-          exit "$status"
+          set -eu
+          fixture="$RUNNER_TEMP/hiqlite-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
+          printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
+      - name: Run both preflight suites; an unreviewed skip is a failure
+        run: python3 scripts/ci-image-probe
       - name: Restore persistent runner workspace ownership
         if: always()
         run: |

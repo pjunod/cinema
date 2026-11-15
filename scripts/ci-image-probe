@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Run the preflight Python suites and refuse every skip that is not reviewed.
+
+A test that skips because a tool is missing reports green and proves nothing.
+`ci-image.yml` runs this inside the image it has just published, as the lane
+would run the suites (same interpreter, same two directories), so a digest is
+pinned only when every test in them executes there.
+
+    scripts/ci-image-probe                 run both suites, judge the skips
+    scripts/ci-image-probe --list          print the reviewed skips
+
+The reviewed skips live in `tests/ci-image-skips.toml`: one `[[skip]]` per
+test, with the suite, the test id as unittest reports it and the reason it is
+meant to skip in the image. The run fails on a test failure or error, on a
+skip that has no entry, and on an entry whose test did not skip (so the list
+cannot outlive its reasons).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SUITES = ("tests/validation", "tests/operations")
+ALLOW = ROOT / "tests/ci-image-skips.toml"
+
+
+def reviewed(path: Path) -> dict[tuple[str, str], str]:
+    rows = tomllib.loads(path.read_text(encoding="utf-8")).get("skip", [])
+    found: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if set(row) != {"suite", "test", "reason"}:
+            raise SystemExit(f"ci-image-probe: {path.name}: an entry needs exactly suite, test, reason: {row}")
+        if row["suite"] not in SUITES or not row["test"].strip() or len(row["reason"].strip()) < 20:
+            raise SystemExit(f"ci-image-probe: {path.name}: unknown suite, empty test or no real reason: {row}")
+        key = (row["suite"], row["test"])
+        if key in found:
+            raise SystemExit(f"ci-image-probe: {path.name}: {key} is listed twice")
+        found[key] = row["reason"]
+    return found
+
+
+def run_suite(suite: str, report_path: Path) -> int:
+    """Child process: one suite, discovered the way `unittest discover -s` does.
+
+    The report goes to a file: tests print to stdout and stderr freely.
+    """
+    os.chdir(ROOT)
+    sys.path.insert(0, str(ROOT))
+    tests = unittest.defaultTestLoader.discover(suite, pattern="test_*.py")
+    result = unittest.TextTestRunner(stream=sys.stderr, verbosity=1).run(tests)
+    report = {
+        "ran": result.testsRun,
+        "failures": [test.id() for test, _ in result.failures],
+        "errors": [test.id() for test, _ in result.errors],
+        "unexpected_successes": [test.id() for test in result.unexpectedSuccesses],
+        "skipped": [[test.id(), reason] for test, reason in result.skipped],
+    }
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--allow", type=Path, default=ALLOW)
+    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--suite", choices=SUITES, help=argparse.SUPPRESS)
+    parser.add_argument("--report", type=Path, help=argparse.SUPPRESS)
+    arguments = parser.parse_args(argv)
+    if arguments.suite:
+        return run_suite(arguments.suite, arguments.report)
+    allowed = reviewed(arguments.allow)
+    if arguments.list:
+        for (suite, test), reason in sorted(allowed.items()):
+            print(f"{suite}  {test}\n    {reason}")
+        return 0
+
+    problems: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    print(f"ci-image-probe: python {sys.version.split()[0]} at {sys.executable}")
+    for suite in SUITES:
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.json"
+            child = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--suite", suite, "--report", str(report_path)],
+                cwd=ROOT,
+            )
+            if not report_path.is_file():
+                problems.append(f"{suite}: the suite did not finish (exit {child.returncode})")
+                continue
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        print(
+            f"ci-image-probe: {suite}: ran {report['ran']}, failures {len(report['failures'])}, "
+            f"errors {len(report['errors'])}, skipped {len(report['skipped'])}"
+        )
+        if report["ran"] == 0:
+            problems.append(f"{suite}: no test ran")
+        for kind in ("failures", "errors", "unexpected_successes"):
+            problems += [f"{suite}: {kind[:-1].replace('_', ' ')}: {test}" for test in report[kind]]
+        for test, reason in report["skipped"]:
+            seen.add((suite, test))
+            if (suite, test) in allowed:
+                print(f"  reviewed skip: {test} ({reason})")
+            else:
+                problems.append(f"{suite}: skipped without review: {test} ({reason})")
+    problems += [
+        f"{suite}: listed in {arguments.allow.name} but did not skip: {test}"
+        for suite, test in sorted(set(allowed) - seen)
+    ]
+    if problems:
+        print(f"ci-image-probe: FAIL, {len(problems)} problem(s):")
+        for problem in problems:
+            print(f"  {problem}")
+        print(
+            "  A skip for a missing tool is fixed in the ci stage of Dockerfile; a skip that is\n"
+            "  meant gets a [[skip]] entry with its reason in tests/ci-image-skips.toml."
+        )
+        return 1
+    print("ci-image-probe: every test ran, or skipped for a reviewed reason")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
