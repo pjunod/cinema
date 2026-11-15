@@ -41,7 +41,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
 | 29 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
 | 30 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
-| 31 | A dead database Raft core is reported, and a known-short disk never starts a snapshot build | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
+| 31 | A dead database Raft core is reported, and a snapshot build that cannot fit is never started | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -308,9 +308,9 @@ made-up URL and prevents the fork from being declared fully tracked.
   its cut through the forwarding `WriteAck` write (row 21) on whichever voter
   holds the backup lease. Target-local storage admission runs
   before the writer request with a size-based floor and ten-second retries.
-  Storage known to be short keeps waiting (row 31); only storage that
-  cannot be measured is bounded at ten minutes (then the existing path),
-  exposed through
+  A build that cannot fit keeps waiting (row 31); one that can fit but is
+  short of the floor, or unmeasurable storage, is bounded at ten minutes
+  (then the existing path), exposed through
   passive fixed-label metrics. This changes no replicated enum ordinal,
   metadata encoding, completed image format, or install format.
   Files: `src/store/state_machine/sqlite/writer.rs`,
@@ -506,17 +506,24 @@ made-up URL and prevents the fork from being declared fully tracked.
   panic). plurxd ends the process on `Fatal`
   (`docs/cluster/DEAD-RAFT-CORE-EXIT-BUILD.md`). In OpenRaft 0.9.25 the
   core turns a `build_snapshot` storage error into its own fatal quit
-  (`raft_core.rs`: `command_result.result?`), so admission no longer
-  attempts a build on storage known to be short: it waits, and only an
-  unmeasurable disk keeps the ten-minute bound. A build that fails before
-  its rename removes its `<uuid>.temp` and `-journal`, and startup removes
-  any abandoned ones. Tests:
+  (`raft_core.rs`: `command_result.result?`), so admission never attempts
+  a build that cannot fit (available below one image, `max(WAL, 32 MiB)`
+  and 64 MiB): it waits, rechecked every 10 s, and `snapshot_storage_deferral`
+  does not bound that wait. A build that can fit but is short of the
+  comfortable floor, or whose storage cannot be measured, keeps the old
+  bound (ten minutes by default; 0 attempts it at once). A deferred build
+  ends with an error once the SQL writer has stopped, instead of waiting
+  forever or panicking on a closed channel. A build that fails before its
+  rename removes its `<uuid>.temp` and `-journal`, and startup removes any
+  abandoned ones. Both client shutdowns release the SQL writer, and so its
+  lock file, whatever the WAL's shutdown returns. Tests:
   `mgmt::tests::the_core_stop_names_a_fatal_quit_and_ignores_an_ordinary_stop`,
-  `snapshot_admission::tests::known_insufficient_storage_never_attempts_the_build`,
-  `a_known_answer_restarts_the_unknown_bound` and the snapshot builder's
-  temp-removal tests.
+  `the_lock_file_is_released_whatever_the_wal_shutdown_returns`, the
+  `snapshot_admission` band tests, and the snapshot builder's and state
+  machine's temp-removal tests.
   Files: `src/client/mgmt.rs`, `src/client/mod.rs`, `src/lib.rs`,
-  `src/snapshot_admission.rs`, `src/store/state_machine/sqlite/snapshot_builder.rs`,
+  `src/config.rs`, `src/snapshot_admission.rs`,
+  `src/store/state_machine/sqlite/snapshot_builder.rs`,
   `src/store/state_machine/sqlite/state_machine.rs`.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)

@@ -876,7 +876,11 @@ impl Client {
                 tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
             }
             state.raft_db.raft.shutdown().await?;
-            state.raft_db.shutdown_handle.shutdown().await?;
+            // Plurx patch 31: the SQL writer's shutdown removes the lock file,
+            // so it runs whatever the WAL's shutdown returns (a WAL whose
+            // writer died on an IO error fails here) and a clean stop is not
+            // mistaken for a crash by the next start's auto-heal.
+            let wal = state.raft_db.shutdown_handle.shutdown().await;
             let (tx, rx) = tokio::sync::oneshot::channel();
             state
                 .raft_db
@@ -886,6 +890,7 @@ impl Client {
                 .map_err(|error| Error::Error(error.to_string().into()))?;
             rx.await
                 .map_err(|error| Error::Error(error.to_string().into()))?;
+            wal?;
             let _ = self
                 .inner
                 .tx_client_db
@@ -1154,7 +1159,14 @@ impl Client {
             }
             state.raft_db.raft.shutdown().await?;
             info!("Shutting down sqlite logs writer");
-            state.raft_db.shutdown_handle.shutdown().await?;
+            // Plurx patch 31: the SQL writer's shutdown removes the lock file,
+            // so it runs whatever the WAL's shutdown returns (a WAL whose
+            // writer died on an IO error fails here) and a clean stop is not
+            // mistaken for a crash by the next start's auto-heal.
+            let wal = state.raft_db.shutdown_handle.shutdown().await;
+            if let Err(error) = &wal {
+                tracing::error!("sqlite logs writer shutdown failed: {error}");
+            }
 
             info!("Shutting down sqlite writer");
             let (tx_sm, rx_sm) = tokio::sync::oneshot::channel();
@@ -1167,6 +1179,7 @@ impl Client {
             rx_sm
                 .await
                 .expect("To always get an answer from SQL writer");
+            wal?;
 
             let _ = tx_client_db.send_async(ClientStreamReq::Shutdown).await;
         }
@@ -1589,6 +1602,31 @@ mod tests {
             matches!(closed.core_stopped().await, LocalDbCoreStop::Fatal(_)),
             "a core that vanished without a terminal state died"
         );
+    }
+
+    #[test]
+    fn the_lock_file_is_released_whatever_the_wal_shutdown_returns() {
+        let source = include_str!("mgmt.rs")
+            .split_once("#[cfg(all(test, feature = \"sqlite\"))]")
+            .expect("production code precedes the tests")
+            .0;
+        let source: String = source.split_whitespace().collect();
+        let sites: Vec<&str> = source
+            .split("letwal=state.raft_db.shutdown_handle.shutdown().await;")
+            .skip(1)
+            .collect();
+        assert_eq!(sites.len(), 2, "both shutdown paths hold the WAL result");
+        for site in sites {
+            let writer = site
+                .find("WriterRequest::Shutdown(")
+                .expect("the SQL writer shutdown follows");
+            let wal = site.find("wal?;").expect("the WAL result is returned");
+            assert!(
+                writer < wal,
+                "the lock is released before the WAL error returns"
+            );
+        }
+        assert!(!source.contains("shutdown_handle.shutdown().await?"));
     }
 
     #[test]
