@@ -160,7 +160,6 @@ async fn rule_page(
     state: &AppState,
     user: &User,
     spec: &RowSpec,
-    only_items: Option<&[i64]>,
     offset: i64,
     limit: i64,
     presence: ItemPresence,
@@ -169,7 +168,7 @@ async fn rule_page(
     let query = RuleQuery {
         viewer: user.id,
         spec,
-        only_items,
+        only_items: None,
         day: today(),
         presence,
     };
@@ -636,7 +635,6 @@ pub async fn tag_items(
             &state,
             &user,
             &spec,
-            None,
             offset,
             limit,
             ItemPresence::Everything,
@@ -867,10 +865,7 @@ pub(crate) async fn tag_filtered_grid(
     if let Some(genre) = genre {
         spec.all_of.push(Term::Genre(genre.to_owned()));
     }
-    let mut page = rule_page(
-        state, user, &spec, None, offset, limit, presence, read_after,
-    )
-    .await?;
+    let mut page = rule_page(state, user, &spec, offset, limit, presence, read_after).await?;
     if facts {
         // The same opt-in spec columns the unfiltered grid gives.
         let file_backed: Vec<i64> = page
@@ -989,7 +984,6 @@ pub(crate) async fn tag_search(
                 state,
                 user,
                 &spec,
-                None,
                 0,
                 limit,
                 ItemPresence::OnDisk,
@@ -1213,7 +1207,6 @@ pub async fn row_items(
             &state,
             &user,
             &row.spec,
-            None,
             offset,
             limit,
             ItemPresence::OnDisk,
@@ -1244,7 +1237,6 @@ pub async fn preview_row(
             &state,
             &user,
             &body.spec,
-            None,
             0,
             limit,
             ItemPresence::OnDisk,
@@ -1456,7 +1448,6 @@ pub async fn home_rows(
                 state,
                 user,
                 &row.spec,
-                None,
                 0,
                 limit,
                 ItemPresence::OnDisk,
