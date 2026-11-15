@@ -809,6 +809,9 @@ pub struct AppState {
     pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// The cluster facade (`crate::cluster`): authority, role and peers.
+    /// Feature code asks it; the three raw handles above stay until slice 7.
+    pub(crate) cluster: crate::cluster::Cluster,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
     pub(crate) clock_observer: crate::clock_offset::ClockObserver,
@@ -1204,6 +1207,7 @@ impl AppState {
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
+        let cluster = crate::cluster::Cluster::new(serving.clone(), membership.clone());
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1418,6 +1422,7 @@ impl AppState {
             copy_observation_dir,
             node_hostname: membership.local_hostname(),
             membership,
+            cluster,
             media_pool,
             media_sessions,
             settings_changes,

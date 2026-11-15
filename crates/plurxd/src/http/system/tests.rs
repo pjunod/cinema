@@ -1942,3 +1942,24 @@ fn applied_view_metrics_render_reads_reloads_mark_and_pool_wait() {
         assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
     }
 }
+
+/// Cluster facade B2: the directory's reads render by outcome, from the
+/// counts a scrape loads.
+#[test]
+fn cluster_directory_metrics_render_each_outcome() {
+    let rendered = render_cluster_directory_metrics(
+        plurx_core::cluster::membership::directory::DirectoryReadCounts {
+            hit: 40,
+            reload: 2,
+            uncached: 1,
+        },
+    );
+    for line in [
+        "# TYPE plurx_cluster_directory_reads_total counter\n",
+        "plurx_cluster_directory_reads_total{outcome=\"hit\"} 40\n",
+        "plurx_cluster_directory_reads_total{outcome=\"reload\"} 2\n",
+        "plurx_cluster_directory_reads_total{outcome=\"uncached\"} 1\n",
+    ] {
+        assert!(rendered.contains(line), "missing {line:?} in\n{rendered}");
+    }
+}

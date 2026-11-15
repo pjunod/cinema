@@ -16,7 +16,9 @@
 //! stamp if the image generation is odd, the membership is not committed, or
 //! a table has no slot in the applied mark; read; reload `s1`; keep the stamp
 //! only if `s0 == s1`. A cache of the snapshot is current only while
-//! [`MembershipManager::roster_stamp`] still equals `s0`.
+//! [`MembershipManager::roster_stamp`] still equals `s0`: [`PeerDirectory`]
+//! keeps that cache. A miss is one local read. No timer, no TTL, no
+//! background task.
 //!
 //! The stamp needs both signals. Roster rows change through ordinary log
 //! entries (a removal fence is a row), and the membership changes through
@@ -68,6 +70,17 @@ pub struct RosterSnapshot {
     voters: BTreeSet<u64>,
     rows: Vec<MediaPeerRow>,
     stamp: Option<RosterStamp>,
+}
+
+/// This node's standing in the applied Raft membership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppliedStanding {
+    /// No replicated membership: this process is the whole server.
+    Standalone,
+    Voter,
+    Learner,
+    /// Clustered, but the applied membership does not list this node.
+    Absent,
 }
 
 impl RosterSnapshot {
@@ -191,6 +204,11 @@ impl RosterSnapshot {
     }
 }
 
+/// The wall clock the purposes are evaluated at, as the producers read it.
+pub fn roster_now() -> Result<i64, MembershipError> {
+    unix_ms()
+}
+
 fn peer(now: i64, row: &MediaPeerRow) -> ActivityPeer {
     ActivityPeer {
         http_base: row.http_base.clone(),
@@ -214,6 +232,105 @@ impl MembershipManager {
         match self.inner.as_deref() {
             Some(inner) => read_roster(inner).await,
             None => Ok(RosterSnapshot::standalone()),
+        }
+    }
+    /// This node's standing in the applied Raft membership — the source
+    /// [`Self::local_node_is_committed_voter`] reads — with no IO or await.
+    #[must_use]
+    pub fn applied_standing(&self) -> AppliedStanding {
+        let Some(inner) = self.inner.as_deref() else {
+            return AppliedStanding::Standalone;
+        };
+        let membership = inner.local_metrics.membership_snapshot();
+        let local = inner.identity.raft_id;
+        if membership.voters.contains(&local) {
+            AppliedStanding::Voter
+        } else if membership.members.contains(&local) {
+            AppliedStanding::Learner
+        } else {
+            AppliedStanding::Absent
+        }
+    }
+
+    /// The heartbeat-published serving role, as
+    /// [`Self::local_serving_role`] answers it, without the `async`.
+    #[must_use]
+    pub fn published_serving_role(&self) -> LocalServingRole {
+        self.inner
+            .as_deref()
+            .map_or(LocalServingRole::Unclustered, |inner| {
+                LocalServingRole::from_encoded(inner.local_serving_role.load(Ordering::Acquire))
+            })
+    }
+}
+
+/// Reads answered by a [`PeerDirectory`], by outcome: `hit` from the cached
+/// snapshot, `reload` a read that replaced it, `uncached` a read that could
+/// not be cached (no stamp, or the roster moved during the read).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirectoryReadCounts {
+    pub hit: u64,
+    pub reload: u64,
+    pub uncached: u64,
+}
+
+#[derive(Default)]
+struct DirectoryReads {
+    hit: AtomicU64,
+    reload: AtomicU64,
+    uncached: AtomicU64,
+}
+
+/// The cached roster of one membership manager. Clones share the cache.
+#[derive(Clone)]
+pub struct PeerDirectory {
+    membership: MembershipManager,
+    cached: Arc<Mutex<Option<Arc<RosterSnapshot>>>>,
+    standalone: Arc<RosterSnapshot>,
+    reads: Arc<DirectoryReads>,
+}
+
+impl PeerDirectory {
+    #[must_use]
+    pub fn new(membership: MembershipManager) -> Self {
+        Self {
+            membership,
+            cached: Arc::default(),
+            standalone: Arc::new(RosterSnapshot::standalone()),
+            reads: Arc::default(),
+        }
+    }
+
+    /// The current applied roster. An unclustered process answers its empty
+    /// roster with no read, counted as a hit.
+    pub async fn snapshot(&self) -> Result<Arc<RosterSnapshot>, MembershipError> {
+        if !self.membership.is_replicated() {
+            self.reads.hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(Arc::clone(&self.standalone));
+        }
+        if let Some(current) = self.membership.roster_stamp() {
+            let cached = self.cached.lock().expect("peer directory cache").clone();
+            if let Some(cached) = cached.filter(|cached| cached.stamp == Some(current)) {
+                self.reads.hit.fetch_add(1, Ordering::Relaxed);
+                return Ok(cached);
+            }
+        }
+        let snapshot = Arc::new(self.membership.roster_snapshot().await?);
+        if snapshot.stamp.is_some() {
+            *self.cached.lock().expect("peer directory cache") = Some(Arc::clone(&snapshot));
+            self.reads.reload.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.reads.uncached.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(snapshot)
+    }
+
+    #[must_use]
+    pub fn reads(&self) -> DirectoryReadCounts {
+        DirectoryReadCounts {
+            hit: self.reads.hit.load(Ordering::Relaxed),
+            reload: self.reads.reload.load(Ordering::Relaxed),
+            uncached: self.reads.uncached.load(Ordering::Relaxed),
         }
     }
 }
@@ -278,3 +395,6 @@ async fn read_roster(inner: &ReplicatedMembership) -> Result<RosterSnapshot, Mem
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "hiqlite-contract-tests"))]
+mod invalidation_tests;
