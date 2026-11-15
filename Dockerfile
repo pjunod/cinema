@@ -141,10 +141,22 @@ COPY licenses/ /usr/share/doc/plurx/licenses/
 RUN rm -rf /usr/lib/plurx/dv-processing \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
+    # bookworm's curl is 7.88; scripts/provision-hiqlite-upstream needs 8.4
+    # (--max-filesize on unknown-length bodies). Only curl and libcurl4 come
+    # from bookworm-backports, from a fixed snapshot so the build reproduces,
+    # at exactly the versions below; the pin keeps every other package on
+    # bookworm. Same snapshot as Dockerfile.pi.
+    && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260928T000000Z bookworm-backports main\n' \
+         > /etc/apt/sources.list.d/plurx-ci-backports.list \
+    && printf 'Package: *\nPin: release n=bookworm-backports\nPin-Priority: 1\n\nPackage: curl libcurl4\nPin: version 8.14.1-2+deb13u2~bpo13+1\nPin-Priority: 900\n' \
+         > /etc/apt/preferences.d/plurx-ci-curl \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-        autoconf automake build-essential clang cmake curl dbus-daemon git jq libssl-dev lld llvm \
+        autoconf automake build-essential clang cmake dbus-daemon git jq libssl-dev lld llvm \
         make nasm ninja-build openssl libgtk-4-dev libdbus-1-dev pkg-config procps python3 \
+        curl=8.14.1-2+deb13u2~bpo13+1 libcurl4=8.14.1-2+deb13u2~bpo13+1 \
+    && rm /etc/apt/sources.list.d/plurx-ci-backports.list \
+    && curl -q --version | sed -n 1p | grep -E '^curl 8\.([4-9]|[1-9][0-9])\.' \
     && ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     # One interpreter for every job in the image: the CPython the main fast

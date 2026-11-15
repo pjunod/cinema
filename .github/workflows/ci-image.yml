@@ -70,6 +70,7 @@ jobs:
             npm --version
             ffmpeg -version | grep -E "^ffmpeg version n?8"
             test "$(readlink -f "$(command -v ffmpeg)")" = /usr/lib/jellyfin-ffmpeg/ffmpeg
+            curl -q --version | sed -n 1p | grep -E "^curl 8\.([4-9]|[1-9][0-9])\."
             docker --version
             docker compose version
             autoconf --version | sed -n 1p

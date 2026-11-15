@@ -5170,6 +5170,10 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         for needed in (
             "autoconf automake ",
+            "curl=8.14.1-2+deb13u2~bpo13+1 libcurl4=8.14.1-2+deb13u2~bpo13+1",
+            "snapshot.debian.org/archive/debian/20260928T000000Z bookworm-backports",
+            "Package: curl libcurl4\\nPin: version 8.14.1-2+deb13u2~bpo13+1",
+            "curl -q --version | sed -n 1p | grep -E '^curl 8\\.([4-9]|[1-9][0-9])\\.'",
             " dbus-daemon ",
             " openssl ",
             " procps ",
