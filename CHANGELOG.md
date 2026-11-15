@@ -273,6 +273,11 @@ bump may break compatibility and a **patch** bump never does.
 - Apple TV Settings enters each category at its first setting and restores the
   category when returning with Back. Picker controls expose their names and
   selected values to accessibility.
+- A brief serving-authority lapse no longer closes a node's shared-library listener. An
+  unreadable sharing switch is treated as unknown for up to the serving-fence session grace
+  (5 s): the listener keeps accepting peers (each request is still checked) and live shared
+  bodies continue; only a confirmed disable, or an unknown switch past the grace, closes it.
+  Recipients saw `sharing_start_unresolved` while the port refused them.
 
 - Android direct Dolby Vision playback lists preserved dynamic metadata, and
   native DYN indicators wait for a selected Dolby Vision decoder instead of
