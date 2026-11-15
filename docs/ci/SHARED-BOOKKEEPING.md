@@ -6,7 +6,7 @@ Companion to [PAPERWORK.md](PAPERWORK.md) (which rules are checked, and when)
 — this is *where a change records itself*, and what an open pull request does
 after this layout landed.
 
-Six files used to be edited by nearly every pull request at the same line,
+Seven files used to be edited by nearly every pull request at the same line,
 so merging `main` into a branch conflicted in them almost every time. Each
 now takes a file per change, or takes nothing at all. Two pull requests write
 two paths; Git has nothing to merge. No merge driver or `.gitattributes
@@ -20,6 +20,7 @@ need no special handling.
 | A changed task/timer/process count | `tests/rolling-producer-owners.d/<slug>.toml` | `expected_occurrences` in `tests/playback/rolling-producer-owners.toml` |
 | A client fix anchor | `tests/client-fixes.d/<slug>.toml` | new rows in `tests/client-fixes.toml` |
 | A file under an existing functionality point | `validation/points.d/<slug>.toml` | that point's `paths` in `validation/points.toml` |
+| A patch to vendored hiqlite / hiqlite-wal | `vendor/<crate>/patches.d/<name>.toml` | a numbered row or the count in `PLURX-PATCH.md` |
 | An effort's status | `status.d/<YYYY-MM-DD>-<slug>.md` | `STATUS.md` |
 
 Name the file after the change (the branch or the subject), not after a
@@ -169,6 +170,18 @@ lane see them. A new point, check, timeout or setting still goes in
 `validation/points.toml`. Format:
 [validation/points.d/README.md](../../validation/points.d/README.md).
 
+## Vendored patches (`vendor/hiqlite*/patches.d/`)
+
+`PLURX-PATCH.md` numbered each patch and stated the total in words, and the
+ledger test repeated both. Every pull request that added a patch took "the
+next number" — four were open at once on 2026-11-15, all claiming 29. The
+numbered rows are closed; a later patch is a file keyed by its name, with the
+row's fields (`patch`, `kind`, `upstream`, `drop`) and its bullet as
+`description`. The same rules apply, a file named in a description counts as
+owned for `PLURX-FILES.toml`, and nothing states a total:
+`python3 -m validation.vendor_patches` derives it (rows plus files). Format:
+[vendor/hiqlite/patches.d/README.md](../../vendor/hiqlite/patches.d/README.md).
+
 ## Status (`status.d/`)
 
 One effort per file: `# Title`, then owner, state and a link to the ledger; at
@@ -190,7 +203,8 @@ The tool works out what the branch added to each shared file since it left
 back out, and three-way merges what is left with `main`'s copy — so each
 shared file ends exactly as `main` has it and the merge has no bookkeeping
 conflict left. It moves changelog lines, new client fix rows, count changes
-(with the review comment as the `reason`), paths added to a point, and status
+(with the review comment as the `reason`), paths added to a point, vendored
+patch rows with their bullets, and status
 entries (an update to an effort `main` already moved lands on that effort's
 file); it drops a claimed build number and the Android status narrative,
 which it prints so you can keep it in your fragment. Everything is staged,
@@ -205,8 +219,8 @@ in a status line or a `Build:` line in a new Apple fragment.
 ## What is still shared, and why
 
 Touches in the 150 `main` commits before 2026-11-15; the six above were
-CHANGELOG 53, owner counts 34, points.toml 31, client-fixes 22, STATUS.md 19
-and the build number.
+CHANGELOG 53, owner counts 34, points.toml 31, client-fixes 22, STATUS.md 19,
+the build number and the vendored patch ledgers.
 
 | File | Touches | Why it is not a per-change file yet |
 |---|---|---|
@@ -223,6 +237,6 @@ not bookkeeping.
 
 Kept honest by `tests/operations/test_shared_bookkeeping.py`,
 `test_migrate_bookkeeping.py`, `test_status_page_shape.py`,
-`test_release_cut.py`, `test_mobile_channels.py`,
+`test_release_cut.py`, `test_mobile_channels.py`, `test_hiqlite_patch_ledger.py`,
 and `tests/validation/test_mobile_build.py`, `test_mobile_versions.py` and
 `test_rolling_producer_ownership_inventory.py`.

@@ -49,6 +49,15 @@ STATUS_NEW = "# Status\n\nEach effort is a file under status.d/.\n\n## Older eff
 GRADLE = "android {\n        versionCode = {n}\n        versionName = \"0.8.0\"\n}\n"
 PROJECT = 'settings:\n    MARKETING_VERSION: "0.8.0"\n    CURRENT_PROJECT_VERSION: "{n}"\n'
 README_OLD = "# Android\n\nIntro.\n\n> Status: **v0.8.0**, build `207` — an old change.\n>\n> Build `206` — older.\n\nBody.\n"
+PATCHES = (
+    "# Vendored Hiqlite\n\nPlurx carries two patches.\n\n"
+    "| # | Patch | Kind | Upstream | Drop condition |\n|---:|---|---|---|---|\n"
+    "| 1 | First | generic bug | pending M6 | Upstream fixes it. |\n"
+    "| 2 | Second | plurx policy | — | Never; Plurx owns it. |\n\n"
+    "- The first patch.\n  Files: `src/a.rs`.\n- The second patch.\n  Files: `src/a.rs`.\n\n"
+    "Remove this vendor when (rows 1) retire and (rows 2) are unneeded.\n"
+)
+LEDGER_FILE = "vendor/hiqlite/PLURX-PATCH.md"
 README_NEW = "# Android\n\nIntro.\n\n> Status: **v0.8.0** — native viewer.\n\nBody.\n"
 
 
@@ -66,6 +75,7 @@ class MigrateBookkeepingCase(unittest.TestCase):
             "STATUS.md": STATUS_OLD, "clients/android/README.md": README_OLD,
             "clients/android/app/build.gradle.kts": GRADLE.replace("{n}", "207"),
             "clients/apple/project.yml": PROJECT.replace("{n}", "301"),
+            LEDGER_FILE: PATCHES,
         }.items():
             self.write(path, text)
         self.commit("old layout")
@@ -77,6 +87,7 @@ class MigrateBookkeepingCase(unittest.TestCase):
             "clients/android/README.md": README_NEW,
             "clients/android/app/build.gradle.kts": GRADLE.replace("{n}", "1"),
             "clients/apple/project.yml": PROJECT.replace("{n}", "1"),
+            LEDGER_FILE: PATCHES.replace("carries two patches", "carries two numbered patches"),
         }.items():
             self.write(path, text)
         self.commit("per-change layout")
@@ -127,6 +138,15 @@ class MigrateBookkeepingCase(unittest.TestCase):
             "> Status: **v0.8.0**, build `207` — an old change.",
             "> Status: **v0.8.0**, build `208` — the branch's change.\n>\n> Build `207` — an old change.",
         ))
+        self.write(LEDGER_FILE, PATCHES.replace("carries two patches", "carries three patches").replace(
+            "| 2 | Second | plurx policy | — | Never; Plurx owns it. |\n",
+            "| 2 | Second | plurx policy | — | Never; Plurx owns it. |\n"
+            "| 3 | Keep the writer alive | generic bug | pending M6 | Upstream delivers every reply. |\n",
+        ).replace(
+            "- The second patch.\n  Files: `src/a.rs`.\n",
+            "- The second patch.\n  Files: `src/a.rs`.\n"
+            "- The writer no longer panics on a dropped receiver.\n  Files: `src/a.rs`.\n",
+        ).replace("(rows 1)", "(rows 1 and 3)"))
         self.write("src/code.rs", "fn main() {}\n")
         self.commit("old-layout edits")
 
@@ -170,6 +190,18 @@ class MigrateBookkeepingCase(unittest.TestCase):
         self.assertEqual(
             self.read("status.d/2026-11-13-trim-fidelity.md"),
             "# Trim fidelity\n\nOwner Codex. Qualified; [ledger](../docs/x.md).\n",
+        )
+        # The patch the branch numbered 3 is a file keyed by name; the ledger,
+        # its count and its row lists are the target's again.
+        self.assertEqual(self.read(LEDGER_FILE), self.git("show", f"main:{LEDGER_FILE}").stdout)
+        patch = tomllib.loads(self.read("vendor/hiqlite/patches.d/keep-the-writer-alive.toml"))
+        self.assertEqual(
+            patch,
+            {
+                "patch": "Keep the writer alive", "kind": "generic bug", "upstream": "pending M6",
+                "drop": "Upstream delivers every reply.",
+                "description": "The writer no longer panics on a dropped receiver.\nFiles: `src/a.rs`.\n",
+            },
         )
         self.assertIn("the branch's change.", result.stdout, "the dropped narrative is shown")
         # Work that is not bookkeeping is untouched, and the merge can be committed.

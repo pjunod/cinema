@@ -40,7 +40,8 @@ decides what a session costs. Every agent working here, Claude or GPT:
   `status.d/<date>-<slug>.md` (`scripts/status` lists them); a client fix
   anchor is `tests/client-fixes.d/<slug>.toml`; a changed task/timer count is
   a `delta` row in `tests/rolling-producer-owners.d/<slug>.toml`; a file under
-  an existing functionality point is a row in `validation/points.d/<slug>.toml`.
+  an existing functionality point is a row in `validation/points.d/<slug>.toml`;
+  a patch to vendored hiqlite is `vendor/<crate>/patches.d/<name>.toml`.
   Do not edit `CHANGELOG.md`, `STATUS.md`, a build number or a status line:
   every pull request used to, and they conflicted on nearly every merge.
   [docs/ci/SHARED-BOOKKEEPING.md](docs/ci/SHARED-BOOKKEEPING.md) has each

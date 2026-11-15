@@ -40,7 +40,7 @@ import tomllib  # noqa: E402
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOL_ROOT))
 
-from validation import changelog_fragments, status_entries  # noqa: E402
+from validation import changelog_fragments, status_entries, vendor_patches  # noqa: E402
 from validation.mobile_build import ANDROID, APPLE  # noqa: E402
 
 CHANGELOG = "CHANGELOG.md"
@@ -49,6 +49,8 @@ OWNERS = "tests/playback/rolling-producer-owners.toml"
 CATALOG = "validation/points.toml"
 STATUS = "STATUS.md"
 ANDROID_README = "clients/android/README.md"
+PATCH_TEST = "tests/operations/test_hiqlite_patch_ledger.py"
+PATCH_PLAN = "docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md"
 OWNER_TABLES = ("symbols", "module_symbols", "module_structures")
 _NUMBER_LINES = {
     ANDROID: re.compile(r"(?m)^\s*versionCode\s*=\s*\d+\s*$"),
@@ -331,6 +333,111 @@ class Migration:
         stripped = self.same_but_for_blank_lines("\n".join(lines), base)
         self.settle(STATUS, stripped, base, theirs, f"{written} effort(s) -> {status_entries.DIRECTORY}/")
 
+    # --- vendor/*/PLURX-PATCH.md ------------------------------------------
+
+    def vendor_ledgers(self) -> None:
+        """Numbered rows a branch added become files under the crate's patches.d/.
+
+        A row and its bullet are moved together. What the branch then still
+        changed in the ledger is the count in words and the row lists of the
+        removal paragraph, which are derived now, so the target's ledger is
+        taken; any other remaining edit is left for the author.
+        """
+
+        row = re.compile(r"^\| (\d+) \| (.*?) \| (.*?) \| (.*?) \| (.*?) \|\s*$")
+        for crate in vendor_patches.CRATES:
+            path = f"{crate}/{vendor_patches.LEDGER}"
+            versions = self.versions(path)
+            if versions is None:
+                continue
+            base, ours, theirs = versions
+            titles = {m.group(2) for m in map(row.match, base.split("\n")) if m}
+            lines = ours.split("\n")
+            new_rows = [(i, m) for i, m in ((i, row.match(line)) for i, line in enumerate(lines))
+                        if m and m.group(2) not in titles]
+            if not new_rows:
+                continue
+            base_lines = set(base.split("\n"))
+            # The bullets the branch added, in order: one per new row.
+            bullets: list[list[int]] = []
+            for index, line in enumerate(lines):
+                if line.startswith("- ") and line not in base_lines:
+                    bullets.append([index])
+                elif bullets and line.startswith("  ") and bullets[-1][-1] == index - 1:
+                    # A continuation line belongs to its bullet even when the
+                    # same text (a `Files:` line) also occurs in another one.
+                    bullets[-1].append(index)
+            if len(bullets) != len(new_rows):
+                self.manual.append(
+                    f"{path}: {len(new_rows)} new row(s) but {len(bullets)} new bullet(s); "
+                    f"record each patch as {crate}/{vendor_patches.DIRECTORY}/<name>.toml by hand"
+                )
+                continue
+            drop: set[int] = set()
+            written = []
+            for (index, found), bullet in zip(new_rows, bullets):
+                _, title, kind, upstream, condition = found.groups()
+                text = "\n".join(lines[i][2:] for i in bullet)
+                name = "-".join(re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-").split("-")[:6])
+                fields = {"patch": title, "kind": kind, "upstream": upstream, "drop": condition}
+                body = "".join(f"{key} = {json.dumps(value, ensure_ascii=False)}\n" for key, value in fields.items())
+                body += f"description = '''\n{text}\n'''\n"
+                target = f"{crate}/{vendor_patches.DIRECTORY}/{name}.toml"
+                self.write(target, body)
+                written.append(target)
+                drop.update({index, *bullet})
+            kept = [line for i, line in enumerate(lines) if i not in drop]
+            start = next((i for i, line in enumerate(kept) if line.startswith("| # |")), 0)
+            end = next((i for i, line in enumerate(kept) if line.startswith("Remove this vendor")), len(kept))
+            base_kept = base.split("\n")
+            base_start = next((i for i, line in enumerate(base_kept) if line.startswith("| # |")), 0)
+            base_end = next((i for i, line in enumerate(base_kept) if line.startswith("Remove this vendor")), len(base_kept))
+            text = lambda rows: [line for line in rows if line.strip()]  # noqa: E731
+            if text(kept[start:end]) != text(base_kept[base_start:base_end]):
+                self.manual.append(
+                    f"{path}: patches moved to {', '.join(written)}, but the branch also edited "
+                    "existing rows or bullets; carry those edits over by hand"
+                )
+                continue
+            # Only the count and the removal paragraph's row lists differ now.
+            self.write(path, theirs)
+            self.done.append(f"{path}: {len(written)} patch(es) -> {', '.join(written)}")
+            self.patch_count_constants()
+
+    def patch_count_constants(self) -> None:
+        """The ledger test no longer states a total; put its constants back."""
+
+        versions = self.versions(PATCH_TEST)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        self.revert_lines(
+            PATCH_TEST,
+            r'PLURX-PATCH\.md", \d+\),$|^NUMBER_WORDS = |assertEqual\(len\(generic\), \d+\)'
+            r'|\("hiqlite(?:-wal)?", number\) for number in \(|generic rows',
+            "patch-count constants dropped (the count is derived)",
+        )
+        self.revert_lines(
+            PATCH_PLAN, r"generic rows pending", "restated pending-row count dropped (the count is derived)"
+        )
+
+    def revert_lines(self, path: str, pattern: str, what: str) -> None:
+        """Put the lines matching `pattern` back as the merge base had them."""
+
+        versions = self.versions(path)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        matcher = re.compile(pattern)
+        base_lines = [line for line in base.split("\n") if matcher.search(line)]
+        lines = ours.split("\n")
+        indexes = [i for i, line in enumerate(lines) if matcher.search(line)]
+        if len(indexes) != len(base_lines) or [lines[i] for i in indexes] == base_lines:
+            return
+        for index, line in zip(indexes, base_lines):
+            lines[index] = line
+        self.settle(path, "\n".join(lines), base, theirs, what)
+
     # --- build numbers ----------------------------------------------------
 
     def build_numbers(self) -> None:
@@ -393,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
               "(no changelog.d/); nothing to migrate to", file=sys.stderr)
         return 2
     for step in (migration.changelog, migration.client_fixes, migration.owners, migration.catalog,
-                 migration.status, migration.build_numbers, migration.android_readme):
+                 migration.status, migration.vendor_ledgers, migration.build_numbers,
+                 migration.android_readme):
         step()
 
     for line in migration.done:

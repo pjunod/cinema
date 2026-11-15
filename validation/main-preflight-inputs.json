@@ -255,6 +255,7 @@
       "id_prefix": "operations:test_hiqlite_patch_ledger.",
       "inputs": [
         "validation/__init__.py",
+        "validation/vendor_patches.py",
         "vendor/hiqlite/**",
         "vendor/hiqlite-wal/**",
         "vendor/s3-simple/Cargo.toml",
@@ -269,6 +270,7 @@
       "id_prefix": "operations:test_hiqlite_patch_ledger.ForkSourceManifestCase.test_manifest_matches_upstream",
       "inputs": [
         "validation/__init__.py",
+        "validation/vendor_patches.py",
         "vendor/hiqlite/**",
         "vendor/hiqlite-wal/**",
         "vendor/s3-simple/Cargo.toml",
@@ -4622,7 +4624,9 @@
         "vendor/bitvec_helpers/PLURX-PATCH.md",
         "vendor/dolby_vision/PLURX-PATCH.md",
         "vendor/hiqlite-wal/PLURX-PATCH.md",
+        "vendor/hiqlite-wal/patches.d/*.toml",
         "vendor/hiqlite/PLURX-PATCH.md",
+        "vendor/hiqlite/patches.d/*.toml",
         "vendor/rust_decimal/PLURX-PATCH.md",
         "vendor/s3-simple/PLURX-PATCH.md"
       ],

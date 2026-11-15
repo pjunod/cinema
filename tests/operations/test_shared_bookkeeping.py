@@ -125,6 +125,26 @@ class RepositoryCase(unittest.TestCase):
             "validation/points.d/<slug>.toml (`scripts/migrate-bookkeeping` does it)",
         )
 
+    def test_the_vendored_patch_ledgers_gain_no_numbered_rows(self):
+        """A new patch is a file under `patches.d/`, never "the next number"."""
+        import re
+
+        if not BASE:
+            self.skipTest("no merge base given (PLURX_VALIDATION_BASE)")
+        for crate in ("vendor/hiqlite", "vendor/hiqlite-wal"):
+            ledger = f"{crate}/PLURX-PATCH.md"
+            before = base_file(ledger)
+            if before is None:
+                continue
+            rows = lambda text: len(re.findall(r"(?m)^\| \d+ \|", text))  # noqa: E731
+            with self.subTest(ledger=ledger):
+                self.assertLessEqual(
+                    rows((ROOT / ledger).read_text(encoding="utf-8")),
+                    rows(before),
+                    f"{ledger}'s numbered table is closed: record the patch as "
+                    f"{crate}/patches.d/<name>.toml (`scripts/migrate-bookkeeping` does it)",
+                )
+
     def test_client_fix_fragments_load_with_the_ledger(self):
         ledger = load_client_fixes(ROOT / LEDGER)
         fragment_rows = [fix for fix in ledger.fixes if fix.origin is not None]
