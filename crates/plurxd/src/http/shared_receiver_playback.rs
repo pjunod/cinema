@@ -3694,10 +3694,6 @@ mod outage_policy_tests {
         );
     }
 
-    /// An empty exact read inside the owner's own lease can only be a
-    /// non-temporal fact (a revoked grant, a logout, a replaced owner): it
-    /// revokes at once. Only after the lease has passed is it unknown.
-
     /// A6 M3: the connection monitor's time term. A lapsed deadline wakes a
     /// look at once (1 ms past it), not a re-sleep; one still ahead (a
     /// renewal moved it) waits for it again.
@@ -3717,6 +3713,10 @@ mod outage_policy_tests {
         );
         assert!(wait.contains("std::pin::pin!(watch.changed())"));
     }
+
+    /// An empty exact read inside the owner's own lease can only be a
+    /// non-temporal fact (a revoked grant, a logout, a replaced owner): it
+    /// revokes at once. Only after the lease has passed is it unknown.
     #[test]
     fn receiver_absence_inside_the_lease_is_affirmative_and_after_it_unknown() {
         let owner = |now_ms, lease_expires_at_ms| {

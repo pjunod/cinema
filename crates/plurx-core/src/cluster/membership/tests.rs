@@ -10293,7 +10293,7 @@ mod floor_advisory {
             .answer(
                 tokio::time::Instant::now(),
                 AGE,
-                || async { Ok(*key.lock().unwrap()) },
+                || async { Ok(*key.lock().expect("key")) },
                 async {
                     reads.fetch_add(1, Ordering::SeqCst);
                     answer
@@ -10317,7 +10317,7 @@ mod floor_advisory {
         tokio::time::advance(Duration::from_millis(200)).await;
         assert_eq!(ask(&advisory, &key, &reads, Ok(true)).await, Ok(true));
         assert_eq!(reads.load(Ordering::SeqCst), 2);
-        *key.lock().unwrap() = 2;
+        *key.lock().expect("key") = 2;
         assert_eq!(ask(&advisory, &key, &reads, Ok(false)).await, Ok(false));
         assert_eq!(reads.load(Ordering::SeqCst), 3);
     }
@@ -10382,7 +10382,7 @@ mod floor_advisory {
         let slow = advisory.answer(
             tokio::time::Instant::now(),
             AGE,
-            || async { Ok::<_, ()>(*key.lock().unwrap()) },
+            || async { Ok::<_, ()>(*key.lock().expect("key")) },
             async {
                 reads.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(300)).await;
@@ -10402,10 +10402,10 @@ mod floor_advisory {
             .answer(
                 tokio::time::Instant::now(),
                 AGE,
-                || async { Ok::<_, ()>(*key.lock().unwrap()) },
+                || async { Ok::<_, ()>(*key.lock().expect("key")) },
                 async {
                     reads.fetch_add(1, Ordering::SeqCst);
-                    *key.lock().unwrap() = 2;
+                    *key.lock().expect("key") = 2;
                     Ok(true)
                 },
                 || (),
@@ -10456,7 +10456,7 @@ mod floor_advisory {
         let failing = advisory.answer(
             tokio::time::Instant::now(),
             AGE,
-            || async { Ok::<_, ()>(*key.lock().unwrap()) },
+            || async { Ok::<_, ()>(*key.lock().expect("key")) },
             async {
                 reads.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(900)).await;
