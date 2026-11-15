@@ -245,7 +245,6 @@ pub async fn post_create_backup(state: AppStateExt, headers: HeaderMap) -> Resul
         if leader == state.id {
             state
                 .raft_db
-                .raft
                 .client_write(QueryWrite::Backup((state.id, now)))
                 .await?;
         } else {
@@ -831,7 +830,6 @@ async fn handle_socket_concurrent(
                 ApiStreamRequestPayload::Execute(sql) => {
                     match state
                         .raft_db
-                        .raft
                         .client_write(QueryWrite::Execute(sql))
                         .await
                     {
@@ -862,7 +860,6 @@ async fn handle_socket_concurrent(
                 ApiStreamRequestPayload::ExecuteReturning(sql) => {
                     match state
                         .raft_db
-                        .raft
                         .client_write(QueryWrite::ExecuteReturning(sql))
                         .await
                     {
@@ -895,7 +892,6 @@ async fn handle_socket_concurrent(
                 ApiStreamRequestPayload::Transaction(queries) => {
                     match state
                         .raft_db
-                        .raft
                         .client_write(QueryWrite::Transaction(queries))
                         .await
                     {
@@ -966,7 +962,6 @@ async fn handle_socket_concurrent(
                 ApiStreamRequestPayload::Batch(sql) => {
                     match state
                         .raft_db
-                        .raft
                         .client_write(QueryWrite::Batch(sql))
                         .await
                     {
@@ -992,7 +987,6 @@ async fn handle_socket_concurrent(
                 ApiStreamRequestPayload::Migrate(migrations) => {
                     match state
                         .raft_db
-                        .raft
                         .client_write(QueryWrite::Migration(migrations))
                         .await
                     {
@@ -1018,7 +1012,6 @@ async fn handle_socket_concurrent(
                 ApiStreamRequestPayload::Backup((node_id, ts)) => {
                     match state
                         .raft_db
-                        .raft
                         .client_write(QueryWrite::Backup((node_id, ts)))
                         .await
                     {

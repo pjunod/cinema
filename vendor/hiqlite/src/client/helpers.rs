@@ -685,6 +685,11 @@ mod tests {
             addr_api: "node-nine:21000".to_owned(),
         };
         let recovery = tokio::spawn(async move { change_leader_and_wait(&tx, 9, node).await });
+        // One variant without `dashboard`, two with it.
+        #[cfg_attr(
+            not(feature = "dashboard"),
+            allow(clippy::infallible_destructuring_match)
+        )]
         let request = match rx.recv_async().await.expect("leader change request") {
             ClientStreamControl::Leader(request) => request,
             #[cfg(feature = "dashboard")]
@@ -752,6 +757,11 @@ mod tests {
         tokio::task::yield_now().await;
         time::advance(Duration::from_millis(500)).await;
         let _queued = rx.recv_async().await.expect("drain queued control message");
+        // One variant without `dashboard`, two with it.
+        #[cfg_attr(
+            not(feature = "dashboard"),
+            allow(clippy::infallible_destructuring_match)
+        )]
         let request = match rx.recv_async().await.expect("receive leader handoff") {
             ClientStreamControl::Leader(request) => request,
             #[cfg(feature = "dashboard")]
