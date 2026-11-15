@@ -1328,7 +1328,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v113: item ratings and per-person item lists (watchlist, favorites).
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
-    super::dv_title_jobs::SCHEMA,
+    super::dv_title_jobs::SCHEMA_V1,
     // v115: one-time playback handoff codes and their file-scoped tokens.
     super::playback_handoffs::SCHEMA,
     // v116: centrally fenced recomputable text subtitle translation slices.
@@ -1363,6 +1363,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::offload::SQLITE_MIGRATION,
     // v131: storage-domain changes are saved at once and applied when safe.
     super::storage_domain_pending::SCHEMA,
+    // v132: exact FEL outbox continuity and independent quality waiters.
+    super::dv_title_jobs::MIGRATION_V2,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

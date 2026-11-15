@@ -289,6 +289,31 @@ history remains true. Completed/unstarted positions retain start-over behavior;
 unknown-duration watched records retain conservative behavior. No saved watch
 state or watched flag is rewritten by this repair.
 
+## Android prepared playback follow-up
+
+The 2026-11-14 Android batch (build 205) preserves the executing quality after
+an optional Auto failure, keeps processed-route selection across later seeks,
+adopts the prepared control channel only after the accepted commit, and
+resolves full-VOD film time without treating the acquisition hint as a new
+origin. It checks successor playlist ownership and measures native seek
+settlement separately from buffer-readiness waiting. Server staging
+distinguishes outside cancellation from genuine refusal and reuses the existing
+rendering-triggered retry lifecycle.
+
+The control snapshot now reports its playhead against the title duration. A
+copy-HLS session that began at a resume point has a player timeline that starts
+at its media origin; clamping to that window's duration reported Axel F at
+4:16 as 2:06, and the processed upgrade staged its successor two minutes
+behind the viewer. On the corrected build the successor was staged at the
+viewer's position (262 s).
+
+Google TV evidence on this branch: Avatar P7 FEL processing-ON passed cold
+start, the original 23:24 failure point and the 50:58 resume (measured
+3840×2160 HDR10, FEL+RPU route, zero dropped frames and zero counted
+interruptions). Axel F and Air processing-ON did not yet reach their processed
+route; their causes are tracked in the owner's status page and are not claimed
+fixed here. Server changes are not deployed.
+
 ## Review and acceptance
 
 Astra independently reviewed causal claims and changes. Its rejected
