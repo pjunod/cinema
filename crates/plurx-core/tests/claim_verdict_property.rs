@@ -17,7 +17,19 @@ use plurx_core::store::SqliteStore;
 use std::fmt::Write;
 
 const NOW: i64 = 1_000_000;
-const CASES: usize = 2_000;
+/// Cases in an ordinary run. Each is a real statement inside a savepoint, a
+/// quarter of a second on a small machine, so the lane runs enough to reach
+/// every outcome (the tally at the end asserts that) and no more. Set
+/// `PLURX_CLAIM_PROPERTY_CASES` for a deeper run; 2,000 passed when this was
+/// written.
+const DEFAULT_CASES: usize = 400;
+
+fn cases() -> usize {
+    std::env::var("PLURX_CLAIM_PROPERTY_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_CASES)
+}
 
 /// xorshift64*: a fixed seed, no dependency.
 struct Rng(u64);
@@ -143,7 +155,8 @@ async fn the_verdict_and_the_admissible_listing_agree_with_the_claim_statement()
     let others = &jobs[1..];
     let mut rng = Rng(0x5EED_CAFE_F00D_0001);
     let mut tally = std::collections::BTreeMap::<String, usize>::new();
-    for case in 0..CASES {
+    let cases = cases();
+    for case in 0..cases {
         let mut state = String::new();
         db.execute_batch("SAVEPOINT case_state")
             .expect("case savepoint");
@@ -304,7 +317,7 @@ async fn the_verdict_and_the_admissible_listing_agree_with_the_claim_statement()
         db.execute_batch("ROLLBACK TO case_state; RELEASE case_state")
             .expect("case rollback");
     }
-    eprintln!("verdict tally over {CASES} cases: {tally:?}");
+    eprintln!("verdict tally over {cases} cases: {tally:?}");
     for outcome in [
         "admit",
         "state",
