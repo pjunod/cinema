@@ -108,7 +108,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 207
+        versionCode = 1
         versionName = "0.8.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -119,6 +119,11 @@ android {
     if (providers.gradleProperty("plurxIsolatedBudgetProbe").orNull == "true") {
         testBuildType = "capabilityProbe"
     }
+
+    // The tree carries the development build above and no change edits it. A
+    // store or sideload build is numbered from the commit it is built from
+    // (validation/mobile_build.py) and passes that number here.
+    providers.gradleProperty("plurxBuildNumber").orNull?.let { defaultConfig.versionCode = it.toInt() }
 
     signingConfigs {
         create("release") {

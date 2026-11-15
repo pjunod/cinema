@@ -3,8 +3,8 @@
 **Status:** live. Owner: `scripts/paperwork`. Added 2026-10-17.
 
 Most CI failures on a pull request here are not about code. A doc was added
-without its index row, a client change shipped without a release-counter
-bump, a real host name slipped into the tree, a `fix(` commit had no
+without its index row, an entry went into a shared file instead of its own,
+a real host name slipped into the tree, a `fix(` commit had no
 `Regression-Test:` line. Each is a rule with a test behind it, and each used
 to be learned by failing a lane 15–40 minutes after pushing — after the
 compile fan-out had already been spent.
@@ -28,8 +28,7 @@ failures; they never execute a publisher with a persistent credential:
 
 | Rule | The fix it applies |
 |---|---|
-| Apple release counter | `make apple-build-bump` above the merge target (every generated surface, the branch's fragments) |
-| Android release counter | `versionCode` one above the merge target's, and the README status line's build |
+| A claimed build number | `versionCode` and `CURRENT_PROJECT_VERSION` back to the development build; the release assigns the real one ([SHARED-BOOKKEEPING.md](SHARED-BOOKKEEPING.md#store-build-numbers)) |
 | Real host names | `scripts/scrub-infra-names --write`, kept only in Markdown files |
 | Missing index row | a row in `docs/<area>/README.md` with the doc's `# ` title and its `**Status:**` word (`open` if none); improve the wording later if you like |
 
@@ -68,12 +67,13 @@ opening its pull request, before any compiler job is allocated.
 |---|---|---|
 | Every governed file maps to a functionality point | `scripts/validate lint` | map the file in `validation/points.toml` |
 | A `fix(`/`perf(` commit carries `Regression-Test: <path>::<test>` in the PR description | `validation.regression_field` (locally a reminder; in CI against the description) | add the line; whoever merges copies it into the landing commit (`--landing-lines`) |
-| Client changes raise the Apple and Android release counters | `validation.mobile_versions` (changed-from the merge base) | `make apple-build-bump`; raise Android `versionCode` and its README status line |
+| No branch claims a store build number | `validation.mobile_versions` | `make paperwork-fix` |
+| Changelog entries and client fix anchors are one file per change | `test_shared_bookkeeping` | move the entry into `changelog.d/` or `tests/client-fixes.d/` ([SHARED-BOOKKEEPING.md](SHARED-BOOKKEEPING.md)) |
 | Every doc under `docs/` has an index row; no reference names a missing `docs/` path | `test_docs_index` | add the row to the doc's folder index in the same commit |
 | The tree names no real host, address, home or SSH user | `test_infra_names` | `scripts/scrub-infra-names --write`, or an allow-list row with its reason |
 | `docs/API.md` lists every route | `test_api_doc_routes` | add or delete the route entry |
-| Build claims are generated, not hand-edited | `test_apple_build_claims`, `test_mobile_build_claims` | `make apple-build-bump`; a user-visible change also gets a `docs/apple-builds/` fragment |
-| `STATUS.md` stays short and indexes what moved out | `test_status_page_shape` | move the oldest sections per [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) §3.4 |
+| No status document states a build number or carries per-build narrative | `test_apple_build_claims`, `test_mobile_build_claims` | drop the number; put the sentence in a changelog fragment (Apple: also a `docs/apple-builds/` fragment) |
+| `STATUS.md` is a fixed page; each effort is a short file under `status.d/` | `test_status_page_shape` | put the effort in `status.d/<date>-<slug>.md` |
 | No status page calls a merged PR open | `test_status_pr_claims` | update the quoted prose |
 | Doc `**Status:**` headers make possible claims | `test_doc_status_audit` | correct the header |
 | Every Node web test is in a lane | `test_web_test_inventory` | add the file to `make web-unit-check` |

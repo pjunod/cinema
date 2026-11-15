@@ -22,17 +22,25 @@ knowing what it bought.
 
 [mobile-channels.yml](../.github/workflows/mobile-channels.yml) runs after a
 push to `main` on Forgejo. It compares the complete push range using the same
-release-input paths as [the build-counter validator](../validation/mobile_versions.py).
+release-input paths as [the mobile version validator](../validation/mobile_versions.py).
 Apple source, resources or project metadata select iOS and tvOS TestFlight;
 Android release source or build metadata select Google Play **internal testing**.
 Docs, native test changes and server changes alone do not allocate a signing
-runner. Contributors still bump the affected build counter in their pull
-request; this job preserves those numbers rather than committing a new bump.
+runner. A change confined to comments is not built either.
 
-A platform publishes only if no client path changed after the `main`
-commit that landed its counter (first-parent, so an early bump in a merged PR
-counts). Otherwise the log says `skipping Cinema <platform>` and the next bump
-publishes it. The controller guard must use the same first-parent rule.
+No pull request bumps a build number. The job numbers the build itself: the
+number is the count of commits in the `main` commit it releases
+(`make mobile-build-number`), so it rises with every release and is the same
+on Apple and Android. The controller reads the number from the manifests of
+the commit it checks out, so the job hands it that commit plus one unpushed
+*stamp commit* that writes the number into `project.yml` and
+`build.gradle.kts`; receipts name the stamp commit, whose parent is the
+`main` commit. Every changed platform publishes — there is no claimed number
+to wait for. A store refuses the same number twice, so re-uploading after a
+rejected build needs a newer `main` commit; a manual retry releases the
+newest `main`, which normally is one.
+[SHARED-BOOKKEEPING.md](ci/SHARED-BOOKKEEPING.md#store-build-numbers) has the
+reasoning.
 
 The job calls `media/mobile-channels.yml` in the private Ansible repository,
 selecting `cinema` only. This channel playbook is separate from the physical
@@ -402,11 +410,13 @@ Two numbers, and they are not the same number:
 | Key | Where | Rule |
 |---|---|---|
 | `MARKETING_VERSION` | `project.yml` | The version humans see — `0.1.0`. Tracks the server's number ([RELEASING.md](RELEASING.md)) so a bug report naming one identifies the other |
-| `CURRENT_PROJECT_VERSION` | `project.yml` | The build number. **Must strictly increase on every upload**, including uploads that get rejected, expire, or that you delete |
+| `CURRENT_PROJECT_VERSION` | `project.yml` | The build number. `1` in the tree (a development build); the release job writes the real one. **Must strictly increase on every upload**, including uploads that get rejected, expire, or that you delete |
 
 App Store Connect rejects a duplicate build number at upload time, after the
-whole archive has finished — so bump it before you archive, not after you wait
-twenty minutes to be told.
+whole archive has finished. The number is the commit count of the commit being
+released ([above](#publishing-the-apps--testflight-the-app-store-and-google-play)),
+so never archive for upload from an unstamped checkout: use the release job,
+or `scripts/ship-physical`, which stamps its own worktree.
 
 ### 2.3 Archive and upload
 

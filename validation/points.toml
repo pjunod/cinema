@@ -94,7 +94,7 @@ timeout_seconds = 30
 
 [[checks]]
 id = "mobile-version"
-title = "Changed mobile apps advance their store build numbers"
+title = "Mobile versions are coherent and the tree claims no store build number"
 command = "python3 -m validation.mobile_versions"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["git", "python3"]
@@ -1247,6 +1247,7 @@ paths = [
   "scripts/vod-probe-fixtures.sh",
   "scripts/vod-probe-stub",
   "tests/playback/**",
+  "tests/rolling-producer-owners.d/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff", "audio-synthetic-receipt"]
 depends_on = ["core.media", "server.api", "library.catalog"]
@@ -1488,7 +1489,7 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "mobile.versioning"
 title = "Mobile release versioning"
-contract = "Shipped Apple and Android changes advance their store build counters, both marketing versions track the workspace release, and every copy of the Apple build number is generated from project.yml rather than written by hand."
+contract = "Both marketing versions track the workspace release; the tree and its status documents carry no store build number, because a build is numbered from the commit it is released from; and that number rises with every release of main."
 paths = [
   "Cargo.toml",
   "clients/apple/README.md",
@@ -1673,6 +1674,7 @@ paths = [
   "scripts/paperwork-fix",
   "validation/pr_event.py",
   "scripts/outline",
+  "scripts/status",
   "scripts/quiet",
   "tests/operations/test_quiet.py",
   "scripts/ci-failures",

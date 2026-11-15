@@ -1081,15 +1081,17 @@ pins the Compose project and state mount, configurable HTTP/discovery ports,
 discovery networking, build stamp, real Apple/Android ship targets, concrete
 CI simulators, container port/state/cleanup behavior, and copy-video reporting.
 
-The same operations gate extracts current mobile build claims from the Apple
-and Android READMEs, the Apple parity document, and the status page. Those
-claims must match `CURRENT_PROJECT_VERSION` and `versionCode`; advancing a
-client build without its user-facing status documents is red before a PR opens.
+The same operations gate refuses a store build number in the Apple and
+Android READMEs' status lines, the Apple parity document's, and the status
+page. A build is numbered when it is released
+([SHARED-BOOKKEEPING.md](ci/SHARED-BOOKKEEPING.md#store-build-numbers)), so a
+document cannot keep "the current build" true, and keeping it true was an
+edit every client pull request made to the same line.
 
 The READMEs and the parity document each carry exactly one anchored `> Status:`
-line, so the gate reads a single declared current claim from them. `STATUS.html`
+line, which names the version only. `STATUS.html`
 has no such anchor — it is prose, and every Apple build number in it is treated
-as a current claim. That page also has to narrate history, and a sentence like
+as a current claim, which is refused. That page also has to narrate history, and a sentence like
 "build 52 corrected the reported iPad mini failure" stays true after the next
 bump while a regex cannot see its tense. Mark such a mention explicitly:
 
@@ -1137,56 +1139,39 @@ attribute-name case, surrounding whitespace and line breaks, and a quoted
 attribute value containing `>` all still match. `tests/operations/test_mobile_build_claims.py`
 pins both lists.
 
-Android needs no equivalent. Its build claim is read only from the anchored
-`> Status:` line in `clients/android/README.md`, and no whole-file sweep runs
+Android needs no equivalent. Only the anchored `> Status:` line in
+`clients/android/README.md` is checked for a build number, and no whole-file sweep runs
 against Android numbers anywhere, so a historical Android mention cannot break
 the gate. `STATUS.html`'s Android build numbers are consequently unvalidated —
 the opposite gap, and out of scope here; adding that coverage would mean
 adopting the same marker for the historical Android mentions the page already
 carries.
 
-### Who owns the Apple build number
+### Who owns the build number
 
-The number is claimed once, in `clients/apple/project.yml`. Every other copy is
-**generated** from it by `make apple-build-bump`
-(`validation/apple_build.py`), and `tests/operations/test_apple_build_claims.py`
-re-renders the tree to prove no copy was hand-edited. The generated copies are
-exactly the ones the sweep above already reads:
+Nobody in the tree. `clients/apple/project.yml` and
+`clients/android/app/build.gradle.kts` carry the development build, `1`, and
+`validation/mobile_versions.py` refuses any other value. The release job
+numbers a store build from the commit it releases
+(`validation/mobile_build.py`); before 2026-11-15 every client branch claimed
+the next number in the manifest and in up to five generated copies, and the
+second of two branches to merge had to claim again.
 
-| Surface | Occurrence |
-| --- | --- |
-| `clients/apple/project.yml` | `CURRENT_PROJECT_VERSION` — the only load-bearing claim |
-| `clients/apple/README.md` | the anchored `> Status:` line |
-| `docs/clients/APPLE-CLIENT-PARITY.md` | the anchored `> Status (date):` line |
-| `docs/STATUS.html` | the viewers tile and the `👤 Paul` TestFlight upload item |
+Per-change narrative lives in `docs/apple-builds/` (one file per Apple
+change, named after the issue) and in `changelog.d/`. Before issue #509 the
+Apple narrative sat at a shared insertion point in the two `> Status:`
+blockquotes, and the Android README carried a paragraph per build there until
+2026-11-15 (`clients/android/BUILD-HISTORY.md`). Builds through 78 are
+archived verbatim in `docs/apple-builds/history-through-build-78.md`.
 
-Per-build narrative is **not** one of them. It lives in `docs/apple-builds/`,
-one file per change, named after the issue rather than the build. Before issue
-#509 that narrative sat at a shared insertion point in the two `> Status:`
-blockquotes and in a growing parenthetical on the `👤 Paul` item, so any two
-concurrent Apple branches conflicted on all three and re-conflicted every time
-`main` moved — while the number itself merged clean, because both branches
-wrote the same next value, into a tree where that value was already taken.
-Builds through 78 are archived verbatim in
-`docs/apple-builds/history-through-build-78.md`.
-
-The relocation is enforced, not merely documented: neither anchored `> Status`
-blockquote may contain a `Build <n> …` sentence. The ban stops at the
-blockquote. Body prose may still narrate a past build — `APPLE-CLIENT-PARITY.md`
-explains under its own headings how a behaviour came to be — because those
-sentences never accumulate at a shared offset, and banning them would push
-authors to reword true prose, which is the same failure `data-build-history`
-exists to prevent on `STATUS.html`.
-
-Nothing above is relaxed. `validation/mobile_versions.py` still requires the
-counter to increase past the **merge target** whenever Apple release inputs
-change, and the claim still has to agree across all four documents. What changed
-is that re-claiming after the base moves is `git merge origin/main` followed by
-`make apple-build-bump` — a sync Git resolves by itself plus one mechanical
-commit — instead of three prose merges and six hand-edited mentions that had
-already merged clean and wrong. The order matters: claiming before the sync
-leaves the branch two above the base while `main` holds one above it, on the
-same line.
+The relocation is enforced, not merely documented: no anchored `> Status`
+blockquote — Apple README, Android README, parity — may contain a
+`Build <n> …` sentence. The ban stops at the blockquote. Body prose may still
+narrate a past build — `APPLE-CLIENT-PARITY.md` explains under its own
+headings how a behaviour came to be — because those sentences never
+accumulate at a shared offset, and banning them would push authors to reword
+true prose, which is the same failure `data-build-history` exists to prevent
+on `STATUS.html`.
 
 The four `👤 device` acceptance items in `STATUS.html` deliberately no longer
 name a build. They are forward-looking instructions rather than evidence, so

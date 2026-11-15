@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from validation import mobile_build
 from validation.mobile_channels import (
     changed_platforms,
     main,
@@ -34,7 +35,15 @@ class MobileChannelsCase(unittest.TestCase):
         self.run_git("config", "user.name", "Test")
         self.run_git("config", "user.email", "test@example.invalid")
         self.run_git("remote", "add", "origin", str(self.source))
+        # Both manifests carry the development build, as the tree does.
+        self.commit("clients/apple/project.yml", 'CURRENT_PROJECT_VERSION: "1"\n')
+        self.commit("clients/android/app/build.gradle.kts", "versionCode = 1\n")
         self.base = self.commit("README.md")
+        # Fixture histories are a handful of commits; the real floor is the
+        # last number the stores hold.
+        floor = patch.dict(mobile_build.LAST_CLAIMED, {"apple": 0, "android": 0})
+        floor.start()
+        self.addCleanup(floor.stop)
         self.ansible = self.root / "ansible"
         self.ansible.mkdir()
         (self.ansible / "mobile-channels.yml").touch()
@@ -74,16 +83,14 @@ class MobileChannelsCase(unittest.TestCase):
         self.run_git("commit", "-m", "fixture")
         return self.run_git("rev-parse", "HEAD")
 
-    def bump(self, platform: str, build: int) -> str:
+    def change(self, platform: str, revision: int) -> str:
+        """A client source change. No commit in these tests claims a number."""
         if platform == "apple":
-            return self.commit("clients/apple/project.yml", f'CURRENT_PROJECT_VERSION: "{build}"\n')
-        return self.commit("clients/android/app/build.gradle.kts", f"versionCode = {build}\n")
+            return self.commit("clients/apple/Sources/Shared/Player.swift", f"let revision = {revision}\n")
+        return self.commit("clients/android/app/src/main/Player.kt", f"val revision = {revision}\n")
 
-    def scope(self, base: str, head: str) -> tuple[list[str], str]:
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            platforms = scope_platforms(self.source, base, head)
-        return platforms, err.getvalue()
+    def pin_git(self, pin: Path, *args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(pin), *args], text=True).strip()
 
     def test_scope_uses_complete_push_range_and_ignores_tests_and_docs(self) -> None:
         self.commit("clients/apple/Sources/Shared/Player.swift")
@@ -103,15 +110,20 @@ class MobileChannelsCase(unittest.TestCase):
         self.assertEqual(platforms_for_paths(("clients/android/app/build.gradle.kts",)), ["android"])
 
     def test_first_push_selects_only_existing_mobile_sources_and_invalid_revision_fails(self) -> None:
-        self.assertEqual(changed_platforms(self.source, "0" * 40, self.base, initial_push=True), [])
-        head = self.commit("clients/apple/Sources/Shared/Player.swift")
+        self.assertEqual(
+            changed_platforms(self.source, "0" * 40, self.base, initial_push=True),
+            ["ios", "tvos", "android"],
+        )
+        self.run_git("rm", "-q", "-r", "clients/android")
+        self.run_git("commit", "-m", "drop the Android client")
+        head = self.run_git("rev-parse", "HEAD")
         self.assertEqual(changed_platforms(self.source, "0" * 40, head, initial_push=True), ["ios", "tvos"])
         with self.assertRaises(ValueError):
             changed_platforms(self.source, "--option", self.base)
 
     def test_queued_release_includes_newer_main_and_enforces_internal_track(self) -> None:
-        trigger = self.bump("apple", 2)
-        self.bump("android", 2)
+        trigger = self.change("apple", 2)
+        self.change("android", 2)
         with patch.dict(os.environ, {"PLURX_MOBILE_VARS_FILE": str(self.root / "local vars.yml")}):
             release(self.base, trigger)
         command = json.loads((self.root / "command.json").read_text())
@@ -124,25 +136,36 @@ class MobileChannelsCase(unittest.TestCase):
         head = self.run_git("rev-parse", "HEAD")
         pin = Path(variables["mobile_release_repositories"]["cinema"]["source_path"])
         self.assertEqual(pin, self.root / "state" / "pinned-source.git")
-        self.assertEqual(subprocess.check_output(["git", "-C", str(pin), "rev-parse", "main"], text=True).strip(), head)
-        self.assertEqual(variables["mobile_release_expected_commits"], {"cinema": head})
+        # The controller is given the newest main plus the build-number stamp.
+        stamped = self.pin_git(pin, "rev-parse", "main")
+        self.assertEqual(self.pin_git(pin, "rev-parse", "main^"), head)
+        self.assertEqual(variables["mobile_release_expected_commits"], {"cinema": stamped})
+        build = int(self.run_git("rev-list", "--count", head))
+        self.assertEqual(
+            self.pin_git(pin, "show", "main:clients/android/app/build.gradle.kts"),
+            f"versionCode = {build}",
+        )
+        self.assertEqual(
+            self.pin_git(pin, "show", "main:clients/apple/project.yml"),
+            f'CURRENT_PROJECT_VERSION: "{build}"',
+        )
 
     def test_store_failure_is_not_reported_as_success(self) -> None:
-        head = self.bump("android", 2)
+        head = self.change("android", 2)
         with patch.dict(os.environ, {"PLAY_EXIT": "9"}):
             with self.assertRaises(subprocess.CalledProcessError):
                 release(self.base, head)
 
     def test_apple_only_update_never_builds_or_submits_android(self) -> None:
         self.commit("clients/apple/Sources/Shared/Player.swift")
-        head = self.bump("apple", 2)
+        head = self.change("apple", 2)
         release(self.base, head)
         command = json.loads((self.root / "command.json").read_text())
         self.assertEqual(json.loads(command[-1])["mobile_release_channels_platforms"], ["ios", "tvos"])
 
     def test_android_only_update_never_builds_or_submits_apple(self) -> None:
         self.commit("clients/android/app/src/main/AndroidManifest.xml")
-        head = self.bump("android", 2)
+        head = self.change("android", 2)
         release(self.base, head)
         command = json.loads((self.root / "command.json").read_text())
         self.assertEqual(json.loads(command[-1])["mobile_release_channels_platforms"], ["android"])
@@ -194,38 +217,42 @@ class MobileChannelsCase(unittest.TestCase):
                 release(self.base, self.base)
         self.assertFalse((self.root / "command.json").exists())
 
-    def test_client_change_without_a_bump_is_skipped_not_failed(self) -> None:
-        bumped = self.bump("apple", 2)
-        self.bump("android", 2)
-        head = self.commit("clients/apple/Sources/Shared/Player.swift")
-        platforms, warning = self.scope(bumped, head)
-        self.assertEqual(platforms, ["android"])
-        self.assertIn("skipping Cinema apple", warning)
-        self.assertIn("clients/apple/Sources/Shared/Player.swift", warning)
-        platforms, _ = self.scope(self.base, head)
-        self.assertEqual(platforms, ["android"])
-        only_apple = self.commit("clients/apple/Sources/Shared/Other.swift")
-        with contextlib.redirect_stderr(io.StringIO()):
-            release(head, only_apple)
-        self.assertFalse((self.root / "command.json").exists())
+    def test_every_client_change_publishes_without_a_claimed_number(self) -> None:
+        # The old guard skipped a platform whose sources changed after its
+        # number was last claimed, until some later commit claimed one. No
+        # commit claims a number now, and each push publishes what it changed.
+        first = self.change("apple", 1)
+        self.assertEqual(scope_platforms(self.source, self.base, first), ["ios", "tvos"])
+        second = self.change("apple", 2)
+        self.assertEqual(scope_platforms(self.source, first, second), ["ios", "tvos"])
+        release(first, second)
+        variables = json.loads(json.loads((self.root / "command.json").read_text())[-1])
+        self.assertEqual(variables["mobile_release_channels_platforms"], ["ios", "tvos"])
 
-    def test_merged_bump_counts_even_when_older_than_the_branch_sources(self) -> None:
-        # The controller guard took the last non-merge bump commit, so a
-        # branch that bumped early and edited sources afterwards was refused
-        # after it merged. Main's first-parent history sees one merge.
-        self.bump("apple", 2)
-        main_tip = self.run_git("rev-parse", "HEAD")
-        self.run_git("switch", "-q", "-c", "feature")
-        self.bump("apple", 3)
-        self.commit("clients/apple/Sources/Shared/Player.swift")
-        self.run_git("switch", "-q", "main")
-        self.commit("docs/PUBLISHING.md")
-        self.run_git("merge", "--no-ff", "-q", "-m", "merge feature", "feature")
-        merged = self.run_git("rev-parse", "HEAD")
-        platforms, warning = self.scope(main_tip, merged)
-        self.assertEqual((platforms, warning), (["ios", "tvos"], ""))
-        later = self.commit("clients/apple/Resources/Strings.txt")
-        self.assertEqual(self.scope(merged, later)[0], [])
+    def test_each_release_is_stamped_with_a_higher_number_than_the_last(self) -> None:
+        builds = []
+        previous = self.base
+        for revision in (1, 2, 3):
+            head = self.change("android", revision)
+            release(previous, head)
+            variables = json.loads(json.loads((self.root / "command.json").read_text())[-1])
+            pin = Path(variables["mobile_release_repositories"]["cinema"]["source_path"])
+            builds.append(int(self.pin_git(
+                pin, "show", "main:clients/android/app/build.gradle.kts").split("=")[1]))
+            previous = head
+        self.assertEqual(builds, sorted(set(builds)))
+
+    def test_a_comment_only_client_change_publishes_nothing(self) -> None:
+        self.commit("clients/android/app/src/main/Player.kt", "val revision = 1\n")
+        before = self.run_git("rev-parse", "HEAD")
+        head = self.commit("clients/android/app/src/main/Player.kt", "// A note.\nval revision = 1\n")
+        self.assertEqual(scope_platforms(self.source, before, head), [])
+
+    def test_a_claimed_number_in_the_tree_refuses_the_release(self) -> None:
+        head = self.commit("clients/android/app/build.gradle.kts", "versionCode = 208\n")
+        with self.assertRaisesRegex(ValueError, "already stamped or was edited by hand"):
+            release(self.base, head)
+        self.assertFalse((self.root / "command.json").exists())
 
     def test_merges_during_the_build_do_not_move_the_published_commit(self) -> None:
         # The controller fetches origin/main before the build and again before
@@ -246,40 +273,32 @@ class MobileChannelsCase(unittest.TestCase):
             "head = subprocess.check_output(['git', '-C', tree, 'rev-parse', 'HEAD'], text=True).strip()\n"
             "Path(os.environ['CAPTURE']).write_text(json.dumps([before, after, head]))\n"
         )
-        head = self.bump("android", 2)
+        head = self.change("android", 2)
         release(self.base, head)
         before, after, built = json.loads((self.root / "command.json").read_text())
-        self.assertEqual((before, after, built), (head, head, head))
+        self.assertEqual(before, after)
+        self.assertEqual(built, before)
+        pin = self.root / "state" / "pinned-source.git"
+        self.assertEqual(self.pin_git(pin, "rev-parse", f"{built}^"), head)
         self.assertNotEqual(self.run_git("rev-parse", "HEAD"), head)
         # A later release re-pins to the newer main.
-        newer = self.bump("android", 3)
+        newer = self.change("android", 3)
         release(head, newer)
-        self.assertEqual(json.loads((self.root / "command.json").read_text())[0], newer)
-
-    def test_controller_with_the_old_guard_is_refused_before_building(self) -> None:
-        guard = self.ansible / "library" / "noirr_mobile_release_guard.py"
-        guard.parent.mkdir()
-        guard.write_text('["log", "-1", "--format=%H", "-G"]\n')
-        head = self.bump("android", 2)
-        with self.assertRaisesRegex(ValueError, "first-parent"):
-            release(self.base, head)
-        self.assertFalse((self.root / "command.json").exists())
-        guard.write_text('["log", "-1", "--first-parent", "--diff-merges=first-parent", "-G"]\n')
-        with contextlib.redirect_stdout(io.StringIO()):
-            release(self.base, head)
-        self.assertTrue((self.root / "command.json").exists())
+        repinned = json.loads((self.root / "command.json").read_text())[0]
+        self.assertEqual(self.pin_git(pin, "rev-parse", f"{repinned}^"), newer)
 
     def test_pin_drops_refs_left_by_an_earlier_run(self) -> None:
         state = self.root / "state"
         state.mkdir()
-        first = self.bump("android", 2)
-        pin = pinned_source(self.source, state, first)
+        first = self.change("android", 2)
+        pin, _ = pinned_source(self.source, state, first, 7)
         subprocess.run(["git", "-C", str(pin), "update-ref", "refs/remotes/origin/stale", first], check=True)
-        second = self.bump("android", 3)
-        pinned_source(self.source, state, second)
+        second = self.change("android", 3)
+        _, stamped = pinned_source(self.source, state, second, 8)
         refs = subprocess.check_output(["git", "-C", str(pin), "for-each-ref", "--format=%(refname)"], text=True).split()
         self.assertEqual(refs, ["refs/heads/main"])
-        self.assertEqual(subprocess.check_output(["git", "-C", str(pin), "rev-parse", "main"], text=True).strip(), second)
+        self.assertEqual(self.pin_git(pin, "rev-parse", "main"), stamped)
+        self.assertEqual(self.pin_git(pin, "rev-parse", "main^"), second)
 
     def test_rewritten_history_does_not_publish_an_unrelated_main(self) -> None:
         trigger = self.commit("clients/apple/project.yml")

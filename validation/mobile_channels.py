@@ -11,79 +11,32 @@ import re
 import subprocess
 import sys
 
+from validation import mobile_build
 from validation.mobile_versions import (
     ANDROID_RELEASE_FILES,
     ANDROID_RELEASE_PATHS,
     APPLE_RELEASE_FILES,
     APPLE_RELEASE_PATHS,
+    _touches_shipped_bytes,
 )
 
 
-# The signing controller's release guard (noirr_mobile_release_guard, kind
-# "plurx") refuses a platform whose client paths changed after its last
-# build-number update. Mirror its layout here so the workflow skips such a
-# platform with a warning instead of starting a build the guard will refuse.
-# Keep this table in step with the controller's LAYOUTS["plurx"].
-_README = r"(^|/)README(?:\.[^/]*)?$"
-GUARD_LAYOUT = {
-    "apple": ("clients/apple/project.yml", "CURRENT_PROJECT_VERSION", "clients/apple",
-              (r"(^|/)Tests?/", _README)),
-    "android": ("clients/android/app/build.gradle.kts", "versionCode", "clients/android",
-                (r"(^|/)src/(?:test|androidTest)/", _README)),
-}
-
-
-def _guard_group(platform: str) -> str:
-    return "android" if platform == "android" else "apple"
-
-
-def unbumped_changes(root: Path, head: str, platform: str) -> list[str]:
-    """Client paths changed on main since this platform's build number landed.
-
-    The bump is found along main's first-parent history and merge commits are
-    diffed against their first parent, so a pull request whose bump commit is
-    older than its later source commits still counts as bumped when it merges:
-    the merge is the moment both reached main together. An empty list means
-    the platform is releasable at ``head``.
-    """
-    metadata, pattern, client, ignored = GUARD_LAYOUT[_guard_group(platform)]
-    bump = git(root, "log", "-1", "--first-parent", "--diff-merges=first-parent", "--no-patch",
-               "--format=%H", "-G", pattern, head, "--", metadata)
-    if not bump:
-        return [metadata]
-    changed = git(root, "diff", "--no-renames", "--name-only", "-z", bump, head, "--", client)
-    return [path for path in changed.rstrip("\0").split("\0")
-            if path and not any(re.search(rule, path) for rule in ignored)]
-
-
-def releasable_platforms(root: Path, head: str, platforms: list[str]) -> list[str]:
-    """Drop platforms the controller guard would refuse, saying why on stderr."""
-    ready = []
-    reasons: dict[str, list[str]] = {}
-    for platform in platforms:
-        group = _guard_group(platform)
-        if group not in reasons:
-            reasons[group] = unbumped_changes(root, head, platform)
-        if reasons[group]:
-            continue
-        ready.append(platform)
-    for group, paths in reasons.items():
-        if paths:
-            shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
-            print(f"mobile channels: skipping Cinema {group}: changed after its last build-number "
-                  f"update ({shown}); the next build-number bump on main publishes it.",
-                  file=sys.stderr, flush=True)
-    return ready
-
-
-def pinned_source(source: Path, state: Path, commit: str) -> Path:
-    """A bare repository whose ``main`` stays at ``commit`` for the whole build.
+def pinned_source(source: Path, state: Path, commit: str, build: int) -> tuple[Path, str]:
+    """A bare repository whose ``main`` is ``commit`` stamped as ``build``.
 
     The controller fetches ``origin/main`` before building and again before
     publishing, and refuses when the two differ. Pointed at the live checkout
     that comparison fails whenever anything merges during a build, which on
     this repository is most builds. Its remote is itself, so both fetches see
     the commit this job chose; objects come from the source checkout.
+
+    The controller also reads the build number from the two manifests of the
+    commit it checks out, and refuses a platform whose client paths changed
+    after the manifest's number last changed. The tree carries no claimed
+    number (validation/mobile_build.py), so ``main`` here is the stamp commit:
+    ``commit`` plus one child that writes ``build`` into both manifests. That
+    child is the newest change to each number, so the controller's guard sees
+    every client path as released with it. Returns the pin and the stamp.
     """
     pin = state / "pinned-source.git"
     if not (pin / "HEAD").is_file():
@@ -91,22 +44,19 @@ def pinned_source(source: Path, state: Path, commit: str) -> Path:
     common = Path(git(source, "rev-parse", "--path-format=absolute", "--git-common-dir"))
     (pin / "objects" / "info").mkdir(parents=True, exist_ok=True)
     (pin / "objects" / "info" / "alternates").write_text(f"{common / 'objects'}\n")
-    # The pin owns no objects. Drop what an earlier run left so a replaced or
-    # rewritten source clone cannot leave refs naming objects it no longer has.
+    # The pin owns only its stamp commits. Drop the refs an earlier run left so
+    # a replaced or rewritten source clone cannot leave one naming objects it
+    # no longer has.
     for ref in git(pin, "for-each-ref", "--format=%(refname)", "refs/remotes").splitlines():
         subprocess.run(["git", "-C", str(pin), "update-ref", "-d", ref], check=True)
     subprocess.run(["git", "-C", str(pin), "worktree", "prune"], check=True)
     subprocess.run(["git", "-C", str(pin), "config", "remote.origin.url", str(pin)], check=True)
-    subprocess.run(["git", "-C", str(pin), "update-ref", "refs/heads/main", commit], check=True)
-    return pin
-
-
-def require_first_parent_guard(ansible: Path) -> None:
-    """Refuse a controller whose guard would reject what this job selects."""
-    guard = ansible / "library" / "noirr_mobile_release_guard.py"
-    if guard.is_file() and "--first-parent" not in guard.read_text():
-        raise ValueError(f"{guard} predates the first-parent bump rule; install a controller version "
-                         "whose guard uses --first-parent --diff-merges=first-parent")
+    try:
+        stamped = mobile_build.stamp_commit(pin, commit, build)
+    except mobile_build.MobileBuildError as exc:
+        raise ValueError(str(exc)) from exc
+    subprocess.run(["git", "-C", str(pin), "update-ref", "refs/heads/main", stamped], check=True)
+    return pin, stamped
 
 
 def platforms_for_paths(paths: tuple[str, ...]) -> list[str]:
@@ -132,18 +82,28 @@ def changed_platforms(root: Path, base: str, head: str, *, initial_push: bool = 
         subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", base, head], check=True)
     # NUL separation preserves whitespace; both old and new names of a rename
     # matter (moving a source out of the app still changes the shipped app).
-    paths = (
-        git(root, "ls-tree", "-r", "--name-only", "-z", head)
-        if base == "0" * 40 else
-        git(root, "diff", "--no-renames", "--name-only", "-z", base, head)
-    )
-    return platforms_for_paths(tuple(paths.rstrip("\0").split("\0")))
+    if base == "0" * 40:
+        paths = git(root, "ls-tree", "-r", "--name-only", "-z", head).rstrip("\0").split("\0")
+    else:
+        # A change confined to comments ships no different bytes, so it is not
+        # a reason to build (validation.mobile_versions._touches_shipped_bytes,
+        # which answers "shipped" whenever it cannot tell).
+        paths = [
+            path
+            for path in git(root, "diff", "--no-renames", "--name-only", "-z", base, head)
+            .rstrip("\0").split("\0")
+            if path and _touches_shipped_bytes(root, path, base, head)
+        ]
+    return platforms_for_paths(tuple(paths))
 
 
 def scope_platforms(root: Path, base: str, head: str) -> list[str]:
-    """Platforms whose release inputs changed in the push and that can publish."""
-    platforms = changed_platforms(root, base, head, initial_push=os.environ.get("GITHUB_EVENT_NAME") == "push")
-    return releasable_platforms(root, head, platforms)
+    """Platforms whose release inputs changed in the push.
+
+    Every one of them publishes: the build number is assigned from the
+    release commit, so there is no unclaimed number to wait for.
+    """
+    return changed_platforms(root, base, head, initial_push=os.environ.get("GITHUB_EVENT_NAME") == "push")
 
 
 def release(base: str, head: str) -> None:
@@ -162,7 +122,6 @@ def release(base: str, head: str) -> None:
             raise ValueError("another mobile channel release is running; retry this job") from exc
         if not (ansible / "mobile-channels.yml").is_file() or not inventory.is_file():
             raise ValueError("configure PLURX_ANSIBLE_DIR and PLURX_ANSIBLE_INVENTORY on the signing runner")
-        require_first_parent_guard(ansible)
         subprocess.run(["git", "-C", str(source), "fetch", "origin",
                         "+refs/heads/main:refs/remotes/origin/main"], check=True)
         current = git(source, "rev-parse", "origin/main")
@@ -173,19 +132,22 @@ def release(base: str, head: str) -> None:
         if not platforms:
             print("No mobile release inputs changed.")
             return
-        platforms = releasable_platforms(source, current, platforms)
-        if not platforms:
-            print("No changed mobile platform has a new build number yet.")
-            return
-        print(f"Publishing Cinema {current}: {', '.join(platforms)}", flush=True)
-        pin = pinned_source(source, state, current)
+        try:
+            build = mobile_build.build_number(source, current)
+        except mobile_build.MobileBuildError as exc:
+            raise ValueError(str(exc)) from exc
+        pin, stamped = pinned_source(source, state, current, build)
+        print(f"Publishing Cinema {current} as build {build} (stamp commit {stamped}): "
+              f"{', '.join(platforms)}", flush=True)
         variables = {
             "mobile_release_channels_apps": ["cinema"],
             "mobile_release_channels_platforms": platforms,
             "mobile_release_channels_android_track": "internal",
             "mobile_release_channels_upload": True,
             "mobile_release_channels_receipts": str(state),
-            "mobile_release_expected_commits": {"cinema": current},
+            # The commit the controller checks out and names in its receipts:
+            # `current` plus the build-number stamp.
+            "mobile_release_expected_commits": {"cinema": stamped},
             "mobile_release_repositories": {
                 "cinema": {"source_path": str(pin), "metadata_kind": "plurx"},
             },

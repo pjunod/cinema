@@ -35,12 +35,17 @@ decides what a session costs. Every agent working here, Claude or GPT:
   For a red CI run, `scripts/ci-failures [<sha> | --pr N]` prints just the
   failing jobs' failure lines instead of whole job logs; `--wait SECONDS`
   waits quietly for running jobs and prints only the final state.
-- **Append without reading.** `STATUS.md` and the project backlog carry an
-  `<!-- … insert … -->` anchor line; add new entries just below it with an
-  edit instead of reading the whole file first. In `CHANGELOG.md` read only the
-  `## [Unreleased]` section (`sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p'`)
-  and add to its matching `###` list — an entry outside that section is never
-  released.
+- **Record a change in its own file, never in a shared one.** A changelog
+  entry is `changelog.d/<slug>.md`; an effort's status is
+  `status.d/<date>-<slug>.md` (`scripts/status` lists them); a client fix
+  anchor is `tests/client-fixes.d/<slug>.toml`; a changed task/timer count is
+  a `delta` row in `tests/rolling-producer-owners.d/<slug>.toml`. Do not edit
+  `CHANGELOG.md`, `STATUS.md`, a build number or a status line: every pull
+  request used to, and they conflicted on nearly every merge.
+  [docs/ci/SHARED-BOOKKEEPING.md](docs/ci/SHARED-BOOKKEEPING.md) has each
+  format and what an open pull request does. The project backlog still
+  carries an `<!-- … insert … -->` anchor; add below it without reading the
+  file.
 - **Delegate exploration** that spans many files to a sub-agent that returns a
   conclusion, and start a fresh session per pull request rather than carrying
   one long context through several. Claude sessions run exploration and
@@ -62,16 +67,16 @@ unset or `off`, land your PR yourself as below.
 ## Before you push: paperwork
 
 `make paperwork` (`scripts/paperwork`) checks, in about ten seconds, the
-bookkeeping rules CI enforces — doc index rows, Apple/Android release
-counters, infra names, `docs/API.md` routes, status-page shape, and the
+bookkeeping rules CI enforces — doc index rows, per-change bookkeeping files,
+no claimed build number, infra names, `docs/API.md` routes, status-page shape, and the
 `Regression-Test:` lines a `fix(`/`perf(` commit needs in the pull request
 description — and prints the fix under each failure. `make hooks` runs it on
 every push. Forgejo runs it as the first job of every pull request, drafts
 included, and nothing else starts until it passes, so skipping it only costs
 you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules.
 
-`make paperwork-fix` applies the ones with a single right answer — release
-counters, host names in Markdown, missing index rows — and the lane does the
+`make paperwork-fix` applies the ones with a single right answer — a claimed
+build number put back, host names in Markdown, missing index rows — and the lane does the
 same on its own: it pushes a `chore(paperwork)` commit to your branch instead
 of failing, so `git pull --rebase` before your next push. A new push cancels
 the PR's in-flight lane run; successes from earlier finished runs are still reused.

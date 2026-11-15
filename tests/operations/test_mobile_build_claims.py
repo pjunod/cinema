@@ -12,37 +12,30 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MobileBuildClaimCase(unittest.TestCase):
-    def test_repository_build_claims_match_release_inputs(self) -> None:
+    def test_repository_documents_claim_no_store_build_number(self) -> None:
         self.assertEqual(check_repository(ROOT), ())
 
-    def test_advancing_a_build_counter_without_docs_is_rejected(self) -> None:
-        project = (ROOT / "clients/apple/project.yml").read_text(encoding="utf-8")
-        current = int(re.search(r'CURRENT_PROJECT_VERSION: "(\d+)"', project).group(1))
-
+    def test_a_current_build_claim_on_the_status_page_is_rejected(self) -> None:
         def read(path: str) -> str:
             contents = (ROOT / path).read_text(encoding="utf-8")
-            if path == "clients/apple/project.yml":
-                return contents.replace(
-                    f'CURRENT_PROJECT_VERSION: "{current}"',
-                    f'CURRENT_PROJECT_VERSION: "{current + 1}"',
-                )
+            if path == "docs/STATUS.html":
+                return contents + "<p>Apple build 302 source, not yet uploaded</p>"
             return contents
 
         errors = validate_documented_builds(read)
 
-        self.assertTrue(
-            any(f"claims Apple build {current}" in error for error in errors), errors
-        )
-        self.assertTrue(any("STATUS.html" in error for error in errors), errors)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("docs/STATUS.html states Apple build 302 as current", errors[0])
 
 
 class StatusHistoricalBuildMentionCase(unittest.TestCase):
     """docs/STATUS.html must be able to narrate past builds.
 
     The page carries sentences like "build 52 corrected the iPad mini failure"
-    that are true when written and stay true after the next bump. Tense is
-    invisible to the claim sweep, so a historical mention opts out explicitly
-    with a `data-build-history` span. These cases pin both directions: the
+    that are true when written and stay true. A build number is assigned at
+    release, so the sweep refuses every mention as a claim the page cannot
+    keep current; tense is invisible to it, so a historical mention opts out
+    explicitly with a `data-build-history` span. These cases pin both directions: the
     exemption works, and it is the only thing that grants it.
     """
 
@@ -76,25 +69,25 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         self,
     ) -> None:
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            "<p>Apple source, numbered at release</p>"
             "<p><span data-build-history>Apple build 52</span> corrected the "
             "reported iPad mini failure.</p>"
         )
 
         self.assertEqual(self._status_errors(status), ())
 
-    def test_a_stale_current_claim_still_fails(self) -> None:
+    def test_an_unmarked_claim_fails(self) -> None:
         status = f"<p>Apple build {self.APPLE_BUILD - 1} source, not yet uploaded</p>"
 
         errors = self._status_errors(status)
 
-        self.assertTrue(errors, "a status page behind project.yml must be red")
+        self.assertTrue(errors, "a status page that states a current build must be red")
         self.assertIn(str(self.APPLE_BUILD - 1), errors[0])
 
     def test_an_unmarked_historical_mention_is_still_swept(self) -> None:
         """The exemption is opt-in; prose alone never earns it."""
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            "<p>Apple source, numbered at release</p>"
             "<p>Apple build 52 corrected the reported iPad mini failure.</p>"
         )
 
@@ -106,7 +99,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
     def test_a_marker_that_drifts_across_a_nested_span_fails_closed(self) -> None:
         """A marker that no longer wraps its sentence must not silently exempt."""
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            "<p>Apple source, numbered at release</p>"
             "<p><span data-build-history><span class='t'>Apple build 52</span>"
             " corrected the iPad mini failure.</span></p>"
         )
@@ -151,7 +144,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
     def _page_with(self, opening_tag: str) -> str:
         closing = "</div>" if opening_tag.startswith("<div") else "</span>"
         return (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            "<p>Apple source, numbered at release</p>"
             f"<p>{opening_tag}Apple build 52{closing} corrected the reported "
             "iPad mini failure.</p>"
         )
@@ -172,7 +165,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
 
     def test_an_unclosed_marker_span_fails_closed(self) -> None:
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            "<p>Apple source, numbered at release</p>"
             "<p><span data-build-history>Apple build 52 corrected the failure.</p>"
         )
 
@@ -225,7 +218,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         for description, fragment in self.NON_ELEMENTS.items():
             with self.subTest(description):
                 status = (
-                    f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+                    "<p>Apple source, numbered at release</p>"
                     f"{fragment}"
                 )
 
@@ -242,7 +235,7 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         closing tag rather than running on into later prose.
         """
         status = (
-            f"<p>Apple build {self.APPLE_BUILD} source, not yet uploaded</p>"
+            "<p>Apple source, numbered at release</p>"
             "<p><span data-build-history>Apple build 52 <!-- </span> --></span>"
             " corrected the iPad mini failure.</p>"
             "<p>Apple build 51 stale</p>"
@@ -258,32 +251,23 @@ class StatusHistoricalBuildMentionCase(unittest.TestCase):
         """Guards the real page, not just synthetic fixtures.
 
         The shipped `docs/STATUS.html` narrates the build that carried the
-        offline-location fix. Bumping the counter must leave that sentence
-        alone rather than forcing it to be reworded.
+        offline-location fix. Every such sentence is marked, and unmarking
+        one turns the page red.
         """
         shipped = (ROOT / "docs/STATUS.html").read_text(encoding="utf-8")
         marked = re.findall(
             r"<span data-build-history>.*?</span>", shipped, re.DOTALL
         )
         self.assertTrue(marked, "the shipped page must mark its historical build")
+        self.assertIn("Apple build 52", shipped)
+        self.assertEqual(self._status_errors(shipped), ())
 
-        # Bump every *current* claim the way a real build bump would, leaving
-        # the marked historical sentences exactly as written.
-        bumped = shipped
-        for index, span in enumerate(marked):
-            bumped = bumped.replace(span, f"@@history-{index}@@")
-        bumped = re.sub(
-            r"Apple build [1-9]\d*", f"Apple build {self.APPLE_BUILD}", bumped
+        unmarked = shipped.replace(
+            "<span data-build-history>Apple build 52</span>", "Apple build 52"
         )
-        for index, span in enumerate(marked):
-            bumped = bumped.replace(f"@@history-{index}@@", span)
+        self.assertNotEqual(unmarked, shipped)
+        self.assertIn("52", self._status_errors(unmarked)[0])
 
-        self.assertIn("Apple build 52", bumped, "history survived the bump verbatim")
-        self.assertEqual(self._status_errors(bumped), ())
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 class AndroidToolchainClaimCase(unittest.TestCase):
     """Prose that names the Android toolchain must name the pinned one.

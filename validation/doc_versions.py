@@ -1,4 +1,10 @@
-"""Pin current mobile build claims in user-facing repository status documents."""
+"""Keep store build numbers out of the status documents, and pin quoted constants.
+
+A store build number is assigned when a build is released
+(validation/mobile_build.py), so a status document cannot quote "the current
+build": the sentence would be wrong after the next release, and keeping it
+right was an edit every client pull request made to the same line.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +14,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 import re
 
-from validation.mobile_versions import REPO_ROOT, read_versions
+from validation.mobile_versions import REPO_ROOT
 
 
 def _one(contents: str, pattern: str, label: str) -> int:
@@ -18,10 +24,10 @@ def _one(contents: str, pattern: str, label: str) -> int:
     return int(matches[0])
 
 
-# A build number in docs/STATUS.html is a *current* claim by default: the sweep
-# in `validate_documented_builds` requires every mention to match project.yml,
-# so a status page that quietly falls behind a build bump is red before a PR
-# opens. But the page also has to narrate history — "build 52 corrected the
+# A build number in docs/STATUS.html is a *current* claim by default, and the
+# sweep in `validate_documented_builds` refuses every one: the number is
+# assigned at release, so the page cannot keep such a claim true. But the page
+# also has to narrate history — "build 52 corrected the
 # reported iPad mini failure" is true and stays true after the bump — and tense
 # is invisible to a regex. A historical mention therefore opts out explicitly:
 #
@@ -126,53 +132,46 @@ def _current_claims_only(contents: str) -> str:
     return "".join(kept)
 
 
-def validate_documented_builds(read: Callable[[str], str]) -> tuple[str, ...]:
-    versions = read_versions(read)
-    claims = {
-        "clients/apple/README.md": _one(
-            read("clients/apple/README.md"),
-            r"^> Status:.*?build `([1-9]\d*)`",
-            "Apple README current build claim",
-        ),
-        "clients/android/README.md": _one(
-            read("clients/android/README.md"),
-            r"^> Status:.*?build `([1-9]\d*)`",
-            "Android README current build claim",
-        ),
-        "docs/clients/APPLE-CLIENT-PARITY.md": _one(
-            read("docs/clients/APPLE-CLIENT-PARITY.md"),
-            r"^> Status .*?Apple build ([1-9]\d*)\.",
-            "Apple parity current build claim",
-        ),
-    }
-    errors: list[str] = []
-    for path in ("clients/apple/README.md", "docs/clients/APPLE-CLIENT-PARITY.md"):
-        if claims[path] != versions.apple_build:
-            errors.append(
-                f"{path} claims Apple build {claims[path]}; "
-                f"project.yml declares {versions.apple_build}"
-            )
-    if claims["clients/android/README.md"] != versions.android_build:
-        errors.append(
-            "clients/android/README.md claims Android build "
-            f"{claims['clients/android/README.md']}; build.gradle.kts declares "
-            f"{versions.android_build}"
-        )
+# The anchored status line of each client document, and the build claim it
+# may no longer carry.
+_STATUS_LINES = (
+    ("clients/apple/README.md", r"^> Status:.*$", r"build `[1-9]\d*`"),
+    ("clients/android/README.md", r"^> Status:.*$", r"build `[1-9]\d*`"),
+    ("docs/clients/APPLE-CLIENT-PARITY.md", r"^> Status .*$", r"Apple build [1-9]\d*"),
+)
 
-    status_claims = {
-        int(value)
-        for value in re.findall(
-            r"Apple build ([1-9]\d*)",
-            _current_claims_only(read("docs/STATUS.html")),
-            re.IGNORECASE,
-        )
-    }
-    if not status_claims:
-        errors.append("docs/STATUS.html has no current Apple build claim")
-    elif status_claims != {versions.apple_build}:
+
+def validate_documented_builds(read: Callable[[str], str]) -> tuple[str, ...]:
+    errors: list[str] = []
+    for path, line, claim in _STATUS_LINES:
+        lines = re.findall(line, read(path), re.MULTILINE)
+        if len(lines) != 1:
+            errors.append(f"{path} must carry exactly one status line; found {len(lines)}")
+            continue
+        found = re.search(claim, lines[0])
+        if found:
+            errors.append(
+                f"{path}'s status line claims {found.group(0)}. A store build number is "
+                "assigned at release (docs/ci/SHARED-BOOKKEEPING.md), so the status "
+                "line names the version only"
+            )
+
+    status_claims = sorted(
+        {
+            int(value)
+            for value in re.findall(
+                r"Apple build ([1-9]\d*)",
+                _current_claims_only(read("docs/STATUS.html")),
+                re.IGNORECASE,
+            )
+        }
+    )
+    if status_claims:
         errors.append(
-            "docs/STATUS.html Apple build claims must all match project.yml "
-            f"({versions.apple_build}); found {sorted(status_claims)}"
+            "docs/STATUS.html states Apple build "
+            f"{', '.join(map(str, status_claims))} as current. A store build number is "
+            "assigned at release, so the page cannot keep that true: say it without "
+            "the number, or wrap a past build in <span data-build-history>"
         )
     return tuple(errors)
 

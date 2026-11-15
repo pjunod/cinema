@@ -5,9 +5,11 @@ import subprocess
 import tempfile
 import unittest
 
+from validation.mobile_build import DEVELOPMENT_BUILD
 from validation.mobile_versions import (
     MobileVersionError,
     MobileVersions,
+    _touches_shipped_bytes,
     check_repository,
     validate_versions,
 )
@@ -21,9 +23,9 @@ def versions(
     *,
     workspace: str = "0.2.2",
     apple_name: str | None = None,
-    apple_build: int = 10,
+    apple_build: int = DEVELOPMENT_BUILD,
     android_name: str | None = None,
-    android_build: int = 5,
+    android_build: int = DEVELOPMENT_BUILD,
 ) -> MobileVersions:
     return MobileVersions(
         workspace=workspace,
@@ -76,7 +78,12 @@ def cargo_workspace(version: str = "0.2.2", *, dependency: bool = False) -> str:
     return manifest
 
 
-def seed_repository(root: Path, *, apple_build: int, android_build: int) -> None:
+def seed_repository(
+    root: Path,
+    *,
+    apple_build: int = DEVELOPMENT_BUILD,
+    android_build: int = DEVELOPMENT_BUILD,
+) -> None:
     """Lay down a minimal repo on a ``main`` branch with both apps present."""
     (root / "clients/apple/Sources").mkdir(parents=True)
     (root / "clients/android/app/src/main").mkdir(parents=True)
@@ -101,279 +108,10 @@ def seed_repository(root: Path, *, apple_build: int, android_build: int) -> None
     git(root, "commit", "-qm", "seed")
 
 
-class MergeTargetBaselineCase(unittest.TestCase):
-    """The counter has to clear what the merge target ships, not the branch point.
-
-    Reproduces the shape that let PR #294 sit green and unmergeable: the branch
-    bumped its counter to N for its own feature, then an unrelated release bump
-    landed the same N on the target. Both sides wrote the same literal, so Git
-    auto-merged with no conflict and no diff evidence, and the release-hygiene
-    check kept comparing against the branch point where the counter was still
-    N-1.
-    """
-
-    def collide(
-        self, root: Path, *, branch_edit: str, gradle: str, project: str
-    ) -> str:
-        """Bump one app to the same counter on both `main` and `feature`.
-
-        Returns the branch point, which is what CI records as the base sha.
-        """
-        seed_repository(root, apple_build=10, android_build=26)
-        branch_point = git(root, "rev-parse", "HEAD")
-
-        git(root, "checkout", "-qb", "feature")
-        (root / branch_edit).write_text("changed by the feature\n", encoding="utf-8")
-        (root / "clients/android/app/build.gradle.kts").write_text(
-            gradle, encoding="utf-8"
-        )
-        (root / "clients/apple/project.yml").write_text(project, encoding="utf-8")
-        git(root, "add", "-A")
-        git(root, "commit", "-qm", "feature work and its build bump")
-
-        git(root, "checkout", "-q", "main")
-        (root / "clients/android/app/build.gradle.kts").write_text(
-            gradle, encoding="utf-8"
-        )
-        (root / "clients/apple/project.yml").write_text(project, encoding="utf-8")
-        git(root, "add", "-A")
-        git(root, "commit", "-qm", "unrelated operator release bump")
-
-        git(root, "checkout", "-q", "feature")
-        return branch_point
-
-    def assert_collision_is_invisible_to_git(self, root: Path) -> None:
-        git(root, "checkout", "-qb", "merge-probe", "feature")
-        merge = subprocess.run(
-            ["git", "merge", "--no-edit", "main"],
-            cwd=root,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        self.assertEqual(merge.returncode, 0, merge.stdout)
-        self.assertNotIn(
-            "<<<<<<<", (root / "clients/android/app/build.gradle.kts").read_text()
-        )
-        git(root, "checkout", "-q", "feature")
-
-    def test_android_counter_the_target_already_ships_fails_against_the_target(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            branch_point = self.collide(
-                root,
-                branch_edit="clients/android/app/src/main/AndroidManifest.xml",
-                gradle=android_gradle(27),
-                project=apple_project(10),
-            )
-            self.assert_collision_is_invisible_to_git(root)
-
-            # The defect: baselined on the branch point, 27 > 26 and the branch
-            # is green on a tree that cannot ship.
-            self.assertEqual(
-                check_repository(root, mode="changed-from", base=branch_point), ()
-            )
-
-            errors = check_repository(
-                root, mode="changed-from", base=branch_point, merge_target="main"
-            )
-            failure = "\n".join(errors)
-            self.assertIn("versionCode must increase", failure)
-            self.assertIn("above 27", failure)
-            self.assertIn("found 27", failure)
-            self.assertIn("main is the merge target", failure)
-            self.assertNotIn("CURRENT_PROJECT_VERSION", failure)
-
-            # Re-bumping above the target, not above the branch point, clears it.
-            (root / "clients/android/app/build.gradle.kts").write_text(
-                android_gradle(28), encoding="utf-8"
-            )
-            git(root, "commit", "-qam", "re-bump above the current base")
-            self.assertEqual(
-                check_repository(
-                    root, mode="changed-from", base=branch_point, merge_target="main"
-                ),
-                (),
-            )
-
-    def test_apple_counter_the_target_already_ships_fails_against_the_target(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            branch_point = self.collide(
-                root,
-                branch_edit="clients/apple/Sources/App.swift",
-                gradle=android_gradle(26),
-                project=apple_project(11),
-            )
-
-            self.assertEqual(
-                check_repository(root, mode="changed-from", base=branch_point), ()
-            )
-
-            errors = check_repository(
-                root, mode="changed-from", base=branch_point, merge_target="main"
-            )
-            failure = "\n".join(errors)
-            self.assertIn("CURRENT_PROJECT_VERSION must increase", failure)
-            self.assertIn("above 11", failure)
-            self.assertIn("found 11", failure)
-            self.assertIn("main is the merge target", failure)
-            self.assertNotIn("versionCode must increase", failure)
-
-    def test_the_target_scopes_only_the_counter_not_which_app_changed(self):
-        """A target bump alone does not obligate an untouched app to re-bump."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            seed_repository(root, apple_build=10, android_build=26)
-            branch_point = git(root, "rev-parse", "HEAD")
-
-            git(root, "checkout", "-qb", "feature")
-            (root / "docs").mkdir()
-            (root / "docs/NOTES.md").write_text("prose only\n", encoding="utf-8")
-            git(root, "add", "-A")
-            git(root, "commit", "-qm", "documentation only")
-
-            git(root, "checkout", "-q", "main")
-            (root / "clients/android/app/build.gradle.kts").write_text(
-                android_gradle(27), encoding="utf-8"
-            )
-            git(root, "commit", "-qam", "operator release bump")
-            git(root, "checkout", "-q", "feature")
-
-            self.assertEqual(
-                check_repository(
-                    root, mode="changed-from", base=branch_point, merge_target="main"
-                ),
-                (),
-            )
-
-    def release_lands_on_the_target(self, root: Path) -> str:
-        """Ship release 0.2.3 on `main` under a branch that touched no client.
-
-        The branch appends a workspace dependency and nothing else. `Cargo.toml`
-        is in the `mobile.versioning` point paths, so this is the shape of an
-        ordinary dependency pull request, not a client change.
-        """
-        seed_repository(root, apple_build=10, android_build=26)
-        branch_point = git(root, "rev-parse", "HEAD")
-
-        git(root, "checkout", "-qb", "feature")
-        (root / "Cargo.toml").write_text(
-            cargo_workspace(dependency=True), encoding="utf-8"
-        )
-        git(root, "add", "-A")
-        git(root, "commit", "-qm", "add a workspace dependency")
-
-        git(root, "checkout", "-q", "main")
-        (root / "Cargo.toml").write_text(cargo_workspace("0.2.3"), encoding="utf-8")
-        (root / "clients/android/app/build.gradle.kts").write_text(
-            android_gradle(27, "0.2.3"), encoding="utf-8"
-        )
-        (root / "clients/apple/project.yml").write_text(
-            apple_project(11, "0.2.3"), encoding="utf-8"
-        )
-        git(root, "add", "-A")
-        git(root, "commit", "-qm", "release 0.2.3")
-        git(root, "checkout", "-q", "feature")
-        return branch_point
-
-    def test_a_release_on_the_target_does_not_obligate_a_branch_that_shipped_none(self):
-        """Whether *this branch* released is read at the branch point, not the target.
-
-        `workspace_changed` is a scope input — it answers "did this branch ship a
-        release", which is a property of the branch. Reading it off the merge
-        target instead conflates that with "the target shipped a release", so
-        every pull request open across a release goes red and is told to bump two
-        store counters it never touched.
-        """
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            branch_point = self.release_lands_on_the_target(root)
-
-            self.assertEqual(
-                check_repository(
-                    root, mode="changed-from", base=branch_point, merge_target="main"
-                ),
-                (),
-            )
-
-    def test_the_target_release_still_raises_the_bar_for_a_branch_that_did_touch(self):
-        """Scoping on the branch point must not weaken the counter comparison.
-
-        The obvious wrong fix for the test above is to stop consulting the target
-        at all. This pins the other side: the same target release, but a branch
-        that genuinely edits an Android release input still has to clear the
-        counter the target ships, not the one its branch point had.
-        """
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            branch_point = self.release_lands_on_the_target(root)
-
-            (root / "clients/android/app/src/main/AndroidManifest.xml").write_text(
-                "<manifest android:label=\"feature\" />\n", encoding="utf-8"
-            )
-            git(root, "commit", "-qam", "android feature work")
-
-            errors = check_repository(
-                root, mode="changed-from", base=branch_point, merge_target="main"
-            )
-            failure = "\n".join(errors)
-            self.assertIn("versionCode must increase", failure)
-            self.assertIn("above 27", failure)
-            self.assertIn("main is the merge target", failure)
-            # Apple was never touched by this branch, and the target's release
-            # bump is not this branch's, so Apple stays silent.
-            self.assertNotIn("CURRENT_PROJECT_VERSION must increase", failure)
-
-    def test_a_branch_that_ships_its_own_release_is_still_scoped_in(self):
-        """A workspace bump made *by the branch* still obligates both counters."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            seed_repository(root, apple_build=10, android_build=26)
-            branch_point = git(root, "rev-parse", "HEAD")
-
-            git(root, "checkout", "-qb", "feature")
-            (root / "Cargo.toml").write_text(cargo_workspace("0.2.3"), encoding="utf-8")
-            (root / "clients/android/app/build.gradle.kts").write_text(
-                android_gradle(26, "0.2.3"), encoding="utf-8"
-            )
-            (root / "clients/apple/project.yml").write_text(
-                apple_project(10, "0.2.3"), encoding="utf-8"
-            )
-            git(root, "add", "-A")
-            git(root, "commit", "-qm", "release 0.2.3 from the branch")
-
-            errors = check_repository(
-                root, mode="changed-from", base=branch_point, merge_target="main"
-            )
-            failure = "\n".join(errors)
-            self.assertIn("versionCode must increase", failure)
-            self.assertIn("CURRENT_PROJECT_VERSION must increase", failure)
-
-    def test_an_unreadable_merge_target_fails_instead_of_falling_back(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            seed_repository(root, apple_build=10, android_build=26)
-            branch_point = git(root, "rev-parse", "HEAD")
-
-            with self.assertRaises(MobileVersionError):
-                check_repository(
-                    root,
-                    mode="changed-from",
-                    base=branch_point,
-                    merge_target="origin/never-fetched",
-                )
-
-    def test_a_merge_target_without_a_branch_diff_is_rejected_not_ignored(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            seed_repository(root, apple_build=10, android_build=26)
-
-            with self.assertRaises(MobileVersionError):
-                check_repository(root, mode="all", merge_target="main")
-
-
 class MobileVersionCase(unittest.TestCase):
+    def test_this_repository_declares_coherent_versions_and_claims_no_build(self):
+        self.assertEqual(check_repository(ROOT), ())
+
     def test_mobile_marketing_versions_still_match_the_workspace_release(self):
         errors = validate_versions(
             versions(apple_name="0.2.1", android_name="0.3.0")
@@ -384,150 +122,74 @@ class MobileVersionCase(unittest.TestCase):
             any("Apple MARKETING_VERSION must match" in error for error in errors)
         )
 
-    def test_each_changed_app_requires_only_its_own_build_counter(self):
-        baseline = versions()
+    def test_the_development_build_is_the_only_number_the_tree_may_carry(self):
+        self.assertEqual(validate_versions(versions()), ())
+        apple = validate_versions(versions(apple_build=302))
+        self.assertEqual(len(apple), 1)
+        self.assertIn("Apple CURRENT_PROJECT_VERSION must stay 1", apple[0])
+        android = validate_versions(versions(android_build=208))
+        self.assertEqual(len(android), 1)
+        self.assertIn("Android versionCode must stay 1", android[0])
 
-        apple_errors = validate_versions(
-            versions(),
-            baseline=baseline,
-            changed_paths=("clients/apple/Sources/PlayerView.swift",),
-        )
-        self.assertTrue(
-            any(
-                "CURRENT_PROJECT_VERSION must increase" in error
-                for error in apple_errors
-            )
-        )
-        self.assertEqual(
-            validate_versions(
-                versions(apple_build=11),
-                baseline=baseline,
-                changed_paths=("clients/apple/Sources/PlayerView.swift",),
-            ),
-            (),
-        )
+    def test_a_client_change_obligates_no_edit_to_either_manifest(self):
+        """Two branches each change a client; neither touches a counter.
 
-        android_errors = validate_versions(
-            versions(),
-            baseline=baseline,
-            changed_paths=("clients/android/app/src/main/AndroidManifest.xml",),
-        )
-        self.assertTrue(any("versionCode must increase" in error for error in android_errors))
-        self.assertEqual(
-            validate_versions(
-                versions(android_build=6),
-                baseline=baseline,
-                changed_paths=("clients/android/app/src/main/AndroidManifest.xml",),
-            ),
-            (),
-        )
-
-    def test_tests_and_documentation_do_not_require_a_build_increment(self):
-        baseline = versions()
-        self.assertEqual(
-            validate_versions(
-                versions(),
-                baseline=baseline,
-                changed_paths=(
-                    "clients/apple/Tests/AppleClientTests.swift",
-                    "clients/android/app/src/test/AppVersionTest.kt",
-                    "clients/apple/README.md",
-                ),
-            ),
-            (),
-        )
-
-    def test_workspace_release_change_updates_and_advances_both_apps(self):
-        baseline = versions()
-        unchanged_builds = validate_versions(
-            versions(workspace="0.2.3"),
-            baseline=baseline,
-            changed_paths=("Cargo.toml",),
-        )
-        self.assertTrue(
-            any(
-                "CURRENT_PROJECT_VERSION must increase" in error
-                for error in unchanged_builds
-            )
-        )
-        self.assertTrue(
-            any("versionCode must increase" in error for error in unchanged_builds)
-        )
-
-        self.assertEqual(
-            validate_versions(
-                versions(workspace="0.2.3", apple_build=11, android_build=6),
-                baseline=baseline,
-                changed_paths=("Cargo.toml",),
-            ),
-            (),
-        )
-
-    def test_staged_check_reads_the_index_not_unstaged_version_edits(self):
+        This is the property the old rule could not have: it demanded that
+        each branch write the next number, so both wrote the same line.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "clients/apple/Sources").mkdir(parents=True)
-            (root / "clients/android/app").mkdir(parents=True)
-            (root / "Cargo.toml").write_text(
-                '[workspace]\n[workspace.package]\nversion = "0.2.2"\n',
-                encoding="utf-8",
-            )
-            (root / "clients/apple/project.yml").write_text(
-                apple_project(10), encoding="utf-8"
-            )
-            (root / "clients/apple/Sources/App.swift").write_text(
-                "let release = 1\n", encoding="utf-8"
-            )
-            (root / "clients/android/app/build.gradle.kts").write_text(
-                'versionCode = 5\nversionName = "0.2.2"\n', encoding="utf-8"
-            )
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            subprocess.run(
-                ["git", "config", "user.name", "Version Test"], cwd=root, check=True
-            )
-            subprocess.run(
-                ["git", "config", "user.email", "version@example.invalid"],
-                cwd=root,
-                check=True,
-            )
-            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-            subprocess.run(["git", "commit", "-qm", "seed"], cwd=root, check=True)
-            base = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=root,
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-            ).stdout.strip()
-
-            (root / "clients/apple/Sources/App.swift").write_text(
-                "let release = 2\n", encoding="utf-8"
-            )
-            subprocess.run(
-                ["git", "add", "clients/apple/Sources/App.swift"], cwd=root, check=True
-            )
-            (root / "clients/apple/project.yml").write_text(
-                apple_project(11), encoding="utf-8"
-            )
-
-            errors = check_repository(root, mode="staged")
-            self.assertTrue(
-                any(
-                    "CURRENT_PROJECT_VERSION must increase" in error
-                    for error in errors
+            seed_repository(root)
+            base = git(root, "rev-parse", "HEAD")
+            for branch, path, text in (
+                ("one", "clients/apple/Sources/App.swift", "let release = 2\n"),
+                ("two", "clients/android/app/src/main/AndroidManifest.xml", "<manifest a='1' />\n"),
+            ):
+                git(root, "checkout", "-qb", branch, base)
+                (root / path).write_text(text, encoding="utf-8")
+                git(root, "add", "-A")
+                git(root, "commit", "-qm", f"change {branch}")
+                self.assertEqual(
+                    check_repository(root, mode="changed-from", base=base, merge_target="main"),
+                    (),
                 )
-            )
+            git(root, "checkout", "-q", "main")
+            git(root, "merge", "-q", "--no-ff", "-m", "merge one", "one")
+            git(root, "merge", "-q", "--no-ff", "-m", "merge two", "two")
+            self.assertEqual(check_repository(root), ())
 
-            subprocess.run(
-                ["git", "add", "clients/apple/project.yml"], cwd=root, check=True
-            )
+    def test_a_claimed_number_is_refused_in_the_tree_each_mode_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_repository(root)
+            base = git(root, "rev-parse", "HEAD")
+            manifest = root / "clients/apple/project.yml"
+            manifest.write_text(apple_project(11), encoding="utf-8")
+
+            # Unstaged: the working tree carries it, the index and HEAD do not.
+            self.assertEqual(len(check_repository(root, mode="all")), 1)
             self.assertEqual(check_repository(root, mode="staged"), ())
-            subprocess.run(
-                ["git", "commit", "-qm", "change apple app"], cwd=root, check=True
-            )
-            self.assertEqual(
-                check_repository(root, mode="changed-from", base=base), ()
-            )
+            self.assertEqual(check_repository(root, mode="changed-from", base=base), ())
+
+            git(root, "add", "clients/apple/project.yml")
+            self.assertEqual(len(check_repository(root, mode="staged")), 1)
+            self.assertEqual(check_repository(root, mode="changed-from", base=base), ())
+
+            git(root, "commit", "-qm", "claim a build number")
+            errors = check_repository(root, mode="changed-from", base=base)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("assigned when a build is released", errors[0])
+
+    def test_modes_keep_the_argument_shape_the_lanes_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_repository(root)
+            with self.assertRaises(MobileVersionError):
+                check_repository(root, mode="changed-from")
+            with self.assertRaises(MobileVersionError):
+                check_repository(root, mode="all", merge_target="main")
+            with self.assertRaises(MobileVersionError):
+                check_repository(root, mode="nonsense")
 
     def test_catalog_routes_only_release_inputs_to_the_version_gate(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
@@ -556,146 +218,72 @@ class MobileVersionCase(unittest.TestCase):
         )
 
 
-class CommentOnlyChangeCase(unittest.TestCase):
-    """A comment carries no bytes to a device, so it obligates no build number.
+class ShippedBytesCase(unittest.TestCase):
+    """A comment carries no bytes to a device, so it is no reason to publish.
 
-    The counter contract exists so that different bytes reach the store under
-    a different number. Demanding one for a corrected documentation path in a
-    `///` comment is not merely pedantic: the number has to be mirrored into
-    the parity document and the status page, so a comment fix would end up
-    asserting that a build nobody produced was released.
-
-    The exemption has to be narrow in exactly one direction — it may never
-    excuse a change that ships. Every case below that mixes code into the diff
-    is there to prove it does not.
+    `validation.mobile_channels` leaves a path out of the release scope only
+    when every line its diff touched is a comment or blank. The exemption has
+    to be narrow in exactly one direction — it may never excuse a change that
+    ships — so every case that mixes code into the diff proves it does not.
     """
 
-    def branch_with(self, root: Path, *, swift: str) -> str:
-        seed_repository(root, apple_build=10, android_build=26)
-        branch_point = git(root, "rev-parse", "HEAD").strip()
-        git(root, "checkout", "-qb", "branch")
-        (root / "clients/apple/Sources/App.swift").write_text(swift, encoding="utf-8")
-        git(root, "add", "-A")
-        git(root, "commit", "-qm", "change")
-        return branch_point
-
-    def check(self, root: Path, branch_point: str) -> tuple[str, ...]:
-        return check_repository(root, mode="changed-from", base=branch_point)
-
-    def test_a_comment_only_change_obligates_no_build_bump(self):
+    def shipped(self, path: str, before: str | None, after: str | None) -> bool:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            point = self.branch_with(
-                root, swift="/// See docs/clients/APPLE-CLIENT-PARITY.md\nlet release = 1\n"
-            )
-            self.assertEqual(self.check(root, point), ())
+            seed_repository(root)
+            target = root / path
+            if before is not None:
+                target.write_text(before, encoding="utf-8")
+                git(root, "add", "-A")
+                git(root, "commit", "-qm", "before")
+            base = git(root, "rev-parse", "HEAD")
+            if after is None:
+                target.unlink()
+            else:
+                target.write_text(after, encoding="utf-8")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "after")
+            return _touches_shipped_bytes(root, path, base, "HEAD")
 
-    def test_a_block_comment_and_its_delimiters_obligate_no_build_bump(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            point = self.branch_with(
-                root,
-                swift="/*\n * See docs/streaming/ADAPTIVE-QUALITY.md\n */\nlet release = 1\n",
-            )
-            self.assertEqual(self.check(root, point), ())
+    SWIFT = "clients/apple/Sources/App.swift"
 
-    def test_a_code_change_beside_a_comment_still_obligates_a_bump(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            point = self.branch_with(
-                root, swift="/// See docs/clients/APPLE-CLIENT-PARITY.md\nlet release = 2\n"
-            )
-            errors = self.check(root, point)
-            self.assertTrue(
-                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
-            )
-
-    def test_a_bare_code_change_still_obligates_a_bump(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            point = self.branch_with(root, swift="let release = 2\n")
-            errors = self.check(root, point)
-            self.assertTrue(
-                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
-            )
-
-    def test_a_deleted_source_file_still_obligates_a_bump(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            seed_repository(root, apple_build=10, android_build=26)
-            point = git(root, "rev-parse", "HEAD").strip()
-            git(root, "checkout", "-qb", "branch")
-            git(root, "rm", "-q", "clients/apple/Sources/App.swift")
-            git(root, "commit", "-qm", "remove")
-            errors = self.check(root, point)
-            self.assertTrue(
-                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
-            )
-
-    def add_source(self, root: Path, contents: str) -> str:
-        seed_repository(root, apple_build=10, android_build=26)
-        point = git(root, "rev-parse", "HEAD").strip()
-        git(root, "checkout", "-qb", "branch")
-        (root / "clients/apple/Sources/Notes.swift").write_text(
-            contents, encoding="utf-8"
+    def test_a_comment_only_change_ships_nothing(self):
+        self.assertFalse(
+            self.shipped(self.SWIFT, None, "/// See the parity notes.\nlet release = 1\n")
         )
-        git(root, "add", "-A")
-        git(root, "commit", "-qm", "add")
-        return point
 
-    def test_a_new_source_file_with_any_code_obligates_a_bump(self):
-        # The diff for a new file is every one of its lines, so one line of
-        # code in it is enough — which is what makes the next case meaningful
-        # rather than an artifact of how new files are diffed.
+    def test_a_block_comment_and_its_delimiters_ship_nothing(self):
+        self.assertFalse(
+            self.shipped(self.SWIFT, None, "/*\n * See the parity notes.\n */\nlet release = 1\n")
+        )
+
+    def test_a_code_change_beside_a_comment_ships(self):
+        self.assertTrue(
+            self.shipped(self.SWIFT, None, "/// A comment.\nlet release = 2\n")
+        )
+
+    def test_a_deleted_source_file_ships(self):
+        self.assertTrue(self.shipped(self.SWIFT, None, None))
+
+    def test_a_new_source_file_of_nothing_but_comments_ships_nothing(self):
+        self.assertFalse(
+            self.shipped("clients/apple/Sources/Notes.swift", None, "// Only a note.\n")
+        )
+
+    def test_a_non_source_release_input_always_ships(self):
+        self.assertTrue(
+            self.shipped(
+                "clients/android/app/src/main/AndroidManifest.xml",
+                None,
+                "<!-- only a comment -->\n<manifest />\n",
+            )
+        )
+
+    def test_an_unreadable_diff_ships(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            point = self.add_source(root, "/// notes\nimport Foundation\n")
-            errors = self.check(root, point)
-            self.assertTrue(
-                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
-            )
-
-    def test_a_new_source_file_of_nothing_but_comments_obligates_none(self):
-        # Consistent with the rule rather than an exception to it: a file the
-        # compiler turns into nothing carries nothing to the device, whether it
-        # is new or edited.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            point = self.add_source(root, "// notes on docs/clients/APPLE-CLIENT-PARITY.md\n")
-            self.assertEqual(self.check(root, point), ())
-
-    def test_a_non_source_release_input_is_never_exempt(self):
-        # project.yml has no comment exemption: it is configuration the build
-        # reads, and a "#" line in it can carry meaning.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            seed_repository(root, apple_build=10, android_build=26)
-            point = git(root, "rev-parse", "HEAD").strip()
-            git(root, "checkout", "-qb", "branch")
-            (root / "clients/apple/project.yml").write_text(
-                "# a comment\n" + apple_project(10), encoding="utf-8"
-            )
-            git(root, "add", "-A")
-            git(root, "commit", "-qm", "comment in project.yml")
-            errors = self.check(root, point)
-            self.assertTrue(
-                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
-            )
-
-    def test_a_workspace_version_change_is_never_exempt(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            seed_repository(root, apple_build=10, android_build=26)
-            point = git(root, "rev-parse", "HEAD").strip()
-            git(root, "checkout", "-qb", "branch")
-            (root / "Cargo.toml").write_text(cargo_workspace("0.2.3"), encoding="utf-8")
-            (root / "clients/apple/Sources/App.swift").write_text(
-                "/// only a comment change here\nlet release = 1\n", encoding="utf-8"
-            )
-            git(root, "add", "-A")
-            git(root, "commit", "-qm", "release")
-            errors = self.check(root, point)
-            self.assertTrue(len(errors) >= 2, errors)
+            seed_repository(root)
+            self.assertTrue(_touches_shipped_bytes(root, self.SWIFT, "no-such-ref", "HEAD"))
 
 
 if __name__ == "__main__":

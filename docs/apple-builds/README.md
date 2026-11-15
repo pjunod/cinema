@@ -18,64 +18,33 @@ docs/apple-builds/<issue>-<short-slug>.md
 ```
 
 Issue-keyed names are the whole point. Two concurrent Apple changes write two
-different paths, so the narrative cannot collide, and neither branch has to
-guess which build number it will end up shipping as.
+different paths, so the narrative cannot collide.
 
 ```markdown
 # Say when a Skip Credits button is an estimate
 
-Build: 79
 Issue: #351
 
 Skip Credits now says when its end-credits boundary is estimated rather than
 detected, so a viewer can tell a confident jump from a guess.
 ```
 
-`Build:` and `Issue:` are required and each appears once. `Build:` is the only
-number in the fragment that the tooling rewrites, and it is rewritten for you.
-
-## Claim or re-claim the build number
-
-```
-make apple-build-bump
-```
-
-That reads `clients/apple/project.yml` and the merge target, picks the next
-number above both, and rewrites every place the number is allowed to appear:
-`project.yml`, the anchored `> Status:` lines in
-[`clients/apple/README.md`](../../clients/apple/README.md) and
-[`APPLE-CLIENT-PARITY.md`](../clients/APPLE-CLIENT-PARITY.md), the viewers tile and the
-`👤 Paul` TestFlight item in [`STATUS.html`](../STATUS.html), and the `Build:`
-line of the fragments this branch adds.
-
-Run it again after `main` moves under an open branch, **in that order**: merge
-`main` in first, then claim.
-
-```
-git merge origin/main      # conflict-free: both sides claimed the same number
-make apple-build-bump      # now claims one above what main actually holds
-```
-
-The counter has to beat the merge target, not the commit the branch was cut
-from. Claiming before the sync puts the branch two above the base while `main`
-holds one above it, on the same line — an ordinary same-line conflict, and the
-one thing the tool cannot merge for you. Syncing first costs a merge Git
-resolves by itself and leaves exactly one mechanical commit behind.
-
-Claiming is idempotent. A branch already above the merge target keeps the number
-it holds, so running the tool again when nothing moved changes nothing and
-prints so.
+`Issue:` is required and appears once. A fragment carries no build number: a
+TestFlight build is numbered when it is released, from the commit it is built
+from ([SHARED-BOOKKEEPING.md](../ci/SHARED-BOOKKEEPING.md#store-build-numbers)),
+so no branch claims one and there is nothing to re-claim when `main` moves.
+Fragments written before 2026-11-15 keep the `Build:` line that records the
+build they shipped in.
 
 ## What still fails the gate
 
-`tests/operations/test_mobile_build_claims.py` and `validation/mobile_versions.py`
-are unchanged. The number still has to agree across `project.yml`, both
-`> Status:` lines, and every unmarked `Apple build <n>` mention in `STATUS.html`,
-and it still has to increase whenever Apple release inputs change.
-`tests/operations/test_apple_build_claims.py` adds the fragment rules, pins the
-generated form of every surface, refuses to let per-build narrative move back
-into either status blockquote, and merges two branches cut from one base in
-sequence to prove they no longer collide.
+`tests/operations/test_apple_build_claims.py` holds the fragment rules,
+refuses per-build narrative in the Apple, Android and parity status
+blockquotes, and merges two branches cut from one base in either order to
+prove they do not collide. `tests/operations/test_mobile_build_claims.py`
+refuses a status line or an unmarked `STATUS.html` sentence that states a
+build number, and `validation/mobile_versions.py` refuses a tree whose
+manifests carry anything but the development build.
 
 Settings navigation: [Keep category input in its remote adapter](1355-settings-category-adapter.md)
 records the behavior-preserving input-fence repair.

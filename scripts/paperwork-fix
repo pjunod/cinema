@@ -4,9 +4,9 @@
 `scripts/paperwork` checks the bookkeeping rules; this applies the ones a
 machine can satisfy exactly, so they stop costing a red lane:
 
-  release counters   Apple: `make apple-build-bump` (validation.apple_build);
-                     Android: versionCode and the README status line, above
-                     the merge target's
+  build numbers      a number a branch claimed in project.yml or
+                     build.gradle.kts goes back to the development build;
+                     the release assigns the real one (validation.mobile_build)
   infra names        `scripts/scrub-infra-names --write`, Markdown only
   docs index rows    a row for every unlisted docs/<area>/*.md, from the
                      document's own title and **Status:** header
@@ -47,8 +47,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 TRAILER = "Paperwork-Fix:"
-ANDROID_GRADLE = "clients/android/app/build.gradle.kts"
-ANDROID_README = "clients/android/README.md"
 STATUS_WORDS = ("live", "open", "built", "done")
 
 
@@ -64,43 +62,27 @@ def write(path: str, text: str) -> None:
     (ROOT / path).write_text(text, encoding="utf-8")
 
 
-# --- release counters --------------------------------------------------------
+# --- build numbers -----------------------------------------------------------
 
-def counter_errors(base: str, merge_target: str) -> tuple[str, ...]:
-    from validation import mobile_versions
+def fix_counters() -> list[str]:
+    """Put the development build back where a branch claimed a number.
 
-    return mobile_versions.check_repository(mode="changed-from", base=base, merge_target=merge_target)
+    No branch claims a store build number (validation/mobile_build.py). One
+    that did — an open pull request from before 2026-11-15, or a hand edit —
+    has exactly one right answer, so it is applied instead of failing a lane.
+    """
+    from validation.mobile_build import ANDROID, APPLE, DEVELOPMENT_BUILD
 
-
-def fix_apple(merge_target: str) -> list[str]:
-    from validation import apple_build
-
-    _, changed = apple_build.bump(ROOT, merge_target=merge_target)
-    return list(changed)
-
-
-def fix_android(merge_target: str) -> list[str]:
-    target = git("show", f"{merge_target}:{ANDROID_GRADLE}")
-    want = int(re.search(r"^\s*versionCode\s*=\s*(\d+)\s*$", target, re.M).group(1)) + 1
-    gradle = read(ANDROID_GRADLE)
-    current = int(re.search(r"^\s*versionCode\s*=\s*(\d+)\s*$", gradle, re.M).group(1))
-    if current >= want:
-        return []
-    write(ANDROID_GRADLE, re.sub(r"(?m)^(\s*versionCode\s*=\s*)\d+(\s*)$", rf"\g<1>{want}\g<2>", gradle, count=1))
-    readme = read(ANDROID_README)
-    fixed, count = re.subn(r"(?m)^(> Status:.*?build `)[1-9]\d*(`)", rf"\g<1>{want}\g<2>", readme, count=1)
-    if count == 1:
-        write(ANDROID_README, fixed)
-    return [ANDROID_GRADLE, ANDROID_README]
-
-
-def fix_counters(base: str, counter_target: str) -> list[str]:
-    errors = counter_errors(base, counter_target)
-    changed: list[str] = []
-    if any(error.startswith("Apple release inputs changed") for error in errors):
-        changed += fix_apple(counter_target)
-    if any(error.startswith("Android release inputs changed") for error in errors):
-        changed += fix_android(counter_target)
+    changed = []
+    for path, pattern in (
+        (ANDROID, r"(?m)^(\s*versionCode\s*=\s*)(\d+)(\s*)$"),
+        (APPLE, r'(?m)^(\s*CURRENT_PROJECT_VERSION:\s*")(\d+)("\s*)$'),
+    ):
+        text = read(path)
+        fixed, count = re.subn(pattern, rf"\g<1>{DEVELOPMENT_BUILD}\g<3>", text)
+        if count == 1 and fixed != text:
+            write(path, fixed)
+            changed.append(path)
     return changed
 
 
@@ -215,7 +197,7 @@ def non_bookkeeping(paths: list[str]) -> list[str]:
 # --- entry points ------------------------------------------------------------
 
 def apply(base: str, counter_target: str) -> list[str]:
-    changed = fix_counters(base, counter_target) + fix_infra_names() + fix_docs_index()
+    changed = fix_counters() + fix_infra_names() + fix_docs_index()
     return sorted(set(changed))
 
 
@@ -321,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--base", help="branch point (default: merge base with --merge-target)")
     parser.add_argument("--merge-target", default="origin/main")
-    parser.add_argument("--counter-target", help="branch whose release counters to exceed (default: --merge-target)")
+    parser.add_argument("--counter-target", help="accepted for the lanes that still pass it; build numbers no longer compare to a branch")
     parser.add_argument("--ci", action="store_true", help="commit the fix (fast lane only)")
     parser.add_argument("--push", action="store_true", help="push the fix commit to --head-ref (fast lane only)")
     parser.add_argument("--head-sha", help="--ci/--push: the pull request head the checkout must be")

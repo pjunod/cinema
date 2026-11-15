@@ -12,12 +12,14 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.8.0**, build `301` in [`project.yml`](project.yml) — working
+> Status: **v0.8.0** — working
 > development client. Browse, resume, discover, and play on both iOS and tvOS.
 > Both targets compile against the iOS/tvOS27 SDKs and share the same
 > regression suite.
 >
-> Per-build release notes live in
+> TestFlight builds are numbered when they are released
+> ([how](../../docs/ci/SHARED-BOOKKEEPING.md#store-build-numbers)); the tree
+> carries no build number. Per-change release notes live in
 > [`docs/apple-builds/`](../../docs/apple-builds/README.md). Builds through 78
 > are archived in
 > [`history-through-build-78.md`](../../docs/apple-builds/history-through-build-78.md).

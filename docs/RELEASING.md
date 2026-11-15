@@ -15,8 +15,9 @@ version = "0.3.0"
 
 Every crate inherits it with `version.workspace = true`. The native apps keep
 their store-facing marketing versions aligned with the workspace separately;
-their monotonically increasing build counters advance whenever their release
-paths change, and CI enforces that contract.
+their store build numbers are assigned when a build is released, from the
+commit it is built from, so no branch claims one
+([SHARED-BOOKKEEPING.md](ci/SHARED-BOOKKEEPING.md#store-build-numbers)).
 
 plurx follows [semantic versioning](https://semver.org/) under the 0.x rules,
 which are worth stating plainly because they are not what 1.x users expect:
@@ -71,15 +72,14 @@ CI passes the tag name automatically when it publishes an image.
 2. **Run `scripts/release-cut`** (`--part minor` for a minor bump, or
    `--version X.Y.Z`). It refuses an empty `Unreleased` section, an existing
    tag and an existing changelog section before it writes anything; then it
-   moves `CHANGELOG.md`'s `Unreleased` section under a dated
+   folds every `changelog.d/` fragment and `CHANGELOG.md`'s `Unreleased`
+   section under a dated
    `## [X.Y.Z] — YYYY-MM-DD` heading, rewrites the two link definitions at the
-   bottom, sets the workspace version in `Cargo.toml`, sets both native apps'
-   marketing versions to it and advances both native build counters (the
-   mobile-version contract requires all of that of a version bump), rewrites
-   the status lines that quote the version or a build counter
+   bottom, deletes the fragments, sets the workspace version in `Cargo.toml`,
+   sets both native apps' marketing versions to it (it writes no build
+   number), rewrites the status lines that quote the version
    (`clients/apple/README.md`, `clients/android/README.md`,
-   `docs/clients/APPLE-CLIENT-PARITY.md`, `docs/STATUS.html`, the Apple ones
-   through `validation/apple_build.py`'s generator) so the tree it leaves
+   `docs/clients/APPLE-CLIENT-PARITY.md`) so the tree it leaves
    passes `make operations-check`, and lets Cargo relock `Cargo.lock` and
    `spikes/hiqlite-m0/Cargo.lock`. It never tags.
 

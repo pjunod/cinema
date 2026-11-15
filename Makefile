@@ -158,16 +158,16 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
 	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
 
-# The bookkeeping rules CI enforces — index rows, release counters, infra
+# The bookkeeping rules CI enforces — index rows, per-change files, infra
 # names, Regression-Test lines, route docs — checked in seconds with the fix
 # printed beside each failure. The pre-push hook and the fast lane's first job
 # run the same script. docs/ci/PAPERWORK.md lists every rule.
 .PHONY: paperwork
-paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
+paperwork: ## Fast bookkeeping checks (index rows, per-change files, names, Regression-Test) with fixes
 	@python3 scripts/paperwork
 
 .PHONY: paperwork-fix
-paperwork-fix: ## Apply the derivable paperwork fixes (counters, Markdown host names, index rows) to the working tree
+paperwork-fix: ## Apply the derivable paperwork fixes (a claimed build number, Markdown host names, index rows) to the working tree
 	@python3 scripts/paperwork-fix
 
 .PHONY: history-check
@@ -1925,9 +1925,9 @@ desktop-macos-check: desktop-macos-build desktop-macos-test ## Build the arm64 t
 
 ## ---- apple clients -----------------------------------------------------
 
-.PHONY: apple-build-bump
-apple-build-bump: ## Claim the next Apple build number across every generated surface
-	@python3 -m validation.apple_build --merge-target "$${PLURX_MERGE_TARGET:-origin/main}"
+.PHONY: mobile-build-number
+mobile-build-number: ## Print the store build number of HEAD (assigned at release; nothing in the tree claims one)
+	@python3 -m validation.mobile_build number
 
 # iPhone and iPad run the exact same build products, so iOS compiles ONCE with
 # `build-for-testing` and both destinations replay it with
@@ -2088,6 +2088,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	@test -f "$${PLURX_ANDROID_KEYSTORE}" || { echo "PLURX_ANDROID_KEYSTORE=$${PLURX_ANDROID_KEYSTORE} is not a file"; exit 1; }
 	@test -f "$${PLURX_ANDROID_OLD_KEYSTORE:-}" || { echo "set PLURX_ANDROID_OLD_KEYSTORE to the audited original signer"; exit 1; }
 	@test -f "$${PLURX_ANDROID_LINEAGE:-}" || { echo "set PLURX_ANDROID_LINEAGE to the signed debug-to-release lineage"; exit 1; }
+	build="$$(python3 -m validation.mobile_build number)" && \
 	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
 	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
 	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \
@@ -2106,7 +2107,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	  -v "$$oldkeystore":/signing/old.jks:ro \
 	  -v "$$lineage":/signing/lineage.bin:ro \
 	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
-	  $(ANDROID_IMAGE) sh -ec './gradlew --no-daemon :app:assembleRelease && python3 /workspace/scripts/sign-android-release'
+	  $(ANDROID_IMAGE) sh -ec "./gradlew --no-daemon -PplurxBuildNumber=$$build :app:assembleRelease && python3 /workspace/scripts/sign-android-release"
 	@echo "→ clients/android/app/build/outputs/apk/release/app-release.apk"
 
 # Publishing keeps the R8 mapping of every build it serves (plan

@@ -31,6 +31,7 @@ a document to this folder.
 | [AGENT-COMPILE-LOOP.md](AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
 | [CI-THROUGHPUT.md](CI-THROUGHPUT.md) | What to run before pushing, why a push cancels the PR's in-flight run, which paperwork the lane fixes itself, and the 2026-11-02..12 failure analysis behind both. | built |
 | [MERGE-TRAIN.md](MERGE-TRAIN.md) | How a pull request lands on `main` with the merge train off and on, its four controls (`WIP:`, `hold`, `train:solo`, `MERGE_TRAIN`) and what the bot comment means. | built |
+| [SHARED-BOOKKEEPING.md](SHARED-BOOKKEEPING.md) | Where a change records its changelog entry, count change, client fix anchor and status without editing a shared file; how store builds are numbered; what an open pull request does after 2026-11-15. | live |
 | [PAPERWORK.md](PAPERWORK.md) | Which bookkeeping rules run first — on push and as every pull request's first job — and the fix for each. | live |
 | [AI-HARNESS-ASSESSMENT.md](AI-HARNESS-ASSESSMENT.md) | Why agent navigation and dependable feedback should precede new orchestration, and where Ripwire fits. | open |
 | [AI-HARNESS-FABLE-ASSESSMENT.md](AI-HARNESS-FABLE-ASSESSMENT.md) | Fable's assessment: fix the compile loop, test evidence, and prompt drift before navigation tooling; positions on Gemini's and Codex's proposals. | open |

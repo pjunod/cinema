@@ -194,19 +194,17 @@ class PaperworkFixTests(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "base")
 
-    def test_the_android_counter_is_raised_above_the_merge_target(self):
+    def test_a_claimed_build_number_goes_back_to_the_development_build(self):
         self.repository()
-        self.git("branch", "target")
-        self.git("checkout", "-q", "target")
-        self.write("clients/android/app/build.gradle.kts", 'android {\n        versionCode = 200\n        versionName = "0.8.0"\n}\n')
-        self.git("commit", "-qam", "main took 200")
-        self.git("checkout", "-q", "main")
-        self.assertEqual(self.fix.fix_android("target"),
-                         ["clients/android/app/build.gradle.kts", "clients/android/README.md"])
-        self.assertIn("versionCode = 201", (self.root / "clients/android/app/build.gradle.kts").read_text())
-        self.assertIn("build `201` — a change.", (self.root / "clients/android/README.md").read_text())
+        self.write("clients/apple/project.yml", 'settings:\n    CURRENT_PROJECT_VERSION: "302"\n')
+        self.git("add", "-A")
+        self.git("commit", "-qm", "a branch claimed numbers")
+        self.assertEqual(self.fix.fix_counters(),
+                         ["clients/android/app/build.gradle.kts", "clients/apple/project.yml"])
+        self.assertIn("versionCode = 1\n", (self.root / "clients/android/app/build.gradle.kts").read_text())
+        self.assertIn('CURRENT_PROJECT_VERSION: "1"\n', (self.root / "clients/apple/project.yml").read_text())
         self.assertEqual(self.fix.non_bookkeeping(self.fix.dirty_paths()), [])
-        self.assertEqual(self.fix.fix_android("target"), [], "a claim above the target is kept")
+        self.assertEqual(self.fix.fix_counters(), [], "the development build is left alone")
 
     def test_only_numbers_or_markdown_may_change(self):
         self.repository()

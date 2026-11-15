@@ -3,7 +3,7 @@
 
 Every rule here is one an agent or contributor meets by failing CI half an
 hour after pushing: a corrective commit without its `Regression-Test:` line,
-a client change without a release-counter bump, a doc missing from its index,
+an entry added to a shared file instead of its own, a doc missing from its index,
 a real host name, a route missing from docs/API.md. Each check below runs the
 same validator or test the CI lane runs, and prints the fix beside the
 failure, so the rule is learned at push time instead of after a fan-out.
@@ -52,22 +52,29 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
         "add (or delete) the route's entry in docs/API.md",
     ),
     (
+        "test_shared_bookkeeping",
+        "changelog entries and client fix anchors are one file per change",
+        "move the entry out of CHANGELOG.md's [Unreleased] into changelog.d/<slug>.md, and a "
+        "new tests/client-fixes.toml row into tests/client-fixes.d/<slug>.toml "
+        "(docs/ci/SHARED-BOOKKEEPING.md)",
+    ),
+    (
         "test_apple_build_claims",
-        "the Apple build number has one owner and generated copies",
-        "run `make apple-build-bump` (never hand-edit the generated surfaces); a user-visible "
-        "change also gets a docs/apple-builds/ fragment",
+        "client status blockquotes carry no per-build narrative; Apple notes are well formed",
+        "put the sentence in changelog.d/<slug>.md (and, for Apple, a docs/apple-builds/ "
+        "fragment) instead of the README or parity status blockquote",
     ),
     (
         "test_mobile_build_claims",
-        "the Apple and Android README/status build claims match the build files",
-        "run `make apple-build-bump`; for Android edit versionCode in "
-        "clients/android/app/build.gradle.kts and the status line in clients/android/README.md",
+        "no status document states a store build number",
+        "drop the number from the status line or docs/STATUS.html sentence (a build is "
+        "numbered at release), or wrap a past build in <span data-build-history>",
     ),
     (
         "test_status_page_shape",
-        "STATUS.md stays short and indexes the sections moved out of it",
-        "move the oldest STATUS.md sections verbatim into their subject folder's status history "
-        "and leave one index row each (docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.4)",
+        "STATUS.md is a fixed page and each effort is a short file under status.d/",
+        "put the effort in status.d/<YYYY-MM-DD>-<slug>.md (status.d/README.md) instead of "
+        "STATUS.md; keep it within the size limit by moving detail to its ledger",
     ),
     (
         "test_status_pr_claims",
@@ -250,12 +257,12 @@ def check_mobile_versions(base: str, merge_target: str) -> Result:
         },
     )
     return Result(
-        "mobile release counters rise with client changes",
+        "no branch claims a store build number",
         code == 0,
         time.monotonic() - start,
         "" if code == 0 else tail(out),
-        "Apple: `make apple-build-bump`; Android: raise versionCode in "
-        "clients/android/app/build.gradle.kts and the clients/android/README.md status line",
+        "run `make paperwork-fix`: it puts versionCode and CURRENT_PROJECT_VERSION back to "
+        "the development build; the release numbers the build (docs/ci/SHARED-BOOKKEEPING.md)",
     )
 
 
@@ -319,7 +326,7 @@ def print_list() -> None:
     print("paperwork checks — what each guards, and the fix:\n")
     print("  catalog            every governed file maps to a functionality point")
     print("  Regression-Test    fix(/perf( commits need `Regression-Test:` lines in the PR description")
-    print("  mobile counters    Apple/Android build numbers rise when client code changes")
+    print("  build numbers      no branch claims an Apple/Android build number; the release assigns it")
     for module, guard, hint in TEST_RULES:
         print(f"  {module:<26} {guard}\n  {'':<26} fix: {hint}")
     print(f"  web (node)                 {WEB_HINT}")
@@ -331,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--merge-target", default="origin/main", help="branch the work merges into")
     parser.add_argument(
         "--counter-target",
-        help="branch whose release counters a client change must exceed (default: --merge-target)",
+        help="accepted for the lanes that still pass it; build numbers no longer compare to a branch",
     )
     parser.add_argument("--body-file", type=Path, help="pull request description to check")
     parser.add_argument(

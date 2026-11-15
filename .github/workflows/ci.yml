@@ -224,13 +224,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      # The recorded base sha is the target tip at event time, not now. Two
-      # branches that write the same build counter auto-merge with no conflict
-      # and no BEHIND signal in this job, so a branch bumped to N stays green
-      # forever once an unrelated release bump lands N on the target. Re-fetch
-      # the target here so the counter is compared against what the target
-      # actually ships, while the recorded base still scopes which release
-      # inputs this branch touched.
+      # No branch claims a store build number: the release assigns it from the
+      # commit it builds (validation/mobile_build.py), and this check refuses a
+      # tree whose manifests carry anything but the development build. The
+      # merge target is still resolved for the modes that name it.
       - name: Resolve the current merge target
         if: github.event_name == 'pull_request' || needs.scope.outputs.qualification == 'true'
         env:

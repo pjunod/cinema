@@ -63,13 +63,13 @@ CARGO = textwrap.dedent(
     serde = { version = "1.0.0" }
     """
 )
-ANDROID = '    defaultConfig {\n        versionCode = 120\n        versionName = "0.3.0"\n    }\n'
+ANDROID = '    defaultConfig {\n        versionCode = 1\n        versionName = "0.3.0"\n    }\n'
 APPLE = textwrap.dedent(
     """\
     settings:
       base:
         MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "180"
+        CURRENT_PROJECT_VERSION: "1"
     targets:
       iOS:
         info:
@@ -84,25 +84,20 @@ APPLE = textwrap.dedent(
     """
 )
 
-# The status lines that quote the version and both build counters, in the
-# shape the real documents carry them (validation/apple_build.py and
-# validation/doc_versions.py pin those shapes on the real tree).
+# The status lines that quote the version, in the shape the real documents
+# carry them (validation/doc_versions.py pins that no build number rides
+# along on the real tree).
 DOCUMENTS = {
     release_cut.APPLE_README: (
         "# plurx for Apple\n\n"
-        "> Status: **v0.3.0**, build `180` in [`project.yml`](project.yml) — working\n"
+        "> Status: **v0.3.0** — working\n"
         "> regression suite.\n"
     ),
     release_cut.APPLE_PARITY: (
-        "# Parity\n\n> Status (2026-09-15): source is v0.3.0, Apple build 180. Timer-only\n"
+        "# Parity\n\n> Status (2026-09-15): source is v0.3.0. Timer-only\n"
     ),
     release_cut.ANDROID_README: (
-        "# plurx for Android\n\n> Status: **v0.3.0**, build `120` — native viewer parity\n"
-    ),
-    release_cut.STATUS_PAGE: (
-        "<div>web · Android versionCode 119 source · Apple build 180 source, not yet uploaded</div>\n"
-        "<li>upload Apple build 180 (release notes: x) to TestFlight</li>\n"
-        "<li>Install Apple build 180 and Android versionCode 119 on the physical devices.</li>\n"
+        "# plurx for Android\n\n> Status: **v0.3.0** — native viewer parity\n"
     ),
 }
 
@@ -163,20 +158,17 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertIn('serde = { version = "1.0.0" }', cargo)
         android = (root / release_cut.ANDROID).read_text(encoding="utf-8")
         self.assertIn('versionName = "0.3.1"', android)
-        self.assertIn("versionCode = 121", android)
+        # The cut writes no build number: a store build is numbered from the
+        # commit it is released from (validation/mobile_build.py).
+        self.assertIn("versionCode = 1\n", android)
         apple = (root / release_cut.APPLE).read_text(encoding="utf-8")
         self.assertIn('MARKETING_VERSION: "0.3.1"', apple)
-        self.assertIn('CURRENT_PROJECT_VERSION: "181"', apple)
-        # Every status document's quote of the version and both counters.
+        self.assertIn('CURRENT_PROJECT_VERSION: "1"\n', apple)
+        # Every status document's quote of the version.
         read = lambda path: (root / path).read_text(encoding="utf-8")  # noqa: E731
-        self.assertIn("> Status: **v0.3.1**, build `181` in", read(release_cut.APPLE_README))
-        self.assertIn("source is v0.3.1, Apple build 181. Timer-only", read(release_cut.APPLE_PARITY))
-        self.assertIn("> Status: **v0.3.1**, build `121` — native", read(release_cut.ANDROID_README))
-        status = read(release_cut.STATUS_PAGE)
-        self.assertIn("Android versionCode 121 source · Apple build 181 source", status)
-        self.assertIn("upload Apple build 181 (release notes", status)
-        self.assertIn("Install Apple build 181 and Android versionCode 121 on", status)
-        self.assertNotRegex(status, r"\b(180|119)\b")
+        self.assertIn("> Status: **v0.3.1** — working", read(release_cut.APPLE_README))
+        self.assertIn("source is v0.3.1. Timer-only", read(release_cut.APPLE_PARITY))
+        self.assertIn("> Status: **v0.3.1** — native", read(release_cut.ANDROID_README))
         # It never tags; tagging is the scheduled run's, from a green gate.
         tags = subprocess.run(
             ["git", "tag", "-l"], cwd=root, text=True, stdout=subprocess.PIPE
@@ -192,16 +184,17 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual(self.run_cut(root, "--part", "minor").returncode, 0)
         after = read_versions(lambda path: (root / path).read_text(encoding="utf-8"))
         self.assertEqual(after.workspace, "0.4.0")
-        self.assertEqual(validate_versions(after, baseline=before), ())
+        self.assertEqual((after.apple_build, after.android_build),
+                         (before.apple_build, before.android_build))
+        self.assertEqual(validate_versions(after), ())
 
     def test_the_cut_real_tree_passes_the_build_claim_sweeps(self):
         """PR #485 review finding 2: the cut left the repository red.
 
-        `make operations-check` pins every status document's build claim to
-        the manifests (`test_mobile_build_claims`, `test_apple_build_claims`),
-        and a cut that advanced the counters without them failed both. This
-        runs the cut on a copy of this repository's own release files and
-        then those same sweeps on the result.
+        `make operations-check` sweeps every status document and both
+        manifests (`test_mobile_build_claims`, `test_apple_build_claims`).
+        This runs the cut on a copy of this repository's own release files
+        and then those same sweeps on the result.
         """
 
         from validation.apple_build import NOTES_DIR, check_repository
@@ -213,7 +206,7 @@ class ReleaseCutCase(unittest.TestCase):
         root = Path(temporary.name)
         for path in (
             "CHANGELOG.md", "Cargo.toml", release_cut.ANDROID, release_cut.APPLE,
-            *DOCUMENTS,
+            "docs/STATUS.html", *DOCUMENTS,
         ):
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / path, root / path)
@@ -234,16 +227,17 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
         after = read_versions(read)
-        self.assertEqual(after.apple_build, before.apple_build + 1)
+        self.assertEqual(after.apple_build, before.apple_build)
+        self.assertNotEqual(after.workspace, before.workspace)
         self.assertEqual(validate_documented_builds(read), ())
         self.assertEqual(check_repository(root), ())
-        self.assertEqual(validate_versions(after, baseline=before), ())
+        self.assertEqual(validate_versions(after), ())
 
     def test_a_reworded_claim_refuses_the_cut_before_anything_is_written(self):
         root = self.tree()
         readme = root / release_cut.ANDROID_README
         readme.write_text(
-            DOCUMENTS[release_cut.ANDROID_README].replace("build `120`", "versionCode 120"),
+            DOCUMENTS[release_cut.ANDROID_README].replace("**v0.3.0**", "version 0.3.0"),
             encoding="utf-8",
         )
         result = self.run_cut(root)
