@@ -433,11 +433,12 @@ SQL behind `CountedClient`, which hands out no raw client, so the
 directory takes the applied mark from `AppliedView::applied_mark()`
 instead, and the membership operation census covers `directory.rs`. With
 the review's census classes, slice 1 counts **755** sites at `dd76bb88e`
-and **763** in 75 files on the merged tree (main's sharing work, A6 M1
-and M3, added eight `.serving` sites). On the merged tree: `.membership` 275 in 42
+and **765** in 75 files on the merged tree (main's sharing work, A6 M1
+and M3, added eight `.serving` sites, and the leader handoff, #1642, two
+`main.rs` sites). On the merged tree: `.membership` 276 in 42
 files, `.serving` 144 in 28, `.replication` 19 in 6, type names 86 in 28,
 other `hiqlite::` 10 in 4, `PeerTransport::new` 19 in 17, role 62 in 27,
-roster 33 in 22, and the new `manager` class 115 in 35. The first two
+roster 33 in 22, and the new `manager` class 116 in 35. The first two
 classes moved against §10.1 because test-only `cfg(all(test, ..))` code is
 no longer counted and patterns and shorthand fields now are.
 
