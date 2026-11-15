@@ -28,7 +28,11 @@ import androidx.media3.exoplayer.video.VideoRendererEventListener
  * finite player ([requestsTunneling]); a successor is untunneled. The tunneled
  * hardware callback supplies frame PTS where tunneling is on; the normal path
  * reports item-local PTS. */
-internal class PreparedFrameRenderersFactory(context: Context, private val continuousOutput: ContinuousOutputEvidence? = null) : DefaultRenderersFactory(context) {
+internal class PreparedFrameRenderersFactory(
+    context: Context,
+    private val continuousOutput: ContinuousOutputEvidence? = null,
+    private val videoDecoderEvidence: VideoDecoderEvidence? = null,
+) : DefaultRenderersFactory(context) {
     override fun getCodecAdapterFactory(): MediaCodecAdapter.Factory {
         val original = super.getCodecAdapterFactory()
         return continuousOutput?.let { ContinuousCodecAdapterFactory(original, it) } ?: original
@@ -58,7 +62,7 @@ internal class PreparedFrameRenderersFactory(context: Context, private val conti
             .experimentalSetLateThresholdToDropDecoderInputUs(
                 MediaCodecVideoRenderer.DEFAULT_LATE_THRESHOLD_TO_DROP_DECODER_INPUT_US)
             .setEnableDurationToProgressUs(false)
-        out.add(PreparedFrameVideoRenderer(builder, continuousOutput))
+        out.add(PreparedFrameVideoRenderer(builder, continuousOutput, videoDecoderEvidence))
     }
     override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink? {
         val evidence = continuousOutput ?: return super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
@@ -100,7 +104,12 @@ internal class PreparedFrameRenderersFactory(context: Context, private val conti
 
 /** Media3's normal path already reports item-local PTS. Its tunneled path
  * reports codec timestamps through a different callback, before first render. */
-private class PreparedFrameVideoRenderer(builder: MediaCodecVideoRenderer.Builder, private val continuousOutput: ContinuousOutputEvidence?) : MediaCodecVideoRenderer(builder) {
+private class PreparedFrameVideoRenderer(
+    builder: MediaCodecVideoRenderer.Builder,
+    private val continuousOutput: ContinuousOutputEvidence?,
+    private val videoDecoderEvidence: VideoDecoderEvidence?,
+) : MediaCodecVideoRenderer(builder) {
+    private var decoderClaim: VideoDecoderEvidence.Claim? = null
     private var metadataListener: VideoFrameMetadataListener? = null
     private var decodedFormat: Format? = null
     private val actualFrames = ContinuousCodecFrames()
@@ -125,6 +134,7 @@ private class PreparedFrameVideoRenderer(builder: MediaCodecVideoRenderer.Builde
 
     override fun onCodecInitialized(name: String, configuration: MediaCodecAdapter.Configuration, initializedTimestampMs: Long, initializationDurationMs: Long) {
         super.onCodecInitialized(name, configuration, initializedTimestampMs, initializationDurationMs)
+        decoderClaim = videoDecoderEvidence?.initialized(name, configuration.codecInfo.codecMimeType)
         actualFrames.reset()
         installActualFrameObserver()
     }
@@ -142,6 +152,10 @@ private class PreparedFrameVideoRenderer(builder: MediaCodecVideoRenderer.Builde
     }
     override fun onCodecReleased(name: String) {
         super.onCodecReleased(name)
+        if (decoderClaim?.name == name) {
+            videoDecoderEvidence?.released(decoderClaim)
+            decoderClaim = null
+        }
         actualFrames.reset()
     }
     override fun onPositionReset(positionUs: Long, joining: Boolean, sampleStreamIsResetToKeyFrame: Boolean) {
@@ -178,6 +192,8 @@ private class PreparedFrameVideoRenderer(builder: MediaCodecVideoRenderer.Builde
     }
 
     override fun onDisabled() {
+        videoDecoderEvidence?.released(decoderClaim)
+        decoderClaim = null
         decodedFormat = null
         super.onDisabled()
     }

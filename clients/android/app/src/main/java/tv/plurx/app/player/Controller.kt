@@ -305,6 +305,12 @@ class Controller internal constructor(
     private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
     private var progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
+    private val videoDecodersByPlayer = java.util.WeakHashMap<ExoPlayer, VideoDecoderEvidence>().apply {
+        put(builtPlayer.player, builtPlayer.videoDecoderEvidence)
+    }
+    /** Actual configured codec MIME for the current player, including successor/rollback. */
+    val selectedVideoCodecMime: String? get() = videoDecodersByPlayer[player]?.codecMimeType
+
     private val autoTransfersByPlayer = java.util.WeakHashMap<ExoPlayer, AutoTransferEvidence>().apply {
         put(builtPlayer.player, builtPlayer.autoTransfers)
     }
@@ -689,18 +695,22 @@ class Controller internal constructor(
         private set
 
     /**
-     * The open session's server-computed Dolby Vision enhancement (FEL / RPU /
-     * DYN). Set by the session that reports it and cleared with the session
+     * The active delivery's server-computed Dolby Vision enhancement (FEL /
+     * RPU / DYN). Direct play starts from its decision; an HLS session replaces
+     * it with its own report, which is cleared with the session
      * wherever [effectiveProcessing] is cleared on a session change; a seek
      * leaves it standing, because a processed delivery's badges are already
      * gated on [effectiveProcessing] matching the current generation
      * ([tv.plurx.app.data.PlaybackEnhancement.shown]).
      */
-    private var baseEnhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(null)
+    private var baseEnhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(
+        directPlaybackEnhancement(plan.mode, plan.deliveredDynamicRange, plan.enhancement),
+    )
     private var processingSkip: tv.plurx.app.data.ProcessingSkip? by mutableStateOf(null)
     var enhancement: tv.plurx.app.data.PlaybackEnhancement?
         get() = baseEnhancement?.explainingSkip(processingSkip, effectiveProcessingGeneration)
         private set(value) { baseEnhancement = value; processingSkip = null }
+
     var deliveredRange: String? by mutableStateOf(plan.deliveredDynamicRange)
         private set
 
@@ -2500,7 +2510,7 @@ class Controller internal constructor(
         val recipe = currentRecipe()
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
-                leaveSessionPlayback()
+                leaveSessionPlayback(restoreDirectEnhancement = true)
                 activeMediaPath = relativeMediaPath(fileContext.translatedDeliveryPath(plan.playUrl))
                 player.setMediaItem(directMediaItem(fileContext.translatedDeliveryPath(plan.playUrl)), positionMs)
                 attachRecipe(recipe)
@@ -3176,7 +3186,7 @@ class Controller internal constructor(
     private fun textTrackAt(ordinal: Int): Pair<TrackGroup, Int>? =
         trackAt(C.TRACK_TYPE_TEXT, ordinal)
 
-    private fun leaveSessionPlayback() {
+    private fun leaveSessionPlayback(restoreDirectEnhancement: Boolean = false) {
         stallGuard.invalidateForUserAction()
         val endingSession = sessionId
         // The final control exchange may release the session after the
@@ -3198,7 +3208,9 @@ class Controller internal constructor(
         // Both halves, for the same reason they are adopted together.
         effectiveProcessing = null
         effectiveProcessingGeneration = null
-        enhancement = null
+        enhancement = if (restoreDirectEnhancement) {
+            directPlaybackEnhancement(plan.mode, plan.deliveredDynamicRange, plan.enhancement)
+        } else null
         deliveredRange = plan.deliveredDynamicRange
         deliveredDolbyVisionProfile = plan.deliveredDolbyVisionProfile
     }
@@ -5132,6 +5144,7 @@ class Controller internal constructor(
             fallBackAfterPreparedFailure()
             return
         }
+        videoDecodersByPlayer[built.player] = built.videoDecoderEvidence
         autoTransfersByPlayer[built.player] = built.autoTransfers
         val desired = autoDesiredCandidate
         val stagedSessionId = action.sessionId
@@ -6064,6 +6077,8 @@ interface PlanLike {
     val qualityCandidates: List<tv.plurx.app.data.QualityCandidate> get() = emptyList()
     val qualityCandidateId: String? get() = null
     val displayAwareAutoProtocol: String? get() = null
+    /** Server enhancement for the original direct delivery, never a replacement session. */
+    val enhancement: tv.plurx.app.data.PlaybackEnhancement? get() = null
     val title: String
     val isAudioOnly: Boolean get() = false
     val fileId: Long
@@ -6528,6 +6543,7 @@ class BuiltPlayer internal constructor(
     internal val autoTransfers: AutoTransferEvidence = AutoTransferEvidence(progressiveMediaOrigin),
     internal val continuousSources: ContinuousSourceRegistry = ContinuousSourceRegistry(),
     internal val continuousOutput: ContinuousOutputEvidence = ContinuousOutputEvidence(),
+    internal val videoDecoderEvidence: VideoDecoderEvidence = VideoDecoderEvidence(),
 )
 
 @UnstableApi
@@ -6572,12 +6588,14 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
     val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)
     val continuousSources = ContinuousSourceRegistry()
     val continuousOutput = ContinuousOutputEvidence()
+    val videoDecoderEvidence = VideoDecoderEvidence()
     val player = PlurxPlayerBuilder(context, role).build(
         dataSource = Net.dataSourceFactory(),
         audioLanguage = vm.audioLang,
         transferListener = autoTransfers,
         continuousSources = continuousSources,
         continuousOutput = continuousOutput,
+        videoDecoderEvidence = videoDecoderEvidence,
     )
     player.addAnalyticsListener(object : AnalyticsListener {
         override fun onMediaItemTransition(eventTime: AnalyticsListener.EventTime, mediaItem: MediaItem?, reason: Int) {
@@ -6593,7 +6611,7 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
             autoTransfers.discard(loadEventInfo.uri.toString())
         }
     })
-    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput)
+    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput, videoDecoderEvidence)
 }
 
 // Keep the pending language choice tied to one of the two supported caption tasks.

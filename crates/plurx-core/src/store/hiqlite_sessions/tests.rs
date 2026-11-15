@@ -71,7 +71,7 @@ fn ending_a_session_reads_its_owner_inside_the_transaction() {
         "the pin delete covers every epoch of the ended incarnation"
     );
     assert!(
-        source.contains("Ok(route_by(self, \"incarnation_id\", &route.incarnation_id)"),
+        source.split_whitespace().collect::<Vec<_>>().join(" ").contains("Ok(route_by( \"end_media_session\", self, \"incarnation_id\", &route.incarnation_id, )"),
         "the returned route must be re-read after the transaction commits"
     );
 }
@@ -130,7 +130,10 @@ fn preparation_neither_reaps_nor_repoints() {
         normalized_method.contains("let statements = prepare_statements(preparation, layout)?;")
             && method.matches("let statements =").count() == 1
             && method.matches(".txn(").count() == 1
-            && method.matches(".txn(statements)").count() == 1
+            && method
+                .matches(".txn(\"prepare_media_session\", statements)")
+                .count()
+                == 1
             && !method.contains("statements.push(")
             && !method.contains("statements.extend(")
             && !method.contains("statements.insert(")
@@ -233,7 +236,7 @@ fn preparation_abort_is_ledger_gated_in_every_statement() {
                 "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, layout, );"
             ) && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
-                && method.matches(".txn(statements)").count() == 1
+                && method.matches(".txn(\"abort_media_session_preparation\", statements)").count() == 1
                 && !method.contains("statements.push(")
                 && !method.contains("statements.extend(")
                 && !method.contains("statements.insert(")
@@ -315,7 +318,9 @@ fn preparation_abort_is_ledger_gated_in_every_statement() {
 #[test]
 fn activation_losing_pointer_read_race_is_a_read_only_replay() {
     let wrapper = method_source("activate_media_session");
-    assert!(wrapper.contains("activate_with_authority(self, activation, None, None).await"));
+    assert!(wrapper.contains(
+        "activate_with_authority(\"activate_media_session\", self, activation, None, None).await"
+    ));
     let source = SOURCE
         .split_once("async fn activate_with_authority(")
         .expect("activation helper")

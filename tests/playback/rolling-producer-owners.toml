@@ -3983,7 +3983,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Reader B0/B1: +1 bounded source-recovery diagnostic spawn_blocking. One
 # try-acquired owned semaphore permit remains in the closure through completion
 # even after request cancellation; contention returns unavailable, never queues.
-expected_occurrences = 1158
+# #1602: +1 joined test-only probe worker in http::tests::seeded_write_surface;
+# the test cancels its token and awaits the JoinHandle before asserting.
+expected_occurrences = 1159
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes

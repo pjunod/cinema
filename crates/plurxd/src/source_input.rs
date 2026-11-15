@@ -256,6 +256,10 @@ struct InputState {
     source_bytes: std::sync::atomic::AtomicU64,
     cache_hits: std::sync::atomic::AtomicU64,
     cached_bytes: std::sync::atomic::AtomicUsize,
+    /// A served read failed (EIO, a changed source, a revoked budget). The
+    /// consumer saw truncated input, so what it concluded is not a verdict
+    /// on the file.
+    read_failed: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     read_gate: Option<Arc<tests::ReadGate>>,
 }
@@ -385,6 +389,7 @@ impl SourceInput {
             seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
+            read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -454,6 +459,7 @@ impl SourceInput {
             seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
+            read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -508,6 +514,7 @@ impl SourceInput {
             window_bytes: std::sync::atomic::AtomicUsize::new(SOURCE_WINDOW_MAX),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
+            read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             read_gate: Some(Arc::clone(&gate)),
             read_ceiling: std::sync::atomic::AtomicU64::new(u64::MAX),
@@ -551,6 +558,7 @@ impl SourceInput {
             seek_bootstrap: std::sync::OnceLock::new(),
             source_bytes: std::sync::atomic::AtomicU64::new(0),
             cache_hits: std::sync::atomic::AtomicU64::new(0),
+            read_failed: std::sync::atomic::AtomicBool::new(false),
             cached_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             read_gate: None,
@@ -725,6 +733,12 @@ impl SourceInput {
     pub(crate) fn url(&self) -> &str {
         &self.url
     }
+    /// Whether any read this input served to its consumer failed.
+    pub(crate) fn source_read_failed(&self) -> bool {
+        self.state
+            .read_failed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
     pub(crate) fn foreground_observer(&self) -> Option<SourceObserver> {
         self.state.observer.clone()
     }
@@ -850,7 +864,13 @@ fn input_body(state: Arc<InputState>, offset: u64, remaining: u64) -> Body {
             if remaining == 0 {
                 return Ok::<_, std::io::Error>(None);
             }
-            let bytes = read_source(&state, offset, remaining).await?;
+            let bytes = read_source(&state, offset, remaining)
+                .await
+                .inspect_err(|_| {
+                    state
+                        .read_failed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                })?;
             let count = bytes.len() as u64;
             Ok(Some((
                 bytes::Bytes::from(bytes),
