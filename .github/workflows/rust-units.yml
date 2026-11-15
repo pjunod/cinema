@@ -23,6 +23,14 @@ on:
         description: Commit the change is measured against; its merge-base with the head is used.
         required: true
         type: string
+      tests:
+        description: >-
+          A merge-train probe's Train-Tests: comma-separated nextest test ids.
+          When set, exactly those tests run, regardless of content keys, and
+          nothing is adopted or baselined for them.
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       base:
@@ -51,6 +59,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       build: ${{ steps.adopt.outputs.build || 'false' }}
+      absent_only: ${{ steps.adopt.outputs.absent_only || 'false' }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -60,7 +69,8 @@ jobs:
         id: select
         env:
           BASE: ${{ inputs.base }}
-        run: python3 -m validation.rust_units select --base "$BASE"
+          TRAIN_TESTS: ${{ inputs.tests }}
+        run: python3 -m validation.rust_units select --base "$BASE" --tests "$TRAIN_TESTS"
       - name: Drop tests that already passed under the same keys
         id: adopt
         if: steps.select.outputs.any == 'true'
@@ -75,6 +85,17 @@ jobs:
           path: |
             target/rust-units/selection.json
             target/rust-units/pending.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+      # Only absent named tests: no archive or shard; the verdict reads this plan.
+      - name: Hand the all-absent plan to the verdict
+        if: steps.adopt.outputs.absent_only == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-units-plan-${{ github.run_id }}
+          path: target/rust-units/plan.json
           if-no-files-found: error
           overwrite: true
           retention-days: 7
@@ -287,12 +308,15 @@ jobs:
 
   verdict:
     name: "Rust units: verdict"
-    needs: [rust_units_archive, shard]
-    if: always() && needs.rust_units_archive.result == 'success' && needs.rust_units_archive.outputs.shards != '[]'
+    needs: [select, rust_units_archive, shard]
+    if: >-
+      always() && (needs.select.outputs.absent_only == 'true' ||
+      (needs.rust_units_archive.result == 'success' && needs.rust_units_archive.outputs.shards != '[]'))
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 15
     outputs:
       failures: ${{ steps.verdict.outputs.failures }}
+      absent: ${{ steps.verdict.outputs.absent }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -420,7 +444,9 @@ jobs:
   rust_units_baseline:
     name: "Rust units: merge-base check of failures"
     needs: verdict
-    if: always() && needs.verdict.outputs.failures == 'true'
+    # A named-test probe is judged by the train against main-alone probes: a
+    # failure there is never excused by this stage's own merge-base check.
+    if: always() && needs.verdict.outputs.failures == 'true' && inputs.tests == ''
     runs-on: [ci-nonvoter-compile-amd64]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
@@ -559,15 +585,30 @@ jobs:
         env:
           SELECT: ${{ needs.select.result }}
           BUILD: ${{ needs.select.outputs.build }}
+          ABSENT_ONLY: ${{ needs.select.outputs.absent_only }}
           ARCHIVE: ${{ needs.rust_units_archive.result }}
           SHARDS: ${{ needs.rust_units_archive.outputs.shards }}
           SHARD: ${{ needs.shard.result }}
           VERDICT: ${{ needs.verdict.result }}
           FAILURES: ${{ needs.verdict.outputs.failures }}
+          ABSENT: ${{ needs.verdict.outputs.absent }}
           BASELINE: ${{ needs.rust_units_baseline.result }}
+          TRAIN_TESTS: ${{ inputs.tests }}
         run: |
           echo "select=$SELECT build=$BUILD archive=$ARCHIVE shards=$SHARDS shard=$SHARD verdict=$VERDICT failures=$FAILURES baseline=$BASELINE"
           [ "$SELECT" = success ] || { echo "selection did not complete"; exit 1; }
+          if [ -n "$TRAIN_TESTS" ] && [ "$ABSENT_ONLY" = true ]; then
+            [ "$VERDICT" = success ] || { echo "the verdict ended with $VERDICT"; exit 1; }
+            echo "every named test is absent (see the verdict's ABSENT lines); absent is never a pass"; exit 1
+          fi
+          if [ -n "$TRAIN_TESTS" ]; then
+            # Named tests must actually run: no "nothing due" or "already passed" exit.
+            [ "$BUILD" = true ] && [ "$SHARDS" != '[]' ] || { echo "named tests were not planned to run: $TRAIN_TESTS"; exit 1; }
+            [ "$ARCHIVE" = success ] && [ "$SHARD" = success ] && [ "$VERDICT" = success ] || { echo "named tests did not all run and pass (archive=$ARCHIVE shard=$SHARD verdict=$VERDICT failures=$FAILURES)"; exit 1; }
+            [ "$FAILURES" != true ] || { echo "a named test failed"; exit 1; }
+            [ "$ABSENT" != true ] || { echo "a named test is absent (see the verdict's ABSENT lines); absent is never a pass"; exit 1; }
+            echo "Every named test ran and passed."; exit 0
+          fi
           if [ "$BUILD" != true ]; then echo "No due Rust unit test: every affected crate already passed under its key, or none is affected."; exit 0; fi
           [ "$ARCHIVE" = success ] || { echo "the archive job ended with $ARCHIVE"; exit 1; }
           if [ "$SHARDS" = '[]' ]; then echo "Every due test already passed under the same keys."; exit 0; fi
