@@ -290,6 +290,25 @@ impl UpgradeRun {
         (outcome == "cancelled" || outcome == SLOT_HELD) && !self.cancelled.is_cancelled()
     }
 
+    /// Only displacement is retryable. A real staging refusal remains a
+    /// terminal skip even if another task cancels the token after that refusal.
+    pub(super) fn finish_staging(
+        &self,
+        staged: super::preparation::PreparationStageOutcome,
+    ) -> &'static str {
+        use super::preparation::PreparationStageOutcome;
+        match staged {
+            PreparationStageOutcome::Staged => "staged",
+            PreparationStageOutcome::Cancelled => "cancelled",
+            PreparationStageOutcome::Refused(_) => {
+                self.skipped(
+                    "the verified reconstruction could not be staged for the current playback",
+                );
+                "not_staged"
+            }
+        }
+    }
+
     /// Put the upgrade back to wait for the session's next rendering exchange,
     /// if the entry is still this run's.
     fn wait_again(&self, intent: Box<UpgradeIntent>) {
@@ -477,14 +496,25 @@ fn start_upgrade_claim(
     crate::playback_control::record_processed_upgrade("scheduled");
     let state = state.clone();
     tokio::spawn(async move {
-        let mut outcome = run_upgrade(&state, &intent, &run, pending).await;
-        if run.displaced(outcome) {
-            outcome = "displaced";
-            run.wait_again(intent);
-        }
-        crate::playback_control::record_processed_upgrade(outcome);
-        drop(run);
+        let outcome = run_upgrade(&state, &intent, &run, pending).await;
+        finish_upgrade_run(intent, run, outcome);
     });
+}
+
+/// Finish through the same displacement lifecycle regardless of whether the
+/// pending claim was cancelled before the trial or inside successor staging.
+pub(super) fn finish_upgrade_run(
+    intent: Box<UpgradeIntent>,
+    run: UpgradeRun,
+    mut outcome: &'static str,
+) -> &'static str {
+    if run.displaced(outcome) {
+        outcome = "displaced";
+        run.wait_again(intent);
+    }
+    crate::playback_control::record_processed_upgrade(outcome);
+    drop(run);
+    outcome
 }
 
 /// The run found another preparation holding the playback's slot before it
@@ -937,15 +967,12 @@ where
         ids,
     )
     .await;
-    if staged {
+    if staged == super::preparation::PreparationStageOutcome::Staged {
         tracing::info!(target: "plurxd::http::hls", session = %session,
             film_time_ms, prepared_window_reused,
             "processed upgrade staged as a prepared successor");
-        "staged"
-    } else {
-        run.skipped("the verified reconstruction could not be staged for the current playback");
-        "not_staged"
     }
+    run.finish_staging(staged)
 }
 
 /// When an admission is asked: before the GPU trial, or after it.
