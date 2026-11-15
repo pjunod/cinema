@@ -1,8 +1,9 @@
 # Cluster facade — one layer, and a test that keeps it one
 
-**Status:** open — build contract for audit items **B1** and **B2** of
-[CLUSTER-LAYER-AUDIT-2026-11-14.md](CLUSTER-LAYER-AUDIT-2026-11-14.md) §7.
-Slice 1 is built (§10.1); slices 2–7 follow the open PRs named in §8.
+**Status:** built — slice 1 of the build contract for audit items **B1**
+and **B2** of [CLUSTER-LAYER-AUDIT-2026-11-14.md](CLUSTER-LAYER-AUDIT-2026-11-14.md)
+§7 is built and reviewed (§10.1, §10.2); slices 2–7 follow the PRs named in
+§8.
 **Verified against:** `main @ dd76bb88e`, from source only — nothing was
 compiled or run. Every `file:line` below is **re-verify at build time**.
 **Author:** Claude (Fable 5.2), session `01BCWLA3JD1HCNMEid3AZrc3`.
@@ -355,7 +356,7 @@ role 5→1; `shared_cache.rs` roster 2→0, membership 3→0, role 1→0, type
 
 **Deviations, each the smallest change that fits.**
 
-- The cache lives in plurx-core, `directory.rs`'s `PeerDirectory`, and
+- The cache lives in plurx-core, `directory.rs`'s `RosterDirectory`, and
   plurxd's `cluster::Directory` wraps it. The invalidation test needs a real
   replicated node, and the in-process fixtures that build one are in
   plurx-core. `mem.rs` still gains one line.
@@ -396,3 +397,46 @@ replaced": the producers `activity_peers`, `media_peers` and
 deletes is the callers' own filters and the hand-built predicate. The
 audit's `shared_cache.rs:395-421` is `:540-562` at `dd76bb88e` (this
 document had it right). Every other `file:line` in §2–§4 held.
+
+### 10.2 Review and landing
+
+One adversarial review (Fable 5.2): no blocker, no behaviour drift; six
+should-fix findings, all taken.
+
+- **S1** The census also counts a handle taken out by a pattern or moved
+  by a shorthand field, and every public `MembershipManager` method
+  (class `manager`), read from plurx-core's source less five shared names
+  (`NOT_CLUSTER`). Its module doc lists what it still cannot see.
+- **S2** The ratchet compares the whole census with the base: `CEILING`,
+  every (file, class) pin, `EXEMPT`, the name lists and `NOT_CLUSTER`.
+- **S3** It fails, not passes, when CI or a named base cannot resolve the
+  base, and it is a paperwork rule: the fast lane's `paperwork` job runs it
+  against the pull request's base (`--base "$PR_BASE_SHA"`). A branch
+  behind a `main` whose pins fell since reads as loosened: rebase it.
+- **S4** Migrated code asks `role().is_clustered()` instead of
+  `state.membership.is_replicated()`, and fixtures replace the manager and
+  the facade together (`AppState::replace_membership`).
+- **S5** plurxd tests the purpose mapping on a clustered snapshot, and
+  `peer_base`, the media-pool rollout answer and the shared-cache canary
+  as behaviour.
+- **S6** `cfg(all(test, ..))` items and `#[cfg(test)]` statements and
+  blocks are skipped; `any(test, ..)` is counted.
+- Nits: `PeerDirectory` → `RosterDirectory`; `Voters` alone carries
+  `complete()`; the four mark slots resolve once and a hit compares the
+  revisions before the membership watch (which still builds the member
+  sets: the vendor watch has no IO-free membership-log accessor); the
+  invalidation test waits on the Raft watch and evaluates at one instant;
+  no directory exemption; `..serving` in a macro is not a field.
+
+**Landing on main.** Main's store attribution (#1626) put the manager's
+SQL behind `CountedClient`, which hands out no raw client, so the
+directory takes the applied mark from `AppliedView::applied_mark()`
+instead, and the membership operation census covers `directory.rs`. With
+the review's census classes, slice 1 counts **755** sites at `dd76bb88e`
+and **758** in 75 files on the merged tree (main's sharing work added
+three `.serving` sites). On the merged tree: `.membership` 275 in 42
+files, `.serving` 139 in 28, `.replication` 19 in 6, type names 86 in 28,
+other `hiqlite::` 10 in 4, `PeerTransport::new` 19 in 17, role 62 in 27,
+roster 33 in 22, and the new `manager` class 115 in 35. The first two
+classes moved against §10.1 because test-only `cfg(all(test, ..))` code is
+no longer counted and patterns and shorthand fields now are.

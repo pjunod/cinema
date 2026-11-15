@@ -88,7 +88,9 @@ facade, `state.cluster` (`crates/plurxd/src/cluster.rs`, whose module doc is
 the contract): `authority()`, `role()` and `peers(purpose)` today, with
 `read`, `watch` and `call` reserved. `peers()` answers from one cached roster
 snapshot, kept current by the applied mark and the applied Raft membership
-rather than a timer. The raw membership, replication and serving handles
+rather than a timer; `/metrics` counts its reads as
+`plurx_cluster_directory_reads_total{outcome}` — `hit` from the snapshot,
+`reload` and `uncached` one local read each. The raw membership, replication and serving handles
 are still on `AppState` while callers move; the census in
 `crates/plurxd/src/cluster/census.rs` pins every remaining reach-around and
 only lets the count fall
