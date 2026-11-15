@@ -165,7 +165,11 @@ async fn read_state(store: &dyn Store) -> Result<Loaded, StoreError> {
     // Both rows come from one snapshot, including the exact legacy bytes used
     // by the atomic compare-and-swap. Unknown or malformed legacy fields fail
     // explicitly rather than disappearing into a default or partial hash.
-    let rows = store.get_settings(&[MANAGED_KEY, LEGACY_KEY]).await?;
+    loaded(store.get_settings(&[MANAGED_KEY, LEGACY_KEY]).await?)
+}
+
+/// The configuration both rows of one snapshot describe.
+fn loaded(rows: std::collections::BTreeMap<String, String>) -> Result<Loaded, StoreError> {
     let legacy_raw = rows.get(LEGACY_KEY).cloned();
     let legacy = legacy_raw
         .as_deref()
@@ -241,6 +245,17 @@ async fn read_state(store: &dyn Store) -> Result<Loaded, StoreError> {
 
 pub(crate) async fn read(store: &dyn Store) -> Result<Snapshot, StoreError> {
     read_state(store).await.map(|loaded| loaded.snapshot)
+}
+
+/// [`read`] from this node's applied settings view, for the managed worker's
+/// look every pass (A4): both rows in one view read, parsed exactly as
+/// [`read`] parses them. A save made here raises the settings floor and is
+/// read back from the authority until this replica holds it; every
+/// configuration write keeps its compare-and-swap against [`read`].
+pub(crate) async fn read_applied(
+    applied: &plurx_core::store::AppliedView,
+) -> Result<Snapshot, StoreError> {
+    loaded(applied.setting_values(&[MANAGED_KEY, LEGACY_KEY]).await?).map(|loaded| loaded.snapshot)
 }
 
 async fn write(
@@ -402,6 +417,48 @@ mod tests {
             model_id: "base.en".into(),
             advanced: None,
         }
+    }
+
+    /// A4: the managed worker looks at this configuration every pass. The
+    /// applied view's answer is the Store's, parsed the same way, and a save
+    /// is followed. (A standalone view counts a `view` read; a direct Store
+    /// read counts nothing.)
+    #[tokio::test]
+    async fn the_worker_reads_the_configuration_through_the_applied_view() {
+        use plurx_core::store::{AppliedTable, AppliedView, ViewSource};
+        let store = std::sync::Arc::new(SqliteStore::open_in_memory().expect("SQLite"));
+        let applied = AppliedView::authority(store.clone());
+        let same = |applied: &Snapshot, store: &Snapshot| {
+            serde_json::to_value(applied).expect("view snapshot")
+                == serde_json::to_value(store).expect("store snapshot")
+        };
+        let idle = read_applied(&applied).await.expect("virtual defaults");
+        assert!(same(
+            &idle,
+            &read(store.as_ref()).await.expect("store defaults")
+        ));
+        assert!(!idle.enabled);
+        let saved = save(
+            store.as_ref(),
+            request(&read(store.as_ref()).await.expect("revision").revision),
+            &catalog(),
+        )
+        .await
+        .expect("save");
+        let current = read_applied(&applied).await.expect("saved configuration");
+        assert!(current.enabled && current.revision == saved.revision);
+        assert!(same(
+            &current,
+            &read(store.as_ref()).await.expect("store saved")
+        ));
+        let observation = applied.observation();
+        assert_eq!(
+            (
+                observation.view_total(AppliedTable::Settings, ViewSource::View),
+                observation.view_total(AppliedTable::Settings, ViewSource::Authority),
+            ),
+            (2, 0)
+        );
     }
 
     #[tokio::test]
