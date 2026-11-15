@@ -12,13 +12,14 @@
 //! clock as an argument, so a cached snapshot still ages.
 //!
 //! [`MembershipManager::roster_snapshot`] stamps a read with the rule
-//! `AppliedView` uses: load the stamp `s0` ([`RosterStamp`]); refuse to
-//! stamp if the image generation is odd, the membership is not committed, or
-//! a table has no slot in the applied mark; read; reload `s1`; keep the stamp
-//! only if `s0 == s1`. A cache of the snapshot is current only while
-//! [`MembershipManager::roster_stamp`] still equals `s0`: [`RosterDirectory`]
-//! keeps that cache. A miss is one local read. No timer, no TTL, no
-//! background task.
+//! `AppliedView` uses, against the node's applied mark (the handle the
+//! applied view holds; the manager's counted client hands out no raw one):
+//! load the stamp `s0` ([`RosterStamp`]); refuse to stamp if the image
+//! generation is odd, the membership is not committed, or a table has no
+//! slot in the mark; read; reload `s1`; keep the stamp only if `s0 == s1`.
+//! [`RosterDirectory`] keeps the stamped snapshot and answers from it only
+//! while the current stamp still equals `s0`. A miss is one local read. No
+//! timer, no TTL, no background task.
 //!
 //! The stamp needs both signals. Roster rows change through ordinary log
 //! entries (a removal fence is a row), and the membership changes through
@@ -263,18 +264,18 @@ fn peer(now: i64, row: &MediaPeerRow) -> ActivityPeer {
 }
 
 impl MembershipManager {
-    /// The stamp of the roster as this node has applied it, IO-free; `None`
-    /// for an unclustered process or when no read could be cached.
-    #[must_use]
-    pub fn roster_stamp(&self) -> Option<RosterStamp> {
-        roster_stamp(self.inner.as_deref()?).map(|(stamp, _)| stamp)
-    }
-
-    /// One local read of the roster, stamped only when nothing moved under
-    /// it. An unclustered process has the empty roster and reads nothing.
-    pub async fn roster_snapshot(&self) -> Result<RosterSnapshot, MembershipError> {
+    /// One local read of the roster, stamped against `mark` (this node's
+    /// applied mark) only when nothing moved under it; unstamped without a
+    /// mark. An unclustered process has the empty roster and reads nothing.
+    pub async fn roster_snapshot(
+        &self,
+        mark: Option<&hiqlite::AppliedMarkHandle>,
+    ) -> Result<RosterSnapshot, MembershipError> {
         match self.inner.as_deref() {
-            Some(inner) => read_roster(inner).await,
+            Some(inner) => {
+                let mark = mark.cloned().and_then(RosterMark::of);
+                read_roster(inner, mark.as_ref()).await
+            }
             None => Ok(RosterSnapshot::standalone()),
         }
     }
@@ -333,8 +334,7 @@ struct RosterMark {
 }
 
 impl RosterMark {
-    fn of(inner: &ReplicatedMembership) -> Option<Self> {
-        let handle = inner.client.local_db_applied_mark().ok()?;
+    fn of(handle: hiqlite::AppliedMarkHandle) -> Option<Self> {
         let mut slots = Vec::with_capacity(ROSTER_TABLES.len());
         for table in ROSTER_TABLES {
             slots.push(handle.slot(table)?);
@@ -370,10 +370,13 @@ pub struct RosterDirectory {
 }
 
 impl RosterDirectory {
+    /// The directory of `membership`, stamped against `mark`, this node's
+    /// applied mark (`AppliedView::applied_mark`). Without one it never
+    /// caches: every read is a local read, as before the directory.
     #[must_use]
-    pub fn new(membership: MembershipManager) -> Self {
+    pub fn new(membership: MembershipManager, mark: Option<hiqlite::AppliedMarkHandle>) -> Self {
         Self {
-            mark: membership.inner.as_deref().and_then(RosterMark::of),
+            mark: mark.and_then(RosterMark::of),
             membership,
             cached: Arc::default(),
             standalone: Arc::new(RosterSnapshot::standalone()),
@@ -413,7 +416,7 @@ impl RosterDirectory {
             self.reads.hit.fetch_add(1, Ordering::Relaxed);
             return Ok(cached);
         }
-        let snapshot = Arc::new(self.membership.roster_snapshot().await?);
+        let snapshot = Arc::new(read_roster(inner, self.mark.as_ref()).await?);
         if snapshot.stamp.is_some() {
             *self.cached.lock().expect("roster directory cache") = Some(Arc::clone(&snapshot));
             self.reads.reload.fetch_add(1, Ordering::Relaxed);
@@ -435,23 +438,24 @@ impl RosterDirectory {
 
 /// The IO-free half: the stamp of the roster as this node has applied it,
 /// with the membership it names. `None` when no read can be cached: an
-/// uncommitted (or not running) membership, no local applied mark, an odd
-/// image generation, or a roster table without a slot.
+/// uncommitted (or not running) membership, no applied mark, or an odd image
+/// generation.
 fn roster_stamp(
     inner: &ReplicatedMembership,
+    mark: Option<&RosterMark>,
 ) -> Option<(RosterStamp, hiqlite::LocalDbMembershipSnapshot)> {
+    let mark = mark?;
     let membership = inner.local_metrics.membership_snapshot();
     if !membership.committed {
         return None;
     }
-    let mark = inner.client.local_db_applied_mark().ok()?;
-    let image_generation = mark.generation();
-    if image_generation % 2 == 1 {
+    let image_generation = mark.handle.generation();
+    if !image_generation.is_multiple_of(2) {
         return None;
     }
     let mut revisions = [0; 4];
-    for (revision, table) in revisions.iter_mut().zip(ROSTER_TABLES) {
-        *revision = mark.revision(mark.slot(table)?);
+    for (revision, slot) in revisions.iter_mut().zip(mark.slots) {
+        *revision = mark.handle.revision(slot);
     }
     Some((
         RosterStamp {
@@ -464,8 +468,11 @@ fn roster_stamp(
 }
 
 /// One local read of the roster, stamped only when nothing moved under it.
-async fn read_roster(inner: &ReplicatedMembership) -> Result<RosterSnapshot, MembershipError> {
-    let before = roster_stamp(inner);
+async fn read_roster(
+    inner: &ReplicatedMembership,
+    mark: Option<&RosterMark>,
+) -> Result<RosterSnapshot, MembershipError> {
+    let before = roster_stamp(inner, mark);
     let (members, voters) = match &before {
         Some((_, membership)) => (membership.members.clone(), membership.voters.clone()),
         None => {
@@ -475,9 +482,13 @@ async fn read_roster(inner: &ReplicatedMembership) -> Result<RosterSnapshot, Mem
     };
     let rows = inner
         .client
-        .query_map::<MediaPeerRow, _>(ROSTER_SQL, params!(inner.identity.node_id.as_str()))
+        .query_map::<MediaPeerRow, _>(
+            "read_roster",
+            ROSTER_SQL,
+            params!(inner.identity.node_id.as_str()),
+        )
         .await?;
-    let after = roster_stamp(inner).map(|(stamp, _)| stamp);
+    let after = roster_stamp(inner, mark).map(|(stamp, _)| stamp);
     let stamp = before
         .map(|(stamp, _)| stamp)
         .filter(|stamp| after == Some(*stamp));

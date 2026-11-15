@@ -90,7 +90,12 @@ async fn directory_invalidation_fixture() {
     .await
     .expect("actual singleton activation");
     let manager = selected.membership_manager();
-    let directory = RosterDirectory::new(manager.clone());
+    let mark = selected
+        .local_client()
+        .expect("a local voter client")
+        .local_db_applied_mark()
+        .expect("the voter's applied mark");
+    let directory = RosterDirectory::new(manager.clone(), Some(mark));
     let leader = manager.replicated_inner().expect("actual leader");
     // One instant for the whole test: rows are written at it and every
     // purpose is evaluated at it, so nothing depends on how long a step took.
@@ -243,14 +248,14 @@ async fn directory_invalidation_fixture() {
     };
     leader
         .client
-        .execute(progress(true), params!())
+        .execute("directory_invalidation_fixture", progress(true), params!())
         .await
         .expect("ready progress row");
     let ready = directory.snapshot().await.expect("ready read");
     assert_eq!(workers(&ready), vec![learner_id.clone()]);
     leader
         .client
-        .execute(progress(false), params!())
+        .execute("directory_invalidation_fixture", progress(false), params!())
         .await
         .expect("unready progress row");
     let unready = directory.snapshot().await.expect("unready read");
@@ -263,6 +268,7 @@ async fn directory_invalidation_fixture() {
     leader
         .client
         .execute(
+            "directory_invalidation_fixture",
             "UPDATE cluster_nodes SET last_seen_at = $1 WHERE node_id = $2",
             params!(t0, learner_id.as_str()),
         )
@@ -293,7 +299,9 @@ async fn directory_invalidation_fixture() {
     let attempt = uuid::Uuid::new_v4().to_string();
     let written = leader
         .client
-        .txn(vec![
+        .txn(
+            "directory_invalidation_fixture",
+            vec![
             (
                 "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) VALUES ($1, $2)"
                     .to_owned(),
@@ -307,7 +315,8 @@ async fn directory_invalidation_fixture() {
                 BEGIN_REMOVAL_FENCE_SQL.to_owned(),
                 params!(learner_id.as_str(), t0, attempt.as_str()),
             ),
-        ])
+        ],
+        )
         .await
         .expect("removal fence transaction")
         .into_iter()

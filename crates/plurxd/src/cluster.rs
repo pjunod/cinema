@@ -69,9 +69,15 @@ pub(crate) struct Cluster {
 }
 
 impl Cluster {
-    pub(crate) fn new(fence: ServingFence, membership: MembershipManager) -> Self {
+    /// The facade over this node's fence and manager; `mark` is the applied
+    /// mark the peer directory stamps with (`AppliedView::applied_mark`).
+    pub(crate) fn new(
+        fence: ServingFence,
+        membership: MembershipManager,
+        mark: Option<hiqlite::AppliedMarkHandle>,
+    ) -> Self {
         Self {
-            directory: Directory::new(membership.clone()),
+            directory: Directory::with_mark(membership.clone(), mark),
             fence,
             membership,
         }
@@ -197,9 +203,18 @@ pub(crate) struct Directory {
 }
 
 impl Directory {
+    /// A directory with no applied mark: correct, never cached. For a
+    /// subsystem a test wires to its own manager.
     pub(crate) fn new(membership: MembershipManager) -> Self {
+        Self::with_mark(membership, None)
+    }
+
+    pub(crate) fn with_mark(
+        membership: MembershipManager,
+        mark: Option<hiqlite::AppliedMarkHandle>,
+    ) -> Self {
         Self {
-            inner: RosterDirectory::new(membership),
+            inner: RosterDirectory::new(membership, mark),
         }
     }
 
@@ -479,6 +494,7 @@ pub(crate) mod tests {
                     .metrics_handle(),
             ),
             MembershipManager::unavailable(),
+            None,
         );
         assert_eq!(
             cluster.role(),

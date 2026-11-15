@@ -1207,7 +1207,11 @@ impl AppState {
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
-        let cluster = crate::cluster::Cluster::new(serving.clone(), membership.clone());
+        let cluster = crate::cluster::Cluster::new(
+            serving.clone(),
+            membership.clone(),
+            applied.applied_mark(),
+        );
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1485,7 +1489,11 @@ impl AppState {
         &mut self,
         membership: plurx_core::cluster::membership::MembershipManager,
     ) {
-        self.cluster = crate::cluster::Cluster::new(self.serving.clone(), membership.clone());
+        self.cluster = crate::cluster::Cluster::new(
+            self.serving.clone(),
+            membership.clone(),
+            self.applied.applied_mark(),
+        );
         self.membership = membership;
     }
 
