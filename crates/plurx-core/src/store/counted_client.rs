@@ -167,6 +167,37 @@ impl CountedClient {
         self.client.metrics_db().await
     }
 
+    /// Hiqlite patch 30: stop this node's own database Raft election timer,
+    /// for a node that is stopping. Process-local; not a replicated
+    /// operation.
+    pub fn disable_local_db_elections(&self) -> Result<(), hiqlite::Error> {
+        self.client.disable_local_db_elections()
+    }
+
+    /// Hiqlite patch 31: hold this node's database Raft proposals, waiting
+    /// for in-flight ones until `deadline` (`None` when they do not finish by
+    /// then). Process-local; not a replicated operation.
+    pub async fn hold_local_db_proposals(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<hiqlite::ProposalHold>, hiqlite::Error> {
+        self.client.hold_local_db_proposals(deadline).await
+    }
+
+    /// Hiqlite patch 31: wait, by `deadline`, for this node's own database
+    /// Raft metrics to meet `condition`. Process-local; not a replicated
+    /// operation.
+    pub async fn wait_local_db_metrics<F>(
+        &self,
+        deadline: tokio::time::Instant,
+        condition: F,
+    ) -> Result<DbRaftMetrics, hiqlite::Error>
+    where
+        F: Fn(&DbRaftMetrics) -> bool + Send,
+    {
+        self.client.wait_local_db_metrics(deadline, condition).await
+    }
+
     /// Hiqlite's validation-only precommit hold, for the membership tests
     /// that drive a real transaction into it. Not compiled into a daemon.
     #[cfg(all(test, feature = "cluster-read-cost-validation"))]

@@ -58,7 +58,6 @@ impl Client {
         if let Some(state) = self.is_leader_db_with_state().await {
             let res = state
                 .raft_db
-                .raft
                 .client_write(QueryWrite::Transaction(queries))
                 .await?;
             let resp: Response = res.data;

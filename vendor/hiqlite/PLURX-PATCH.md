@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-nine patches for clustered deployments. An
+Apache-2.0. Plurx carries thirty-one patches for clustered deployments. An
 upstream release can retire the nine generic bugs and the one dependency-only
-constraint; it cannot retire the nineteen Plurx policies:
+constraint; it cannot retire the twenty-one Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -40,6 +40,8 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 27 | Applied mark: registered-table revisions, applied index, image generation and change watches, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
 | 29 | `DbRaftMetrics` type re-export | plurx policy | — | Never; it only names a type Plurx's counted membership client forwards. |
+| 30 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
+| 31 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -470,6 +472,41 @@ made-up URL and prevents the fork from being declared fully tracked.
   alias lets it do so without a direct `openraft` dependency. A type alias
   only; no behaviour.
   Files: `src/lib.rs`.
+- `Client::disable_local_db_elections` calls OpenRaft's
+  `runtime_config().elect(false)` on the database Raft of a local client. A
+  plurxd told to stop calls it first, leader or not, before it hands
+  leadership off (`docs/cluster/LEADER-SHUTDOWN-HANDOFF-BUILD.md`): the node
+  keeps voting, replicating and answering an explicit election trigger, but
+  its own timer never starts a campaign, so a handoff that loses the vote
+  costs the survivors one election rather than two. It is process state,
+  not persisted; the next start campaigns normally. Remote clients fail
+  immediately, with no HTTP fallback. Test:
+  `mgmt::tests::local_election_switch_has_no_remote_fallback`.
+  Files: `src/client/mgmt.rs`.
+- Every proposal to the database Raft takes a shared permit from one gate
+  (`proposal_gate.rs`): `client_write` from the local client paths and from
+  the API handlers that serve forwarded writes, and the learner and
+  membership changes, all through `StateRaftDB`'s three helpers.
+  `Client::hold_local_db_proposals(deadline)` takes the exclusive side. It
+  waits for in-flight permits, new proposals wait rather than fail, and the
+  hold releases on drop on every path. A blocking learner add holds its
+  permit only for the append; the catch-up wait runs after it drops. It returns `None` when it cannot
+  be taken by the deadline. `Client::wait_local_db_metrics` waits on the
+  metrics watch for a condition. A leader that hands off
+  (`docs/cluster/LEADER-SHUTDOWN-HANDOFF-BUILD.md`) holds its log, waits
+  until a survivor's matched index equals its last entry, and triggers that
+  survivor. Before this, a trigger racing an in-flight append was refused
+  by the old leader in 5 of 14 daemon runs. Heartbeats append nothing; the
+  leader's blank entry comes only at its election. The cache Raft is not
+  gated. Tests: `proposal_gate::tests`, including the source tests
+  `every_database_proposal_goes_through_the_gate` and
+  `a_learner_catch_up_wait_holds_no_permit`, and
+  `mgmt::tests::proposal_hold_and_metrics_wait_are_local_only`.
+  Files: `src/proposal_gate.rs`, `src/app_state.rs`, `src/store/mod.rs`,
+  `src/lib.rs`, `src/client/mgmt.rs`, `src/client/execute.rs`,
+  `src/client/transaction.rs`, `src/client/batch.rs`, `src/client/migrate.rs`,
+  `src/client/backup.rs`, `src/backup.rs`, `src/helpers.rs`,
+  `src/network/api.rs`, `src/network/management.rs`, `src/dashboard/query.rs`.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
 was accepted on 2026-10-05 as
@@ -522,7 +559,7 @@ Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 28: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27 and 29) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30 and 31) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

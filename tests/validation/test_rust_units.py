@@ -724,5 +724,55 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(list(self.config.excluded), re.findall(r"--exclude (\S+)", unit))
 
 
+class TestDiskTests(unittest.TestCase):
+    """A shard refuses a runner whose temp filesystem is under the playback
+    cache's floor instead of reporting the cache's refusals as test failures."""
+
+    @staticmethod
+    def filesystem(total, free, fragment=4096):
+        return lambda _directory: os.statvfs_result(
+            (fragment, fragment, total // fragment, free // fragment, free // fragment,
+             0, 0, 0, 0, 255))
+
+    def test_the_floor_is_the_playback_caches_own(self):
+        source = (ROOT / "crates/plurxd/src/playback_cache.rs").read_text()
+        self.assertIn("const GIB: u64 = 1024 * 1024 * 1024;", source)
+        self.assertIn("GIB.max(self.total / 50)", source)
+        self.assertEqual(ru.CACHE_FLOOR_MIN_BYTES, 1024 ** 3)
+        self.assertEqual(ru.CACHE_FLOOR_FRACTION, 50)
+        self.assertEqual(ru.cache_floor(10 * 2 ** 30), 2 ** 30)
+        self.assertEqual(ru.cache_floor(1000 * 2 ** 30), 20 * 2 ** 30)
+
+    def test_a_disk_under_the_cache_floor_stops_the_shard_and_names_the_runner(self):
+        # 1 TiB with 2% free: every cache reservation would be refused.
+        full = self.filesystem(1024 * 2 ** 30, 1024 * 2 ** 30 // 50)
+        with mock.patch.dict(os.environ, {"RUNNER_NAME": "lab5-general-2"}):
+            with self.assertRaisesRegex(ru.UnitsError, "lab5-general-2 cannot run unit tests"):
+                ru.require_test_disk("/tmp", statvfs=full)
+        # A small temp filesystem is held to the 1 GiB minimum, not to 2%.
+        small = self.filesystem(900 * 2 ** 20, 890 * 2 ** 20)
+        with self.assertRaises(ru.UnitsError):
+            ru.require_test_disk("/tmp", statvfs=small)
+
+    def test_a_disk_with_the_floor_and_headroom_free_runs(self):
+        total = 1000 * 2 ** 30
+        enough = self.filesystem(total, ru.cache_floor(total) + ru.TEST_DISK_HEADROOM_BYTES)
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            ru.require_test_disk("/tmp", statvfs=enough)
+        self.assertIn("test disk:", out.getvalue())
+
+    def test_the_shard_checks_the_disk_before_it_runs_a_test(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "plan.json"
+            plan.write_text(json.dumps({"shards": 1, "filters": ["all()"], "serial_filters": []}))
+            with mock.patch.object(ru, "require_test_disk",
+                                   side_effect=ru.UnitsError("full")) as check, \
+                    mock.patch.object(ru, "run_nextest") as nextest:
+                with self.assertRaises(ru.UnitsError):
+                    ru.run_shard(plan, "archive.tar.zst", 1, 2)
+            check.assert_called_once_with()
+            nextest.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

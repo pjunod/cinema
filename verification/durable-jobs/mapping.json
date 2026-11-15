@@ -757,7 +757,7 @@
       },
       {
         "anchor": "crate::source_custody::configure_recovery_backend(",
-        "sha256": "6005810f3f8a63abe0ce2364ae1119085e0518d89cf6b2aa82f594a9958664e1",
+        "sha256": "6345825436cb8532b27840ba229767dfa032086292a9cdc47ec2a0401532e1fc",
         "source": "crates/plurxd/src/main.rs",
         "table": "recovery dependency outside model: startup before source producers"
       }
