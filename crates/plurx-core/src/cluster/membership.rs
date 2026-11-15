@@ -2519,6 +2519,56 @@ impl PassiveMembershipMetrics {
     }
 }
 
+/// How long a node-to-node HTTP connection may take to establish.
+///
+/// Without a bound, a peer that silently drops packets consumes the caller's
+/// whole deadline — up to eight seconds on the hydrate paths. Two seconds is
+/// above one TCP SYN retransmission (Linux's initial RTO is one second), so a
+/// single lost SYN still connects, and a caller's own shorter deadline still
+/// applies first. The cost is at the long end: a caller with an eight-second
+/// or longer deadline that would have connected on the second retransmission,
+/// about three seconds in, now fails at two.
+const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long an unused pooled connection is kept.
+///
+/// The peer listener closes a connection that has waited fifteen seconds for
+/// its next request head (`HEADER_READ_TIMEOUT` in plurxd's `main.rs`). A
+/// pooled connection must be retired before the server does that, or a
+/// request can be written into a socket the peer is closing and fail as
+/// unreachable on a healthy peer. reqwest's default of ninety seconds is
+/// longer than the server's close, so it is set here, with margin.
+const PEER_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The one pooled HTTP client for `PeerTransport` requests between this node
+/// and its peers. (The short-lived clients this module builds for the Hiqlite
+/// management API are a different listener and are not pooled here.)
+///
+/// The membership manager owns it because every peer request is made on the
+/// manager's behalf, and every clone of the manager shares it. A client built
+/// per caller is a connection pool per caller: nothing is reused, and each
+/// request pays a fresh TCP and TLS handshake.
+#[derive(Clone)]
+pub struct PeerHttpClient(Result<reqwest::Client, String>);
+
+impl PeerHttpClient {
+    fn new() -> Self {
+        Self(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(PEER_CONNECT_TIMEOUT)
+                .pool_idle_timeout(PEER_POOL_IDLE_TIMEOUT)
+                .build()
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    /// The pooled client, or why it could not be built.
+    pub fn into_result(self) -> Result<reqwest::Client, String> {
+        self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
@@ -4776,6 +4826,7 @@ impl FlooredClient {
 
 struct ReplicatedMembership {
     client: FlooredClient,
+    peer_http: PeerHttpClient,
     local_metrics: hiqlite::LocalDbRaftMetrics,
     store: Arc<dyn Store>,
     identity: ClusterIdentity,
@@ -5180,6 +5231,16 @@ impl MembershipManager {
         }
     }
 
+    /// The pooled client for node-to-node HTTP. Every clone of a replicated
+    /// manager returns the same pool. A manager with no cluster has no peers
+    /// to call, so it has no pool to share and builds a client on request.
+    #[must_use]
+    pub fn peer_http(&self) -> PeerHttpClient {
+        self.inner
+            .as_ref()
+            .map_or_else(PeerHttpClient::new, |inner| inner.peer_http.clone())
+    }
+
     #[must_use]
     pub fn clock_guard(&self) -> Arc<super::clock::ClusterClockGuard> {
         Arc::clone(&self.clock)
@@ -5563,6 +5624,7 @@ impl MembershipManager {
                     client,
                     floor: settings_floor,
                 },
+                peer_http: PeerHttpClient::new(),
                 local_metrics,
                 store,
                 identity,

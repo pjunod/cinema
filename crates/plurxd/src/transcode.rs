@@ -886,6 +886,9 @@ pub struct TranscodeManager {
     /// Readable manual library jobs currently waiting for a local heavy turn.
     /// A cancelled waiter removes itself before maintenance resumes.
     interactive_library_waiters: tokio::sync::watch::Sender<usize>,
+    /// Playback qualification demand waiting for the heavy lane. This reclaims
+    /// maintenance work without pretending a foreground encoder is waiting.
+    playback_qualification_waiters: tokio::sync::watch::Sender<usize>,
     offline_waiting: AtomicBool,
     /// Whether this daemon's ffmpeg can strip a Dolby Vision configuration —
     /// probed at boot ([`crate::ffmpeg::has_dovi_rpu`]).

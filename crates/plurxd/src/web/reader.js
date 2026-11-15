@@ -186,6 +186,20 @@
     return extent ? Math.min(1, current / extent) : 0;
   }
 
+  function navigationEntries(publication) {
+    if (publication.toc && publication.toc.length) return publication.toc;
+    return (publication.readingOrder || []).map(function (link, index) {
+      return { href: link.href, title: link.title || "Section " + (index + 1) };
+    });
+  }
+
+  function pageOffset(root, value) {
+    const width = Math.max(1, root.clientWidth), extent = Math.max(0, root.scrollWidth - width);
+    const current = Math.max(0, Math.min(extent, value));
+    const previous = Math.floor(current / width) * width, next = Math.min(extent, previous + width);
+    return current - previous < next - current ? previous : next;
+  }
+
   function readerCss(value) {
     const prefs = normalizePrefs(value);
     const theme = THEMES[prefs.theme];
@@ -212,8 +226,7 @@
       body { position:absolute; inset:0; width:auto !important; height:100% !important; margin:0 !important;
         padding:${margin}vh ${margin}vw !important; max-width:none !important; overflow-x:auto !important; overflow-y:hidden !important;
         column-width:${Math.max(40, 100 - margin * 2)}vw; column-gap:${margin * 2}vw; column-fill:auto;
-        scroll-snap-type:x mandatory; }
-      body > * { scroll-snap-align:start; }
+        scroll-behavior:auto !important; scroll-snap-type:none !important; }
     `;
   }
 
@@ -242,7 +255,7 @@
       const body = doc.body;
       const rect = element.getBoundingClientRect();
       const width = Math.max(1, body.clientWidth);
-      body.scrollLeft += Math.floor(rect.left / width) * width;
+      body.scrollLeft = pageOffset(body, body.scrollLeft + Math.floor(rect.left / width) * width);
     } else {
       element.scrollIntoView({ block: "start", inline: "nearest" });
     }
@@ -254,7 +267,7 @@
     if (element) return scrollElement(doc, element, flow);
     const within = clamp(locator && locator.locations && locator.locations.progression, 0, 1, 0);
     const root = flow === "paginated" ? doc.body : doc.scrollingElement || doc.documentElement;
-    if (flow === "paginated") root.scrollLeft = within * Math.max(0, root.scrollWidth - root.clientWidth);
+    if (flow === "paginated") root.scrollLeft = pageOffset(root, within * Math.max(0, root.scrollWidth - root.clientWidth));
     else root.scrollTop = within * Math.max(0, root.scrollHeight - root.clientHeight);
     return false;
   }
@@ -294,6 +307,8 @@
       this.onClick = this.onClick.bind(this);
       this.onKey = this.onKey.bind(this);
       this.onResize = this.onResize.bind(this);
+      this.onTouchStart = this.onTouchStart.bind(this);
+      this.onTouchEnd = this.onTouchEnd.bind(this);
       if (typeof ResizeObserver !== "undefined") {
         this.resizeObserver = new ResizeObserver(this.onResize);
         this.resizeObserver.observe(frame);
@@ -322,6 +337,9 @@
       this.installStyle();
       doc.addEventListener("click", this.onClick, true);
       doc.addEventListener("keydown", this.onKey, true);
+      doc.addEventListener("touchstart", this.onTouchStart, { passive: true });
+      doc.addEventListener("touchend", this.onTouchEnd, { passive: true });
+      doc.addEventListener("touchcancel", this.onTouchEnd, { passive: true });
       const root = this.scrollRoot();
       root.addEventListener("scroll", this.onScroll, { passive: true });
       const destination = locator || (splitHref(href).fragment ? { href: href } : null);
@@ -380,30 +398,64 @@
       this.emitLocation();
     }
 
+    pageInfo() {
+      if (!this.ready || this.prefs.flow !== "paginated") return null;
+      const root = this.scrollRoot(), width = Math.max(1, root.clientWidth);
+      const extent = Math.max(0, root.scrollWidth - width), current = Math.abs(root.scrollLeft || 0);
+      const pages = Math.ceil(extent / width) + 1;
+      return { page: current >= extent - 1 ? pages : Math.min(pages, Math.round(current / width) + 1), pages };
+    }
+
     move(direction) {
       if (!this.ready) return false;
+      clearTimeout(this.resizeTimer);
+      this.resizeAnchor = null;
       const root = this.scrollRoot();
       const horizontal = this.prefs.flow === "paginated";
       const current = horizontal ? Math.abs(root.scrollLeft || 0) : root.scrollTop || 0;
       const extent = horizontal ? root.scrollWidth - root.clientWidth : root.scrollHeight - root.clientHeight;
-      const step = (horizontal ? root.clientWidth : root.clientHeight) * 0.9;
+      const step = horizontal ? root.clientWidth : root.clientHeight * 0.9;
       if ((direction < 0 && current <= 2) || (direction > 0 && current >= extent - 2)) return false;
-      if (horizontal) root.scrollTo({ left: Math.max(0, current + direction * step), behavior: "smooth" });
+      if (horizontal) {
+        const page = this.pageInfo().page;
+        root.scrollTo({ left: pageOffset(root, (page - 1 + direction) * step), behavior: "auto" });
+        this.emitLocation();
+      }
       else root.scrollBy({ top: direction * step, behavior: "smooth" });
       return true;
+    }
+
+    onTouchStart() {
+      this.touchActive = true;
+      clearTimeout(this.scrollTimer);
+      clearTimeout(this.resizeTimer);
+      this.resizeAnchor = null;
+    }
+
+    onTouchEnd(event) {
+      this.touchActive = !!(event.touches && event.touches.length);
+      if (!this.touchActive) this.onScroll();
     }
 
     onScroll() {
       // Reflow can dispatch scroll events before the durable anchor has been
       // restored. Publishing those intermediate positions would replace the
       // very locator the reflow is preserving.
-      if (this.prefAnchor || this.resizeAnchor) return;
+      if (this.prefAnchor || this.resizeAnchor || this.touchActive) return;
       clearTimeout(this.scrollTimer);
-      this.scrollTimer = setTimeout(() => this.emitLocation(), 120);
+      this.scrollTimer = setTimeout(() => {
+        // A touch swipe may stop between columns. Settle on the nearest page,
+        // rather than snapping to the publisher's arbitrary paragraph starts.
+        if (this.prefs.flow === "paginated") {
+          const root = this.scrollRoot();
+          root.scrollLeft = pageOffset(root, Math.abs(root.scrollLeft || 0));
+        }
+        this.emitLocation();
+      }, 120);
     }
 
     onResize() {
-      if (!this.ready) return;
+      if (!this.ready || this.touchActive) return;
       this.resizeAnchor = this.resizeAnchor || this.locator || this.currentLocator();
       clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => {
@@ -447,6 +499,10 @@
       if (!doc) return;
       doc.removeEventListener("click", this.onClick, true);
       doc.removeEventListener("keydown", this.onKey, true);
+      doc.removeEventListener("touchstart", this.onTouchStart);
+      doc.removeEventListener("touchend", this.onTouchEnd);
+      doc.removeEventListener("touchcancel", this.onTouchEnd);
+      this.touchActive = false;
       const root = this.prefs.flow === "paginated" ? doc.body : doc.scrollingElement || doc.documentElement;
       if (root) root.removeEventListener("scroll", this.onScroll);
     }
@@ -464,6 +520,7 @@
     elementAtPath,
     elementPath,
     makeLocator,
+    navigationEntries,
     normalizePath,
     normalizePrefs,
     readerCss,

@@ -17,6 +17,21 @@ import tv.plurx.app.data.Rung
  */
 class PlaybackPolicyTest {
 
+    @Test
+    fun onlyOriginalDirectDolbyVisionBytesUseTheDecisionEnhancement() {
+        val enhancement = tv.plurx.app.data.PlaybackEnhancement(
+            listOf(tv.plurx.app.data.EnhancementBadge.DYN), emptyList(),
+        )
+        assertEquals(enhancement, directPlaybackEnhancement("direct", "dolby_vision", enhancement))
+        // Session delivery and compatibility recovery own their reports; neither
+        // may inherit the direct plan's DYN claim, including a DV copy remux.
+        assertNull(directPlaybackEnhancement("remux", "dolby_vision", enhancement))
+        assertNull(directPlaybackEnhancement("transcode", "dolby_vision", enhancement))
+        assertNull(directPlaybackEnhancement("direct", "hdr10", enhancement))
+        assertNull(directPlaybackEnhancement("direct", "sdr", enhancement))
+        assertNull(directPlaybackEnhancement("direct", "dolby_vision", null))
+    }
+
     // ---- §5.3 force says what the menu means --------------------------------
 
     @Test
