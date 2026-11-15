@@ -5922,7 +5922,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # released its custody, then removes its local witness. It owns no producer,
 # process or child, spawns nothing, and decides nothing about capacity: the
 # sweep does; the loop only ends the ledger task once there is nothing left.
-expected_occurrences = 2236
+# +2 #1657 (main-units harness repairs), test-only: http/tests.rs's
+# `settle_admitted_scans` polls the scan queue every 25 ms (at most 200
+# rounds, then fails), and state/tests.rs's idle-wake test sleeps 100 ms on a
+# paused clock so the worker's first pass is parked before the request. Both
+# run on the test's own task; no task, producer or process.
+expected_occurrences = 2238
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
