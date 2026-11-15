@@ -6442,7 +6442,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 352
+# Shared Dolby Vision M1 (T1.6): +2 test-only commands in
+# `dolby_vision_fixture_source`. Two finite synchronous FFmpeg remuxes (to a
+# fragmented pipe and back to an ordinary MP4) build the Dolby Vision fixture
+# source; testfixtures::run waits for and reaps each before the fixture reads
+# its output, and neither runs in a shipped binary.
+expected_occurrences = 354
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
