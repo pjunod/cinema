@@ -147,6 +147,10 @@ in `CLUSTER_SINGLETON_RESOURCES`
 [system.rs:4852-4856](../../crates/plurxd/src/http/system.rs)).
 `plurx_store_operations_total{class,outcome}` counts authority reads and
 writes per process.
+**Comparability (2026-11-14):** from the build that counts the
+membership manager's operations, this counter also includes its heartbeat
+transactions, membership reads and the 2 Hz quorum watermark sampler. Rates
+taken across that deploy are not comparable; take both sides on it or later.
 
 ## 3. Change
 
@@ -253,7 +257,8 @@ Before/after, per voter, using the bounded protocol in §5.5 (Paul withdrew
 the twelve-hour requirement on 2026-10-13):
 Δ`plurx_raft_commit_index` (proposals per
 day), `plurx_store_operations_total{class="authority_read"}` rate,
-`plurx_store_operations_total{class="write"}` rate, snapshot builds per day
+`plurx_store_operations_total{class="write"}` rate (both include membership
+operations from the 2026-11-14 build; §2.4), snapshot builds per day
 from `plurx_raft_snapshot_seconds_count{operation="build"}`. Expected: the
 outbox's share falls from ~86,400 proposals/node/day to ≤ 8,640 (30 s forced
 claims on one node) plus real work; the takeover loop's authority reads fall

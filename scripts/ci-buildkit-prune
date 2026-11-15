@@ -13,6 +13,12 @@ budget_gb=$2
   || die "refusing unsafe builder name: $builder_name"
 [[ "$budget_gb" =~ ^[1-9][0-9]*$ ]] || die "budget must be whole gigabytes"
 
+runner_budget_gb=${PLURX_CI_BUILDKIT_MAX_GB:-$budget_gb}
+[[ "$runner_budget_gb" =~ ^[1-9][0-9]*$ ]] || die "runner ceiling must be whole gigabytes"
+if [ "$runner_budget_gb" -lt "$budget_gb" ]; then
+  budget_gb=$runner_budget_gb
+fi
+
 canonical_directory() {
   [ -d "$1" ] || return 1
   (cd -P -- "$1" 2>/dev/null && pwd -P)

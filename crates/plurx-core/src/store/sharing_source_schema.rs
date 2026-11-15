@@ -31,18 +31,23 @@ impl From<&mut hiqlite::Row<'_>> for DispatchGuardRow {
 /// Provision only at Store construction, never from serving session I/O.
 /// Competing initializers may adopt an exact winner; fragments are never repaired.
 pub(crate) async fn provision_dispatch_guard(
-    client: &hiqlite::Client,
+    client: &super::CountedClient,
 ) -> Result<(), crate::error::StoreError> {
     use crate::error::StoreError;
-    let rows=client.query_consistent_map::<DispatchGuardRow,_>("SELECT count(*) AS count FROM sqlite_master WHERE name='sharing_source_dispatch_guard'",hiqlite::params!()).await.map_err(|error|StoreError::Database(error.to_string()))?;
+    let rows=client.query_consistent_map::<DispatchGuardRow,_>("provision_dispatch_guard","SELECT count(*) AS count FROM sqlite_master WHERE name='sharing_source_dispatch_guard'",hiqlite::params!()).await.map_err(|error|StoreError::Database(error.to_string()))?;
     if matches!(rows.as_slice(),[row] if row.0==0) {
         let creation = client
-            .execute(DISPATCH_GUARD_SCHEMA, hiqlite::params!())
+            .execute(
+                "provision_dispatch_guard",
+                DISPATCH_GUARD_SCHEMA,
+                hiqlite::params!(),
+            )
             .await;
         // Do not interpret an uncertain creation response as absence. Verify the
         // actual committed complete shape; no mutation is replayed here.
         let rows = client
             .query_consistent_map::<DispatchGuardRow, _>(
+                "provision_dispatch_guard",
                 format!(
                     "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
                     dispatch_guard_shape()
@@ -64,6 +69,7 @@ pub(crate) async fn provision_dispatch_guard(
     }
     let rows = client
         .query_consistent_map::<DispatchGuardRow, _>(
+            "provision_dispatch_guard",
             format!(
                 "SELECT CASE WHEN ({}) THEN 1 ELSE 0 END AS count",
                 dispatch_guard_shape()
