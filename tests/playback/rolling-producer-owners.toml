@@ -3993,7 +3993,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
 # the staging task, joined by tokio::time::timeout on its JoinHandle.
 
-expected_occurrences = 1161
+# Source lease step 2 (2026-11-15): -14, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+expected_occurrences = 1147
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4248,7 +4251,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 99
+# Source lease step 2 (2026-11-15): -9, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+expected_occurrences = 90
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4274,7 +4280,10 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # PR1491: +3 closure calls, not task calls: producer_spawn.rs calls its
 # `spawn` builder argument twice (mediated and direct), and reader.rs's
 # declared_background_spawn calls `spawn()` after recording the escape tick.
-expected_occurrences = 22
+# Source lease step 2 (2026-11-15): -1, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+expected_occurrences = 21
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5915,7 +5924,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # released its custody, then removes its local witness. It owns no producer,
 # process or child, spawns nothing, and decides nothing about capacity: the
 # sweep does; the loop only ends the ledger task once there is nothing left.
-expected_occurrences = 2228
+# Source lease step 2 (2026-11-15): -28, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+# The tree already measured +4 above the reviewed count before this step
+# (main and #1597 alike); that unreviewed drift is left visible, not absorbed.
+expected_occurrences = 2200
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6435,7 +6449,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 352
+# Source lease step 2 (2026-11-15): -10, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+expected_occurrences = 342
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7157,7 +7174,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Sharing listener (#1598): +5 SharingManager::status() reads in the listener
 # tests, asserting the reported listener state. They read an in-memory status
 # snapshot; none launches a process.
-expected_occurrences = 935
+# Source lease step 2 (2026-11-15): -9, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+expected_occurrences = 926
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7471,7 +7491,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Reader B0/B1: +1 explicit wait for the verified native true fixture. The
 # fixture retains ChildJob through the positive physical join. The output-pipe
 # collision fixture now calls status instead of output (net zero lifecycle).
-expected_occurrences = 393
+# Source lease step 2 (2026-11-15): -14, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+expected_occurrences = 379
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -7554,7 +7577,10 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 88
+# Source lease step 2 (2026-11-15): -5, all removals. The reader
+# witness, census and physical-stop recovery module, the completion ledger
+# and their tests are deleted; no shape is added.
+expected_occurrences = 83
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
