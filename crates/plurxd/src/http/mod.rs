@@ -19,6 +19,7 @@ mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
+pub(crate) mod delegation;
 mod developer;
 pub(crate) mod dto;
 mod dv_disk;
@@ -1658,6 +1659,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/server/node", get(system::server_node))
+        .nest("/delegation", delegation::router())
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
