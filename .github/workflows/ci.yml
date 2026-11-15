@@ -81,7 +81,7 @@ jobs:
     name: validation scope
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr
@@ -210,7 +210,7 @@ jobs:
     if: needs.scope.outputs.mobile_version == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr
@@ -277,7 +277,7 @@ jobs:
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr
@@ -519,7 +519,7 @@ jobs:
     runs-on: [ci-nonvoter-heavy-amd64]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
@@ -776,7 +776,7 @@ jobs:
     if: always() && needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr
@@ -1325,7 +1325,7 @@ jobs:
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [ci-nonvoter-compile-amd64]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
@@ -1457,7 +1457,7 @@ jobs:
     # through ffmpeg. See .github/actions/ffmpeg.
     runs-on: [ci-nonvoter-heavy-amd64]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
@@ -1621,7 +1621,7 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     runs-on: [ci-nonvoter-heavy-amd64]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 20g --memory-swap 20g --cpus 4 --cpuset-cpus 0-3 --pids-limit 4096
       credentials:
         username: noirr
@@ -2475,7 +2475,7 @@ jobs:
       - package_smoke
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr
@@ -2602,7 +2602,7 @@ jobs:
       - pr_gate
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr

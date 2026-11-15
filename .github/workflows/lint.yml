@@ -19,7 +19,7 @@ jobs:
     name: rustfmt + clippy
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
       options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
       credentials:
         username: noirr

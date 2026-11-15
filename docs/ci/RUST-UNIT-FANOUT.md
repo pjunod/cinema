@@ -197,7 +197,7 @@ literal re-keys only its reader.
 
 ## 6. Known constraints carried over
 
-- Environment: the `plurx-ci@sha256:3d84b711…` image (Jellyfin FFmpeg 8, Rust
+- Environment: the `plurx-ci@sha256:6a989b4d…` image (Jellyfin FFmpeg 8, Rust
   1.97.1), the same as ci.yml's full Rust lane, not the fast Rust gate's Ubuntu
   24.04 / FFmpeg 6. A change of image is a change of every key.
 - `hiqlite-store`: kept by building the whole unit workspace (§1).

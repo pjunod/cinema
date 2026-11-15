@@ -3384,7 +3384,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertRegex(header, r"(?m)^    timeout-minutes: 180$")
         self.assertIn(
             FLEET_REGISTRY_EXPR + "/noirr/plurx-ci@sha256:"
-            "3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855",
+            "6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d",
             header,
         )
         self.assertEqual(
