@@ -81,7 +81,7 @@ BUILD_SPECS = {
     # migrate-bookkeeping is added; android-publish refuses build 1; and
     # android-release passes the release-assigned build number to Gradle
     # (validation/mobile_build.py). No native test recipe changes.
-    'Makefile': '0cfc81923e27ee944e1abe9c9145d2c05557c8dfb6142eae573b6b575b5156b0',
+    'Makefile': 'ce99ad574dcdf081845c628efcadb364e50939b260b0b54a7a0f3a3e3646f6af',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag
