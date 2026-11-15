@@ -246,13 +246,17 @@ def build(work, mode, header=None):
     if not compiler:
         raise RuntimeError("C++ compiler required for the precise PQ helper port")
     work = Path(work)
-    source, library = work / ("pq_helper_port_%s.cpp" % mode), work / ("pq_helper_port_%s.so" % mode)
+    source, compiled, library = (work / ("pq_helper_port_%s.%s" % (mode, suffix)) for suffix in ("cpp", "o", "so"))
     source.write_text(port_source(HEADER.read_text() if header is None else header))
     # -ffp-contract=off: no fusing beyond what the source asks for, as `precise` requires.
     # -ffast-math: reassociation and contraction allowed, as without `precise`.
     flags = {"fused": ["-ffp-contract=off"], "unfused-fma": ["-ffp-contract=off", "-DUNFUSED_FMA"],
              "no-precise": ["-ffast-math"]}[mode]
-    subprocess.run([compiler, "-std=c++17", "-O2", "-fPIC", "-shared", "-Wall", "-Wextra", "-Werror",
-                    "-Wno-unused-function", "-Wno-unused-parameter", *flags, str(source), "-o", str(library), "-lm"],
+    subprocess.run([compiler, "-std=c++17", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror",
+                    "-Wno-unused-function", "-Wno-unused-parameter", *flags, "-c", str(source), "-o", str(compiled)],
                    check=True)
+    # Linked without the mode's flags: before GCC 13 a -ffast-math link adds crtfastmath.o even to
+    # a shared object, and loading that sets flush-to-zero in the caller's thread. Every port
+    # run afterwards, "fused" included, then computes without subnormals and is no longer exact.
+    subprocess.run([compiler, "-shared", str(compiled), "-o", str(library), "-lm"], check=True)
     return Port(library)

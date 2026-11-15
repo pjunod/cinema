@@ -427,7 +427,7 @@ class PlaybackControlSession(
         /** The server has given up on the selected track, not merely not got to it. */
         onSubtitleUnavailable: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
-        onAcknowledged: (ActionAcknowledgement) -> Unit = {},
+        onAcknowledged: (ActionAcknowledgement, ControlResponse) -> Unit = { _, _ -> },
         onEffectiveSelection: (EffectiveSelection) -> Unit = {},
         /** The reporter stopped for good. A fact to record, never a surface. */
         onGaveUp: (String) -> Unit = {},
@@ -550,7 +550,7 @@ class PlaybackControlSession(
                 // retry replays the exact request, which is what makes a lost
                 // commit go again instead of vanishing.
                 if (exchange.response != null && generation == answerGeneration) {
-                    exchange.request.acknowledgement?.let { onAcknowledged(it) }
+                    exchange.request.acknowledgement?.let { onAcknowledged(it, exchange.response) }
                 }
                 val action = exchange.response?.action
                 // A staged successor is named on an ordinary exchange, not only

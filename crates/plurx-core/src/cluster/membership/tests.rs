@@ -1,3 +1,28 @@
+/// Node-to-node HTTP reuses connections only while there is exactly one pool.
+/// A client built per call, or per transport, is a pool per call: the defect
+/// the pooled client replaced. So the production source may build one in two
+/// places only: the replicated manager's field, and the fallback for a
+/// manager with no cluster and so no peers.
+#[test]
+fn the_peer_http_pool_is_built_once_per_cluster_membership() {
+    let source = include_str!("../membership.rs");
+    let production = &source[..source
+        .find("\n#[cfg(test)]\nmod tests")
+        .expect("the test module follows the production code")];
+    assert_eq!(
+        production.matches("PeerHttpClient::new").count(),
+        2,
+        "PeerHttpClient::new belongs in ReplicatedMembership's initialiser and in \
+         peer_http()'s no-cluster fallback, nowhere else: a third site is a second pool"
+    );
+    assert!(
+        production.contains("map_or_else(PeerHttpClient::new, |inner| inner.peer_http.clone())"),
+        "peer_http() must hand out the replicated manager's own pool"
+    );
+    assert!(production.contains(".pool_idle_timeout(PEER_POOL_IDLE_TIMEOUT)"));
+    assert!(production.contains(".connect_timeout(PEER_CONNECT_TIMEOUT)"));
+}
+
 #[test]
 fn cluster_mode_retains_persisted_members_without_explicit_advertisement() {
     assert!(!super::cluster_enabled_for_peer(false, None));

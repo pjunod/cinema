@@ -454,6 +454,8 @@ internal class SharedPlaybackOwner(
             return
         }
         val target = hold.rendezvousFilmMs ?: return
+        if (preparedSeekReady(!h.withdrawn && !sessionEnded, ready.seekLanded, ready.ready, ready.positionMs, target))
+            hold.seekReady(clock())
         if (!hold.isReady) {
             if (!ready.seekLanded || !successorIsBuffered(ready.bufferedMs, target)) return
             hold.ready(clock())

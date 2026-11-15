@@ -310,7 +310,8 @@ internal class RendezvousHold(
         private set
 
     /**
-     * How long the last seek to a rendezvous actually took, in wall time.
+     * Wall time until the last park's native seek-ready receipt, independent
+     * of the later contiguous-runway and warm-presentation gates.
      *
      * Measured rather than assumed. [leadMs] is an estimate of a device class;
      * this is what *this* device just did, and a re-park that ignored it would
@@ -320,20 +321,27 @@ internal class RendezvousHold(
         private set
 
     private var parkIssuedAtMs = 0L
-    private var ready = false
+    private var readyAtMs: Long? = null
+    private var seekReadyObserved = false
 
     /** Pick the first rendezvous and send the successor to it, parked. */
     fun park(nowMs: Long, incumbentFilmMs: Long, speed: Double = 1.0): Park =
         repark(nowMs, incumbentFilmMs, speed)
 
-    /** The successor's seek landed and it holds runway through the rendezvous. */
-    fun ready(nowMs: Long) {
-        if (ready) return
-        ready = true
+    /** First owner-fenced native READY at this park; later buffer waits do not overwrite it. */
+    fun seekReady(nowMs: Long) {
+        if (seekReadyObserved) return
+        seekReadyObserved = true
         observedSeekMs = (nowMs - parkIssuedAtMs).coerceAtLeast(0L)
     }
 
-    val isReady: Boolean get() = ready
+    /** The seek, contiguous runway, and any warm-picture gate are all ready. */
+    fun ready(nowMs: Long) {
+        if (readyAtMs != null) return
+        readyAtMs = nowMs
+    }
+
+    val isReady: Boolean get() = readyAtMs != null
 
     /**
      * Wall time until the incumbent reaches the rendezvous.
@@ -396,7 +404,8 @@ internal class RendezvousHold(
         val target = maxOf(incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead, floorFilmMs)
         rendezvousFilmMs = target
         parkIssuedAtMs = nowMs
-        ready = false
+        readyAtMs = null
+        seekReadyObserved = false
         return Park(target, playWhenReady = false)
     }
 }

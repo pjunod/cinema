@@ -511,6 +511,12 @@ fun PlayerScreen(
     onPlayNext: (PlaybackTarget) -> Unit,
     onExit: () -> Unit,
 ) {
+    fun exitBeforePlayer(origin: PlaybackExitOrigin) {
+        vm.postPlaybackDiagnostic(PlaybackClientLog(level = "info", event = "playback_exit_requested",
+            message = "Playback exit requested before player attachment.", fileId = fileId,
+            detail = playbackExitDetail(origin), ua = "Android Media3"))
+        onExit()
+    }
     val presentationLifecycle = LocalLifecycleOwner.current
     var presentationTarget by remember(itemId, fileId) { mutableStateOf<PresentationTarget?>(null) }
     var presentationRevision by remember(itemId, fileId) { mutableLongStateOf(0L) }
@@ -618,13 +624,13 @@ fun PlayerScreen(
                         startReason = "fallback"
                         generation++
                     } else {
-                        onExit()
+                        exitBeforePlayer(PlaybackExitOrigin.PlanFailure)
                     }
                 },
             )
             plan == null -> {
                 LoadingBox()
-                BackChip(onExit)
+                BackChip { exitBeforePlayer(PlaybackExitOrigin.LoadingBack) }
             }
             else -> PlayerContent(
                 vm = vm,
@@ -1015,6 +1021,11 @@ private fun PlayerContent(
      * recovery owner's and this screen's. Shared by the blocking prompt and the
      * banner, so one action cannot come to mean two things.
      */
+    fun exitPlayback(origin: PlaybackExitOrigin, input: PlayerContractInput? = null, repeats: Int = 0) {
+        controller.reportExit(origin, input, repeats)
+        onExit()
+    }
+
     fun onSurfaceAction(action: SurfaceAction) {
         controller.surfaceAction(action)
         when (action) {
@@ -1027,12 +1038,12 @@ private fun PlayerContent(
                 "fallback",
                 playbackIntent.desiredQuality,
             )
-            SurfaceAction.Close -> onExit()
+            SurfaceAction.Close -> exitPlayback(PlaybackExitOrigin.SurfaceClose)
             // The credential the server refused is the one this app is holding;
             // dropping it lands on the sign-in screen.
             SurfaceAction.SignIn -> {
                 vm.logout()
-                onExit()
+                exitPlayback(PlaybackExitOrigin.SignIn)
             }
             // Unreachable: `surfaceActions` is the only thing that builds a
             // button, and it drops `force_transcode` — which no Android owner
@@ -1070,7 +1081,8 @@ private fun PlayerContent(
         focusRequestTicket += 1
     }
 
-    fun applyOutcome(outcome: PlayerInputOutcome, input: PlayerContractInput): Boolean {
+    fun applyOutcome(outcome: PlayerInputOutcome, input: PlayerContractInput,
+        exitOrigin: PlaybackExitOrigin = PlaybackExitOrigin.Input): Boolean {
         fun commitPreview() {
             pendingMs?.let(::seekWithMarkerUndo)
             pendingMs = null
@@ -1194,7 +1206,7 @@ private fun PlayerContent(
                 true
             }
             PlayerInputOutcome.Exit, PlayerInputOutcome.ReturnBrowser -> {
-                onExit()
+                exitPlayback(exitOrigin, input, repeatCount)
                 true
             }
             PlayerInputOutcome.ToggleChrome -> {
@@ -1283,7 +1295,7 @@ private fun PlayerContent(
         }
         if (action.type == "stop") {
             if (!controller.requestRemotePlaying(false)) return RemoteOutcome.Unavailable
-            cancelNetworkPreview(); onExit(); return RemoteOutcome.Applied
+            cancelNetworkPreview(); exitPlayback(PlaybackExitOrigin.RemoteStop); return RemoteOutcome.Applied
         }
         if (action.type == "seek_relative" || action.type == "seek_absolute") {
             if (inputState() in setOf(PlayerInputState.Failed, PlayerInputState.Menu, PlayerInputState.Info)) return RemoteOutcome.Unsupported
@@ -1305,7 +1317,7 @@ private fun PlayerContent(
         if (outcome == PlayerInputOutcome.Ignore) return RemoteOutcome.Unsupported
         val before = pendingMs
         repeatCount = 0
-        val applied = applyOutcome(outcome, input)
+        val applied = applyOutcome(outcome, input, PlaybackExitOrigin.RemoteNavigation)
         remotePreview.claim(before, pendingMs)
         return if (applied && !(outcome == PlayerInputOutcome.Preview && pendingMs == before)) RemoteOutcome.Applied else RemoteOutcome.Unsupported
     }
@@ -1330,6 +1342,7 @@ private fun PlayerContent(
     }
 
     BackHandler(enabled = !isInPip) {
+        repeatCount = 0
         applyOutcome(
             PlayerInputPolicy.route(
                 playerSurface,
@@ -1337,6 +1350,7 @@ private fun PlayerContent(
                 PlayerContractInput.Back,
             ),
             PlayerContractInput.Back,
+            PlaybackExitOrigin.BackHandler,
         )
     }
 
@@ -1406,6 +1420,7 @@ private fun PlayerContent(
         controller.addPlayerListener(listener)
         controller.startAt(startMs, startReason, attemptOpenedAtMs)
         onDispose {
+            controller.reportScreenDisposed()
             vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs, method = controller.deliveryMode)
             controller.removePlayerListener(listener)
             controller.removePlayerListener(screenOn)
@@ -1754,7 +1769,7 @@ private fun PlayerContent(
                 // drawn in. `closeSteps` closes what is open, then exits.
                 onClose = {
                     PlayerInputPolicy.closeSteps(inputState()).forEach { outcome ->
-                        applyOutcome(outcome, PlayerContractInput.Select)
+                        applyOutcome(outcome, PlayerContractInput.Select, PlaybackExitOrigin.CloseControl)
                     }
                 },
                 onPlayPause = { controller.playPause(); poke() },

@@ -179,6 +179,15 @@ class PreciseHelperExactness(unittest.TestCase):
                 self.assertGreater(len(self.samples[helper][0]), 9000)
                 self.assertEqual(self.wrong("fused", helper), (0, 0, None))
 
+    def test_loading_the_ports_leaves_subnormals_in_this_process(self):
+        # setUpClass has loaded every mode, "no-precise" (-ffast-math) included. A port linked
+        # with that flag brings crtfastmath.o on GCC before 13 and turns flush-to-zero on for
+        # this thread, after which "fused" is wrong on 16 samples at the black threshold.
+        self.assertEqual(self.ports.keys(), set(pq_helper_port.MODES))
+        smallest_normal = ctypes.c_double(2.0 ** -1022)
+        self.assertEqual(smallest_normal.value / 2, 2.0 ** -1023)
+        self.assertGreater(ctypes.c_double(smallest_normal.value / 2).value * 1.0, 0.0)
+
     def test_precise_helpers_need_a_fused_fma(self):
         # The product's error term is fma(a,b,-a*b): unfused it is zero and the low words are lost.
         for helper in pq_helper_port.HELPERS:
