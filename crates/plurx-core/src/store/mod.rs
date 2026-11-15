@@ -2150,6 +2150,9 @@ pub mod keys {
     /// in the world. So an operator arms it, sees it finish, and it disarms
     /// itself.
     pub const GENRE_BACKFILL: &str = "genres.backfill";
+    /// The household default Home layout (JSON `HomeLayout`), set by an
+    /// admin; empty or absent means the built-in Home.
+    pub const HOME_DEFAULT_LAYOUT: &str = "home.default_layout";
     /// The highest item id the backfill has finished with, stamped after
     /// every single title.
     ///

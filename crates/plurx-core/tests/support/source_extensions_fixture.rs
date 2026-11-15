@@ -792,10 +792,74 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
     });
 }
 
+/// Remove only the exact, entirely empty v134 curation extension (custom
+/// tags, rows, Home layouts, grants) before older tails. Validates the whole
+/// shape, the marker and that every table is empty before dropping anything.
+#[allow(dead_code)]
+pub(crate) fn rewind_empty_curation_to_v133(conn: &rusqlite::Connection) {
+    let ordinal: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .expect("curation ordinal");
+    if ordinal < 134 {
+        return;
+    };
+    assert_eq!(ordinal, 134, "only published curation tail can rewind");
+    const QUERY: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'library_curation*' OR tbl_name GLOB 'library_curation*') AND sql IS NOT NULL ORDER BY name";
+    let shape = |db: &rusqlite::Connection| {
+        db.prepare(QUERY)
+            .expect("shape query")
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .expect("shape rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete shape")
+    };
+    let fixture = rusqlite::Connection::open_in_memory().expect("canonical shape");
+    fixture
+        .execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY); CREATE TABLE items(id INTEGER PRIMARY KEY);")
+        .expect("dependency");
+    fixture
+        .execute_batch(include_str!("../../src/store/library_curation.sql"))
+        .expect("published curation");
+    assert_eq!(
+        shape(conn),
+        shape(&fixture),
+        "exact curation shape required"
+    );
+    let marker: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM library_curation_schema WHERE singleton=1 AND version=1",
+            [],
+            |r| r.get(0),
+        )
+        .expect("marker");
+    assert_eq!(marker, 1, "published marker required");
+    for table in [
+        "library_curation_grants",
+        "library_curation_tags",
+        "library_curation_item_tags",
+        "library_curation_rejections",
+        "library_curation_rows",
+        "library_curation_home",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .expect("data inventory");
+        assert_eq!(count, 0, "cannot discard curation user data");
+    }
+    conn.execute_batch(
+        "DROP TABLE library_curation_home;DROP TABLE library_curation_rows;\
+         DROP TABLE library_curation_rejections;DROP TABLE library_curation_item_tags;\
+         DROP TABLE library_curation_tags;DROP TABLE library_curation_grants;\
+         DROP TABLE library_curation_schema;PRAGMA user_version=133;",
+    )
+    .expect("empty curation rewind");
+}
+
 /// Remove only the exact, entirely empty v133 extension before older tails.
 /// Read and validate the complete removal plan before changing any object.
 #[allow(dead_code)]
 pub(crate) fn rewind_empty_delegation_to_v132(conn: &rusqlite::Connection) {
+    rewind_empty_curation_to_v133(conn);
     let ordinal: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("delegation ordinal");
