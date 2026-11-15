@@ -8,6 +8,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Removed
+
+- The engineering knowledge pilot (`scripts/knowledge`, `validation/knowledge/`,
+  its repository skill, AGENTS.md section, fast-lane lint and docs) is retired.
+  In the 224 merges after it landed, 17 touched its seven covered files and only
+  three acknowledged it; its records were never extended past the original 27,
+  and its evaluation never ran (the study PR #1262 is closed unmerged).
+
 ### Fixed
 
 - Background workers no longer propose job claims their node can already see
@@ -21,6 +29,28 @@ bump may break compatibility and a **patch** bump never does.
   counts the skipped claims, and `claim_write`/`claim_refused` now count
   proposals only
   ([plan](docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md)).
+- Linux replicated servers validate actual-host reboot identity before serving;
+  required deployment mounts preserve source-custody recovery after a reboot.
+- Android prepared Dolby Vision handoffs now keep the executing playback choice
+  and film position through optional Auto failures, later seeks, and the
+  accepted switch to the processed stream.
+- Canceled HDR preparation can retry when live playback resumes; genuine
+  staging refusals keep their failure result.
+- Android reports its playhead in title time for streams that began at a
+  resume point, so a processed HDR upgrade starts where the viewer is instead
+  of minutes behind them.
+- Signed node-to-node requests (`PeerTransport`) reuse connections: the membership manager owns
+  one pooled client with a two-second connect bound, and every peer transport takes it. Before, each of about twenty
+  call sites built its own client — the peer-status loop a new one every three seconds — so
+  requests redialled, and a peer that dropped packets consumed the caller's whole deadline
+  (cluster layer audit, item A5).
+- One stopped, slow or rate-limited voter no longer revokes the shared
+  playback cache on every healthy node. The 30 s mount canary now admits the
+  shared root when a majority of voters (counting this node when it is one)
+  confirms the same mount. A voter that is unreachable, busy or on a different
+  mount is not counted and cannot veto the rest; a voter on a different mount
+  is logged as a warning and fails its own canary. A peer's refusal now names
+  its cause; older peers' undistinguished refusals count as no evidence.
 - Linearizable reads no longer time out when one TCP SYN is lost: the vendored Hiqlite Raft client
   reuses an idle connection per voter instead of dialing a new TCP + WebSocket handshake inside
   every 800 ms leadership read-confirm (Hiqlite patch 28,
@@ -29,6 +59,7 @@ bump may break compatibility and a **patch** bump never does.
 - Playback-control refusal logs retain the protocol code, route-read failure
   stage and sanitized source location, distinguishing release reconciliation
   from storage errors without exposing session capabilities.
+
 - Curator's additional TV copies now join their existing series instead of
   creating identical show cards. Consolidation recognizes the generated copy
   folders while preserving physical files, versions and watch history.
@@ -276,6 +307,15 @@ bump may break compatibility and a **patch** bump never does.
 - Apple TV Settings enters each category at its first setting and restores the
   category when returning with Back. Picker controls expose their names and
   selected values to accessibility.
+- A brief serving-authority lapse no longer closes a node's shared-library listener. An
+  unreadable sharing switch is treated as unknown for up to the serving-fence session grace
+  (5 s): the listener keeps accepting peers (each request is still checked) and live shared
+  bodies continue; only a confirmed disable, or an unknown switch past the grace, closes it.
+  Recipients saw `sharing_start_unresolved` while the port refused them.
+
+- Android direct Dolby Vision playback lists preserved dynamic metadata, and
+  native DYN indicators wait for a selected Dolby Vision decoder instead of
+  claiming enhancement during HDR/SDR decoder fallback.
 
 ### Added
 

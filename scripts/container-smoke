@@ -35,6 +35,8 @@ fi
 docker create \
   --name "$name" \
   --publish 127.0.0.1:0:32400 \
+  --mount type=bind,src=/etc/machine-id,dst=/run/plurx-host-machine-id,readonly \
+  --mount type=bind,src=/proc/sys/kernel/random/boot_id,dst=/run/plurx-host-boot-id,readonly \
   --volume "$scratch:/var/lib/plurx" \
   "$image" >/dev/null
 docker start "$name" >/dev/null

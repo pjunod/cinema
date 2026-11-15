@@ -423,10 +423,18 @@ class MainPreflightAdoptionCase(unittest.TestCase):
                     changed = adoption.input_digest(old, row) != adoption.input_digest(new, row)
                     self.assertEqual(path in paths[:3], changed)
 
-    def test_knowledge_smoke_witness_binds_document_and_physical_child_bytes(self):
-        root = Path(__file__).resolve().parents[2]
-        rows = json.loads((root / "validation/main-preflight-inputs.json").read_text())["families"]
-        row = adoption.witness("operations:test_knowledge_pilot.KnowledgePilotSmokeTests.test_code_context_is_source_bound_and_utf8_bounded", rows)
+    def test_document_and_child_glob_witness_binds_document_and_physical_child_bytes(self):
+        row = adoption.witness("operations:test_child_binding.Case.test_bytes", [{
+            "id_prefix": "operations:test_child_binding.",
+            "inputs": ["docs/PLAYBACK.md", "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
+                       "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md",
+                       "crates/plurx-core/src/playback/**",
+                       "crates/plurxd/src/http/stream/**",
+                       "tests/validation/test_main_unit_receipts.py"],
+            "pathsets": ["crates/plurx-core/src/playback/**",
+                         "crates/plurxd/src/http/stream/**"],
+            "reason": "Synthetic row: named documents plus glob-selected child sources.",
+        }])
         selected = ["docs/PLAYBACK.md", "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
                     "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md",
                     "crates/plurx-core/src/playback/tests/child.rs",

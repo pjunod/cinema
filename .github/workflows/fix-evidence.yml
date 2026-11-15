@@ -12,6 +12,15 @@ jobs:
   revert-proof:
     name: report whether retained Rust tests reject the base implementation
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 60
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -19,6 +28,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
       - name: Revert production paths in a disposable clone
         id: proof
         continue-on-error: true
@@ -47,3 +59,8 @@ jobs:
             echo "## Revert proof: no discriminating failure observed" >> "$GITHUB_STEP_SUMMARY"
             echo "This is report-only during the evidence-policy trial month." >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"

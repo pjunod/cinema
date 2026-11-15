@@ -5,15 +5,17 @@ use std::future::Future;
 use std::io;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+mod arguments;
 mod descriptors;
 mod policy;
+pub use arguments::ArgumentProfile;
 pub use descriptors::{
     register_daemon_file, DaemonFileRegistration, DescriptorManifest, InheritedFd, StdioFacts,
     StdioMode,
 };
 pub use policy::{
-    configure_no_input_probe, is_registered_broker, register_broker, set_daemon_roots,
-    BrokerRegistration,
+    configure_no_input_probe, daemon_roots_configured, is_registered_broker, register_broker,
+    set_daemon_roots, BrokerRegistration,
 };
 
 static ADMISSION: RwLock<()> = RwLock::new(());

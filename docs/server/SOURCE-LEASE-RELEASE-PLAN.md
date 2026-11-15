@@ -33,8 +33,8 @@ The 2026-11-14 incident shows how easily the proof fails:
 | Host census helper | Needs the `/run/plurx-physical-stop` bind that only #1561 adds |
 | What worked | Stop plurxd, park a throwaway container on the freed namespace number, start plurxd |
 
-Earlier incidents (2026-11-09 → 11-13: three playback owners on nynuc, a
-cancelled `transcode_prepare` on nuc3) needed a host reboot or a new helper.
+Earlier incidents (2026-11-09 → 11-13: three playback owners on one voter, a
+cancelled `transcode_prepare` on another) needed a host reboot or a new helper.
 Each fix added another proof path. Every one of them can fail closed, and a
 closed failure is a cluster-wide outage.
 
@@ -168,6 +168,6 @@ one node from serialising the cluster.
 
 | Date | Session | Step | Result |
 |---|---|---|---|
-| 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Incident | Custody `7c92c813` released on nynuc via the fresh-namespace restart |
+| 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Incident | Custody `7c92c813` released on its voter via the fresh-namespace restart |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 | PR #1597 opened as a draft |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 review | Fable review: 5 should-fix, 3 nits, all addressed (stamped grace, veto removed, witness retirement, role unpinning, shared lapse expression) |

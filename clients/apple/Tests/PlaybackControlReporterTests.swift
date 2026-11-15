@@ -702,7 +702,10 @@ final class PlaybackControlReporterTests: XCTestCase {
         }
         try await assertTerminal(response: prepare { $0.actionId = nil })
         try await assertTerminal(response: prepare { $0.effectiveSelection = nil })
-        try await assertTerminal(response: prepare { $0.mediaOriginMs = -1 })
+        // A1/B1: signed media origins are valid; only values outside the
+        // representable media range are a protocol violation.
+        try await assertTerminal(response: prepare { $0.mediaOriginMs = PlaybackControl.maximumMediaMs + 1 })
+        try await assertTerminal(response: prepare { $0.mediaOriginMs = -PlaybackControl.maximumMediaMs - 1 })
         try await assertTerminal(response: prepare {
             $0.playlistUrl = "http://elsewhere.example/api/v1/hls/\(sessionId)/index.m3u8"
         })
@@ -741,6 +744,33 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(prepared.mediaOriginMs, 600_000)
         XCTAssertEqual(prepared.effectiveSelection.height, 720)
         await reporter.stop()
+    }
+
+    /// A1/B1: a prepare's origin is signed. Every origin within the
+    /// representable media range, negative included, is a valid prepare;
+    /// one past either end is not.
+    func testAPrepareAcceptsEverySignedOriginInsideTheMediaRange() {
+        let sessionId = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d"
+        func action(_ origin: Int) -> ControlAction {
+            ControlAction(
+                type: PlaybackControl.prepareActionType,
+                actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+                sessionId: sessionId,
+                playlistUrl: "/api/v1/hls/\(sessionId)/index.m3u8",
+                mediaOriginMs: origin,
+                effectiveSelection: EffectiveSelection(
+                    qualityAuto: true, height: 1_080, audioTrack: nil, subtitleBurn: nil,
+                    audioOffsetMs: 0, codec: "server_selected", dynamicRange: "sdr"
+                )
+            )
+        }
+        let maximum = PlaybackControl.maximumMediaMs
+        for origin in [-maximum, -1, 0, 1, maximum] {
+            XCTAssertEqual(PreparedReplacementAction(action(origin))?.mediaOriginMs, origin, "origin \(origin)")
+        }
+        for origin in [-maximum - 1, maximum + 1] {
+            XCTAssertNil(PreparedReplacementAction(action(origin)), "origin \(origin)")
+        }
     }
 
     /// §C12.6 and the stickiness rule, on the wire rather than in the ledger.

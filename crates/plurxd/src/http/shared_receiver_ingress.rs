@@ -69,6 +69,10 @@ fn actor_error(error: ReceiverStartError) -> ApiError {
         ReceiverStartError::Unresolved => {
             (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unresolved")
         }
+        ReceiverStartError::Unknown | ReceiverStartError::PeerUnavailable => {
+            (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable")
+        }
+        ReceiverStartError::Ending => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unresolved"),
         ReceiverStartError::Unavailable => {
             (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable")
         }

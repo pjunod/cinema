@@ -1707,7 +1707,7 @@ async fn applied_planning_view_closes_on_the_dv_title_and_probe_result_writers()
     let scanner = hex::encode(sha2::Sha256::digest(b"d3b-scanner"));
     let demand = node
         .store
-        .dv_title_demands(&scanner, 0)
+        .dv_title_demands(&scanner, 0, 1_000)
         .await
         .expect("demands")
         .into_iter()
