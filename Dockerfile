@@ -165,6 +165,13 @@ RUN rm -rf /usr/lib/plurx/dv-processing \
     && /opt/python/bin/python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
     && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \
+    # Debian's python3 (3.11) stays installed for the packages that depend on
+    # it, but nothing in this image may reach it: scripts that name
+    # /usr/bin/python3 (install-sharing-host, prepare-linux-dolby-sdk's meson
+    # launcher, evaluation_isolation) and any job with a reset PATH get 3.12.
+    # After the last apt step so no package install puts 3.11 back.
+    && ln -sf /opt/python/bin/python3 /usr/bin/python3 \
+    && /usr/bin/python3 --version | grep -Fx 'Python 3.12.15' \
     && rustup toolchain install 1.97.1 --profile minimal \
         --component rustfmt --component clippy --component llvm-tools-preview \
     && rustc +1.97.1 --version | grep -F 'rustc 1.97.1' \

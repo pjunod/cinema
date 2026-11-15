@@ -5185,6 +5185,7 @@ assert.equal(context.ACT_TIMER, null);
             "sha256sum --check --strict",
             "/opt/python/bin/python3 -m venv /opt/playwright-venv",
             "assert sys.version_info[:3] == (3, 12, 15)",
+            "&& ln -sf /opt/python/bin/python3 /usr/bin/python3",
         ):
             self.assertIn(needed, ci_stage)
         self.assertNotIn("&& python3 -m venv", ci_stage)

@@ -80,7 +80,7 @@ The `ci` stage of `Dockerfile` is the definition. Its build asserts each row.
 | Tool | In the stage |
 |---|---|
 | Distribution | Debian 12 |
-| Python | CPython 3.12.15 (the checksummed build the main fast lane used to download per job), as `python3` through the Playwright venv built from it |
+| Python | CPython 3.12.15 (the checksummed build the main fast lane used to download per job), as `python3` through the Playwright venv built from it and as `/usr/bin/python3` (a link over Debian's 3.11, which stays installed for its packages but is never the default) |
 | Node | 22.23.4 with npm |
 | C toolchain | gcc 12, clang 14, make, cmake, ninja, nasm, pkg-config, autoconf, automake |
 | Docker | client 27.5.1 and the compose plugin, from a digest-pinned image; no daemon and no socket |
