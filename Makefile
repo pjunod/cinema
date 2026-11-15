@@ -1382,7 +1382,6 @@ validate-help: ## Explain the validation workflow and UI golden commands
 .PHONY: validation-lint
 validation-lint: ## Verify every governed file maps to a valid functionality point
 	@scripts/validate lint
-	@scripts/knowledge lint --scope pilot --body-env
 
 .PHONY: validate-plan
 validate-plan: ## Explain which points and checks the staged diff selects

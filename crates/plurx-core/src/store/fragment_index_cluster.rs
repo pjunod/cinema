@@ -102,7 +102,7 @@ END;
 pub(crate) fn analysis_source_capacity_terms(
     now: &str,
     exclude_self: bool,
-) -> [(&'static str, String); 4] {
+) -> [(&'static str, String); 3] {
     let (own_occupancy, own_reservation) = if exclude_self {
         (
             " AND NOT (held.owner_kind='analysis' AND held.work_id=analysis_requests.request_id)",
@@ -112,14 +112,6 @@ pub(crate) fn analysis_source_capacity_terms(
         ("", "")
     };
     [
-        // A reader whose authority lapsed may still be reading.
-        (
-            "source_custody_unsettled",
-            format!(
-                r#"EXISTS(SELECT 1 FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.custody_id IS NOT NULL AND held.active_occupancy=1 AND held.expires_at_ms<={now}{own_occupancy})"#
-            ),
-        ),
         // A foreground stream needs this domain now.
         (
             "foreground_source",
@@ -183,13 +175,12 @@ pub(crate) fn analysis_source_capacity_terms(
 /// Shared capacity predicate for the pre-artifact source read. Both Store
 /// backends place it in candidate selection and the fenced claim mutation.
 pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
-    let [custody, foreground, readers, background] =
+    let [foreground, readers, background] =
         analysis_source_capacity_terms(now, false).map(|(_, term)| term);
     format!(
         "NOT EXISTS (SELECT 1 FROM analysis_required_resources required
       WHERE required.request_id = analysis_requests.request_id AND (
-        {custody}
-        OR {foreground}
+        {foreground}
         OR {readers}
         OR {background}))"
     )

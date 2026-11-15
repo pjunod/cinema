@@ -788,6 +788,7 @@ impl PeerConnection {
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
             let status = response.status();
+            let retry_after = response.headers().contains_key(header::RETRY_AFTER);
             let bytes = axum::body::to_bytes(
                 Body::new(
                     response
@@ -809,7 +810,7 @@ impl PeerConnection {
                 return Err(PeerError::ProtocolUnsupported);
             }
             if status != StatusCode::OK {
-                return Err(PeerError::Rejected(status));
+                return Err(crate::sharing_client::peer_status_refusal(status, retry_after));
             }
             SourceStatusReceipt::parse_with_receiver(&bytes, session, known, true)
         })
@@ -1085,7 +1086,12 @@ impl PeerConnection {
             }
             StatusCode::UNAUTHORIZED => return Err(PeerError::Authentication),
             StatusCode::UPGRADE_REQUIRED => return Err(PeerError::ProtocolUnsupported),
-            status => return Err(PeerError::Rejected(status)),
+            status => {
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    response.headers().contains_key(header::RETRY_AFTER),
+                ))
+            }
         }
         let head = SourceResourceHead::parse(response.headers(), session, known, resource)?;
         let body = if head.playlist {
@@ -1212,7 +1218,10 @@ mod resource_tests {
                 Some("99999999999999999999999999"),
                 Some(1),
             ),
+            // A Source whose own authority is unknown answers 503 with
+            // Retry-After: unavailable (never busy); a plain 503 is a refusal.
             (StatusCode::SERVICE_UNAVAILABLE, Some("3"), None),
+            (StatusCode::SERVICE_UNAVAILABLE, None, None),
             (StatusCode::UNAUTHORIZED, Some("3"), None),
             (StatusCode::UPGRADE_REQUIRED, Some("3"), None),
         ] {
@@ -1268,7 +1277,14 @@ mod resource_tests {
                     match error {
                         PeerError::Authentication => status == StatusCode::UNAUTHORIZED,
                         PeerError::ProtocolUnsupported => status == StatusCode::UPGRADE_REQUIRED,
-                        PeerError::Rejected(actual) => actual == status,
+                        PeerError::Unavailable => {
+                            status == StatusCode::SERVICE_UNAVAILABLE && retry_after.is_some()
+                        }
+                        PeerError::Rejected(actual) => {
+                            actual == status
+                                && !(status == StatusCode::SERVICE_UNAVAILABLE
+                                    && retry_after.is_some())
+                        }
                         _ => false,
                     },
                     "a genuine refusal must not become resource busy: {error:?}"

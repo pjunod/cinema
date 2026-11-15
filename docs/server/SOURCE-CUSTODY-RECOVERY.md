@@ -2,6 +2,11 @@
 
 **Status:** open · reviewed PR #1570 guard incorporated into the playback scheduling batch; combined qualification and rollout pending; the lab4 exact-owner recovery completed 2026-11-13 · **Updated:** 2026-11-13
 
+> **Superseded for capacity (2026-11-14):** source capacity is now released by
+> lease expiry alone — see [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md).
+> Nothing below is needed to unblock queued work any more; this document is
+> retired to `archive/` when that plan's step 2 removes the machinery.
+
 Executes the first independently useful recovery portion of
 [P42's RCA and proposed fix](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md). That document
 owns the larger scheduling and queue-management project. This is the bounded
