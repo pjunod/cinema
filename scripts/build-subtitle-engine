@@ -72,13 +72,13 @@ def verify(package):
         if manifest.get(key) != PIN[key]:
             raise ValueError(f"unqualified subtitle engine {key}")
     target = manifest.get("platform")
-    if target not in ["linux-arm64", "linux-aarch64", "linux-x86_64", "macos-arm64", "macos-x86_64", "macos-universal"]:
+    if target not in ["linux-arm64", "linux-aarch64", "linux-x86_64", "macos-arm64"]:
         raise ValueError("unqualified subtitle engine platform")
     system = "Darwin" if target.startswith("macos-") else "Linux"
     variants = manifest.get("cpu_variants", {})
     if not isinstance(variants, dict) or not set(variants) <= set(PIN["cpu_variants"]):
         raise ValueError("unqualified subtitle engine CPU variants")
-    if variants and target not in ["linux-x86_64", "macos-x86_64", "macos-universal"]:
+    if variants and target != "linux-x86_64":
         raise ValueError("subtitle engine CPU variant requires x86_64")
     expected = {"whisper-cli", "subtitle-engine.json", "self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"}
     for name, facts in variants.items():
@@ -170,6 +170,8 @@ def build(output, archive=None, jobs=2, architecture=None):
         raise ValueError("unsupported engine architecture")
     if system == "Linux" and machine.replace("aarch64", "arm64") != platform.machine().replace("aarch64", "arm64"):
         raise ValueError("Linux engine architecture must match the native build host")
+    if system == "Darwin" and machine != "arm64":
+        raise ValueError("macOS engines are Apple Silicon (arm64) only")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".subtitle-engine-", dir=output.parent) as temporary:
         work = Path(temporary)
@@ -226,40 +228,6 @@ def build(output, archive=None, jobs=2, architecture=None):
         return facts
 
 
-def combine(packages, output):
-    if platform.system() != "Darwin" or output.exists() or not output.is_absolute():
-        raise ValueError("universal assembly requires macOS and a new absolute output")
-    receipts = [verify(package) for package in packages]
-    if {item["platform"] for item in receipts} != {"macos-arm64", "macos-x86_64"}:
-        raise ValueError("universal assembly requires one qualified slice of each architecture")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".subtitle-universal-", dir=output.parent) as temporary:
-        stage = Path(temporary) / "package"
-        shutil.copytree(packages[0], stage)
-        binary = stage / "whisper-cli"
-        binary.unlink()
-        run(["/usr/bin/lipo", "-create", "-output", str(binary), *[str(package / "whisper-cli") for package in packages]])
-        run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)])
-        facts = receipts[0].copy()
-        facts.pop("cpu_variants", None)
-        intel = next(index for index, receipt in enumerate(receipts) if receipt["platform"] == "macos-x86_64")
-        variants = receipts[intel].get("cpu_variants", {})
-        for pin in PIN["cpu_variants"].values():
-            (stage / pin["filename"]).unlink(missing_ok=True)
-        for name, variant in variants.items():
-            shutil.copyfile(packages[intel] / variant["filename"], stage / variant["filename"])
-            (stage / variant["filename"]).chmod(0o755)
-        if variants:
-            facts["cpu_variants"] = variants
-        facts.update(platform="macos-universal", binary_bytes=binary.stat().st_size,
-                     binary_sha256=digest(binary), slices=receipts,
-                     runtime_dependencies=loader_dependencies(binary))
-        (stage / "subtitle-engine.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
-        verify(stage)
-        stage.rename(output)
-        return facts
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
@@ -268,11 +236,9 @@ def main():
     parser.add_argument("--source-archive", type=Path)
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--architecture", choices=["arm64", "x86_64"])
-    parser.add_argument("--combine", type=Path, nargs=2, metavar=("ARM_PACKAGE", "INTEL_PACKAGE"))
     args = parser.parse_args()
     try:
-        facts = (verify(args.verify) if args.verify else combine(args.combine, args.output)
-                 if args.combine else build(args.output, args.source_archive, args.jobs, args.architecture))
+        facts = verify(args.verify) if args.verify else build(args.output, args.source_archive, args.jobs, args.architecture)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"subtitle engine: {error}\n")
     print(json.dumps(facts, sort_keys=True))

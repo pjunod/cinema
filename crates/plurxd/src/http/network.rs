@@ -158,10 +158,13 @@ pub(crate) fn client_class(headers: &HeaderMap) -> &'static str {
 
 pub(crate) async fn stored_prior(
     store: &dyn Store,
+    applied: &plurx_core::store::AppliedView,
     identity: Option<&NetworkIdentity>,
 ) -> Result<Option<NetworkPrior>, ApiError> {
-    let enabled = store
-        .get_setting(keys::PLAYBACK_NETWORK_PRIORS)
+    // The preference from this node's applied view (E1b); the prior row
+    // itself stays a store read.
+    let enabled = applied
+        .setting(keys::PLAYBACK_NETWORK_PRIORS)
         .await?
         .is_some_and(|value| value.trim() == "1");
     let Some(identity) = identity.filter(|_| enabled) else {

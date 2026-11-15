@@ -566,6 +566,81 @@ fn every_production_spawn_goes_through_the_launcher() {
     );
 }
 
+/// Descriptor manifests are meaningful only while the audited builder owns
+/// every installation and file-stdio boundary. The remaining custom hooks
+/// alter process policy, or run the decoder's prepared plan before custom exec.
+#[test]
+fn every_production_descriptor_install_uses_the_single_builder() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates directory");
+    let builder = crates.join("plurxd/src/producer_spawn.rs");
+    let installer = crates.join("plurx-core/src/process/source_lifetime/descriptors.rs");
+    let empty_stdio = crates.join("plurx-core/src/process/source_lifetime.rs");
+    let policy_hooks = [
+        crates.join("plurx-core/src/process/priority.rs"),
+        crates.join("plurxd/src/decode_facts.rs"),
+        crates.join("plurxd/src/decode_facts/pi_namespace.rs"),
+        crates.join("plurxd/src/subtitle_ride_along.rs"),
+        crates.join("plurxd/src/subtitle_translation/runtime.rs"),
+    ];
+    let mut violations = Vec::new();
+    let mut builder_seen = false;
+    let mut installer_seen = false;
+    for (file, production) in daemon_production_sources() {
+        builder_seen |= file == builder;
+        installer_seen |= file == installer;
+        let compact: String = production
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        for pattern in [
+            "Stdio::from(",
+            "DescriptorManifest::new(",
+            "InheritedFd::duplicate",
+        ] {
+            if compact.contains(pattern)
+                && file != builder
+                && file != installer
+                && !(pattern == "DescriptorManifest::new(" && file == empty_stdio)
+            {
+                violations.push(format!(
+                    "{}: {pattern} bypasses the descriptor builder",
+                    file.display()
+                ));
+            }
+        }
+        for pattern in ["libc::dup2(", "libc::dup3("] {
+            if compact.contains(pattern) && file != installer {
+                violations.push(format!(
+                    "{}: {pattern} bypasses the prepared installer",
+                    file.display()
+                ));
+            }
+        }
+        if compact.contains(".pre_exec(") && file != builder && !policy_hooks.contains(&file) {
+            violations.push(format!("{}: unaudited pre_exec hook", file.display()));
+        }
+        // A policy/security hook can close or mark extra descriptors CLOEXEC;
+        // clearing CLOEXEC or duplicating a child target belongs to the plan.
+        if compact.contains(".pre_exec(") && file != builder && compact.contains("libc::F_SETFD") {
+            violations.push(format!(
+                "{}: descriptor flag installation outside the builder",
+                file.display()
+            ));
+        }
+    }
+    assert!(
+        builder_seen && installer_seen,
+        "descriptor census missed its construction or installation boundary"
+    );
+    assert!(
+        violations.is_empty(),
+        "all descriptor and file stdio installations must use producer_spawn::Descriptors:\n{}",
+        violations.join("\n")
+    );
+}
+
 #[test]
 fn the_census_sees_through_formatting_literals_and_test_items() {
     let source = r##"

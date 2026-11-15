@@ -87,12 +87,33 @@ async fn completed_job_with_unreleased_reader_keeps_origin_and_raises_recovery_g
     );
     assert_eq!(held.origin_job_state.as_deref(), Some("succeeded"));
     assert_eq!(held.phase.as_deref(), Some("cleanup_pending"));
+    // Not yet seen by the expiry sweep: no lapse time, so not overdue.
     let metrics = store
-        .prometheus_store_snapshot("observer", 3)
+        .prometheus_store_snapshot("observer", 1000)
         .await
         .expect("sample");
     assert_eq!(metrics.background_jobs.source_io_reservations, 0);
+    assert_eq!(metrics.background_jobs.source_recovery_pending, 0);
+    // The sweep stamped it at 1 s and it is still charged at 1000 s: the
+    // sweep is not releasing it, which is what the gauge reports.
+    db.execute(
+        "UPDATE background_source_custody SET phase='cleanup_pending',updated_at_ms=1000 WHERE custody_id='reader'",
+        [],
+    )
+    .expect("stamped by the sweep");
+    let metrics = store
+        .prometheus_store_snapshot("observer", 1000)
+        .await
+        .expect("sample");
     assert_eq!(metrics.background_jobs.source_recovery_pending, 1);
+    let metrics = store
+        .prometheus_store_snapshot("observer", 100)
+        .await
+        .expect("sample");
+    assert_eq!(
+        metrics.background_jobs.source_recovery_pending, 0,
+        "inside the grace plus a sweep tick the release is still on its way"
+    );
 }
 
 #[tokio::test]
@@ -1741,14 +1762,20 @@ fn receipt_pressure_literals_match_constants() {
         })
         .map(|(index, _)| index)
         .collect();
+    // v129 replaces it once more, adding only the custody clause (pinned in
+    // custody_retention's own test); nothing after it redefines it.
     assert_eq!(
         creators.len(),
-        3,
+        4,
         "another migration redefines the maintenance trigger"
     );
     assert!(std::ptr::eq(
         super::sqlite::MIGRATIONS[creators[2]],
         migration
+    ));
+    assert!(std::ptr::eq(
+        super::sqlite::MIGRATIONS[creators[3]],
+        super::custody_retention::SCHEMA
     ));
 }
 
@@ -2289,7 +2316,7 @@ async fn advertised_manual_scan_wins_cross_type_claim_and_expiry_releases_the_tu
 async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_disk(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
-    use super::background_jobs_resources::StorageDomainMapping;
+    use super::background_jobs_resources::{StorageDomainApply, StorageDomainMapping};
     use super::LibraryStore;
     use crate::domain::{LibraryKind, NewLibrary};
 
@@ -2312,19 +2339,22 @@ async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_dis
     }
     let a = &libraries[0];
     let b = &libraries[1];
+    let mappings = libraries
+        .iter()
+        .map(|l| StorageDomainMapping {
+            library_id: l.id,
+            root_path: l.paths[0].display().to_string(),
+            domain_id: l.name.clone(),
+        })
+        .collect();
     store
-        .replace_storage_domains(
-            libraries
-                .iter()
-                .map(|l| StorageDomainMapping {
-                    library_id: l.id,
-                    root_path: l.paths[0].display().to_string(),
-                    domain_id: l.name.clone(),
-                })
-                .collect(),
-            900,
-        )
-        .await?;
+        .save_storage_domains(mappings, None, 900)
+        .await?
+        .expect("valid roots");
+    assert!(matches!(
+        store.apply_pending_storage_domains(900).await?,
+        StorageDomainApply::Applied { .. }
+    ));
     let enqueue_library = |library_id, trigger| NewLibraryWork {
         library_id,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -2423,4 +2453,316 @@ async fn busy_scan_voter_keeps_its_local_turn_without_blocking_a_free_remote_dis
     local.kind = JobKind::LibraryScan;
     claimed(&store, local).await;
     Ok(())
+}
+
+#[tokio::test]
+async fn retention_keeps_a_job_that_still_owns_charged_source_custody() {
+    // 2026-11-12: custody 4170fe8e outlived its dead owner, and
+    // retention then deleted the owner's settled job row. That row was the
+    // custody's only exact source binding, so the host census could no longer
+    // release it. A job is retained while any custody it owns is charged.
+    let store = SqliteStore::open_in_memory().expect("store");
+    let owner = enqueue(1_000);
+    let other = enqueue(1_000);
+    for job in [&owner, &other] {
+        store.enqueue_job(job.clone()).await.expect("enqueue");
+        store
+            .cancel_job(CancelJob {
+                job_id: job.id.clone(),
+                now_ms: 1_001,
+            })
+            .await
+            .expect("settle");
+    }
+    let custody = |sql: &'static str| {
+        QueueSql::queue_sql(
+            &store,
+            sql.into(),
+            serde_json::json!({"job": owner.id}).to_string(),
+            true,
+            true,
+        )
+    };
+    custody(
+        "INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,
+            owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+         VALUES('4170fe8e-c89f-462e-a68e-6b8726958640','dead-owner','{}','[\"source_io\"]',
+            'job',json_extract($1,'$.job'),1,'active',1000,1000,2000)",
+    )
+    .await
+    .expect("charged custody");
+    // Eight days later both jobs are past the seven-day receipt window.
+    let later = 1_001 + 8 * 86_400_000;
+    let mut passes = 0;
+    while store.maintain_jobs(later + passes).await.expect("upkeep") {
+        passes += 1;
+        assert!(passes < 8, "upkeep converges");
+    }
+    assert!(
+        store
+            .background_job(&owner.id)
+            .await
+            .expect("read")
+            .is_some(),
+        "the custody owner's job keeps its source binding"
+    );
+    assert!(
+        store
+            .background_job(&other.id)
+            .await
+            .expect("read")
+            .is_none(),
+        "ordinary settled history still expires"
+    );
+    custody("DELETE FROM background_source_custody WHERE work_id=json_extract($1,'$.job')")
+        .await
+        .expect("release");
+    while store.maintain_jobs(later + passes).await.expect("upkeep") {
+        passes += 1;
+        assert!(passes < 16, "upkeep converges");
+    }
+    assert!(
+        store
+            .background_job(&owner.id)
+            .await
+            .expect("read")
+            .is_none(),
+        "a released owner's job expires like any other"
+    );
+}
+
+#[tokio::test]
+async fn a_viewer_waiting_on_its_titles_measurement_reads_beside_background_work() {
+    // 2026-11-12: Twilight's FEL measurement sat queued for five days behind
+    // library and subtitle work, because only playback demand may read
+    // alongside the one background source reader and a viewer waiting on a
+    // measurement was not counted as playback demand.
+    let store = SqliteStore::open_in_memory().expect("store");
+    let job = |index: usize, viewer: Option<i64>| {
+        let mut request = enqueue(1_000);
+        request.dedupe_key = format!("fragment:{index}");
+        if let Some(deadline) = viewer {
+            request.request.scope = "playback-qualification".to_owned();
+            request.request.consumer_kind = "playback_qualification".to_owned();
+            request.request.deadline_ms = Some(deadline);
+        }
+        request
+    };
+    let background = job(0, None);
+    store
+        .enqueue_job(background.clone())
+        .await
+        .expect("background");
+    claimed(&store, claim(&background.id, 0, 1_000)).await;
+    let ordinary = job(1, None);
+    let lapsed = job(2, Some(1_001));
+    let watching = job(3, Some(60_000));
+    for request in [&ordinary, &lapsed, &watching] {
+        store.enqueue_job(request.clone()).await.expect("enqueue");
+    }
+    for request in [&ordinary, &lapsed] {
+        assert!(matches!(
+            store
+                .claim_job(claim(&request.id, 0, 1_002))
+                .await
+                .expect("claim"),
+            ClaimOutcome::Contended
+        ));
+    }
+    claimed(&store, claim(&watching.id, 0, 1_002)).await;
+}
+
+#[tokio::test]
+async fn a_waiting_viewer_attaches_and_renews_its_demand_on_the_title_scan() {
+    use crate::{
+        domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
+        store::{dv_title_jobs::TitleViewerRequest, LibraryStore, MediaStore},
+        transcode::{
+            dv_fel_qualification as q, EnhancementRateEnvelope, EnhancementRateLimits,
+            EnhancementRateProvenance,
+        },
+    };
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("jobs.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let db = rusqlite::Connection::open(path).expect("fixture connection");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "viewer-title".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/media".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "viewer title".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file = store
+        .upsert_file(
+            item,
+            "/media/viewer-title.mkv",
+            100,
+            1,
+            &ProbeResult {
+                video_codec: Some("hevc".into()),
+                dolby_vision: DolbyVisionFacts {
+                    profile: Some(7),
+                    rpu_present: Some(true),
+                    el_present: Some(true),
+                    ..Default::default()
+                },
+                raw_json: Some("{}".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("source");
+    let envelope = EnhancementRateEnvelope::resolve(
+        90_000,
+        EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        3840,
+        2160,
+        (24, 1),
+        true,
+        EnhancementRateLimits::default(),
+    )
+    .expect("envelope");
+    let recipe = q::FelRecipeRequest::new(
+        "b".repeat(64),
+        100,
+        1,
+        envelope,
+        q::FelRecipeOutput::new(0, (3840, 2160), (24, 1)),
+    );
+    let viewer = |deadline, now| TitleViewerRequest {
+        file_id: file,
+        viewer: "viewer-1".into(),
+        request: recipe.clone(),
+        scanner_digest: "a".repeat(64),
+        deadline_ms: deadline,
+        now_ms: now,
+    };
+    assert!(!store
+        .attach_dv_title_viewer(viewer(60_000, 1_000))
+        .await
+        .expect("unregistered recipe"));
+    assert!(store
+        .request_dv_fel_variant(file, &recipe)
+        .await
+        .expect("registered request"));
+    db.execute("UPDATE files SET probe_json=json_set(probe_json,'$.plurx_dv_fel_requests_v3.'||?1||'.source_size',99) WHERE id=?2",
+        rusqlite::params![recipe.identity,file]).expect("old source request fixture");
+    assert!(!store
+        .attach_dv_title_viewer(viewer(60_000, 1_000))
+        .await
+        .expect("old source cannot bootstrap"));
+    assert!(store
+        .request_dv_fel_variant(file, &recipe)
+        .await
+        .expect("restore registered current source"));
+    db.execute(
+        "UPDATE dv_title_jobs_demand SET terminal=1 WHERE file_id=?1",
+        [file],
+    )
+    .expect("terminal fixture");
+    assert!(store
+        .dv_title_playback_demands(0, 1_000, None)
+        .await
+        .expect("no live viewers")
+        .is_empty());
+    let terminal: i64 = db
+        .query_row(
+            "SELECT terminal FROM dv_title_jobs_demand WHERE file_id=?1",
+            [file],
+            |r| r.get(0),
+        )
+        .expect("unchanged terminal");
+    assert_eq!(terminal, 1, "read-only live discovery never reopens demand");
+    assert!(store
+        .attach_dv_title_viewer(viewer(60_000, 1_000))
+        .await
+        .expect("bootstrap"));
+    let live = store
+        .dv_title_playback_demands(0, 1_001, None)
+        .await
+        .expect("live");
+    let job = live[0].queued_job_id.clone().expect("queued job");
+    db.execute("UPDATE background_job_waiters SET consumer_ref='legacy-viewer' WHERE consumer_kind='playback_qualification'",[]).expect("legacy demand fixture");
+    assert!(store
+        .attach_dv_title_viewer(viewer(90_000, 30_000))
+        .await
+        .expect("renew legacy waiter"));
+    let (count,deadline,reference):(i64,i64,String)=db.query_row(
+        "SELECT count(*),max(deadline_ms),max(consumer_ref) FROM background_job_waiters WHERE job_id=?1 AND consumer_kind='playback_qualification' AND state='pending'",
+        [&job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).expect("viewer waiter");
+    assert_eq!(
+        (count, deadline, reference),
+        (1, 90_000, recipe.identity.clone())
+    );
+    db.execute("UPDATE background_job_waiters SET state='cancelled' WHERE consumer_kind='playback_qualification'",[]).expect("lapsed demand");
+    assert!(store
+        .attach_dv_title_viewer(viewer(200_000, 110_000))
+        .await
+        .expect("explicit viewer renewal"));
+    assert!(store
+        .attach_dv_title_viewer(viewer(1_000, 2_000))
+        .await
+        .is_err());
+    // A worker can consume the exact request after registration commits but
+    // before its caller's authoritative observation. That is success too.
+    struct ConsumeBeforeRead<'a> {
+        store: &'a SqliteStore,
+        file: i64,
+        receipt: serde_json::Value,
+    }
+    #[async_trait::async_trait]
+    impl QueueSql for ConsumeBeforeRead<'_> {
+        async fn queue_transaction(
+            &self,
+            statements: Vec<(String, String)>,
+        ) -> Result<(), crate::error::StoreError> {
+            self.store.queue_transaction(statements).await?;
+            assert!(
+                self.store
+                    .put_dv_fel_verdict(self.file, 100, 1, &self.receipt)
+                    .await?
+            );
+            Ok(())
+        }
+        async fn queue_sql(
+            &self,
+            sql: String,
+            request: String,
+            mutation: bool,
+            authoritative: bool,
+        ) -> Result<Vec<String>, crate::error::StoreError> {
+            self.store
+                .queue_sql(sql, request, mutation, authoritative)
+                .await
+        }
+    }
+    let receipt = q::FelRecipeVerdict {
+        request: recipe.clone(),
+        verdict: q::FelVerdict::unmeasurable(recipe.identity.clone(), 100, 1, 120_001),
+    };
+    let racing = ConsumeBeforeRead {
+        store: &store,
+        file,
+        receipt: serde_json::to_value(receipt).expect("receipt"),
+    };
+    assert!(
+        super::dv_title_jobs::request_fel_variant(&racing, file, &recipe)
+            .await
+            .expect("worker finished before observation")
+    );
 }

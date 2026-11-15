@@ -200,6 +200,8 @@ function rollbackPreparedReplacement(p,state,successor){
   p.sessionId=predecessor.sessionId;
   p.probeUrl=predecessor.probeUrl;
   p.offset=predecessor.offset;
+  p.vod=predecessor.vod;
+  p.rangePresentation=predecessor.rangePresentation;
   p.method=predecessor.method;
   p.copyHls=predecessor.copyHls;
   p.autoHeight=predecessor.autoHeight;
@@ -371,6 +373,9 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
 
 function failPreparedReplacement(p,state,detail){
   if(preparedState(p)!==state) return;
+  // A commit that began and never exposed the successor is the seam's
+  // `refused`: nothing the viewer sees or hears has changed.
+  if(state.state==="committing") reportPreparedSeamAfterWindow(p,state,"refused");
   state.state="failed";
   queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
   clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
@@ -819,4 +824,61 @@ function askPlaybackControl(renderOverride,observationOverride,deadlineMs=Infini
   // again, so nothing would ever settle this waiter but its timer.
   if(reporter.stopped) settle(null);
   return {trigger,action};
+}
+
+// ---- the seam's outcome, reported ------------------------------------------
+//
+// One `prepared_seam` beacon per prepared switch that reached its commit:
+// committed (after the ±2 s window has been sampled), refused (the commit
+// never exposed the successor), or switched without a frame. The server
+// counts these per platform (`plurx_playback_preparation_seams_*`); the
+// processed Dolby Vision upgrade leaves the Developer tab only after twenty
+// clean, fully measured committed switches. Web audio is not measured (see
+// `preparedSwitchAudioEnable`), so a web switch reports `audio_observed:false`
+// and is never one of the twenty. Reported, never acted on.
+function reportPreparedSeam(p,state,outcome,frames,reopened){
+  const control=window.PlurxPlaybackControl;
+  if(!control||typeof control.preparedSeamReport!=="function"||!state||state.seamReported) return;
+  const report=control.preparedSeamReport({platform:"web",outcome,frames,audioObserved:false,
+    reopened:reopened===true});
+  if(!report) return;
+  state.seamReported=true;
+  clientLog(Object.assign({level:"info",event:"prepared_seam",detail:outcome,
+    message:`prepared switch to ${state.sessionId}: ${outcome}`,
+    session_id:state.sessionId,prepared_seam:report},playbackContext()));
+}
+// What "no reopen" is measured against: the player, its attempt and its
+// session at the outcome. An ordinary reopen either opens a new attempt or a
+// new session on this player, or replaces the player for the same file; a
+// player closed by the viewer is neither.
+function preparedSeamReopenMark(p){
+  return {player:p||null,attemptId:p?p.attemptId:null,sessionId:p?p.sessionId:null,
+    fileId:p?p.fileId:null};
+}
+function preparedSeamReopened(mark){
+  const current=typeof PLAYER==="undefined"?null:PLAYER;
+  if(!current||!mark) return false;
+  if(current!==mark.player) return mark.fileId!=null&&current.fileId===mark.fileId;
+  return current.attemptId!==mark.attemptId||current.sessionId!==mark.sessionId;
+}
+// Every outcome is reported once the ±2 s window has elapsed, with whether an
+// ordinary reopen actually ran inside it (review 3 B2). A committed switch also
+// carries its frame delta: the successor's two seconds after the commit are
+// sampled on the existing 500 ms progress tick. A refused or frameless switch
+// counts as reopened only when the reopen it owes really ran.
+function reportPreparedSeamAfterWindow(p,state,outcome){
+  if(!state||state.seamScheduled) return;
+  state.seamScheduled=true;
+  const control=window.PlurxPlaybackControl;
+  const windowMs=control&&Number.isFinite(control.PREPARED_SWITCH_WINDOW_MS)?control.PREPARED_SWITCH_WINDOW_MS:2000;
+  const mark=preparedSeamReopenMark(p);
+  setTimeout(()=>{
+    const commit=outcome==="committed"?p&&p.switchCommit:null;
+    const samples=(p&&p.switchFrames)||[];
+    const frames=control&&commit?control.preparedSwitchCounterDelta({
+      before:samples.filter(sample=>sample.element===commit.predecessor),
+      after:samples.filter(sample=>sample.element===commit.successor),
+      commitAtMs:commit.at}):null;
+    reportPreparedSeam(p,state,outcome,frames,preparedSeamReopened(mark));
+  },windowMs+250);
 }

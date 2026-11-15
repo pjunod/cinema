@@ -153,7 +153,7 @@ def sign_package(package, identity, team_id, key, key_id, issuer):
 
 
 def extract_candidate(archive, destination, version, source_commit):
-    wrapper = f"plurxd-{version}-macos-universal"
+    wrapper = f"plurxd-{version}-macos-arm64"
     with tarfile.open(archive, "r:gz") as source:
         members = source.getmembers()
         names, total = set(), 0
@@ -170,7 +170,7 @@ def extract_candidate(archive, destination, version, source_commit):
         source.extractall(destination, members=members, filter="data")
     package = destination / wrapper
     release, _, _ = package_tool().verify_package_closure(package)
-    if release.get("version") != version or release.get("source_commit") != source_commit or release.get("architecture") != "universal":
+    if release.get("version") != version or release.get("source_commit") != source_commit or release.get("architecture") != "arm64":
         raise ValueError("macOS candidate differs from resolved release identity")
     return package
 

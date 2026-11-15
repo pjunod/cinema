@@ -110,4 +110,4 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
-          scripts/image-base-drift Dockerfile | tee -a "$GITHUB_STEP_SUMMARY"
+          scripts/image-base-drift Dockerfile Dockerfile.media-runtime | tee -a "$GITHUB_STEP_SUMMARY"

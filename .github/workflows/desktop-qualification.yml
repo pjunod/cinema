@@ -56,8 +56,6 @@ jobs:
         include:
           - platform: macos
             runner: macos-15
-          - platform: macos
-            runner: macos-15-intel
           - platform: linux
             runner: ubuntu-24.04
           - platform: linux
@@ -125,7 +123,7 @@ jobs:
             sudo apt-get -qq update
             sudo apt-get -qq install -y --no-install-recommends build-essential clang cmake pkg-config libgtk-4-dev >/dev/null
           else
-            rustup target add --toolchain 1.97.1 aarch64-apple-darwin x86_64-apple-darwin
+            rustup target add --toolchain 1.97.1 aarch64-apple-darwin
           fi
       - name: Rebuild isolated native cohorts and qualify real local apply/recovery
         if: inputs.run_local_fixture_updates

@@ -1365,6 +1365,7 @@ mod tests {
                 selected.replication_monitor(),
                 selected.membership_manager(),
                 selected.catalogue_reader(),
+                selected.applied_view(),
                 store,
                 crate::create_dirs_for_config(&config).expect("desktop control fixture"),
                 Default::default(),

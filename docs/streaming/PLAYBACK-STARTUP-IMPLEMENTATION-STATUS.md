@@ -2,14 +2,16 @@
 
 **Status:** Implemented; focused Rust, C and mobile qualification passed. Main
 CI and landing are recorded in [PR #1366](http://forge.lan:3000/noirr/plurx/pulls/1366).
-Runtime cold-start acceptance remains open. **Owner:** Codex/root · **Branch:**
+Deployed 2026-11-07 to media1, lab4 and lab6 (media1 and lab6 on build
+`4ddbf1229`, lab4 on `edf6d08fa`; #1366 is in both). Runtime cold-start
+acceptance remains open. **Owner:** Codex/root · **Branch:**
 `codex/playback-startup-fixes` · **Base:** `bd213c819` · **Updated:** 2026-11-03
 
 Companion to the [canonical startup proposal](COLD-PLAYBACK-STARTUP-RCA-AND-PROPOSAL.md),
 [AC3 retest RCA](COLD-PLAYBACK-AC3-RETEST-RCA.md), [native callback RCA](NATIVE-CALLBACK-DELIVERY-RCA.md)
 and [Fable dispositions](NATIVE-CALLBACK-FABLE-REVIEW.md). This is the delivery
 ledger for the user-authorized batched repair. One main PR contains the work;
-the maintainer owns deployment. Startup within five seconds remains a runtime
+the maintainer owned deployment (done 2026-11-07, above). Startup within five seconds remains a runtime
 acceptance target, not a measured result for this candidate.
 
 Astra's follow-up review closed all seven findings against source commit
@@ -206,7 +208,7 @@ boundaries require Linux and packaged-parser qualification after review.
 Private compiler logs, archive checksums, test receipts and ownership handoffs
 live in the workflow's durable evidence directory, outside its disposable build
 cache. Source-only checks and focused synthetic controls do not establish
-runtime cold-start acceptance. The maintainer owns deployment after merge.
+runtime cold-start acceptance. The maintainer deployed it after merge on 2026-11-07.
 
 Final reader inventory corrections require owned input at every production
 processed-runtime entry point, including the first prepared window. Standalone

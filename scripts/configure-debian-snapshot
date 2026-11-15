@@ -5,10 +5,12 @@ snapshot=${1:?usage: configure-debian-snapshot TIMESTAMP [APT_DIRECTORY]}
 apt_dir=${2:-/etc/apt}
 mkdir -p "$apt_dir/apt.conf.d"
 for archive in debian debian-security; do
-    # type:deb excludes the moving mirror from all index/Release requests.
-    printf 'http://deb.debian.org/%s/\tpriority:1 type:deb\nhttp://snapshot.debian.org/archive/%s/%s/\tpriority:2\nhttp://snapshot-cloudflare.debian.org/archive/%s/%s/\tpriority:3\n' \
-        "$archive" "$archive" "$snapshot" "$archive" "$snapshot" \
-        > "$apt_dir/plurx-$archive.mirrors"
+    list="$apt_dir/plurx-$archive"
+    printf 'http://snapshot.debian.org/archive/%s/%s/\tpriority:2\nhttp://snapshot-cloudflare.debian.org/archive/%s/%s/\tpriority:3\n' \
+        "$archive" "$snapshot" "$archive" "$snapshot" > "$list.indexes"
+    printf 'http://deb.debian.org/%s/\tpriority:1 type:deb\n' "$archive" > "$list.packages"
+    cat "$list.indexes" >> "$list.packages"
+    cp "$list.indexes" "$list.mirrors"
 done
 sed \
     -e "s|http://deb.debian.org/debian-security|mirror+file:$apt_dir/plurx-debian-security.mirrors|g" \
@@ -18,5 +20,22 @@ mv "$apt_dir/sources.list.d/debian.sources.tmp" "$apt_dir/sources.list.d/debian.
 cat > "$apt_dir/apt.conf.d/99plurx-snapshot" <<'EOF'
 Acquire::Check-Valid-Until "false";
 Acquire::Retries "5";
+APT::Update::Error-Mode "any";
 Acquire::http::Timeout "30";
 EOF
+
+# Bookworm's mirror method can use the first deb-only mirror for the first
+# InRelease request on a secondary mirror list. Expose only snapshot origins
+# during index acquisition. Once APT has verified the signed indexes, it can
+# fetch each .deb from any mirror matching the indexed size and digest.
+# Quote the installation directory once for the shell invoked by APT.
+hook_dir=$(printf '%s' "$apt_dir" | sed "s/'/'\\\\''/g")
+for phase in Pre-Invoke Post-Invoke-Success; do
+    case "$phase" in
+        Pre-Invoke) list_type=indexes ;;
+        Post-Invoke-Success) list_type=packages ;;
+    esac
+    cat >> "$apt_dir/apt.conf.d/99plurx-snapshot" <<EOF
+APT::Update::$phase { "for archive in debian debian-security; do cp '$hook_dir'/plurx-\$archive.$list_type '$hook_dir'/plurx-\$archive.mirrors || exit 1; done"; };
+EOF
+done

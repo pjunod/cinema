@@ -1,4 +1,5 @@
 //! Process-local sharing transport. Saved enablement is never a readiness gate.
+use crate::serving_fence::{SpanOutcome, UnknownSpan};
 use crate::state::{clock_ms, AppState};
 use plurx_core::{
     config::{SharingEgressConfig, SharingNetworkConfig},
@@ -119,36 +120,59 @@ pub(crate) struct ReceiverSourceStartResult {
     pub viewer_hash: String,
     pub endpoint: plurx_core::sharing::Endpoint,
     pub source: crate::http::sharing_direct_wire::DecodedSourceStart,
+    pub receiver_presentation_affirmed: bool,
+}
+/// Transport inputs for one exact Source Start. The caller's clock stays
+/// outside the canonical request bytes; connection custody survives every
+/// re-post of that request.
+pub(crate) struct ReceiverSourceStartRequest<'a> {
+    pub request_json: &'a str,
+    pub connection_lifetime: std::sync::Arc<dyn Send + Sync>,
+    pub clock: Option<&'a crate::media_pool::CreateStartupBudget>,
+    pub rejoin_window: Option<tokio::time::Instant>,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
+    enabled_within(
         store.get_setting(setting_keys::SHARING_ENABLED),
+        Duration::from_secs(1),
     )
     .await
-    .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
+}
+/// The switch from one bounded read; a read past `deadline` is unknown.
+async fn enabled_within(
+    read: impl std::future::Future<Output = Result<Option<String>, StoreError>>,
+    deadline: Duration,
+) -> Result<bool, StoreError> {
+    let result = tokio::time::timeout(deadline, read)
+        .await
+        .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
     Ok(stored_switch(result.as_deref(), false))
 }
 impl SharingManager {
     /// Dispatch only after B has committed its blocked owner and retained the
     /// Source request identity. A received Source handle must survive a later
     /// B revocation so the owning task can settle its physical obligation.
-    #[allow(dead_code)] // Wired by the receiver owner, never by a catalogue read.
     pub(crate) async fn start_file_source(
         &self,
         state: &AppState,
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
-        request_json: &str,
-        connection_lifetime: std::sync::Arc<dyn Send + Sync>,
+        request: ReceiverSourceStartRequest<'_>,
         retain_dispatch: impl FnOnce(
                 &plurx_core::secrets::Secret,
                 &str,
                 &plurx_core::sharing::Endpoint,
             ) -> Result<(), crate::sharing_client::PeerError>
             + Send,
+        mut retrying: impl FnMut(crate::sharing_client::StartRetry) -> bool + Send,
     ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
-        use crate::sharing_client::{PeerConnection, PeerError};
+        use crate::sharing_client::{PeerConnection, PeerError, StartRetry};
+        let ReceiverSourceStartRequest {
+            request_json,
+            connection_lifetime,
+            clock,
+            rejoin_window,
+        } = request;
         let expected = receiver_source_request(intent, request_json)?;
         if owner.incarnation_id != intent.recipe.source_request_id.to_string()
             || owner.owner_node_id != state.node_id
@@ -186,15 +210,156 @@ impl SharingManager {
             catalogue_epoch: expected.catalogue_epoch,
             created_at_ms: 0,
         };
-        let (mut peer, _) = PeerConnection::verified_with_lifetime(
+        let (mut peer, identity) = PeerConnection::verified_with_lifetime(
             self,
             &summary.endpoints,
             &source,
             connection_lifetime,
         )
         .await?;
+        // The viewer's clock crosses only to a Source that reads it (H2): an
+        // older Source gets exactly today's Start.
+        let clock =
+            clock.filter(|_| identity.supports(crate::sharing_client::START_BUDGET_FEATURE));
         // The handshake can park. Reobserve the original login and committed
         // blocked owner immediately before the first non-idempotent send.
+        let viewer = self
+            .receiver_presend_authority(state, intent, owner, summary, None)
+            .await?;
+        // Retain cleanup authentication before the first send, including when
+        // no Start response returns. The callback performs no await.
+        let endpoint = peer
+            .verified_endpoint()
+            .ok_or(PeerError::IdentityMismatch)?
+            .clone();
+        retain_dispatch(&credential.credential, &viewer, &endpoint)?;
+        // Durable before the first Start byte: a crash after this point must
+        // still be able to authenticate the owed End. Only the exact live
+        // owner can record it; a refusal or an uncertain commit sends nothing.
+        let envelope = crate::http::shared_receiver_playback::seal_dispatch_capsule(
+            &self.key,
+            local.server_id,
+            intent,
+            &credential.credential,
+            &viewer,
+            &endpoint,
+        )
+        .map_err(|_| PeerError::Unavailable)?;
+        let authority = state
+            .store
+            .prepare_receiver_session_authority(intent.clone())
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Authentication)?;
+        let mut fresh_owner = owner.clone();
+        fresh_owner.now_ms = clock_ms();
+        fresh_owner.lease_expires_at_ms = fresh_owner.now_ms.saturating_add(30_000);
+        match state
+            .store
+            .record_receiver_dispatch(
+                &authority,
+                &plurx_core::sharing_receiver_sessions::ReceiverDispatchRecord {
+                    owner: fresh_owner,
+                    envelope: envelope.clone(),
+                },
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+        {
+            plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Applied
+            | plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Replay => {}
+            plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Refused => {
+                return Err(PeerError::Authentication);
+            }
+        }
+        // One Start, re-posted with the same bytes on the same pinned
+        // connection after each typed "not yet": the Source's retained entry
+        // for this request is rejoined, never a second producer. The viewer's
+        // clock bounds the re-posts by the attempt's fixed rejoin window, the
+        // same instant its abandonment decision reads.
+        let window = rejoin_window.filter(|_| clock.is_some());
+        let reply = loop {
+            match peer
+                .file_start(
+                    &credential.credential,
+                    &expected,
+                    &viewer,
+                    request_json,
+                    clock.map(crate::media_pool::CreateStartupBudget::viewer_remaining),
+                )
+                .await
+            {
+                Err(error) if clock.is_some() && StartRetry::from_peer(error).is_some() => {
+                    let retry = StartRetry::from_peer(error).ok_or(error)?;
+                    let wait = Duration::from_secs(retry.retry_after_secs);
+                    let window = window.ok_or(PeerError::Unavailable)?;
+                    if !retrying(retry) || tokio::time::Instant::now() + wait >= window {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(wait).await;
+                    // A re-post is a new non-idempotent send (after `Busy`
+                    // the Source made no entry): every check the first send
+                    // passed is made again, and any failure ends the Start.
+                    self.receiver_presend_authority(
+                        state,
+                        intent,
+                        owner,
+                        summary,
+                        Some((&viewer, &envelope)),
+                    )
+                    .await?;
+                    if !retrying(retry) {
+                        return Err(error);
+                    }
+                }
+                result => break result?,
+            }
+        };
+        // Do not discard a known Source result after an await. Publication
+        // repeats B authority; cleanup retains this handle independently.
+        Ok(ReceiverSourceStartResult {
+            summary: summary.clone(),
+            credential: credential.credential,
+            viewer_hash: viewer,
+            endpoint,
+            source: reply,
+            receiver_presentation_affirmed: peer.receiver_presentation_affirmed(),
+        })
+    }
+
+    /// Every check B makes before a non-idempotent Start send to the Source:
+    /// sharing is on and the import is still this attempt's, the original
+    /// login and the committed blocked owner are current (and renewed), and
+    /// the viewer is still assigned to the library. Answers the viewer
+    /// pseudonym. With `dispatched`, a re-post after a typed retry: the
+    /// viewer must be the one the dispatch capsule sealed, and that dispatch
+    /// record must still stand. Any failure refuses the send.
+    async fn receiver_presend_authority(
+        &self,
+        state: &AppState,
+        intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
+        owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
+        summary: &plurx_core::sharing::ImportSummary,
+        dispatched: Option<(&str, &plurx_core::secrets::SealedSecret)>,
+    ) -> Result<String, crate::sharing_client::PeerError> {
+        use crate::sharing_client::PeerError;
+        if dispatched.is_some() {
+            let current = state
+                .store
+                .sharing_import(intent.scope.import_id)
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+                .ok_or(PeerError::Unavailable)?;
+            if current.summary.state != "active"
+                || current.summary.source_server_id != summary.source_server_id
+                || current.summary.catalogue_epoch != summary.catalogue_epoch
+                || current.summary.lifecycle_generation != summary.lifecycle_generation
+                || current.summary.claim_id != summary.claim_id
+                || current.summary.remote_grant_id != summary.remote_grant_id
+            {
+                return Err(PeerError::Authentication);
+            }
+        }
         self.ensure_current(state, summary).await?;
         let authority = state
             .store
@@ -223,62 +388,30 @@ impl SharingManager {
             .await
             .map_err(|_| PeerError::Unavailable)?
             .ok_or(PeerError::Authentication)?;
-        // Retain cleanup authentication before the first send, including when
-        // no Start response returns. The callback performs no await.
-        let endpoint = peer
-            .verified_endpoint()
-            .ok_or(PeerError::IdentityMismatch)?
-            .clone();
-        retain_dispatch(&credential.credential, &viewer, &endpoint)?;
-        // Durable before the first Start byte: a crash after this point must
-        // still be able to authenticate the owed End. Only the exact live
-        // owner can record it; a refusal or an uncertain commit sends nothing.
-        let envelope = crate::http::shared_receiver_playback::seal_dispatch_capsule(
-            &self.key,
-            local.server_id,
-            intent,
-            &credential.credential,
-            &viewer,
-            &endpoint,
-        )
-        .map_err(|_| PeerError::Unavailable)?;
-        let authority = state
-            .store
-            .prepare_receiver_session_authority(intent.clone())
-            .await
-            .map_err(|_| PeerError::Unavailable)?
-            .ok_or(PeerError::Authentication)?;
-        fresh_owner.now_ms = clock_ms();
-        match state
-            .store
-            .record_receiver_dispatch(
-                &authority,
-                &plurx_core::sharing_receiver_sessions::ReceiverDispatchRecord {
-                    owner: fresh_owner,
-                    envelope,
-                },
-            )
-            .await
-            .map_err(|_| PeerError::Unavailable)?
-        {
-            plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Applied
-            | plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Replay => {}
-            plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Refused => {
+        if let Some((sealed_viewer, envelope)) = dispatched {
+            if viewer != sealed_viewer {
                 return Err(PeerError::Authentication);
             }
+            match state
+                .store
+                .record_receiver_dispatch(
+                    &authority,
+                    &plurx_core::sharing_receiver_sessions::ReceiverDispatchRecord {
+                        owner: fresh_owner,
+                        envelope: envelope.clone(),
+                    },
+                )
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+            {
+                plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Applied
+                | plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Replay => {}
+                plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Refused => {
+                    return Err(PeerError::Authentication);
+                }
+            }
         }
-        let reply = peer
-            .file_start(&credential.credential, &expected, &viewer, request_json)
-            .await?;
-        // Do not discard a known Source result after an await. Publication
-        // repeats B authority; cleanup retains this handle independently.
-        Ok(ReceiverSourceStartResult {
-            summary: summary.clone(),
-            credential: credential.credential,
-            viewer_hash: viewer,
-            endpoint,
-            source: reply,
-        })
+        Ok(viewer)
     }
 
     pub fn new(
@@ -321,7 +454,8 @@ impl SharingManager {
             receiver_recovery: Mutex::new(ReceiverRecoveryStatus::default()),
         }
     }
-    #[cfg(all(test, target_os = "linux"))]
+    // Read by the scope-saturation test, which runs on every platform.
+    #[cfg(test)]
     pub(crate) fn scope_control_available(&self) -> usize {
         self.scope_control.available_permits()
     }
@@ -453,8 +587,21 @@ impl SharingManager {
         };
         status.host_setup = setup;
     }
+    /// The listener's state is the only record of why peers are refused, so
+    /// every change is logged with the state it left.
     fn listener_status(&self, status: &'static str) {
-        self.status.write().expect("sharing status lock").listener = status;
+        let mut current = self.status.write().expect("sharing status lock");
+        let previous = current.listener;
+        if previous == status {
+            return;
+        }
+        current.listener = status;
+        drop(current);
+        if status == "listening" {
+            tracing::info!(target: "plurx::sharing", from = previous, to = status, "sharing listener status changed");
+        } else {
+            tracing::warn!(target: "plurx::sharing", from = previous, to = status, "sharing listener status changed");
+        }
     }
     pub async fn run(self: Arc<Self>, state: AppState, shutdown: CancellationToken) {
         loop {
@@ -551,6 +698,8 @@ impl SharingManager {
         shutdown: CancellationToken,
     ) {
         let mut next_renewal = tokio::time::Instant::now();
+        let mut span = UnknownSpan::default();
+        let mut serving = state.serving.subscribe();
         loop {
             if let Ok((pin, expiry)) = identity.status() {
                 self.status
@@ -575,26 +724,141 @@ impl SharingManager {
                 };
                 next_renewal = tokio::time::Instant::now() + Duration::from_secs(3600);
             }
-            tokio::select! {
-                () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return; }
-                () = lifetime.cancelled() => { stop.cancel(); return; }
-                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            let look = || enabled(state.store.as_ref());
+            if !self
+                .next_look(look, &mut span, &mut serving, &lifetime, &stop, &shutdown)
+                .await
+            {
+                return;
             }
-            match enabled(state.store.as_ref()).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.listener_status("disabled");
-                    self.disable_bodies();
-                    stop.cancel();
-                    return;
-                }
-                Err(_) => {
+        }
+    }
+    /// The serving listener's pause and next look at the switch. False means
+    /// the listener is stopping; `stop` is already cancelled.
+    ///
+    /// A confirmed disable closes the listener at once. An unreadable switch
+    /// is an outage of this node, not a disable: `enabled` is a linearizable
+    /// read with a one-second deadline, and one slow quorum confirmation must
+    /// not refuse every peer and end live shared bodies. The outage is
+    /// resolved through the cluster layer's [`UnknownSpan`], the same
+    /// [`crate::serving_fence::SessionGrace`] budget local sessions get; past
+    /// it the listener closes and bodies end, so a node cut off from quorum
+    /// cannot keep streaming after a disable written elsewhere. Admission
+    /// never depends on this look: `peer_guard` reads the switch per request
+    /// and refuses while it is unreadable. A listener is still first opened
+    /// only after a confirmed enable.
+    async fn next_look<Look, Read>(
+        &self,
+        mut look: Look,
+        span: &mut UnknownSpan,
+        serving: &mut tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+        lifetime: &CancellationToken,
+        stop: &CancellationToken,
+        shutdown: &CancellationToken,
+    ) -> bool
+    where
+        Look: FnMut() -> Read,
+        Read: std::future::Future<Output = Result<bool, StoreError>>,
+    {
+        tokio::select! {
+            () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return false; }
+            () = lifetime.cancelled() => { stop.cancel(); return false; }
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+        let mut observed = match look().await {
+            Ok(true) => SharingObservation::Current,
+            Ok(false) => SharingObservation::Revoked,
+            Err(error) => {
+                tracing::warn!(target: "plurx::sharing", %error, "sharing switch unreadable; serving within the session grace");
+                SharingObservation::Unknown
+            }
+        };
+        if observed == SharingObservation::Unknown {
+            self.listener_status("listening_switch_unreadable");
+            let reread = || {
+                let read = look();
+                async move { SharingObservation::of_switch(read.await) }
+            };
+            let outcome = tokio::select! {
+                outcome = span.resolve(
+                    serving,
+                    tokio::time::Instant::now(),
+                    Duration::from_secs(1),
+                    reread,
+                    SharingObservation::is_unknown,
+                ) => outcome,
+                () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return false; }
+                () = lifetime.cancelled() => { stop.cancel(); return false; }
+            };
+            observed = match outcome {
+                SpanOutcome::Known(observed) => observed,
+                SpanOutcome::Expired | SpanOutcome::Closed => {
                     self.listener_status("authority_unavailable");
                     self.disable_bodies();
                     stop.cancel();
-                    return;
+                    return false;
                 }
+            };
+        }
+        match observed {
+            SharingObservation::Current => {
+                self.listener_status("listening");
+                true
             }
+            SharingObservation::Revoked
+            | SharingObservation::Unknown
+            | SharingObservation::Ending => {
+                self.listener_status("disabled");
+                self.disable_bodies();
+                stop.cancel();
+                false
+            }
+        }
+    }
+}
+
+/// One owner's observation of its shared-library authority.
+///
+/// Only an affirmative read of the switch, a grant, its items or its files
+/// is [`Self::Revoked`]. A read that errs or times out, and a member floor
+/// that is not ready (what a leaderless window returns), is
+/// [`Self::Unknown`]: an outage of this node, resolved through
+/// [`UnknownSpan`], never a revocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SharingObservation {
+    /// The authority holds.
+    Current,
+    /// An affirmative read says the authority is gone.
+    Revoked,
+    /// The authority could not be read.
+    Unknown,
+    /// This owner is already stopping or retiring; nothing to decide.
+    Ending,
+}
+
+impl SharingObservation {
+    pub(crate) fn is_unknown(&self) -> bool {
+        *self == Self::Unknown
+    }
+    /// The saved switch, read once: on is current, off is affirmative.
+    pub(crate) fn of_switch(read: Result<bool, StoreError>) -> Self {
+        Self::of_term(read)
+    }
+    /// A term that can revoke (the switch, a grant's items or files): `false`
+    /// is an affirmative answer, an error is unknown.
+    pub(crate) fn of_term<E>(read: Result<bool, E>) -> Self {
+        match read {
+            Ok(true) => Self::Current,
+            Ok(false) => Self::Revoked,
+            Err(_) => Self::Unknown,
+        }
+    }
+    /// The sharing member floor never revokes: not ready is what a leaderless
+    /// window, a stale heartbeat or a membership change in flight returns.
+    pub(crate) fn of_floor<E>(read: Result<bool, E>) -> Self {
+        match read {
+            Ok(true) => Self::Current,
+            Ok(false) | Err(_) => Self::Unknown,
         }
     }
 }
@@ -1802,20 +2066,16 @@ impl SharingManager {
         .map_err(|_| PeerError::Unavailable)?
     }
 
-    /// A fresh pinned read of the exact opaque artwork resource. No offline
-    /// cache hit can substitute for this opened-byte digest proof.
-    pub async fn read_artwork(
+    /// Every local authority check an artwork read needs, with no peer call:
+    /// the import is active for this lifecycle, names this Source, grant and
+    /// catalogue epoch, is current, and the user is assigned the item's
+    /// library. A receiver-held snapshot may be served only after this passes.
+    pub async fn artwork_authority(
         &self,
         state: &AppState,
         reference: &plurx_core::sharing_artwork::ReceiverArtReference,
-    ) -> Result<
-        (
-            plurx_core::sharing::ImportSummary,
-            crate::sharing_client::PeerArtwork,
-        ),
-        crate::sharing_client::PeerError,
-    > {
-        use crate::sharing_client::{PeerConnection, PeerError};
+    ) -> Result<plurx_core::sharing::StoredImport, crate::sharing_client::PeerError> {
+        use crate::sharing_client::PeerError;
         tokio::time::timeout(Duration::from_secs(5), async {
             let import = state
                 .store
@@ -1850,12 +2110,29 @@ impl SharingManager {
             if !assigned.contains(&reference.item.library_id) {
                 return Err(PeerError::Authentication);
             }
+            Ok(import)
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+
+    /// The peer dial for an artwork read already authorized by
+    /// [`Self::artwork_authority`].
+    pub async fn fetch_artwork(
+        &self,
+        state: &AppState,
+        reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+        import: &plurx_core::sharing::StoredImport,
+    ) -> Result<crate::sharing_client::PeerArtwork, crate::sharing_client::PeerError> {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let summary = &import.summary;
             let local = state
                 .store
                 .sharing_identity(clock_ms())
                 .await
                 .map_err(|_| PeerError::Unavailable)?;
-            let credentials = ImportCredential::open(self, local.server_id, &import)
+            let credentials = ImportCredential::open(self, local.server_id, import)
                 .map_err(|_| PeerError::Unavailable)?;
             let expected = plurx_core::sharing::SharingIdentity {
                 server_id: summary.source_server_id,
@@ -1865,10 +2142,8 @@ impl SharingManager {
             let (mut peer, _) =
                 PeerConnection::verified(self, &summary.endpoints, &expected).await?;
             self.ensure_current(state, summary).await?;
-            let asset = peer
-                .artwork(&credentials.credential, &reference.source)
-                .await?;
-            Ok((summary.clone(), asset))
+            peer.artwork(&credentials.credential, &reference.source)
+                .await
         })
         .await
         .map_err(|_| PeerError::Unavailable)?
@@ -1882,11 +2157,39 @@ impl SharingManager {
         items: Vec<plurx_core::sharing_catalogue_details::SourceScopeItem>,
         files: Vec<plurx_core::sharing_catalogue_details::SourceScopeFile>,
     ) -> bool {
-        use crate::sharing_client::{PeerConnection, PeerError};
-        use plurx_core::{sharing::SharingIdentity, sharing_catalogue_details::SourceScopeRequest};
-        let Ok(_permit) = self.scope_control.clone().try_acquire_owned() else {
+        let Ok(permit) = self.scope_control.clone().try_acquire_owned() else {
             return false;
         };
+        matches!(
+            self.scope_proof(state, permit, captured, items, files)
+                .await,
+            Ok(true)
+        )
+    }
+    /// Waits up to `wait` for scope-control capacity. `None` means the Source
+    /// scope checks are saturated, which says nothing about the grant.
+    pub(crate) async fn scope_permit_within(
+        &self,
+        wait: Duration,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        tokio::time::timeout(wait, self.scope_control.clone().acquire_owned())
+            .await
+            .ok()?
+            .ok()
+    }
+    /// The live Source scope check, with its capacity already held. `Ok(false)`
+    /// and `Authentication` are refusals; a missed deadline or unreachable
+    /// Source is `Unavailable`. Only a peer that itself answers 429 is `Busy`.
+    pub(crate) async fn scope_proof(
+        &self,
+        state: &AppState,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        captured: &plurx_core::store::sharing_catalogue::ReceiverCatalogueScope,
+        items: Vec<plurx_core::sharing_catalogue_details::SourceScopeItem>,
+        files: Vec<plurx_core::sharing_catalogue_details::SourceScopeFile>,
+    ) -> Result<bool, crate::sharing_client::PeerError> {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        use plurx_core::{sharing::SharingIdentity, sharing_catalogue_details::SourceScopeRequest};
         tokio::time::timeout(Duration::from_secs(1), async {
             let import = state
                 .store
@@ -1943,7 +2246,7 @@ impl SharingManager {
             peer.current_scope(&credentials.credential, &request).await
         })
         .await
-        .is_ok_and(|result| matches!(result, Ok(true)))
+        .map_err(|_| PeerError::Unavailable)?
     }
     pub async fn read_admin_libraries(
         &self,
@@ -2692,6 +2995,168 @@ mod catalogue_cache_tests {
 #[cfg(test)]
 mod loop_pacing_tests {
     use super::*;
+    fn running_listener_fixture(seed: u8) -> SharingManager {
+        SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([seed; 32])),
+            PathBuf::from("unused-running-listener-fixture"),
+            SharingNetworkConfig::default(),
+        )
+    }
+    fn unreadable() -> Result<bool, StoreError> {
+        Err(StoreError::Identity("sharing authority unavailable".into()))
+    }
+    type SwitchRead =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, StoreError>> + Send>>;
+    /// Reads answered in order; once exhausted, every read is unreadable.
+    fn scripted(results: Vec<Result<bool, StoreError>>) -> impl FnMut() -> SwitchRead {
+        let mut queue = std::collections::VecDeque::from(results);
+        move || {
+            let next = queue.pop_front().unwrap_or_else(unreadable);
+            Box::pin(std::future::ready(next))
+        }
+    }
+    fn ready_fence() -> (
+        tokio::sync::watch::Sender<crate::serving_fence::ServingState>,
+        tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    ) {
+        tokio::sync::watch::channel(crate::serving_fence::ServingState {
+            ready: true,
+            loss_generation: 0,
+        })
+    }
+    #[tokio::test(start_paused = true)]
+    async fn running_listener_survives_an_unreadable_switch_and_closes_on_a_confirmed_disable() {
+        let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
+        let (_fence, mut serving) = ready_fence();
+        // Two missed quorum confirmations, then a readable enable inside the
+        // grace: the listener keeps serving and keeps live bodies.
+        let manager = running_listener_fixture(43);
+        let bodies = manager.begin_lifetime();
+        let mut span = UnknownSpan::default();
+        let started = tokio::time::Instant::now();
+        let reads = scripted(vec![unreadable(), unreadable(), Ok(true)]);
+        assert!(
+            manager
+                .next_look(reads, &mut span, &mut serving, &bodies, &stop, &shutdown)
+                .await
+        );
+        assert!(started.elapsed() < crate::serving_fence::SERVING_FENCE_SESSION_GRACE);
+        assert_eq!(manager.status().listener, "listening");
+        assert!(!bodies.is_cancelled());
+        assert!(!stop.is_cancelled());
+        // A switch that stays unreadable past the grace is an outage of this
+        // node: the listener closes and bodies end, so a partitioned node
+        // cannot keep streaming after a disable written elsewhere.
+        let manager = running_listener_fixture(44);
+        let bodies = manager.begin_lifetime();
+        let mut span = UnknownSpan::default();
+        let started = tokio::time::Instant::now();
+        assert!(
+            !manager
+                .next_look(
+                    scripted(vec![]),
+                    &mut span,
+                    &mut serving,
+                    &bodies,
+                    &stop,
+                    &shutdown
+                )
+                .await
+        );
+        assert!(started.elapsed() >= crate::serving_fence::SERVING_FENCE_SESSION_GRACE);
+        assert_eq!(manager.status().listener, "authority_unavailable");
+        assert!(bodies.is_cancelled());
+        assert!(stop.is_cancelled());
+        // A confirmed disable closes at once.
+        let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
+        let manager = running_listener_fixture(45);
+        let bodies = manager.begin_lifetime();
+        let mut span = UnknownSpan::default();
+        assert!(
+            !manager
+                .next_look(
+                    scripted(vec![Ok(false)]),
+                    &mut span,
+                    &mut serving,
+                    &bodies,
+                    &stop,
+                    &shutdown
+                )
+                .await
+        );
+        assert_eq!(manager.status().listener, "disabled");
+        assert!(bodies.is_cancelled());
+        assert!(stop.is_cancelled());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn serving_listener_look_keeps_the_listener_through_an_unreadable_read() {
+        let manager = running_listener_fixture(46);
+        let lifetime = manager.begin_lifetime();
+        let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
+        let (_fence, mut serving) = ready_fence();
+        let mut span = UnknownSpan::default();
+        // The real read deadline: a read that never answers maps to unknown;
+        // the next read answers, so the span recovers.
+        let mut first = true;
+        let reads = move || -> SwitchRead {
+            if std::mem::take(&mut first) {
+                Box::pin(enabled_within(
+                    std::future::pending::<Result<Option<String>, StoreError>>(),
+                    Duration::from_secs(1),
+                ))
+            } else {
+                Box::pin(std::future::ready(Ok(true)))
+            }
+        };
+        assert!(
+            manager
+                .next_look(reads, &mut span, &mut serving, &lifetime, &stop, &shutdown)
+                .await
+        );
+        assert!(!stop.is_cancelled());
+        assert!(!lifetime.is_cancelled());
+        assert_eq!(manager.status().listener, "listening");
+    }
+    #[test]
+    fn only_a_revoking_term_revokes_and_the_member_floor_never_does() {
+        assert_eq!(
+            SharingObservation::of_term::<()>(Ok(false)),
+            SharingObservation::Revoked
+        );
+        assert_eq!(
+            SharingObservation::of_term::<()>(Err(())),
+            SharingObservation::Unknown
+        );
+        assert_eq!(
+            SharingObservation::of_term::<()>(Ok(true)),
+            SharingObservation::Current
+        );
+        // A leaderless window answers the floor `false`: an outage, not a revocation.
+        assert_eq!(
+            SharingObservation::of_floor::<()>(Ok(false)),
+            SharingObservation::Unknown
+        );
+        assert_eq!(
+            SharingObservation::of_floor::<()>(Err(())),
+            SharingObservation::Unknown
+        );
+        assert_eq!(
+            SharingObservation::of_floor::<()>(Ok(true)),
+            SharingObservation::Current
+        );
+    }
+    #[test]
+    fn serving_listener_observer_takes_every_look_through_next_look() {
+        let source = include_str!("sharing.rs");
+        let start = source.find("async fn observe_listener(").expect("observer");
+        let end = start
+            + source[start..]
+                .find("async fn next_look<")
+                .expect("next_look");
+        let observer = &source[start..end];
+        assert!(observer.contains(".next_look(look, &mut span,"));
+        assert!(!observer.contains("enabled(state.store.as_ref()).await"));
+    }
     #[test]
     fn sharing_claim_schedule_refreshes_healthy_active_imports_at_the_backoff_ceiling() {
         assert_eq!(claim_retry_delay(0, true), ACTIVE_IMPORT_REFRESH);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build plurx-player_<version>_amd64.deb (launcher + private mpv/libplacebo)
+# Build plurx-player_<version>_amd64.deb (Python launcher + Cinema Lua controls)
 # and its Debian source package in a disposable Ubuntu 26.10 container,
 # verify it in a second fresh one, then build it again and check the two
 # builds are byte-identical. Nothing is installed on the host: every
@@ -10,7 +10,7 @@
 #
 # Output (default target/linux-player-deb/ at the repository root):
 #   plurx-player_<version>_amd64.deb; the source package (.dsc, the launcher
-#   .orig.tar.gz, .orig-libplacebo.tar.gz, .orig-mpv.tar.gz, .debian.tar.xz);
+#   .orig.tar.gz and .debian.tar.xz);
 #   SHA256SUMS over all of those; the .buildinfo (the exact build
 #   environment); build.log, verify.log and rebuild.log.
 #

@@ -98,6 +98,13 @@ pub enum Failure {
     /// its own class directly and `record_failure` is first-wins, so the
     /// consequence vodgen reports afterwards cannot overwrite it.
     EngineChanged(String),
+    /// The rendition was planned from a v3 copy index, and this generation's
+    /// promoted muxer init does not have the init contract that index was
+    /// sealed with: this node's engine emits another init than the one the
+    /// publisher observed. Nothing is published. The contract is remembered
+    /// as unserved by this process, so a reopened session plans from its
+    /// next index.
+    SealedInit(String),
 }
 
 /// How a generation ended.
@@ -364,10 +371,9 @@ struct GenerationRun<'a, S> {
     /// buffer that decided it reaches, so the discard outlives the buffer.
     discard_remaining: usize,
     /// The index row the next video-carrying fragment must weigh, from the
-    /// landing until the first segment is cut. A landing is a claim about
-    /// where the stream is; every fragment read before the first publication
-    /// is evidence for or against it, and the first that disagrees is the
-    /// typed landing failure instead of a segment of the wrong film.
+    /// landing through the generation's last video fragment. A successful
+    /// first segment does not establish that a later fragment still matches
+    /// the candidate index; a disagreement must stop before its publication.
     verify_row: Option<usize>,
     segmenter: Option<Segmenter>,
     produced_through: Option<u32>,
@@ -808,7 +814,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         // video (a leading audio-only flush) does not count against the
         // discard — and feed everything after them onward. The count runs on
         // past the buffer into the fragments still to come, and every one of
-        // them is checked against the index until the first cut.
+        // them is checked against the index through the rest of the range.
         self.discard_remaining = discards;
         self.verify_row = landed;
         let buffered = std::mem::take(&mut self.landing);
@@ -819,9 +825,9 @@ impl<S: Sink> GenerationRun<'_, S> {
         Ok(())
     }
 
-    /// One fragment after the landing: verify it against the index while the
-    /// landing is still unproven by a publication, drop it while the discard
-    /// to the target entry is unfinished, and otherwise cut it.
+    /// One fragment after the landing: keep verifying the candidate index,
+    /// including after earlier segments were published, drop it while the
+    /// discard to the target entry is unfinished, and otherwise cut it.
     async fn feed_landed(&mut self, fragment: Fragment) -> Result<(), Outcome> {
         let video_bytes = self.video_bytes_of(&fragment);
         if let (Some(bytes), Some(row)) = (video_bytes, self.verify_row) {
@@ -847,9 +853,6 @@ impl<S: Sink> GenerationRun<'_, S> {
             return Ok(());
         }
         self.push_to_segmenter(fragment).await?;
-        if self.produced_through.is_some() {
-            self.verify_row = None;
-        }
         Ok(())
     }
 
@@ -2181,6 +2184,32 @@ mod tests {
             "a stale index must be a typed landing failure, got {outcome:?}"
         );
         assert!(sink.taken().is_empty());
+    }
+
+    /// A good prefix does not attest the rest of a candidate index. A late
+    /// mismatch must leave the already published prefix usable but keep the
+    /// contradicted segment out of the sink.
+    #[tokio::test]
+    async fn a_late_index_mismatch_stops_before_publishing_its_segment() {
+        let mut film = film().await;
+        assert!(film.index.rows.len() > LANDING_WINDOW + 1);
+        let row = film.index.rows.last_mut().expect("fixture rows");
+        row.video_bytes = row.video_bytes.wrapping_add(1);
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..], generation(&film, 0), &sink, "late-mismatch").await;
+        assert!(
+            matches!(outcome, Outcome::Failed(Failure::Landing(_))),
+            "{outcome:?}"
+        );
+        let writes = sink.taken();
+        assert!(
+            !writes.is_empty(),
+            "a verified prefix must have been published"
+        );
+        assert!(
+            writes.len() < film.plan.len(),
+            "the contradicted tail must stay unpublished"
+        );
     }
 
     /// The fixture film behind four extra index rows whose first three

@@ -895,7 +895,7 @@ impl VodServe {
                     .admit_controlled_video_before(session_id, &companion, frontier_ms, deadline)
                     .await
                 {
-                    tracing::debug!(session_id, %error, "optional continuous companion remains deferred");
+                    tracing::debug!(target: "plurxd::vodserve", session_id, %error, "optional continuous companion remains deferred");
                 }
             }
         }

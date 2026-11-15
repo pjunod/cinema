@@ -21,6 +21,14 @@ import tv.plurx.app.data.Rung
  * menu, the routing, and the ordinals came to disagree.
  */
 
+/** A decision's enhancement applies only while its original direct bytes are used. */
+internal fun directPlaybackEnhancement(
+    mode: String,
+    delivered: String?,
+    enhancement: tv.plurx.app.data.PlaybackEnhancement?,
+): tv.plurx.app.data.PlaybackEnhancement? =
+    enhancement.takeIf { mode == "direct" && delivered == DynamicRange.DOLBY_VISION }
+
 // ---- §5.3 What the menu says ------------------------------------------------
 
 /**
@@ -215,6 +223,7 @@ internal object CreateRetry {
         "vod_index_pending",
         "vod_engine_unattested",
         "transcode_capacity_pending",
+        "media_session_overloaded",
         "quality_catalog_unavailable",
     )
 }

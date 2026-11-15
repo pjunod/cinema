@@ -14,6 +14,7 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [SHARING-AUTHORITY-A6-BUILD.md](SHARING-AUTHORITY-A6-BUILD.md) | How shared-library monitors stop proving their own authority: classified observations, one outage policy through `SessionGrace`, a cached advisory member floor, then change-driven re-observation (audit A6). | open |
 | [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Why the exhaustive async driver/Store refinement proof is parked, the state it reached, where the work is preserved and what restarting it needs. | open |
 | [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
 | [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
@@ -58,5 +59,7 @@ failures.
 | [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md) | Making admission an authorization decision. | open |
 | [LAB3_SNAPSHOT_CATCHUP_DIAGNOSIS.md](LAB3_SNAPSHOT_CATCHUP_DIAGNOSIS.md) | Why a live learner waited fifteen idle minutes. | open |
 | [ACTIVITY_PEER_READ_FIX_PLAN.md](ACTIVITY_PEER_READ_FIX_PLAN.md) | Coalescing peer-read bursts and reporting failures truthfully. | built |
+| [RAFT-READ-CONFIRM-DIAL-RCA-2026-11-14.md](RAFT-READ-CONFIRM-DIAL-RCA-2026-11-14.md) | Why leader read-confirm RPCs timed out at 800 ms (a fresh TCP dial per linearizable read, one lost SYN outlasting the budget), the evidence, Hiqlite patch 28, and the physical-loss items still open. | built |
+| [CLUSTER-LAYER-AUDIT-2026-11-14.md](CLUSTER-LAYER-AUDIT-2026-11-14.md) | Whether there is a cluster layer, who goes around it, what the quorum costs on the fleet (measured 2026-11-14), and the ordered action items: a single cluster facade, applied-replica reads by default, one change feed, one peer call path. | open |
 | [PLAYBACK-QUORUM-GAPS-RCA.md](PLAYBACK-QUORUM-GAPS-RCA.md) | Why playback died on brief quorum gaps (serving-fence lapses, fail-fast 503s, a leader-bound cache read, a dead producer polled for 55 s, an uncapped build on a voter), and the milestone plan that fixes each cause. | open |
 | [DVR-ACTIVITY-ZERO-GENERATION-STATUS.md](DVR-ACTIVITY-ZERO-GENERATION-STATUS.md) | Why remote Activity rejected a healthy recorder's initial serving epoch, and the repair's review and promotion state. | open |

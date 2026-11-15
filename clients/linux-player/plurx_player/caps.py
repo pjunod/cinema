@@ -4,9 +4,9 @@ Field names are crates/plurx-core/src/playback/caps.rs `DeviceCaps`; the
 shape follows the Apple template (clients/apple/Sources/Caps.swift) except
 where docs/clients/LINUX-PLAYER-PLAN.md section 3.2 says otherwise:
 
-* HEVC claims Dolby Vision profiles 5, 7 and 8. mpv/libplacebo rebuild P5
-  and P8 from the RPU, and compose P7's full enhancement layer, so the
-  server sends the original stream (plan section 3.3).
+* Native Dolby Vision profiles 5, 7 and 8 are claimed only when the selected
+  renderer reports the compiled ``native-dovi-api-1`` capability. Otherwise
+  Dolby Vision is converted by the server to the existing HDR10 route.
 * ``display`` carries no ``max_nits``: on the preserved route the player maps
   locally at the compositor's target, so the server never display-targets
   this client, and a guessed peak would be an over-claim.
@@ -23,7 +23,7 @@ CONTAINERS = ["mkv", "mp4", "webm", "mov", "m4v", "ts", "m4a", "m4b", "mp3", "aa
               "flac", "ogg", "opus", "wav"]
 
 
-def control_capabilities():
+def control_capabilities(native_dovi=False):
     """The `capabilities` object of a playback-control exchange.
 
     crates/plurxd/src/playback_control.rs `DynamicCapabilities`. The server
@@ -32,18 +32,18 @@ def control_capabilities():
     the launcher drives one mpv.
     """
     return {"platform": "linux", "max_height": 2160, "codecs": ["h264", "hevc", "av1"],
-            "dynamic_ranges": ["sdr", "hdr10", "hlg", "dolby_vision"],
+            "dynamic_ranges": ["sdr", "hdr10", "hlg"] + (["dolby_vision"] if native_dovi else []),
             "dual_player_preparation": False}
 
 
-def device_caps(build):
+def device_caps(build, native_dovi=False):
     return {
         "v": 2,
         "client": {"kind": "linux-player", "build": build[:48],
                    "ua": f"plurx-player/{build} (Linux; mpv)"[:160]},
         "video": [
             {"codec": "hevc", "profiles": ["main", "main10"], "max_height": 2160,
-             "present": list(PRESENT), "dv_profiles": [5, 7, 8]},
+             "present": list(PRESENT), "dv_profiles": [5, 7, 8] if native_dovi else []},
             {"codec": "h264", "profiles": [], "present": list(PRESENT)},
             {"codec": "av1", "profiles": ["main"], "present": list(PRESENT)},
         ],
@@ -59,5 +59,5 @@ def device_caps(build):
         "hls_hevc_sample_entries": ["hvc1", "hev1"],
         "subtitle_overlays": [],
         "dv_transport": "hls",
-        "display": {"hdr": True, "dolby_vision": True},
+        "display": {"hdr": True, "dolby_vision": native_dovi},
     }

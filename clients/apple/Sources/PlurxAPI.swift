@@ -5,6 +5,13 @@ enum PlaybackLinkRequestContext {
     @TaskLocal static var receipt: String?
 }
 
+/// What the current start sequence has left of its own deadline, sent on a
+/// session create as `X-Plurx-Startup-Remaining-Ms` so the server answers
+/// inside it (and never waits past its own 10 s clamp) instead of guessing.
+enum PlaybackStartupRequestContext {
+    @TaskLocal static var remainingMs: Int?
+}
+
 enum APIError: Error, LocalizedError {
     case badURL
     /// A non-2xx answer with no legible `{code, message}` body — and every
@@ -157,6 +164,13 @@ struct PlurxAPI {
            let receipt = PlaybackLinkRequestContext.receipt,
            UUID(uuidString: receipt)?.uuidString.lowercased() == receipt {
             req.setValue(receipt, forHTTPHeaderField: "X-Plurx-Link-Receipt")
+        }
+        // Every create carries the viewer's remaining start, a shared import's
+        // (`shared/imports/<id>/files/<fid>/hls/sessions`) as much as a local
+        // file's: the server bounds its owner's work by it.
+        if path.hasSuffix("/hls/sessions"),
+           let remaining = PlaybackStartupRequestContext.remainingMs {
+            req.setValue(String(max(0, remaining)), forHTTPHeaderField: "X-Plurx-Startup-Remaining-Ms")
         }
         Session.shared.authorize(&req)
         return try await run(req, using: session)
@@ -377,14 +391,26 @@ struct PlurxAPI {
         _ id: Int,
         sort: LibrarySort = .title,
         offset: Int = 0,
-        limit: Int = 200
+        limit: Int = 200,
+        presence: LibraryPresence = .disk
     ) async throws -> Page {
-        try await get("libraries/\(id)/items", query: [
+        var query = [
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "offset", value: String(offset)),
             URLQueryItem(name: "sort", value: sort.rawValue),
-        ])
+        ]
+        // The server's default is what is on disk, so an older server that
+        // does not know the parameter is only ever asked for the default.
+        if presence != .disk { query.append(URLQueryItem(name: "presence", value: presence.rawValue)) }
+        return try await get("libraries/\(id)/items", query: query)
     }
+
+    /// Admin: ask Curator to download an offloaded title again.
+    func getItBack(itemId: Int) async throws -> OffloadAnswer {
+        try await post("items/\(itemId)/get-it-back", body: [String: String]())
+    }
+    /// What Curator reports for an offloaded title right now (never stored).
+    func offloadStatus(itemId: Int) async throws -> OffloadAnswer { try await get("items/\(itemId)/offload-status") }
 
     /// Signed in: the answering node's hostname and the server's label.
     func serverNode() async throws -> ServerNode { try await get("server/node") }

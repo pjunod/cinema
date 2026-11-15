@@ -48,6 +48,7 @@ async function setSync(v){
 function subUrl(index){ return tok(playbackFileUrl(playbackFileContextForPlayer(PLAYER),`subs/${index}`)); }
 function subLabelFor(s, index){ return s?subLabelMenu(s):("Subtitle "+(index+1)); }
 function clearSubs(v){
+  v._nativeSubtitleCleanup?.();
   [...v.querySelectorAll("track")].forEach(t=>t.remove());
   try{ for(const t of v.textTracks) t.mode="disabled"; }catch(e){}
 }
@@ -143,8 +144,26 @@ async function attachPlaybackSubtitle(v,me,index){
     if(me.hls){
       me.hls.subtitleDisplay=true;
       me.hls.subtitleTrack=nativeOrdinal;
-    }else if(v.textTracks&&v.textTracks[nativeOrdinal]){
-      v.textTracks[nativeOrdinal].mode="showing";
+    }else if(v.textTracks){
+      // Native HLS may register its tracks after the recipe attaches. Own the
+      // registration edge with this attachment, not another viewer command.
+      const tracks=v.textTracks;
+      const cleanup=()=>{
+        tracks.removeEventListener?.("addtrack",select);
+        if(v._nativeSubtitleCleanup===cleanup)v._nativeSubtitleCleanup=null;
+      };
+      const select=()=>{
+        if(PLAYER!==me||me.curSub!==index||me.captionIntentSerial!==captionSerial
+          ||me.mediaAttachment!==attachment||document.getElementById("video")!==v
+          ||(auth!=null&&auth!==AUTH_GENERATION)){cleanup();return;}
+        const track=tracks[nativeOrdinal];
+        if(!track)return;
+        track.mode="showing";
+        cleanup();
+      };
+      v._nativeSubtitleCleanup=cleanup;
+      tracks.addEventListener?.("addtrack",select);
+      select();
     }
     return;
   }

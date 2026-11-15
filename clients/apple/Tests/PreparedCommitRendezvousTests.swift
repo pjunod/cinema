@@ -68,6 +68,46 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         return source[start.upperBound...]
     }
 
+    /// D1 seam fix: Shared's commit exposed the successor right after its
+    /// alignment seek landed. A landed seek is a clock, not a picture: the
+    /// aligned item must show a decoded frame before `replaceCurrentItem`, and
+    /// a frame that does not come inside the bound is the `.refused` that keeps
+    /// the incumbent.
+    func testSharedCommitShowsADecodedFrameBeforeExposingTheSuccessor() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../Sources/SharedPlayerController.swift")
+            .standardizedFileURL
+        let source = try String(contentsOf: sources, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: "func commitPreparedSuccessor("))
+        let body = source[start.upperBound...]
+        let end = try XCTUnwrap(body.range(of: "return .committed(firstFrameUnixMs: frame)"))
+        let commit = body[..<end.lowerBound]
+        let aligned = try XCTUnwrap(commit.range(of: "await alignPrepared("))
+        let decoded = try XCTUnwrap(commit.range(of: "await awaitSharedDecodedAlignment("),
+                                    "the shared commit waits for a decoded frame")
+        let exposed = try XCTUnwrap(commit.range(of: "player.replaceCurrentItem(with: item)"))
+        XCTAssertLessThan(aligned.lowerBound, decoded.lowerBound)
+        XCTAssertLessThan(decoded.lowerBound, exposed.lowerBound,
+                          "the successor is exposed only after its decoded frame")
+        let refusal = commit[decoded.upperBound..<exposed.lowerBound]
+        XCTAssertTrue(refusal.contains("PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand"))
+        let wait = try XCTUnwrap(source.range(of: "private func awaitSharedDecodedAlignment("))
+        let waitBody = source[wait.upperBound...].prefix(1_600)
+        // Review 3 S5: the alignment seek and the decoded frame share one
+        // `alignmentMs` budget, so the commit lead (two bounded suspensions)
+        // still covers them: the wait is bounded by what the seek left.
+        XCTAssertTrue(waitBody.contains("< boundMs"), "bounded by the budget it is handed")
+        let budget = try XCTUnwrap(commit.range(of: "let alignmentDeadlineMs = "),
+                                   "one alignment budget, minted in the commit")
+        XCTAssertTrue(commit[budget.upperBound...].prefix(120).contains("PreparedReplacementBounds.alignmentMs"))
+        XCTAssertLessThan(budget.lowerBound, aligned.lowerBound, "minted before the alignment seek")
+        XCTAssertTrue(commit[aligned.upperBound..<exposed.lowerBound].contains("boundMs: alignmentDeadlineMs"),
+                      "the decoded-frame wait gets the remainder of that budget, not a fresh one")
+        XCTAssertTrue(waitBody.contains("acceptsDecodedAlignment("), "at the aligned position")
+        XCTAssertEqual(PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand, .refused)
+    }
+
     func testDecodedAlignmentRejectsStaleInvalidAndEmptySamples() {
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: 1_000, incumbentFilmPositionMs: 10_000, mediaOriginMs: 2_000

@@ -1724,6 +1724,7 @@
                         since_ms: None,
                         event: Some("session_end".to_owned()),
                         limit: 50,
+                        ..Default::default()
                     })
                     .await
                     .expect("retirement event query")
@@ -2485,6 +2486,7 @@
             .arg(media.join("segment%05d.ts"))
             .arg(media.join("index.m3u8"))
             .stdout(std::process::Stdio::null())
+            .process_group(0)
             .kill_on_drop(true);
         let child = command.spawn().expect("actual realtime media publisher");
         let publisher_pid = child.id().expect("live publisher pid");

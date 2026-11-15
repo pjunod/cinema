@@ -1,5 +1,6 @@
 //! Closed source catalogue presentation. Internal records cannot be serialized.
 use super::{error::ApiError, sharing};
+use crate::sharing::SharingObservation;
 use crate::state::{clock_ms, AppState};
 use axum::{
     body::{to_bytes, Body},
@@ -80,14 +81,32 @@ async fn current_scope(
 fn fail(status: StatusCode, code: &'static str) -> ApiError {
     ApiError::typed(status, code, code.replace('_', " "))
 }
+/// This Source's own authority could not be read (an outage, not a refusal):
+/// a 503 with `Retry-After`, which a receiver retries instead of retiring.
+fn retry_unavailable(code: &'static str) -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code,
+        message: code.replace('_', " "),
+        retry_after_seconds: 1,
+    }
+}
+/// The response for a content authority that is not current.
+fn content_refusal(observed: SharingObservation) -> ApiError {
+    if observed == SharingObservation::Unknown {
+        retry_unavailable("sharing_body_authority_unavailable")
+    } else {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        )
+    }
+}
 fn invalid() -> ApiError {
     fail(StatusCode::BAD_REQUEST, "sharing_invalid_request")
 }
 fn unavailable(_: plurx_core::error::StoreError) -> ApiError {
-    fail(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "sharing_authority_unavailable",
-    )
+    retry_unavailable("sharing_authority_unavailable")
 }
 fn missing() -> ApiError {
     fail(StatusCode::NOT_FOUND, "sharing_not_found")
@@ -126,23 +145,10 @@ pub(super) async fn authority<
             ),
         )
         .await
-        .map_err(|_| {
-            fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_member_floor_unavailable",
-            )
-        })?
-        .map_err(|_| {
-            fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_member_floor_unavailable",
-            )
-        })?;
+        .map_err(|_| retry_unavailable("sharing_member_floor_unavailable"))?
+        .map_err(|_| retry_unavailable("sharing_member_floor_unavailable"))?;
         if !ready {
-            return Err(fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_member_floor_unavailable",
-            ));
+            return Err(retry_unavailable("sharing_member_floor_unavailable"));
         }
     }
     if let Some(principal) = headers.authenticated_principal() {
@@ -612,52 +618,67 @@ pub(super) fn attach_source_file_authority(
     });
 }
 
+/// Admission and in-memory responses: only a current authority passes.
 async fn source_content_current(state: &AppState, authority: &SourceContentAuthority) -> bool {
+    source_content_observation(state, authority).await == SharingObservation::Current
+}
+
+/// The Source content authority, classified per term: the switch, the grant's
+/// items and its files can each say `Revoked`; a member floor that is not
+/// ready (what a leaderless window returns), a read error and the one-second
+/// deadline are `Unknown`, an outage of this node rather than a revocation.
+async fn source_content_observation(
+    state: &AppState,
+    authority: &SourceContentAuthority,
+) -> SharingObservation {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
-            return Some(false);
+        let switch =
+            SharingObservation::of_term(crate::sharing::enabled(state.store.as_ref()).await);
+        if switch != SharingObservation::Current {
+            return switch;
         }
-        if state.membership.is_replicated()
-            && !state
-                .membership
-                .sharing_member_floor_ready(
-                    plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+        if state.membership.is_replicated() {
+            let floor = SharingObservation::of_floor(
+                state
+                    .membership
+                    .sharing_member_floor_ready(
+                        plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+                    )
+                    .await,
+            );
+            if floor != SharingObservation::Current {
+                return floor;
+            }
+        }
+        let items = SharingObservation::of_term(
+            state
+                .store
+                .source_content_authorized(
+                    authority.grant,
+                    authority.server,
+                    authority.epoch,
+                    &authority.libraries,
+                    &authority.items,
                 )
-                .await
-                .ok()?
-        {
-            return Some(false);
+                .await,
+        );
+        if items != SharingObservation::Current || authority.files.is_empty() {
+            return items;
         }
-        let items_current = state
-            .store
-            .source_content_authorized(
-                authority.grant,
-                authority.server,
-                authority.epoch,
-                &authority.libraries,
-                &authority.items,
-            )
-            .await
-            .ok()?;
-        if !items_current {
-            return Some(false);
-        }
-        if authority.files.is_empty() {
-            return Some(true);
-        }
-        state
-            .store
-            .source_content_files_authorized(
-                authority.grant,
-                authority.server,
-                authority.epoch,
-                &authority.files,
-            )
-            .await
-            .ok()
+        SharingObservation::of_term(
+            state
+                .store
+                .source_content_files_authorized(
+                    authority.grant,
+                    authority.server,
+                    authority.epoch,
+                    &authority.files,
+                )
+                .await,
+        )
     })
     .await
-        == Ok(Some(true))
+    .unwrap_or(SharingObservation::Unknown)
 }
 pub(super) async fn source_art_scope_current(
     state: &AppState,
@@ -718,12 +739,9 @@ pub(super) async fn guard_source_response(
         // returns, so this check is their authority point. Re-observing bytes
         // that already exist cannot withdraw them; artwork memory is owned by
         // its Bytes (`shared_artwork::asset_response`), not by a monitor.
-        if !source_content_current(&state, &authority).await {
-            return fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "sharing_body_authority_unavailable",
-            )
-            .into_response();
+        let observed = source_content_observation(&state, &authority).await;
+        if observed != SharingObservation::Current {
+            return content_refusal(observed).into_response();
         }
         return response;
     };
@@ -737,12 +755,9 @@ pub(super) async fn guard_source_response(
     let Ok(permit) = CONTENT_MONITORS.clone().try_acquire_owned() else {
         return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
     };
-    if !source_content_current(&state, &authority).await {
-        return fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sharing_body_authority_unavailable",
-        )
-        .into_response();
+    let observed = source_content_observation(&state, &authority).await;
+    if observed != SharingObservation::Current {
+        return content_refusal(observed).into_response();
     }
     let cancel = connection.0.clone();
     let drain = connection.drain_token();
@@ -756,8 +771,13 @@ pub(super) async fn guard_source_response(
         // re-observed while this body is alive. Its drop ends the observation.
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // One outage budget for this body's whole life (see `UnknownSpan`).
+        let mut span = crate::serving_fence::UnknownSpan::default();
+        let mut serving = state.serving.subscribe();
         loop {
             tokio::select! {
+                // Retirement is decided before another observation is due.
+                biased;
                 () = body_live.cancelled() => break,
                 () = source_guard.cancelled() => {
                     let mode=source_guard.retirement_mode();
@@ -769,8 +789,33 @@ pub(super) async fn guard_source_response(
             }
             tokio::select! {
                 () = body_live.cancelled() => break,
-                current = source_content_current(&state, &authority) => {
-                    if !current {
+                observed = source_content_observation(&state, &authority) => {
+                    let observed = if observed.is_unknown() {
+                        tokio::select! {
+                            () = body_live.cancelled() => break,
+                            // The loop's own retirement arm settles it at once.
+                            () = source_guard.cancelled() => continue,
+                            outcome = span.resolve(
+                                &mut serving,
+                                tokio::time::Instant::now(),
+                                std::time::Duration::from_secs(1),
+                                || source_content_observation(&state, &authority),
+                                SharingObservation::is_unknown,
+                            ) => match outcome {
+                                crate::serving_fence::SpanOutcome::Known(observed) => observed,
+                                crate::serving_fence::SpanOutcome::Expired
+                                | crate::serving_fence::SpanOutcome::Closed => {
+                                    // An outage past the grace stops bytes exactly as a
+                                    // revocation does; only the cause differs.
+                                    tracing::warn!(target: "plurx::sharing", "Source body authority stayed unknown past the session grace; ending the stream as an outage");
+                                    SharingObservation::Revoked
+                                }
+                            },
+                        }
+                    } else {
+                        observed
+                    };
+                    if observed != SharingObservation::Current {
                         source_guard.request_revocation();cancel.cancel();
                         let _=super::shared_source_playback::settle_ingress_custody(&state,source_guard.assignment(),source_guard.retirement_deadline(),crate::sharing_connection_custody::DriverCloseMode::Revoke).await;
                         break;
@@ -931,6 +976,74 @@ async fn receiver_login_current(
         }
     }
 }
+/// How long a poster waits for Source scope-check capacity before being told
+/// to come back. A grid burst can exceed the 32 concurrent scope checks; each
+/// takes milliseconds, so a short bounded wait absorbs the burst.
+const ART_SCOPE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// What the loader is told when scope-check capacity is exhausted. It is not
+/// a refusal: nothing was found revoked, and the proof never started.
+const ART_SCOPE_RETRY_AFTER_SECS: u64 = 1;
+fn art_scope_busy() -> ApiError {
+    ApiError::TypedRetry {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "sharing_art_scope_busy",
+        message: "sharing art scope proof busy".into(),
+        retry_after_seconds: ART_SCOPE_RETRY_AFTER_SECS,
+    }
+}
+/// The live revocation proof for one artwork body, same checks as
+/// [`receiver_content_current`] (nothing cached, a fresh Source scope request
+/// per response). It differs only in how it fails: no capacity permit within
+/// the admission wait, or a Source that itself answers 429, is a typed 429 the
+/// loader retries; a refused, timed-out or unreachable proof stays 503
+/// `sharing_body_authority_unavailable`, since a retry hint would mislead.
+async fn receiver_art_content_current(
+    state: &AppState,
+    authority: &ReceiverContentAuthority,
+) -> Result<(), ApiError> {
+    use crate::sharing_client::PeerError;
+    let refused = || {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        )
+    };
+    let [source] = authority.sources.as_slice() else {
+        return Err(refused());
+    };
+    if !crate::sharing::enabled(state.store.as_ref())
+        .await
+        .unwrap_or(false)
+        || receiver_login_current(state, authority).await != Some(true)
+    {
+        return Err(refused());
+    }
+    let permit = state
+        .sharing
+        .scope_permit_within(ART_SCOPE_ADMISSION_WAIT)
+        .await
+        .ok_or_else(art_scope_busy)?;
+    match state
+        .sharing
+        .scope_proof(
+            state,
+            permit,
+            &source.scope,
+            source.items.clone(),
+            source.files.clone(),
+        )
+        .await
+    {
+        Ok(true) => {}
+        Err(PeerError::Busy { .. }) => return Err(art_scope_busy()),
+        _ => return Err(refused()),
+    }
+    // Local login/assignment may change during the remote check.
+    if receiver_login_current(state, authority).await != Some(true) {
+        return Err(refused());
+    }
+    Ok(())
+}
 async fn receiver_content_current(state: &AppState, authority: &ReceiverContentAuthority) -> bool {
     use futures_util::{stream, StreamExt};
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -1075,12 +1188,7 @@ pub(super) async fn attach_receiver_art_authority(
         scopes: vec![source.scope.clone()],
         sources: vec![source],
     };
-    if !receiver_content_current(state, &authority).await {
-        return Err(fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sharing_body_authority_unavailable",
-        ));
-    }
+    receiver_art_content_current(state, &authority).await?;
     response.extensions_mut().insert(authority);
     Ok(())
 }

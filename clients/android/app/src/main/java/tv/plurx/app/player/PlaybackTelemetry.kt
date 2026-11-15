@@ -42,6 +42,18 @@ internal data class PlaybackClientLog(
     @SerialName("session_id") val sessionId: String? = null,
     @SerialName("link_sample") val linkSample: CandidateLinkSample? = null,
     @SerialName("candidate_recovery") val candidateRecovery: CandidateRecoverySample? = null,
+    @SerialName("prepared_seam") val preparedSeam: PreparedSeam? = null,
+)
+
+/** How a prepared switch ended at its seam. No field may carry a default. */
+@Serializable
+internal data class PreparedSeam(
+    val platform: String,
+    val outcome: String,
+    @SerialName("frames_complete") val framesComplete: Boolean,
+    @SerialName("dropped_frames") val droppedFrames: Long?,
+    @SerialName("audio_observed") val audioObserved: Boolean,
+    val reopened: Boolean,
 )
 
 /**

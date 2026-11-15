@@ -911,7 +911,13 @@ impl VodServe {
             if !self.response_owner_is_live(session_id, owner).await {
                 return Ok(false);
             }
-            let Some(route) = self.shared.store.media_session_route(session_id).await? else {
+            let Some(route) = crate::media_sessions::read_media_session_route(
+                &*self.shared.store,
+                crate::media_sessions::RouteReadSite::Verdict,
+                session_id,
+            )
+            .await?
+            else {
                 return Ok(false);
             };
             let now_ms = now_ms();

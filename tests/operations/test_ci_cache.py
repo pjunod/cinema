@@ -106,6 +106,9 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertNotIn("inputs.persistent-eligible", action)
         self.assertIn("scripts/ci-runner-cache-audit", action)
         self.assertIn("scripts/ci-cargo-cache-prepare", action)
+        # Container (root) and host (runner user) executors on one runner
+        # never share a cache root, so neither can own the other's lanes.
+        self.assertIn('runner_name="${runner_name}-uid$(id -u)"', action)
         self.assertIn("ensure_child_directory", prepare)
         self.assertIn("plurx-ci", prepare)
         self.assertIn("toolchain=$(rustc -Vv", action)

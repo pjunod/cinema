@@ -45,6 +45,7 @@ class SettingsStore(private val context: Context) {
         val THEME = stringPreferencesKey("theme")
         val APPEARANCE = stringPreferencesKey("appearance")
         val LIBRARY_PRESENTATION = stringPreferencesKey("library_presentation")
+        val LIBRARY_PRESENCE = stringPreferencesKey("library_presence")
         val POSTER_SIZE = stringPreferencesKey("poster_size")
         val HOME_GROUPING = stringPreferencesKey("home_grouping")
         val PLAYBACK_QUALITY = stringPreferencesKey("playback_quality")
@@ -82,6 +83,7 @@ class SettingsStore(private val context: Context) {
                 appearance = Appearance.fromStorage(p[Keys.APPEARANCE]),
                 posterSize = PosterSize.fromStorage(p[Keys.POSTER_SIZE]),
                 libraryPresentation = LibraryPresentation.fromStorage(p[Keys.LIBRARY_PRESENTATION]),
+                libraryPresence = LibraryPresence.fromStorage(p[Keys.LIBRARY_PRESENCE]),
                 homeGrouping = HomeGrouping.fromStorage(p[Keys.HOME_GROUPING]),
                 playbackQuality = PlaybackQuality.fromStorage(p[Keys.PLAYBACK_QUALITY]),
                 hdrDisplayPeak = HdrDisplayPeak.fromStorage(p[Keys.HDR_DISPLAY_PEAK]),
@@ -191,6 +193,7 @@ class SettingsStore(private val context: Context) {
             p[Keys.APPEARANCE] = value.appearance.storageValue
             p[Keys.POSTER_SIZE] = value.posterSize.storageValue
             p[Keys.LIBRARY_PRESENTATION] = value.libraryPresentation.storageValue
+            p[Keys.LIBRARY_PRESENCE] = value.libraryPresence.storageValue
             p[Keys.HOME_GROUPING] = value.homeGrouping.storageValue
             p[Keys.PLAYBACK_QUALITY] = value.playbackQuality.storageValue
             p[Keys.HDR_DISPLAY_PEAK] = value.hdrDisplayPeak.storageValue

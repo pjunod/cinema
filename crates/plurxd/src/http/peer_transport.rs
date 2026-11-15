@@ -31,6 +31,7 @@ pub(crate) enum PeerAuthMode {
 #[derive(Debug)]
 pub(crate) struct PeerResponse {
     pub(crate) dv_processing_header: Option<String>,
+    pub(crate) processing_skip_header: Option<String>,
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: Vec<u8>,
     pub(crate) clock_timing: Option<(i64, i64, plurx_core::cluster::clock::ClockDecisionTicket)>,
@@ -50,14 +51,12 @@ pub(crate) struct PeerTransport {
 }
 
 impl PeerTransport {
+    /// A transport over the membership manager's pooled client. Building one
+    /// is cheap and opens nothing: every transport made from the same cluster
+    /// membership shares one connection pool, however many callers make one.
     pub(crate) fn new(membership: MembershipManager) -> Self {
-        Self {
-            membership,
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|error| error.to_string()),
-        }
+        let client = membership.peer_http().into_result();
+        Self { membership, client }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -340,7 +339,7 @@ impl PeerTransport {
                 .map(SignedPeerAuth::Activity),
             // A stream has no complete body to authenticate at this layer.
             PeerAuthMode::ExactRequestAndResponse | PeerAuthMode::ExactRequestAndMemberResponse => {
-                return Err(PeerTransportError::InvalidResponse)
+                return Err(PeerTransportError::InvalidResponse);
             }
             PeerAuthMode::ExactRequest => self
                 .membership
@@ -560,6 +559,12 @@ pub(crate) async fn read_bounded(
         .filter(|value| value.as_bytes().len() <= 4096)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let processing_skip_header = response
+        .headers()
+        .get("x-plurx-processing-skip")
+        .filter(|value| value.as_bytes().len() <= 4096)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let mut body = Vec::new();
     loop {
         let chunk = tokio::time::timeout_at(deadline, response.chunk())
@@ -582,6 +587,7 @@ pub(crate) async fn read_bounded(
     }
     Ok(PeerResponse {
         dv_processing_header,
+        processing_skip_header,
         status,
         body,
         clock_timing: None,
@@ -603,6 +609,28 @@ fn unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every transport must take the membership manager's pooled client. A
+    /// client built here is a connection pool per caller, which is what made
+    /// node-to-node requests redial on every use.
+    #[test]
+    fn a_transport_never_builds_its_own_http_client() {
+        let source = include_str!("peer_transport.rs");
+        let production = &source[..source
+            .find("\n#[cfg(test)]\nmod tests")
+            .expect("the test module follows the production code")];
+        assert!(
+            production.contains("membership.peer_http()"),
+            "PeerTransport::new must take MembershipManager::peer_http()"
+        );
+        for built_here in ["Client::builder", "Client::new", "ClientBuilder"] {
+            assert!(
+                !production.contains(built_here),
+                "peer_transport.rs builds an HTTP client with {built_here}; take \
+                 MembershipManager::peer_http() so the connection pool is shared"
+            );
+        }
+    }
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;

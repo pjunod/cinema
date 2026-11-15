@@ -67,7 +67,7 @@ class DesktopReleaseCase(unittest.TestCase):
         # Fractional filesystem mtimes would make Python's default PAX format emit extension headers.
         os.utime(package / "runtime/plurxd", ns=(1792400000123456789, 1792400000123456789))
         release = {"schema_version": 1, "repository": "pjunod/cinema", "version": "1.2.3",
-                   "source_commit": "a" * 40, "architecture": "universal"}
+                   "source_commit": "a" * 40, "architecture": "arm64"}
         (package / "release.json").write_text(json.dumps(release))
         closure = {"schema_version": 1, "version": "1.2.3", "files": []}
         for member in sorted(package.rglob("*")):
@@ -76,7 +76,7 @@ class DesktopReleaseCase(unittest.TestCase):
                     "size": member.stat().st_size, "sha256": hashlib.sha256(member.read_bytes()).hexdigest(),
                     "executable": bool(member.stat().st_mode & 0o111)})
         (package / "runtime-closure-v1.json").write_text(json.dumps(closure))
-        name = "plurxd-1.2.3-macos-universal.tar.gz"
+        name = "plurxd-1.2.3-macos-arm64.tar.gz"
         left, right = self.root / "left" / name, self.root / "right" / name
         tool.archive_native(package, left, 1792400000)
         tool.archive_native(package, right, 1792400000)
@@ -91,9 +91,9 @@ class DesktopReleaseCase(unittest.TestCase):
             headers.append(header[:100].split(b"\0", 1)[0].decode())
             offset += 512 + ((size + 511) // 512) * 512
         self.assertTrue(headers)
-        self.assertTrue(all(name.startswith("plurxd-1.2.3-macos-universal") for name in headers))
+        self.assertTrue(all(name.startswith("plurxd-1.2.3-macos-arm64") for name in headers))
         with tarfile.open(left) as archive:
-            daemon = archive.getmember("plurxd-1.2.3-macos-universal/runtime/plurxd")
+            daemon = archive.getmember("plurxd-1.2.3-macos-arm64/runtime/plurxd")
             self.assertTrue(daemon.mode & 0o111)
             self.assertEqual(archive.extractfile(daemon).read(), b"native archive format fixture")
         (package / "runtime/plurxd").write_bytes(b"tampered after closure")
@@ -247,7 +247,7 @@ class DesktopReleaseCase(unittest.TestCase):
         (app / "Contents/MacOS").mkdir(parents=True)
         (app / "Contents/MacOS/PlurxServer").write_bytes(b"native app fixture")
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleShortVersionString": "1.2.3", "CFBundleIdentifier": "tv.plurx.Server", "CFBundleExecutable": "PlurxServer"}))
-        with patch.object(tool.subprocess, "check_output", return_value=b"x86_64 arm64\n"), patch.object(tool.subprocess, "run"):
+        with patch.object(tool.subprocess, "check_output", return_value=b"arm64\n"), patch.object(tool.subprocess, "run"):
             tool.attach_desktop(stage, app, controls, "1.2.3", "a" * 40, "-")
         closure = json.loads((stage / "runtime-closure-v1.json").read_bytes())
         self.assertEqual(closure["version"], "1.2.3")

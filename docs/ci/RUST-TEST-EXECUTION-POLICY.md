@@ -87,7 +87,7 @@ Re-verify at build time.
 
 | Trigger | Workflow | Rust content |
 |---|---|---|
-| PR to `main`, ready (not draft) | `main-fast-lane.yml` `rust_compile` | pinned Rust 1.97.1 / Ubuntu 24.04 / FFmpeg 6; `make effort-rust-check`; `make hiqlite-vendor-clippy`; `make lint`; no full Rust unit execution |
+| PR to `main`, ready (not draft) | `main-fast-lane.yml` `rust_compile`, `rust_units` | `rust_compile`: pinned Rust 1.97.1 / Ubuntu 24.04 / FFmpeg 6; `make fast-rust-gate` (formatting, locked all-target Clippy and vendored Clippy). Since 2026-11-13 `rust_units` also runs the affected crates' unit tests once per content key ([RUST-UNIT-FANOUT.md](RUST-UNIT-FANOUT.md)); the full suite stays in `ci.yml` |
 | `v*` tag, `workflow_dispatch` | `ci.yml` | `check`: `make ci-rust-gate` plus workspace Rust/SQLite tests and serial restart fixtures, on `ffmpeg-6` runners; cluster lanes; `publish_main` only on manual `main` dispatch without promotion inputs |
 | `v*` tag, dispatch | `lint.yml:3-6` | `make fmt-check lint` (workspace Clippy), badge |
 | weekly cron | `rust-audit.yml` | advisories only |

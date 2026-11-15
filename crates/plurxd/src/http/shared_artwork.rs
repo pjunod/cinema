@@ -106,6 +106,42 @@ impl ArtBodyLease {
         Ok(())
     }
 }
+/// How long a client is told to wait for a derivative the Source has queued
+/// but not rendered. The durable artwork queue exposes no per-job completion
+/// estimate, so this is a fixed bound: a W300/W500/W780 render of one poster is
+/// well under a second of CPU on every node, and the worker is woken the moment
+/// the demand is persisted, so two seconds covers the render plus the queue
+/// pickup without parking a poster grid for long.
+const VARIANT_RENDER_RETRY_AFTER_SECS: u64 = 2;
+fn variant_busy() -> super::error::ApiError {
+    super::error::ApiError::TypedRetry {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "sharing_art_variant_busy",
+        message: "sharing art variant busy".into(),
+        retry_after_seconds: VARIANT_RENDER_RETRY_AFTER_SECS,
+    }
+}
+/// The receiver relays a Source's typed wait to its own client, and records the
+/// refusal; every other peer failure stays "unavailable".
+fn peer_refusal(error: crate::sharing_client::PeerError) -> super::error::ApiError {
+    tracing::warn!(
+        target: "plurx::sharing",
+        code = super::sharing::peer_error_code(&error),
+        ?error,
+        "shared artwork Source refused"
+    );
+    match error {
+        crate::sharing_client::PeerError::Busy { retry_after_secs } => {
+            super::error::ApiError::TypedRetry {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "sharing_art_source_busy",
+                message: "sharing art source busy".into(),
+                retry_after_seconds: retry_after_secs,
+            }
+        }
+        _ => unavailable(),
+    }
+}
 fn fail(status: StatusCode, code: &'static str) -> super::error::ApiError {
     super::error::ApiError::typed(status, code, code.replace('_', " "))
 }
@@ -182,7 +218,7 @@ pub(super) async fn source(
         let reference=key.verify_art(&resource,grant,clock_ms()).map_err(|_| missing())?;
         let lease=ArtBodyLease::source(reference.variant!=ArtVariant::Original)?;
         let asset=super::images::shared_artwork_asset(&state,&selection,&hash,lease.clone()).await?;
-        let Some(asset)=asset else {return Err(if reference.variant==ArtVariant::Original {missing()} else {fail(StatusCode::TOO_MANY_REQUESTS,"sharing_art_variant_busy")});};
+        let Some(asset)=asset else {return Err(if reference.variant==ArtVariant::Original {missing()} else {variant_busy()});};
         let current=state.store.source_art_snapshot(&hash,grant,&reference).await.map_err(|_| unavailable())?;
         if !matches!(current,SourceArtRead::Authorized(ref snapshot) if selection.same_selection(snapshot)) || !asset.still_current().await
             || !super::shared_library::source_art_scope_current(&state,&reference).await
@@ -235,11 +271,16 @@ pub(super) async fn receiver(
             .verify_art(&resource, import_id, user.id, clock_ms())
             .map_err(|_| missing())?;
         let lease = ArtBodyLease::receiver()?;
-        let (summary, asset) = state
+        // Authority first, with no peer call: the snapshot below may be served
+        // only to a request that passes every check a live read would.
+        let import = state
             .sharing
-            .read_artwork(&state, &reference)
+            .artwork_authority(&state, &reference)
             .await
-            .map_err(|_| unavailable())?;
+            .map_err(peer_refusal)?;
+        let summary = import.summary.clone();
+        let (asset, from_peer) =
+            receiver_artwork_asset(&state, &reference, &import, lease.clone()).await?;
         key.verify_art(&resource, import_id, user.id, clock_ms())
             .map_err(|_| missing())?;
         let mut proof = Response::new(Body::empty());
@@ -247,7 +288,9 @@ pub(super) async fn receiver(
             &state, &token, user.id, &summary, &reference, &mut proof,
         )
         .await?;
-        publish_disk_snapshot(&state, &reference, &asset, lease.clone()).await?;
+        if from_peer {
+            publish_disk_snapshot(&state, &reference, &asset, lease.clone()).await?;
+        }
         let source = reference
             .source
             .reference_unverified()
@@ -378,6 +421,157 @@ impl AsRef<[u8]> for LeasedArtBytes {
         &self.bytes
     }
 }
+fn disk_filename(
+    reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+    source: &plurx_core::sharing_artwork::SourceArtReference,
+    digest: [u8; 32],
+) -> Result<String, super::error::ApiError> {
+    use sha2::{Digest, Sha256};
+    let context = serde_json::to_vec(&serde_json::json!([
+        "receiver-art-disk-v1",
+        reference.user_id,
+        reference.lifecycle_generation,
+        reference.item,
+        source.grant_id,
+        source.kind,
+        source.variant,
+        hex::encode(digest)
+    ]))
+    .map_err(|_| unavailable())?;
+    Ok(format!("{}.bin", hex::encode(Sha256::digest(context))))
+}
+/// What the receiver last proved against the Source for one artwork view. The
+/// disk file is named by its digest, so the digest has to be known before the
+/// file can be found; it comes from here, never from the file itself.
+#[derive(Clone, Copy)]
+struct SnapshotRecord {
+    digest: [u8; 32],
+    mime: &'static str,
+    used: u64,
+}
+static SNAPSHOT_INDEX: LazyLock<Mutex<std::collections::HashMap<[u8; 32], SnapshotRecord>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static SNAPSHOT_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The view a snapshot answers for: owner, lifecycle, item, grant, art slot,
+/// and the Source's `expires_at_ms` on the resource the request carries. The
+/// Source issues a fresh resource (new expiry) with every catalogue read, so a
+/// snapshot is reused for exactly one catalogue issue: poster changes reach the
+/// receiver on the next catalogue read, and never outlive the resource's own
+/// five-minute lifetime, which `verify_art` already enforced for this request.
+fn snapshot_view(
+    reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+    source: &plurx_core::sharing_artwork::SourceArtReference,
+) -> Result<[u8; 32], super::error::ApiError> {
+    use sha2::{Digest, Sha256};
+    let view = serde_json::to_vec(&serde_json::json!([
+        "receiver-art-view-v1",
+        reference.user_id,
+        reference.lifecycle_generation,
+        reference.item,
+        source.grant_id,
+        source.kind,
+        source.variant,
+        source.expires_at_ms
+    ]))
+    .map_err(|_| unavailable())?;
+    Ok(Sha256::digest(view).into())
+}
+fn remember_snapshot(view: [u8; 32], digest: [u8; 32], mime: &'static str) {
+    let mut index = SNAPSHOT_INDEX.lock().expect("art snapshot index");
+    if index.len() >= DISK_ENTRIES && !index.contains_key(&view) {
+        if let Some(oldest) = index.iter().min_by_key(|(_, r)| r.used).map(|(k, _)| *k) {
+            index.remove(&oldest);
+        }
+    }
+    let used = SNAPSHOT_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    index.insert(view, SnapshotRecord { digest, mime, used });
+}
+/// Choose verified local bytes before issuing an image fetch. The caller
+/// checks `artwork_authority` first and attaches the live response proof afterward.
+async fn receiver_artwork_asset(
+    state: &AppState,
+    reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+    import: &plurx_core::sharing::StoredImport,
+    lease: Arc<ArtBodyLease>,
+) -> Result<(crate::sharing_client::PeerArtwork, bool), super::error::ApiError> {
+    match read_disk_snapshot(state, reference, lease).await {
+        Some(asset) => Ok((asset, false)),
+        None => Ok((
+            state
+                .sharing
+                .fetch_artwork(state, reference, import)
+                .await
+                .map_err(peer_refusal)?,
+            true,
+        )),
+    }
+}
+
+/// The receiver's own verified snapshot for this view, or `None` (then the
+/// caller dials the Source). Authority is the caller's: this runs only after
+/// `artwork_authority`. The disk bytes are re-hashed against the digest the
+/// receiver proved with the Source, so a missing, resized or corrupt file is a
+/// miss, never a wrong poster.
+async fn read_disk_snapshot(
+    state: &AppState,
+    reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+    lease: Arc<ArtBodyLease>,
+) -> Option<crate::sharing_client::PeerArtwork> {
+    let source = reference.source.reference_unverified().ok()?;
+    let view = snapshot_view(reference, &source).ok()?;
+    let record = *SNAPSHOT_INDEX
+        .lock()
+        .expect("art snapshot index")
+        .get(&view)?;
+    let filename = disk_filename(reference, &source, record.digest).ok()?;
+    let root = state.runtime_cache_dir.join("sharing-art-v1");
+    let read = async {
+        use plurx_core::fs_secure;
+        fs_secure::directory_identity_nofollow(&root).await?;
+        let file = fs_secure::open_read_nofollow(&root.join(&filename)).await?;
+        let file = file.into_std().await;
+        tokio::task::spawn_blocking(move || {
+            // The admission lease stays with the blocking read.
+            let _owner = lease;
+            use sha2::{Digest, Sha256};
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take(plurx_core::sharing_artwork::MAX_ART_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.is_empty() || bytes.len() > plurx_core::sharing_artwork::MAX_ART_BYTES {
+                return Err(std::io::Error::other("art cache size"));
+            }
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            Ok::<_, std::io::Error>((bytes, digest))
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(2), read).await {
+        Ok(Ok((bytes, digest))) if digest == record.digest => {
+            let used = SNAPSHOT_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(entry) = SNAPSHOT_INDEX
+                .lock()
+                .expect("art snapshot index")
+                .get_mut(&view)
+            {
+                entry.used = used;
+            }
+            Some(crate::sharing_client::PeerArtwork {
+                bytes: axum::body::Bytes::from(bytes),
+                digest,
+                mime: record.mime,
+            })
+        }
+        _ => {
+            SNAPSHOT_INDEX
+                .lock()
+                .expect("art snapshot index")
+                .remove(&view);
+            None
+        }
+    }
+}
 async fn publish_disk_snapshot(
     state: &AppState,
     reference: &plurx_core::sharing_artwork::ReceiverArtReference,
@@ -389,18 +583,9 @@ async fn publish_disk_snapshot(
         .source
         .reference_unverified()
         .map_err(|_| unavailable())?;
-    let context = serde_json::to_vec(&serde_json::json!([
-        "receiver-art-disk-v1",
-        reference.user_id,
-        reference.lifecycle_generation,
-        reference.item,
-        source.grant_id,
-        source.kind,
-        source.variant,
-        hex::encode(asset.digest)
-    ]))
-    .map_err(|_| unavailable())?;
-    let filename = format!("{}.bin", hex::encode(Sha256::digest(context)));
+    let filename = disk_filename(reference, &source, asset.digest)?;
+    let view = snapshot_view(reference, &source)?;
+    let mime = asset.mime;
     let root = state.runtime_cache_dir.join("sharing-art-v1");
     let bytes = asset.bytes.clone();
     let digest = asset.digest;
@@ -529,7 +714,9 @@ async fn publish_disk_snapshot(
         .await
         .map_err(|_| unavailable())?
         .map_err(|_| unavailable())?
-        .map_err(|_| unavailable())
+        .map_err(|_| unavailable())?;
+    remember_snapshot(view, digest, mime);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -752,5 +939,393 @@ mod tests {
             .is_err());
             assert_eq!(std::fs::read(target).expect("outside"), b"private");
         }
+    }
+    /// The receiver relays a Source's typed wait as 429 with `Retry-After`,
+    /// and keeps every other peer failure a plain 503.
+    #[test]
+    fn sharing_art_receiver_relays_source_busy_as_429_with_retry_after() {
+        use crate::sharing_client::PeerError;
+        use axum::response::IntoResponse;
+        let busy = peer_refusal(PeerError::Busy {
+            retry_after_secs: 3,
+        })
+        .into_response();
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(busy.headers()[header::RETRY_AFTER], "3");
+        for other in [
+            PeerError::Unavailable,
+            PeerError::InvalidResponse,
+            PeerError::Rejected(StatusCode::NOT_FOUND),
+        ] {
+            let response = peer_refusal(other).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        }
+    }
+
+    async fn snapshot(
+        state: &AppState,
+        reference: &ReceiverArtReference,
+    ) -> Option<crate::sharing_client::PeerArtwork> {
+        read_disk_snapshot(state, reference, ArtBodyLease::receiver().expect("permit")).await
+    }
+    struct ReceiverArtFixture {
+        _directory: tempfile::TempDir,
+        state: AppState,
+        source_key: CatalogueRevisionKey,
+        import: uuid::Uuid,
+        grant: uuid::Uuid,
+        lifecycle: i64,
+        viewer: i64,
+        token: String,
+        remote: SharingIdentity,
+    }
+    /// An active B import whose Source endpoint cannot be reached, so any
+    /// request answered 200 was answered from B's own snapshot.
+    async fn receiver_art_fixture() -> ReceiverArtFixture {
+        use plurx_core::{
+            secrets::SharingSecretPurpose,
+            sharing::{Assignment, Endpoint, ImportOutcome, NewImport},
+            sharing_file_locators::FileLocatorKey,
+            store::SqliteStore,
+        };
+        let directory = tempfile::tempdir().expect("B fixture");
+        let path = directory.path().join("receiver.sqlite");
+        let store: Arc<dyn plurx_core::store::Store> =
+            Arc::new(SqliteStore::open(&path).expect("B store"));
+        let (_, mut state) = super::super::tests::test_app_with_state();
+        state.store = store.clone();
+        state.catalogue = plurx_core::store::CatalogueReader::authority(store);
+        state.runtime_cache_dir = directory
+            .path()
+            .canonicalize()
+            .expect("canonical cache")
+            .join("runtime");
+        std::fs::create_dir(&state.runtime_cache_dir).expect("runtime cache");
+        state
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+            .await
+            .expect("enable B");
+        let user = state
+            .store
+            .create_user("receiver-art-viewer", "synthetic-hash", false)
+            .await
+            .expect("viewer");
+        let token = "receiver-art-login".to_owned();
+        state
+            .store
+            .create_token(&plurx_core::auth::hash_token(&token), user.id, None)
+            .await
+            .expect("login");
+        let local = state.store.sharing_identity(1000).await.expect("identity");
+        let remote = SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: 1000,
+        };
+        let import = uuid::Uuid::new_v4();
+        let grant = uuid::Uuid::new_v4();
+        let credential = crate::sharing::ImportCredential::encode(
+            &plurx_core::sharing::new_secret().expect("grant"),
+            uuid::Uuid::new_v4(),
+            1000,
+            "Fixture B",
+            2000,
+            None,
+        )
+        .expect("credential");
+        let seal = |purpose, text: &str| {
+            state
+                .sharing
+                .key
+                .seal_sharing(purpose, local.server_id, import, text)
+                .expect("seal")
+        };
+        assert_eq!(
+            state
+                .store
+                .create_share_import(NewImport {
+                    id: import,
+                    source: remote.clone(),
+                    source_name: "Fixture Source".into(),
+                    claim_id: uuid::Uuid::new_v4(),
+                    credential: seal(SharingSecretPurpose::Credential, credential.expose()),
+                    claim_secret: seal(SharingSecretPurpose::Claim, "synthetic-claim"),
+                    endpoints: vec![Endpoint {
+                        ipv4: "100.64.0.1".parse().expect("address"),
+                        ipv6: None,
+                        ts_fqdn: "source.fixture.ts.net".into(),
+                        port: 32443,
+                        spki_sha256: "a".repeat(64),
+                    }],
+                    now_ms: 1000,
+                })
+                .await
+                .expect("B import"),
+            ImportOutcome::Created
+        );
+        state
+            .store
+            .settle_share_claim(import, grant, true, 1001)
+            .await
+            .expect("active import");
+        state
+            .store
+            .assign_share_viewers(
+                import,
+                1,
+                vec![Assignment {
+                    library_id: SourceId::parse("1").expect("lib"),
+                    user_id: user.id,
+                }],
+                1002,
+            )
+            .await
+            .expect("assignment");
+        let envelope = FileLocatorKey::generate_sealed(&state.sharing.key, &local).expect("key");
+        let writer = rusqlite::Connection::open(&path).expect("B writer");
+        writer
+            .execute_batch(
+                plurx_core::store::sharing_file_locators::CANDIDATE_FILE_LOCATOR_KEY_SCHEMA,
+            )
+            .expect("key schema");
+        writer
+            .execute(
+                "INSERT INTO sharing_file_locator_keys VALUES(1,?1,?2,?3)",
+                rusqlite::params![
+                    local.server_id.to_string(),
+                    local.catalogue_epoch.to_string(),
+                    envelope.as_stored()
+                ],
+            )
+            .expect("key row");
+        drop(writer);
+        let source_envelope =
+            CatalogueRevisionKey::generate_sealed(&state.sharing.key, remote.clone())
+                .expect("source key");
+        let source_key =
+            CatalogueRevisionKey::open(&state.sharing.key, remote.clone(), &source_envelope)
+                .expect("open");
+        let lifecycle = state
+            .store
+            .sharing_import(import)
+            .await
+            .expect("import")
+            .expect("present")
+            .summary
+            .lifecycle_generation;
+        ReceiverArtFixture {
+            _directory: directory,
+            state,
+            source_key,
+            import,
+            grant,
+            lifecycle,
+            viewer: user.id,
+            token,
+            remote,
+        }
+    }
+    impl ReceiverArtFixture {
+        /// The reference B holds for one poster view, issued at `now_ms`.
+        fn reference(&self, now_ms: i64) -> ReceiverArtReference {
+            let library = SourceId::parse("1").expect("lib");
+            let item = SourceId::parse("1").expect("item");
+            ReceiverArtReference {
+                item: SharedReference {
+                    import_id: self.import,
+                    server_id: self.remote.server_id,
+                    catalogue_epoch: self.remote.catalogue_epoch,
+                    library_id: library.clone(),
+                    item_id: item.clone(),
+                },
+                user_id: self.viewer,
+                lifecycle_generation: self.lifecycle,
+                source: self
+                    .source_key
+                    .issue_art(
+                        &SourceArtReference {
+                            server_id: self.remote.server_id,
+                            catalogue_epoch: self.remote.catalogue_epoch,
+                            grant_id: self.grant,
+                            library_id: library,
+                            item_id: item,
+                            kind: ArtKind::Poster,
+                            variant: ArtVariant::W300,
+                            expires_at_ms: artwork_expiry(now_ms).expect("expiry"),
+                        },
+                        now_ms,
+                    )
+                    .expect("Source resource"),
+            }
+        }
+    }
+
+    /// The second view of a poster is answered from B's own verified
+    /// snapshot with no artwork fetch from the Source, after every local
+    /// authority check. (The response's separate live scope proof,
+    /// `attach_receiver_art_authority`, is a small Source request by design
+    /// and is not part of this seam; it needs the pinned-TLS fixtures.)
+    #[tokio::test]
+    async fn sharing_art_receiver_serves_verified_snapshot_before_dialling_the_source() {
+        use plurx_core::sharing::Assignment;
+        use sha2::{Digest, Sha256};
+        let _serial = ART_FIXTURES.lock().await;
+        let fixture = receiver_art_fixture().await;
+        let state = &fixture.state;
+        let now = clock_ms();
+        let reference = fixture.reference(now);
+        // Every local authority check passes for the assigned viewer.
+        let import = state
+            .sharing
+            .artwork_authority(state, &reference)
+            .await
+            .expect("assigned viewer of an active import");
+        // Cold: nothing held yet, so the handler would have to dial.
+        assert!(snapshot(state, &reference).await.is_none());
+        // B proved these bytes against the Source once (the first view).
+        let mut png = vec![7u8; 4096];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let bytes = axum::body::Bytes::from(png);
+        let asset = crate::sharing_client::PeerArtwork {
+            digest: Sha256::digest(&bytes).into(),
+            bytes: bytes.clone(),
+            mime: "image/png",
+        };
+        publish_disk_snapshot(
+            state,
+            &reference,
+            &asset,
+            ArtBodyLease::receiver().expect("permit"),
+        )
+        .await
+        .expect("first view publishes");
+        // Negative control: the original always-fetch path cannot serve this
+        // fixture, even though verified local bytes are available.
+        assert!(state
+            .sharing
+            .fetch_artwork(state, &reference, &import)
+            .await
+            .is_err());
+        for _ in 0..2 {
+            let (held, from_peer) = receiver_artwork_asset(
+                state,
+                &reference,
+                &import,
+                ArtBodyLease::receiver().expect("permit"),
+            )
+            .await
+            .expect("served from the snapshot without dialing the unavailable Source");
+            assert!(!from_peer, "the receiver uses its verified local bytes");
+            assert_eq!(held.bytes, bytes);
+            assert_eq!(held.digest, asset.digest);
+            assert_eq!(held.mime, "image/png");
+        }
+        // Corrupt snapshot bytes are a miss, never a wrong poster.
+        let root = state.runtime_cache_dir.join("sharing-art-v1");
+        let file = std::fs::read_dir(&root)
+            .expect("entries")
+            .next()
+            .expect("entry")
+            .expect("entry")
+            .path();
+        std::fs::write(&file, vec![9u8; bytes.len()]).expect("same-size corruption");
+        assert!(
+            snapshot(state, &reference).await.is_none(),
+            "digest mismatch"
+        );
+        std::fs::write(&file, &bytes).expect("restore");
+        publish_disk_snapshot(
+            state,
+            &reference,
+            &asset,
+            ArtBodyLease::receiver().expect("permit"),
+        )
+        .await
+        .expect("republish");
+        assert!(snapshot(state, &reference).await.is_some());
+        // A newer catalogue read issues a new Source resource: the old
+        // snapshot does not answer for it.
+        let next = fixture.reference(now + 60_000);
+        assert!(
+            snapshot(state, &next).await.is_none(),
+            "a new catalogue issue revalidates against the Source"
+        );
+        // Losing the assignment refuses before any snapshot is consulted.
+        state
+            .store
+            .assign_share_viewers(
+                fixture.import,
+                2,
+                vec![Assignment {
+                    library_id: SourceId::parse("2").expect("other library"),
+                    user_id: fixture.viewer,
+                }],
+                1003,
+            )
+            .await
+            .expect("assignment change");
+        assert!(state
+            .sharing
+            .artwork_authority(state, &reference)
+            .await
+            .is_err());
+    }
+    /// A poster burst that exceeds Source scope-check capacity is told to come
+    /// back (429 + Retry-After, which the loader retries); it is not refused,
+    /// and nothing is served without the live proof.
+    #[tokio::test]
+    async fn sharing_art_scope_saturation_is_a_typed_429_not_a_503() {
+        use axum::response::IntoResponse;
+        let _serial = ART_FIXTURES.lock().await;
+        let fixture = receiver_art_fixture().await;
+        let state = &fixture.state;
+        let reference = fixture.reference(clock_ms());
+        let summary = state
+            .sharing
+            .artwork_authority(state, &reference)
+            .await
+            .expect("assigned viewer of an active import")
+            .summary;
+        let mut held = Vec::new();
+        while let Some(permit) = state
+            .sharing
+            .scope_permit_within(std::time::Duration::ZERO)
+            .await
+        {
+            held.push(permit);
+        }
+        assert_eq!(held.len(), 32, "all scope capacity held");
+        let mut response = Response::new(Body::empty());
+        let busy = super::super::shared_library::attach_receiver_art_authority(
+            state,
+            &fixture.token,
+            fixture.viewer,
+            &summary,
+            &reference,
+            &mut response,
+        )
+        .await
+        .expect_err("saturated scope capacity")
+        .into_response();
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(busy.headers()[header::RETRY_AFTER], "1");
+        // With capacity free the proof runs; the unreachable Source then
+        // cannot confirm the scope, which stays a refusal, never a 429.
+        drop(held);
+        let refused = super::super::shared_library::attach_receiver_art_authority(
+            state,
+            &fixture.token,
+            fixture.viewer,
+            &summary,
+            &reference,
+            &mut response,
+        )
+        .await
+        .expect_err("unreachable Source cannot prove scope")
+        .into_response();
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.sharing.scope_control_available(), 32);
     }
 }

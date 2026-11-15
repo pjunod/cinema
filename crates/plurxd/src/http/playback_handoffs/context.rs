@@ -114,7 +114,9 @@ async fn next_episode(state: &AppState, item: &Item) -> Result<Option<Episode>, 
                 });
         }
     }
-    let Some(next) = next else {
+    // An offloaded successor has no file: the sequence stops here and nothing
+    // is prepared for it.
+    let Some(next) = next.filter(|next| next.offloaded_at.is_none()) else {
         return Ok(None);
     };
     let files = state.store.files_for_item(next.id).await?;

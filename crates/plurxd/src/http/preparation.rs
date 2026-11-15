@@ -369,15 +369,15 @@ pub async fn status(
         .unwrap_or("off");
     let dv = dv_preparation_fact(conversion.as_ref(), mode, file.dolby_vision.profile);
     let automatic = state
-        .store
-        .get_setting("subtitles.automatic")
+        .applied
+        .setting("subtitles.automatic")
         .await?
         .as_deref()
         == Some("true");
     let thumbnails_enabled = plurx_core::store::stored_switch(
         state
-            .store
-            .get_setting(plurx_core::store::keys::CHAPTER_THUMBNAILS)
+            .applied
+            .setting(plurx_core::store::keys::CHAPTER_THUMBNAILS)
             .await?
             .as_deref(),
         true,

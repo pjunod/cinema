@@ -36,6 +36,10 @@ def state():
 
 
 def main():
+    if sys.argv[1:] == ["--no-config", "--version"]:
+        features = " native-dovi-api-1" if state().get("native_dovi", True) else ""
+        print("mpv interface control\nList of enabled features: lua" + features)
+        return
     sock_path = next(a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--input-ipc-server="))
     with open(path("argv.json"), "w", encoding="utf-8") as handle:
         json.dump(sys.argv[1:], handle)

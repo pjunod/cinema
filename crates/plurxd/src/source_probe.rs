@@ -51,6 +51,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let mut title: Option<title_work::TitleTask> = None;
     #[cfg(target_os = "linux")]
     let mut title_after = 0;
+    #[cfg(target_os = "linux")]
+    let mut live_title_after = 0;
     loop {
         if shutdown.is_cancelled() {
             #[cfg(target_os = "linux")]
@@ -76,6 +78,23 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 Err(error) => tracing::warn!(%error,"title priority observation unavailable"),
             }
         }
+        // An exact active playback request is considered before ordinary
+        // probe pagination, including when that pagination has more pages.
+        #[cfg(target_os = "linux")]
+        if title.is_none() && !shutdown.is_cancelled() {
+            match title_work::TitleTask::start(
+                &state,
+                &boot,
+                &mut title_after,
+                &mut live_title_after,
+                true,
+            )
+            .await
+            {
+                Ok(work) => title = work,
+                Err(error) => tracing::warn!(%error,"playback qualification demand unavailable"),
+            }
+        }
         #[cfg(target_os = "linux")]
         let ordinary_idle = title.is_none();
         #[cfg(not(target_os = "linux"))]
@@ -95,7 +114,15 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         #[cfg(target_os = "linux")]
         if title.is_none() && cursor.is_none() && !yielded && !published && !shutdown.is_cancelled()
         {
-            match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
+            match title_work::TitleTask::start(
+                &state,
+                &boot,
+                &mut title_after,
+                &mut live_title_after,
+                false,
+            )
+            .await
+            {
                 Ok(work) => title = work,
                 Err(error) => tracing::warn!(%error,"title demand unavailable"),
             }
@@ -324,7 +351,21 @@ async fn execute(
                         path: file.path.display().to_string(),
                         reason,
                     })?;
-            let result = probe::probe_single_threaded(std::path::Path::new(input.url())).await;
+            let result = plurx_core::process::source_lifetime::mediated(
+                probe::probe_single_threaded(std::path::Path::new(input.url())),
+            )
+            .await;
+            // FFprobe reads through the bridge: a failed source read reaches
+            // it as truncated input, so its refusal is not a file verdict.
+            let result = match result {
+                Err(error) if error.is_file_verdict() && input.source_read_failed() => {
+                    Err(ProbeError::Transient {
+                        path: file.path.display().to_string(),
+                        reason: format!("source read failed during probe: {error}"),
+                    })
+                }
+                other => other,
+            };
             input
                 .close_and_wait()
                 .await
@@ -415,6 +456,17 @@ async fn execute(
                         }
                     }
                 }
+            }
+            // FFprobe ran to completion on reads that all succeeded and
+            // refused this exact file. The verdict settles this generation
+            // (the next coordinator pass or a changed file enqueues anew);
+            // retrying it only keeps every waiter (an admin reanalyze, a scan
+            // page) queued to its deadline.
+            Err(error) if error.is_file_verdict() => {
+                tracing::warn!(job=job.id,%error,"leaf probe refused the file");
+                Some(JobSettlement::Fail {
+                    error_code: "probe_refused".into(),
+                })
             }
             Err(error) => {
                 tracing::warn!(job=job.id,%error,"leaf probe failed");

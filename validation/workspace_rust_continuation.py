@@ -11,12 +11,38 @@ from validation import promotion_unit_retention as retention
 from validation import python_unit_receipts as receipts
 from validation import qualification_unit_continuation as commands
 from validation import workspace_rust_outcomes as native
+from validation.native_makefile_compatibility import reviewed_native_makefile_transition
 
 # Reviewed native job includes the unmodified checkout, toolchain, image, root
 # ownership prerequisite, Cargo flags and runtime limits. A changed historical
 # job needs explicit review before any earlier pass is usable.
 ORIGINAL_JOB = '1a68af55093f2b325f2187fe79082a03f1c6bf8b13ea75545e99f3155783f304'
-CURRENT_JOB = 'cc3cd0d1e30d16f4df37b689884de4294c0dc658e7304552a9b50378f2932b4f'
+# Reviewed four-line HDR inverse check uses the already pinned FFmpeg 8
+# action. Checkout/toolchain/image/Cargo commands/flags/limits are unchanged;
+# ORIGINAL_JOB and protected-input refusal remain exact and unchanged.
+PRE_NONVOTER_JOB = '8672bfc684e8900df352a108a13fe12946ca6bde0f451b8895482379f3072da8'
+# Reviewed nonvoter role and effective 20 GiB/no-swap/four-CPU guard only.
+# Checkout, pinned image/toolchain, Cargo flags, job/test threads and timeout
+# remain exact. Historical admission names each reviewed recipe explicitly;
+# current admission accepts only the new recipe, never arbitrary resource edits.
+NONVOTER_JOB = '6bccb65add53e801408f5ff9143022c9ddf7dc68854cf2ff3eabb5a6f4214a49'
+# Reviewed verifier parsing only: the first step finds the single unified
+# (cgroup v2) line of /proc/self/cgroup instead of requiring it to be first,
+# so a hybrid host's unrelated v1 hierarchy (lab5's net_cls) no longer fails
+# it. The five checked limits, their values and every refusal are unchanged.
+CGROUP_PARSE_JOB = 'c337a99f0dd97cbb824ce3207cf11abb81f2bab1768db7ddf6214ccfdc81051b'
+# Reviewed timeout only: 120 -> 180 minutes (2026-11-11). On the four-CPU
+# nonvoter the full suite needs ~175 minutes (run 7243 timed out at 4,870 of
+# ~7,850 cases with none failed). Checkout, image, toolchain, Cargo flags,
+# job/test threads and every resource limit are unchanged.
+TIMEOUT_180_JOB = '5ed443546bfbd4d4cfea28aeccd3add213f3dcc61a1be65f99a4a65822478668'
+# Reviewed image pin only (#1607, 2026-11-15): the job's container moves from
+# plurx-ci@sha256:3d84b711... to the probed plurx-ci@sha256:6a989b4d... that
+# every general lane job now uses. Checkout, toolchain, Cargo flags, job/test
+# threads, timeout and resource limits are unchanged. Passes recorded under
+# the previous image stay historical and are not current evidence.
+CURRENT_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16df5e77'
+HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB, CURRENT_JOB)
 ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
@@ -33,13 +59,14 @@ def check_changes(record, candidate, targets):
     known.update(target+'::'+row['interrupted_test'] for target, row in targets.items() if row.get('interrupted_test'))
     invalidated = set()
     for path, witness in changes.items():
-        receipts.require(path not in PROTECTED and not path.startswith(NATIVE_ACTIONS)
+        old, new = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
+        compatible_make = path == 'Makefile' and reviewed_native_makefile_transition(old, new)
+        receipts.require((path not in PROTECTED or compatible_make) and not path.startswith(NATIVE_ACTIONS)
                          and not path.endswith('/Cargo.toml'),
                          'Historical Rust compile or execution environment changed')
         receipts.require(isinstance(witness, dict) and set(witness) == {'before', 'after', 'affected', 'reason'}
                          and isinstance(witness['reason'], str) and 0 < len(witness['reason'].strip()) <= 2048,
                          'Rust applicability reason is missing')
-        old, new = retention.git_bytes(prior, path), retention.git_bytes(candidate, path)
         receipts.require(witness['before'] == (retention.digest(old) if old is not None else None)
                          and witness['after'] == (retention.digest(new) if new is not None else None),
                          'Rust applicability path bytes contradict source')
@@ -51,12 +78,23 @@ def check_changes(record, candidate, targets):
 
 
 def check_workflow_environment(workflow, expected):
+    commands.canonical_job_keys(workflow)
     job = re.search(r'(?s)\n  check:\n.*?(?=\n  cluster_store_legacy:)', workflow)
     global_env = re.findall(r'(?m)^env:\n((?:  [^\n]+\n)+)',workflow)
-    receipts.require(job and retention.digest(job[0].encode()) == expected
+    roots = re.findall(r'(?m)^[^\s#][^\n]*$', workflow)
+    accepted = expected if isinstance(expected, tuple) else (expected,)
+    receipts.require(job and retention.digest(job[0].encode()) in accepted
+                     and roots == ['name: ci', 'on:', 'env:', 'concurrency:', 'jobs:']
                      and global_env == ['  CARGO_TERM_COLOR: always\n']
                      and not re.search(r'(?m)^defaults:',workflow),
                      'Unrecognized workflow or native Rust job execution environment')
+
+
+def require_native_inputs(inputs):
+    receipts.require(all(not inputs.get(key) for key in (
+        'retained_units_sha256', 'retained_units_attachment_id',
+        'retained_units_attachment_uuid', 'workspace_rust_evidence')),
+        'Historical Rust job may not adopt earlier unit outcomes')
 
 
 def authenticate(api, descriptor, binding, candidate):
@@ -80,13 +118,14 @@ def authenticate(api, descriptor, binding, candidate):
                      and run['prettyref'] == record['branch'] and inputs['promotion_head_sha'] == prior
                      and str(record['pr']) == str(inputs['promotion_pr']),
                      'Historical Rust promotion identity differs')
+    require_native_inputs(inputs)
     jobs = [j for j in api.pages(f'/actions/runs/{run_id}/jobs')
             if j['name'] == 'Rust unit and SQLite contracts']
     receipts.require(len(jobs) == 1 and jobs[0]['id'] == job_id and jobs[0]['run_id'] == run_id
                      and jobs[0]['repo_id'] == repository and jobs[0]['attempt'] == 1
                      and jobs[0]['status'] in ('success','failure'), 'Original native Rust job differs')
     workflow = retention.git_bytes(prior, '.github/workflows/ci.yml').decode()
-    check_workflow_environment(workflow,ORIGINAL_JOB)
+    check_workflow_environment(workflow,HISTORICAL_JOBS)
     check_workflow_environment(retention.git_bytes(candidate,'.github/workflows/ci.yml').decode(),CURRENT_JOB)
     commands.authenticate_scope(api, run_id, run, workflow, record, prior, repository)
     source = api.bytes(f'/actions/jobs/{job_id}/logs')

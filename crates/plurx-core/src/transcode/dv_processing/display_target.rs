@@ -295,7 +295,7 @@ impl DvDisplayTarget {
         ))?;
         // Eligible target selection proves L1 peak > bucket. Retain the min
         // explicitly so the static CLL bound follows the same title policy.
-        let max_cll = pq_nits(self.max_l1_pq).min(f64::from(self.nits)).ceil() as u16;
+        let max_cll = export_max_cll(pq_nits(self.max_l1_pq).min(f64::from(self.nits)));
         crate::fmp4::Hdr10OutputMetadata::new(
             primaries,
             self.nits,
@@ -322,10 +322,12 @@ impl DvDisplayTarget {
 /// The display-management selection the helper (`dv_dm.h`) makes for this RPU at `nits`, for a
 /// title mastered at `title_peak` nits: CM v4 when the RPU carries CM v4.0 metadata (L254) or L8
 /// trims, otherwise CM v2.9. With trims, CM v4 uses every L8 whose target display is a preset or
-/// is described by an L10. CM v2.9 uses the L2 authored for the bucket peak; otherwise each trim
-/// field is interpolated linearly in target PQ between the bracketing L2 targets, with neutral
-/// trims at PQ 0 and at the mastering peak (measured against the reference renderer). At or above
-/// the mastering peak both families map untrimmed.
+/// is described by an L10, and maps untrimmed at or above the mastering peak. CM v2.9 uses the L2
+/// authored for the bucket peak; otherwise each trim field is interpolated linearly in target PQ
+/// between the nearest L2 targets below and above (wherever they sit against the mastering peak),
+/// with a neutral trim at the mastering display's minimum (L6) for a missing lower side and at
+/// the mastering peak for a missing upper side. With no L2 above, a bucket at or above the
+/// mastering peak maps untrimmed (measured against the reference renderer).
 fn dv_display_management(
     raw: &[u8],
     nits: u32,
@@ -407,21 +409,36 @@ fn dv_display_management(
             (hi, hi_ms) = (q, ms);
         }
     }
-    // An L2 target between this display and the mastering peak; without one (and without a lower
-    // target) every trim has faded out.
-    let (upper, lower) = (hi <= 1.0 && hi < smast, lo >= 0.0);
-    let (curve, weight) = if tmax >= smast {
-        ("cm29-l1-only", 0.0)
-    } else if let Some(ms) = exact {
+    // The mastering display's minimum, as the helper reads it: this RPU's L6, else 0.005 nits.
+    let smin_nits = dm
+        .level_blocks_iter(6)
+        .find_map(|block| match block {
+            ExtMetadataBlock::Level6(x) => {
+                Some(f64::from(x.min_display_mastering_luminance) / 10000.0)
+            }
+            _ => None,
+        })
+        .unwrap_or(0.005);
+    let (upper, lower) = (hi <= 1.0, lo >= 0.0);
+    let (curve, weight) = if let Some(ms) = exact {
         ("cm29-l2-exact", ms)
-    } else if lower || upper {
+    } else if upper || (lower && tmax < smast) {
         if !upper {
             (hi, hi_ms) = (smast, 0.0);
         }
         if !lower {
-            (lo, lo_ms) = (0.0, 0.0);
+            lo = if smin_nits > 0.0 {
+                pq_code_f64(smin_nits)
+            } else {
+                0.0
+            };
+            lo_ms = 0.0;
         }
-        let w: f64 = ((hi - tmax) / (hi - lo)).clamp(0.0, 1.0);
+        let w: f64 = if hi > lo {
+            ((hi - tmax) / (hi - lo)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         ("cm29-l2-interpolated", w * lo_ms + (1.0 - w) * hi_ms)
     } else {
         ("cm29-l1-only", 0.0)
@@ -442,6 +459,99 @@ pub struct DvSourceMastering {
     pub min_1e4_nits: u32,
 }
 
+/// The source's own HDR10 static metadata, re-declared on a master-grade
+/// render: its mastering display (ST 2086 units, luminance in 1/10000 cd/m²)
+/// and its stated content light levels. Nothing is derived from Dolby L1: L1
+/// is an intensity statistic, not the per-component maximum MaxCLL means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DvMasterMetadata {
+    primaries_rgbw: [u16; 8],
+    max_1e4_nits: u32,
+    min_1e4_nits: u32,
+    light: Option<[u16; 2]>,
+}
+impl DvMasterMetadata {
+    pub fn new(
+        primaries_rgbw: [u16; 8],
+        max_1e4_nits: u32,
+        min_1e4_nits: u32,
+        light: Option<[u16; 2]>,
+    ) -> Result<Self, DvContractError> {
+        let metadata = Self {
+            primaries_rgbw,
+            max_1e4_nits,
+            min_1e4_nits,
+            light: light.filter(|light| light[0] != 0),
+        };
+        metadata.output_metadata()?;
+        Ok(metadata)
+    }
+    /// What a processed master may still say about its picture. The mastering
+    /// display describes the grade and survives reconstruction. The content
+    /// light levels describe the base layer's own samples: a render that adds
+    /// the enhancement layer, or applies reshaping that is not the identity,
+    /// produces other samples, which can exceed them, so they are not
+    /// re-declared. `reshape_identity` is a proof, never an assumption: a
+    /// caller that cannot show every frame's reshaping is the identity passes
+    /// `false`.
+    pub fn for_processed(self, mode: super::DvProcessingMode, reshape_identity: bool) -> Self {
+        if mode == super::DvProcessingMode::Fel || !reshape_identity {
+            Self {
+                light: None,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+    /// What the re-exported picture declares. The mastering display is the
+    /// source's own. Its content light levels describe the source's samples;
+    /// this render writes new 10-bit codes, which can round a component up, so
+    /// each stated level is raised by that one export step (and no further
+    /// than PQ's 10000). The identity above keeps the levels as stated.
+    pub fn output_metadata(self) -> Result<crate::fmp4::Hdr10OutputMetadata, DvContractError> {
+        let invalid = || DvContractError::Invalid("source HDR10 metadata cannot be represented");
+        // Validate the declaration as stated before deriving anything from it.
+        crate::fmp4::Hdr10OutputMetadata::from_source(
+            self.primaries_rgbw,
+            self.max_1e4_nits,
+            self.min_1e4_nits,
+            self.light,
+        )
+        .map_err(|_| invalid())?;
+        let bound = |level: u16| match level {
+            0 => 0,
+            level => export_max_cll(f64::from(level)).min(10_000),
+        };
+        crate::fmp4::Hdr10OutputMetadata::from_source(
+            self.primaries_rgbw,
+            self.max_1e4_nits,
+            self.min_1e4_nits,
+            self.light.map(|light| light.map(bound)),
+        )
+        .map_err(|_| invalid())
+    }
+}
+
+/// The largest excursion of one decoded R'G'B' component caused by the
+/// export's round-to-nearest 10-bit limited-range BT.2020 NCL codes: half a
+/// luma code (1/876) plus the blue-difference weight (1.8814) of half a chroma
+/// code (1/896). Red (1.4746) and green are smaller.
+const EXPORT_ROUNDING_PQ: f64 = 0.5 / 876.0 + 1.8814 * 0.5 / 896.0;
+
+/// MaxCLL of a render whose every component is clipped to `peak_nits` before
+/// the 10-bit export: the peak plus that rounding excursion, rounded up. It
+/// bounds every decoded sample of a flat field; no static value bounds what
+/// 4:2:0 chroma filtering can add across a saturated edge.
+fn export_max_cll(peak_nits: f64) -> u16 {
+    pq_eotf_f64((pq_code_f64(peak_nits) + EXPORT_ROUNDING_PQ).min(1.0)).ceil() as u16
+}
+
+/// The MaxCLL a display-targeted render of an eligible title declares.
+pub fn display_target_max_cll(nits: u32) -> u16 {
+    export_max_cll(f64::from(nits))
+}
+
 /// ST 2084 inverse EOTF of absolute nits (the helper's `dm_pq_oetf`).
 fn pq_code_f64(nits: f64) -> f64 {
     let p = (nits / 10000.0).powf(2610.0 / 16384.0);
@@ -449,7 +559,11 @@ fn pq_code_f64(nits: f64) -> f64 {
 }
 
 fn pq_nits(code: u16) -> f64 {
-    let p = (f64::from(code) / 4095.0).powf(32.0 / 2523.0);
+    pq_eotf_f64(f64::from(code) / 4095.0)
+}
+/// ST 2084 EOTF of a normalized code.
+fn pq_eotf_f64(value: f64) -> f64 {
+    let p = value.powf(32.0 / 2523.0);
     10000.0
         * ((p - 3424.0 / 4096.0).max(0.0) / (2413.0 / 128.0 - 2392.0 / 128.0 * p))
             .powf(16384.0 / 2610.0)
@@ -537,7 +651,7 @@ mod tests {
             );
         };
         // CM v2.9: exact 12-bit match, else linear in target PQ between the bracketing L2
-        // targets, with neutral ones at PQ 0 and at the mastering peak (4000 here); raw
+        // targets, with neutral ones at the mastering minimum and peak (4000 here); raw
         // ms_weight -1 is 0. The interpolated weights are pinned in test_dv_dm.c too.
         let cm29 = build(false, vec![l2(2081, -1), l2(3079, 1800)]);
         let weight = (1800.0 - 2048.0) / 2048.0;
@@ -558,7 +672,8 @@ mod tests {
         near(600, -0.09346839266980962);
         near(1600, -0.07994135942825827);
         near(2000, -0.060392435898949166);
-        // below the lowest target: PQ(600) / PQ(3079) of that trim
+        // below the lowest target: (PQ(600) - PQ(min)) / (PQ(3079) - PQ(min)) of that trim, min the
+        // fixture's L6 mastering minimum
         let held = target(600)
             .display_management_with(&build(false, vec![l2(3079, 1800)]), true, true)
             .expect("selection");
@@ -566,10 +681,10 @@ mod tests {
             (held.cm4, held.curve, held.trim_targets),
             (false, "cm29-l2-interpolated", 1)
         );
-        assert!((held.detail_weight - -0.1121395094623157).abs() < 1e-12);
-        // A title mastered at 1000 nits: the trims fade to neutral at its peak, not at 4000. The
-        // 3079 trim is above PQ(1000) and does not count as a target below the peak; a CM v4 trim
-        // at the mastering peak has faded out. Pinned in test_dv_dm.c too.
+        assert!((held.detail_weight - -0.11211961090243337).abs() < 1e-12);
+        // A title mastered at 1000 nits: a trim without an L2 above it fades to neutral at that
+        // peak, not at 4000. An L2 at the mastering peak brackets lower buckets and is applied at
+        // its own; a CM v4 trim at the mastering peak has faded out. Pinned in test_dv_dm.c too.
         let mastered = |nits| {
             let mut stats = stats();
             stats.mastering_luminance = TitleConstant::Consistent(MasteringLuminance {
@@ -590,13 +705,15 @@ mod tests {
         let (cm4, curve, trims, w) = at_1000(&build(false, vec![l2(2081, 1800)]), 600);
         assert_eq!((cm4, curve, trims), (false, "cm29-l2-interpolated", 1));
         assert!((w - -0.02760024702986694).abs() < 1e-12, "{w}");
-        assert_eq!(
-            at_1000(&build(false, vec![l2(3079, 1800)]), 600),
-            (false, "cm29-l1-only", 0, 0.0)
-        );
-        // an L2 authored for the mastering peak itself is not applied at it
+        let (cm4, curve, trims, w) = at_1000(&build(false, vec![l2(3079, 1800)]), 600);
+        assert_eq!((cm4, curve, trims), (false, "cm29-l2-interpolated", 1));
+        assert!((w - -0.11211961090243337).abs() < 1e-12, "{w}");
         assert_eq!(
             at_1000(&build(false, vec![l2(3079, 1800)]), 1000),
+            (false, "cm29-l2-exact", 1, weight)
+        );
+        assert_eq!(
+            at_1000(&build(false, vec![l2(3079, 1800)]), 2000),
             (false, "cm29-l1-only", 0, 0.0)
         );
         assert_eq!(
@@ -872,7 +989,8 @@ mod tests {
                 .expect("resolve source MDCV")
                 .output_metadata()
                 .expect("source MDCV fallback"),
-            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 17, 1600).expect("expected metadata")
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 17, display_target_max_cll(1600))
+                .expect("expected metadata")
         );
         let known = target(
             TitleConstant::Consistent(MasteringLuminance {
@@ -891,7 +1009,8 @@ mod tests {
                 .expect("resolve L6/L9")
                 .output_metadata()
                 .expect("L6/L9 win"),
-            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 50, 1600).expect("expected metadata")
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 50, display_target_max_cll(1600))
+                .expect("expected metadata")
         );
         for contradictory in [
             target(TitleConstant::Inconsistent, TitleConstant::Unknown),
@@ -937,11 +1056,13 @@ mod tests {
         assert_eq!(fallback.endpoint_args(), ["50", "4000"]);
         assert_eq!(
             resolved.output_metadata().expect("resolved metadata"),
-            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 17, 1600).expect("expected metadata")
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 17, display_target_max_cll(1600))
+                .expect("expected metadata")
         );
         assert_eq!(
             fallback.output_metadata().expect("fallback metadata"),
-            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 50, 1600).expect("expected metadata")
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 50, display_target_max_cll(1600))
+                .expect("expected metadata")
         );
         let export = |target| DvExportPolicy::DisplayTargetYuv420p10V1 {
             raster: (64, 64),
@@ -995,6 +1116,210 @@ mod tests {
                 .endpoint_args(),
             ["50", "4000"]
         );
+    }
+
+    #[test]
+    fn master_grade_export_identity_binds_the_source_declarations() {
+        use super::super::DvExportPolicy;
+        let raster = (64, 64);
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let undeclared = DvExportPolicy::PqBilinearYuv420p10V1 { raster };
+        assert_eq!(DvExportPolicy::for_master(raster, None), undeclared);
+        let declared = |max, min, light| {
+            DvExportPolicy::for_master(
+                raster,
+                Some(DvMasterMetadata::new(p3, max, min, light).expect("source metadata")),
+            )
+        };
+        let silent = declared(10_000_000, 1, None);
+        assert_eq!(silent.master_metadata().map(|m| m.light), Some(None));
+        assert_eq!(silent.display_target(), None);
+        assert_eq!(silent.output_policy(), "bt2020-pq-master-clip");
+        assert_eq!(silent.raster((64, 64)).expect("raster"), raster);
+        // A zero MaxCLL is the source saying nothing, whatever its MaxFALL.
+        assert_eq!(silent, declared(10_000_000, 1, Some([0, 400])));
+        let mut identities = std::collections::BTreeSet::from([undeclared.target_parameters()]);
+        for policy in [
+            silent,
+            declared(10_000_000, 50, None),
+            declared(40_000_000, 1, None),
+            declared(10_000_000, 1, Some([450, 0])),
+            declared(10_000_000, 1, Some([450, 120])),
+        ] {
+            assert!(identities.insert(policy.target_parameters()), "{policy:?}");
+            assert_eq!(
+                policy
+                    .master_metadata()
+                    .expect("declared")
+                    .output_metadata()
+                    .expect("metadata"),
+                {
+                    let m = policy.master_metadata().expect("declared");
+                    crate::fmp4::Hdr10OutputMetadata::from_source(
+                        m.primaries_rgbw,
+                        m.max_1e4_nits,
+                        m.min_1e4_nits,
+                        m.light.map(|light| {
+                            light.map(|level| match level {
+                                0 => 0,
+                                level => display_target_max_cll(level.into()),
+                            })
+                        }),
+                    )
+                    .expect("same declaration")
+                }
+            );
+        }
+        assert!(DvMasterMetadata::new(p3, 0, 0, None).is_err());
+        assert!(DvMasterMetadata::new([0; 8], 10_000_000, 1, None).is_err());
+    }
+
+    /// A reconstructed master is not the base layer's picture: with the
+    /// enhancement layer, or with reshaping that is not the identity, it keeps
+    /// the mastering display and drops the base layer's light levels.
+    #[test]
+    fn reconstructed_master_keeps_mastering_and_omits_base_layer_light_levels() {
+        use super::super::{DvExportPolicy, DvProcessingMode};
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let from_source = crate::fmp4::Hdr10OutputMetadata::from_source;
+        let stated = DvMasterMetadata::new(p3, 40_000_000, 50, Some([1187, 320])).expect("stated");
+        let mastering_only = from_source(p3, 40_000_000, 50, None).expect("mastering only");
+        for (mode, reshape_identity) in [
+            (DvProcessingMode::Fel, true),
+            (DvProcessingMode::Fel, false),
+            (DvProcessingMode::BaseRpu, false),
+        ] {
+            let processed = stated.for_processed(mode, reshape_identity);
+            assert_eq!(processed.light, None, "{mode:?} {reshape_identity}");
+            assert_eq!(
+                processed.output_metadata().expect("declared"),
+                mastering_only
+            );
+            // The export identity is the mastering-only one, whatever the
+            // base layer stated: two sources differing only there share it.
+            assert_eq!(
+                DvExportPolicy::for_master((64, 64), Some(processed)),
+                DvExportPolicy::for_master(
+                    (64, 64),
+                    Some(DvMasterMetadata::new(p3, 40_000_000, 50, None).expect("mastering")),
+                )
+            );
+        }
+        // Only an unchanged base-layer picture keeps its stated levels.
+        let unchanged = stated.for_processed(DvProcessingMode::BaseRpu, true);
+        assert_eq!(unchanged, stated);
+        assert_ne!(
+            unchanged.output_metadata().expect("declared"),
+            mastering_only
+        );
+        // The runtime has no title-wide proof of identity reshaping, so it
+        // never claims one.
+        let runtime = include_str!("../../../../plurxd/src/dv_runtime.rs");
+        assert!(runtime.contains(".for_processed(self.mode, false)"));
+        assert!(!runtime.contains(".for_processed(self.mode, true)"));
+    }
+
+    /// A master-grade render re-exports the picture, so its stated light
+    /// levels must be valid and must still bound the re-exported samples.
+    #[test]
+    fn master_grade_light_levels_are_valid_and_bound_the_re_export() {
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let from_source = crate::fmp4::Hdr10OutputMetadata::from_source;
+        // Beyond PQ's range the record is malformed and declares nothing.
+        for light in [[10_001, 0], [450, 10_001], [u16::MAX, u16::MAX]] {
+            assert!(DvMasterMetadata::new(p3, 10_000_000, 1, Some(light)).is_err());
+        }
+        for (stated, declared) in [
+            ([400, 0], [407, 0]),
+            ([1000, 400], [1015, 407]),
+            ([10_000, 10_000], [10_000, 10_000]),
+        ] {
+            let metadata = DvMasterMetadata::new(p3, 10_000_000, 1, Some(stated)).expect("stated");
+            // The identity is the source's statement; the declaration covers
+            // the export's rounding step, exactly as a targeted render's does.
+            assert_eq!(metadata.light, Some(stated));
+            assert_eq!(
+                metadata.output_metadata().expect("declared"),
+                from_source(p3, 10_000_000, 1, Some(declared)).expect("bounded")
+            );
+            for (level, bounded) in stated.into_iter().zip(declared) {
+                assert!(bounded >= level);
+                assert_eq!(
+                    bounded,
+                    display_target_max_cll(level.into()).max(level).min(10_000)
+                        * u16::from(level != 0)
+                );
+                // A flat field at the stated level decodes at or below the declaration.
+                if level != 0 {
+                    let code = pq_code_f64(f64::from(level));
+                    let peak = export_round_trip([code; 3]).into_iter().fold(0.0, f64::max);
+                    assert!(pq_eotf_f64(peak) <= f64::from(bounded), "{level} {bounded}");
+                }
+            }
+        }
+        // Mastering alone still declares no light level.
+        assert_eq!(
+            DvMasterMetadata::new(p3, 10_000_000, 1, None)
+                .expect("mastering")
+                .output_metadata()
+                .expect("declared"),
+            from_source(p3, 10_000_000, 1, None).expect("mastering only")
+        );
+    }
+
+    /// Limited-range 10-bit BT.2020 NCL codes of a PQ-coded colour, rounded to
+    /// nearest as the export writes them, decoded back at the same site.
+    fn export_round_trip(rgb: [f64; 3]) -> [f64; 3] {
+        let luma = 0.2627 * rgb[0] + 0.6780 * rgb[1] + 0.0593 * rgb[2];
+        let y = (64.0 + 876.0 * luma).round();
+        let cb = (512.0 + 896.0 * (rgb[2] - luma) / 1.8814).round();
+        let cr = (512.0 + 896.0 * (rgb[0] - luma) / 1.4746).round();
+        let (luma, cb, cr) = (
+            (y - 64.0) / 876.0,
+            (cb - 512.0) / 896.0,
+            (cr - 512.0) / 896.0,
+        );
+        let (red, blue) = (luma + 1.4746 * cr, luma + 1.8814 * cb);
+        [red, (luma - 0.2627 * red - 0.0593 * blue) / 0.6780, blue]
+    }
+
+    #[test]
+    fn targeted_max_cll_bounds_every_exported_flat_colour() {
+        for nits in DISPLAY_TARGET_BUCKETS {
+            let declared = display_target_max_cll(nits);
+            // More than the bucket, by the export's rounding step and no more.
+            assert!(u32::from(declared) > nits, "{nits}: {declared}");
+            assert!(
+                f64::from(declared) <= f64::from(nits) * 1.025,
+                "{nits}: {declared}"
+            );
+            let clip = pq_code_f64(f64::from(nits));
+            let mut worst: f64 = 0.0;
+            let mut exceeded_bucket = false;
+            // Every colour the mapper can emit has all components at or below
+            // the clip; the brightest have one, two or three of them on it.
+            const STEPS: u32 = 96;
+            for a in 0..=STEPS {
+                for b in 0..=STEPS {
+                    let (a, b) = (
+                        clip * f64::from(a) / f64::from(STEPS),
+                        clip * f64::from(b) / f64::from(STEPS),
+                    );
+                    for rgb in [[clip, a, b], [a, clip, b], [a, b, clip]] {
+                        for component in export_round_trip(rgb) {
+                            let light = pq_eotf_f64(component.clamp(0.0, 1.0));
+                            worst = worst.max(light);
+                            exceeded_bucket |= light > f64::from(nits);
+                        }
+                    }
+                }
+            }
+            assert!(worst <= f64::from(declared), "{nits}: {worst} > {declared}");
+            // The old declaration (the bucket itself) did not bound the export.
+            assert!(exceeded_bucket, "{nits}: export never left the bucket");
+        }
+        assert_eq!(display_target_max_cll(400), 407);
+        assert_eq!(display_target_max_cll(10_000), 10_000);
     }
 
     #[test]

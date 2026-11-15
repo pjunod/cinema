@@ -467,7 +467,7 @@ extension SharedPlaybackPlan {
         let request = try SharedPreparedHandoff.successorRequest(self.request, selection: selection, positionMs: positionMs)
         let session = offer.action.sessionId
         var wire: [String: Any] = [
-            "session_id": session, "playlist_url": offer.action.playlistUrl, "vod": true,
+            "session_id": session, "playlist_url": offer.action.playlistUrl, "vod": false,
             "start_seconds": request.start ?? 0, "media_origin_ms": offer.action.mediaOriginMs,
             "control": ["protocol": offer.control.proto, "url": offer.control.url, "generation": offer.control.generation,
                         "control_epoch": offer.control.controlEpoch, "next_exchange_ms": offer.control.nextExchangeMs,

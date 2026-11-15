@@ -793,11 +793,20 @@ impl<'a> PublicationStore<'a> {
         root_fingerprint: &str,
         gone_file_ids: &[i64],
         prune_limit: u64,
+        offload_keep: &[i64],
+        offloaded_at: i64,
     ) -> Result<ReconcileOutcome, StoreError> {
         if self.fence.is_none() {
             return self
                 .store
-                .reconcile_library(library_id, root_fingerprint, gone_file_ids, prune_limit)
+                .reconcile_library(
+                    library_id,
+                    root_fingerprint,
+                    gone_file_ids,
+                    prune_limit,
+                    offload_keep,
+                    offloaded_at,
+                )
                 .await;
         }
         self.fenced_call(move |lease, replacement| {
@@ -808,6 +817,8 @@ impl<'a> PublicationStore<'a> {
                         root_fingerprint,
                         gone_file_ids,
                         prune_limit,
+                        offload_keep,
+                        offloaded_at,
                         &lease,
                         &replacement,
                     )

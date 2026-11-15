@@ -53,6 +53,15 @@ where
     .await
 }
 
+/// Whether a claimed library job is a contract v2 targeted job.
+pub(super) fn is_targeted(job: &plurx_core::store::background_jobs::BackgroundJob) -> bool {
+    matches!(
+        job.supported_payload(),
+        Ok(JobPayload::LibraryScan { generation, .. })
+            if generation == plurx_core::store::background_jobs_library::LIBRARY_TARGETED_GENERATION
+    )
+}
+
 pub(super) struct TokioEnvironment<'a> {
     // Rust drops fields in declaration order, so the order below IS the release
     // order when this environment is dropped without the driver finishing
@@ -79,7 +88,15 @@ pub(super) struct TokioEnvironment<'a> {
     library_id: i64,
     fence: crate::background_jobs::JobFence,
     work_result: Option<Result<(), StoreError>>,
+    /// The library's mutation fence was held by another job when this one
+    /// asked for it.
+    domain_refused: bool,
 }
+
+/// How soon a targeted job refused by the library fence may be claimed again.
+/// The fence holder's release wakes this node's library loop at once; other
+/// nodes reach it within their next idle poll.
+const TARGETED_FENCE_REPOLL_MS: i64 = 250;
 
 impl<'a> TokioEnvironment<'a> {
     pub(super) fn new(
@@ -104,6 +121,7 @@ impl<'a> TokioEnvironment<'a> {
             work: None,
             completed: None,
             work_result: None,
+            domain_refused: false,
         }
     }
 
@@ -235,14 +253,35 @@ impl Environment for TokioEnvironment<'_> {
                         true
                     }
                     result => {
+                        let fence_held = result.is_ok();
+                        if let Err(error) = result {
+                            tracing::warn!(library_id = self.library_id, %error, "library domain lease unavailable");
+                        }
+                        self.domain_refused = true;
+                        // Only a lease another worker holds is `full_scan:`;
+                        // an unreachable coordinator names no wait.
+                        if fence_held && is_targeted(&self.job) {
+                            // Another worker holds the library's mutation
+                            // fence — a full scan or a metadata refresh, both
+                            // reported as `full_scan:<library>`. A targeted job
+                            // never runs beside it (its reconcile would prune
+                            // what this one inserts), so it yields and says so.
+                            let name = match self.manager.store.get_library(self.library_id).await {
+                                Ok(Some(library)) => library.name,
+                                _ => self.library_id.to_string(),
+                            };
+                            crate::background_jobs::note_targeted_wait(
+                                self.manager.store.as_ref(),
+                                &self.job.id,
+                                &format!("full_scan:{name}"),
+                            )
+                            .await;
+                        }
                         #[cfg(test)]
                         crate::background_jobs::faults::worker::at(
                             crate::background_jobs::faults::worker::Point::DomainUnavailable,
                         )
                         .await;
-                        if let Err(error) = result {
-                            tracing::warn!(library_id = self.library_id, %error, "library domain lease unavailable");
-                        }
                         false
                     }
                 };
@@ -264,6 +303,15 @@ impl Environment for TokioEnvironment<'_> {
                     .await
                 {
                     Ok(true) => {
+                        if is_targeted(&self.job) {
+                            // Running now: nothing is in its way any more.
+                            crate::background_jobs::note_targeted_wait(
+                                self.manager.store.as_ref(),
+                                &self.job.id,
+                                "",
+                            )
+                            .await;
+                        }
                         #[cfg(test)]
                         crate::background_jobs::faults::worker::at(
                             crate::background_jobs::faults::worker::Point::Bound,
@@ -341,6 +389,12 @@ impl Environment for TokioEnvironment<'_> {
                     }
                 }
                 if !unbound {
+                    // A targeted request refused by this fence may be waiting:
+                    // let this node's library loop claim it now rather than at
+                    // its next idle poll (contract v2 §5.1).
+                    if !is_targeted(&self.job) {
+                        self.manager.library_wake.notify_one();
+                    }
                     #[cfg(test)]
                     crate::background_jobs::faults::worker::at(
                         crate::background_jobs::faults::worker::Point::ReleaseFinished,
@@ -373,13 +427,22 @@ impl Environment for TokioEnvironment<'_> {
                 }
             }
             Request::Settle(settlement) => {
+                // The shared driver defers any fence refusal by five seconds.
+                // A targeted request waits only for the fence itself: its
+                // retry is due almost at once, and the holder's release wakes
+                // the loop that claims it.
+                let targeted_refusal = self.domain_refused && is_targeted(&self.job);
                 settle_library(
                     &self.fence,
                     match settlement {
                         Settlement::Yield { not_before_ms } => JobSettlement::Yield {
                             error_code: None,
                             checkpoint: None,
-                            not_before_ms,
+                            not_before_ms: if targeted_refusal {
+                                not_before_ms.min(clock_ms() + TARGETED_FENCE_REPOLL_MS)
+                            } else {
+                                not_before_ms
+                            },
                         },
                         Settlement::Retry { not_before_ms } => JobSettlement::Retry {
                             error_code: "library_execution_failed".into(),

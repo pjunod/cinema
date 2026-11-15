@@ -22,6 +22,14 @@ pub(crate) enum RemoteStartError {
     Status(StatusCode),
     RestartDrain,
     ServingFence,
+    /// A capacity refusal no retry of the same start can outlive. Still the
+    /// 503 every refusal of the class answers, so an older ingress reads it
+    /// exactly as before; the body names the code for one that can tell.
+    TerminalCapacity(&'static str),
+    /// This owner's plan at the request's binding differs even from
+    /// Authority (D3b): the 409 a changed source has always answered, with a
+    /// body naming the code so the ingress can close its own view.
+    PlanChanged,
 }
 
 impl From<StatusCode> for RemoteStartError {
@@ -58,6 +66,18 @@ impl IntoResponse for RemoteStartError {
                     .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
                 response
             }
+            Self::PlanChanged => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "code": crate::media_sessions::REMOTE_START_PLAN_CHANGED
+                })),
+            )
+                .into_response(),
+            Self::TerminalCapacity(code) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "code": code })),
+            )
+                .into_response(),
         }
     }
 }
@@ -176,9 +196,56 @@ pub(crate) async fn start(
         .principal
         .local_user_id()
         .ok_or(StatusCode::FORBIDDEN)?;
-    if !state.media_pool.remote_placement_ready(&state).await {
+    // This owner's one plan for the start (D3b, contract §4.3): its own view
+    // at the binding the ingress planned at, Authority once on a mismatch,
+    // and Authority for a legacy route that carries no binding. Read first so
+    // placement answers from it; its refusals keep their order below.
+    // Bounded as the restore stage it replaced (review S4): the owner's
+    // snapshot read ran under `deadline.min(create_stage_deadline(2 s))`.
+    let plan = tokio::time::timeout_at(
+        start_deadline.min(crate::media_pool::create_stage_deadline(
+            std::time::Duration::from_secs(2),
+        )),
+        super::hls::start_plan::owner_plan(
+            &state.applied,
+            request.request.file_id,
+            request
+                .candidate_catalog
+                .as_ref()
+                .map(|catalog| &catalog.binding),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(super::hls::start_plan::OwnerPlanError::Store(
+            plurx_core::error::StoreError::Task(
+                "the owner's planning read exceeded its stage deadline".to_owned(),
+            ),
+        ))
+    });
+    if !state
+        .media_pool
+        .remote_placement_ready(&state, plan.as_ref().ok().and_then(Option::as_ref))
+        .await
+    {
         return Err(StatusCode::SERVICE_UNAVAILABLE.into());
     }
+    let plan = match plan {
+        Ok(plan) => plan,
+        // Authority holds another revision than the ingress planned at: the
+        // answer this route has always given a changed source.
+        Err(super::hls::start_plan::OwnerPlanError::Changed) => {
+            return Err(RemoteStartError::PlanChanged)
+        }
+        Err(super::hls::start_plan::OwnerPlanError::Store(error)) => {
+            tracing::warn!(target: "plurxd::http::hls",
+                incarnation_id = %request.incarnation_id,
+                %error,
+                "remote start could not read its planning inputs"
+            );
+            return Err(StatusCode::SERVICE_UNAVAILABLE.into());
+        }
+    };
     let user = state
         .store
         .get_user(user_id)
@@ -187,7 +254,7 @@ pub(crate) async fn start(
         .ok_or(StatusCode::NOT_FOUND)?;
     state
         .transcode
-        .restore_candidate_context_with_deadline(&mut request, start_deadline)
+        .restore_candidate_context_with_deadline(&mut request, start_deadline, plan.as_ref())
         .await
         .map_err(|error| {
             if error.is_incompatible() {
@@ -201,183 +268,218 @@ pub(crate) async fn start(
     // owned operation. If the peer disconnects after ffmpeg starts, dropping
     // this HTTP future cannot strand the worker before the watcher is armed.
     let start_state = state.clone();
-    let start_task = tokio::spawn(async move {
-        let _restart_admission = restart_admission;
-        let started = start_state
-            .transcode
-            .create_cluster_session_for_receiver(
-                (
-                    &request.request,
-                    request.retained_output_receiver,
-                    request.retained_output.as_ref(),
+    // A spawned task does not inherit the request's Store-operation scope, so
+    // without this the owner's own planning, settings, probe and file reads
+    // were attributed to nothing. `spawn_in_http_store_scope` carries the
+    // request's counts in, and this start reports its own window by Store
+    // method (D3a, section 7.1-2). The confirmation watcher below, the
+    // activation task and the abort settlement outlive their request on
+    // purpose and stay unscoped: the watcher makes one route read after the
+    // response, and neither of the others is a start.
+    let start_task = plurx_core::store::spawn_in_http_store_scope(|owner_counts| {
+        async move {
+            let _restart_admission = restart_admission;
+            let owner_before = owner_counts.snapshot();
+            let owner_methods_before = owner_counts.method_snapshot();
+            let started = start_state
+                .transcode
+                .create_cluster_session_for_receiver(
+                    (
+                        &request.request,
+                        request.retained_output_receiver,
+                        request.retained_output.as_ref(),
+                    ),
+                    // A relayed worker start carries no epoch: `RemoteStartRequest`
+                    // is the recipe the owning node sends, and the epoch is not on
+                    // it. Adding one is a change to a relayed type and therefore a
+                    // fleet rollout, so it is deliberately not taken here — an
+                    // empty epoch is refused by the ledger, which makes this "no
+                    // budget" rather than a second one.
+                    //
+                    // **This gap is inverted, and it is worse than it reads.** The
+                    // owning node runs the same activation for a relayed start as
+                    // for a local one, so the durable row *does* get a real epoch;
+                    // it is only the node holding the producer that does not. And
+                    // ranked placement steers work away from a busy local node, so
+                    // the relayed path is the loaded one — which is where decode
+                    // faults cluster. The durable bound is therefore available on
+                    // the least-loaded path and absent on the most-loaded one.
+                    // Owed until the epoch reaches this recipe.
+                    &crate::transcode::SessionRecoveryIdentity {
+                        principal: request.principal.clone(),
+                        incarnation_id: request.incarnation_id.clone(),
+                        recovery_epoch: String::new(),
+                    },
+                    &user.username,
+                    start_deadline,
+                    admitted_serving_generation,
+                    plan.as_ref(),
+                )
+                .await;
+            // The owner's own window, by Store method, keyed by the incarnation:
+            // the reads and writes a remote start makes that the ingress never
+            // sees (D3 acceptance reads the planning, settings, probe and file
+            // reads here and wants them to be zero).
+            let owner_after = owner_counts.snapshot();
+            tracing::info!(target: "plurxd::http::hls",
+                incarnation_id = %request.incarnation_id,
+                authority_reads = owner_after[1].saturating_sub(owner_before[1]),
+                local_reads = owner_after[0].saturating_sub(owner_before[0]),
+                mutations = owner_after[2].saturating_sub(owner_before[2]),
+                methods = %plurx_core::store::format_method_counts(
+                    &owner_counts.method_snapshot_since(&owner_methods_before),
                 ),
-                // A relayed worker start carries no epoch: `RemoteStartRequest`
-                // is the recipe the owning node sends, and the epoch is not on
-                // it. Adding one is a change to a relayed type and therefore a
-                // fleet rollout, so it is deliberately not taken here — an
-                // empty epoch is refused by the ledger, which makes this "no
-                // budget" rather than a second one.
-                //
-                // **This gap is inverted, and it is worse than it reads.** The
-                // owning node runs the same activation for a relayed start as
-                // for a local one, so the durable row *does* get a real epoch;
-                // it is only the node holding the producer that does not. And
-                // ranked placement steers work away from a busy local node, so
-                // the relayed path is the loaded one — which is where decode
-                // faults cluster. The durable bound is therefore available on
-                // the least-loaded path and absent on the most-loaded one.
-                // Owed until the epoch reaches this recipe.
-                &crate::transcode::SessionRecoveryIdentity {
-                    principal: request.principal.clone(),
-                    incarnation_id: request.incarnation_id.clone(),
-                    recovery_epoch: String::new(),
-                },
-                &user.username,
+                "remote start store operations finished"
+            );
+            let started = started?;
+            // Creation publishes the local worker before the shared-cache pin can
+            // complete. Keep the exact worker, request claim, and replacement
+            // gate owned across every cancellation, error, or panic after that
+            // publication point; the confirmation watcher takes this guard below.
+            let crate::transcode::ClusterSessionStart {
+                info,
+                replacement,
+                created,
+            } = started;
+            let guard = Some(if created {
+                super::hls::StartedSessionGuard::worker_only(
+                    start_state.clone(),
+                    start_state.node_id.clone(),
+                    request.incarnation_id.clone(),
+                    info.session_id.clone(),
+                    request.principal.clone(),
+                    request.incarnation_id.clone(),
+                    Some(replacement),
+                )
+            } else {
+                super::hls::StartedSessionGuard::replayed(
+                    start_state.clone(),
+                    start_state.node_id.clone(),
+                    request.incarnation_id.clone(),
+                    info.session_id.clone(),
+                    request.principal.clone(),
+                    request.incarnation_id.clone(),
+                    Some(replacement),
+                )
+            });
+            if !serving_authority.is_current(admitted_serving_generation) {
+                return Err(crate::transcode::serving_fence_error(
+                    "the node lost authority before the remote worker could be pinned",
+                ));
+            }
+            let provisional_pin_ms =
+                i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis())
+                    .unwrap_or(i64::MAX);
+            let pinned = pin_shared_session_before_deadline(
                 start_deadline,
-                admitted_serving_generation,
+                start_state.transcode.pin_shared_session(
+                    &info.session_id,
+                    &request.incarnation_id,
+                    1,
+                    unix_ms().saturating_add(provisional_pin_ms),
+                ),
             )
             .await?;
-        // Creation publishes the local worker before the shared-cache pin can
-        // complete. Keep the exact worker, request claim, and replacement
-        // gate owned across every cancellation, error, or panic after that
-        // publication point; the confirmation watcher takes this guard below.
-        let crate::transcode::ClusterSessionStart {
-            info,
-            replacement,
-            created,
-        } = started;
-        let guard = Some(if created {
-            super::hls::StartedSessionGuard::worker_only(
-                start_state.clone(),
-                start_state.node_id.clone(),
-                request.incarnation_id.clone(),
-                info.session_id.clone(),
-                request.principal.clone(),
-                request.incarnation_id.clone(),
-                Some(replacement),
-            )
-        } else {
-            super::hls::StartedSessionGuard::replayed(
-                start_state.clone(),
-                start_state.node_id.clone(),
-                request.incarnation_id.clone(),
-                info.session_id.clone(),
-                request.principal.clone(),
-                request.incarnation_id.clone(),
-                Some(replacement),
-            )
-        });
-        if !serving_authority.is_current(admitted_serving_generation) {
-            return Err(crate::transcode::serving_fence_error(
-                "the node lost authority before the remote worker could be pinned",
-            ));
-        }
-        let provisional_pin_ms =
-            i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
-        let pinned = pin_shared_session_before_deadline(
-            start_deadline,
-            start_state.transcode.pin_shared_session(
-                &info.session_id,
-                &request.incarnation_id,
-                1,
-                unix_ms().saturating_add(provisional_pin_ms),
-            ),
-        )
-        .await?;
-        if !pinned {
-            return Err("shared cache generation changed before activation".to_owned());
-        }
-        if !serving_authority.is_current(admitted_serving_generation) {
-            return Err(crate::transcode::serving_fence_error(
-                "the node lost authority before remote activation confirmation",
-            ));
-        }
-        let mut response = RemoteStartResponse::from(info);
-        if negotiated_ownership {
-            response.activation_generation = Some(admitted_serving_generation);
-        }
-        let confirmation_state = start_state.clone();
-        let confirmation_incarnation = request.incarnation_id.clone();
-        let confirmation_session = response.session_id.clone();
-        tokio::spawn(async move {
-            // Ownership crosses into this cancellation-independent watcher
-            // before the start task returns its response.
-            let mut guard = guard;
-            let mut confirmed_lease = None;
-            let deadline = tokio::time::Instant::now() + REMOTE_ACTIVATION_CONFIRMATION_WINDOW;
-            loop {
-                match tokio::time::timeout_at(
-                    deadline,
-                    confirmation_state
-                        .store
-                        .media_session_route_by_incarnation(&confirmation_incarnation),
-                )
-                .await
-                {
-                    Ok(Ok(Some(route)))
-                        if route.session_id == confirmation_session
-                            && route.owner_node_id == confirmation_state.node_id
-                            && route.owner_epoch == 1
-                            && route.state == "active"
-                            && route.publication_ready_at_ms
-                                != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
-                            && route.lease_expires_at_ms > unix_ms() =>
-                    {
-                        if !serving_authority.is_current(admitted_serving_generation) {
-                            break;
-                        }
-                        if confirmed_lease.is_some_and(|lease_expires_at_ms| {
-                            route.lease_expires_at_ms > lease_expires_at_ms
-                        }) {
-                            // Both a finite predecessor handoff and a
-                            // response-published route enter owner inventory.
-                            // A lease advance proves the ordinary lease loop
-                            // accepted durable worker ownership; publication
-                            // remains fenced until the request resolves, but
-                            // the provisional START owner may now retire.
-                            if let Some(guard) = guard.as_mut() {
-                                guard.disarm();
-                            }
-                            return;
-                        }
-                        confirmed_lease = Some(route.lease_expires_at_ms);
-                        let remaining =
-                            deadline.saturating_duration_since(tokio::time::Instant::now());
-                        tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
-                    }
-                    Ok(Ok(Some(route)))
-                        if route.session_id == confirmation_session
-                            && route.owner_node_id == confirmation_state.node_id
-                            && route.owner_epoch == 1
-                            && route.state == "active"
-                            && route.publication_ready_at_ms
-                                == plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
-                            && route.lease_expires_at_ms > unix_ms()
-                            && tokio::time::Instant::now() < deadline =>
-                    {
-                        let remaining =
-                            deadline.saturating_duration_since(tokio::time::Instant::now());
-                        tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
-                    }
-                    Ok(Ok(Some(_))) => break,
-                    Ok(Ok(None)) | Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
-                        let remaining =
-                            deadline.saturating_duration_since(tokio::time::Instant::now());
-                        tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
-                    }
-                    Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
-                }
+            if !pinned {
+                return Err("shared cache generation changed before activation".to_owned());
             }
-            // Dropping the armed guard performs exact local cleanup and
-            // releases the replacement gate after an unconfirmed outcome.
-        });
-        Ok::<(RemoteStartResponse, bool), String>((response, created))
+            if !serving_authority.is_current(admitted_serving_generation) {
+                return Err(crate::transcode::serving_fence_error(
+                    "the node lost authority before remote activation confirmation",
+                ));
+            }
+            let mut response = RemoteStartResponse::from(info);
+            if negotiated_ownership {
+                response.activation_generation = Some(admitted_serving_generation);
+            }
+            let confirmation_state = start_state.clone();
+            let confirmation_incarnation = request.incarnation_id.clone();
+            let confirmation_session = response.session_id.clone();
+            tokio::spawn(async move {
+                // Ownership crosses into this cancellation-independent watcher
+                // before the start task returns its response.
+                let mut guard = guard;
+                let mut confirmed_lease = None;
+                let deadline = tokio::time::Instant::now() + REMOTE_ACTIVATION_CONFIRMATION_WINDOW;
+                loop {
+                    match tokio::time::timeout_at(
+                        deadline,
+                        confirmation_state
+                            .store
+                            .media_session_route_by_incarnation(&confirmation_incarnation),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(route)))
+                            if route.session_id == confirmation_session
+                                && route.owner_node_id == confirmation_state.node_id
+                                && route.owner_epoch == 1
+                                && route.state == "active"
+                                && route.publication_ready_at_ms
+                                    != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+                                && route.lease_expires_at_ms > unix_ms() =>
+                        {
+                            if !serving_authority.is_current(admitted_serving_generation) {
+                                break;
+                            }
+                            if confirmed_lease.is_some_and(|lease_expires_at_ms| {
+                                route.lease_expires_at_ms > lease_expires_at_ms
+                            }) {
+                                // Both a finite predecessor handoff and a
+                                // response-published route enter owner inventory.
+                                // A lease advance proves the ordinary lease loop
+                                // accepted durable worker ownership; publication
+                                // remains fenced until the request resolves, but
+                                // the provisional START owner may now retire.
+                                if let Some(guard) = guard.as_mut() {
+                                    guard.disarm();
+                                }
+                                return;
+                            }
+                            confirmed_lease = Some(route.lease_expires_at_ms);
+                            let remaining =
+                                deadline.saturating_duration_since(tokio::time::Instant::now());
+                            tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
+                        }
+                        Ok(Ok(Some(route)))
+                            if route.session_id == confirmation_session
+                                && route.owner_node_id == confirmation_state.node_id
+                                && route.owner_epoch == 1
+                                && route.state == "active"
+                                && route.publication_ready_at_ms
+                                    == plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+                                && route.lease_expires_at_ms > unix_ms()
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            let remaining =
+                                deadline.saturating_duration_since(tokio::time::Instant::now());
+                            tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
+                        }
+                        Ok(Ok(Some(_))) => break,
+                        Ok(Ok(None)) | Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
+                            let remaining =
+                                deadline.saturating_duration_since(tokio::time::Instant::now());
+                            tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
+                        }
+                        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+                    }
+                }
+                // Dropping the armed guard performs exact local cleanup and
+                // releases the replacement gate after an unconfirmed outcome.
+            });
+            Ok::<(RemoteStartResponse, bool), String>((response, created))
+        }
     });
     let (response, created) = start_task
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|error| {
-            if error.contains("already used") {
+            if let Some((crate::transcode::CapacityRefusal::Terminal(code), _)) =
+                crate::transcode::capacity_refusal(&error)
+            {
+                return RemoteStartError::TerminalCapacity(code);
+            }
+            RemoteStartError::from(if error.contains("already used") {
                 StatusCode::CONFLICT
             } else if crate::transcode::is_serving_fence_error(&error)
                 || crate::transcode::is_start_infrastructure_error(&error)
@@ -386,7 +488,7 @@ pub(crate) async fn start(
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY
-            }
+            })
         })?;
     let status = remote_start_success_status(&headers, created);
     let processed_header = response.processed_dv_header();
@@ -981,7 +1083,13 @@ pub(crate) async fn control_authorized(
     state: AppState,
     request: crate::playback_control::ControlRelayRequest,
 ) -> Response {
-    let route = match state.store.media_session_route(&request.session_id).await {
+    let route = match crate::media_sessions::read_media_session_route(
+        &*state.store,
+        crate::media_sessions::RouteReadSite::Verdict,
+        &request.session_id,
+    )
+    .await
+    {
         Ok(Some(route)) => route,
         Ok(None) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);

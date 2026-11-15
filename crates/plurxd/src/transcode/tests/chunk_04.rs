@@ -909,6 +909,7 @@
                         since_ms: None,
                         event: None,
                         limit: 20,
+                        ..Default::default()
                     })
                     .await
                     .expect("segment-delivery telemetry query");
@@ -1004,6 +1005,7 @@
                         since_ms: None,
                         event: None,
                         limit: 20,
+                        ..Default::default()
                     })
                     .await
                     .expect("segment-stall telemetry query");
@@ -1085,6 +1087,7 @@
                         since_ms: None,
                         event: None,
                         limit: 20,
+                        ..Default::default()
                     })
                     .await
                     .expect("segment-delivery telemetry query")
@@ -1102,6 +1105,62 @@
         assert!(extra.contains("\"producer_superseded\":true"));
         assert!(extra.contains("\"cut_class\":\"producer_superseded\""));
         assert!(extra.contains("\"client_disposition\":\"unknown\""));
+    }
+
+    /// With the control protocol on, a processed upgrade is staged and
+    /// committed by the viewer's control stream, so its request declares film
+    /// demand whatever the client's own request promised, and its windows'
+    /// source owners register as rolling. With control off the declaration
+    /// the create path cleared stays cleared. Nothing else changes.
+    #[test]
+    fn a_processed_upgrade_request_declares_film_demand_only_under_control() {
+        let ordinary = reopen_request(7039, "playback", "incarnation", "previous");
+        assert_eq!(ordinary.source_telemetry, None);
+        let processed = crate::transcode::manager_create::processed_upgrade_request(&ordinary, true);
+        assert_eq!(
+            processed.source_telemetry,
+            Some(crate::transcode::SourceTelemetry::FilmV1)
+        );
+        let mut restored = processed.clone();
+        restored.source_telemetry = ordinary.source_telemetry;
+        assert_eq!(
+            serde_json::to_value(&restored).expect("serialize"),
+            serde_json::to_value(&ordinary).expect("serialize"),
+        );
+        let control_off = crate::transcode::manager_create::processed_upgrade_request(&ordinary, false);
+        assert_eq!(
+            serde_json::to_value(&control_off).expect("serialize"),
+            serde_json::to_value(&ordinary).expect("serialize"),
+        );
+    }
+
+    /// The trial plans, runs and stages from the declared request: the
+    /// shadowing happens before source planning reads its telemetry, and with
+    /// the same control switch and default the create path advertises.
+    #[test]
+    fn the_processed_upgrade_plans_from_its_declared_request() {
+        let source = include_str!("../manager/create.rs");
+        let body = source
+            .split_once("pub(crate) async fn prepare_processed_upgrade(")
+            .expect("prepare_processed_upgrade")
+            .1;
+        let declared = body
+            .find("let request = &processed_upgrade_request(")
+            .expect("the upgrade declares its request");
+        let planned = body
+            .find("\"processed-source-planning\"")
+            .expect("processed source planning");
+        assert!(declared < planned, "declared before source planning");
+        assert!(
+            body[declared..planned].contains("keys::PLAYBACK_CONTROL_PROTOCOL_V1"),
+            "the declaration follows the control protocol switch"
+        );
+        let rolling = include_str!("../../vod/generation.rs");
+        assert!(
+            rolling.contains("rendition.recipe.source_telemetry")
+                && rolling.contains("ForegroundSourcePolicy::Rolling"),
+            "a declared recipe registers a rolling source owner"
+        );
     }
 
     fn reopen_request(

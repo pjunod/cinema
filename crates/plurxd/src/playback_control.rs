@@ -41,6 +41,7 @@ pub(crate) const VOD_LEASE_TIMEOUT_MS: u32 = 300_000;
 /// retained delivery evidence, not a playback or owner lease.
 pub(crate) const TERMINAL_ACK_REPLAY_TTL_MS: i64 = 60_000;
 
+pub(crate) const MAX_MEDIA_ORIGIN_MILLIS: i64 = 9_007_199_254_740_991;
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const MAX_OBSERVED_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
 const MAX_ERROR_DETAIL_BYTES: usize = 512;
@@ -908,10 +909,9 @@ impl ActionAcknowledgement {
         if self.first_frame_unix_ms.is_some_and(|value| value <= 0) {
             return Err("acknowledgement.first_frame_unix_ms");
         }
-        if self
-            .committed_media_origin_ms
-            .is_some_and(|value| !(0..=MAX_MEDIA_MILLIS).contains(&value))
-        {
+        if self.committed_media_origin_ms.is_some_and(|value| {
+            !(-MAX_MEDIA_ORIGIN_MILLIS..=MAX_MEDIA_ORIGIN_MILLIS).contains(&value)
+        }) {
             return Err("acknowledgement.committed_media_origin_ms");
         }
         match self.state {
@@ -2143,7 +2143,7 @@ pub(crate) fn prepared_payload_is_valid(
         value.len() <= MAX_ACTION_ID_LEN && uuid::Uuid::parse_str(value).is_ok()
     }) && uuid::Uuid::parse_str(session_id).is_ok()
         && is_node_relative_playlist(playlist_url, session_id)
-        && (0..=MAX_MEDIA_MILLIS).contains(&media_origin_ms)
+        && (-MAX_MEDIA_ORIGIN_MILLIS..=MAX_MEDIA_ORIGIN_MILLIS).contains(&media_origin_ms)
         && effective_selection.is_valid()
 }
 
@@ -2504,7 +2504,11 @@ pub(crate) async fn verify_authority(
 ) -> Result<(), ControlStateError> {
     let route = tokio::time::timeout(
         Duration::from_secs(2),
-        store.media_session_route(session_id),
+        crate::media_sessions::read_media_session_route(
+            store,
+            crate::media_sessions::RouteReadSite::Control,
+            session_id,
+        ),
     )
     .await
     .map_err(|_| ControlStateError::Unavailable)?
@@ -6688,6 +6692,11 @@ pub(crate) enum RollingTerminalCause {
     LeaseExpired,
     StartupExpired,
     PauseExpired,
+    /// The viewer released the capability (client DELETE). A routine
+    /// lifecycle end, never a loss of serving authority.
+    Released,
+    /// An operator stopped the session from the Activity page.
+    Stopped,
 }
 
 impl RollingTerminalCause {
@@ -6698,6 +6707,21 @@ impl RollingTerminalCause {
             Self::LeaseExpired => "expired",
             Self::StartupExpired => "startup_expired",
             Self::PauseExpired => "pause_expired",
+            Self::Released => "released",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// The typed actor cause a durable terminal intent retires a rolling
+    /// generation with. Only a client release and an operator stop have a
+    /// lifecycle cause of their own; every other durable terminal (takeover,
+    /// revocation, replacement, lease loss) withdraws this node's authority
+    /// to serve the generation and stays an authority fence.
+    pub(crate) fn release_for(terminal: crate::vodserve::Terminal) -> Option<Self> {
+        match terminal {
+            crate::vodserve::Terminal::Deleted => Some(Self::Released),
+            crate::vodserve::Terminal::AdminStop => Some(Self::Stopped),
+            _ => None,
         }
     }
 
@@ -6709,6 +6733,10 @@ impl RollingTerminalCause {
             Self::LeaseExpired => Terminal::ControlExpired,
             Self::StartupExpired => Terminal::StartupExpired,
             Self::PauseExpired => Terminal::PauseExpired,
+            // Existing durable reasons, so the HTTP 410 body an older client
+            // decodes keeps its vocabulary.
+            Self::Released => Terminal::Deleted,
+            Self::Stopped => Terminal::AdminStop,
         }
     }
 
@@ -6727,6 +6755,8 @@ impl RollingTerminalCause {
             Self::LeaseExpired => 2,
             Self::StartupExpired => 3,
             Self::PauseExpired => 4,
+            Self::Released => 5,
+            Self::Stopped => 6,
         }
     }
 
@@ -6737,6 +6767,8 @@ impl RollingTerminalCause {
             Self::LeaseExpired => 3,
             Self::StartupExpired => 4,
             Self::PauseExpired => 5,
+            Self::Released => 6,
+            Self::Stopped => 7,
         }
     }
 
@@ -6747,6 +6779,8 @@ impl RollingTerminalCause {
             3 => Some(Self::LeaseExpired),
             4 => Some(Self::StartupExpired),
             5 => Some(Self::PauseExpired),
+            6 => Some(Self::Released),
+            7 => Some(Self::Stopped),
             _ => None,
         }
     }
@@ -7008,6 +7042,11 @@ pub(crate) struct RollingProducerTransitionFence {
     lease_deadline: Instant,
     install_authorization: Option<ProducerInstallCoordinate>,
     producer_signal_authorized: bool,
+    /// Typed cause of a handle-side retirement that a release or operator stop
+    /// published first. Written only by the caller that moved the shared
+    /// retirement bit from false to true, so the first retirement keeps its
+    /// cause; the actor imports it in place of the default authority fence.
+    projected_release: Option<RollingTerminalCause>,
 }
 
 impl RollingProducerTransitionFence {
@@ -7016,6 +7055,7 @@ impl RollingProducerTransitionFence {
             lease_deadline,
             install_authorization: None,
             producer_signal_authorized: true,
+            projected_release: None,
         }
     }
 }
@@ -9394,6 +9434,42 @@ struct StartupPositionObservation {
     accepted_sequence: u64,
     position_ms: i64,
     timeline_sequence: u64,
+}
+
+/// Reuse the existing pure D1 presentation observation without exposing a
+/// session authority or creating another startup timer. Rendering alone is
+/// insufficient: accepted same-timeline progress must cross the D1 threshold.
+pub(crate) struct PresentedFrameMilestone(RollingStartupState);
+impl Default for PresentedFrameMilestone {
+    fn default() -> Self {
+        Self(RollingStartupState::new())
+    }
+}
+impl PresentedFrameMilestone {
+    pub(crate) fn activate_at(&mut self, now: Instant) {
+        self.0.activate_at(now);
+    }
+    pub(crate) fn observe_control(
+        &mut self,
+        now: Instant,
+        generation: &str,
+        owner_epoch: u64,
+        producer_attempt: u64,
+        accepted_sequence: u64,
+        demand: &PlaybackDemandSnapshot,
+    ) {
+        self.0.observe_control(
+            now,
+            generation,
+            owner_epoch,
+            producer_attempt,
+            accepted_sequence,
+            demand,
+        );
+    }
+    pub(crate) fn presented(&self) -> bool {
+        matches!(self.0, RollingStartupState::Presented)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12529,7 +12605,9 @@ impl RollingControlActor {
             }
             RollingTerminalCause::End
             | RollingTerminalCause::AuthorityFence
-            | RollingTerminalCause::StartupExpired => {
+            | RollingTerminalCause::StartupExpired
+            | RollingTerminalCause::Released
+            | RollingTerminalCause::Stopped => {
                 ROLLING_LEASE_RETIREMENTS.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -12613,8 +12691,13 @@ impl RollingControlActor {
             // never revive publication or renew the actor after the timeout.
             // `was_retired` is sampled first so the normal transition wake
             // still reaches the passive executor.
+            // A release or operator stop names its cause with the bit; any
+            // other handle-side retirement is a fail-closed authority fence.
             if self.retired_fence.load(Ordering::Acquire) && !self.retired {
-                let _ = self.terminate(RollingTerminalCause::AuthorityFence);
+                let cause = transition
+                    .projected_release
+                    .unwrap_or(RollingTerminalCause::AuthorityFence);
+                let _ = self.terminate(cause);
             }
             let publication_may_win_exact_deadline = matches!(
                 &command,
@@ -14651,6 +14734,36 @@ impl RollingControlHandle {
             && now < guard.lease_deadline
     }
 
+    /// Retire this generation synchronously because its viewer released it or
+    /// an operator stopped it. The producer transition is the same as
+    /// [`Self::fence_unavailable`]; only the typed cause differs. The first
+    /// handle-side retirement wins: if the bit is already set (a serving
+    /// fence, a deadline, or the actor's own terminal), its cause stands.
+    pub(crate) fn release_unavailable(&self, cause: RollingTerminalCause) {
+        debug_assert!(matches!(
+            cause,
+            RollingTerminalCause::Released | RollingTerminalCause::Stopped
+        ));
+        let mut transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.retired.swap(true, Ordering::AcqRel) {
+            transition.projected_release = Some(cause);
+        }
+        self.producer_events.notify_flow_capacity_waiters();
+        self.flow_sync.request();
+    }
+
+    /// The release cause this handle published as its first retirement, if
+    /// a release or operator stop retired it.
+    pub(crate) fn projected_release(&self) -> Option<RollingTerminalCause> {
+        self.producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .projected_release
+    }
+
     /// A closed mailbox cannot accept another renewal. The repair loop uses
     /// this fail-closed fence before removing the orphaned session.
     pub(crate) fn fence_unavailable(&self) {
@@ -14867,10 +14980,10 @@ static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_CONTROL_COMMANDS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 static ROLLING_PRODUCER_ACTION_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-/// End, authority-fence, lease-expiry, presentation-startup expiry, and pause
-/// grace expiry; each
-/// records won/already-terminal independently.
-static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+/// End, authority-fence, lease-expiry, presentation-startup expiry, pause
+/// grace expiry, client release and operator stop; each records
+/// won/already-terminal independently.
+static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
 
 const RELAY_VALID_RESPONSE: usize = 0;
 const RELAY_TRANSPORT_ERROR: usize = 1;
@@ -15011,6 +15124,105 @@ static PREPARATIONS_STAGED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn record_preparation_staged(staged: bool) {
     PREPARATIONS_STAGED[usize::from(staged)].fetch_add(1, Ordering::Relaxed);
+}
+
+/// What one processed Dolby Vision / HDR10-E upgrade came to (plan ruling 3:
+/// an upgrade after the first frame). Index order is
+/// [`PROCESSED_UPGRADE_OUTCOMES`]; `other` keeps the sum equal to the number of
+/// first frames that scheduled one.
+pub(crate) const PROCESSED_UPGRADE_OUTCOMES: [&str; 9] = [
+    "scheduled",
+    "not_applicable",
+    "declined",
+    "admission_refused",
+    "staged",
+    "not_staged",
+    "qualification_pending",
+    "displaced",
+    "cancelled",
+];
+static PROCESSED_UPGRADES: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+
+pub(crate) fn record_processed_upgrade(outcome: &'static str) {
+    let index = PROCESSED_UPGRADE_OUTCOMES
+        .iter()
+        .position(|known| *known == outcome)
+        .unwrap_or(PROCESSED_UPGRADE_OUTCOMES.len() - 1);
+    PROCESSED_UPGRADES[index].fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn processed_upgrade_count(outcome: &str) -> u64 {
+    PROCESSED_UPGRADE_OUTCOMES
+        .iter()
+        .position(|known| *known == outcome)
+        .map_or(0, |index| PROCESSED_UPGRADES[index].load(Ordering::Relaxed))
+}
+
+/// How a client's prepared switch ended at the seam, as that client reported
+/// it (`prepared_seam` beacons). Index order is [`PREPARED_SEAM_OUTCOMES`].
+pub(crate) const PREPARED_SEAM_OUTCOMES: [&str; 3] =
+    ["committed", "refused", "switched_without_a_frame"];
+
+/// One reported seam: the outcome, whether the ±2 s frame window was fully
+/// sampled, whether audio continuity was independently observed, and whether
+/// the change also reopened. Only a committed switch with complete frames,
+/// observed audio and no reopen counts toward the twenty the Developer tab
+/// asks for before the processed upgrade graduates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedSeamReport {
+    pub(crate) outcome: usize,
+    pub(crate) frames_complete: bool,
+    pub(crate) dropped_frames: Option<u64>,
+    pub(crate) audio_observed: bool,
+    pub(crate) reopened: bool,
+}
+
+impl PreparedSeamReport {
+    pub(crate) fn qualifies(&self) -> bool {
+        self.outcome == 0
+            && self.frames_complete
+            && self.dropped_frames == Some(0)
+            && self.audio_observed
+            && !self.reopened
+    }
+}
+
+/// [platform][processed][outcome] reports, and [platform][processed]
+/// qualifying switches. `processed` is whether the switch was to a processed
+/// Dolby Vision / HDR10-E successor, so the processed upgrade's bar counts its
+/// own switches and not every rung change (review 3 S4).
+static PREPARED_SEAMS: [[[AtomicU64; 3]; 2]; CLIENT_PLATFORMS] =
+    [const { [const { [const { AtomicU64::new(0) }; 3] }; 2] }; CLIENT_PLATFORMS];
+static PREPARED_SEAMS_QUALIFIED: [[AtomicU64; 2]; CLIENT_PLATFORMS] =
+    [const { [const { AtomicU64::new(0) }; 2] }; CLIENT_PLATFORMS];
+
+pub(crate) fn record_prepared_seam(
+    platform: ClientPlatform,
+    processed: bool,
+    report: PreparedSeamReport,
+) {
+    let platform = platform_index(platform);
+    let processed = usize::from(processed);
+    if let Some(counter) = PREPARED_SEAMS[platform][processed].get(report.outcome) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    if report.qualifies() {
+        PREPARED_SEAMS_QUALIFIED[platform][processed].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// (qualifying switches, all reported seams) for one platform on this node,
+/// for processed successors or for ordinary ones.
+pub(crate) fn prepared_seam_counts(platform: ClientPlatform, processed: bool) -> (u64, u64) {
+    let platform = platform_index(platform);
+    let processed = usize::from(processed);
+    (
+        PREPARED_SEAMS_QUALIFIED[platform][processed].load(Ordering::Relaxed),
+        PREPARED_SEAMS[platform][processed]
+            .iter()
+            .map(|counter| counter.load(Ordering::Relaxed))
+            .sum(),
+    )
 }
 
 /// Why a reserved successor was settled without ever being watched.
@@ -15474,6 +15686,42 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(
+        "# HELP plurx_playback_preparation_processed_upgrades_total Processed Dolby Vision upgrades after a first frame, by outcome.\n\
+         # TYPE plurx_playback_preparation_processed_upgrades_total counter\n",
+    );
+    for (index, outcome) in PROCESSED_UPGRADE_OUTCOMES.iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_processed_upgrades_total{{outcome=\"{outcome}\"}} {}\n",
+            PROCESSED_UPGRADES[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_seams_total Prepared switches as the client reported their seam, by platform, whether the successor was processed, and outcome.\n\
+         # TYPE plurx_playback_preparation_seams_total counter\n",
+    );
+    for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
+        for (processed, label) in ["false", "true"].iter().enumerate() {
+            for (index, outcome) in PREPARED_SEAM_OUTCOMES.iter().enumerate() {
+                output.push_str(&format!(
+                    "plurx_playback_preparation_seams_total{{platform=\"{platform}\",processed=\"{label}\",outcome=\"{outcome}\"}} {}\n",
+                    PREPARED_SEAMS[platform_index][processed][index].load(Ordering::Relaxed)
+                ));
+            }
+        }
+    }
+    output.push_str(
+        "# HELP plurx_playback_preparation_seams_qualified_total Committed prepared switches with complete +-2 s frame samples, zero dropped frames, observed audio continuity and no reopen, by platform and whether the successor was processed.\n\
+         # TYPE plurx_playback_preparation_seams_qualified_total counter\n",
+    );
+    for (platform_index, platform) in CLIENT_PLATFORM_LABELS.iter().enumerate() {
+        for (processed, label) in ["false", "true"].iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_preparation_seams_qualified_total{{platform=\"{platform}\",processed=\"{label}\"}} {}\n",
+                PREPARED_SEAMS_QUALIFIED[platform_index][processed].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    output.push_str(
         "# HELP plurx_playback_replacement_reclaimed_total Players whose replacement key was reclaimed from a hold that could not use it, by what proved it reclaimable.\n\
          # TYPE plurx_playback_replacement_reclaimed_total counter\n",
     );
@@ -15613,6 +15861,8 @@ pub(crate) fn prometheus() -> String {
         "lease_expired",
         "startup_expired",
         "pause_expired",
+        "released",
+        "stopped",
     ]
     .iter()
     .enumerate()

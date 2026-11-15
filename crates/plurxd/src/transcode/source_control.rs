@@ -9,8 +9,8 @@ use crate::playback_control::{
 #[allow(dead_code)] // Source HTTP control transport follows actual actor qualification.
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
-    guard: SourceResponseGuard,
-    subtitle_revision: Option<String>,
+    guard: Arc<SourceResponseGuard>,
+    subtitle: Option<(crate::playback_control::SubtitleTrackCache, Option<String>)>,
     projection: Box<(
         MediaSessionRoute,
         crate::http::hls::StartResponse,
@@ -23,7 +23,7 @@ impl SourceOpenedControl {
         request: &ControlRequestV1,
     ) -> (
         Result<crate::playback_control::ControlResponseV1, ControlStateError>,
-        SourceResponseGuard,
+        Arc<SourceResponseGuard>,
     ) {
         let (route, start, recipe) = *self.projection;
         let response = self.result.map(|result| {
@@ -35,9 +35,13 @@ impl SourceOpenedControl {
                 &result,
                 crate::media_sessions::unix_ms(),
             );
-            if let Some(revision) = self.subtitle_revision {
-                response.delivery.subtitle_readiness = Some("ready".into());
-                response.delivery.subtitle_revision = Some(revision);
+            if let Some((cache, revision)) = self.subtitle {
+                response.delivery.subtitle_readiness =
+                    crate::playback_control::subtitle_readiness_value(
+                        &request.selection.subtitle,
+                        Some(cache),
+                    );
+                response.delivery.subtitle_revision = revision;
             }
             response
         });
@@ -48,7 +52,7 @@ impl SourceOpenedControl {
         self,
     ) -> (
         Result<LocalControlResult, ControlStateError>,
-        SourceResponseGuard,
+        Arc<SourceResponseGuard>,
     ) {
         (self.result, self.guard)
     }
@@ -283,32 +287,306 @@ impl SourceViewerActor {
             )
             .unwrap_or(i64::MAX),
         );
+        #[cfg(unix)]
+        let result = if let Some(backing) = self.growing_backing() {
+            backing
+                .control_current(&mut authority, control, deadline_unix_ms)
+                .await
+        } else {
+            manager
+                .vod
+                .control_source(&mut authority, control, deadline_unix_ms)
+                .await
+                .ok_or(SourceWorkerError::Unavailable)?
+        };
+        #[cfg(not(unix))]
         let result = manager
             .vod
             .control_source(&mut authority, control, deadline_unix_ms)
             .await
             .ok_or(SourceWorkerError::Unavailable)?;
         drop(authority);
-        let subtitle_revision = {
-            let state = self.0.state.lock().expect("Source native control");
-            match (
-                request.selection.subtitle.mode,
-                request.selection.subtitle.track,
-                state.native.as_ref(),
-            ) {
-                (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
-                    u16::try_from(index)
-                        .ok()
-                        .and_then(|index| tracks.revision(index))
-                }
-                _ => None,
+        // This HTTP control already runs in its detached owned factory. A
+        // selected native demand uses that same counted guard while its actual
+        // window readers and children settle; polling an unselected track does
+        // no physical work.
+        let native = self
+            .0
+            .state
+            .lock()
+            .expect("Source native control")
+            .native
+            .clone();
+        let guard = Arc::new(guard);
+        let custody = resource::SourceResourceReadCustody::new(
+            Arc::clone(&guard),
+            Arc::clone(&self.0.resource_hooks),
+        );
+        let subtitle = match (
+            request.selection.subtitle.mode,
+            request.selection.subtitle.track,
+            native,
+        ) {
+            (crate::playback_control::SubtitleMode::Native, Some(index), Some(tracks)) => {
+                use crate::playback_control::SubtitleTrackCache as Cache;
+                let demand = request.seek_target_ms.unwrap_or(request.position_ms).max(0) / 1_000;
+                let reserve = Duration::from_millis(250);
+                let observe_until = deadline
+                    .checked_sub(reserve)
+                    .unwrap_or(deadline)
+                    .min(Instant::now() + Duration::from_millis(100));
+                Some(match u16::try_from(index) {
+                    Ok(index) if Instant::now() < observe_until => {
+                        let span = tokio::time::timeout_at(
+                            observe_until.into(),
+                            super::super::source_subtitles::SourceNativeTracks::window_seconds(
+                                &manager,
+                            ),
+                        )
+                        .await;
+                        match span {
+                            Ok(span) => {
+                                let readiness = tracks.readiness(index, demand, span, &custody);
+                                if result.is_err() || readiness.0 != Cache::Warming {
+                                    readiness
+                                } else {
+                                    let work = self.start_native_window_work(
+                                        Arc::clone(&tracks),
+                                        Arc::clone(&manager),
+                                        index,
+                                        demand,
+                                        span,
+                                        custody.clone(),
+                                        deadline,
+                                    );
+                                    match tokio::time::timeout_at(observe_until.into(), work).await
+                                    {
+                                        Ok(Ok(Ok(_))) => {
+                                            tracks.readiness(index, demand, span, &custody)
+                                        }
+                                        Ok(Ok(Err(SourceWorkerError::Unsupported))) => {
+                                            (Cache::Unavailable, None)
+                                        }
+                                        Ok(Ok(Err(
+                                            SourceWorkerError::Capacity
+                                            | SourceWorkerError::Deadline,
+                                        ))) => (Cache::Warming, None),
+                                        Ok(Ok(Err(error))) => return Err(error),
+                                        Ok(Err(_)) => return Err(SourceWorkerError::Unavailable),
+                                        Err(_) => tracks.readiness(index, demand, span, &custody),
+                                    }
+                                }
+                            }
+                            Err(_) => (Cache::Warming, None),
+                        }
+                    }
+                    Ok(_) => (Cache::Warming, None),
+                    Err(_) => (Cache::Unavailable, None),
+                })
             }
+            _ => None,
         };
+        drop(custody);
         Ok(SourceOpenedControl {
-            subtitle_revision,
+            subtitle,
             result,
             guard,
             projection: Box::new((route, current_response, recipe)),
         })
+    }
+}
+
+/// One immutable physical producer; a replacement creates a fresh backing/state.
+#[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct GrowingControlState {
+    pub(super) snapshot: Option<PlaybackDemandSnapshot>,
+    fence: crate::playback_control::ControlState,
+    presented: crate::playback_control::PresentedFrameMilestone,
+    lease_expires_at_unix_ms: i64,
+}
+
+#[cfg(unix)]
+impl SourceGrowingBacking {
+    /// Called only by authenticated media acceptance, never readiness polling.
+    pub(crate) async fn note_media_served(&self) {
+        if self.is_live() {
+            self.control
+                .lock()
+                .await
+                .presented
+                .activate_at(Instant::now());
+        }
+    }
+    pub(crate) async fn control_current(
+        &self,
+        authority: &mut SourceControlAuthority<'_>,
+        control: LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+    ) -> Result<LocalControlResult, ControlStateError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if control.session_id != self.session_id || !self.is_live() {
+            return Err(ControlStateError::Unavailable);
+        }
+        authority.refresh(&control).await?;
+        let target = control.snapshot.buffer_anchor_ms();
+        let files = self.production.files.lock().await;
+        let origin = files
+            .media_origin_ms()
+            .ok_or(ControlStateError::Unavailable)?;
+        let seconds = files
+            .segments()
+            .iter()
+            .map(|segment| segment.seconds)
+            .sum::<f64>();
+        let (start, end) = super::status::growing_range_bounds(origin, seconds)
+            .map_err(|_| ControlStateError::Unavailable)?;
+        if target < start
+            || target > end
+            || (target == end && control.snapshot.seek_target_ms.is_some())
+            || files.segments().is_empty()
+        {
+            return Err(ControlStateError::Unavailable);
+        }
+        drop(files);
+        let mut state = self.control.lock().await;
+        authority.before_acceptance().await;
+        authority.validate()?;
+        if !self.is_live()
+            || crate::media_sessions::unix_ms() >= deadline_unix_ms
+            || !self.owners.contains_live_assignment(authority.assignment())
+        {
+            return Err(ControlStateError::Unavailable);
+        }
+        let (disposition, accepted_sequence, action, platform, action_suppressed) =
+            state.fence.accept(
+                control.generation,
+                control.owner_epoch,
+                control.client_instance_id,
+                control.sequence,
+                crate::playback_control::ControlAcceptance::observed(
+                    control.snapshot.platform(),
+                    &control.prepared_successor,
+                    control.snapshot.acknowledgement.as_ref(),
+                    control.snapshot.request_fingerprint.as_deref(),
+                    &control.snapshot.selection,
+                    control.snapshot.capabilities.as_ref(),
+                ),
+            )?;
+        let accepted = disposition == crate::playback_control::ControlDisposition::Accepted;
+        let selection = if accepted {
+            state.fence.observe(
+                &control.snapshot.selection,
+                control.snapshot.capabilities.as_ref(),
+            )
+        } else {
+            crate::playback_control::SelectionObservation::default()
+        };
+        let accepted_demand = accepted.then(|| control.snapshot.clone());
+        if accepted {
+            let now = Instant::now();
+            // This backing never restarts its producer in place. Generation,
+            // epoch and the fresh state bind this stable producer-attempt tag.
+            state.presented.observe_control(
+                now,
+                control.generation,
+                control.owner_epoch,
+                1,
+                accepted_sequence,
+                &control.snapshot,
+            );
+            state.snapshot = Some(control.snapshot);
+            state.lease_expires_at_unix_ms = crate::media_sessions::unix_ms()
+                .saturating_add(i64::from(crate::playback_control::VOD_LEASE_TIMEOUT_MS));
+        }
+        let mark_rendered = state.presented.presented();
+        let lease_expires_at_unix_ms = state.lease_expires_at_unix_ms;
+        drop(state);
+        if let Some(demand) = accepted_demand {
+            self.observe_demand(demand)
+                .await
+                .map_err(|_| ControlStateError::Unavailable)?;
+        }
+        if mark_rendered {
+            self.production
+                .mark_rendered()
+                .await
+                .map_err(|_| ControlStateError::Unavailable)?;
+        }
+        let status = self
+            .status_info()
+            .await
+            .map_err(|_| ControlStateError::Unavailable)?;
+        Ok(LocalControlResult {
+            disposition,
+            accepted_sequence,
+            action,
+            action_suppressed,
+            preparation_directive: None,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            lease_state: "active",
+            status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
+            platform,
+            terminal_handoff: None,
+            terminal_commit: None,
+            selection,
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod growing_control_tests {
+    use super::*;
+    #[test]
+    fn growing_presentation_needs_media_and_same_timeline_progress() {
+        let mut state = GrowingControlState::default();
+        let mut demand =
+            PlaybackDemandSnapshot::test_default(crate::playback_control::ClientPlatform::Apple);
+        let now = Instant::now();
+        state
+            .presented
+            .observe_control(now, "range-a", 3, 1, 1, &demand);
+        demand.position_ms += 300;
+        state
+            .presented
+            .observe_control(now, "range-a", 3, 1, 2, &demand);
+        assert!(
+            !state.presented.presented(),
+            "unserved observations cannot claim D1"
+        );
+        state.presented.activate_at(now);
+        state
+            .presented
+            .observe_control(now, "range-a", 3, 1, 3, &demand);
+        demand.position_ms += 300;
+        state
+            .presented
+            .observe_control(now, "range-b", 3, 1, 4, &demand);
+        assert!(
+            !state.presented.presented(),
+            "a different generation resets progress"
+        );
+        demand.seek_target_ms = Some(demand.position_ms);
+        state
+            .presented
+            .observe_control(now, "range-b", 3, 1, 5, &demand);
+        demand.seek_target_ms = None;
+        state
+            .presented
+            .observe_control(now, "range-b", 3, 1, 6, &demand);
+        demand.position_ms += 249;
+        state
+            .presented
+            .observe_control(now, "range-b", 3, 1, 7, &demand);
+        assert!(!state.presented.presented());
+        demand.position_ms += 250;
+        state
+            .presented
+            .observe_control(now, "range-b", 3, 1, 8, &demand);
+        assert!(
+            state.presented.presented(),
+            "new accepted same-timeline progress crosses D1"
+        );
     }
 }

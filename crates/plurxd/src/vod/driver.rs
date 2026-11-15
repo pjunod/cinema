@@ -1,5 +1,23 @@
 use super::*;
 
+/// Source copies transfer an actual copy permit through SourceRenditionOwners
+/// even though their recipe has no Encoding. Local copy owns no such permit.
+pub(super) fn producer_contention(
+    belief: Producer,
+    encoding: Option<&crate::vodencode::Encoding>,
+    source_copy_admissions: Option<&crate::admission::Admissions>,
+    handoff_waiting: bool,
+) -> Contention {
+    let admissions = encoding
+        .map(|encoding| &encoding.admissions)
+        .or(source_copy_admissions);
+    Contention {
+        live_waiting: admissions.is_some_and(|admissions| admissions.live_is_waiting()),
+        holds_permit: crate::prodexec::holds_permit(belief, admissions.is_some()),
+        handoff_waiting: admissions.is_some() && handoff_waiting,
+    }
+}
+
 pub(super) fn spawn_driver(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
@@ -18,12 +36,20 @@ pub(super) fn spawn_driver(
                 .encoding
                 .as_ref()
                 .is_some_and(|encoding| encoding.is_waiting());
-            let stopped_encoder = rendition.recipe.encoding.is_some()
-                && matches!(rendition.slot.belief().await, Producer::Stopped { .. });
-            if encoded_waiting || stopped_encoder {
+            let belief = rendition.slot.belief().await;
+            let copy_admissions = rendition.source_owners.copy_admissions();
+            let stopped_permit_owner = matches!(belief, Producer::Stopped { .. })
+                && producer_contention(
+                    belief,
+                    rendition.recipe.encoding.as_deref(),
+                    copy_admissions.as_ref(),
+                    false,
+                )
+                .holds_permit;
+            if encoded_waiting || stopped_permit_owner {
                 // One owned driver, not one retry task per GET. Pool releases
                 // outside VOD cannot notify this registry. A queued rendition
-                // retries admission quickly; a stopped encoder polls slowly
+                // retries admission quickly; a stopped permit owner polls slowly
                 // enough to yield inside the live start's five-second budget.
                 let poll = if encoded_waiting {
                     Duration::from_millis(250)
@@ -35,7 +61,7 @@ pub(super) fn spawn_driver(
                     _ = rendition.wake.notified() => {},
                     _ = tokio::time::sleep(poll) => {},
                 }
-                if stopped_encoder && !encoded_waiting {
+                if stopped_permit_owner && !encoded_waiting {
                     rendition.hooks.stopped_poll_fired();
                 }
             } else {
@@ -572,10 +598,29 @@ async fn new_start_wants_permit(shared: &Shared, rendition: &Rendition, belief: 
 async fn bound_handoff(shared: &Shared, rendition: &Rendition) -> Option<HandoffRequest> {
     rendition.recipe.encoding.as_ref()?;
     let request = rendition.live_handoff()?;
-    let successor_live = request
-        .successor
-        .upgrade()
-        .is_some_and(|successor| !successor.closed.load(Relaxed));
+    if let HandoffClaimant::Trial(claim) = &request.claimant {
+        let claim = Arc::clone(claim);
+        let bound = if claim.is_staged() {
+            staged_trial_bound(shared, rendition, &claim.incarnation).await
+        } else {
+            trial_claim_bound(shared, rendition, &claim).await
+        };
+        if bound {
+            return Some(request);
+        }
+        // Runway spent, a seek past it, another reader, or the viewer's
+        // session ended: the incumbent is released at once, and the closed
+        // claim tells the upgrade to give back what it took.
+        claim.close();
+        rendition.release_trial_claim(&claim);
+        return None;
+    }
+    let successor_live = match &request.claimant {
+        HandoffClaimant::Rendition(successor) => successor
+            .upgrade()
+            .is_some_and(|successor| !successor.closed.load(Relaxed)),
+        HandoffClaimant::Trial(_) => false,
+    };
     let bound = successor_live && {
         let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
         let sessions = shared.sessions.lock().await;
@@ -599,31 +644,179 @@ async fn bound_handoff(shared: &Shared, rendition: &Rendition) -> Option<Handoff
     }
 }
 
-/// Reserve the successor's capacity before this producer's permit is
-/// released, so nothing else can start in the gap before it retries.
-fn reserve_for_successor(request: &HandoffRequest) -> Option<Arc<Rendition>> {
-    let successor = request.successor.upgrade()?;
-    if let Some(encoding) = successor.recipe.encoding.as_ref() {
-        let token = encoding
-            .admissions
-            .reserve_for_handoff(&request.wanted, HANDOFF_RESERVATION_TTL);
-        encoding.accept_handoff_claim(token, Arc::clone(&request.admitted));
+/// A trial claim stays bound while every reader of this rendition is a live
+/// session of the claim's own playback, and the published runway past that
+/// viewer's playhead still covers the claim's reserve: what a failed trial
+/// needs to give the permit back and let this producer re-admit.
+pub(super) async fn trial_claim_bound(
+    shared: &Shared,
+    rendition: &Rendition,
+    claim: &TrialClaim,
+) -> bool {
+    let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
+    if readers.is_empty() {
+        return false;
     }
-    Some(successor)
+    let playhead_ms = {
+        let sessions = shared.sessions.lock().await;
+        let mut playhead: Option<i64> = None;
+        for id in &readers {
+            let Some(session) = sessions.get(id) else {
+                return false;
+            };
+            if !session.renewable() || session.playback_id != claim.playback_id {
+                return false;
+            }
+            if let (Some(demand), Some(observed)) = (
+                session.last_control_snapshot.as_ref(),
+                session.control_observed_at,
+            ) {
+                let at = crate::playback_control::rolling_estimated_position_ms(
+                    demand,
+                    observed.elapsed(),
+                );
+                playhead = Some(playhead.map_or(at, |earliest| earliest.min(at)));
+            }
+        }
+        match playhead {
+            Some(playhead) => playhead.max(0),
+            None => return false,
+        }
+    };
+    // A reader blocked on media this parked incumbent has not published (a
+    // seek whose GET beat its next control exchange) is owed that media now.
+    let blocked: Vec<u32> = rendition
+        .demand_since
+        .lock()
+        .expect("demand clock")
+        .keys()
+        .copied()
+        .collect();
+    {
+        let manifest = rendition.manifest.lock().await;
+        if blocked.iter().any(|index| {
+            !manifest
+                .state(*index)
+                .is_some_and(|state| state.is_materialized())
+        }) {
+            return false;
+        }
+    }
+    trial_runway_ms(rendition, playhead_ms).await >= claim.reserve_ms
 }
 
-fn finish_handoff_yield(
-    shared: &Arc<Shared>,
-    rendition: &Rendition,
-    successor: Option<Arc<Rendition>>,
-) {
+/// A staged trial's handoff is bound exactly as a staged successor's: some
+/// reader of this rendition is being replaced by that incarnation now.
+async fn staged_trial_bound(shared: &Shared, rendition: &Rendition, incarnation: &str) -> bool {
+    let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
+    let sessions = shared.sessions.lock().await;
+    readers.iter().any(|id| {
+        sessions.get(id).is_some_and(|session| {
+            session.tombstone.is_none()
+                && session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .live_preparation_incarnation()
+                    == Some(incarnation)
+        })
+    })
+}
+
+/// Published media contiguous from `playhead_ms`, in milliseconds.
+async fn trial_runway_ms(rendition: &Rendition, playhead_ms: i64) -> i64 {
+    // Published media from the playhead to the first gap, measured on the
+    // plan's own entry boundaries: segments vary in length, so a uniform
+    // segment duration would misstate the lead a hand-back has to cover.
+    let timescale = u64::from(rendition.timescale.max(1));
+    let end_ms = |index: u32| {
+        rendition
+            .plan
+            .entry(index)
+            .map(|entry| (entry.end_ticks().saturating_mul(1_000) / timescale) as i64)
+    };
+    let playhead = playhead_ms.max(0);
+    let Some(first) = (0..rendition.plan.len() as u32)
+        .find(|index| end_ms(*index).is_some_and(|end| end > playhead))
+    else {
+        return 0;
+    };
+    let manifest = rendition.manifest.lock().await;
+    let mut published = None;
+    for index in first..rendition.plan.len() as u32 {
+        if !manifest
+            .state(index)
+            .is_some_and(|state| state.is_materialized())
+        {
+            break;
+        }
+        published = end_ms(index);
+    }
+    published.map_or(0, |end| end.saturating_sub(playhead))
+}
+
+/// What a yield woke: the staged successor rendition, or a trial's claim.
+enum HandoffWoken {
+    Rendition(Arc<Rendition>),
+    Trial,
+}
+
+/// Reserve the successor's capacity before this producer's permit is
+/// released, so nothing else can start in the gap before it retries.
+fn reserve_for_successor(rendition: &Rendition, request: &HandoffRequest) -> Option<HandoffWoken> {
+    match &request.claimant {
+        HandoffClaimant::Rendition(successor) => {
+            let successor = successor.upgrade()?;
+            if let Some(encoding) = successor.recipe.encoding.as_ref() {
+                let token = encoding
+                    .admissions
+                    .reserve_for_handoff(&request.wanted, HANDOFF_RESERVATION_TTL);
+                encoding.accept_handoff_claim(token, Arc::clone(&request.admitted));
+            }
+            Some(HandoffWoken::Rendition(successor))
+        }
+        HandoffClaimant::Trial(claim) => {
+            let encoding = rendition.recipe.encoding.as_ref()?;
+            {
+                // Under the token lock: a claim whose owner is dropping either
+                // sees this token or this pass sees it closed, never neither.
+                let mut token = claim.token.lock().expect("trial claim token");
+                if claim.is_closed() || claim.is_staged() || token.is_some() {
+                    return None;
+                }
+                // Held for the claim's reserve: the trial plans before it
+                // admits, and an expired reservation would hand the capacity
+                // to whoever asked first. The claim's drop returns it unused.
+                // A claim that needs no runway still needs its reservation to
+                // outlive the hand-back, as a staged successor's does.
+                *token = Some(
+                    encoding.admissions.reserve_for_handoff(
+                        &request.wanted,
+                        Duration::from_millis(claim.reserve_ms.max(0) as u64)
+                            .max(HANDOFF_RESERVATION_TTL),
+                    ),
+                );
+            }
+            claim.ready.notify_waiters();
+            Some(HandoffWoken::Trial)
+        }
+    }
+}
+
+fn finish_handoff_yield(shared: &Arc<Shared>, rendition: &Rendition, woken: Option<HandoffWoken>) {
+    let (claimant, successor) = match &woken {
+        Some(HandoffWoken::Rendition(successor)) => ("prepared successor", successor.key.as_str()),
+        Some(HandoffWoken::Trial) => ("processed upgrade trial", "trial"),
+        None => ("prepared successor", "gone"),
+    };
     tracing::info!(
         target: "plurxd::vodserve",
         rendition = %rendition.key,
-        successor = successor.as_ref().map_or("gone", |successor| successor.key.as_str()),
-        "gave this viewer's encoder permit to its prepared successor"
+        claimant,
+        successor,
+        "gave this viewer's encoder permit to its {claimant}"
     );
-    if let Some(successor) = successor {
+    if let Some(HandoffWoken::Rendition(successor)) = woken {
         successor.kick();
     }
     shared.kick_all();
@@ -632,6 +825,15 @@ fn finish_handoff_yield(
 /// A parked predecessor wakes itself when its handoff lapses, so a viewer GET
 /// that arrived meanwhile is not left to its whole block budget.
 fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
+    // A trial has no expiry of its own: every path that ends it (claim drop,
+    // a closed claim in `bound_handoff`, the slot's settlement once staged)
+    // kicks this producer directly.
+    if rendition
+        .live_handoff()
+        .is_some_and(|request| matches!(request.claimant, HandoffClaimant::Trial(_)))
+    {
+        return;
+    }
     if rendition.handoff_expiry_armed.swap(true, AcqRel) {
         return;
     }
@@ -719,17 +921,12 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             (demands, ledgers)
         };
         let handoff_requested = handoff.is_some();
-        let contention = rendition.recipe.encoding.as_ref().map_or(
-            Contention {
-                live_waiting: false,
-                holds_permit: false,
-                handoff_waiting: false,
-            },
-            |encoding| Contention {
-                live_waiting: encoding.admissions.live_is_waiting(),
-                holds_permit: crate::prodexec::holds_permit(belief, true),
-                handoff_waiting: handoff_requested,
-            },
+        let copy_admissions = rendition.source_owners.copy_admissions();
+        let contention = producer_contention(
+            belief,
+            rendition.recipe.encoding.as_deref(),
+            copy_admissions.as_ref(),
+            handoff_requested,
         );
         let position = Position {
             produced_through: belief.produced_through(),
@@ -815,7 +1012,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
                 drop(manifest);
                 if matches!(step, Step::Restart { .. }) {
-                    let successor = handoff.as_ref().map(reserve_for_successor);
+                    let successor = handoff
+                        .as_ref()
+                        .map(|request| reserve_for_successor(rendition, request));
                     match perform_driver_step(shared, rendition, step).await {
                         Ok(_) => {}
                         Err(error) => {
@@ -970,7 +1169,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 let successor = handoff
                     .as_ref()
                     .filter(|_| yielding_for_handoff)
-                    .map(reserve_for_successor);
+                    .map(|request| reserve_for_successor(rendition, request));
                 // Epoch and handoff decisions are committed above, as for
                 // Start/Restart. Join only after releasing the publication lock.
                 drop(manifest);

@@ -6,8 +6,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.HlsStart
+import tv.plurx.app.data.StartupAllowance
 
 /** Client-owned bound for repeated stall reopens at one resolved rung. */
 internal class StallReopenBudget(private val maxNonDowngrades: Int = 3) {
@@ -274,7 +276,14 @@ internal class SessionCreateCoordinator(
                 var started: HlsStart? = null
                 try {
                     started = createMutex.withLock {
-                        if (isCurrent()) retainIfCurrent(callCreate(request), isCurrent) else null
+                        // Every rung tells the server what the sequence's
+                        // absolute deadline still allows.
+                        val allowance = StartupAllowance(CreateRetry.DEADLINE_MS - (nowMs() - began))
+                        if (isCurrent()) {
+                            retainIfCurrent(withContext(allowance) { callCreate(request) }, isCurrent)
+                        } else {
+                            null
+                        }
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled

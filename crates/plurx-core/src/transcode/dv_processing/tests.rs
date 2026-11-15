@@ -2113,10 +2113,11 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
         assert!(make(destination, &keys[..2], &rpus).is_err());
         assert!(make(destination, &keys, &rpus[..2]).is_err());
     }
-    assert!(
-        dv_author_profile81_window(&encoded, (64, 64), 24000, 48048, 1001, &rpus, 1).is_err(),
-        "P8.1 authoring remains narrow"
-    );
+    // P8.1 authoring removes the already-applied mapping over the same
+    // reconstructed master, so real piecewise/MMR reshaping is admitted.
+    let authored = dv_author_profile81_window(&encoded, (64, 64), 24000, 48048, 1001, &rpus, 1)
+        .expect("P8.1 authors over the qualified general FEL reconstruction");
+    assert!(!authored.is_empty());
 }
 
 /// A reconstructed Profile 8.1 report travels only with a Dolby Vision
@@ -2167,4 +2168,34 @@ fn reconstructed_profile81_owner_report_requires_its_dolby_vision_carrier() {
         .expect("array")
         .push(serde_json::json!({"DisplayTargetMapping":{"nits":1000}}));
     assert!(accept(&targeted, Some("dolby_vision")).is_none());
+}
+
+#[test]
+fn completed_profile81_signalling_uses_authored_level_instead_of_source_geometry_level() {
+    use crate::fmp4::{self, Unit};
+    let bytes = include_bytes!("../../../tests/fixtures/dv-runtime/authored.mp4");
+    let mut reader = fmp4::FragmentReader::new();
+    reader.push(bytes);
+    let Some(Unit::Init(mut init)) = reader.next_unit().expect("retained control init") else {
+        panic!("init");
+    };
+    let record =
+        fmp4::DolbyVisionRecord::new(8, 10, false, true, true, 1).expect("level10 declaration");
+    fmp4::set_dolby_vision_record(&mut init, &record).expect("authored declaration");
+    let authored = completed_authored_dv_level(&init.bytes, DvDestination::Profile81)
+        .expect("actual init level");
+    assert_eq!(authored, Some(10));
+    let mut selected = plan(DvDestination::Profile81);
+    selected.source.catalog.level = Some(6);
+    selected.capability.completed_window_checked = true;
+    selected.authored_dv_level = authored;
+    assert_eq!(selected.profile81_level(), Some(10));
+    let identity = selected.semantic_digest();
+    selected.authored_dv_level = Some(6);
+    assert_ne!(
+        identity,
+        selected.semantic_digest(),
+        "different coded declarations cannot alias"
+    );
+    // This is a retained declaration-only control, not pixel/decoder acceptance.
 }

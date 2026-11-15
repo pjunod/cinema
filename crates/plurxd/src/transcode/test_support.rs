@@ -612,6 +612,18 @@ impl HlsDeliveryFixture {
             .arm("control_applied")
     }
 
+    pub(crate) fn worker_retirement_debug(&self, session_id: &str) -> String {
+        format!(
+            "registered={:?} retired={} cleanup_started={} cleanup_finished={} child_present={:?} child_transition_available={}",
+            self.state.transcode.sessions.try_lock().ok().map(|sessions| sessions.contains_key(session_id)),
+            self.session.control.is_retired(),
+            self.session.retirement_cleanup_started.load(Relaxed),
+            self.session.retirement_cleanup_finished.load(Relaxed),
+            self.session.child.try_lock().ok().map(|child| child.is_some()),
+            self.session.child_transition.try_lock().is_ok(),
+        )
+    }
+
     pub(crate) async fn worker_is_registered(&self, session_id: &str) -> bool {
         self.state
             .transcode
@@ -653,6 +665,7 @@ impl HlsDeliveryFixture {
                         since_ms: None,
                         event: None,
                         limit: 50,
+                        ..Default::default()
                     })
                     .await
                     .expect("delivery telemetry query")
@@ -678,6 +691,7 @@ impl HlsDeliveryFixture {
                 since_ms: None,
                 event: None,
                 limit: 50,
+                ..Default::default()
             })
             .await
             .expect("delivery telemetry query")
@@ -714,6 +728,7 @@ fn test_session_with_optional_child(
 ) -> Session {
     let child = stand_in_child.then(|| {
         let child = tokio::process::Command::new("sleep")
+            .process_group(0)
             .arg("30")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

@@ -5808,6 +5808,15 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, LEARNER])
         .await?;
+    let learner_schema_index = cluster.applied_index(leader).await?;
+    cluster
+        .wait_for_local_applied_index(
+            LEARNER,
+            leader,
+            learner_schema_index,
+            "the newly admitted learner never applied the membership schema",
+        )
+        .await?;
     cluster
         .request(LEARNER, Request::Open)
         .await?
@@ -5968,13 +5977,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, LEARNER])
         .await?;
-    let catchup_index = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics {
-            applied_index: Some(index),
-            ..
-        } => index,
-        response => bail!("leader did not publish a catch-up index: {response:?}"),
-    };
+    let catchup_index = cluster.applied_index(leader).await?;
     cluster
         .spawn_node(
             &executable,
@@ -5985,29 +5988,14 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     // state machine during restore can legitimately hold the harness request
     // longer than its protocol deadline; the applied-index watch is the
     // production catch-up source and stays responsive throughout the restore.
-    let catchup_deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        match cluster.request(LEARNER, Request::Metrics).await? {
-            Response::Metrics {
-                applied_index: Some(index),
-                ..
-            } if index >= catchup_index => break,
-            Response::Metrics { .. } => {}
-            response => bail!("unexpected learner catch-up metrics: {response:?}"),
-        }
-        if Instant::now() >= catchup_deadline {
-            let learner_metrics = cluster.request(LEARNER, Request::Metrics).await?;
-            let leader_metrics = cluster.request(leader, Request::Metrics).await?;
-            let learner_raft = cluster.request(LEARNER, Request::RaftDebug).await?;
-            let leader_raft = cluster.request(leader, Request::RaftDebug).await?;
-            bail!(
-                "the restarted learner never applied the write it missed; learner metrics: \
-                 {learner_metrics:?}; leader metrics: {leader_metrics:?}; learner raft: \
-                 {learner_raft:?}; leader raft: {leader_raft:?}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    cluster
+        .wait_for_local_applied_index(
+            LEARNER,
+            leader,
+            catchup_index,
+            "the restarted learner never applied the write it missed",
+        )
+        .await?;
     cluster
         .request(LEARNER, Request::Open)
         .await?
@@ -9436,6 +9424,55 @@ impl ClusterProcesses {
         }
     }
 
+    async fn applied_index(&mut self, node_id: u64) -> Result<u64> {
+        match self.request(node_id, Request::Metrics).await? {
+            Response::Metrics {
+                applied_index: Some(index),
+                ..
+            } => Ok(index),
+            response => bail!("node {node_id} did not publish an applied index: {response:?}"),
+        }
+    }
+
+    /// Wait for a target process's local state machine to apply a watermark
+    /// captured from the leader after membership convergence. Membership
+    /// configuration alone does not establish that a learner has replayed the
+    /// schema commands it will read when its application store opens.
+    async fn wait_for_local_applied_index(
+        &mut self,
+        node_id: u64,
+        leader_id: u64,
+        target_index: u64,
+        failure: &str,
+    ) -> Result<()> {
+        // Query the target-local applied-index watch while SQLite is restoring.
+        // State-machine reads can legitimately block longer than a harness
+        // request deadline during restore; Raft metrics remain responsive.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match self.request(node_id, Request::Metrics).await? {
+                Response::Metrics {
+                    applied_index: Some(index),
+                    ..
+                } if index >= target_index => return Ok(()),
+                Response::Metrics { .. } => {}
+                response => bail!("unexpected learner catch-up metrics: {response:?}"),
+            }
+            if Instant::now() >= deadline {
+                let learner_metrics = self.request(node_id, Request::Metrics).await?;
+                let leader_metrics = self.request(leader_id, Request::Metrics).await?;
+                let learner_raft = self.request(node_id, Request::RaftDebug).await?;
+                let leader_raft = self.request(leader_id, Request::RaftDebug).await?;
+                bail!(
+                    "{failure} through leader applied index {target_index}; learner metrics: \
+                     {learner_metrics:?}; leader metrics: {leader_metrics:?}; learner raft: \
+                     {learner_raft:?}; leader raft: {leader_raft:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn wait_for_ready(&mut self, node_id: u64) -> Result<()> {
         let deadline = Instant::now() + self.convergence_timeout;
         loop {
@@ -11928,6 +11965,8 @@ async fn membership_manager_with_identity_artwork_url(
         client.clone(),
         replication.clone(),
         store,
+        // The checker has no applied view: nothing reads this floor.
+        plurx_core::store::SettingsWriteFloor::detached(),
         ClusterIdentity {
             cluster_id: INSTANCE_ID.to_owned(),
             node_id: node_id.clone(),
@@ -12523,7 +12562,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
     }
     if !matches!(
         store
-            .reconcile_library(library.id, "stale-root", &[file], 1)
+            .reconcile_library(library.id, "stale-root", &[file], 1, &[], 0)
             .await?,
         ReconcileOutcome::RefusedRoot { .. }
     ) || store.get_file(file).await?.is_none()
@@ -12531,7 +12570,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         bail!("stale-root reconciliation committed a prune");
     }
     if store
-        .reconcile_library(library.id, &fingerprint, &[file], 0)
+        .reconcile_library(library.id, &fingerprint, &[file], 0, &[], 0)
         .await?
         != (ReconcileOutcome::RefusedPrune {
             requested: 1,
@@ -12563,7 +12602,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         .await?;
     if !matches!(
         store
-            .reconcile_library(library.id, &fingerprint, &[disposable_file], 1)
+            .reconcile_library(library.id, &fingerprint, &[disposable_file], 1, &[], 0)
             .await?,
         ReconcileOutcome::Applied {
             deleted_files: 1,

@@ -33,7 +33,7 @@
 //!   transition map, not re-observed here;
 //! - *assumption*: a compatibility premise this module pins where it can.
 
-use super::{acquired, for_each_backend, publication_successor};
+use super::{acquired, for_each_backend, publication_successor, set_storage_domains};
 use plurx_core::domain::{ItemKind, ItemSort, LibraryKind, NewItem, NewLibrary};
 use plurx_core::error::StoreError;
 use plurx_core::store::background_jobs::*;
@@ -665,17 +665,17 @@ async fn formal_publication_reservations_owner_removal_and_binding_lifetime_foll
                 .await
                 .expect("library")
                 .expect("library");
-            assert!(store
-                .replace_storage_domains(
-                    vec![StorageDomainMapping {
-                        library_id,
-                        root_path: library.paths[0].to_string_lossy().into_owned(),
-                        domain_id: "formal-nas".into(),
-                    }],
-                    now,
-                )
-                .await
-                .expect("map storage domain"));
+            assert!(set_storage_domains(
+                store.as_ref(),
+                vec![StorageDomainMapping {
+                    library_id,
+                    root_path: library.paths[0].to_string_lossy().into_owned(),
+                    domain_id: "formal-nas".into(),
+                }],
+                now,
+            )
+            .await
+            .expect("map storage domain"));
             let scan = bound_scan(store.as_ref(), backend, library_id, now, now).await;
             store
                 .update_library(

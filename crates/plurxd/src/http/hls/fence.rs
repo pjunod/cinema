@@ -75,6 +75,10 @@ struct ResponseContext {
     owner_kind: Option<&'static str>,
     producer_attempt: Option<u64>,
     relayed_to: Option<String>,
+    control_route_failure: Option<&'static str>,
+    control_store_error_class: Option<&'static str>,
+    control_error_file: Option<&'static str>,
+    control_error_line: Option<u32>,
 }
 
 tokio::task_local! {
@@ -101,6 +105,36 @@ fn note_owner_identity(kind: &'static str, attempt: Option<u64>) {
 pub(crate) fn note_relay(owner_node_id: &str) {
     let _ = RESPONSE_CONTEXT.try_with(|context| {
         context.borrow_mut().relayed_to = Some(owner_node_id.to_owned());
+    });
+}
+
+/// Retain bounded route provenance for the existing response failure event.
+pub(crate) fn note_control_route_failure(error: &crate::media_sessions::ControlRouteError) {
+    let _ = RESPONSE_CONTEXT.try_with(|context| {
+        let mut context = context.borrow_mut();
+        context.control_route_failure = Some(error.stage());
+        context.control_store_error_class = error.store_error_class();
+    });
+}
+
+/// Compiler locations can contain an absolute checkout prefix. Emit only
+/// source paths below this crate, never a build host's directory names.
+pub(crate) fn note_control_error_origin(location: &'static std::panic::Location<'static>) {
+    let file = location.file();
+    let relative = file
+        .strip_prefix("crates/plurxd/src/")
+        .or_else(|| {
+            file.split_once("/crates/plurxd/src/")
+                .map(|(_, suffix)| suffix)
+        })
+        .or_else(|| file.strip_prefix("src/"));
+    let Some(relative) = relative.filter(|path| !path.split('/').any(|part| part == "..")) else {
+        return;
+    };
+    let _ = RESPONSE_CONTEXT.try_with(|context| {
+        let mut context = context.borrow_mut();
+        context.control_error_file = Some(relative);
+        context.control_error_line = Some(location.line());
     });
 }
 
@@ -183,6 +217,10 @@ pub(crate) async fn observe_hls_session_response(
             owner_kind = context.owner_kind.unwrap_or("none"),
             producer_attempt = context.producer_attempt,
             relayed_to = context.relayed_to.as_deref(),
+            control_route_failure = context.control_route_failure,
+            control_store_error_class = context.control_store_error_class,
+            control_error_file = context.control_error_file,
+            control_error_line = context.control_error_line,
             latency_ms = started_at.elapsed().as_millis() as u64,
             "playback response failed"
         );
@@ -349,6 +387,53 @@ mod tests {
                 .filter(|entry| entry.message.contains("playback response failed"))
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn control_backend_failure_logs_only_bounded_store_class_and_callsite() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        let buffer = Arc::new(crate::logbuf::LogBuffer::new(16));
+        let _capture = crate::logbuf::capture_for_test(&buffer);
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let route = hls_session_route("POST", "/api/v1/hls/{session}/control").expect("route");
+        let response =
+            observe_hls_session_response(&fence, route, "/api/v1/hls/secret/control", async {
+                let error = crate::media_sessions::ControlRouteError::Store(
+                    plurx_core::error::StoreError::Database("secret backend details".into()),
+                );
+                note_control_route_failure(&error);
+                super::super::control::control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "unavailable",
+                    None,
+                    None,
+                    Some(500),
+                    None,
+                )
+            })
+            .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let lines = buffer.tail("trace", 16);
+        let message = &lines
+            .iter()
+            .find(|line| line.message.contains("playback response failed"))
+            .expect("failure event")
+            .message;
+        for field in [
+            "control_route_failure=\"store_error\"",
+            "control_store_error_class=\"database\"",
+            "code=\"control_unavailable\"",
+            "control_error_file=\"http/hls/fence.rs\"",
+            "control_error_line=",
+        ] {
+            assert!(message.contains(field), "{field} missing from {message}");
+        }
+        assert!(
+            !message.contains("secret"),
+            "never log backend payload or capability"
         );
     }
 

@@ -185,7 +185,7 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
                   fraction[0] == 0 && fraction[1] == 0,
               "identity polynomial coefficient control");
       out->comp[component].num_pivots = 2;
-      out->comp[component].pivots[1] = curve->pivots.data[1] / 1023.0f;
+      out->comp[component].pivots[1] = curve->pivots.data[1] / 1024.0f;
       out->comp[component].poly_coeffs[0][1] =
           integer[1] + fraction[1] / denominator;
     }
@@ -205,10 +205,13 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
     if (!frame) {
       double slope = nlq->linear_deadzone_slope[component];
       double threshold = nlq->linear_deadzone_threshold[component];
-      out->nlq[component].offset = nlq->nlq_offset[component] / 1023.0f;
-      out->nlq[component].deadzone_slope = 1023.0 * slope / denominator;
-      out->nlq[component].deadzone_threshold =
-          (threshold - slope / 2) / denominator;
+      // libplacebo's own units (pl_map_dovi_metadata): offset in EL codes,
+      // slope, threshold and limit over 2^coef_log2_denom.
+      out->nlq[component].offset = nlq->nlq_offset[component];
+      out->nlq[component].deadzone_slope = slope / denominator;
+      out->nlq[component].deadzone_threshold = threshold / denominator;
+      out->nlq[component].hdr_in_max =
+          nlq->vdr_in_max_int[component] + nlq->vdr_in_max[component] / denominator;
     }
   }
   if (frame) {
@@ -345,7 +348,8 @@ struct segment_gpu {
   pl_renderer renderer;
   pl_tex textures[2][3], output_texture, native_texture;
   pl_tex mapped[2][4];
-  float *output, *staging;
+  float *output;
+  uint16_t *staging;
 };
 static struct segment_gpu context;
 static void gpu_init(int width, int height, int el_width, int el_height) {
@@ -403,13 +407,14 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
 
   context = (struct segment_gpu){
       .log = log, .vk = vk, .gpu = gpu, .format = format, .renderer = renderer};
-  context.plane_format =
-      pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
-  require(context.plane_format && context.plane_format->texel_size == 4,
-          "native float plane format");
+  context.plane_format = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16,
+                                     PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+  require(context.plane_format && context.plane_format->texel_size == 2 &&
+              context.plane_format->host_bits[0] == 16,
+          "linearly sampled UNORM16 plane format");
   context.output = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(context.output, "bounded raster output buffer");
-  context.staging = malloc((size_t)WIDTH * HEIGHT * sizeof(float));
+  context.staging = malloc((size_t)WIDTH * HEIGHT * sizeof(uint16_t));
   require(context.staging != NULL, "bounded reusable native plane staging");
   for (int layer = 0; layer < 2; layer++) {
     for (int c = 0; c < 3; c++) {
@@ -421,20 +426,26 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
       require(context.textures[layer][c] != NULL, "persistent native plane texture");
     }
   }
-  context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT) : NULL;
-  if (!context.output_texture)
+  // The 10-bit export reads its picture from UNORM16; a device without that
+  // format is refused, never handed a float texture instead.
+  context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false) : NULL;
+  require(!EXPORT_YUV10 || context.output_texture != NULL,
+          "export-target-unsupported: renderable UNORM16 RGBA");
+  if (!EXPORT_YUV10)
     context.output_texture = pl_tex_create(gpu,
         pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
-                      .renderable = true, .host_readable = true,
-                      .sampleable = EXPORT_YUV10));
+                      .renderable = true, .host_readable = true));
   require(context.output_texture != NULL, "persistent export float texture");
   require(!EXPORT_YUV10 || dv_yuv10_init(log, gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
           "GPU yuv420p10 export planes");
-  if (dv_target.nits || EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
-    context.native_texture = pl_tex_create(gpu,
-        pl_tex_params(.w = WIDTH, .h = HEIGHT, .format = format,
-                      .renderable = true, .sampleable = true));
-    require(context.native_texture != NULL, "persistent native reconstructed float texture");
+  if (dv_target.nits || !EXPORT_YUV10 || EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
+    // The player reconstructs into UNORM16 and maps from it; do the same, so
+    // display management reads the same master codes on both sides.
+    // No float fallback: a master reconstructed into another format is not
+    // the picture the mapping was qualified on, so the device is refused.
+    context.native_texture = dv_yuv10_source_texture(gpu, WIDTH, HEIGHT, true);
+    require(context.native_texture != NULL,
+            "reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA");
   }
   printf("{\"kind\":\"gpu_context_created\",\"width\":%d,\"height\":%d}\n",
          WIDTH, HEIGHT);
@@ -479,21 +490,22 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
     }
   struct pl_frame enhancement_frame = {
       .num_planes = 3,
-      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL},
+      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
+               .bits = {.sample_depth = 16, .color_depth = 10, .bit_shift = 6}},
       .color = pl_color_space_hdr10};
   struct pl_frame source = {
       .num_planes = 3,
       .repr = {.sys = PL_COLOR_SYSTEM_DOLBYVISION,
                .levels = PL_COLOR_LEVELS_FULL,
                .dovi = &metadata,
-               .bits = {.sample_depth = 10, .color_depth = 10}},
+               .bits = {.sample_depth = 16, .color_depth = 10, .bit_shift = 6}},
       .color = pl_color_space_hdr10,
       .enhancement_layer = &enhancement_frame};
   if (hardware) {
     // Map each decoded surface, then restate the representation the native
     // path uses: DV-coded full-range BL with the parsed metadata, and raw EL
-    // residual components. The mapped sample/colour depth (10 in 16) keeps
-    // the same code/1023 normalization as the host upload.
+    // residual components. The mapped sample/colour depth (10 in 16) is the
+    // same code << 6 UNORM16 contract as the host upload.
     bool mapped = true;
     for (int layer = 0; layer < 2 && mapped; layer++) {
       struct pl_frame *live = &fel_mapped[layer];
@@ -515,8 +527,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
       fel_unmap(gpu);
       dv_hw_host_copy = true;
       source.num_planes = enhancement_frame.num_planes = 3;
-      source.repr.bits = (struct pl_bit_encoding){.sample_depth = 10, .color_depth = 10};
-      enhancement_frame.repr.bits = (struct pl_bit_encoding){0};
+      source.repr.bits = (struct pl_bit_encoding){.sample_depth = 16, .color_depth = 10, .bit_shift = 6};
+      enhancement_frame.repr.bits = source.repr.bits;
       require(dv_host_pack != NULL, "decoded surface host copy");
       // The caller owns and frees decoded[].
       for (int layer = 0; layer < 2; layer++)
@@ -533,8 +545,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
     for (int c = 0; c < 3; c++) {
       int w = c ? width / 2 : width, h = c ? height / 2 : height;
       size_t count = (size_t)w * h;
-      float *plane = context.staging;
-      require(dv_unpack_10bit_plane(decoded[layer] + offset, count, plane),
+      uint16_t *plane = context.staging;
+      require(dv_shift_10bit_plane(decoded[layer] + offset, count, plane),
               "native10-bit sample range");
       require(pl_tex_upload(gpu, pl_tex_transfer_params(
           .tex = context.textures[layer][c], .ptr = plane)), "native plane upload");
@@ -548,32 +560,23 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
   }
   pl_frame_set_chroma_location(&source, bl_chroma);
   pl_frame_set_chroma_location(&enhancement_frame, el_chroma);
-  // Native point resampling has exact texel-edge ties (e.g. odd BL x on
-  // half-sized left-sited EL). At non-power-of-two rasters, interpolation of
-  // normalized float coordinates can approach that edge from either side.
-  // Resolve ties toward the positive texel with a fixed 1/64 reference-pixel
-  // bias. Our admitted ratios are 1, 1/2 and 1/4; every non-tie sample is at
-  // least 1/8 texel from an edge, so this does not change its nearest texel.
-  // This explicit point policy is backend mechanics, not a Dolby filter claim.
-  for (int c = 0; c < source.num_planes; c++) {
-    source.planes[c].shift_x -= 1.0f / 64;
-    source.planes[c].shift_y -= 1.0f / 64;
-  }
-  for (int c = 0; c < enhancement_frame.num_planes; c++) {
-    enhancement_frame.planes[c].shift_x -= 1.0f / 64;
-    enhancement_frame.planes[c].shift_y -= 1.0f / 64;
-  }
+  // One sampling contract with the native player (its reconstruct() in the
+  // mpv patch series): every BL and EL plane is sampled bilinearly at its own
+  // siting, and libplacebo rounds the resampled EL code before LINEAR_DZ.
+  // No point policy and no tie bias: bilinear sampling has no texel-edge ties.
 
   pl_tex output_texture = context.output_texture;
-  bool resized = EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT;
-  pl_tex native_texture = (resized || dv_target.nits) ? context.native_texture : output_texture;
+  // An unresized, untargeted yuv420p10 export reconstructs straight into its
+  // UNORM16 source texture; every other export reconstructs into the UNORM16
+  // native texture first, so the master codes never depend on the export.
+  bool staged = context.native_texture != NULL;
+  pl_tex native_texture = staged ? context.native_texture : output_texture;
   struct pl_frame destination = {.num_planes = 1,
                                  .planes = {{.texture = native_texture,
                                              .components = 3,
                                              .component_mapping = {0, 1, 2}}},
                                  .repr = {.sys = PL_COLOR_SYSTEM_RGB,
-                                          .levels = PL_COLOR_LEVELS_FULL,
-                                          .bits = {.color_depth = 32}},
+                                          .levels = PL_COLOR_LEVELS_FULL},
                                  .color = pl_color_space_hdr10};
   source.color.hdr.max_luma = destination.color.hdr.max_luma = 10000;
   source.color.hdr.min_luma = destination.color.hdr.min_luma = 0.005;
@@ -583,8 +586,8 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
   color_map.metadata = PL_HDR_METADATA_NONE;
   struct pl_render_params parameters = pl_render_fast_params;
   parameters.color_map_params = &color_map;
-  parameters.plane_upscaler = &pl_filter_nearest;
-  parameters.plane_downscaler = &pl_filter_nearest;
+  parameters.plane_upscaler = &pl_filter_bilinear;
+  parameters.plane_downscaler = &pl_filter_bilinear;
   parameters.dither_params = NULL;
   parameters.peak_detect_params = NULL;
   parameters.color_adjustment = NULL;
@@ -594,7 +597,7 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
           "full renderer export");
   if (dv_target.nits)
     destination.planes[0].texture = dv_target_render(context.log, gpu, native_texture, frame_index);
-  if (resized || dv_target.nits) export_native_rgb(renderer, destination, output_texture);
+  if (staged) export_native_rgb(renderer, destination, output_texture);
   struct pl_render_errors errors = pl_renderer_get_errors(renderer);
   require(errors.errors == 0 && errors.num_disabled_hooks == 0,
           "renderer error-free export");

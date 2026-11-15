@@ -19,6 +19,24 @@ reopen-on-failure for healthy playback and adds compatible HLS rendition
 switching. This document retains the earlier contract and its historical
 evidence; it does not establish completion of the new work.
 
+**2026-11-07 (D1, playback start):** processed Dolby Vision / HDR10-E now
+reaches the viewer through this prepared switch, after the first frame (plan
+ruling 3), and leaves the Developer tab only when each platform has twenty
+committed switches with complete ±2 s frame samples, independently observed
+audio continuity and no reopen. Seam fixes landed with it: Apple's Shared
+commit waits for a decoded frame at the aligned position (bounded 4 s →
+`.refused`) before exposing the successor, as Local already did; the web
+client without `requestVideoFrameCallback` requires its decoder to count new
+frames at the aligned position instead of trusting `readyState`; Android hands
+MediaSession the successor only after its proven frame and samples Media3
+`DecoderCounters` across the window. Each client now reports every commit as a
+`prepared_seam` beacon (`committed` / `refused` / `switched_without_a_frame`,
+with frame coverage, dropped frames, audio evidence and reopen), counted by
+`plurx_playback_preparation_seams_*`. The web still does not measure audio
+(§4), so its switches cannot be among the twenty until that changes.
+`PreparedOfferWait.boundMs` stays 12 s; raising it to 20 s is Paul's open
+ruling.
+
 ## 1. The bar
 
 Twenty consecutive viewer-directed quality changes per platform, on a realistic

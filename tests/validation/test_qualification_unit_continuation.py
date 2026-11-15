@@ -864,3 +864,84 @@ class NativeTopologyWorkflowTailCase(unittest.TestCase):
         record['origin']['kind'] = 'attested-local'
         with patch.object(q.retention, 'git_bytes', return_value=b'cluster-harness-unit-check: ## local\n'), patch.object(q, 'make_commands', return_value=list(recipe)), patch.object(q, 'historical_command', side_effect=AssertionError('local invocation has no workflow tail')):
             self.assertEqual(q.historical_recipe(record, 'topology'), recipe)
+
+
+class HistoricalRetentionExecutorCase(unittest.TestCase):
+    """The real pre-retention dispatch used conditional jobs but no evidence input."""
+
+    SOURCE = '5ca3abcb0259b401b7da3716c41f6026e2b95415'
+
+    def workflow(self):
+        raw = q.retention.git_bytes(self.SOURCE, '.github/workflows/ci.yml')
+        self.assertIsNotNone(raw, 'historical workflow source must be available')
+        return raw.decode()
+
+    def test_actual_conditional_rust_executors_keep_the_make_branch_available(self):
+        workflow = self.workflow()
+        for kind in ('store_contract', 'wal', 'topology', 'transport'):
+            with self.subTest(kind=kind):
+                self.assertTrue(q.retention_enabled_rust_executor(workflow, kind))
+                self.assertTrue(q.historical_command(workflow, kind))
+                q.require_unretained_historical_event(workflow, kind, {})
+
+    def test_changed_conditional_commands_or_environment_refuse(self):
+        workflow = self.workflow()
+        changed = (
+            ('store_contract', 'make cluster-store-check 2>&1 | tee',
+             'make cluster-store-check --quick 2>&1 | tee'),
+            ('wal', 'RETAIN_WAL_UNITS: ${{ needs.scope.outputs.retain_wal_units }}',
+             'RETAIN_WAL_UNITS: true'),
+            ('topology', 'make cluster-harness-nonunit-check',
+             'make cluster-harness-check'),
+            ('transport', 'test "$(uname -s)" = Linux',
+             'test "$(uname -s)" = Darwin'),
+        )
+        for kind, before, after in changed:
+            with self.subTest(kind=kind):
+                self.assertIn(before, workflow)
+                altered = workflow.replace(before, after, 1)
+                try:
+                    self.assertFalse(q.historical_command(altered, kind))
+                except receipts.ReceiptError:
+                    pass  # An exact step with forged env must fail closed.
+
+    def test_alternate_step_keys_and_env_merges_refuse(self):
+        workflow = self.workflow()
+        original = ('          RETAIN_STORE_UNITS: '
+                    '${{ needs.scope.outputs.retain_store_contract_units }}')
+        for replacement in (
+            '          "RETAIN_STORE_UNITS": ${{ needs.scope.outputs.retain_store_contract_units }}',
+            original + '\n          EXTRA: true',
+            original + '\n          <<: *override',
+            original + '\n          RETAIN_STORE_UNITS: true',
+        ):
+            with self.subTest(replacement=replacement):
+                altered = workflow.replace(original, replacement, 1)
+                self.assertNotEqual(altered, workflow)
+                try:
+                    self.assertFalse(q.historical_command(altered, 'store_contract'))
+                except receipts.ReceiptError:
+                    pass
+
+    def test_quoted_duplicate_scope_output_refuses(self):
+        workflow = self.workflow()
+        original = ('      retain_store_contract_units: '
+                    '${{ steps.retention.outputs.retain_store_contract_units }}')
+        altered = workflow.replace(original, original + '\n      "retain_store_contract_units": true', 1)
+        self.assertNotEqual(altered, workflow)
+        with self.assertRaises(receipts.ReceiptError):
+            q.require_unretained_historical_event(altered, 'store_contract', {})
+
+    def test_retention_inputs_and_scope_rebinding_refuse_old_full_execution(self):
+        workflow = self.workflow()
+        for kind in ('store_contract', 'wal', 'topology', 'transport'):
+            with self.subTest(kind=kind):
+                with self.assertRaises(receipts.ReceiptError):
+                    q.require_unretained_historical_event(workflow, kind,
+                        {'retained_units_sha256': 'a' * 64})
+                altered = workflow.replace(
+                    "if: inputs.retained_units_sha256 != '' || inputs.retained_units_attachment_id != '' || inputs.retained_units_attachment_uuid != ''",
+                    "if: inputs.retained_units_sha256 == '' || inputs.retained_units_attachment_id != '' || inputs.retained_units_attachment_uuid != ''", 1)
+                self.assertNotEqual(altered, workflow)
+                with self.assertRaises(receipts.ReceiptError):
+                    q.require_unretained_historical_event(altered, kind, {})

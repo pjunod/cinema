@@ -75,7 +75,7 @@ pub enum BootstrapPackageOrigin {
     LocalSource,
 }
 /// Validate the explicit install route before any service or filesystem mutation.
-/// Public release archives remain universal, independently of a local source build.
+/// Public release archives are Apple Silicon (arm64) only, independently of a local source build.
 pub fn verify_bootstrap_identity(
     root: &Path,
     origin: BootstrapPackageOrigin,
@@ -84,8 +84,8 @@ pub fn verify_bootstrap_identity(
     let release: ReleaseIdentityV1 = dir.json("release.json")?;
     release.validate()?;
     match origin {
-        BootstrapPackageOrigin::Release if release.architecture != Architecture::Universal => {
-            return Err(invalid("native macOS release must be universal"));
+        BootstrapPackageOrigin::Release if release.architecture != Architecture::Arm64 => {
+            return Err(invalid("native macOS release must be arm64"));
         }
         BootstrapPackageOrigin::LocalSource => {
             let source: SourceInstallV1 = dir.json("source-install-v1.json")?;
@@ -239,12 +239,12 @@ pub fn archive_package_root(
     artifact: &update::ArtifactV1,
     version: &str,
 ) -> Result<PathBuf> {
-    let expected_name = format!("plurxd-{version}-macos-universal.tar.gz");
+    let expected_name = format!("plurxd-{version}-macos-arm64.tar.gz");
     if semver::Version::parse(version).is_err()
         || !update::asset_name(&expected_name)
         || artifact.name != expected_name
         || artifact.platform != update::Platform::Macos
-        || artifact.architecture != Architecture::Universal
+        || artifact.architecture != Architecture::Arm64
         || artifact.format != update::Format::TarGz
         || artifact.component != update::Component::NativeRuntime
         || artifact.package_name != "plurx-native"
@@ -987,7 +987,7 @@ pub fn bootstrap(
         commit,
         desktop,
         browser_origin,
-        package_root.map(|root| (root, Architecture::Universal)),
+        package_root.map(|root| (root, Architecture::Arm64)),
     )
     .map(|(installed, _)| installed)
 }

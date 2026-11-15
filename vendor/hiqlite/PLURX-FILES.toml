@@ -6,6 +6,7 @@
 # Carry Plurx changes; each must be named by a PLURX-PATCH.md row bullet.
 patched = [
     "src/app_state.rs",
+    "src/applied_mark.rs",
     "src/backup.rs",
     "src/client/backup.rs",
     "src/client/batch.rs",
@@ -40,6 +41,7 @@ patched = [
     "src/network/raft_server.rs",
     "src/network/snapshot_executor.rs",
     "src/network/web_socket_connect.rs",
+    "src/query/mod.rs",
     "src/query/rows.rs",
     "src/reduction.rs",
     "src/server/proxy/stream.rs",
@@ -89,7 +91,6 @@ patched = [
 "src/main.rs" = "f7445e86891246edbc5d17cbeaaae21dc6504b34dc0cefba78b8157a38e0cf48"
 "src/migration.rs" = "254887da3668a6b70c8ee3e791b9a16cd2e830e149b3afda98de7ab77dcf121f"
 "src/query/cust_types.rs" = "8730957c068150e046814b544a3f28605c41149707506afb47be24ad890be968"
-"src/query/mod.rs" = "34b206195642a48588f14fece579bf0ffa556dd4681ddea7aaac9c811eb69d40"
 "src/server/args.rs" = "4c0da35dca2d69532f6ea3757fb57dffc527ded518611ef0b318634e5958daa8"
 "src/server/cache.rs" = "89de47c40b8825b8cf2bf4638d56e4adda5023624cd600fedfa66d8a805b6f42"
 "src/server/config.rs" = "e5ea631c70d0d891a9de7f1c490d25994f9bc3b94cc852e9f5b0adcbfc4eaeed"

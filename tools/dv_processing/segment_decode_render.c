@@ -26,6 +26,10 @@ static int source_profile;
 static int expected_w[2], expected_h[2], frame_cap, emitted;
 static bool debug_frames, initialized, window_mode, window_done, first_pair;
 static bool source_eof, discover_el;
+// --refit-stats / --dump-composed (refit_mode.h): CPU-only F+ statistics.
+// Decoded pairs go to refit_pairs instead of the renderer.
+static bool refit_mode;
+static void refit_pairs(void);
 // GPU decode: PLURX_DV_DECODE_DEVICE names the admitted VA-API render node.
 // Surfaces stay on the GPU and are mapped into the renderer; a host copy of
 // a decoded 4K picture costs more than software decoding it.
@@ -703,7 +707,10 @@ static void receive(struct layer *layer) {
     need(layer->queue[layer->count - 1] != NULL,
          "bounded queued frame reference");
     av_frame_unref(frame);
-    render_pairs();
+    if (refit_mode)
+      refit_pairs();
+    else
+      render_pairs();
     if (window_done)
       break;
   }
@@ -770,7 +777,8 @@ static struct layer open_layer(AVStream *stream, int index) {
   out.decoder->height = expected_h[index];
   // Window admission reserves four frame workers per layer, plus the helper
   // caller and the one software-Vulkan worker. Disable nested slice threading.
-  out.decoder->thread_count = window_mode && !hw_device ? 4 : 1;
+  // A refit decodes in software with the same four workers per layer.
+  out.decoder->thread_count = (window_mode || refit_mode) && !hw_device ? 4 : 1;
   out.decoder->thread_type = FF_THREAD_FRAME;
   if (hw_device) {
     out.decoder->hw_device_ctx = av_buffer_ref(hw_device);
@@ -812,7 +820,10 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
        "split receive");
   av_packet_free(&out);
 }
+#include "refit_mode.h"
 int main(int argc, char **argv) {
+  if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed")))
+    return refit_main(argc, argv);
   bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
   struct rational supplied_origin = {0, 1};
   if (held_origin) {

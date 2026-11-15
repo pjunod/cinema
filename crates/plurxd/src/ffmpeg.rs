@@ -8,6 +8,8 @@
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux_dolby;
+#[cfg(unix)]
+pub(crate) mod output_pipe;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -111,40 +113,7 @@ pub(crate) fn inherit_raw_file_descriptors_with_cwd(
     descriptors: &[(std::os::fd::RawFd, i32)],
     cwd_target: Option<i32>,
 ) {
-    assert!(
-        descriptors.len() <= 7
-            && descriptors
-                .iter()
-                .all(|(_, target)| (3..=9).contains(target))
-    );
-    assert!(cwd_target.is_none_or(|target| descriptors.iter().any(|(_, fd)| *fd == target)));
-    let descriptors = descriptors.to_vec();
-    unsafe {
-        command.pre_exec(move || {
-            let mut copies = [None; 7];
-            for (index, (fd, target)) in descriptors.iter().enumerate() {
-                let duplicate = libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 10);
-                if duplicate == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                copies[index] = Some((duplicate, *target));
-            }
-            for (duplicate, target) in copies.into_iter().flatten() {
-                if libc::dup2(duplicate, target) == -1 {
-                    libc::close(duplicate);
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(duplicate);
-            }
-            #[cfg(target_os = "macos")]
-            if let Some(target) = cwd_target {
-                if libc::fchdir(target) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
+    crate::producer_spawn::Descriptors::install_legacy(command, descriptors, cwd_target);
 }
 
 /// Drain diagnostics alongside the media pipe without letting a noisy
@@ -982,7 +951,9 @@ pub(crate) async fn held_source_packet_probe_json(
     };
     let mut command = tokio::process::Command::new(ffprobe_bin());
     #[cfg(unix)]
-    inherit_file_descriptors(&mut command, &[(source, 3)]);
+    if input.is_none() {
+        inherit_file_descriptors(&mut command, &[(source, 3)]);
+    }
     command.args([
         "-v",
         "error",
@@ -1024,11 +995,13 @@ pub(crate) async fn held_source_packet_probe_json(
     if let Some(input) = input {
         let cap = usize::try_from(max_stdout_bytes.saturating_add(1))
             .map_err(|error| HeldPacketProbeError::Process(error.to_string()))?;
-        let output = plurx_core::process::bounded::output_command(
-            &mut command,
-            timeout,
-            cap,
-            crate::process_control::ChildWork::background("fragment index packet probe"),
+        let output = plurx_core::process::source_lifetime::mediated(
+            plurx_core::process::bounded::output_command(
+                &mut command,
+                timeout,
+                cap,
+                crate::process_control::ChildWork::background("fragment index packet probe"),
+            ),
         )
         .await;
         input.close_and_wait().await.map_err(|error| {
@@ -1219,37 +1192,6 @@ pub(crate) fn source_burn_sidecar_command(
     Ok(command)
 }
 
-/// Build native text extraction without starting unowned subtitle work.
-pub(crate) fn source_native_text_command(
-    source: &std::fs::File,
-    ordinal: u16,
-) -> Result<tokio::process::Command, String> {
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    #[cfg(unix)]
-    inherit_file_descriptors(&mut command, &[(source, 3)]);
-    command.args(["-hide_banner", "-loglevel", "error", "-threads", "1", "-i"]);
-    #[cfg(unix)]
-    command.arg("/dev/fd/3");
-    #[cfg(windows)]
-    {
-        let path = windows_source_path(source)?;
-        verify_windows_source_path(source, &path)?;
-        command.arg(path);
-    }
-    command.args([
-        "-map",
-        &format!("0:s:{ordinal}"),
-        "-vn",
-        "-an",
-        "-threads",
-        "1",
-        "-f",
-        "webvtt",
-        "pipe:1",
-    ]);
-    Ok(command)
-}
-
 async fn held_source_probe_json_with_limits(
     source: &std::fs::File,
     timeout: Duration,
@@ -1360,11 +1302,11 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     if let Some(document) = value.as_object_mut() {
         // Application-owned measurements are grafted after the scan. A fresh
         // probe never carries them; their presence says nothing about whether
-        // the source bytes changed. Keep all FFprobe-owned fields comparable.
-        document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
-        document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
-        document.remove(plurx_core::scan::dv_title::PROBE_FIELD);
-        document.remove(plurx_core::transcode::dv_fel_qualification::PROBE_KEY);
+        // the source bytes changed. They are excluded by their namespace, not
+        // by a list: a list missed `plurx_dv_fel_requests_v3` (#1477), and every
+        // title with a pending FEL request then failed held-source
+        // verification. Keep all FFprobe-owned fields comparable.
+        document.retain(|key, _| !plurx_core::scan::probe::is_application_graft(key));
     }
     if let Some(format) = value
         .get_mut("format")
@@ -3640,8 +3582,26 @@ pub(crate) async fn bounded_command_capture_cancellable(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command, work)
-        .map_err(|error| error.to_string())?;
+    // A legacy tagged hook may install additional original descriptors; an
+    // empty plan must never hide it. Untagged bounded helpers own only stdio.
+    let manifest = if plurx_core::process::source_lifetime::has_descriptor_handoff(command.as_std())
+    {
+        None
+    } else {
+        Some(
+            crate::producer_spawn::Descriptors::default()
+                .prepare(&mut command, crate::producer_spawn::ChildStdios::CAPTURED)
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    let (mut child, _child_job) = match &manifest {
+        Some(manifest) => crate::producer_spawn::with_manifest(manifest, &mut command, |command| {
+            crate::process_control::spawn_job_owned(command, work)
+        }),
+        None => crate::process_control::spawn_job_owned(&mut command, work),
+    }
+    .map_err(|error| error.to_string())?;
+    drop((command, manifest));
     let stdout = child
         .stdout
         .take()

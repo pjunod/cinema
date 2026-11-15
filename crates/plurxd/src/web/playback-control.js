@@ -124,7 +124,7 @@
       && typeof action.action_id === "string" && ACTION_ID_RE.test(action.action_id)
       && typeof action.session_id === "string" && action.session_id !== ""
       && preparedPlaylistUrl(action.session_id, action.playlist_url) !== null
-      && boundedInteger(action.media_origin_ms, 0, MAX_MEDIA_MS)
+      && boundedInteger(action.media_origin_ms, -MAX_MEDIA_MS, MAX_MEDIA_MS)
       && (action.control == null || (validBootstrap(action.control)
         && action.control.url === `/api/v1/hls/${action.session_id}/control`))
       && validEffectiveSelection(action.effective_selection);
@@ -155,7 +155,7 @@
       && (value.first_frame_unix_ms == null
         || (Number.isSafeInteger(value.first_frame_unix_ms) && value.first_frame_unix_ms > 0))
       && (value.committed_media_origin_ms == null
-        || boundedInteger(value.committed_media_origin_ms, 0, MAX_MEDIA_MS))
+        || boundedInteger(value.committed_media_origin_ms, -MAX_MEDIA_MS, MAX_MEDIA_MS))
       && (value.state !== "buffer_ready" || value.buffered_through_ms != null)
       && (value.state !== "committed" || value.first_frame_unix_ms != null)
       && (value.state !== "committed" || value.committed_media_origin_ms != null)
@@ -771,6 +771,30 @@
     return ms == null ? "Not measured" : `${ms} ms`;
   }
 
+  const PREPARED_SEAM_OUTCOMES = Object.freeze(["committed", "refused", "switched_without_a_frame"]);
+
+  /// The `prepared_seam` beacon body, identical in shape on every client.
+  /// `frames_complete` is the coverage clause: a window sampled end to end
+  /// on both sides, never a zero over part of it. `audio_observed` is true
+  /// only when an instrument of its own measured the audio; a platform that
+  /// does not measure it says so and its switches do not count toward the
+  /// twenty. Null for an outcome outside the vocabulary.
+  function preparedSeamReport(options) {
+    const outcome = options && options.outcome;
+    if (!PREPARED_SEAM_OUTCOMES.includes(outcome)) return null;
+    const delta = options.frames || null;
+    const complete = !!(delta && delta.count != null && finiteNumber(delta.coveredMs)
+      && finiteNumber(delta.spanMs) && delta.spanMs > 0 && delta.coveredMs >= delta.spanMs);
+    return {
+      platform: options.platform || "web",
+      outcome,
+      frames_complete: complete,
+      dropped_frames: delta && delta.count != null ? delta.count : null,
+      audio_observed: options.audioObserved === true,
+      reopened: options.reopened === true,
+    };
+  }
+
   return Object.freeze({ PROTOCOL, PREPARE_REPLACEMENT_ACTION, PREPARE_ACTION_TAG,
     SUPPORTED_ACTIONS, SHARED_PREPARE_REPLACEMENT_ACTION, SHARED_SUPPORTED_ACTIONS, Reporter, capture, sameIntent, validBootstrap, validResponse,
     validPreparation, validAcknowledgement, preparedPlaylistUrl,
@@ -779,5 +803,5 @@
     preparedSwitchCounterDelta, preparedSwitchSilenceRunMs, preparedSwitchSeam,
     preparedSwitchVisibleInMs, preparedSwitchFramesRow,
     preparedSwitchAudioEventRow, preparedSwitchAudioSeamRow,
-    preparedSwitchVisibleRow });
+    preparedSwitchVisibleRow, PREPARED_SEAM_OUTCOMES, preparedSeamReport });
 });

@@ -321,6 +321,7 @@ impl TranscodeManager {
             retirement_deadline: Default::default(),
             direct: Some(Arc::new(prepared.into_direct_file())),
             state: std::sync::Mutex::new(SourceViewerState {
+                backing: SourceBacking::ImmutableVod,
                 start: None,
                 retirement_requested: false,
                 retirement_mode: crate::sharing_connection_custody::DriverCloseMode::Drain,

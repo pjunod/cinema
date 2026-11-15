@@ -69,6 +69,7 @@ pub(crate) const DVR_PURGE_CATALOG: [&str; 4] = [
     "DELETE FROM items WHERE id IN (
        SELECT r.item_id FROM dvr_recordings r WHERE r.id=$1 AND r.state='deleted')
        AND library_id IN (SELECT id FROM libraries WHERE kind='recordings')
+       AND offloaded_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM files WHERE files.item_id=items.id)
        AND NOT EXISTS (SELECT 1 FROM items child WHERE child.parent_id=items.id)",
     "UPDATE dvr_recordings SET item_id=NULL, file_id=NULL WHERE id=$1 AND state='deleted'",

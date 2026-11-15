@@ -55,12 +55,30 @@ async fn sharing_source_nonowner_http_cold_probe_and_same_driver_end_require_act
         crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     Box::pin(tokio::time::timeout(
         Duration::from_secs(120),
-        actual_nonowner_forwarding(fixture_body_budget),
+        actual_nonowner_forwarding(fixture_body_budget, false),
     ))
     .await
     .expect("finite real-member forwarding fixture");
 }
-async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemaphorePermit) {
+/// S6/S7 across the Source cluster (ingress is not the owner, the incident
+/// topology): a clocked Start is answered `startup_timeout` with
+/// `Retry-After` on the viewer's clock by the ingress while the owner cannot
+/// publish, and the same request then rejoins the owner's one entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_nonowner_clocked_start_answers_not_yet_and_rejoins_the_owner_entry() {
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
+    Box::pin(tokio::time::timeout(
+        Duration::from_secs(120),
+        actual_nonowner_forwarding(fixture_body_budget, true),
+    ))
+    .await
+    .expect("finite real-member forwarding fixture");
+}
+async fn actual_nonowner_forwarding(
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+    clocked: bool,
+) {
     use plurx_core::{
         cluster::{membership::ClusterRole, migration::select_daemon_store_observing},
         config::Config,
@@ -238,6 +256,51 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
         worker.reference.item_id.as_str(),
         worker.reference.file_id.as_str()
     );
+    if clocked {
+        // The owner cannot publish while its software capacity is held.
+        let hold = worker
+            .state
+            .transcode
+            .test_hold_source_software_capacity()
+            .expect("owner capacity held");
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(&path)
+            .body(axum::body::Body::from(worker.request.clone()))
+            .expect("clocked Start request");
+        *request.headers_mut() = worker.headers.clone();
+        request.headers_mut().insert(
+            super::super::hls::STARTUP_REMAINING_HEADER,
+            axum::http::HeaderValue::from_static("1500"),
+        );
+        let began = Instant::now();
+        let response = sender
+            .send_request(request)
+            .await
+            .expect("forwarded clocked Start");
+        let status = response.status();
+        let retry_after = response.headers().get("retry-after").cloned();
+        let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()), 128 * 1024)
+            .await
+            .expect("not-yet body");
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let reply: Value = serde_json::from_slice(&bytes).expect("typed not-yet");
+        assert_eq!(reply["code"], "startup_timeout");
+        assert_eq!(
+            retry_after.as_ref().and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "the ingress answers on the viewer's clock, not the owner's 305 s"
+        );
+        drop(hold);
+    }
     let request = axum::http::Request::builder()
         .method("POST")
         .uri(&path)
@@ -291,6 +354,18 @@ async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemap
         .await
         .expect("actual retained worker");
     assert_eq!(owned.assignment.owner_node_id(), worker.state.node_id);
+    assert_eq!(
+        worker
+            .state
+            .transcode
+            .source_http_starts
+            .entries
+            .lock()
+            .expect("actual registry")
+            .len(),
+        1,
+        "the retry rejoined the owner's one entry (clocked={clocked})"
+    );
     assert!(
         ingress
             .transcode

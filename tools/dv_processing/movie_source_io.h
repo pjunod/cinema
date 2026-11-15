@@ -74,6 +74,9 @@ struct budget_io {
   int64_t position, length;
   int upstream;
   struct movie_source_interrupt *interrupt;
+  // Original-read budget, set to WINDOW_READ_LIMIT by movie_source_open. Only
+  // a whole-title caller (segment_decode_render --refit-stats) lifts it.
+  uint64_t read_limit;
 };
 
 static int movie_source_interrupt_status(const struct budget_io *io) {
@@ -307,6 +310,7 @@ static int movie_source_open(struct budget_io *io, const char *source) {
   memset(io, 0, sizeof(*io));
   io->fd = -1;
   io->upstream = -1;
+  io->read_limit = WINDOW_READ_LIMIT;
   if (movie_source_url(source, io)) {
     io->remote = true;
     int result = movie_http_head(io, true, 0);
@@ -330,11 +334,11 @@ static int movie_read(void *opaque, uint8_t *buffer, int size) {
   struct budget_io *io = opaque;
   if (size <= 0) return AVERROR(EINVAL);
   uint64_t charged = io->remote ? io->requested_bytes : io->bytes;
-  if (charged >= WINDOW_READ_LIMIT) {
+  if (charged >= io->read_limit) {
     io->exhausted = true;
     return AVERROR(ENOSPC);
   }
-  uint64_t available = WINDOW_READ_LIMIT - charged;
+  uint64_t available = io->read_limit - charged;
   if ((uint64_t)size > available) size = (int)available;
   if (!io->remote) {
     ssize_t n;

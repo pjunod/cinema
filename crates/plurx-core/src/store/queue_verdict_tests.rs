@@ -20,6 +20,7 @@ fn health(
         claimable,
         running_past_lease,
         last_ready_at_ms: 0,
+        ..AnalysisQueueHealth::default()
     }
 }
 
@@ -170,5 +171,88 @@ fn too_few_claims_to_be_sure_is_not_healthy_either() {
     assert_eq!(
         analysis_queue_verdict(health(0, 0, 0, 0, 1), 0, 0, 0),
         AnalysisQueueVerdict::Degraded
+    );
+}
+
+/// The pre-worker half of the queue, which the jobs-table inputs never see.
+fn with_requests(
+    base: AnalysisQueueHealth,
+    waiting: i64,
+    incompatible: i64,
+) -> AnalysisQueueHealth {
+    AnalysisQueueHealth {
+        waiting,
+        incompatible,
+        ..base
+    }
+}
+
+#[test]
+fn requests_still_inside_their_retry_wait_are_not_idle() {
+    // Delayed-only: nothing due, nothing claimed, nothing built. Something
+    // is in front of the queue, so it is not "nothing to judge".
+    assert_eq!(
+        analysis_queue_verdict(with_requests(health(0, 0, 0, 0, 0), 12, 0), 0, 0, 0),
+        AnalysisQueueVerdict::Degraded
+    );
+}
+
+#[test]
+fn a_cohort_under_a_retired_engine_that_nobody_claims_is_dead() {
+    // The 2026-11-07 fleet: 3,878 due requests under digests no node ran,
+    // zero claims, read `idle` because every input counted the jobs table.
+    assert_eq!(
+        analysis_queue_verdict(with_requests(health(0, 0, 0, 2, 0), 0, 3_000), 36, 0, 0),
+        AnalysisQueueVerdict::Dead
+    );
+    assert_eq!(
+        analysis_queue_verdict(
+            with_requests(health(0, 0, 0, 0, 0), 0, ANALYSIS_DEAD_BACKLOG_FLOOR - 1),
+            0,
+            0,
+            0
+        ),
+        AnalysisQueueVerdict::Degraded
+    );
+}
+
+#[test]
+fn a_stranded_cohort_degrades_a_queue_that_is_otherwise_producing() {
+    assert_eq!(
+        analysis_queue_verdict(with_requests(health(20, 0, 22, 4, 0), 0, 0), 25, 2, 0),
+        AnalysisQueueVerdict::Healthy
+    );
+    assert_eq!(
+        analysis_queue_verdict(
+            with_requests(health(20, 0, 22, 4, 0), 0, ANALYSIS_DEAD_BACKLOG_FLOOR),
+            25,
+            2,
+            0
+        ),
+        AnalysisQueueVerdict::Degraded
+    );
+}
+
+#[test]
+fn terminal_history_alone_is_idle() {
+    // Terminal rows are in neither half: no waiting, incompatible or due work.
+    assert_eq!(
+        analysis_queue_verdict(with_requests(health(0, 0, 0, 0, 0), 0, 0), 0, 0, 0),
+        AnalysisQueueVerdict::Idle
+    );
+}
+
+#[test]
+fn eligible_is_due_jobs_plus_compatible_requests_and_claimable_is_its_alias() {
+    let health = AnalysisQueueHealth::with_requests([1, 2, 3, 4, 5, 6], [7, 8, 9, 10]);
+    assert_eq!(health.eligible, 4 + 9);
+    assert_eq!(health.claimable, health.eligible);
+    assert_eq!(
+        (
+            health.waiting,
+            health.incompatible,
+            health.oldest_queued_at_ms
+        ),
+        (7, 8, 10)
     );
 }

@@ -1267,7 +1267,24 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
 
         # Both hand-written downgrade fixtures give the v48 table back.
-        self.assertRegex(dv_conversion, r"DROPPED_BY_THE_FIXTURE: \[&str; \d+\]")
+        # The inferred slice keeps the schema arithmetic authoritative rather
+        # than duplicating its length in the declaration. Require its typed
+        # shape AND the count/migration-membership assertions below.
+        self.assertRegex(
+            dv_conversion,
+            r"const DROPPED_BY_THE_FIXTURE: &\[&str\] = &\[",
+        )
+        self.assertRegex(
+            dv_conversion,
+            r"assert_eq!\(\s*crate::store::SQLITE_SCHEMA_VERSION - GUARD_SCHEMA_VERSION,"
+            r"\s*DROPPED_BY_THE_FIXTURE\.len\(\) as i64,",
+        )
+        self.assertRegex(
+            dv_conversion,
+            r"for &table in DROPPED_BY_THE_FIXTURE \{\s*assert!\(\s*"
+            r"crate::store::sqlite::MIGRATIONS\[GUARD_SCHEMA_VERSION as usize\.\.\]"
+            r"\s*\.iter\(\)\s*\.any\(\|migration\| migration\.contains\(table\)\)",
+        )
         self.assertIn("media_session_producer_recovery", dv_conversion)
         self.assertIn(
             "DROP TABLE media_session_producer_recovery", store_contract
@@ -1683,15 +1700,19 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertEqual(
             production.count("recovery_epoch: recovery_epoch.clone(),"),
-            3,
-            "processed qualification, worker identity and durable activation share one epoch",
+            2,
+            "worker identity and durable activation share the one epoch the start minted",
         )
-        # Processed Auto qualification borrows the same admitted identity;
-        # it must not mint a second recovery allowance before worker creation.
-        qualification = production.split(
-            "let recovery = crate::transcode::SessionRecoveryIdentity {", 1
-        )[1].split(".prepare_processed_hdr10(", 1)[0]
-        self.assertIn("recovery_epoch: recovery_epoch.clone(),", qualification)
+        # Processed Dolby Vision is an upgrade after the first frame (playback
+        # start D1): the create no longer qualifies it. The upgrade's trial
+        # borrows the admitted identity of the session the start made, read
+        # from its durable route, so it cannot mint a second recovery
+        # allowance for the same play.
+        upgrade = (ROOT / "crates/plurxd/src/http/hls/processed_upgrade.rs").read_text()
+        qualification = upgrade.split(
+            "pub(in crate::http) async fn run_upgrade_with<", 1
+        )[1].split("run_trial(trial_request, recovery)", 1)[0]
+        self.assertIn("recovery_epoch: route.recovery_epoch.clone(),", qualification)
         self.assertNotIn("recovery_epoch_for(", qualification)
         self.assertIn(
             "fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row",

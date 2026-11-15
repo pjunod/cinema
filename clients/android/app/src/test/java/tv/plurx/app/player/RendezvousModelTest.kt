@@ -101,6 +101,7 @@ private fun run(sim: Sim, hold: RendezvousHold = RendezvousHold()): Outcome {
         if (!hold.isReady) {
             sim.advance(POLL_MS)
             val target = hold.rendezvousFilmMs ?: return Outcome.NeverSettled
+            if (sim.landed) hold.seekReady(sim.wallMs)
             if (sim.landed && successorIsBuffered(sim.bufferedThroughMs, target)) {
                 hold.ready(sim.wallMs)
             }
@@ -239,6 +240,28 @@ class RendezvousModelTest {
         assertEquals(10_000 + RENDEZVOUS_LEAD_MS, park.rendezvousFilmMs)
     }
 
+    /**
+     * A successor staged ahead of the viewer (a processed upgrade begins at the
+     * window its trial produced) is met where it begins, never before it: the
+     * successor holds nothing earlier. Once the viewer is past that start the
+     * ordinary lead applies again.
+     */
+    @Test
+    fun aSuccessorStagedAheadIsMetAtItsOwnStart() {
+        val hold = RendezvousHold(floorFilmMs = 18_000)
+        assertEquals(18_000L, hold.park(nowMs = 0, incumbentFilmMs = 10_000).rendezvousFilmMs)
+        val step = hold.fire(
+            nowMs = 9_000,
+            incumbentFilmMs = 18_000,
+            successorFilmMs = 18_000,
+            successorReady = true,
+            speed = 1.0,
+        )
+        assertTrue(step is RendezvousHold.Step.Commit, "got $step")
+        val late = RendezvousHold(floorFilmMs = 18_000)
+        assertEquals(20_000 + RENDEZVOUS_LEAD_MS, late.park(nowMs = 0, incumbentFilmMs = 20_000).rendezvousFilmMs)
+    }
+
     /** A hold that has not been parked yet asks to be parked. */
     @Test
     fun firingBeforeAParkParksInstead() {
@@ -303,6 +326,37 @@ class RendezvousModelTest {
         val park = hold.park(0, Long.MAX_VALUE - 1, 2.0)
         assertEquals(Long.MAX_VALUE, park.rendezvousFilmMs)
         assertEquals(false, park.playWhenReady)
+    }
+
+    @Test
+    fun bufferSupplyWaitDoesNotBecomeSeekLatencyOrAFiveSecondLead() {
+        val hold = RendezvousHold()
+        val parked = hold.park(0, 1_417_121)
+        hold.seekReady(125) // native seek-ready and aligned at the target
+        hold.ready(4_824) // HTTP supply finally proves the separate 3s runway
+        assertEquals(125L, hold.observedSeekMs)
+        val step = hold.fire(4_836, 1_421_958, parked.rendezvousFilmMs, true, 1.0)
+        assertTrue(step is RendezvousHold.Step.Repark)
+        assertEquals(1_423_458L, step.park.rendezvousFilmMs) // ordinary 1.5s lead, not 5.074s
+        assertEquals(false, hold.isReady)
+        hold.seekReady(5_036)
+        hold.seekReady(8_000) // repeated state callbacks cannot grow the same park's receipt
+        hold.ready(9_000)
+        assertEquals(200L, hold.observedSeekMs)
+    }
+
+    @Test
+    fun runwayReadinessAloneDoesNotFabricateANativeSeekReceipt() {
+        val hold = RendezvousHold()
+        hold.park(10, 10_000)
+        hold.ready(5_000)
+        assertEquals(0L, hold.observedSeekMs)
+        assertTrue(hold.isReady)
+        assertEquals(false, preparedSeekReady(false, true, true, 11_500, 11_500))
+        assertEquals(false, preparedSeekReady(true, false, true, 11_500, 11_500))
+        assertEquals(false, preparedSeekReady(true, true, false, 11_500, 11_500))
+        assertEquals(false, preparedSeekReady(true, true, true, 11_000, 11_500))
+        assertTrue(preparedSeekReady(true, true, true, 11_500, 11_500))
     }
 
 }

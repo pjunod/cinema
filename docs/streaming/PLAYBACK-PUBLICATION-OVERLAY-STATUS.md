@@ -2,7 +2,7 @@
 
 Companion to [the startup implementation ledger](PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md) and [the playback surface contract](../clients/PLAYBACK-SURFACE-CONTRACT.md) — this records the deployed acceptance failures, their corrections, and the PR's progress toward merge.
 
-**Status:** open — source repair implemented; deployment acceptance pending.
+**Status:** open — source repair merged as [PR #1376](http://forge.lan:3000/noirr/plurx/pulls/1376) (`edf6d08fa`) and deployed 2026-11-07 to media1, lab4 and lab6 (media1 and lab6 on build `4ddbf1229`, lab4 on `edf6d08fa`; #1376 is in both); deployment acceptance pending.
 
 **Progress:** Adversarial review finished; its regression-fixture finding is addressed. This branch’s pull request description is the live record for compiler results, retained per-test evidence, the main fast lane and landing.
 
@@ -21,7 +21,7 @@ Expired-session web Resume also retained a `media_waiting` fault over advancing 
 | Initial publication frontier and clock | Codex/root | Implemented | Requested position, not pre-attachment elapsed time, owns initial coverage. Keep complete cuts, immutable reload duration, exact-attempt admission and steady reserve. |
 | Media-wait and destination-fault lifetime | Sol | Implemented | Attached presentation retires only attached waits; destination faults retire on actual destination proof or supersession. Predecessor movement cannot forgive an unresolved destination. |
 | Regression evidence and main fast lane | Codex/root | Tracked in the PR | One completed adversarial review, fixes, then focused regressions and one fast-lane run. Retry only failed or invalidated checks. |
-| Main merge and post-merge jobs | Codex/root | Tracked in the PR | Carry regression fields into landing commit; record observed post-merge checks. Maintainer owns deployment. |
+| Main merge and post-merge jobs | Codex/root | Tracked in the PR | Carry regression fields into landing commit; record observed post-merge checks. Maintainer deployed 2026-11-07 (see Status). |
 
 ## Decisions and limits
 

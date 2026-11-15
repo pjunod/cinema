@@ -68,7 +68,7 @@ def test_discard_keeps_selected_native_pictures_and_multistream_eof(
     metadata = {'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
                 'helpers': {name: hashlib.sha256(Path(helper).read_bytes()).hexdigest()
                             for name, helper in [('baseline', baseline), ('optimized', optimized)]},
-                'library_sha256': hashlib.sha256((Path(library) / 'libplacebo.so.374').read_bytes()).hexdigest(),
+                'library_sha256': hashlib.sha256((Path(library) / 'libplacebo.so.387').read_bytes()).hexdigest(),
                 'selected_absolute_index': 3, 'original_inventory': 4, 'windows': results}
     (scratch / 'results.json').write_text(json.dumps(metadata, indent=2) + '\n')
     return metadata

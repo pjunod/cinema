@@ -7,6 +7,11 @@ use plurx_core::error::StoreError;
 use plurx_core::store::background_jobs::*;
 use plurx_core::store::Store;
 
+#[allow(unused_imports)]
+pub(crate) use self::source_extensions_fixture::title_extension_fixture::{
+    require_fixture_marker, validated_empty_title_rewind, TITLE_FIXTURE_SHAPE_SQL,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct FragmentFailureFixture {
@@ -686,21 +691,6 @@ pub(crate) fn validated_empty_translation_rewind(
     drops
 }
 
-fn require_fixture_marker(connection: &rusqlite::Connection, table: &str, version: i64) {
-    let counts: (i64, i64) = connection
-        .query_row(
-            &format!("SELECT count(*),COALESCE(sum(singleton=1 AND version=?1),0) FROM {table}"),
-            [version],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("fixture marker inventory");
-    assert_eq!(
-        counts,
-        (1, 1),
-        "one exact published marker required for {table}"
-    );
-}
-
 #[allow(dead_code)]
 pub(crate) const HANDOFF_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'playback_handoffs*' OR tbl_name GLOB 'playback_handoffs*') AND sql IS NOT NULL ORDER BY name";
 
@@ -825,53 +815,9 @@ fn validated_handoff_rewind(connection: &rusqlite::Connection, version: i64) -> 
     )
 }
 
-/// Closed, read-only removal plan for the empty v114 title extension.
+/// Exact annotation schema used by historical fixture validation.
 #[allow(dead_code)]
-pub(crate) const TITLE_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'dv_title_jobs_*' AND sql IS NOT NULL ORDER BY name";
 pub(crate) const ANNOTATIONS_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'library_annotations_*' AND sql IS NOT NULL ORDER BY name";
-
-/// Canonical read-only removal plan shared by SQLite and replicated fixtures.
-#[allow(dead_code)]
-pub(crate) fn validated_empty_title_rewind(
-    actual: &[(String, String)],
-    marker: i64,
-    retained: i64,
-) -> Vec<String> {
-    const SHAPE: &str = TITLE_FIXTURE_SHAPE_SQL;
-    let shape = |conn: &rusqlite::Connection| {
-        conn.prepare(SHAPE)
-            .expect("title shape query")
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .expect("title shape rows")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("complete title shape")
-    };
-    let expected = rusqlite::Connection::open_in_memory().expect("title shape witness");
-    expected.execute_batch("CREATE TABLE files(id INTEGER PRIMARY KEY,path TEXT,size INTEGER,mtime INTEGER,video_codec TEXT,dv_profile INTEGER,dv_rpu_present INTEGER,probe_json TEXT,scanned_at INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,owner_node_id TEXT,owner_boot_id TEXT,claim_id TEXT,lease_expires_ms INTEGER,result_ref TEXT,updated_at_ms INTEGER); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT); CREATE TABLE background_job_waiters(job_id TEXT,state TEXT,result_ref TEXT,updated_at_ms INTEGER);").expect("title witness dependencies");
-    expected
-        .execute_batch(include_str!("../../src/store/dv_title_jobs.sql"))
-        .expect("published title objects");
-    assert_eq!(
-        actual,
-        shape(&expected),
-        "exact current title shape required"
-    );
-    assert_eq!(marker, 1, "current title marker required");
-    assert_eq!(
-        retained, 0,
-        "title demand, accepted work and aggregates cannot be rewound"
-    );
-    let mut drops = actual
-        .iter()
-        .filter(|(_, sql)| sql.starts_with("CREATE TRIGGER"))
-        .map(|(name, _)| format!("DROP TRIGGER {name}"))
-        .collect::<Vec<_>>();
-    drops.push("DROP TABLE dv_title_jobs_demand".into());
-    drops.push("DROP TABLE dv_title_jobs_schema".into());
-    drops
-}
 
 #[allow(dead_code)]
 fn validated_title_rewind(connection: &rusqlite::Connection, version: i64) -> (String, i64) {
@@ -898,6 +844,7 @@ fn validated_title_rewind(connection: &rusqlite::Connection, version: i64) -> (S
         version, 114,
         "only the current title fixture may be rewound"
     );
+    require_fixture_marker(connection, "dv_title_jobs_schema", 1);
     let marker: i64 = connection
         .query_row(
             "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version=1",
@@ -905,8 +852,8 @@ fn validated_title_rewind(connection: &rusqlite::Connection, version: i64) -> (S
             |row| row.get(0),
         )
         .expect("title marker");
-    let retained: i64 = connection.query_row("SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL)", [], |row| row.get(0)).expect("title fixture data");
-    let drops = validated_empty_title_rewind(&actual, marker, retained);
+    let retained: i64 = connection.query_row("SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL))", [], |row| row.get(0)).expect("title fixture data");
+    let drops = validated_empty_title_rewind(&actual, 1, marker, retained);
     (format!("{};", drops.join(";")), 113)
 }
 
@@ -934,6 +881,77 @@ fn historical_title_rewind_refuses_partial_schema_without_mutation() {
     }))
     .is_err());
     assert_eq!(objects(), before, "refusal precedes every fixture mutation");
+}
+
+#[test]
+fn historical_title_rewind_refuses_v2_at_v114_without_mutation() {
+    use source_extensions_fixture::title_extension_fixture as title;
+    let dir = tempfile::tempdir().expect("mislabeled title fixture");
+    let path = dir.path().join("title-v114.db");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
+    let connection = rusqlite::Connection::open(path).expect("fixture connection");
+    title::assert_title_fixture_generation(&connection, 2);
+    connection
+        .execute_batch("PRAGMA user_version=114;")
+        .expect("mislabeled ordinal");
+    let before = title::title_fixture_objects(&connection);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        validated_title_rewind(&connection, 114)
+    }))
+    .is_err());
+    assert_eq!(title::title_fixture_objects(&connection), before);
+    title::assert_title_fixture_generation(&connection, 2);
+}
+
+#[test]
+fn historical_title_rewind_restores_published_v1_topology_and_sequence_before_reopen() {
+    use source_extensions_fixture::title_extension_fixture as title;
+    let dir = tempfile::tempdir().expect("historical title fixture");
+    let path = dir.path().join("title-v131.db");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    title::assert_title_fixture_generation(&connection, 2);
+    connection.execute("INSERT INTO sqlite_sequence(name,seq) SELECT 'dv_title_jobs_demand',41 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='dv_title_jobs_demand')",[]).expect("owned demand sequence");
+    connection
+        .execute(
+            "UPDATE sqlite_sequence SET seq=41 WHERE name='dv_title_jobs_demand'",
+            [],
+        )
+        .expect("fixture sequence history");
+    source_extensions_fixture::within_fixture_savepoint(&connection, || {
+        source_extensions_fixture::rewind_title_v2_to_v131(&connection);
+    });
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .expect("historical ordinal"),
+        131
+    );
+    title::assert_title_fixture_generation(&connection, 1);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("preserved sequence"),
+        41
+    );
+    drop(connection);
+    drop(plurx_core::store::SqliteStore::open(&path).expect("reopen genuine v131 topology"));
+    let connection = rusqlite::Connection::open(&path).expect("upgraded fixture");
+    title::assert_title_fixture_generation(&connection, 2);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("sequence after upgrade"),
+        41
+    );
 }
 
 /// Rewind only an exact, empty v113 ratings/lists extension so the older
@@ -1115,6 +1133,7 @@ fn historical_caption_rewind_refuses_owned_data_and_partial_shapes_without_mutat
         let path=directory.path().join("refusal.db");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
         let connection=rusqlite::Connection::open(path).expect("raw owned fixture");
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v126(&connection);
         connection.execute_batch("PRAGMA foreign_keys=OFF;").expect("raw refusal injection");
         connection.execute_batch(injection).expect("inject refusal condition");
         let snapshot=|| {
@@ -1138,9 +1157,14 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         (122, 3),
         (123, 4),
         (124, 4),
+        (125, 4),
+        (126, 5),
         (122, 4),
+        (125, 5),
+        (126, 4),
         (123, 3),
         (124, 3),
+        (125, 3),
         (119, 2),
         (119, 3),
         (120, 1),
@@ -1152,6 +1176,13 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         let path = directory.path().join("current.db");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture"));
         let connection = rusqlite::Connection::open(path).expect("owned fixture");
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v126(&connection);
+        if schema_version < 126 {
+            source_extensions_fixture::rewind_empty_targeted_managed_to_v125(&connection);
+        }
+        if schema_version < 125 {
+            source_extensions_fixture::rewind_empty_scan_request_to_v124(&connection);
+        }
         if schema_version < 124 {
             rewind_empty_source_extensions_to_v121(&connection);
             if schema_version >= 122 {
@@ -1209,7 +1240,7 @@ fn historical_caption_rewind_accepts_only_the_complete_empty_current_extensions(
         };
         if !matches!(
             (schema_version, managed_version),
-            (119, 1) | (120, 2) | (121..=122, 3) | (123..=124, 4)
+            (119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4) | (126, 5)
         ) {
             let before = snapshot();
             assert!(
@@ -1471,7 +1502,7 @@ pub(crate) fn validated_empty_current_tail_rewind(
         .collect()
 }
 
-/// Read-only plan for the exact empty v119–v124 published fixture tails.
+/// Read-only plan for the exact empty v119–v125 published fixture tails.
 /// This recognizes published layouts, not arbitrary later schema versions.
 fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, i64) {
     let version: i64 = connection
@@ -1505,7 +1536,8 @@ fn validated_current_tail_rewind(connection: &rusqlite::Connection) -> (String, 
         119 => 1,
         120 => 2,
         121 | 122 => 3,
-        123 | 124 => 4,
+        123..=125 => 4,
+        126 => 5,
         _ => panic!("only exact published fixture tails may be rewound"),
     };
     // Validate DDL before using any table identity in the read-only inventory.
@@ -1615,7 +1647,7 @@ fn validated_empty_managed_subtitle_rewind(connection: &rusqlite::Connection) ->
     assert!(
         matches!(
             (schema_version, marker),
-            (111..=119, 1) | (120, 2) | (121..=122, 3) | (123..=124, 4)
+            (111..=119, 1) | (120, 2) | (121..=122, 3) | (123..=125, 4) | (126, 5)
         ),
         "managed marker must match its published SQLite schema version"
     );
@@ -1631,10 +1663,13 @@ fn validated_empty_managed_subtitle_rewind(connection: &rusqlite::Connection) ->
 }
 
 pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
-    let plan = validated_empty_managed_subtitle_rewind(connection);
-    connection
-        .execute_batch(&plan)
-        .expect("atomic empty managed fixture rewind");
+    source_extensions_fixture::within_fixture_savepoint(connection, || {
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v126(connection);
+        let plan = validated_empty_managed_subtitle_rewind(connection);
+        connection
+            .execute_batch(&plan)
+            .expect("atomic empty managed fixture rewind");
+    });
 }
 
 fn complete_fixture_snapshot(connection: &rusqlite::Connection) -> String {
@@ -1683,11 +1718,18 @@ fn complete_fixture_snapshot(connection: &rusqlite::Connection) -> String {
 
 #[test]
 fn current_fixture_rewind_accepts_exact_empty_v120_with_foreign_keys() {
-    for version in [120, 121, 122, 123, 124] {
+    for version in [120, 121, 122, 123, 124, 125, 126] {
         let dir = tempfile::tempdir().expect("current fixture");
         let path = dir.path().join("store.sqlite");
         drop(plurx_core::store::SqliteStore::open(&path).expect("current fixture schema"));
         let connection = rusqlite::Connection::open(path).expect("fixture connection");
+        source_extensions_fixture::rewind_empty_coordination_tail_to_v126(&connection);
+        if version < 126 {
+            source_extensions_fixture::rewind_empty_targeted_managed_to_v125(&connection);
+        }
+        if version < 125 {
+            source_extensions_fixture::rewind_empty_scan_request_to_v124(&connection);
+        }
         if version < 124 {
             rewind_empty_source_extensions_to_v121(&connection);
             if version >= 122 {
@@ -1781,6 +1823,11 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
         "unowned-text-index",
         "unowned-managed-index",
         "legacy-with-current-translation",
+        "retained-scan-request",
+        "scan-request-marker",
+        "scan-request-trigger",
+        "v124-with-scan-request",
+        "v125-with-managed-v5",
     ] {
         let dir = tempfile::tempdir().expect("refusal fixture");
         let path = dir.path().join("store.sqlite");
@@ -1790,7 +1837,7 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             .execute_batch("PRAGMA foreign_keys=OFF;")
             .expect("prepare hostile retained fixture rows");
         let sql = match damage {
-            "future-version" => "PRAGMA user_version=125;",
+            "future-version" => "PRAGMA user_version=127;",
             "v120-managed-v3" => "PRAGMA user_version=120;",
             "v121-managed-v2" => include_str!("../../src/store/subtitle_managed_resources_v2.sql"),
             "unsupported-tail-version" => "PRAGMA user_version=119;",
@@ -1829,6 +1876,16 @@ fn current_fixture_rewind_refuses_drift_and_retained_tail_without_mutation() {
             "unowned-text-index" => "CREATE INDEX unexpected_text_index ON subtitle_text_translation_cues(cue_index);",
             "unowned-managed-index" => "CREATE INDEX unexpected_receipt_index ON subtitle_model_receipts(model_id);",
             "legacy-with-current-translation" => "DROP TABLE shared_caption_read_leases; DROP TABLE shared_caption_schema; DROP TABLE subtitle_text_translation_cues; DROP TABLE subtitle_text_translation_schema; PRAGMA user_version=115;",
+            "retained-scan-request" => "INSERT INTO background_scan_request_v2(request_id,key_id,key_hash,created_at_ms,updated_at_ms) VALUES('retained',1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',0,0);",
+            "scan-request-marker" => "DELETE FROM background_scan_request_v2_schema;",
+            "scan-request-trigger" => "DROP TRIGGER background_scan_request_v2_retired;",
+            // Published managed v4 beside the sidecar, so only the sidecar is
+            // out of place at v124.
+            "v124-with-scan-request" => concat!(
+                include_str!("../../src/store/subtitle_managed_resources_v4.sql"),
+                "\nPRAGMA user_version=124;"
+            ),
+            "v125-with-managed-v5" => "PRAGMA user_version=125;",
             _ => unreachable!(),
         };
         connection.execute_batch(sql).expect("damage owned fixture");
@@ -1876,6 +1933,8 @@ pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
             "historical fixture must not discard managed subtitle model receipts"
         );
     }
+    // The coordination tail is the newest; it must be empty and exact first.
+    source_extensions_fixture::rewind_empty_coordination_tail_to_v126(connection);
     // Validate all subtitle ownership before changing the later source tail.
     let managed_rewind = validated_empty_managed_subtitle_rewind(connection);
     connection

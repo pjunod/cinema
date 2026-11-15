@@ -2049,6 +2049,14 @@ class DisplayAwareAutoEvidenceTest {
         java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
     ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
 
+    @Test fun controlObservationReportsTitleDurationNotTheWindowDuration() {
+        val observe = controllerSource().substringAfter("private fun playbackControlObservation(): PlayerControlObservation? {")
+            .substringBefore("return PlayerControlObservation(")
+        assertTrue(observe.contains("titleDurationMs = plan.durationMs"), "the clamp uses the title duration")
+        assertTrue(observe.contains("playerTimelineIsFilm = directTransport || sessionIsVod"))
+        assertFalse(observe.contains("val duration = player.duration"), "Media3 window duration is not film time")
+    }
+
     @Test fun viewerResumeAndSeekNeverWaitBehindTheOptionalOriginalStage() {
         val source = listOf(
             java.io.File("app/src/main/java/tv/plurx/app/player/Controller.kt"),

@@ -137,7 +137,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
             source_telemetry:false,
         retained_logical: None, measured_candidate: None, file: file.clone(),
         audio_index: None, aac: true, audio_delivery: None, video,
-        source_object_version: None, cluster_cache_key: None, encoding: None,
+        source_object_version: None, cluster_cache_key: None, copy_index_init_contract: None, encoding: None,
     };
     let policy = shipped_policy(index.timescale);
     let plan = plurx_core::segplan::plan_copy(&index, &policy,

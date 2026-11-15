@@ -25,6 +25,14 @@ PROTOCOL_PATHS = {
     'tests/validation/test_promotion_unit_retention.py',
     'validation/retained_lane_commands.py',
     'tests/validation/test_retained_lane_commands.py',
+    'validation/qualification_unit_continuation.py',
+    'validation/incremental_binary_control.py',
+    'tests/validation/test_incremental_binary_control.py',
+    'validation/native_makefile_compatibility.py',
+    'tests/validation/test_native_makefile_compatibility.py',
+    'tests/validation/test_qualification_unit_continuation.py',
+    'validation/native_makefile_compatibility.py',
+    'tests/validation/test_native_makefile_compatibility.py',
     # Receipt adoption machinery decides what runs, not what a unit proves.
     'validation/main_preflight_adoption.py', 'validation/main_unit_receipts.py',
 }
@@ -136,7 +144,8 @@ def android_device_inputs(source, commit):
         r'^ANDROID_\w+ \?=.*$', makefile, re.M)) + '\n').encode())
     # The full finite Make identity refuses shadow assignments and repeated
     # targets outside the Android section, including appended overrides.
-    values['make-complete'] = digest(makefile.encode())
+    from validation.native_makefile_compatibility import native_makefile_digest
+    values['make-complete'] = native_makefile_digest(makefile.encode())
     return values
 
 
@@ -779,13 +788,27 @@ def verify_identity(api, raw, expected_digest, binding, candidate, attachment_id
     document = r.bounded_json(raw)
     pull = api.get('/pulls/' + str(r.positive(binding['pull_request'])))
     repository = r.positive(api.get('')['id'])
-    r.require(pull['state'] == 'open' and pull.get('merged') is False
-              and pull['head']['repo']['id'] == repository == pull['base']['repo']['id']
-              and pull['head']['sha'] == candidate == binding['head_sha']
-              and pull['base']['sha'] == binding['base_sha']
+    evidence_branch = binding['head_ref']
+    if 'landing_sha' in binding:
+        from validation.postmerge_unit_retention import landing_binding
+
+        r.require(landing_binding(api, binding['pull_request'], binding['landing_sha']) == binding,
+                  'Post-merge retention binding differs from authenticated main')
+        if candidate == binding['landing_sha']:
+            r.require(document['version'] in (2, 3) and document['source_commit'] == candidate,
+                      'Landed command evidence must bind the actual main commit')
+            evidence_branch = 'main'
+        else:
+            r.require(candidate == binding['head_sha'], 'Post-merge evidence source is neither parent nor landing')
+    else:
+        r.require(candidate == binding['head_sha'] and pull['state'] == 'open' and pull.get('merged') is False
+                  and pull['base']['sha'] == binding['base_sha'],
+                  'Retention live promotion identity mismatch')
+    r.require(pull['head']['repo']['id'] == repository == pull['base']['repo']['id']
+              and pull['head']['sha'] == binding['head_sha']
               and pull['head']['ref'] == binding['head_ref'] and pull['base']['ref'] == 'main'
               and document['repository'] == repository and document['pr'] == pull['number']
-              and document['branch'] == binding['head_ref']
+              and document['branch'] == evidence_branch
               and document['base_sha'] == binding['base_sha'],
               'Retention live promotion identity mismatch')
     claim = {'repository': repository, 'pr': pull['number'], 'sha256': expected_digest,
@@ -811,6 +834,9 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     document, pull, repository, attested = verify_identity(
         api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid)
     document = expanded_document(document) if objects is None else expanded_document(document, objects)
+    # Evidence targets the declared commit. Earlier dispatches ran under this
+    # authenticated promotion PR's original head ref, even after the PR merged.
+    dispatch_context = {**document, 'branch': binding['head_ref']}
     from validation import qualification_unit_continuation as commands
     from validation.unit_evidence_objects import LiveLogs
     runs, jobs_by_run, native_scopes = {}, {}, set()
@@ -841,16 +867,16 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                         authenticate_android_device_command(run_id, job_id, jobs[0])
                     if record['format'] == 'xctest-full-job-6713':
                         from validation import retained_apple_job as apple_job
-                        apple_job.authenticate(actual_run, jobs[0], document)
+                        apple_job.authenticate(actual_run, jobs[0], dispatch_context)
                     if record['format'] in {'instrumentation-command', 'node-preflight', 'gradle-command'}:
                         from validation import retained_lane_commands as native
-                        native.authenticate(actual_run, jobs[0], record, document)
+                        native.authenticate(actual_run, jobs[0], record, dispatch_context)
                     if (record['format'] in {'instrumentation-command', 'node-preflight', 'gradle-command', 'xctest-full-job-6713'}
                             and run_id not in native_scopes):
                         workflow = git_bytes(record['source_commit'], '.github/workflows/ci.yml')
                         r.require(workflow is not None, 'Native command workflow source missing')
                         commands.authenticate_scope(api, run_id, actual_run, workflow.decode(),
-                            document, record['source_commit'], repository)
+                            dispatch_context, record['source_commit'], repository)
                         native_scopes.add(run_id)
                     raw_log = live_logs.get(api, run_id, job_id)
                     r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
@@ -858,7 +884,7 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     command_units = None
     if document.get('version') == 2:
         from validation import qualification_unit_continuation as commands
-        commands.authenticate(api, document['command_units'], document, repository, live_logs=live_logs)
+        commands.authenticate(api, document['command_units'], dispatch_context, repository, live_logs=live_logs)
         adopted, command_units = validate(document, candidate)
     else:
         adopted = validate(document, candidate)

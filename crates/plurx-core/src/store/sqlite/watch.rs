@@ -609,6 +609,7 @@ impl WatchStore for SqliteStore {
                  LEFT JOIN items show ON show.id = season.parent_id
                  WHERE w.user_id = ?1 AND w.watched = 0 AND w.position_ms > 0
                    AND i.kind IN ('movie','episode','video','audiobook')
+                   AND i.offloaded_at IS NULL
                  ORDER BY w.updated_at DESC LIMIT ?2",
                 i = item_cols("i")
             );

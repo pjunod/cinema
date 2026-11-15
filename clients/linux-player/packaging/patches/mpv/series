@@ -22,3 +22,7 @@
 0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch
 0007-vo_gpu_next-preserve-DV-software-sampling-precision.patch
 0008-vo_gpu_next-round-the-final-DV-UNORM16-cache-exactly.patch
+# 0009 (upstreamable) stops wayland_dispatch_events() spinning at 100% CPU,
+# deaf to IPC and SIGTERM, once the Wayland display is in a fatal error state
+# (the compositor ended the connection, or it was lost).
+0009-wayland-stop-dispatching-after-a-fatal-display-error.patch

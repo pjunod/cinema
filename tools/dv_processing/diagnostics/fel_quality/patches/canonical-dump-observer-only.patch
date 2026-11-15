@@ -1,0 +1,52 @@
+--- a/helper/segment_decode_render.c
++++ b/helper/segment_decode_render.c
+@@ -37,6 +37,7 @@
+ #define DV_DIAGNOSTIC_FORCE_HOST_FLOAT 0
+ #endif
+ static bool diagnostic_forced_host_float;
++static bool diagnostic_canonical_dump;
+ static const char *software_reason = "no-decode-device";
+ static unsigned preroll, paired, preroll_cap;
+ struct rational {
+@@ -631,6 +632,30 @@
+       printf(",\"profile\":%d,\"fel_contributed\":false}\n", source_profile);
+     else
+       printf(",\"el_width\":%d,\"el_height\":%d}\n", el->width, el->height);
++    if (diagnostic_canonical_dump && (emitted == 0 || emitted == 24)) {
++      for (int layer = 0; layer < (base_only ? 1 : 2); layer++) {
++        const AVFrame *source_frame = layer ? el : bl;
++        const char *layer_name = layer ? "el" : "bl";
++        const char *canonical_sha = layer ? el_hash : bl_hash;
++        char canonical_path[64];
++        int canonical_length = snprintf(canonical_path, sizeof(canonical_path),
++                                        "source-%s-%03d.yuv", layer_name, emitted);
++        need(canonical_length > 0 && (size_t)canonical_length < sizeof(canonical_path),
++             "canonical dump path");
++        size_t canonical_bytes = (size_t)source_frame->width * source_frame->height * 3;
++        need(native[layer] != NULL, "canonical dump uses existing packed native data");
++        FILE *canonical_file = fopen(canonical_path, "wbx");
++        need(canonical_file != NULL, "exclusive canonical plane dump");
++        bool canonical_written = fwrite(native[layer], 1, canonical_bytes, canonical_file) == canonical_bytes;
++        int canonical_closed = fclose(canonical_file);
++        need(canonical_written && canonical_closed == 0, "canonical plane dump write/close");
++        printf("{\"kind\":\"diagnostic_canonical_dump\",\"frame\":%d,\"pts\":\"%s\","
++               "\"duration\":\"%s\",\"layer\":\"%s\",\"file\":\"%s\",\"width\":%d,\"height\":%d,"
++               "\"bytes\":%zu,\"sha256\":\"%s\",\"observer_only\":true}\n",
++               emitted, pts, duration, layer_name, canonical_path, source_frame->width,
++               source_frame->height, canonical_bytes, canonical_sha);
++      }
++    }
+     output_pts = bl->pts;
+     output_duration = bl->duration;
+     if (base_only)
+@@ -864,6 +889,10 @@
+   need(!base_only || (expected_w[1] == 0 && expected_h[1] == 0),
+        "base-only mode has no declared EL");
+   debug_frames = number(argv[9], 0, 1) != 0;
++  const char *canonical_dump_env = getenv("PLURX_DV_CANONICAL_DUMP");
++  diagnostic_canonical_dump = canonical_dump_env && !strcmp(canonical_dump_env, "1");
++  need(!diagnostic_canonical_dump || dv_frame_hashes(),
++       "canonical dump requires existing PLURX_DV_FRAME_HASHES=1 packing");
+   // Explicit control API only. Session/caps selection is a later PR.
+   need(argc == 21 ? dv_target_policy(argv[10], argv[19], argv[20]) :
+                        strcmp(argv[10], "bt2020-pq-master-clip") == 0,

@@ -186,6 +186,7 @@ pub(super) fn recently_added_wider_window_offset(offset: i64) -> i64 {
 /// rail still lists its recordings.
 pub(super) fn recently_added(item_columns: &str, ranked_columns: &str) -> Stmt {
     let filter = "i.kind IN ('movie','episode','video','folder','book','audiobook') \
+         AND i.offloaded_at IS NULL \
          AND (@library_id@ IS NULL OR i.library_id = @library_id@) \
          AND (@library_id@ IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l \
              WHERE l.id = i.library_id AND l.kind = 'recordings'))";
@@ -291,6 +292,7 @@ pub(super) fn progress_rails(in_progress_columns: &str, next_up_columns: &str) -
                  LEFT JOIN items show ON show.id = season.parent_id \
                  WHERE w.user_id = @user_id@ AND w.watched = 0 AND w.position_ms > 0 \
                    AND i.kind IN ('movie','episode','video','audiobook') \
+                   AND i.offloaded_at IS NULL \
                  ORDER BY w.updated_at DESC LIMIT @limit@ \
              ) \
              UNION ALL \

@@ -442,7 +442,8 @@ enum PlaybackSurfaceContract {
             .preparing,
             codes: [
                 "startup_timeout", "media_owner_transition", "vod_index_pending",
-                "vod_engine_unattested", "transcode_capacity_pending", "quality_catalog_unavailable",
+                "vod_engine_unattested", "transcode_capacity_pending", "media_session_overloaded",
+                "quality_catalog_unavailable",
             ],
             retryable: true
         ),
@@ -496,6 +497,13 @@ enum PlaybackSurfaceContract {
         SourceRow("repeated_early_end", .attached, .stopped, requiresPlayerStopped: true),
         SourceRow("degraded_notice", nil, .degraded),
         SourceRow("log_only", nil, nil),
+        SourceRow(
+            "create_capacity_terminal",
+            .start,
+            .stopped,
+            codes: ["transcode_height_unavailable", "transcode_scratch_exhausted", "replacement_expired"],
+            requiresPlayerStopped: true
+        ),
     ]
 
     static let timings = Timings(

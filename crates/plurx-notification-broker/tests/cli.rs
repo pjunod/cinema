@@ -25,13 +25,16 @@ fn manifest(
     Ok(())
 }
 fn run(manifest: &Path, database: &Path, command: &str) -> std::io::Result<std::process::Output> {
-    Command::new(env!("CARGO_BIN_EXE_plurx-notification-broker"))
-        .arg("--manifest")
-        .arg(manifest)
-        .arg("--database")
-        .arg(database)
-        .arg(command)
-        .output()
+    Command::new(
+        std::env::var_os("CARGO_BIN_EXE_plurx-notification-broker")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_plurx-notification-broker").into()),
+    )
+    .arg("--manifest")
+    .arg(manifest)
+    .arg("--database")
+    .arg(database)
+    .arg(command)
+    .output()
 }
 #[test]
 fn actual_cli_init_never_replaces_and_explicit_restore_requires_all_rotations(

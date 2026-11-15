@@ -102,6 +102,8 @@ pub struct StateRaftDB {
     pub wal_status: hiqlite_wal::WalStatusHandle,
     pub sql_writer: flume::Sender<WriterRequest>,
     pub read_pool: SqlitePool,
+    /// Plurx patch 27: shared with the writer and the state machine.
+    pub(crate) applied_mark: Arc<crate::applied_mark::AppliedMark>,
     pub log_statements: bool,
     pub is_raft_stopped: Arc<AtomicBool>,
     pub is_startup_finished: Arc<AtomicBool>,

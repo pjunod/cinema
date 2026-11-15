@@ -1,0 +1,71 @@
+name: publish public media runtime
+run-name: public media runtime ${{ inputs.source_image }}
+
+# Explicit maintenance only. Normal Cinema builds consume the public pin.
+on:
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: Published multi-platform source image, including its immutable sha256 digest
+        required: true
+        type: string
+      source_insecure:
+        description: Source registry uses HTTP (destination always uses verified HTTPS)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: media-runtime-public
+  cancel-in-progress: false
+
+jobs:
+  copy:
+    # The private registry is reachable only from the trusted lab. This workflow
+    # is manually invoked on GitHub; untrusted pull requests never trigger it.
+    if: github.server_url == 'https://github.com'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 30
+    env:
+      SOURCE_IMAGE: ${{ inputs.source_image }}
+      SOURCE_INSECURE: ${{ inputs.source_insecure }}
+      SOURCE_USER: ${{ vars.MEDIA_RUNTIME_SOURCE_USER }}
+      SOURCE_TOKEN: ${{ secrets.MEDIA_RUNTIME_SOURCE_TOKEN }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TARGET_REPOSITORY: ghcr.io/pjunod/cinema-media-runtime
+      SKOPEO_IMAGE: quay.io/skopeo/stable@sha256:2681eccb8b02c495b013c2669cbf7f41d5c0b0b0e644e7c69bd3ea9bcb20641f
+    steps:
+      - name: Copy every platform without rebuilding or changing bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_IMAGE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]
+          test -n "$SOURCE_USER"
+          test -n "$SOURCE_TOKEN"
+          digest="${SOURCE_IMAGE##*@}"
+          source_registry="${SOURCE_IMAGE%%/*}"
+          authdir=$(mktemp -d "$RUNNER_TEMP/public-media-auth.XXXXXX")
+          chmod 700 "$authdir"
+          trap 'rm -rf "$authdir"' EXIT
+          copytool() {
+            docker run --rm --network host -i \
+              -v "$authdir:/auth" -e REGISTRY_AUTH_FILE=/auth/auth.json \
+              "$SKOPEO_IMAGE" "$@"
+          }
+          source_tls=true
+          if test "$SOURCE_INSECURE" = true; then source_tls=false; fi
+          printf '%s' "$SOURCE_TOKEN" | copytool login --tls-verify="$source_tls" \
+            --username "$SOURCE_USER" --password-stdin "$source_registry"
+          printf '%s' "$GHCR_TOKEN" | copytool login \
+            --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          target="$TARGET_REPOSITORY:sha256-${digest#sha256:}"
+          copytool copy --all --preserve-digests --src-tls-verify="$source_tls" \
+            "docker://$SOURCE_IMAGE" "docker://$target"
+          # A matching index digest binds both native platform manifests/layers.
+          actual=$(copytool inspect --raw "docker://$TARGET_REPOSITORY@$digest" | sha256sum | cut -d' ' -f1)
+          test "sha256:$actual" = "$digest"
+          printf 'Public candidate: %s@%s\n' "$TARGET_REPOSITORY" "$digest"
+          printf 'Verify anonymous pull after setting package visibility to public.\n'

@@ -1162,11 +1162,93 @@ pub fn hevc_level_for(width: u32, height: u32, fps_num: u32, fps_den: u32) -> Op
         .map(|(level, _, _)| *level)
 }
 
+/// The VA-API render node: `PLURX_VAAPI_DEVICE`, else the lowest-numbered
+/// render node whose kernel driver has a VA-API driver behind it.
+///
+/// A hybrid laptop (Intel or AMD integrated graphics beside an NVIDIA GPU)
+/// often numbers the NVIDIA node first. NVIDIA's kernel driver has no VA-API
+/// implementation here, so taking `renderD128` there failed every VA-API
+/// probe and left the Dolby Vision renderer decoding in software beside an
+/// idle integrated decoder. With several VA-API GPUs the lowest node wins;
+/// `PLURX_VAAPI_DEVICE` chooses another. Only a found node is remembered: a
+/// lookup before the devices or sysfs are visible returns the historical
+/// `renderD128` default and is repeated on the next call.
 pub fn vaapi_device() -> String {
-    std::env::var("PLURX_VAAPI_DEVICE")
+    if let Some(device) = std::env::var("PLURX_VAAPI_DEVICE")
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/dev/dri/renderD128".to_owned())
+    {
+        return device;
+    }
+    static FOUND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(found) = FOUND.get() {
+        return found.clone();
+    }
+    match vaapi_render_node(std::path::Path::new("/dev/dri"), render_node_driver) {
+        Some(found) => FOUND.get_or_init(|| found).clone(),
+        None => "/dev/dri/renderD128".to_owned(),
+    }
+}
+
+/// Kernel DRM drivers with a VA-API user-space driver (iHD/i965, radeonsi).
+const VAAPI_KERNEL_DRIVERS: [&str; 4] = ["i915", "xe", "amdgpu", "radeon"];
+
+/// The kernel driver bound to a render node, found through the node's own
+/// device number, so a container that renames a passed-through node still
+/// reads its real driver; by name under `/sys/class/drm` otherwise.
+fn render_node_driver(node: &std::path::Path) -> Option<String> {
+    let by_number = {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::{FileTypeExt, MetadataExt};
+            std::fs::metadata(node)
+                .ok()
+                .filter(|metadata| metadata.file_type().is_char_device())
+                .map(|metadata| {
+                    let device = metadata.rdev();
+                    std::path::PathBuf::from(format!(
+                        "/sys/dev/char/{}:{}/device/driver",
+                        libc::major(device),
+                        libc::minor(device)
+                    ))
+                })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None::<std::path::PathBuf>
+        }
+    };
+    let by_name = std::path::Path::new("/sys/class/drm")
+        .join(node.file_name()?)
+        .join("device/driver");
+    let driver = by_number
+        .and_then(|link| std::fs::read_link(link).ok())
+        .or_else(|| std::fs::read_link(by_name).ok())?;
+    Some(driver.file_name()?.to_str()?.to_owned())
+}
+
+/// The lowest-numbered `renderD*` under `dev` whose driver (from
+/// `driver_of`) is a VA-API-capable kernel driver.
+fn vaapi_render_node(
+    dev: &std::path::Path,
+    driver_of: impl Fn(&std::path::Path) -> Option<String>,
+) -> Option<String> {
+    let mut nodes: Vec<(u32, std::path::PathBuf)> = std::fs::read_dir(dev)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let minor = name.strip_prefix("renderD")?.parse().ok()?;
+            Some((minor, entry.path()))
+        })
+        .collect();
+    nodes.sort_unstable();
+    nodes.into_iter().find_map(|(_, node)| {
+        let driver = driver_of(&node)?;
+        VAAPI_KERNEL_DRIVERS
+            .contains(&driver.as_str())
+            .then(|| node.to_string_lossy().into_owned())
+    })
 }
 
 /// Which families accept the forced-IDR flag, as measured at startup.
@@ -1325,36 +1407,45 @@ impl VaapiHdrPolicy {
     }
 }
 
-/// The reconstructed Profile 8.1's video rate ceiling. The route replaces a
-/// copy of the disc's base layer at full source rate, so it gets a delivery
-/// rate near that, not the 2160p transcode rung (20 Mb/s).
-pub const RECONSTRUCTED_P81_MAX_VIDEO_KBPS: u32 = 60_000;
-
-/// Identity of the route's encode recipe; part of every per-title FEL
-/// qualification verdict, so changing it re-qualifies every title.
+/// Recipe identity invalidates every qualification made under the old cap.
 pub const RECONSTRUCTED_P81_RECIPE: &str =
-    "p81-vbr:b=min(source,60000k):maxrate=1.5b:bufsize=2b:bf=0:radeonsi-compression_level=0:v1";
+    "p81-vbr:source-budget-preserved:checked-peak-cpb-hevc-dv-envelope:bf=0:radeonsi-compression_level=0:v2";
 
-/// The route's VA-API encode of one sample window for the per-title FEL
+/// The route's actual completed encoder for one sample window of the per-title FEL
 /// qualification: the same Main10 contract arguments and route flags as
 /// [`super::vod_completed_reconstructed_pipe_args`] with
 /// [`super::CompletedReconstructedOutputPlan::with_reconstructed_profile81`],
 /// the level of the window's own raster and cadence, and the VOD window GOP.
 /// Input and output arguments are the caller's.
 pub fn reconstructed_p81_window_encode_args(
-    policy: VaapiHdrPolicy,
+    encoder: Encoder,
+    policy: Option<VaapiHdrPolicy>,
     bitrate_kbps: u32,
     width: u32,
     height: u32,
     rate: (u32, u32),
     frames: u32,
 ) -> Option<Vec<String>> {
-    let contract = CompletedReconstructedOutputContract::resolve(Encoder::Vaapi)?;
+    let contract = CompletedReconstructedOutputContract::resolve(encoder)?;
     let mut args = contract.encode_args(bitrate_kbps, true, Some(1));
-    args.extend(policy.reconstructed_profile81_flags().map(str::to_owned));
-    let level = hevc_level_for(width, height, rate.0, rate.1)?;
-    let at = args.iter().position(|arg| arg == "-level:v")?;
-    args[at + 1] = level.to_owned();
+    if encoder == Encoder::Vaapi {
+        args.extend(
+            policy
+                .into_iter()
+                .flat_map(|policy| policy.reconstructed_profile81_flags().map(str::to_owned)),
+        );
+    }
+    let envelope = super::EnhancementRateEnvelope::resolve(
+        bitrate_kbps,
+        super::EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+        width,
+        height,
+        rate,
+        true,
+        Default::default(),
+    )
+    .ok()?;
+    envelope.apply_args(&mut args, encoder);
     let gop = frames.to_string();
     args.extend(
         [
@@ -1372,28 +1463,37 @@ pub fn reconstructed_p81_window_encode_args(
     Some(args)
 }
 
-/// The reconstructed Profile 8.1's target video rate: the source's average
-/// bitrate (the whole file's, so an upper bound on its video's), capped at
-/// [`RECONSTRUCTED_P81_MAX_VIDEO_KBPS`]. VBR at this target with the ordinary
-/// VBV (`-maxrate` 1.5x, `-bufsize` 2x) kept every measured 2 s segment
-/// under the advertised peak (worst 58 Mb/s at a 60 Mb/s target).
-pub fn reconstructed_p81_video_kbps(source: &crate::domain::MediaFile) -> u32 {
-    let measured = source
-        .bitrate
-        .filter(|bps| *bps > 0)
-        .map(|bps| bps / 1000)
-        .or_else(|| {
-            source
-                .duration_ms
-                .filter(|ms| *ms > 0)
-                .map(|ms| source.size.saturating_mul(8) / ms)
-        });
-    measured
-        .and_then(|kbps| u32::try_from(kbps).ok())
-        .map_or(RECONSTRUCTED_P81_MAX_VIDEO_KBPS, |kbps| {
-            kbps.min(RECONSTRUCTED_P81_MAX_VIDEO_KBPS)
-        })
-        .max(1_000)
+/// A measured conservative video budget; unknown rates never invent a target.
+pub fn reconstructed_p81_video_kbps(
+    source: &crate::domain::MediaFile,
+) -> Result<u32, &'static str> {
+    super::enhancement_source_budget(source, None).map(|(target, _)| target)
+}
+
+/// Compatibility helper for callers selecting a source-copy enhancement.
+/// Declared peak conflicts are errors; they never reduce the measured target.
+pub fn source_copy_hdr10_video_kbps(
+    source: &crate::domain::MediaFile,
+    _rung_kbps: u32,
+    width: u32,
+    height: u32,
+    rate: Option<(u32, u32)>,
+    video_peak_limit_bps: Option<u64>,
+) -> Result<u32, &'static str> {
+    let (target, provenance) = super::enhancement_source_budget(source, None)?;
+    super::EnhancementRateEnvelope::resolve(
+        target,
+        provenance,
+        width,
+        height,
+        rate.ok_or("enhancement cadence unavailable")?,
+        false,
+        super::EnhancementRateLimits {
+            video_peak_bps: video_peak_limit_bps,
+            ..Default::default()
+        },
+    )
+    .map(|envelope| envelope.target_kbps())
 }
 
 /// Physical inventory, independent of whether an encoder initialized successfully.
@@ -1687,12 +1787,26 @@ pub fn parse_video_decoder_list(output: &str) -> Vec<String> {
 pub async fn detect_video_decoders(ffmpeg_bin: &str) -> Vec<String> {
     let mut command = tokio::process::Command::new(ffmpeg_bin);
     command.args(["-hide_banner", "-decoders"]);
-    match crate::process::output_job_owned(
+    crate::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
+    let output = match crate::process::source_lifetime::prepare_stdio(
         &mut command,
-        crate::process::ChildWork::background("ffmpeg decoder list"),
-    )
-    .await
-    {
+        crate::process::source_lifetime::StdioFacts::CAPTURED,
+    ) {
+        Ok(manifest) => {
+            crate::process::source_lifetime::no_source(
+                crate::process::source_lifetime::with_descriptors_async(
+                    manifest,
+                    crate::process::output_job_owned(
+                        &mut command,
+                        crate::process::ChildWork::background("ffmpeg decoder list"),
+                    ),
+                ),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    match output {
         Ok(output) if output.status.success() => {
             parse_video_decoder_list(&String::from_utf8_lossy(&output.stdout))
         }
@@ -2215,11 +2329,25 @@ where
 pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
     let mut command = tokio::process::Command::new(ffmpeg_bin);
     command.args(["-hide_banner", "-encoders"]);
-    let output = crate::process::output_job_owned(
+    crate::process::source_lifetime::configure_no_input_probe(command.as_std_mut());
+    let output = match crate::process::source_lifetime::prepare_stdio(
         &mut command,
-        crate::process::ChildWork::background("ffmpeg encoder list"),
-    )
-    .await;
+        crate::process::source_lifetime::StdioFacts::CAPTURED,
+    ) {
+        Ok(manifest) => {
+            crate::process::source_lifetime::no_source(
+                crate::process::source_lifetime::with_descriptors_async(
+                    manifest,
+                    crate::process::output_job_owned(
+                        &mut command,
+                        crate::process::ChildWork::background("ffmpeg encoder list"),
+                    ),
+                ),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     let devices = graphics_devices();
     let compiled = match output {
         Ok(out) => parse_encoder_list(&String::from_utf8_lossy(&out.stdout)),
@@ -2295,6 +2423,59 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn vaapi_default_skips_a_render_node_without_a_vaapi_driver() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let dev = root.path().join("dev");
+        std::fs::create_dir_all(&dev).expect("dev");
+        for name in ["card0", "card1", "renderD128", "renderD129", "renderD130"] {
+            std::fs::write(dev.join(name), b"").expect("node");
+        }
+        let drivers = |table: &'static [(&'static str, &'static str)]| {
+            move |node: &std::path::Path| {
+                let name = node.file_name()?.to_str()?;
+                table
+                    .iter()
+                    .find(|(node, _)| *node == name)
+                    .map(|(_, driver)| (*driver).to_owned())
+            }
+        };
+        let path = |name: &str| Some(dev.join(name).to_string_lossy().into_owned());
+        // rog: NVIDIA first, Intel Arc second.
+        assert_eq!(
+            super::vaapi_render_node(
+                &dev,
+                drivers(&[
+                    ("renderD128", "nvidia"),
+                    ("renderD129", "i915"),
+                    ("renderD130", "amdgpu")
+                ])
+            ),
+            path("renderD129"),
+            "the lowest VA-API-capable node wins; NVIDIA's node is skipped"
+        );
+        // Single-GPU AMD and Intel hosts keep renderD128.
+        assert_eq!(
+            super::vaapi_render_node(&dev, drivers(&[("renderD128", "amdgpu")])),
+            path("renderD128")
+        );
+        assert_eq!(
+            super::vaapi_render_node(&dev, drivers(&[("renderD128", "xe")])),
+            path("renderD128")
+        );
+        // No VA-API driver, or no driver visible: nothing is chosen here.
+        assert_eq!(
+            super::vaapi_render_node(&dev, drivers(&[("renderD128", "nvidia")])),
+            None
+        );
+        assert_eq!(super::vaapi_render_node(&dev, drivers(&[])), None);
+        assert_eq!(
+            super::vaapi_render_node(&root.path().join("absent"), drivers(&[])),
+            None
+        );
+    }
+
     #[test]
     fn inventory_keeps_actual_pci_identity_and_never_binds_implicit_defaults() {
         let temporary = tempfile::tempdir().expect("PCI fixture");
@@ -3264,6 +3445,21 @@ mod tests {
     }
 
     #[test]
+    fn hdr10_source_copy_rate_preserves_measurements_without_an_invented_cap() {
+        let mut source = crate::transcode::tests::file(Some("hdr10"));
+        source.bitrate = Some(90_893_001);
+        assert_eq!(reconstructed_p81_video_kbps(&source), Ok(90_894));
+        source.bitrate = Some(8_000_000);
+        assert_eq!(reconstructed_p81_video_kbps(&source), Ok(8_000));
+        source.bitrate = None;
+        source.duration_ms = Some(1001);
+        source.size = 10_000_000;
+        assert_eq!(reconstructed_p81_video_kbps(&source), Ok(79_921));
+        source.size = 0;
+        assert!(reconstructed_p81_video_kbps(&source).is_err());
+    }
+
+    #[test]
     fn hevc_level_follows_raster_and_cadence() {
         use super::hevc_level_for;
         assert_eq!(hevc_level_for(1280, 720, 24000, 1001), Some("4"));
@@ -3278,14 +3474,16 @@ mod tests {
 
     #[test]
     fn vaapi_device_defaults_and_honors_env() {
-        // Clean env → documented default render node.
+        // Clean env → this host's first VA-API-capable node, else renderD128.
+        let default = vaapi_render_node(std::path::Path::new("/dev/dri"), render_node_driver)
+            .unwrap_or_else(|| "/dev/dri/renderD128".to_owned());
         std::env::remove_var("PLURX_VAAPI_DEVICE");
-        assert_eq!(vaapi_device(), "/dev/dri/renderD128");
+        assert_eq!(vaapi_device(), default);
         // Explicit override wins; empty is ignored (falls back to default).
         std::env::set_var("PLURX_VAAPI_DEVICE", "/dev/dri/renderD129");
         assert_eq!(vaapi_device(), "/dev/dri/renderD129");
         std::env::set_var("PLURX_VAAPI_DEVICE", "");
-        assert_eq!(vaapi_device(), "/dev/dri/renderD128");
+        assert_eq!(vaapi_device(), default);
         std::env::remove_var("PLURX_VAAPI_DEVICE");
     }
 }

@@ -23,6 +23,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(target_os = "linux")]
+mod stage_clock;
+#[cfg(target_os = "linux")]
+pub(crate) use stage_clock::{HelperStages, WindowStage, WindowStageClock};
+
 const DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
 #[cfg(target_os = "linux")]
 const WINDOW_TRACE_LIMIT: u64 = 128 * 1024;
@@ -208,6 +213,13 @@ impl SegmentEvidence {
     }
     pub(crate) fn renderer_events(&self) -> Result<Vec<u8>, String> {
         Self::read(&self.held, c"renderer.jsonl", WINDOW_TRACE_LIMIT)
+    }
+    /// The helper's diagnostic stage rows. Absent or unreadable is `None`:
+    /// they only feed the window's timing line, never a decision.
+    pub(crate) fn helper_stages(&self) -> Option<HelperStages> {
+        Self::read(&self.held, c"stages.tsv", DIAGNOSTIC_LIMIT)
+            .ok()
+            .and_then(|bytes| HelperStages::parse(&bytes))
     }
     pub(crate) fn rpu(&self, frame: u8) -> Result<Vec<u8>, String> {
         if frame >= 64 {
@@ -675,14 +687,16 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
                 occurrences.len() != 1 || occurrences[0][1] != *value
             })
             || {
-                // The level describes the window's raster and cadence
-                // (`hevc_level_for`), so any defined Main-tier step is valid.
+                // Admit the same Main10 High-tier level vocabulary used by
+                // the frozen enhancement envelope, including high-rate 6.2.
                 let levels: Vec<_> = output
                     .windows(2)
                     .filter(|pair| pair[0] == "-level:v")
                     .collect();
                 levels.len() != 1
-                    || !["4", "4.1", "5", "5.1", "5.2", "6", "6.1"].contains(&levels[0][1].as_str())
+                    || !plurx_core::transcode::EnhancementRateEnvelope::supports_hevc_level_name(
+                        &levels[0][1],
+                    )
             }
         {
             return Err(
@@ -1032,6 +1046,11 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) export_raster: Option<(u32, u32)>,
     /// Explicit producer policy only; this layer never reads client caps.
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    /// The source's static HDR10 metadata a master-grade HDR10 window carries.
+    /// The helper never sees it; it is authored onto the encoded window.
+    pub(crate) master_metadata: Option<plurx_core::transcode::dv_processing::DvMasterMetadata>,
+    /// The window's diagnostic stage clock; nothing here reads it back.
+    pub(crate) stages: Arc<WindowStageClock>,
 }
 
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
@@ -1130,6 +1149,7 @@ async fn run_streaming(
         .transpose()?;
     let windowed = window_args.is_some();
     let base_only = stream.mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu;
+    let stages = Arc::clone(&stream.stages);
     if base_only && (!windowed || stream.request.shape.el != (0, 0)) {
         return Err("base-RPU processing requires an original-source window and omitted EL".into());
     }
@@ -1157,11 +1177,13 @@ async fn run_streaming(
         .producer
         .try_reserve_empty()
         .map_err(|e| e.to_string())?;
-    let lane = tokio::select! {
-        _ = cancel.cancelled() => return Err("streaming segment cancelled".into()),
-        _ = tokio::time::sleep_until(request.preparation_deadline) => return Err("streaming segment handoff deadline expired".into()),
-        lane = request.source_offsets.acquire_owned() => lane.map_err(|_| "source offset lane closed")?,
-    };
+    let lane = acquire_offset_lane(
+        request.source_offsets,
+        request.preparation_deadline,
+        &cancel,
+        &stages,
+    )
+    .await?;
     check_source(&request.source)?;
     let bytes = request
         .source
@@ -1269,6 +1291,7 @@ async fn run_streaming(
             work: crate::process_control::ChildWork::realtime("DV streaming reconstruction"),
         },
     )?;
+    stages.mark(WindowStage::HelperSpawned);
     drop(write); // Only the real renderer owns the writer; its exit delivers EOF.
     let helper_cancel = cancel.child_token();
     let stage_cancel = helper_cancel.clone();
@@ -1301,7 +1324,7 @@ async fn run_streaming(
                 progress: Progress::Stderr,
                 descriptors: Descriptors::from_files(
                     Some(&read),
-                    Some(&resources.source.handle),
+                    source_input.is_none().then_some(&resources.source.handle),
                     None,
                     false,
                 ),
@@ -1312,7 +1335,10 @@ async fn run_streaming(
     });
     drop(read); // No parent reader can prevent SIGPIPE after encoder failure.
     let encoded = match encoded {
-        Ok(encoded) => encoded,
+        Ok(encoded) => {
+            stages.mark(WindowStage::EncoderSpawned);
+            encoded
+        }
         Err(error) => {
             helper_cancel.cancel();
             let _ = helper.await;
@@ -1365,6 +1391,25 @@ async fn run_streaming(
         helper_completion: Some(completion),
         evidence: Some(evidence),
     })
+}
+
+/// Wait for the recipe's one-permit source-offset lane within the window's
+/// deadline, marking how long the wait took.
+#[cfg(target_os = "linux")]
+async fn acquire_offset_lane(
+    lanes: Arc<Semaphore>,
+    deadline: Instant,
+    cancel: &CancellationToken,
+    stages: &WindowStageClock,
+) -> Result<OwnedSemaphorePermit, String> {
+    stages.mark(WindowStage::LaneRequested);
+    let lane = tokio::select! {
+        _ = cancel.cancelled() => return Err("streaming segment cancelled".into()),
+        _ = tokio::time::sleep_until(deadline) => return Err("streaming segment handoff deadline expired".into()),
+        lane = lanes.acquire_owned() => lane.map_err(|_| "source offset lane closed")?,
+    };
+    stages.mark(WindowStage::LaneAcquired);
+    Ok(lane)
 }
 
 async fn drain(pipe: impl tokio::io::AsyncRead + Unpin) -> Result<Vec<u8>, String> {
@@ -1449,8 +1494,10 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
     if streaming {
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
+            stages: WindowStageClock::start(),
             export_raster: None,
             display_target: None,
+            master_metadata: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             // The probe passes no decode device: the renderer decodes in software.
             decode: RendererDecode::Software,
@@ -2015,6 +2062,67 @@ mod tests {
         evidence_read_regression();
     }
 
+    /// The window's timing line reads the helper's own stage rows from the
+    /// evidence directory; a helper that wrote none leaves them absent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn evidence_reads_helper_stage_rows_and_tolerates_their_absence() {
+        let directory = tempfile::tempdir().expect("evidence");
+        let path = directory.path().join("stages.tsv");
+        let evidence = SegmentEvidence::from_test_directory(directory).expect("held evidence");
+        assert_eq!(evidence.helper_stages(), None);
+        std::fs::write(&path, "started\t5\t0\t0\t0\nfirst_frame\t900\t34\t35\t0\n")
+            .expect("helper rows");
+        let stages = evidence.helper_stages().expect("rows");
+        assert_eq!((stages.first_frame_us, stages.preroll), (Some(900), 34));
+        assert_eq!(stages.last, "first_frame");
+    }
+
+    /// The streaming spawn marks its source-offset lane wait: a lane still
+    /// held by the previous window's helper shows as wait, not render time.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn offset_lane_wait_is_marked_on_the_window_clock() {
+        let lanes = Arc::new(Semaphore::new(1));
+        let held = Arc::clone(&lanes)
+            .acquire_owned()
+            .await
+            .expect("previous window");
+        let stages = WindowStageClock::start();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            drop(held);
+        });
+        let lane = acquire_offset_lane(
+            Arc::clone(&lanes),
+            Instant::now() + Duration::from_secs(8),
+            &CancellationToken::new(),
+            &stages,
+        )
+        .await
+        .expect("lane");
+        release.await.expect("release");
+        assert_eq!(
+            stages.report(None).lane_wait,
+            Some(Duration::from_millis(1500))
+        );
+        drop(lane);
+        // A lane that never frees within the deadline still records the ask.
+        let _held = Arc::clone(&lanes).acquire_owned().await.expect("held");
+        let stages = WindowStageClock::start();
+        let error = acquire_offset_lane(
+            lanes,
+            Instant::now() + Duration::from_millis(200),
+            &CancellationToken::new(),
+            &stages,
+        )
+        .await
+        .expect_err("deadline");
+        assert_eq!(error, "streaming segment handoff deadline expired");
+        assert!(stages.at(WindowStage::LaneRequested).is_some());
+        assert_eq!(stages.at(WindowStage::LaneAcquired), None);
+    }
+
     fn encoded_recipe_source(hdr: bool) -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
             downloaded_subtitles: Vec::new(),
@@ -2152,6 +2260,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn completed_vaapi_accepts_envelope_level_62_and_rejects_ambiguous_levels() {
+        use plurx_core::transcode::*;
+        let mut source = encoded_recipe_source(true);
+        source.width = Some(3840);
+        source.height = Some(2160);
+        source.bitrate = Some(300_000_000);
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Hdr10Passthrough,
+            audio_index: None,
+            ..Default::default()
+        };
+        let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("typed Main10 output");
+        let mut args = vod_completed_reconstructed_pipe_args(
+            &source,
+            &output,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            2.0,
+            &fd(3),
+            &fd(4),
+            VodSourceClock::ReportedOrigin(0),
+        )
+        .expect("production graph");
+        let envelope = EnhancementRateEnvelope::resolve(
+            300_000,
+            EnhancementRateProvenance::ContainerAverageVideoUpperBound,
+            3840,
+            2160,
+            (24, 1),
+            false,
+            Default::default(),
+        )
+        .expect("legal high-rate envelope");
+        assert_eq!(envelope.hevc_level(), "6.2");
+        envelope.apply_args(&mut args, Encoder::Vaapi);
+        for (flag, value) in [
+            ("-level:v", "6.2"),
+            ("-b:v", "300000k"),
+            ("-maxrate", "450000k"),
+            ("-bufsize", "600000k"),
+            ("-tier:v", "high"),
+        ] {
+            let actual: Vec<_> = args
+                .windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str())
+                .collect();
+            assert_eq!(actual, [value], "{flag}: {args:?}");
+        }
+        assert!(check_encoder_budget(&args, 5).is_ok(), "{args:?}");
+
+        let level = args
+            .iter()
+            .position(|arg| arg == "-level:v")
+            .expect("frozen level argument")
+            + 1;
+        for unknown in ["", "6.3", "6.20", "186"] {
+            let mut invalid = args.clone();
+            invalid[level] = unknown.into();
+            assert!(check_encoder_budget(&invalid, 5).is_err(), "{invalid:?}");
+        }
+        args.extend(["-level:v".into(), "6.2".into()]);
+        assert!(check_encoder_budget(&args, 5).is_err(), "duplicate level");
     }
 
     #[test]

@@ -765,11 +765,16 @@ async fn a_shared_pass_builds_exactly_what_each_identity_builds_alone() {
     let plain_path = temp.path().join("plain.mp4");
     std::fs::write(&plain_path, &plain_mp4.stdout).expect("plain fixture");
     let truncated_path = temp.path().join("truncated.mp4");
-    std::fs::write(
-        &truncated_path,
-        &plain_mp4.stdout[..plain_mp4.stdout.len() * 2 / 5],
-    )
-    .expect("truncated fixture");
+    // A percentage cut can leave a valid fragmented-MP4 prefix whose probed
+    // extent is simply shorter. Keep ftyp, then stop inside the moov header
+    // so neither indexer can obtain valid initialization/track metadata.
+    assert_eq!(&plain_mp4.stdout[4..8], b"ftyp");
+    let ftyp_size =
+        u32::from_be_bytes(plain_mp4.stdout[..4].try_into().expect("ftyp size")) as usize;
+    assert!(ftyp_size >= 8);
+    assert_eq!(&plain_mp4.stdout[ftyp_size + 4..ftyp_size + 8], b"moov");
+    std::fs::write(&truncated_path, &plain_mp4.stdout[..ftyp_size + 6])
+        .expect("truncated initialization fixture");
 
     let p7 = |path: &Path| {
         let mut file = hevc_file(

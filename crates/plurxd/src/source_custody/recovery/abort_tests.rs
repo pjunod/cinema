@@ -95,8 +95,8 @@ async fn recovery_context_cannot_consume_another_stores_evidence() {
     for foreground_record in [false, true] {
         let record = prepare_record(&owner, foreground_record);
         let persist = |store: &Arc<dyn Store>| match &record {
-            Record::Foreground { token } => foreground(store, token),
-            Record::Background { token } => background(store, token),
+            Record::Foreground { token } => foreground(store, token, OLD_BOOT),
+            Record::Background { token } => background(store, token, OLD_BOOT),
         };
         let joined = match &record {
             Record::Foreground { token } => SettlementReceipt::Foreground(token.clone()),

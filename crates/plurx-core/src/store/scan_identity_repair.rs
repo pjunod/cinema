@@ -73,6 +73,8 @@ pub struct IdentityRepairSnapshot {
     pub watches: Vec<IdentityRepairWatch>,
     /// Owners discovered from exact parser-derived directory evidence.
     pub directory_owner_ids: Vec<i64>,
+    /// Exact path/owner evidence from the conservative range, checked atomically during apply.
+    pub directory_guard_rows: Vec<String>,
     /// Canonical rows from every dependency class checked by the backend.
     /// Empty derived classification rows are intentionally omitted.
     pub dependency_rows: Vec<String>,
@@ -184,6 +186,8 @@ pub fn plan_identity_repair(
         .sort_by_key(|watch| (watch.item_id, watch.user_id));
     snapshot.directory_owner_ids.sort_unstable();
     snapshot.directory_owner_ids.dedup();
+    snapshot.directory_guard_rows.sort_unstable();
+    snapshot.directory_guard_rows.dedup();
     snapshot.dependency_rows.sort();
     snapshot
         .blockers
@@ -289,7 +293,19 @@ pub fn plan_identity_repair(
             .ok();
         match parsed.and_then(|value| value.source_directory) {
             Some(directory) => {
-                source_directories.insert(directory.to_string_lossy().into_owned());
+                let roots = serde_json::from_str::<Vec<String>>(&snapshot.library_paths)
+                    .unwrap_or_default();
+                if roots
+                    .iter()
+                    .any(|root| directory == std::path::Path::new(root))
+                {
+                    blockers.push(blocker(
+                        "invalid_source_directory",
+                        "a physical show directory equals a library root",
+                    ));
+                }
+                source_directories
+                    .insert(super::show_directory_identity(&directory.to_string_lossy()));
                 let show_id = items
                     .get(&file.item_id)
                     .and_then(|episode| episode.parent_id)
@@ -727,6 +743,7 @@ mod tests {
             ],
             watches: Vec::new(),
             directory_owner_ids: vec![10, 20],
+            directory_guard_rows: vec![],
             dependency_rows: Vec::new(),
             blockers: Vec::new(),
         };

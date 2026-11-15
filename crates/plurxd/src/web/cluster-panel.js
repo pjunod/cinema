@@ -665,6 +665,43 @@
     return OBSERVATION_REASONS[code]||clusterOperationReason(code);
   }
 
+  // ---- rolling-upgrade facts -------------------------------------------------
+  // Placement compares build, media protocol and eligibility independently
+  // (docs/OPERATIONS.md "Rolling upgrades"); a node on another protocol is
+  // absent from placement rather than refused, so the card has to say so.
+  const PLACEMENT_REASONS={
+    no_fresh_snapshot:"no fresh media advertisement from it",
+    protocol_unreported:"its build predates media-protocol reporting",
+    egress_unavailable:"its egress is unavailable",
+    no_encoder:"it advertises no encoder",
+  };
+  function clusterPlacementReason(reason){
+    const code=String(reason||"");
+    const skew=/^protocol_mismatch(?::(\d+))?$/.exec(code);
+    if(skew) return skew[1]?`it speaks media protocol ${skew[1]}`:"its media protocol differs";
+    return PLACEMENT_REASONS[code]||clusterOperationReason(code);
+  }
+  function clusterWireFacts(ops,nodeId){
+    const row=clusterDirectOperationRow(ops,nodeId);
+    const status=row&&row.observation==="answered"?row.status:null;
+    const placement=row&&row.placement;
+    return {
+      build:status?status.build:null,
+      protocol:status&&Number.isInteger(status.media_protocol)?status.media_protocol:null,
+      eligible:placement?placement.eligible_owner===true:null,
+      reason:placement&&placement.reason?clusterPlacementReason(placement.reason):null,
+    };
+  }
+  function clusterWireSkew(ops){
+    const builds=new Set(), protocols=new Set();
+    for(const row of (ops&&!ops.unavailable&&ops.nodes)||[]){
+      if(row.observation!=="answered"||!row.status) continue;
+      builds.add(String(row.status.build));
+      protocols.add(Number.isInteger(row.status.media_protocol)?String(row.status.media_protocol):"unreported");
+    }
+    return {builds:[...builds].sort(),protocols:[...protocols].sort(),buildSkew:builds.size>1,protocolSkew:protocols.size>1};
+  }
+
   // ---- the replicated database ---------------------------------------------
   // The store is the other half of this screen, and until now it had no section
   // of its own: watch state was one run-on sentence ("Replicated in sync ·
@@ -924,6 +961,9 @@
     clusterOperationAge,
     clusterOperationReason,
     clusterObservationReason,
+    clusterPlacementReason,
+    clusterWireFacts,
+    clusterWireSkew,
     clusterSqliteReplication,
     clusterDatabaseStatus,
     clusterCapacityText,

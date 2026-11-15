@@ -207,6 +207,23 @@ enum PreparedSwitchMeasurement {
             firstFrameUnixMs = nil
         }
 
+        /// The seam evidence a `prepared_seam` report carries. Frames are
+        /// complete only when both sides of the ±2 s window were sampled end to
+        /// end; audio continuity is observed only when the access log's stall
+        /// counter was sampled across the whole window and moved by zero.
+        func seamEvidence() -> PreparedSeamEvidence {
+            guard let commitAtMs else {
+                return PreparedSeamEvidence(framesComplete: false, droppedFrames: nil, audioObserved: false)
+            }
+            let frames = counterDelta(before: before, after: after, commitAtMs: commitAtMs)
+            let stalls = counterDelta(before: beforeStalls, after: afterStalls, commitAtMs: commitAtMs)
+            return PreparedSeamEvidence(
+                framesComplete: frames.count != nil && frames.coveredMs >= frames.spanMs,
+                droppedFrames: frames.count,
+                audioObserved: stalls.count == 0 && stalls.coveredMs >= stalls.spanMs
+            )
+        }
+
         func reading() -> Reading {
             guard let commitAtMs else { return .unmeasured }
             return Reading(
@@ -255,5 +272,57 @@ enum PreparedSwitchMeasurement {
                 met: false
             ),
         ]
+    }
+}
+
+/// What one prepared switch measured at its seam.
+struct PreparedSeamEvidence: Equatable {
+    let framesComplete: Bool
+    let droppedFrames: Int?
+    let audioObserved: Bool
+}
+
+/// The `prepared_seam` client-log beacon, the same shape on every client. The
+/// server counts it per platform; the processed Dolby Vision upgrade leaves
+/// the Developer tab only after twenty committed switches with complete
+/// frames, zero dropped, observed audio continuity and no reopen.
+struct PreparedSeamBeacon: Encodable {
+    struct Seam: Encodable, Equatable {
+        let platform: String
+        let outcome: String
+        let frames_complete: Bool
+        let dropped_frames: Int?
+        let audio_observed: Bool
+        let reopened: Bool
+    }
+    let level = "info"
+    let event = "prepared_seam"
+    let message: String
+    let detail: String
+    let session_id: String?
+    let prepared_seam: Seam
+
+    /// `reopened` is what happened, not what the outcome implies: whether an
+    /// ordinary reopen actually ran inside the report's window. A refused or
+    /// frameless switch owes one, and counts as reopened only once it ran.
+    static func seam(_ outcome: PreparedCommitOutcome, evidence: PreparedSeamEvidence?,
+                     reopened: Bool) -> Seam? {
+        let name: String
+        switch outcome {
+        case .committed: name = "committed"
+        case .refused: name = "refused"
+        case .switchedWithoutAFrame: name = "switched_without_a_frame"
+        // Nothing was switched and nothing reopens: not a seam outcome.
+        case .failedWithoutReopen: return nil
+        }
+        let committed = name == "committed"
+        return Seam(
+            platform: "apple",
+            outcome: name,
+            frames_complete: committed && evidence?.framesComplete == true,
+            dropped_frames: committed ? evidence?.droppedFrames : nil,
+            audio_observed: committed && evidence?.audioObserved == true,
+            reopened: reopened
+        )
     }
 }

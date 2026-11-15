@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "written_utc": "2026-10-27T02:33:56.232739+00:00",
+  "status": "Preregistered before new control outputs.",
+  "frozen_comparison": "Previous HDR10-opt0/CbCr-9/AQ2/psy-rd2/psy-rdoq1/SAO1/slow/bf0 target115/max125/buffer136.",
+  "control": "rdoq-level0 and coupled psy-rdoq0 only. Keep psy-rd2 and all other requested settings fixed.",
+  "fixtures": [
+    "michael5400",
+    "michael1800"
+  ],
+  "source_hashes": {
+    "michael5400": "8e3d641eecaf1737d421326146b458fdb4af3841ec0e39f122c9d214871dd3a1",
+    "michael1800": "bf02904d4c179afe7e2c82af07e2f89beedd92aa31b6444c5b6175d6bf383897"
+  },
+  "quality": "Same frozen models A-D, source R/F images and reference masks; full frames0/24. Full mean advantage plus below0.1nit mean/p99 no worse than fallback in both frames/windows/allmodels. Retain all other bands/max/plane and gradient tradeoffs.",
+  "rate": "Actual authored video packet average <=130Mbps screen perwindow; not HRD/level/native qualification. Report actualbits and no underflow claims from absent logs.",
+  "association": "Frozen Rust author unchanged. Verify all48VCL/RPU/clock identity and 48input/output counts, normative SPS/PPS syntax; encoder reports document RDOQ/psy policy.",
+  "limits": "Existing calibration windows, not heldout. Prediction-residual coefficients are not identifiable FEL residual coefficients. No normative composer or perceived-quality claim.",
+  "non_goals": [
+    "live playback/settings/deployment",
+    "packaging repair",
+    "changing models/masks/thresholds"
+  ],
+  "source": "https://x265.readthedocs.io/en/master/cli.html#cmdoption-rdoq-level",
+  "tool_sha256": "e6c462c6286e3f8ac4b8534aa4770717191c96802d18435d4b08b57d5da8edca"
+}

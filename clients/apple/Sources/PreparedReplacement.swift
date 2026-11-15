@@ -452,8 +452,11 @@ enum PreparedSeekPolicy: Equatable {
     static func originalTargetHasRunway(
         filmPositionMs: Int, mediaOriginMs: Int, ranges: [ClosedRange<Double>]
     ) -> Bool {
-        guard filmPositionMs >= 0, mediaOriginMs >= 0 else { return false }
-        let targetSeconds = Double(max(0, filmPositionMs - mediaOriginMs)) / 1_000
+        guard filmPositionMs >= 0,
+              (-PlaybackControl.maximumMediaMs...PlaybackControl.maximumMediaMs).contains(mediaOriginMs) else { return false }
+        let (targetMs, overflow) = filmPositionMs.subtractingReportingOverflow(mediaOriginMs)
+        guard !overflow else { return false }
+        let targetSeconds = Double(max(0, targetMs)) / 1_000
         let covering = contiguousRanges(ranges).first {
             $0.lowerBound <= targetSeconds && $0.upperBound >= targetSeconds
         }
@@ -551,7 +554,8 @@ struct PreparedCommitRendezvous: Equatable {
         overlapRemainingMs: Int,
         loadedItemRanges: [ClosedRange<Double>]
     ) -> PreparedCommitRendezvous? {
-        guard stagedFilmPositionMs >= 0, incumbentFilmPositionMs >= 0, mediaOriginMs >= 0,
+        guard stagedFilmPositionMs >= 0, incumbentFilmPositionMs >= 0,
+              (-PlaybackControl.maximumMediaMs...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),
               playbackRate.isFinite, playbackRate > 0,
               let maximumLeadWallMs = commitLeadWallMs(overlapRemainingMs: overlapRemainingMs)
         else { return nil }
@@ -565,7 +569,9 @@ struct PreparedCommitRendezvous: Equatable {
         guard minimumFilmMs.isFinite, maximumFilmMs.isFinite,
               minimumFilmMs <= maximumFilmMs, maximumFilmMs < Double(Int.max) else { return nil }
         let runwaySeconds = Double(PreparedReplacementBounds.switchRunwayMs) / 1_000
-        let originalTargetSeconds = Double(max(0, stagedFilmPositionMs - mediaOriginMs)) / 1_000
+        let (originalItemMs, originalOverflow) = stagedFilmPositionMs.subtractingReportingOverflow(mediaOriginMs)
+        guard !originalOverflow else { return nil }
+        let originalTargetSeconds = Double(max(0, originalItemMs)) / 1_000
         // Readiness admitted the interval containing the original target. A
         // disconnected future island cannot stand in for that interval.
         guard let range = PreparedSeekPolicy.contiguousRanges(loadedItemRanges).first(where: {
@@ -576,7 +582,8 @@ struct PreparedCommitRendezvous: Equatable {
         guard candidateMs.isFinite, candidateMs >= minimumFilmMs,
               candidateMs >= 0, candidateMs < Double(Int.max),
               let filmMs = Int(exactly: candidateMs), filmMs >= mediaOriginMs else { return nil }
-        let itemMs = filmMs - mediaOriginMs
+        let (itemMs, itemOverflow) = filmMs.subtractingReportingOverflow(mediaOriginMs)
+        guard !itemOverflow else { return nil }
         let itemSeconds = Double(itemMs) / 1_000
         guard itemSeconds >= range.lowerBound,
               itemSeconds + runwaySeconds <= range.upperBound else { return nil }
@@ -593,9 +600,10 @@ struct PreparedCommitRendezvous: Equatable {
     ) -> PreparedCommitRendezvous {
         let (future, overflow) = max(0, incumbentFilmPositionMs).addingReportingOverflow(max(0, leadMs))
         let film = max(max(0, stagedFilmPositionMs), overflow ? Int.max : future)
+        let (item, itemOverflow) = film.subtractingReportingOverflow(mediaOriginMs)
         return PreparedCommitRendezvous(
             filmPositionMs: film,
-            itemPositionMs: max(0, film - mediaOriginMs)
+            itemPositionMs: itemOverflow ? Int.max : max(0, item)
         )
     }
 
@@ -944,6 +952,15 @@ protocol PreparedSuccessorHost: AnyObject {
     /// preparation and never exercised it; this is the instrument that closes
     /// that residual.
     func recordPreparedFallbackInterruption(ms: Int)
+
+    /// How the commit ended at its seam, for the `prepared_seam` report. Only
+    /// an observation: nothing reads it back.
+    func reportPreparedSeam(_ outcome: PreparedCommitOutcome)
+}
+
+extension PreparedSuccessorHost {
+    /// A host without seam instruments reports nothing.
+    func reportPreparedSeam(_ outcome: PreparedCommitOutcome) {}
 }
 
 extension PreparedSuccessorHost {
@@ -1136,6 +1153,7 @@ final class PreparedReplacementCoordinator {
         let startedAt = now()
         let outcome = await host?.commitPreparedSuccessor(action) ?? .refused
         openedAtMs = nil
+        host?.reportPreparedSeam(outcome)
         switch outcome {
         case .committed(let firstFrameUnixMs):
             ledger.noteCommitted(action, firstFrameUnixMs: firstFrameUnixMs)

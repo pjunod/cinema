@@ -1,6 +1,6 @@
 # noirr cinema for macOS
 
-This archive contains a universal `plurxd` server (Apple Silicon and Intel),
+This archive contains the Apple Silicon `plurxd` server (Intel Macs are not supported),
 the installer, the launchd agent template it renders, and
 `plurx-source-parser.wasm` — the sandboxed FFprobe build plurxd reads decoder
 facts through, which the installer puts beside the pinned FFprobe. The

@@ -52,7 +52,8 @@ function clusterWorkersHtml(d){
   const statuses=new Map((d.activity_nodes||[]).filter(n=>n.node_id).map(n=>[n.node_id,n.status]));
   const jobs=q.activeJobs||[];
   const ids=[...new Set([...Object.keys(names),...Object.keys(workers),...statuses.keys(),...jobs.map(j=>j.owner_node_id).filter(Boolean)])];
-  const fresh=id=>workers[id]&&Date.now()-workers[id].observed_at_ms>=-30000&&Date.now()-workers[id].observed_at_ms<30000&&(!statuses.has(id)||statuses.get(id)==="answered");
+  const workerObserved=new Set(d.worker_observed_nodes||[]);
+  const fresh=id=>workers[id]&&Date.now()-workers[id].observed_at_ms>=-30000&&Date.now()-workers[id].observed_at_ms<30000&&(workerObserved.has(id)||!statuses.has(id)||statuses.get(id)==="answered");
   const known=ids.filter(fresh),sum=key=>known.reduce((n,id)=>n+Number(workers[id][key]||0),0);
   const queued=(q.counts||[]).filter(c=>c.state==="queued").reduce((n,c)=>n+Number(c.count||0),0);
   const clustered=activityIsClustered(d);
@@ -61,7 +62,7 @@ function clusterWorkersHtml(d){
     <div class="tbl"><table class="activity-node-matrix"><thead><tr><th>${clustered?"Node":"Server"}</th><th>Heavy worker</th><th>Current work</th><th>CPU reserved</th><th>GPU sessions</th></tr></thead><tbody>${ids.sort((a,b)=>nodeLabel(names,a).localeCompare(nodeLabel(names,b))).map(id=>{
       const w=workers[id],known=fresh(id),assigned=jobs.filter(j=>j.owner_node_id===id);
       const status=!known?"Capacity unknown":!w.accepting_work?"Not accepting work":w.heavy_in_use?"Heavy worker busy":w.heavy_available?"Heavy worker available":"Waiting for media capacity";
-      return `<tr><td><button class="ghost sm" data-durable-focus="node-${esc(id)}" onclick="showActivityNode(${esc(JSON.stringify(id))})">${clustered?esc(nodeLabel(names,id)):"This server"}</button></td><td>${esc(status)}<small class="muted">${known?`${esc(w.heavy_in_use)} / ${esc(w.heavy_limit)} occupied`:esc(statuses.has(id)&&statuses.get(id)!=="answered"?activityNodeStatusText(statuses.get(id)):w?"Last capacity report is stale.":"This node has not supplied worker telemetry.")}</small></td><td>${assigned.length?assigned.map(job=>`<button class="ghost sm" data-durable-focus="worker-${esc(job.id)}" data-inspector-focus="job-${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||job.kind.replace(/_/g," "))}</button><small class="muted">${esc(durableStateLabel(job))}${durableLeaseExpired(job)?" · previous owner":" · durable assignment"}</small>`).join(""):known&&w.child_count?`${esc(w.child_count)} child processes`:'<span class="muted">No durable assignment in the latest queue observation.</span>'}</td><td>${known?`${esc(w.software_used)} / ${esc(w.software_limit)}`:"—"}</td><td>${known?`${esc(w.hardware_used)} / ${esc(w.hardware_limit)}`:"—"}</td></tr>`;
+      return `<tr><td><button class="ghost sm" data-durable-focus="node-${esc(id)}" onclick="showActivityNode(${esc(JSON.stringify(id))})">${clustered?esc(nodeLabel(names,id)):"This server"}</button></td><td>${esc(status)}<small class="muted">${known?`${esc(w.heavy_in_use)} / ${esc(w.heavy_limit)} occupied`:esc(statuses.has(id)&&statuses.get(id)!=="answered"?activityNodeStatusText(statuses.get(id)):w?"Last capacity report is stale.":"This node has not supplied worker telemetry.")}</small></td><td>${assigned.length?assigned.map(job=>`<button class="ghost sm" data-durable-focus="worker-${esc(job.id)}" data-inspector-focus="job-${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||durableKindLabel(job))}</button><small class="muted">${esc(durableStateLabel(job))}${durableLeaseExpired(job)?" · previous owner":" · durable assignment"}</small>`).join(""):known&&w.child_count?`${esc(w.child_count)} child processes`:'<span class="muted">No durable assignment in the latest queue observation.</span>'}</td><td>${known?`${esc(w.software_used)} / ${esc(w.software_limit)}`:"—"}</td><td>${known?`${esc(w.hardware_used)} / ${esc(w.hardware_limit)}`:"—"}</td></tr>`;
     }).join("")}</tbody></table></div><p class="hint">CPU counts are reserved threads, not measured utilization. Unknown capacity is excluded from totals. A free slot still needs compatible work and resource admission.</p>${q.activeTruncated?'<p class="hint">Assignment list is partial: more active jobs exist.</p>':""}<button class="ghost sm" onclick="setActivityTab('jobs')">Open jobs →</button>`;
 }
 // Queued library work that cannot start says why, at the top of Status. The
@@ -95,23 +96,29 @@ function activitySourceRecovery(d){
   return summary.source_io_holders.filter(holder=>holder&&holder.active_occupancy!==false
     &&typeof holder.resource_key==="string"&&(holder.resource_key==="source_io"||holder.resource_key.startsWith("source_io:"))
     &&Number.isSafeInteger(holder.lease_expires_at_ms)&&holder.lease_expires_at_ms>=0
-    &&(holder.phase==="cleanup_pending"||holder.lease_expires_at_ms<=observed));
+    // The store sweep releases an owner a minute after its lease lapses and
+    // runs every minute; three minutes on, the sweep itself is not running.
+    &&holder.lease_expires_at_ms<=observed-180000);
 }
 function activitySourceRecoveryHtml(d){
   if(!ME?.is_admin)return "";
   const holders=activitySourceRecovery(d);
   if(holders===null)return '<p class="hint" data-activity-source-capacity role="status">Source capacity unknown: a fresh shared-reader observation is unavailable.</p>';
   if(!holders.length)return "";
-  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Shared source reads need recovery</h2><p>These reservations can block queued scans and other media work even when their jobs are no longer listed. Lease expiry does not prove a physical read has stopped. Recovery must confirm it has stopped before releasing capacity.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(holder.resource_key)} · ${holder.phase==="cleanup_pending"?"cleanup pending":"lease expired"} · ${holder.lease_expires_at_ms===0?"previous authority expired":`authority expiry ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}`}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
+  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Source capacity held past its lease</h2><p>These owners stopped renewing their leases more than three minutes ago but still hold source capacity, so media jobs that read a source are waiting. The lease-expiry sweep normally releases them within two minutes; this means it is not running.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(holder.resource_key)} · lease lapsed ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
 }
+const ACTIVITY_TABS=["status","jobs","starts"];
+const ACTIVITY_TAB_LABELS={status:"Status",jobs:"Jobs",starts:"Starts"};
+function activityTabNeighbor(tab,step){return ACTIVITY_TABS[(ACTIVITY_TABS.indexOf(tab)+step+ACTIVITY_TABS.length)%ACTIVITY_TABS.length];}
 function setActivityTab(tab){
-  ACTIVITY_VIEW.tab=tab==="jobs"&&ME?.is_admin?"jobs":"status";
-  for(const name of ["status","jobs"]){const pane=document.getElementById("activity-"+name);if(pane)pane.hidden=name!==ACTIVITY_VIEW.tab;const button=document.getElementById("activity-tab-"+name);if(button)button.setAttribute("aria-selected",String(name===ACTIVITY_VIEW.tab));}
+  ACTIVITY_VIEW.tab=(tab==="jobs"||tab==="starts")&&ME?.is_admin?tab:"status";
+  for(const name of ACTIVITY_TABS){const pane=document.getElementById("activity-"+name);if(pane)pane.hidden=name!==ACTIVITY_VIEW.tab;const button=document.getElementById("activity-tab-"+name);if(button)button.setAttribute("aria-selected",String(name===ACTIVITY_VIEW.tab));}
   if(ACTIVITY_VIEW.tab==="jobs")refreshDurableActivity();
+  if(ACTIVITY_VIEW.tab==="starts")refreshActivityStarts();
 }
 function activityTabsHtml(){
   if(!ME?.is_admin)return "";
-  return `<div class="activity-tabs" role="tablist" aria-label="Activity views">${["status","jobs"].map(tab=>`<button class="ghost" role="tab" id="activity-tab-${tab}" data-activity-view="${tab}" aria-controls="activity-${tab}" aria-selected="${ACTIVITY_VIEW.tab===tab}" onclick="setActivityTab('${tab}')" onkeydown="if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();setActivityTab('${tab==="status"?"jobs":"status"}');document.getElementById('activity-tab-${tab==="status"?"jobs":"status"}').focus()}">${tab==="status"?"Status":"Jobs"}</button>`).join("")}</div>`;
+  return `<div class="activity-tabs" role="tablist" aria-label="Activity views">${ACTIVITY_TABS.map(tab=>`<button class="ghost" role="tab" id="activity-tab-${tab}" data-activity-view="${tab}" aria-controls="activity-${tab}" aria-selected="${ACTIVITY_VIEW.tab===tab}" onclick="setActivityTab('${tab}')" onkeydown="if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();const next=activityTabNeighbor('${tab}',event.key==='ArrowRight'?1:-1);setActivityTab(next);document.getElementById('activity-tab-'+next).focus()}">${ACTIVITY_TAB_LABELS[tab]}</button>`).join("")}</div>`;
 }
 function durableTypeBreakdownHtml(){
   const q=DURABLE_ACTIVITY,kinds=[...new Set((q.counts||[]).map(c=>c.kind))].sort();
@@ -130,8 +137,19 @@ function durableLeaseExpired(job){
 function durableStateLabel(job){
   return durableLeaseExpired(job)?"Lease expired · awaiting recovery":job.state;
 }
+function durableKindLabel(job){
+  // A targeted library request shares the library_scan kind; say which it is.
+  return job.targeted?"targeted scan":String(job.kind||"").replace(/_/g," ");
+}
 function durableJobReason(job){
   if(job.error_code)return job.error_code;
+  // A targeted library request (pipeline contract v2 §5.1) says what it is
+  // waiting on; Cancel reaches it like any other queued library job.
+  if(job.targeted&&job.waiting_on){
+    const w=String(job.waiting_on),at=w.indexOf(":"),detail=w.slice(at+1);
+    const label=at<0?"":{full_scan:`full scan of ${detail}`,root_unreadable:`root unreadable: ${detail}`,queue_position:`queue position ${detail}`}[w.slice(0,at)];
+    if(label)return `Waiting on: ${label}`;
+  }
   // The title scan also measures a Profile 7 FEL title for the reconstructed
   // Profile 8.1, on this node's GPU, while it runs (FEL-P81-RECONSTRUCTION.md).
   if(job.kind==="dv_title_scan"&&job.state==="running")return "Complete-title Dolby Vision scan. A Profile 7 FEL title is also measured on the GPU (render, encode and compare sample windows) to decide whether it is served the reconstructed Profile 8.1.";
@@ -142,7 +160,7 @@ function durableJobReason(job){
   // A domain-specific reader cannot be attributed to this library from this
   // projection. Only the global source_io reservation applies to every root.
   const recovery=ME?.is_admin&&activitySourceRecovery(ACTIVITY_SNAPSHOT||{})?.some(holder=>holder.resource_key==="source_io");
-  return [root,recovery?"Shared source capacity is reserved by work awaiting recovery; its physical read is not confirmed stopped.":""].filter(Boolean).join(" ");
+  return [root,recovery?"Shared source capacity is still held by an owner whose lease lapsed long ago; the lease-expiry sweep is not releasing it.":""].filter(Boolean).join(" ");
 }
 // Compute both views from the same server window, independent of job filters.
 function durableProcessingHtml(nodeNames={}){
@@ -161,7 +179,7 @@ function durableQueueHtml(nodeNames={}){
   const clustered=activityIsClustered();
   const states=["queued","running","cancelling","failed","cancelled","succeeded"];
   const count=state=>(q.counts||[]).filter(row=>row.state===state).reduce((n,row)=>n+Number(row.count||0),0);
-  const rows=q.rows.map(job=>`<tr><td class="durable-work"><button class="ghost sm durable-title" data-durable-focus="${esc(job.id)}" aria-haspopup="dialog" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||job.kind.replace(/_/g," "))}</button><div class="durable-meta">${job.title?esc(job.kind.replace(/_/g," ")):""}${job.library?` · ${esc(job.library)}`:job.file_id?` · file ${esc(job.file_id)}`:""} · Priority ${esc(job.priority)}</div></td>
+  const rows=q.rows.map(job=>`<tr><td class="durable-work"><button class="ghost sm durable-title" data-durable-focus="${esc(job.id)}" aria-haspopup="dialog" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||durableKindLabel(job))}</button><div class="durable-meta">${job.title?esc(durableKindLabel(job)):""}${job.library?` · ${esc(job.library)}`:job.file_id?` · file ${esc(job.file_id)}`:""} · Priority ${esc(job.priority)}</div></td>
     <td data-label="State"><span class="pill durable-state ${durableLeaseExpired(job)?"expired":states.includes(job.state)?job.state:""}">${esc(durableStateLabel(job))}</span>${job.not_before_ms>q.observed?`<small> · retry ${esc(new Date(job.not_before_ms).toLocaleString())}</small>`:""}</td>
     <td data-label="Worker">${job.owner_node_id?`<span title="${esc(job.owner_node_id)}">${clustered?esc(nodeLabel(nodeNames,job.owner_node_id)):"This server"}</span>${durableLeaseExpired(job)?'<small> · previous owner</small>':""}`:job.target_node_id?`Destination: ${clustered?esc(nodeLabel(nodeNames,job.target_node_id)):"This server"}`:"Awaiting worker"}</td>
     <td class="durable-age" data-label="Since requested">${esc(durableDuration(job.age_ms))}</td><td class="durable-reason" data-label="Reason">${esc(durableJobReason(job)||(!job.supported?"Requires a worker that understands this payload":"—"))}</td>
@@ -298,7 +316,7 @@ function activityInspectorHtml(){
   if(selected.kind==="node"){
     const id=selected.id,w=d.workers?.[id],status=(d.activity_nodes||[]).find(n=>n.node_id===id)?.status,fresh=w&&(!status||status==="answered")&&Date.now()-w.observed_at_ms<30000&&Date.now()-w.observed_at_ms>=-30000;
     const assignments=(q.activeJobs||[]).filter(job=>job.owner_node_id===id);
-    return `<h2>${activityIsClustered()?esc(nodeLabel(names,id)):"This server"}</h2>${activityIsClustered()?`<p class="hint">${esc(id)}</p>`:""}${fresh?`<dl class="activity-facts"><dt>Heavy slots</dt><dd>${esc(w.heavy_in_use)} / ${esc(w.heavy_limit)} occupied · ${esc(w.heavy_available)} available</dd>${w.probe_batch_limit?`<dt>Media probe batch</dt><dd>Up to ${esc(w.probe_batch_limit)} jobs sharing one heavy slot; storage admission still applies</dd>`:""}<dt>CPU reserved</dt><dd>${esc(w.software_used)} / ${esc(w.software_limit)} threads</dd><dt>GPU sessions</dt><dd>${esc(w.hardware_used)} / ${esc(w.hardware_limit)}</dd><dt>Admission</dt><dd>${w.accepting_work?w.heavy_available?"Available for compatible work":w.heavy_in_use?"Heavy work is active":"Waiting for media capacity":"Node is starting or in maintenance"}</dd><dt>Observed</dt><dd>${esc(new Date(w.observed_at_ms).toLocaleTimeString())}</dd></dl>`:'<p class="hint">Capacity unknown. This node has no fresh worker observation.</p>'}<h3>Assignments</h3>${assignments.map(job=>`<p><button class="ghost sm" data-inspector-focus="job-${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||job.kind.replace(/_/g," "))}</button> · ${esc(durableStateLabel(job))}${durableLeaseExpired(job)?" · previous owner":""}</p>`).join("")||'<p class="hint">No durable assignment reported.</p>'}${fresh?`<details><summary>${esc(w.child_count)} child processes</summary>${(w.children||[]).map(child=>`<p class="hint">${esc(child)}</p>`).join("")}</details>`:""}<button class="ghost sm" onclick="openActivityNodeJobs(${esc(JSON.stringify(id))})">View ${activityIsClustered()?"this node’s":"server"} jobs →</button>`;
+    return `<h2>${activityIsClustered()?esc(nodeLabel(names,id)):"This server"}</h2>${activityIsClustered()?`<p class="hint">${esc(id)}</p>`:""}${fresh?`<dl class="activity-facts"><dt>Heavy slots</dt><dd>${esc(w.heavy_in_use)} / ${esc(w.heavy_limit)} occupied · ${esc(w.heavy_available)} available</dd>${w.probe_batch_limit?`<dt>Media probe batch</dt><dd>Up to ${esc(w.probe_batch_limit)} jobs sharing one heavy slot; storage admission still applies</dd>`:""}<dt>CPU reserved</dt><dd>${esc(w.software_used)} / ${esc(w.software_limit)} threads</dd><dt>GPU sessions</dt><dd>${esc(w.hardware_used)} / ${esc(w.hardware_limit)}</dd><dt>Admission</dt><dd>${w.accepting_work?w.heavy_available?"Available for compatible work":w.heavy_in_use?"Heavy work is active":"Waiting for media capacity":"Node is starting or in maintenance"}</dd><dt>Observed</dt><dd>${esc(new Date(w.observed_at_ms).toLocaleTimeString())}</dd></dl>`:'<p class="hint">Capacity unknown. This node has no fresh worker observation.</p>'}<h3>Assignments</h3>${assignments.map(job=>`<p><button class="ghost sm" data-inspector-focus="job-${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.title||durableKindLabel(job))}</button> · ${esc(durableStateLabel(job))}${durableLeaseExpired(job)?" · previous owner":""}</p>`).join("")||'<p class="hint">No durable assignment reported.</p>'}${fresh?`<details><summary>${esc(w.child_count)} child processes</summary>${(w.children||[]).map(child=>`<p class="hint">${esc(child)}</p>`).join("")}</details>`:""}<button class="ghost sm" onclick="openActivityNodeJobs(${esc(JSON.stringify(id))})">View ${activityIsClustered()?"this node’s":"server"} jobs →</button>`;
   }
   const detail=q.detail?.job.id===selected.id?q.detail:null;
   if(!detail)return `<p role="status">${q.detailError?`Could not load details: ${esc(q.detailError)} <button class="ghost sm" onclick="showDurableJob(${esc(JSON.stringify(selected.id))})">Try again</button>`:"Loading job details…"}</p>`;
@@ -308,7 +326,7 @@ function activityInspectorHtml(){
   if(view==="history")body=`<p>${esc(job.failed_attempts)} charged failures · ${esc(job.yield_count)} yields</p><p class="hint">A yield returns work to the queue without charging a failure. Repeated yields can mean the job is stuck.</p>${detail.attempts.map(a=>`<div class="activity-attempt"><b>${esc(nodeLabel(names,a.node_id))}</b> · ${esc(a.outcome||(durableLeaseExpired(job)?"lease expired":"running"))}<p class="hint">${esc(a.error_code?a.error_code.replace(/_/g," "):(a.outcome==="yielded"?"Reason not recorded by this worker":""))} · started ${esc(new Date(a.started_at_ms).toLocaleString())} · ${esc(durableDuration((a.finished_at_ms??(durableLeaseExpired(job)?job.lease_expires_ms:job.observed_at_ms))-a.started_at_ms))} elapsed</p></div>`).join("")||'<p class="hint">No attempts retained.</p>'}`;
   else if(view==="stages")body=`<dl class="activity-facts"><dt>Queue state</dt><dd>${esc(durableStateLabel(job))}</dd><dt>Worker stage</dt><dd>${progress?esc(progress.stage.replace(/_/g," ")):"Not reported"}</dd><dt>Since requested</dt><dd>${esc(durableDuration(job.age_ms))}</dd></dl>${progress?progress.component==="media_probe"?`<p class="hint">Elapsed ${esc(fmtDur(progress.elapsed_ms)||"—")}. This probe reports its stage; byte progress and ETA are not measured.</p>`:`<p>${esc(fmtBytes(progress.bytes_read)||"0 B")} / ${esc(fmtBytes(progress.total_bytes)||"unknown")} examined</p><p class="hint">${esc(fmtBytes(progress.throughput_bps)||"—")}/s · elapsed ${esc(fmtDur(progress.elapsed_ms)||"—")} · ETA ${progress.eta_ms!=null?esc(fmtDur(progress.eta_ms)):"not reported"}</p>`:'<p class="hint">No fresh execution-stage observation is available for this attempt. Queue age is not execution time.</p>'}`;
   else body=`<dl class="activity-facts"><dt>${durableLeaseExpired(job)?"Previous owner":"Owner"}</dt><dd>${job.owner_node_id?(activityIsClustered()?esc(nodeLabel(names,job.owner_node_id)):"This server"):"Unassigned"}</dd><dt>Destination</dt><dd>${activityIsClustered()?(job.target_node_id?esc(nodeLabel(names,job.target_node_id)):"Shared queue"):"This server"}</dd><dt>Requested by</dt><dd>${esc([...new Set(detail.waiters.map(w=>w.consumer_kind))].join(", ")||"Not reported")}</dd><dt>Priority</dt><dd>${esc(job.priority)}</dd><dt>Since requested</dt><dd>${esc(durableDuration(job.age_ms))}</dd><dt>Reason</dt><dd>${esc(durableJobReason(job)||(job.not_before_ms>job.observed_at_ms?"Waiting until "+new Date(job.not_before_ms).toLocaleString():"No refusal reported"))}</dd></dl><p class="hint">${detail.waiters.length} interests shown${detail.more_waiters?" · more retained":""}. Observed ${esc(new Date(job.observed_at_ms).toLocaleTimeString())}.</p>`;
-  return `<h2>${esc(job.title||job.kind.replace(/_/g," "))}</h2><p class="hint">${esc(job.kind.replace(/_/g," "))} · ${esc(durableStateLabel(job))}${job.library?" · "+esc(job.library):""}</p>${tabs}${q.detailError?`<p class="err" role="status">Showing the last observation. ${esc(q.detailError)}</p>`:""}${body}`;
+  return `<h2>${esc(job.title||durableKindLabel(job))}</h2><p class="hint">${esc(durableKindLabel(job))} · ${esc(durableStateLabel(job))}${job.library?" · "+esc(job.library):""}</p>${tabs}${q.detailError?`<p class="err" role="status">Showing the last observation. ${esc(q.detailError)}</p>`:""}${body}`;
 }
 function paintActivityInspector(){
   const host=document.getElementById("activity-inspector-body");if(!host||!ACTIVITY_VIEW.inspector)return;

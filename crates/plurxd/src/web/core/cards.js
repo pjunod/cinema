@@ -77,10 +77,12 @@ function card(it, watchCtx){
   // children happen to be absent. The :not(:has(.badge)):not(:has(.prog))…
   // chain this replaces was both fragile and wrong: a folder card has no watch
   // state either, so it got flagged as unwatched.
-  const cls = `poster k-${esc(it.kind||"item")}${(!watched&&!prog)?" unw":""}`;
+  const off = it.offloaded? " offloaded":"";
+  const offb = typeof offloadedBadge==="function"? offloadedBadge(it):"";
+  const cls = `poster k-${esc(it.kind||"item")}${(!watched&&!prog)?" unw":""}${off}`;
   const itemId=exactWireId(it);
   return `<div class="${cls}" data-remote-item="${itemId}" onclick="location.hash='#/item/${itemId}'">
-    <div class="artbox">${img}${dur}${watched}</div><div class="meta"><div class="t">${esc(main)}</div><div class="s"><span class="stxt">${sub}</span>${resb}</div>${watchLine(it,watchCtx)}</div>${prog}</div>`;
+    <div class="artbox">${img}${dur}${watched}${offb}</div><div class="meta"><div class="t">${esc(main)}</div><div class="s"><span class="stxt">${sub}</span>${resb}</div>${watchLine(it,watchCtx)}</div>${prog}</div>`;
 }
 // Folder and photo cards. A folder opens its page; a photo opens the lightbox
 // in place, because paging through a shoebox of stills via a detail page each

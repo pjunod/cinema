@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from validation.regression_field import (
     check_field,
@@ -29,7 +30,8 @@ class RegressionFieldCase(unittest.TestCase):
 
     def run_main(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        # These fixtures describe their own commit range, not the live CI PR.
+        with patch.dict("os.environ", {"PR_TITLE": "", "PR_BODY": "", "GITHUB_EVENT_PATH": ""}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main(list(argv))
         return code, out.getvalue(), err.getvalue()
 
@@ -86,6 +88,9 @@ class RegressionFieldCase(unittest.TestCase):
         self.assertIn("warning:", out)
         self.assertIn("does not execute", out)
 
+    # This fixture judges its own commit range, not the enclosing CI pull
+    # request. Clear both title sources for this test and restore them after.
+    @patch.dict("os.environ", {"PR_TITLE": "", "GITHUB_EVENT_PATH": ""})
     def test_a_corrective_commit_with_no_field_fails_naming_the_subject(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

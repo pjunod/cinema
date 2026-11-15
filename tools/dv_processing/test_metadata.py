@@ -69,6 +69,25 @@ class MetadataAdmission(unittest.TestCase):
                            check=True, timeout=30)
             subprocess.run([str(binary)], check=True, timeout=15)
 
+    def test_refit_composition(self):
+        """F+ composition, lattice, statistics and pooling; the nonidentity
+        mapping's vectors must equal the ones plurx-core's dv_refit replays."""
+        source = Path(__file__).with_name("test_refit_compose.c")
+        fixture = (Path(__file__).resolve().parents[2] / "crates/plurx-core/tests/"
+                   "fixtures/dv-refit/composer-p7-mapping.json")
+        flags = shlex.split(subprocess.check_output(
+            ["pkg-config", "--static", "--cflags", "--libs", "libavutil"],
+            text=True, timeout=15))
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "refit-compose"
+            vectors = Path(directory) / "vectors.json"
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-fno-math-errno",
+                            "-frounding-math", "-ffp-contract=off", "-std=c11", "-Wall",
+                            "-Wextra", "-Werror", str(source), "-o", str(binary), *flags,
+                            "-lm", "-lpthread", "-ldl"], check=True, timeout=120)
+            subprocess.run([str(binary), str(vectors)], check=True, timeout=60)
+            self.assertEqual(vectors.read_bytes(), fixture.read_bytes())
+
     def test_public_piecewise_fel_mapping(self):
         """Pinned public headers/libraries; CPU-only mapping and refusal grid."""
         source = Path(__file__).with_name("test_decoded_metadata.c")

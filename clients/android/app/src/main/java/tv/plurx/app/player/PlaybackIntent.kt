@@ -51,6 +51,7 @@ class PlaybackIntent(
         private set
     var automaticCandidateHeight: Int? = null
         private set
+    private var automaticCandidateRevision = 0L
     private var envelopeRecipeRevision = 1L
     private var envelopeDestinationRevision = 1L
     private var envelopeTransportRevision = 1L
@@ -62,9 +63,51 @@ class PlaybackIntent(
     }
 
     @Synchronized
-    fun requestAutomaticCandidate(id: String?, height: Int?) {
+    fun requestAutomaticCandidate(id: String?, height: Int?): Long {
         automaticCandidateId = id
         automaticCandidateHeight = height
+        automaticCandidateRevision += 1
+        return automaticCandidateRevision
+    }
+
+    @Synchronized
+    internal fun automaticCandidateOwner(): Long = automaticCandidateRevision
+
+    @Synchronized
+    internal fun requestOptionalAutomaticCandidate(id: String, height: Int): Long? {
+        if (desiredQuality != PlaybackQuality.Auto || pendingQualityChange != null || retainedControlQuality != null)
+            return null
+        return requestAutomaticCandidate(id, height)
+    }
+
+    /** A failed optional target cannot erase the recipe that still executes. */
+    @Synchronized
+    internal fun restoreOptionalAutomaticCandidate(
+        expectedOwner: Long,
+        requestedId: String,
+        executing: QualitySelection.AutoCandidate?,
+    ): Boolean {
+        if (automaticCandidateRevision != expectedOwner || automaticCandidateId != requestedId ||
+            desiredQuality != PlaybackQuality.Auto || pendingQualityChange != null || retainedControlQuality != null
+        ) return false
+        requestAutomaticCandidate(executing?.candidateId, executing?.height)
+        return true
+    }
+
+    /** Only a durably committed route may replace standing Auto's candidate. */
+    @Synchronized
+    internal fun adoptCommittedAutomaticCandidate(
+        candidateId: String?,
+        height: Long,
+        qualityAuto: Boolean,
+        expectedOwner: Long = automaticCandidateRevision,
+    ): Boolean {
+        if (expectedOwner != automaticCandidateRevision || !qualityAuto || desiredQuality != PlaybackQuality.Auto ||
+            pendingQualityChange != null || retainedControlQuality != null ||
+            candidateId.isNullOrBlank() || height !in PlaybackControl.MIN_HEIGHT.toLong()..PlaybackControl.MAX_HEIGHT.toLong()
+        ) return false
+        requestAutomaticCandidate(candidateId, height.toInt())
+        return true
     }
 
     @Synchronized
@@ -134,6 +177,7 @@ class PlaybackIntent(
     /** Adopt the quality carried by the exact decision that a successor opens. */
     @Synchronized
     fun adoptQuality(quality: PlaybackQuality) {
+        automaticCandidateRevision += 1
         desiredQuality = quality
         retainedControlQuality = null
         retainedExecutionQuality = null
@@ -159,6 +203,7 @@ class PlaybackIntent(
         tappedAtMs: Long = monotonicNowMs(),
     ): PendingQualityChange {
         val incumbentQuality = qualityForMedia()
+        automaticCandidateRevision += 1
         desiredQuality = quality
         retainedControlQuality = null
         retainedExecutionQuality = null
@@ -695,4 +740,105 @@ internal class PlaybackTargetDeadline(private val timeoutMs: Long = 8_000) {
         fired = false
         elapsedActiveMs = 0
     }
+}
+
+/** The server's exact accepted commit, not a local picture swap or any 200 response. */
+internal data class PreparedControlHandoff(
+    val action: ControlAction,
+    val standingSelection: ClientSelection,
+    val candidateOwner: Long,
+) {
+    /**
+     * Set once the successor's first frame is on screen and its COMMITTED
+     * acknowledgement is owed. From then on the viewer is watching the
+     * committed candidate: a session created before the receipt arrives (a
+     * seek held behind the switch) must carry it, not [standingSelection],
+     * which exists only for the predecessor reporter's own exchanges.
+     */
+    var framePresented: Boolean = false
+
+    /** Whether this handoff owns [acknowledgement]'s action. */
+    fun owns(acknowledgement: ActionAcknowledgement): Boolean = acknowledgement.actionId == action.actionId
+
+    /** Adopt the committed effective selection into [intent]; true when the intent now names it. */
+    fun adoptInto(intent: PlaybackIntent): Boolean = action.effectiveSelection?.let {
+        intent.adoptCommittedAutomaticCandidate(it.candidateId, it.height, it.qualityAuto, candidateOwner)
+    } ?: false
+
+    val bootstrap: ControlBootstrap? get() = action.control?.takeIf {
+        it.isValid && it.url == "/api/v1/hls/${action.sessionId}/control"
+    }
+
+    // The receipt carries the predecessor's effective selection, not the
+    // successor's. Exact request identity is checked by the reporter before
+    // this callback; the server consumes the bound commit with preparation:none.
+    fun receiptAccepted(acknowledgement: ActionAcknowledgement, preparation: String?, responseAction: String,
+        attachedSession: String?): Boolean =
+        acknowledgement.isValid && acknowledgement.state == AcknowledgementState.COMMITTED &&
+            acknowledgement.actionId == action.actionId &&
+            acknowledgement.committedMediaOriginMs == action.mediaOriginMs && attachedSession == action.sessionId &&
+            preparation == "none" && responseAction in setOf("none", "hold")
+
+    fun accepted(acknowledgement: ActionAcknowledgement, preparation: String?, responseAction: String,
+        attachedSession: String?): Boolean = bootstrap != null &&
+        receiptAccepted(acknowledgement, preparation, responseAction, attachedSession)
+
+}
+
+/** Finite diagnostic vocabulary: never accepts key text, URLs, or remote payloads. */
+internal enum class PlaybackExitOrigin(val wire: String) {
+    Input("input"), BackHandler("back_handler"), RemoteNavigation("remote_navigation"),
+    RemoteStop("remote_stop"), CloseControl("close_control"), SurfaceClose("surface_close"),
+    SignIn("sign_in"), PlanFailure("plan_failure"), LoadingBack("loading_back"),
+}
+
+internal fun playbackExitDetail(origin: PlaybackExitOrigin, input: PlayerContractInput? = null,
+    repeatCount: Int = 0): String =
+    "origin=${origin.wire} input=${input?.contractName ?: "none"} repeat=${repeatCount.coerceIn(0, 9999)}"
+
+/**
+ * What was standing before an optional Auto target was published, so a failed
+ * attempt is withdrawn to exactly that.
+ *
+ * Ownership of the wire is the intent's candidate revision plus the requested
+ * id: while both are still this attempt's, nothing newer (a viewer quality
+ * change, a committed route, another Auto request) exists to protect, so the
+ * target is withdrawn even when the player, session or media epoch moved under
+ * it. Withdrawing restores the standing selection: the named executing
+ * candidate, or unnamed Auto when unnamed Auto was standing.
+ */
+internal class OptionalAutoAttempt private constructor(
+    val requestedId: String,
+    private val candidateOwner: Long,
+    private val standing: QualitySelection.AutoCandidate?,
+) {
+    companion object {
+        /**
+         * Null when standing is not Auto, or names a candidate that is not the
+         * one executing: an unknown execution must never be restored as
+         * something it was not.
+         */
+        fun capture(
+            intent: PlaybackIntent,
+            activeCandidateId: String?,
+            standing: QualitySelection,
+            requestedId: String,
+            requestedHeight: Int,
+        ): OptionalAutoAttempt? {
+            val restore = when (standing) {
+                is QualitySelection.AutoCandidate -> standing.takeIf { it.candidateId == activeCandidateId }
+                    ?: return null
+                // Unnamed Auto restores to unnamed Auto, whatever the server
+                // chose to execute under it.
+                QualitySelection.Auto -> null
+                else -> return null
+            }
+            val owner = intent.requestOptionalAutomaticCandidate(requestedId, requestedHeight) ?: return null
+            return OptionalAutoAttempt(requestedId, owner, restore)
+        }
+    }
+
+    /** Withdraw the target to what was standing; false when a newer intent owns the wire. */
+    fun withdraw(intent: PlaybackIntent): Boolean =
+        intent.restoreOptionalAutomaticCandidate(candidateOwner, requestedId, standing)
 }

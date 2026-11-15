@@ -10,8 +10,10 @@ class AndroidLibraryPagingWiringCase(unittest.TestCase):
         screen = (ROOT / "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt").read_text()
         public = screen.split("fun LibraryScreen(", 1)[1].split("internal fun LibraryScreen(", 1)[0]
         body = screen.split("internal fun LibraryScreen(", 1)[1]
-        self.assertIn("vm.libraryPager(libraryIds, order)", public)
-        self.assertIn("LibraryScreen(libraryIds, title, preferences, kind, pagerFactory, onOpenItem, onBack, vm::setLibraryPresentation)", public)
+        # The presence filter (on disk, offloaded, everything) is part of the
+        # pager's identity, so the public route rebuilds it per filter.
+        self.assertIn("remember(vm, libraryIds, presence) { { order: String -> vm.libraryPager(libraryIds, order, presence) } }", public)
+        self.assertIn("libraryIds, title, preferences, kind, pagerFactory, onOpenItem, onBack, vm::setLibraryPresentation,\n        presence = presence, onPresenceChange = vm::setLibraryPresence,", public)
         # The ordinary Grid and the expanded single group share the same
         # route, pager, cards, and stable item IDs.
         self.assertEqual(screen.count("LazyVerticalGrid("), 2)

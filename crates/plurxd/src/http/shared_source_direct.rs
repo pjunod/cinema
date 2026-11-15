@@ -246,15 +246,19 @@ impl PreparedSourceStart {
     pub(super) fn bind_invocation(
         &mut self,
         binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+        presentation: crate::http::hls::SourceCopyPresentation,
     ) -> Result<(), SourceStartFailure> {
         if self.principal() != binding.principal() || self.playback_id() != binding.playback_id() {
             return Err(SourceStartFailure::Unresolved);
         }
         match self {
             Self::Hls(prepared) => prepared
-                .bind_source_invocation(binding)
+                .bind_source_invocation(binding, presentation)
                 .map_err(|_| SourceStartFailure::Unresolved),
             Self::Direct(prepared) => {
+                if presentation != crate::http::hls::SourceCopyPresentation::FullVod {
+                    return Err(SourceStartFailure::Unresolved);
+                }
                 let target = &prepared.target;
                 if binding.request_id() != prepared.request_id
                     || binding.source_server_id() != target.server_id

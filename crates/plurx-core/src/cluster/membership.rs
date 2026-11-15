@@ -2519,6 +2519,56 @@ impl PassiveMembershipMetrics {
     }
 }
 
+/// How long a node-to-node HTTP connection may take to establish.
+///
+/// Without a bound, a peer that silently drops packets consumes the caller's
+/// whole deadline — up to eight seconds on the hydrate paths. Two seconds is
+/// above one TCP SYN retransmission (Linux's initial RTO is one second), so a
+/// single lost SYN still connects, and a caller's own shorter deadline still
+/// applies first. The cost is at the long end: a caller with an eight-second
+/// or longer deadline that would have connected on the second retransmission,
+/// about three seconds in, now fails at two.
+const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long an unused pooled connection is kept.
+///
+/// The peer listener closes a connection that has waited fifteen seconds for
+/// its next request head (`HEADER_READ_TIMEOUT` in plurxd's `main.rs`). A
+/// pooled connection must be retired before the server does that, or a
+/// request can be written into a socket the peer is closing and fail as
+/// unreachable on a healthy peer. reqwest's default of ninety seconds is
+/// longer than the server's close, so it is set here, with margin.
+const PEER_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The one pooled HTTP client for `PeerTransport` requests between this node
+/// and its peers. (The short-lived clients this module builds for the Hiqlite
+/// management API are a different listener and are not pooled here.)
+///
+/// The membership manager owns it because every peer request is made on the
+/// manager's behalf, and every clone of the manager shares it. A client built
+/// per caller is a connection pool per caller: nothing is reused, and each
+/// request pays a fresh TCP and TLS handshake.
+#[derive(Clone)]
+pub struct PeerHttpClient(Result<reqwest::Client, String>);
+
+impl PeerHttpClient {
+    fn new() -> Self {
+        Self(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(PEER_CONNECT_TIMEOUT)
+                .pool_idle_timeout(PEER_POOL_IDLE_TIMEOUT)
+                .build()
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    /// The pooled client, or why it could not be built.
+    pub fn into_result(self) -> Result<reqwest::Client, String> {
+        self.0
+    }
+}
+
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
@@ -4720,8 +4770,63 @@ impl ArtworkRepairClaim {
     }
 }
 
-struct ReplicatedMembership {
+/// The membership manager's replicated client: hiqlite's [`Client`] with
+/// the store's settings floor armed around every write (playback-start E1b,
+/// `docs/streaming/PLAYBACK-START-E1-BUILD.md` §4.3). Membership writes
+/// `settings` in its own transactions (the reduction reference, the removal
+/// owner fence, the Live TV activation tuple), outside the store's
+/// `TimedClient`; without this the saving node's applied view could answer
+/// from a replica that has not applied them. Reads deref to the client.
+#[derive(Clone)]
+struct FlooredClient {
     client: Client,
+    floor: crate::store::SettingsWriteFloor,
+}
+
+impl std::ops::Deref for FlooredClient {
+    type Target = Client;
+
+    fn deref(&self) -> &Client {
+        &self.client
+    }
+}
+
+impl FlooredClient {
+    async fn execute<S>(&self, sql: S, params: hiqlite::Params) -> Result<usize, hiqlite::Error>
+    where
+        S: Into<std::borrow::Cow<'static, str>>,
+    {
+        let sql = sql.into();
+        let settings = self.floor.arm([sql.as_ref()]);
+        let result = self.client.execute(sql, params).await;
+        drop(settings);
+        result
+    }
+
+    async fn txn<C, Q>(
+        &self,
+        statements: Q,
+    ) -> Result<Vec<Result<usize, hiqlite::Error>>, hiqlite::Error>
+    where
+        Q: IntoIterator<Item = (C, hiqlite::Params)>,
+        C: Into<std::borrow::Cow<'static, str>>,
+    {
+        let statements: Vec<(std::borrow::Cow<'static, str>, hiqlite::Params)> = statements
+            .into_iter()
+            .map(|(sql, params)| (sql.into(), params))
+            .collect();
+        let settings = self
+            .floor
+            .arm(statements.iter().map(|(sql, _)| sql.as_ref()));
+        let result = self.client.txn(statements).await;
+        drop(settings);
+        result
+    }
+}
+
+struct ReplicatedMembership {
+    client: FlooredClient,
+    peer_http: PeerHttpClient,
     local_metrics: hiqlite::LocalDbRaftMetrics,
     store: Arc<dyn Store>,
     identity: ClusterIdentity,
@@ -5126,6 +5231,16 @@ impl MembershipManager {
         }
     }
 
+    /// The pooled client for node-to-node HTTP. Every clone of a replicated
+    /// manager returns the same pool. A manager with no cluster has no peers
+    /// to call, so it has no pool to share and builds a client on request.
+    #[must_use]
+    pub fn peer_http(&self) -> PeerHttpClient {
+        self.inner
+            .as_ref()
+            .map_or_else(PeerHttpClient::new, |inner| inner.peer_http.clone())
+    }
+
     #[must_use]
     pub fn clock_guard(&self) -> Arc<super::clock::ClusterClockGuard> {
         Arc::clone(&self.clock)
@@ -5230,6 +5345,7 @@ impl MembershipManager {
         client: Client,
         replication: ReplicationMonitor,
         store: Arc<dyn Store>,
+        settings_floor: crate::store::SettingsWriteFloor,
         identity: ClusterIdentity,
         local: ClusterPeer,
         bootstrap_http: String,
@@ -5244,6 +5360,7 @@ impl MembershipManager {
             client,
             replication,
             store,
+            settings_floor,
             identity,
             local,
             bootstrap_http,
@@ -5268,6 +5385,7 @@ impl MembershipManager {
         client: Client,
         replication: ReplicationMonitor,
         store: Arc<dyn Store>,
+        settings_floor: crate::store::SettingsWriteFloor,
         identity: ClusterIdentity,
         local: ClusterPeer,
         bootstrap_http: String,
@@ -5282,6 +5400,7 @@ impl MembershipManager {
             client,
             replication,
             store,
+            settings_floor,
             identity,
             local,
             bootstrap_http,
@@ -5461,6 +5580,7 @@ impl MembershipManager {
         client: Client,
         replication: ReplicationMonitor,
         store: Arc<dyn Store>,
+        settings_floor: crate::store::SettingsWriteFloor,
         identity: ClusterIdentity,
         local: ClusterPeer,
         bootstrap_http: String,
@@ -5500,7 +5620,11 @@ impl MembershipManager {
                 })?
                 .clock_guard(),
             inner: Some(Arc::new(ReplicatedMembership {
-                client,
+                client: FlooredClient {
+                    client,
+                    floor: settings_floor,
+                },
+                peer_http: PeerHttpClient::new(),
                 local_metrics,
                 store,
                 identity,
@@ -6962,8 +7086,20 @@ impl MembershipManager {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
+        // Distinct protocol capability: an old Source must not accept a new
+        // owner-designated copy request merely because it can read the file.
+        statements.push((
+            "DELETE FROM cluster_node_capabilities WHERE node_id=$1 AND capability=$2".into(),
+            params!(
+                inner.identity.node_id.as_str(),
+                crate::store::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY
+            ),
+        ));
         if let Some(boot) = ingress_boot {
             let shape = crate::store::sharing_ingress_custody::schema_guard();
+            if inner.source_dispatch_ready.load(Ordering::Acquire) {
+                statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({shape}) AND EXISTS(SELECT 1 FROM analysis_coordination_schema WHERE singleton=1 AND version=1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),crate::store::analysis_coordination::SOURCE_COPY_COORDINATION_CAPABILITY,now)));
+            }
             let capability = format!("sharing_ingress_boot_v1:{boot}");
             statements.push((format!("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE ({shape}) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at"),params!(inner.identity.node_id.as_str(),capability,now)));
         }
@@ -8888,6 +9024,16 @@ impl MembershipManager {
     /// from this directory before owned work is settled, and the progress row
     /// keeps a lagged learner out even while its heartbeat is fresh.
     pub async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        self.media_peers_for_route(true).await
+    }
+
+    /// Ready media targets restricted by the caller's learner route policy.
+    /// Read admission role with the endpoint/progress row, rather than joining
+    /// an independently fetched status snapshot onto this directory.
+    pub async fn media_peers_for_route(
+        &self,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
@@ -8904,7 +9050,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<MediaPeerRow, _>(
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+                "SELECT node.node_id, node.raft_id, node.last_seen_at, node.role, \
                         http.public_http_url, \
                         COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
                         progress.observed_at \
@@ -8918,21 +9064,36 @@ impl MembershipManager {
                 params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
             )
             .await?;
-        Ok(rows
-            .into_iter()
-            .filter(|row| members.contains(&row.raft_id))
-            .filter(|row| {
-                row.bounded_read_ready
-                    && node_is_reachable(now, row.observed_at.unwrap_or_default())
-            })
-            .take(MAX_ACTIVITY_PEERS)
-            .map(|row| ActivityPeer {
+        Self::media_peer_directory(now, &members, rows, allow_learners)
+    }
+
+    fn media_peer_directory(
+        now: i64,
+        members: &BTreeSet<u64>,
+        rows: Vec<MediaPeerRow>,
+        allow_learners: bool,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let mut peers = Vec::new();
+        for row in rows.into_iter().filter(|row| {
+            members.contains(&row.raft_id)
+                && row.bounded_read_ready
+                && node_is_reachable(now, row.observed_at.unwrap_or_default())
+        }) {
+            let role = ClusterRole::from_stored(row.admitted_role.as_deref())?;
+            if !allow_learners && role == ClusterRole::Learner {
+                continue;
+            }
+            peers.push(ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
                 raft_id: row.raft_id,
                 reachable: node_is_reachable(now, row.last_seen_at),
-            })
-            .collect())
+            });
+            if peers.len() == MAX_ACTIVITY_PEERS {
+                break;
+            }
+        }
+        Ok(peers)
     }
 
     /// Number of committed voters, including this node. Media rollout gates
@@ -13726,6 +13887,7 @@ impl From<&mut Row<'_>> for NodeHostnameRow {
 
 struct MediaPeerRow {
     node_id: String,
+    admitted_role: Option<String>,
     raft_id: u64,
     last_seen_at: i64,
     http_base: Option<String>,
@@ -13738,6 +13900,7 @@ impl From<&mut Row<'_>> for MediaPeerRow {
         let raft_id: i64 = row.get("raft_id");
         Self {
             node_id: row.get("node_id"),
+            admitted_role: row.get("role"),
             raft_id: u64::try_from(raft_id).unwrap_or_default(),
             last_seen_at: row.get("last_seen_at"),
             http_base: row.get("public_http_url"),

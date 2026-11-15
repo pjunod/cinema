@@ -279,12 +279,21 @@ object Caps {
                     } catch (_: Exception) { null } ?: return@typeLoop
                     val video = capabilities.videoCapabilities ?: return@typeLoop
                     val hardware = isHardwareAccelerated(info)
+                    // Every Android playback path selects decoders through Media3,
+                    // so the envelope claims only what Media3's selector admits
+                    // for this component: its performance-point coverage, its
+                    // rule for devices whose declared points are wrong, and its
+                    // achievable-rate check. The platform ranges alone overstate
+                    // (HEVC L5.1 gives 64.47 fps at 2160p against a declared
+                    // 3840x2160@60 point, which Media3 refuses).
+                    val admits = media3Admits(info, advertisedType, capabilities, hardware)
                     val sizes = VIDEO_PROBE_SIZES.filter { hardware || it.second <= SOFTWARE_VIDEO_MAX_HEIGHT }
                     val levels = capabilities.profileLevels.toList()
                     // Preserve unknown profile as unknown, with no new geometry claim.
                     if (levels.isEmpty()) {
                         val height = sizes.firstOrNull { (width, height) ->
-                            runCatching { video.areSizeAndRateSupported(width, height, 30.0) }.getOrDefault(false)
+                            runCatching { video.areSizeAndRateSupported(width, height, 30.0) }.getOrDefault(false) &&
+                                admits(width, height, 30.0)
                         }?.second ?: return@typeLoop
                         add(VideoDecoderLimit(codec, height, hardware))
                     }
@@ -297,19 +306,21 @@ object Caps {
                         val size = sizes.firstOrNull { (width, height) ->
                             runCatching {
                                 video.areSizeAndRateSupported(width, height, 30.0) &&
-                                    (profileVideo?.areSizeAndRateSupported(width, height, 30.0) ?: (profile == null))
+                                    (profileVideo?.areSizeAndRateSupported(width, height, 30.0) ?: (profile == null)) &&
+                                    admits(width, height, 30.0)
                             }.getOrDefault(false)
                         } ?: return@levelLoop
                         // Unlike a successful query at one cadence, the platform
                         // ranges supply an advertised maximum for this rectangle.
-                        // Intersect the component and profile-level envelopes, then
+                        // Intersect the component and profile-level envelopes, lower
+                        // that to the highest rate Media3's selector admits, then
                         // round downward to a rational and verify that exact tuple.
                         val rate = if (profile != null && profileVideo != null) {
                             runCatching {
-                                val upper = minOf(
+                                val upper = highestAcceptedRate(minOf(
                                     video.getSupportedFrameRatesFor(size.first, size.second).upper,
                                     profileVideo.getSupportedFrameRatesFor(size.first, size.second).upper,
-                                )
+                                )) { rate -> admits(size.first, size.second, rate) }
                                 if (!upper.isFinite() || upper <= 0.0 || upper > 1000.0) {
                                     null
                                 } else {
@@ -318,7 +329,8 @@ object Caps {
                                     DecoderFrameRate(numerator, 1000).takeIf {
                                         numerator > 0 &&
                                             video.areSizeAndRateSupported(size.first, size.second, cadence) &&
-                                            profileVideo.areSizeAndRateSupported(size.first, size.second, cadence)
+                                            profileVideo.areSizeAndRateSupported(size.first, size.second, cadence) &&
+                                            admits(size.first, size.second, cadence)
                                     }
                                 }
                             }.getOrNull()
@@ -332,6 +344,32 @@ object Caps {
                 }
             }
         }
+
+    /**
+     * Media3's verdict on a rectangle and rate for this component
+     * (`MediaCodecInfo.isVideoSizeAndRateSupportedV21`, the check its
+     * `isFormatSupported` applies). A component Media3 cannot describe, or a
+     * query that throws, leaves the platform ranges to decide.
+     */
+    private fun media3Admits(
+        info: MediaCodecInfo,
+        type: String,
+        capabilities: MediaCodecInfo.CodecCapabilities,
+        hardware: Boolean,
+    ): (Int, Int, Double) -> Boolean {
+        val selector = runCatching {
+            androidx.media3.exoplayer.mediacodec.MediaCodecInfo.newInstance(
+                info.name, type, type, capabilities, hardware,
+                /* softwareOnly = */ Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && info.isSoftwareOnly,
+                /* vendor = */ Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && info.isVendor,
+                /* forceDisableAdaptive = */ false,
+                /* forceSecure = */ false,
+            )
+        }.getOrNull() ?: return { _, _, _ -> true }
+        return { width, height, rate ->
+            runCatching { selector.isVideoSizeAndRateSupportedV21(width, height, rate) }.getOrDefault(true)
+        }
+    }
 
     /** Unmapped profiles remain absent instead of becoming a blanket main claim. */
     private fun videoProfileName(codec: String, profile: Int): String? = when (codec) {

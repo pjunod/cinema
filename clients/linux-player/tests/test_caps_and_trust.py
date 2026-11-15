@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 import support
-from plurx_player.caps import device_caps
+from plurx_player.caps import control_capabilities, device_caps
 from plurx_player.trust import TrustStore, ensure_trusted
 
 REPO = os.path.dirname(os.path.dirname(support.PACKAGE_ROOT))
@@ -26,7 +26,7 @@ def rust_fields(path, struct):
 
 class CapsTests(unittest.TestCase):
     def setUp(self):
-        self.caps = device_caps("0.1.0")
+        self.caps = device_caps("0.1.0", native_dovi=True)
 
     @unittest.skipUnless(os.path.exists(CAPS_RS), "needs the plurx source tree")
     def test_every_field_is_a_caps_rs_field(self):
@@ -37,6 +37,15 @@ class CapsTests(unittest.TestCase):
         self.assertLessEqual(set(self.caps["client"]), rust_fields(CAPS_RS, "ClientInfo"))
         for sink in self.caps["audio_sinks"]:
             self.assertLessEqual(set(sink), rust_fields(AUDIO_RS, "AudioSink"))
+
+    def test_unqualified_renderer_negotiates_server_conversion(self):
+        caps = device_caps("0.5.0")
+        hevc = next(v for v in caps["video"] if v["codec"] == "hevc")
+        self.assertEqual(hevc["dv_profiles"], [])
+        self.assertEqual(caps["display"], {"hdr": True, "dolby_vision": False})
+        self.assertEqual(hevc["present"], ["sdr", "pq", "hlg"])
+        self.assertNotIn("dolby_vision", control_capabilities()["dynamic_ranges"])
+        self.assertIn("dolby_vision", control_capabilities(True)["dynamic_ranges"])
 
     def test_plan_section_3_2_claims(self):
         caps = self.caps

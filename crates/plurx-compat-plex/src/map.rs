@@ -224,6 +224,7 @@ mod tests {
             book_work_id: None,
             book_edition_id: None,
             book_metadata_source: None,
+            offloaded_at: None,
         }
     }
 

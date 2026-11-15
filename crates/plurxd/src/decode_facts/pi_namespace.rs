@@ -109,6 +109,7 @@ pub(super) fn configure(
     arguments: &[OsString],
     class: crate::process_control::ChildClass,
     deadline: std::time::Instant,
+    stdio: crate::producer_spawn::StdioFacts,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     let bootstrap_path = PathBuf::from("/proc/self/exe");
     #[cfg(test)]
@@ -184,34 +185,27 @@ pub(super) fn configure(
         .arg(namespace_ids.join(","))
         .arg(arg0)
         .args(arguments);
+    let mut mappings = vec![
+        (executable_fd, HELD_PROBE_FD),
+        (bootstrap.as_raw_fd(), 5),
+        (sender, 6),
+    ];
+    if let Some(source) = source_fd {
+        mappings.push((source, 3));
+    }
+    let descriptors = crate::producer_spawn::Descriptors::from_mappings(&mappings, None)
+        .prepare_inline(stdio)
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let child_descriptors = Arc::clone(&descriptors);
     crate::process_control::priority::apply(command, class);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
-            // Duplicate every additional capability before the fixed-FD moves.
-            let bootstrap_copy = duplicate_child_fd(bootstrap.as_raw_fd())?;
-            let sender_copy = match duplicate_child_fd(sender) {
-                Ok(fd) => fd,
-                Err(error) => {
-                    libc::close(bootstrap_copy);
-                    return Err(error);
-                }
-            };
-            let result: std::io::Result<()> = (|| {
-                match source_fd {
-                    Some(source) => install_probe_child_fds(source, executable_fd)?,
-                    None => {
-                        install_child_fd(executable_fd, HELD_PROBE_FD)?;
-                        libc::close(3);
-                    }
-                }
-                assign_child_fd(bootstrap_copy, 5)?;
-                assign_child_fd(sender_copy, 6)?;
-                Ok(())
-            })();
-            libc::close(bootstrap_copy);
-            libc::close(sender_copy);
-            result?;
+            // All collision-safe duplicates are pinned before any fixed-FD move.
+            child_descriptors.inherit()?;
+            if source_fd.is_none() {
+                libc::close(3);
+            }
             libc::close(receiver);
             // Preserve only parser/bootstrap/control capabilities across bwrap.
             if libc::syscall(
@@ -226,7 +220,9 @@ pub(super) fn configure(
             Ok(())
         });
     }
-    Ok(ProbeExecutionSupervisor::linux(supervisor))
+    let mut supervisor = ProbeExecutionSupervisor::linux(supervisor);
+    supervisor.descriptors = Some(descriptors);
+    Ok(supervisor)
 }
 
 /// Called synchronously before a Tokio runtime or configuration access. The

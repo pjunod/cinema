@@ -674,7 +674,15 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
                 kind: JobKind::CopyOutputPrepare, payload_version: 1, now_ms: now, dispatched_at_ms: now,
             }).await.expect("claim") {
                 ClaimOutcome::Claimed { job } => {
-                    *token.lock().expect("token slot") = job.token;
+                    // The executor accepts physical custody before the drain
+                    // cancels its claim; cancellation cannot create a new owner.
+                    let active = crate::background_jobs::ActiveBackgroundJob::start(
+                        Arc::clone(&store), Arc::new(CopyPreparationAuthority),
+                        job.token.expect("claimed owner"),
+                        tokio::time::Instant::now() + Duration::from_secs(30),
+                        JobKind::CopyOutputPrepare,
+                    ).await.expect("owner accepted before cancellation");
+                    *token.lock().expect("owner slot") = Some(active);
                 }
                 other => panic!("claim {other:?}"),
             }
@@ -691,11 +699,7 @@ async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
     );
     assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelling,
         "a row claimed during the drain goes to cancelling, never back to queued");
-    let claimed = token.lock().expect("token slot").take().expect("claimed in the window");
-    let active = crate::background_jobs::ActiveBackgroundJob::start(
-        Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed,
-        tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
-    ).await.expect("owner");
+    let active = token.lock().expect("owner slot").take().expect("accepted before the drain");
     active.fence().settle(JobSettlement::Cancel).await.expect("owner settles the cancel");
     active.finish().await;
     assert_eq!(d2_job_state(&store, &live).await, JobState::Cancelled);

@@ -42,3 +42,103 @@ function hdrChip(f){
   if(s) return {cls, text:s, full:s};                    // HDR10+ / HDR10 / HLG are already short
   if(f.hdr) return {cls, text:hdrLabel(f.hdr), full:hdrLabel(f.hdr)};
   return null; }
+
+// ---- Offload: Curator deleted the files to free disk; the title stays ----
+// Badge for a card or a page. A container is "offloaded" only when every leaf
+// is; a partly offloaded one carries a count instead (`rollup.offloaded`).
+function offloadedBadge(it){
+  if(!it) return "";
+  if(it.offloaded) return `<span class="offbadge" title="Curator removed the files to free disk space">Offloaded</span>`;
+  const n=it.rollup&&it.rollup.offloaded;
+  return n>0?`<span class="offbadge" title="Curator removed the files of ${n} of these to free disk space">${n} offloaded</span>`:"";
+}
+// What replaces Play on an offloaded title. Only admins can ask Curator for it
+// back, so everyone else just sees where it stands. The answer and its state
+// are shown inline, in the same block as the button.
+function offloadActions(it){
+  const id=exactWireId(it);
+  const ask=ME&&ME.is_admin
+    ? `<button class="btnplay" id="offask" onclick="getItBack('${id}')">Get it back</button>` : "";
+  return `<div class="actions offactions">${ask}</div>
+    <div class="offstatus" id="offstatus" role="status" aria-live="polite">Offloaded · the files were removed to free disk space</div>`;
+}
+// A partly offloaded show or season: the same button, for the leaves that are.
+function offloadContainerActions(it){
+  const n=it&&it.rollup&&it.rollup.offloaded;
+  if(!(n>0)||!(ME&&ME.is_admin)) return "";
+  const id=exactWireId(it);
+  return `<div class="actions offactions"><button class="ghost" id="offask" onclick="getItBack('${id}')">Get ${n} back</button></div>
+    <div class="offstatus" id="offstatus" role="status" aria-live="polite"></div>`;
+}
+function offloadLine(a){
+  if(!a) return "";
+  return a.message||a.state||"";
+}
+async function getItBack(id){
+  const btn=/** @type {HTMLButtonElement|null} */(document.getElementById("offask")), line=document.getElementById("offstatus");
+  if(btn) btn.disabled=true;
+  if(line) line.textContent="Asking Curator…";
+  try{
+    const a=await api(`/items/${id}/get-it-back`,{method:"POST",body:{}});
+    if(line) line.textContent="Get it back: "+offloadLine(a);
+    watchOffload(id);
+  }catch(e){
+    if(line) line.textContent=(e&&e.message)||"Curator could not be asked.";
+  }
+  if(btn) btn.disabled=false;
+}
+// While an offloaded title's page is open, read Curator's state for it. The
+// read is a pass-through: nothing is stored, and the loop ends with the page.
+// The page body is inserted after the renderer that calls this returns, so the
+// first read is deferred a tick and a missing status line is tolerated a few
+// times before the loop gives up. It polls every 15 s while the page is
+// visible, and a title that is no longer offloaded (409 not_offloaded, or
+// Curator says on_disk) re-renders the page.
+let OFFWATCH=null;
+const OFFWATCH_MS=15000;
+function stopOffloadWatch(){
+  if(!OFFWATCH) return;
+  clearInterval(OFFWATCH.timer);
+  document.removeEventListener("visibilitychange",OFFWATCH.onVisible);
+  OFFWATCH=null;
+}
+function watchOffload(id){
+  if(OFFWATCH&&OFFWATCH.id===id) return;
+  stopOffloadWatch();
+  const watch={id,misses:0,busy:false};
+  const tick=async()=>{
+    if(OFFWATCH!==watch||document.hidden||watch.busy) return;
+    const line=document.getElementById("offstatus");
+    if(!line||!location.hash.endsWith("/item/"+id)){
+      if(++watch.misses>=3) stopOffloadWatch();
+      return;
+    }
+    watch.misses=0; watch.busy=true;
+    try{
+      const a=await api(`/items/${id}/offload-status`);
+      if(OFFWATCH!==watch) return;
+      if(a.state==="on_disk"){
+        // Curator has it back, but the page re-renders only once cinema's own
+        // item stops reporting it offloaded; until then keep the slow poll
+        // rather than restarting the watch from a render.
+        let d=null;
+        try{ d=await api(`/items/${id}`); }catch(e){ d=null; }
+        if(OFFWATCH!==watch) return;
+        if(d&&d.item&&!d.item.offloaded){ stopOffloadWatch(); render(); return; }
+        line.textContent="Back on disk, waiting for the library to pick it up";
+        return;
+      }
+      line.textContent="Offloaded · "+offloadLine(a);
+    }catch(e){
+      if(OFFWATCH!==watch) return;
+      if(e&&e.code==="not_offloaded"){ stopOffloadWatch(); render(); return; }
+      line.textContent="Offloaded · curator unreachable";
+    }finally{ watch.busy=false; }
+  };
+  watch.onVisible=()=>{ if(!document.hidden) tick(); };
+  watch.tick=tick;
+  watch.timer=setInterval(tick,OFFWATCH_MS);
+  document.addEventListener("visibilitychange",watch.onVisible);
+  OFFWATCH=watch;
+  setTimeout(tick,0);
+}

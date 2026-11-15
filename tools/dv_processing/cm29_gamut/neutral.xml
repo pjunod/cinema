@@ -1,0 +1,207 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<DolbyLabsMDF version="2.0.5">
+  <RevisionHistory>
+    <Revision>
+      <DateTime>2026-10-25T00:00:00</DateTime>
+      <Author>Codex self-owned research fixture</Author>
+      <Software>dmh29 self-owned fixture generator</Software>
+      <SoftwareVersion>1</SoftwareVersion>
+      <Comment>Self-owned synthetic CM v2.9 measurement fixture</Comment>
+    </Revision>
+  </RevisionHistory>
+  <SourceList>
+    <Source>
+      <UniqueID>5754983d-ce30-511d-9972-c48d4a266e46</UniqueID>
+    </Source>
+  </SourceList>
+  <Outputs>
+    <Output name="Domestic Digital Cinema">
+      <UniqueID>eb47b1c9-c9fb-5cf6-a352-ba027fb19615</UniqueID>
+      <NumberVideoTracks>1</NumberVideoTracks>
+      <NumberAudioTracks>0</NumberAudioTracks>
+      <CanvasAspectRatio>1.77777778</CanvasAspectRatio>
+      <ImageAspectRatio>1.84971098266</ImageAspectRatio>
+      <Video>
+        <Track name="Main Layer">
+          <UniqueID>3a8066fc-1e9b-5044-a460-45e1766307c6</UniqueID>
+          <Rate>
+            <n>24</n>
+            <d>1</d>
+          </Rate>
+          <ColorEncoding>
+            <Primaries>
+              <Red>0.708,0.292</Red>
+              <Green>0.17,0.797</Green>
+              <Blue>0.131,0.046</Blue>
+            </Primaries>
+            <WhitePoint>0.3127,0.329</WhitePoint>
+            <MinimumBrightness>0</MinimumBrightness>
+            <PeakBrightness>10000</PeakBrightness>
+            <Encoding>pq</Encoding>
+            <ColorSpace>rgb</ColorSpace>
+            <SignalRange>computer</SignalRange>
+            <BitDepth>16</BitDepth>
+            <ChromaFormat>444</ChromaFormat>
+          </ColorEncoding>
+          <Level6>
+            <MaxFALL>0</MaxFALL>
+            <MaxCLL>0</MaxCLL>
+          </Level6>
+          <PluginNode>
+            <DolbyEDR>
+              <AlgorithmVersions>2,2</AlgorithmVersions>
+              <Characteristics level="0">
+                <MasteringDisplay id="8" name="4000-nit, p3d65, D65, ST.2084, Full">
+                  <ID>8</ID>
+                  <Name>4000-nit, p3d65, D65, ST.2084, Full</Name>
+                  <Primaries>
+                    <Red>0.68,0.32</Red>
+                    <Green>0.265,0.69</Green>
+                    <Blue>0.15,0.06</Blue>
+                  </Primaries>
+                  <WhitePoint>0.3127,0.329</WhitePoint>
+                  <MinimumBrightness>0.005</MinimumBrightness>
+                  <PeakBrightness>4000</PeakBrightness>
+                  <Encoding>pq</Encoding>
+                  <ColorSpace>rgb</ColorSpace>
+                  <SignalRange>computer</SignalRange>
+                  <DiagonalSize>42</DiagonalSize>
+                  <BitDepth>16</BitDepth>
+                  <ChromaFormat>444</ChromaFormat>
+                </MasteringDisplay>
+                <TargetDisplay id="1" name="100-nit, BT.709, BT.1886, Full (HOME)">
+                  <ID>1</ID>
+                  <Name>100-nit, BT.709, BT.1886, Full (HOME)</Name>
+                  <Primaries>
+                    <Red>0.64,0.33</Red>
+                    <Green>0.3,0.6</Green>
+                    <Blue>0.15,0.06</Blue>
+                  </Primaries>
+                  <WhitePoint>0.3127,0.329</WhitePoint>
+                  <MinimumBrightness>0.005</MinimumBrightness>
+                  <PeakBrightness>100</PeakBrightness>
+                  <Encoding>gamma_bt1886</Encoding>
+                  <ColorSpace>rgb</ColorSpace>
+                  <SignalRange>computer</SignalRange>
+                  <DiagonalSize>42</DiagonalSize>
+                  <BitDepth>16</BitDepth>
+                  <ChromaFormat>444</ChromaFormat>
+                </TargetDisplay>
+                <TargetDisplay id="27" name="600-nit, P3, D65, ST.2084, Full (HOME)">
+                  <ID>27</ID>
+                  <Name>600-nit, P3, D65, ST.2084, Full (HOME)</Name>
+                  <Primaries>
+                    <Red>0.68,0.32</Red>
+                    <Green>0.265,0.69</Green>
+                    <Blue>0.15,0.06</Blue>
+                  </Primaries>
+                  <WhitePoint>0.3127,0.329</WhitePoint>
+                  <MinimumBrightness>0.005</MinimumBrightness>
+                  <PeakBrightness>600</PeakBrightness>
+                  <Encoding>pq</Encoding>
+                  <ColorSpace>rgb</ColorSpace>
+                  <SignalRange>computer</SignalRange>
+                  <DiagonalSize>42</DiagonalSize>
+                  <BitDepth>16</BitDepth>
+                  <ChromaFormat>444</ChromaFormat>
+                </TargetDisplay>
+                <TargetDisplay id="37" name="2000-nit, P3, D65, ST.2084, Full (HOME)">
+                  <ID>37</ID>
+                  <Name>2000-nit, P3, D65, ST.2084, Full (HOME)</Name>
+                  <Primaries>
+                    <Red>0.68,0.32</Red>
+                    <Green>0.265,0.69</Green>
+                    <Blue>0.15,0.06</Blue>
+                  </Primaries>
+                  <WhitePoint>0.3127,0.329</WhitePoint>
+                  <MinimumBrightness>0.005</MinimumBrightness>
+                  <PeakBrightness>2000</PeakBrightness>
+                  <Encoding>pq</Encoding>
+                  <ColorSpace>rgb</ColorSpace>
+                  <SignalRange>computer</SignalRange>
+                  <DiagonalSize>42</DiagonalSize>
+                  <BitDepth>16</BitDepth>
+                  <ChromaFormat>444</ChromaFormat>
+                </TargetDisplay>
+                <TargetDisplay id="48" name="1000-nit, P3, D65, ST.2084, Full (HOME)">
+                  <ID>48</ID>
+                  <Name>1000-nit, P3, D65, ST.2084, Full (HOME)</Name>
+                  <Primaries>
+                    <Red>0.68,0.32</Red>
+                    <Green>0.265,0.69</Green>
+                    <Blue>0.15,0.06</Blue>
+                  </Primaries>
+                  <WhitePoint>0.3127,0.329</WhitePoint>
+                  <MinimumBrightness>0.005</MinimumBrightness>
+                  <PeakBrightness>1000</PeakBrightness>
+                  <Encoding>pq</Encoding>
+                  <ColorSpace>rgb</ColorSpace>
+                  <SignalRange>computer</SignalRange>
+                  <DiagonalSize>42</DiagonalSize>
+                  <BitDepth>16</BitDepth>
+                  <ChromaFormat>444</ChromaFormat>
+                </TargetDisplay>
+              </Characteristics>
+            </DolbyEDR>
+          </PluginNode>
+          <Shot>
+            <UniqueID>4d6b7e07-8526-50dd-9d9e-b083b16a18ea</UniqueID>
+            <Source>
+              <ParentID>a3a8e94b-c6d9-5d26-8866-8d4518cf06c6</ParentID>
+              <In>0</In>
+            </Source>
+            <Record>
+              <In>0</In>
+              <Duration>1</Duration>
+            </Record>
+            <PluginNode>
+              <DolbyEDR level="1">
+                <ImageCharacter>0.000488400488,0.5001221,0.902808303</ImageCharacter>
+              </DolbyEDR>
+              <DolbyEDR level="2">
+                <TID>1</TID>
+                <Trim>0,0,0,0,0,0,0,0,0</Trim>
+              </DolbyEDR>
+              <DolbyEDR level="2">
+                <TID>27</TID>
+                <Trim>0,0,0,0,0,0,0,0,0</Trim>
+              </DolbyEDR>
+              <DolbyEDR level="2">
+                <TID>48</TID>
+                <Trim>0,0,0,0,0,0,0,0,0</Trim>
+              </DolbyEDR>
+              <DolbyEDR level="2">
+                <TID>37</TID>
+                <Trim>0,0,0,0,0,0,0,0,0</Trim>
+              </DolbyEDR>
+            </PluginNode>
+            <Frame>
+              <EditOffset>0</EditOffset>
+              <PluginNode>
+                <DolbyEDR level="1">
+                  <ImageCharacter>0.000488400488,0.5001221,0.902808303</ImageCharacter>
+                </DolbyEDR>
+                <DolbyEDR level="2">
+                  <TID>1</TID>
+                  <Trim>0,0,0,0,0,0,0,0,0</Trim>
+                </DolbyEDR>
+                <DolbyEDR level="2">
+                  <TID>27</TID>
+                  <Trim>0,0,0,0,0,0,0,0,0</Trim>
+                </DolbyEDR>
+                <DolbyEDR level="2">
+                  <TID>48</TID>
+                  <Trim>0,0,0,0,0,0,0,0,0</Trim>
+                </DolbyEDR>
+                <DolbyEDR level="2">
+                  <TID>37</TID>
+                  <Trim>0,0,0,0,0,0,0,0,0</Trim>
+                </DolbyEDR>
+              </PluginNode>
+            </Frame>
+          </Shot>
+        </Track>
+      </Video>
+    </Output>
+  </Outputs>
+</DolbyLabsMDF>

@@ -27,8 +27,11 @@ This separate finite TLA+ package models two distinct library jobs, each with
 its complete admission, claim, token mutex, publication lock, scan, item,
 completion, heartbeat, retry, settlement and cleanup pipeline. Admission and
 claim intentionally overapproximate production eligibility so both can
-contend on one `scan:library:<id>` domain. The production same-root queue
-gate instead refuses the second background library claim; the paired Rust
+contend on one `scan:library:<id>` domain. The production queue gate instead
+refuses the second background library claim on the same storage domain (or
+with an unmapped root, whose generic `source_io` key conflicts with every
+domain); a targeted library job takes no source reader and meets only the
+domain fence; the paired Rust
 schedule covers that refusal and sequential completion. Domain overlap is
 model-only evidence. Each job owns its own selected durable
 request and waiter. Repeated demand and retries remain cyclic without an

@@ -18,9 +18,21 @@ from pathlib import Path
 import re
 import tomllib
 
-# Labels the forge adds to every self-hosted registration; the roster derives
-# them from `os` and `arch` instead of repeating them on every runner.
+# Existing GitHub-style rows inherit platform labels by default. Dedicated
+# Forgejo rows set implicit_labels=false to preserve their exact API labels.
 IMPLICIT = "self-hosted"
+# These repository-scoped Forgejo workers advertise exact role labels, without
+# GitHub's implicit generic labels. Only these reviewed local selector shapes
+# are accepted; an unknown or mixed alias cannot disappear from fleet checks.
+FORGEJO_ROLE_LABEL_SETS = frozenset({
+    ("ci-nonvoter-heavy-amd64",),
+    ("ci-nonvoter-compile-amd64",),
+    ("ci-nonvoter-store",),
+    ("incus", "ci-nonvoter-heavy-amd64"),
+})
+FORGEJO_ROLE_LABELS = frozenset({
+    "ci-nonvoter-heavy-amd64", "ci-nonvoter-compile-amd64", "ci-nonvoter-store",
+})
 
 
 def load_roster(source: str | Path) -> dict:
@@ -32,14 +44,25 @@ def load_roster(source: str | Path) -> dict:
 
 
 def rostered_runners(roster: dict) -> tuple[tuple[str, frozenset[str]], ...]:
-    """Each rostered runner and every label the forge would match it against."""
-    return tuple(
-        (
-            runner["name"],
-            frozenset(runner["labels"]) | {IMPLICIT, runner["os"], runner["arch"]},
-        )
-        for runner in roster["runners"]
-    )
+    """Each rostered runner with its provider's actual label projection."""
+    result = []
+    for runner in roster["runners"]:
+        implicit = runner.get("implicit_labels", True)
+        if type(implicit) is not bool:
+            raise ValueError("implicit_labels must be a boolean")
+        raw_labels = runner["labels"]
+        if (not isinstance(raw_labels, list)
+                or not all(isinstance(label, str) and label for label in raw_labels)
+                or len(raw_labels) != len(set(raw_labels))):
+            raise ValueError("runner labels must be unique nonempty strings")
+        labels = frozenset(raw_labels)
+        if any(label.startswith("ci-nonvoter-") and label not in FORGEJO_ROLE_LABELS
+               for label in labels):
+            raise ValueError("unknown dedicated Forgejo runner role")
+        if implicit:
+            labels |= {IMPLICIT, runner["os"], runner["arch"]}
+        result.append((runner["name"], labels))
+    return tuple(result)
 
 
 def self_hosted_label_sets(block: str) -> list[tuple[str, ...]]:
@@ -56,7 +79,18 @@ def self_hosted_label_sets(block: str) -> list[tuple[str, ...]]:
         tuple(json.loads(literal))
         for literal in re.findall(r"(?m)^ +runs_on: '(\[[^']*\])'$", block)
     ]
-    return [labels for labels in (*direct, *matrix) if IMPLICIT in labels]
+    result = []
+    for labels in (*direct, *matrix):
+        if not all(isinstance(label, str) and label for label in labels):
+            raise ValueError("runner selector labels must be nonempty strings")
+        dedicated = any(label.startswith("ci-nonvoter-") for label in labels)
+        if dedicated:
+            if labels not in FORGEJO_ROLE_LABEL_SETS:
+                raise ValueError("unknown or ambiguous dedicated Forgejo selector")
+            result.append(labels)
+        elif IMPLICIT in labels:
+            result.append(labels)
+    return result
 
 
 @dataclass(frozen=True)

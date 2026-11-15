@@ -210,7 +210,8 @@ TCL for a television panel, the Lenovo for tablet memory only).
 ### 2.5 Television detection and the successor
 
 `isTelevision(context)` (`Controller.kt:3915`) reads
-`UI_MODE_TYPE_TELEVISION`; it already gates tunneling. The successor is built
+`UI_MODE_TYPE_TELEVISION`; it gates the finite player's tunneling (a successor
+is never tunneled). The successor is built
 by `buildSuccessorPlayer` (`:3991`) with `setVideoSurface(null)` and volume 0
 and becomes visible at the commit in `commitPreparedReplacement`
 (`:3555-3572`, `player = successor; mediaSession.setPlayer(successor); …

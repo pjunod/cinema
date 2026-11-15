@@ -22,6 +22,7 @@ impl ClassificationStore for HiqliteAuthStore {
     async fn classification_page(&self, after: i64, limit: i64) -> Result<Vec<Entry>, StoreError> {
         self.client()
             .query_consistent_map::<Payload, _>(
+                "classification_page",
                 inventory_sql(),
                 params!(after, limit.clamp(1, 256)),
             )
@@ -34,6 +35,7 @@ impl ClassificationStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "write_classification",
                 write_sql(),
                 params!(
                     id,
@@ -53,6 +55,7 @@ impl ClassificationStore for HiqliteAuthStore {
         let rows = self
             .client()
             .query_map::<Due, _>(
+                "classification_hint",
                 hint_sql(),
                 params!(crate::metadata::classification::VERSION, now_unix),
             )

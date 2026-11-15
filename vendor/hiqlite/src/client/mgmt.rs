@@ -293,6 +293,17 @@ impl Client {
         })
     }
 
+    /// Plurx patch 27: this node's applied mark — image generation, applied
+    /// index and one revision per registered table. Remote clients return an
+    /// error; this method never performs IO and has no HTTP fallback.
+    #[cfg(feature = "sqlite")]
+    pub fn local_db_applied_mark(&self) -> Result<crate::AppliedMarkHandle, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("the local applied mark requires a local node client".to_owned())
+        })?;
+        Ok(state.raft_db.applied_mark.handle())
+    }
+
     /// The same caller-owned admission installed before listeners. Remote or
     /// unguarded local clients cannot manufacture a replacement context.
     pub fn local_membership_admission(
@@ -1419,6 +1430,23 @@ mod tests {
         assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
         assert!(!accessor.contains("build_addr"));
         assert!(!accessor.contains("get_metrics_remote"));
+        assert!(!accessor.contains(".await"));
+    }
+
+    #[test]
+    fn local_applied_mark_accessor_has_no_remote_fallback() {
+        let source = include_str!("mgmt.rs");
+        let accessor = source
+            .split_once("pub fn local_db_applied_mark")
+            .expect("applied mark accessor")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of applied mark accessor")
+            .0;
+        assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
+        assert!(!accessor.contains("build_addr"));
+        assert!(!accessor.contains("get_metrics_remote"));
+        assert!(!accessor.contains("send_with_retry"));
         assert!(!accessor.contains(".await"));
     }
 

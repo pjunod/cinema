@@ -68,10 +68,12 @@ function shippedFunction(file,name){
   assert.ok(node,`${file}::${name} exists`);return text.slice(node.start,node.end);
 }
 function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0&dv=0&dvprofile=&hdr10t=0"){
-  const ctx=vm.createContext({requests:[],console,AUTH_GENERATION:0});
+  const clock={now:0};
+  const ctx=vm.createContext({requests:[],console,AUTH_GENERATION:0,AbortController,setTimeout,clearTimeout,performance:{now:()=>clock.now}});
   const functions=[
     ["detail/preplay-selection.js",["prePlaySelection","playbackSelection","setPrePlay","prePlaySelectionQuery","decisionUrl","askDecision"]],
     ["player/directed-change.js",["openSession"]],
+    ["player/measurements.js",["beginPlaybackPreparation","preparationRemainingMs"]],
     ["player/session.js",["newStreamId","remuxUrl"]],
     ["player/audio-sync.js",["subUrl"]],
     ["detail/watch-browser.js",["watchChapterThumbUrl"]],
@@ -104,10 +106,26 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     progress(){return reportProgress("7");},next:playNextEpisode,bookNext:playNextAudiobookPart,
     contract(session){vodClientContract=()=>({session});},
     stub(name,fn){globalThis[name]=fn;},
+    prepare:()=>beginPlaybackPreparation(()=>true,{background:true}),
     attachShared(c,sharedReference){PLAYER={fileId:"7",fileContext:c,meta:{fileContext:c,kind:"episode",sharedReference},aoffset:0};},
     requests};`,ctx);
+  ctx.calls.clock=clock;
   return ctx.calls;
 }
+// D2 item 1: a local create tells the server what its preparation has left,
+// on every attempt, from the one preparation clock — never a server guess.
+test("a local session create sends the preparation's remaining start time",async()=>{
+  const h=callerHarness(),local=h.local("7");
+  const preparation=h.prepare();
+  h.clock.now=4500;
+  await preparation.run(signal=>h.start(local,{start:0},signal));
+  h.clock.now=9000;
+  await preparation.run(signal=>h.start(local,{start:0},signal));
+  const sent=h.requests.filter(r=>r.url==="/files/7/hls/sessions").map(r=>r.options.startupRemainingMs);
+  assert.deepEqual(sent,[15500,11000]);
+  await h.start(local,{start:0},null);
+  assert.equal(h.requests.at(-1).options.startupRemainingMs,null,"no preparation, no claimed allowance");
+});
 test("shipped preplay choices and every file resource caller retain A/B collision context",async()=>{
   const h=callerHarness(),shared=h.shared(reference,detail()),local=h.local("7");
   h.select(local,"audio","0");h.select(shared,"audio","1");

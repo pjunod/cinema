@@ -43,6 +43,7 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
         hasher.update(audio.byte_identity().as_bytes());
     }
     match recipe.cluster_cache_key.as_deref() {
+        // A v2 artifact key, or `copy-index-v3:` and a v3 contract key.
         Some(cache_key) => {
             hasher.update(b"cluster-v2\0");
             hasher.update(cache_key.as_bytes());

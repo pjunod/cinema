@@ -90,9 +90,9 @@ function setPreparedHandoffEnabled(on){
 // field that says the same thing, and is the fallback.
 function sessionMediaOriginMs(session){
   if(!session||typeof session!=="object") return 0;
-  if(session.vod) return 0;
+  if(session.vod&&(session.media_origin_ms==null||Number(session.media_origin_ms)===0)) return 0;
   const explicit=Number(session.media_origin_ms);
-  if(Number.isFinite(explicit)) return Math.max(0,Math.round(explicit));
+  if(Number.isSafeInteger(explicit)) return explicit;
   const seconds=Number(session.start_seconds);
   if(Number.isFinite(seconds)) return Math.max(0,Math.round(seconds*1000));
   return 0;
@@ -103,13 +103,13 @@ function sessionMediaOriginMs(session){
 function realMediaPositionMs(localMs,baseMs,isVod){
   const local=Number(localMs);
   if(!Number.isFinite(local)) return 0;
-  const base=isVod?0:Math.max(0,Number(baseMs)||0);
+  const base=isVod?0:(Number(baseMs)||0);
   return Math.max(0,Math.round(base+local));
 }
 // The inverse: where a film position sits on a session whose zero is `baseMs`.
 // This is the only thing that puts the second pipeline on the first's second.
 function preparedLocalPositionMs(filmMs,baseMs){
-  return Math.max(0,Math.round((Number(filmMs)||0)-Math.max(0,Number(baseMs)||0)));
+  return Math.max(0,Math.round((Number(filmMs)||0)-(Number(baseMs)||0)));
 }
 // Where the incumbent is, in film time, right now.
 function playbackFilmPositionMs(v,p){
@@ -323,14 +323,11 @@ function beginPreparedReplacement(p,action,sharedContext=null){
   // is how it tells "the client built what I offered" from "the client built
   // something else and is asking me to publish it".
   //
-  // `mediaOriginMs` is what this client aligns against, and a VOD successor's
-  // is zero: a VOD playlist is the whole immutable title, so its own zero IS
-  // the source's zero and adding the resume position would seek the successor
-  // twice. A prepared replacement never changes presentation — the successor is
-  // the predecessor's request with the selection fields overwritten — so the
-  // predecessor's `vod` is the successor's.
-  const offeredOriginMs=Math.max(0,Math.round(Number(action.media_origin_ms)||0));
-  const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
+  // The offer owns its explicit origin. It contains no immutable whole-title
+  // proof, so never inherit the predecessor's VOD timeline for this successor.
+  const offeredOriginMs=Number(action.media_origin_ms);
+  if(!Number.isSafeInteger(offeredOriginMs)) return null;
+  const originMs=sessionMediaOriginMs({vod:false,media_origin_ms:offeredOriginMs});
   const filmMs=playbackFilmPositionMs(v,p);
   // A replacement that begins encoding at the incumbent's current second
   // spends its entire preparation chasing a moving playhead. Begin up to three
@@ -348,7 +345,7 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     // absent (an older server) stays null.
     enhancement:typeof playbackEnhancementFromWire==="function"?playbackEnhancementFromWire(action.enhancement):null,
     sharedContext,
-    mediaOriginMs:originMs,offeredOriginMs,
+    mediaOriginMs:originMs,offeredOriginMs,vod:false,
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
     stageAtMs,bufferReadyAtMs:null,overlapProofReadyAtMs:null,
@@ -905,8 +902,13 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     failPreparedReplacement(p,state,"no parallel video presentation proof");
     return false;
   }
-  if(!streamHasVideo(p,spare)||typeof spare.requestVideoFrameCallback!=="function")
+  if(!streamHasVideo(p,spare))
     return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+  // No frame callbacks: the successor still has to show decoded frames at the
+  // aligned position before it takes the picture. `readyState` and a landed
+  // seek describe the element, not this position.
+  if(typeof spare.requestVideoFrameCallback!=="function")
+    return exposePreparedReplacementAfterDecodedFrames(p,state,v,spare);
   // Buffer readiness can precede the first warm callback. The aligned,
   // advancing frame proof below is the actual presentation evidence; rejecting
   // the handoff here would reopen an otherwise ready successor at the cliff.
@@ -1071,6 +1073,63 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   requestFrame();
   return true;
 }
+// The decoded-frame counter (`getVideoPlaybackQuality().totalVideoFrames`, or
+// WebKit's `webkitDecodedFrameCount`), or null where the engine has neither.
+function preparedDecodedFrameCount(element){
+  try{
+    const quality=typeof element.getVideoPlaybackQuality==="function"
+      ?element.getVideoPlaybackQuality():null;
+    const count=Number(quality?.totalVideoFrames??element.webkitDecodedFrameCount);
+    return Number.isFinite(count)?count:null;
+  }catch(e){ return null; }
+}
+// The proof for an engine without `requestVideoFrameCallback`. A seek into a
+// buffer hole leaves `readyState` at HAVE_FUTURE_DATA about a range the
+// playhead is not in, so readiness was never evidence of a picture. Wait,
+// under the same bound as the callback proof, for the decoder to count
+// PREPARED_MONOTONIC_FRAME_STEPS new frames while the successor's clock
+// advances on the incumbent's second with runway in front of it. An engine
+// with no decoded-frame counter cannot prove a frame and is refused; the
+// incumbent is untouched either way.
+function exposePreparedReplacementAfterDecodedFrames(p,state,v,spare){
+  const initial=preparedDecodedFrameCount(spare);
+  if(initial==null){
+    failPreparedReplacement(p,state,"no decoded-frame observation on this engine");
+    return false;
+  }
+  const live=()=>PLAYER===p&&preparedState(p)===state
+    &&document.getElementById("video")===v&&preparedVideoElement()===spare
+    &&playbackOwnsAttachedMedia(p);
+  const started=performance.now();
+  let priorTime=Number(spare.currentTime)||0;
+  state.overlapPhase="decoded-frames";
+  const observe=()=>{
+    state.exposeFrameTimer=null;
+    if(!live()) return;
+    if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
+      failPreparedReplacement(p,state,"viewer-intent");
+      return;
+    }
+    const count=preparedDecodedFrameCount(spare);
+    const at=Number(spare.currentTime)||0;
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    const advancing=at>priorTime;
+    priorTime=at;
+    if(count!=null&&count-initial>=PREPARED_MONOTONIC_FRAME_STEPS&&advancing
+      &&Math.abs(at-target)*1000<=preparedClockAlignmentSlackMs(p)&&preparedAlignedBuffered(spare)){
+      exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+      return;
+    }
+    if(performance.now()-started>=PREPARED_FRAME_PROOF_MS){
+      failPreparedReplacement(p,state,`decoded-frame deadline: frames=${count==null?"none":count-initial} `+
+        `drift_ms=${Math.round(Math.abs(at-target)*1000)} ready_state=${spare.readyState}`);
+      return;
+    }
+    state.exposeFrameTimer=setTimeout(observe,40);
+  };
+  state.exposeFrameTimer=setTimeout(observe,40);
+  return true;
+}
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
 // boundary, mute and rate are applied before display, the elements swap, and
 // the predecessor stays alive and hidden until a real successor frame proves
@@ -1096,7 +1155,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   detachPreparedOverlapListeners(state);
   state.overlapPhase="exposed";
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
-    probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
+    probeUrl:p.probeUrl,offset:p.offset,vod:p.vod,rangePresentation:p.rangePresentation,wantsPlayback:p.wantsPlayback,
     method:p.method,copyHls:p.copyHls,autoHeight:p.autoHeight,encoder:p.encoder,
     qualityCandidateId:p.qualityCandidateId,deliveredRange:p.deliveredRange,
     enhancement:p.enhancement||null,health:p.health,healthObservedAt:p.healthObservedAt,
@@ -1114,6 +1173,8 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;
   p.offset=state.mediaOriginMs/1000;
+  p.vod=!!state.vod&&state.mediaOriginMs===0;
+  p.rangePresentation=!p.vod;
   const candidate=(p.qualityCandidates||[]).find(row=>row.id===state.selection?.candidate_id);
   if(candidate){
     p.qualityCandidateId=candidate.id;
@@ -1206,6 +1267,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     deferPreparedPredecessorRetirement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    reportPreparedSeamAfterWindow(p,state,"committed");
     const committedAtMs=performance.now();
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
       message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s `+
@@ -1222,6 +1284,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.preparedCommitting===state) p.preparedCommitting=null;
     rollbackPreparedReplacement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+    reportPreparedSeamAfterWindow(p,state,"switched_without_a_frame");
     // Rolled back to the incumbent, which is the quality the viewer was
     // already watching -- so the change they asked for still has not happened
     // and still owes them its one reopen.

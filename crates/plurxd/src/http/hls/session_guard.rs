@@ -219,6 +219,53 @@ impl MediaSessionRequestGuard {
     pub(super) fn disarm(&mut self) {
         self.cleanup = None;
     }
+
+    /// Await `claim`, the Store call that claims `request_id` for the
+    /// proposed `incarnation_id`, with that incarnation's settlement already
+    /// armed. `Ok(Ok((guard, incarnation)))` is an acquired claim and the
+    /// armed guard that now owns it; `Ok(Err(claim))` is any other answer,
+    /// with nothing left armed.
+    ///
+    /// The claim is durable once the Store commits it, which can be before
+    /// its future returns. A create cancelled at this await — its viewer went
+    /// away or its allowance ended while the commit was in flight, or the
+    /// Store had answered and the task was not polled again — used to leave a
+    /// `starting` row that no guard, worker or owner would settle, so every
+    /// re-post with the same `request_id` joined it and answered
+    /// `startup_timeout` until the claim expired a minute later. Armed first,
+    /// the guard settles the proposed incarnation whenever the claim does not
+    /// come back to be owned, including on a Store error whose commit is
+    /// unknown. Settling an incarnation the Store never wrote (the insert did
+    /// not land, or another owner holds the row) changes nothing: the Store
+    /// fails only the exact incarnation it holds.
+    pub(super) async fn claim(
+        state: AppState,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
+        request_id: String,
+        incarnation_id: String,
+        claim: impl std::future::Future<
+            Output = Result<MediaSessionRequestClaim, plurx_core::error::StoreError>,
+        >,
+    ) -> Result<Result<(Self, String), MediaSessionRequestClaim>, plurx_core::error::StoreError>
+    {
+        let mut guard = Self::new(state, principal, request_id, incarnation_id);
+        match claim.await? {
+            MediaSessionRequestClaim::Acquired {
+                incarnation_id: acquired,
+            } => {
+                // The Store acquires with the proposed incarnation; should it
+                // ever name another, the guard settles the one it holds.
+                if let Some(cleanup) = guard.cleanup.as_mut() {
+                    cleanup.3.clone_from(&acquired);
+                }
+                Ok(Ok((guard, acquired)))
+            }
+            other => {
+                guard.disarm();
+                Ok(Err(other))
+            }
+        }
+    }
 }
 
 impl Drop for MediaSessionRequestGuard {

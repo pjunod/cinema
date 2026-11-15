@@ -211,8 +211,8 @@ pub(crate) fn advisory_deadline() -> tokio::time::Instant {
 /// either way (D6).
 pub(crate) async fn network_priors_enabled(state: &AppState) -> bool {
     state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+        .applied
+        .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
         .await
         .ok()
         .flatten()
@@ -489,7 +489,13 @@ impl LinkReceipts {
                 }
             }
             let file = state.store.get_file(value.binding.file_id).await.ok()??;
-            let route = state.store.media_session_route(session).await.ok()??;
+            let route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                session,
+            )
+            .await
+            .ok()??;
             let proof = self
                 .current_negative_until(
                     state,
@@ -605,11 +611,13 @@ impl LinkReceipts {
                 }
                 row.binding.clone()
             };
-            let route = state
-                .store
-                .media_session_route(&captured.session)
-                .await
-                .ok()??;
+            let route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                &captured.session,
+            )
+            .await
+            .ok()??;
             if !Self::same_route(&captured, &route, &state.node_id) {
                 return None;
             }
@@ -622,11 +630,13 @@ impl LinkReceipts {
             if current_source != captured.source {
                 return None;
             }
-            let current_route = state
-                .store
-                .media_session_route(&captured.session)
-                .await
-                .ok()??;
+            let current_route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                &captured.session,
+            )
+            .await
+            .ok()??;
             if !Self::same_route(&captured, &current_route, &state.node_id)
                 || playback_id.is_some_and(|playback| playback != current_route.playback_id)
             {
@@ -944,7 +954,11 @@ impl LinkReceipts {
         }
         let route = tokio::time::timeout(
             Duration::from_secs(1),
-            state.store.media_session_route(&captured.session),
+            crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptCandidate,
+                &captured.session,
+            ),
         )
         .await
         .ok()?
@@ -1011,7 +1025,12 @@ impl LinkReceipts {
         // Source lookup can suspend while the exact serving attachment is
         // retired or replaced. Claim only after its current authority fence.
         let route = tokio::time::timeout(Duration::from_secs(1), async {
-            let route = state.store.media_session_route(&captured.session).await;
+            let route = crate::media_sessions::read_media_session_route(
+                &*state.store,
+                crate::media_sessions::RouteReadSite::ReceiptFence,
+                &captured.session,
+            )
+            .await;
             if staged.is_some() {
                 state
                     .hls_route_hooks
@@ -1232,23 +1251,36 @@ pub(crate) async fn filter_catalog(
         .collect()
 }
 
-/// A new processed recipe cannot turn a timed-out negative read into a grant.
-/// This is the caller's reserved post-qualification stage, not a renewed
-/// ordinary advisory allowance.
-pub(crate) async fn processed_candidate_admissible(
+/// What this network's link memory says about one processed recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessedLinkEvidence {
+    /// No negative is held for the recipe on this network, or there is no
+    /// network identity or link memory to consult.
+    Admissible,
+    /// An exact negative for this recipe on this network is still active.
+    Negative,
+    /// The memory could not be read before the deadline, or the source could
+    /// not be fenced. Not a verdict about the recipe.
+    Unavailable,
+}
+
+/// One processed recipe's link memory on this network. Callers decide what an
+/// `Unavailable` read means at their stage; after a qualification it must never
+/// become a grant (the reserved post-qualification read is the last word).
+pub(crate) async fn processed_candidate_link_evidence(
     state: &AppState,
     network: Option<&NetworkIdentity>,
     file: &MediaFile,
     candidate: &plurx_core::playback::candidate::QualityCandidate,
     deadline: tokio::time::Instant,
-) -> bool {
+) -> ProcessedLinkEvidence {
     let Some(network) = network else {
-        return true;
+        return ProcessedLinkEvidence::Admissible;
     };
     let read = async {
         let enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+            .applied
+            .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
             .await
             .map_err(|_| ())?
             .is_some_and(|value| value.trim() == "1");
@@ -1265,7 +1297,11 @@ pub(crate) async fn processed_candidate_admissible(
             .map_err(|_| ())?;
         Ok(!prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())))
     };
-    matches!(tokio::time::timeout_at(deadline, read).await, Ok(Ok(true)))
+    match tokio::time::timeout_at(deadline, read).await {
+        Ok(Ok(true)) => ProcessedLinkEvidence::Admissible,
+        Ok(Ok(false)) => ProcessedLinkEvidence::Negative,
+        Ok(Err(())) | Err(_) => ProcessedLinkEvidence::Unavailable,
+    }
 }
 
 /// Public advisory projection from the exact existing local resolver. Remote
@@ -1954,6 +1990,7 @@ mod tests {
                 caps: caps.clone(),
                 candidate: incumbent.clone(),
                 binding: crate::media_pool::PlanningBinding::from_snapshot(&planning),
+                catalog_query: None,
             }),
             presentation_target: None,
             decoder_caps: Some(
@@ -3526,7 +3563,7 @@ mod tests {
                     &state,
                     &query,
                     tokio::time::Instant::now() + Duration::from_millis(500),
-                    None,
+                    crate::media_pool::CatalogSource::Quorum(None),
                 )
                 .await
             })
@@ -3553,12 +3590,6 @@ mod tests {
             "a description cannot inherit production permission"
         );
         assert!(matching[0].dispatch_supported && matching[0].binding.is_some());
-        assert!(request
-            .candidate_context
-            .as_ref()
-            .expect("context")
-            .prepared_processing
-            .is_none());
     }
 
     #[tokio::test]
@@ -3679,7 +3710,7 @@ mod tests {
         // reserved post-qualification read must still reject this exact
         // recipe, and an exhausted reserved allowance must never grant it.
         assert!(
-            !processed_candidate_admissible(
+            processed_candidate_link_evidence(
                 &state,
                 Some(&network),
                 &file,
@@ -3687,9 +3718,10 @@ mod tests {
                 tokio::time::Instant::now() + Duration::from_millis(500),
             )
             .await
+                != ProcessedLinkEvidence::Admissible
         );
         assert!(
-            !processed_candidate_admissible(
+            processed_candidate_link_evidence(
                 &state,
                 Some(&network),
                 &file,
@@ -3697,6 +3729,48 @@ mod tests {
                 tokio::time::Instant::now() - Duration::from_secs(2),
             )
             .await
+                != ProcessedLinkEvidence::Admissible
+        );
+
+        // The tri-state read names why: an active exact negative is a
+        // verdict, an expired deadline is not, and a recipe with no negative
+        // is admissible. The boolean wrapper above stays fail-closed.
+        assert_eq!(
+            processed_candidate_link_evidence(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() + Duration::from_millis(500),
+            )
+            .await,
+            ProcessedLinkEvidence::Negative
+        );
+        assert_eq!(
+            processed_candidate_link_evidence(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() - Duration::from_secs(2),
+            )
+            .await,
+            ProcessedLinkEvidence::Unavailable
+        );
+        let clean = catalog
+            .iter()
+            .find(|row| !same_recipe(row))
+            .expect("a candidate without a negative");
+        assert_eq!(
+            processed_candidate_link_evidence(
+                &state,
+                Some(&network),
+                &file,
+                clean,
+                tokio::time::Instant::now() + Duration::from_millis(500),
+            )
+            .await,
+            ProcessedLinkEvidence::Admissible
         );
 
         // No requester identity is Unknown, never a refusal.

@@ -5,11 +5,18 @@
 //
 // usage: dm_shader_control PARAMS RGBA_F32_IN W H GPU_OUT CPU_OUT
 // PARAMS lines (raw RPU units):
-//   l1 MIN AVG MAX | l3 MIN AVG MAX | l6 MIN_1E4 MAX | l9 INDEX | l254
+//   l1 MIN AVG MAX | l3 MIN AVG MAX | l5 LEFT RIGHT TOP BOTTOM
+//   l6 MIN_1E4 MAX | l9 INDEX | l254
 //   l2 TARGET_MAX_PQ SLOPE OFFSET POWER CHROMA SAT MS
 //   l8 INDEX LENGTH SLOPE OFFSET POWER CHROMA SAT MS MID CLIP S0..S5 H0..H5
 //   l10 INDEX TARGET_MAX_PQ TARGET_MIN_PQ PRIMARY_INDEX
 //   target NITS FLOOR_NITS PRIM(0 bt2020|1 p3d65|2 bt709) SMAST_NITS
+//
+// usage: dm_shader_control --pq-helper eotf|oetf RGBA_F32_IN W H GPU_OUT [unfused-fma|no-precise]
+// Evaluates one precise CM4 transfer helper of the production final-pass header on every R, G and B
+// of the raster, so run_pq_helper_exact.py can compare each result with the correctly rounded value.
+// The optional mutation rewrites this run's copy of the header (a*b+c for fma, or no `precise`):
+// a device on which a mutated header still passes cannot tell the helpers from broken ones.
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -24,11 +31,81 @@ static void require(bool ok, const char *why) {
   if (!ok) { fprintf(stderr, "dm control refused: %s\n", why); exit(1); }
 }
 
+static char *replace_all(const char *text, const char *from, const char *to, int *count) {
+  size_t from_len = strlen(from), to_len = strlen(to), n = 0;
+  for (const char *at = strstr(text, from); at; at = strstr(at + from_len, from)) n++;
+  char *out = malloc(strlen(text) + n * (to_len > from_len ? to_len - from_len : 0) + 1), *w = out;
+  require(out != NULL, "memory");
+  for (const char *at; (at = strstr(text, from)); text = at + from_len) {
+    memcpy(w, text, (size_t)(at - text)); w += at - text;
+    memcpy(w, to, to_len); w += to_len;
+  }
+  strcpy(w, text);
+  *count = (int)n;
+  return out;
+}
+
+static int pq_helper(int argc, char **argv) {
+  require(argc == 7 || argc == 8, "--pq-helper eotf|oetf RGBA_IN W H GPU_OUT [unfused-fma|no-precise]");
+  const char *body = !strcmp(argv[2], "eotf") ?
+      "vec4 t=texelFetch(master,ivec2(gl_FragCoord.xy),0); color=vec4(dfi_eq_finish_eotf(t.rgb),1.0);\n" :
+      !strcmp(argv[2], "oetf") ?
+      "vec4 t=texelFetch(master,ivec2(gl_FragCoord.xy),0); color=vec4(eqpq_oetf3(t.rgb),1.0);\n" : NULL;
+  require(body != NULL, "helper is eotf or oetf");
+  int w = atoi(argv[4]), h = atoi(argv[5]);
+  require(w > 0 && h > 0 && w <= 8192 && h <= 8192, "size");
+  char *header; int changed = 1;
+  if (argc == 7) { header = malloc(sizeof(dv_dm_glsl_cm4_final)); require(header != NULL, "memory"); strcpy(header, dv_dm_glsl_cm4_final); }
+  else if (!strcmp(argv[7], "unfused-fma"))
+    header = replace_all(dv_dm_glsl_cm4_final, "fma(a.hi,b.hi,negative_product)", "a.hi*b.hi+negative_product", &changed);
+  else if (!strcmp(argv[7], "no-precise")) header = replace_all(dv_dm_glsl_cm4_final, "precise ", "", &changed);
+  else { header = NULL; require(false, "mutation is unfused-fma or no-precise"); }
+  require(changed > 0, "mutation matched nothing in the header");
+  size_t n = (size_t)w * h;
+  float *pix = malloc(n * 16), *gpu_out = malloc(n * 16);
+  require(pix && gpu_out, "memory");
+  FILE *in = fopen(argv[3], "rb"); require(in != NULL, "input open");
+  require(fread(pix, 16, n, in) == n && fgetc(in) == EOF, "exact input raster"); fclose(in);
+  pl_log log = pl_log_create(PL_API_VER, NULL);
+  pl_vulkan vk = pl_vulkan_create(log, pl_vulkan_params(.allow_software = true));
+  require(vk != NULL, "Vulkan context");
+  pl_gpu gpu = vk->gpu;
+  pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_RENDERABLE);
+  require(format != NULL, "float32 texture format");
+  pl_tex source = pl_tex_create(gpu, pl_tex_params(.w = w, .h = h, .format = format, .sampleable = true, .host_writable = true));
+  require(source && pl_tex_upload(gpu, pl_tex_transfer_params(.tex = source, .ptr = pix)), "input upload");
+  pl_tex out = pl_tex_create(gpu, pl_tex_params(.w = w, .h = h, .format = format, .renderable = true, .host_readable = true));
+  require(out != NULL, "output texture");
+  pl_dispatch dispatch = pl_dispatch_create(log, gpu);
+  require(dispatch != NULL, "dispatch");
+  static float u[DV_DM_U][4];   // the header's curve functions name it; the helpers do not read it
+  struct pl_shader_desc d = {.desc = {.name = "master", .type = PL_DESC_SAMPLED_TEX},
+      .binding = {.object = source, .address_mode = PL_TEX_ADDRESS_CLAMP, .sample_mode = PL_TEX_SAMPLE_NEAREST}};
+  struct pl_var var = pl_var_vec4("u"); var.dim_a = DV_DM_U;
+  struct pl_shader_var v = {.var = var, .data = u, .dynamic = true};
+  pl_shader sh = pl_dispatch_begin(dispatch);
+  require(pl_shader_custom(sh, &(struct pl_custom_shader){
+      .description = "dv-dm-pq-helper", .header = header, .body = body,
+      .input = PL_SHADER_SIG_NONE, .output = PL_SHADER_SIG_COLOR,
+      .descriptors = &d, .num_descriptors = 1, .variables = &v, .num_variables = 1,
+      .output_w = w, .output_h = h}) &&
+      pl_dispatch_finish(dispatch, pl_dispatch_params(.shader = &sh, .target = out)), "shader");
+  require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = out, .ptr = gpu_out)), "download");
+  FILE *o = fopen(argv[6], "wb");
+  require(o && fwrite(gpu_out, 16, n, o) == n && !fclose(o), "output");
+  pl_dispatch_destroy(&dispatch); pl_tex_destroy(gpu, &out); pl_tex_destroy(gpu, &source);
+  pl_vulkan_destroy(&vk); pl_log_destroy(&log);
+  free(pix); free(gpu_out); free(header);
+  return 0;
+}
+
 int main(int argc, char **argv) {
+  if (argc > 1 && !strcmp(argv[1], "--pq-helper")) return pq_helper(argc, argv);
   require(argc == 7, "PARAMS RGBA_IN W H GPU_OUT CPU_OUT");
   int w = atoi(argv[3]), h = atoi(argv[4]);
   require(w > 0 && h > 0 && w <= 8192 && h <= 8192, "size");
   static DoviExtMetadataBlockLevel1 l1; static DoviExtMetadataBlockLevel3 l3; static DoviExtMetadataBlockLevel6 l6;
+  static DoviExtMetadataBlockLevel5 l5;
   static DoviExtMetadataBlockLevel9 l9; static DoviExtMetadataBlockLevel254 l254;
   static DoviExtMetadataBlockLevel2 l2[16]; static const DoviExtMetadataBlockLevel2 *l2p[16];
   static DoviExtMetadataBlockLevel8 l8[16]; static const DoviExtMetadataBlockLevel8 *l8p[16];
@@ -45,6 +122,13 @@ int main(int argc, char **argv) {
       l3.min_pq_offset = v[0]; l3.avg_pq_offset = v[1]; l3.max_pq_offset = v[2]; dm.dm_data.level3 = &l3; }
     else if (!strcmp(key, "l6")) { require(fscanf(p, "%u %u", &v[0], &v[1]) == 2, "l6");
       l6.min_display_mastering_luminance = v[0]; l6.max_display_mastering_luminance = v[1]; dm.dm_data.level6 = &l6; }
+    else if (!strcmp(key, "l5")) {
+      require(fscanf(p, "%u %u %u %u", &v[0], &v[1], &v[2], &v[3]) == 4, "l5");
+      require(v[0] <= 65535 && v[1] <= 65535 && v[2] <= 65535 && v[3] <= 65535, "l5 range");
+      l5.active_area_left_offset=v[0]; l5.active_area_right_offset=v[1];
+      l5.active_area_top_offset=v[2]; l5.active_area_bottom_offset=v[3];
+      dm.dm_data.level5=&l5;
+    }
     else if (!strcmp(key, "l9")) { require(fscanf(p, "%u", &v[0]) == 1, "l9"); l9.source_primary_index = v[0]; dm.dm_data.level9 = &l9; }
     else if (!strcmp(key, "l254")) { l254.dm_version_index = 2; dm.dm_data.level254 = &l254; }
     else if (!strcmp(key, "l2")) { require(n2 < 16 && fscanf(p, "%u %u %u %u %u %u %u", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) == 7, "l2");

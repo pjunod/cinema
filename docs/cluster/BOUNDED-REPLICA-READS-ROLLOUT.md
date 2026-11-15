@@ -482,6 +482,17 @@ qualify a moved base.
 - **Authority stays Authority:** token and key validation, settings that
   gate work, leases, membership, admission, offline ownership, migration
   guards, and every pre-mutation read.
+  *Correction (2026-11-11, playback-start E1b):* "settings that gate work"
+  no longer means every such read. Request-path settings that only choose
+  how to serve or present now read this node's applied view (`AppliedView`,
+  one lease old at most, read-your-write on the saving node), independent
+  of `cluster.bounded_replica_reads`; planning and background-worker reads,
+  and settings reads before a write, under a save's lock, for
+  auth/trust/membership/ownership, for a save response, or
+  at boot stay `Authority`. Contract:
+  [`PLAYBACK-START-E1-BUILD.md`](../streaming/PLAYBACK-START-E1-BUILD.md)
+  §6.3 and §12-1; inventory:
+  `crates/plurxd/src/http/applied_settings_inventory.rs`.
 - **Watch state is never served locally without the M2 fence** — the
   client's `X-Plurx-Read-After`, which a node's own write record may raise
   but never replace.

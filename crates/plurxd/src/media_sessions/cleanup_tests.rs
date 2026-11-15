@@ -165,7 +165,7 @@ impl Fixture {
         let cached = self
             .state
             .media_sessions
-            .cached_route(&route.session_id)
+            .cached_route_entry(&route.session_id)
             .await
             .expect("cached authority")
             .expect("durable terminal state must not become cached absence");
@@ -332,7 +332,7 @@ async fn terminal_projection_rejects_wrong_owner_epoch_and_uncommitted_end_witho
     let cached = fixture
         .state
         .media_sessions
-        .cached_route(&active.session_id)
+        .cached_route_entry(&active.session_id)
         .await
         .expect("active cache")
         .expect("active route");

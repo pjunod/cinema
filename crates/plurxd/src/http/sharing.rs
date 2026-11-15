@@ -28,11 +28,16 @@ fn failure(status: StatusCode, code: &'static str) -> ApiError {
 fn invalid() -> ApiError {
     failure(StatusCode::BAD_REQUEST, "sharing_invalid_request")
 }
+/// A store that cannot answer is an outage of this Source, not a refusal:
+/// the typed 503 carries `Retry-After`, which a receiver reads as
+/// "unavailable for now" and never as a revocation.
 fn authority(_: StoreError) -> ApiError {
-    failure(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "sharing_authority_unavailable",
-    )
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "sharing_authority_unavailable",
+        message: "sharing authority unavailable".into(),
+        retry_after_seconds: 1,
+    }
 }
 async fn body<T: DeserializeOwned>(body: Body) -> Result<T, ApiError> {
     let bytes = to_bytes(body, BODY_LIMIT).await.map_err(|_| invalid())?;
@@ -249,7 +254,7 @@ async fn identity(State(state): State<AppState>) -> Result<Json<Value>, ApiError
         .await
         .map_err(authority)?;
     Ok(Json(
-        json!({"server_id":source.server_id,"catalogue_epoch":source.catalogue_epoch,"name":name(&state).await?,"protocol_min":1,"protocol_max":1}),
+        json!({"server_id":source.server_id,"catalogue_epoch":source.catalogue_epoch,"name":name(&state).await?,"protocol_min":1,"protocol_max":1,"features":[crate::sharing_client::START_BUDGET_FEATURE]}),
     ))
 }
 #[derive(Deserialize)]
@@ -894,9 +899,11 @@ pub(crate) fn peer_error_code(error: &crate::sharing_client::PeerError) -> &'sta
         PeerError::ProtocolUnsupported => "sharing_protocol_unsupported",
         PeerError::Authentication => "sharing_peer_auth_failed",
         PeerError::InvalidResponse => "sharing_invalid_peer_response",
-        PeerError::Unavailable | PeerError::Rejected(_) | PeerError::DolbyVisionUnsupported => {
-            "sharing_peer_unavailable"
-        }
+        PeerError::Unavailable
+        | PeerError::Rejected(_)
+        | PeerError::Busy { .. }
+        | PeerError::StartNotYet { .. }
+        | PeerError::DolbyVisionUnsupported => "sharing_peer_unavailable",
     }
 }
 fn peer_error(error: crate::sharing_client::PeerError) -> ApiError {

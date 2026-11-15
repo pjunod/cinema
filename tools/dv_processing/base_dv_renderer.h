@@ -10,6 +10,7 @@ struct base_gpu {
   pl_renderer renderer;
   pl_tex textures[4], output_texture, native_texture;
   float *rgba;
+  uint16_t *staging;
   int width, height;
 };
 static struct base_gpu base_context;
@@ -93,29 +94,85 @@ static void base_gpu_init(int width, int height) {
   base_context.renderer = pl_renderer_create(base_context.log, gpu);
   pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
                            PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE |
-                           ((dv_target.nits || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
+                           ((EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
                             PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR : 0) |
                            (EXPORT_YUV10 ? PL_FMT_CAP_SAMPLEABLE : 0));
   require(base_context.renderer && fmt && fmt->texel_size == 16,
           "base renderer/output format");
-  base_context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT) : NULL;
-  if (!base_context.output_texture)
+  // The 10-bit export reads its picture from UNORM16; a device without that
+  // format is refused, never handed a float texture instead.
+  base_context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT, false) : NULL;
+  require(!EXPORT_YUV10 || base_context.output_texture != NULL,
+          "export-target-unsupported: renderable UNORM16 RGBA");
+  if (!EXPORT_YUV10)
     base_context.output_texture = pl_tex_create(gpu,
         pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = fmt,
-                      .renderable = true, .host_readable = true,
-                      .sampleable = EXPORT_YUV10));
+                      .renderable = true, .host_readable = true));
   require(!EXPORT_YUV10 || dv_yuv10_init(base_context.log, gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
           "GPU yuv420p10 export planes");
   base_context.rgba = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(base_context.output_texture && base_context.rgba, "base output buffer");
-  if (dv_target.nits || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
-    base_context.native_texture = pl_tex_create(gpu,
-        pl_tex_params(.w = width, .h = height, .format = fmt,
-                      .renderable = true, .sampleable = true));
-    require(base_context.native_texture != NULL, "native base float texture");
+  if (dv_target.nits || !EXPORT_YUV10 || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
+    // As the FEL path and the player: reconstruct into UNORM16, then map/export.
+    // No float fallback: a master reconstructed into another format is not
+    // the picture the mapping was qualified on, so the device is refused.
+    base_context.native_texture = dv_yuv10_source_texture(gpu, width, height, true);
+    require(base_context.native_texture != NULL,
+            "reconstruction-target-unsupported: linearly sampled renderable UNORM16 RGBA");
   }
+  base_context.staging = malloc((size_t)width * height * sizeof(uint16_t));
+  require(base_context.staging != NULL, "bounded base plane staging");
   printf("{\"kind\":\"gpu_context_created\",\"width\":%d,\"height\":%d,"
          "\"processing_mode\":\"base-rpu\"}\n", width, height);
+}
+// libplacebo uploads software yuv420p10 as code/65535 in UNORM16 (bits
+// 16/10/0), where a bilinear tap between adjacent codes is not representable
+// exactly. Restage each plane as code << 6 (bits 16/10/6), the contract the
+// FEL path and the native player use. Mapped GPU surfaces already hold it,
+// and so does their host copy: a decoded surface the Vulkan device cannot
+// import is transferred as P010, which is code << 6 in two planes. Those
+// planes are left exactly as uploaded; only planar low-aligned input is
+// restaged.
+static void base_restage_software_planes(pl_gpu gpu, const AVFrame *input,
+                                         struct pl_frame *source) {
+  if (input->format == AV_PIX_FMT_VAAPI)
+    return;
+  if (input->format == AV_PIX_FMT_P010LE) {
+    require(source->num_planes == 2 && source->repr.bits.sample_depth == 16 &&
+                source->repr.bits.color_depth == 10 && source->repr.bits.bit_shift == 6,
+            "host-copied base planes are high-aligned 10-bit in UNORM16");
+    for (int p = 0; p < 2; p++) {
+      pl_tex tex = source->planes[p].texture;
+      require(tex && tex->params.format->type == PL_FMT_UNORM &&
+                  (tex->params.format->caps & PL_FMT_CAP_LINEAR),
+              "linearly sampled UNORM16 host-copied base plane");
+    }
+    return;
+  }
+  require(input->format == AV_PIX_FMT_YUV420P10LE && source->num_planes == 3 &&
+              source->repr.bits.sample_depth == 16 && source->repr.bits.color_depth == 10 &&
+              source->repr.bits.bit_shift == 0,
+          "software base planes are low-aligned 10-bit in UNORM16");
+  for (int p = 0; p < 3; p++) {
+    pl_tex tex = source->planes[p].texture;
+    require(tex && tex->params.format->type == PL_FMT_UNORM &&
+                tex->params.format->num_components == 1 &&
+                tex->params.format->texel_size == 2 && tex->params.host_writable &&
+                (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
+                tex->params.w <= base_context.width && tex->params.h <= base_context.height &&
+                input->linesize[p] >= tex->params.w * 2,
+            "linearly sampled UNORM16 base plane");
+    for (int y = 0; y < tex->params.h; y++) {
+      uint16_t row[4096];
+      memcpy(row, input->data[p] + (size_t)y * input->linesize[p], (size_t)tex->params.w * 2);
+      require(dv_shift_10bit_plane(row, tex->params.w,
+                                   base_context.staging + (size_t)y * tex->params.w),
+              "native 10-bit base sample range");
+    }
+    require(pl_tex_upload(gpu, pl_tex_transfer_params(.tex = tex, .ptr = base_context.staging)),
+            "base plane restage");
+  }
+  source->repr.bits.bit_shift = 6;
 }
 static void base_gpu_render(const AVFrame *frame, const struct base_mapping *mapping,
                             int index, const char *pts, const char *duration,
@@ -143,6 +200,7 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
                                   .map_dovi = true)),
             "public base AVFrame upload");
   }
+  base_restage_software_planes(gpu, input, &source);
   struct pl_dovi_metadata dovi = mapping->dovi;
   source.repr.dovi = &dovi;
   source.enhancement_layer = NULL;
@@ -152,8 +210,8 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   struct pl_frame destination = {.num_planes = 1,
       .planes = {{.texture = base_context.native_texture ? base_context.native_texture : base_context.output_texture, .components = 3,
                   .component_mapping = {0, 1, 2}}},
-      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
-               .bits = {.color_depth = 32}}, .color = pl_color_space_hdr10};
+      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL},
+      .color = pl_color_space_hdr10};
   source.color.hdr.max_luma = destination.color.hdr.max_luma = 10000;
   source.color.hdr.min_luma = destination.color.hdr.min_luma = 0.005;
   struct pl_color_map_params cmap = pl_color_map_default_params;
@@ -162,8 +220,8 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   cmap.metadata = PL_HDR_METADATA_NONE;
   struct pl_render_params params = pl_render_fast_params;
   params.color_map_params = &cmap;
-  params.plane_upscaler = &pl_filter_nearest;
-  params.plane_downscaler = &pl_filter_nearest;
+  params.plane_upscaler = &pl_filter_bilinear;
+  params.plane_downscaler = &pl_filter_bilinear;
   params.dither_params = NULL;
   params.peak_detect_params = NULL;
   params.color_adjustment = NULL;
@@ -246,5 +304,6 @@ static void base_gpu_close(void) {
   pl_vulkan_destroy(&base_context.vk);
   pl_log_destroy(&base_context.log);
   free(base_context.rgba);
+  free(base_context.staging);
 }
 #endif

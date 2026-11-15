@@ -525,6 +525,36 @@ impl SessionGrace {
             .await
             .unwrap_or(Some(None))
         };
+        self.settle(lost_at, recovered)
+    }
+
+    /// [`Self::resolve_loss_from`] for an outage the fence does not publish:
+    /// this owner's own proof is unknown while the node may still hold
+    /// authority (a quorum read timed out or erred). `recovery` resolves
+    /// with the loss generation under which the proof became known again,
+    /// or `None` when the fence is gone. The span spends the same budget as
+    /// a published loss, so flapping between the two kinds of outage is
+    /// still one outage.
+    pub(crate) async fn resolve_from(
+        &mut self,
+        lost_at: tokio::time::Instant,
+        recovery: impl std::future::Future<Output = Option<u64>>,
+    ) -> LossOutcome {
+        let deadline = self.deadline_for_loss(lost_at);
+        self.outage_spent = self.spent_at(lost_at);
+        let recovered = match tokio::time::timeout_at(deadline, recovery).await {
+            Ok(Some(generation)) => Some(Some(generation)),
+            Ok(None) => None,
+            Err(_) => Some(None),
+        };
+        self.settle(lost_at, recovered)
+    }
+
+    fn settle(
+        &mut self,
+        lost_at: tokio::time::Instant,
+        recovered: Option<Option<u64>>,
+    ) -> LossOutcome {
         match recovered {
             Some(Some(generation)) => {
                 let outage = lost_at.elapsed();
@@ -542,6 +572,80 @@ impl SessionGrace {
                 LossOutcome::Expired
             }
             None => LossOutcome::Closed,
+        }
+    }
+}
+
+/// How an owner's unknown proof resolved.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SpanOutcome<T> {
+    /// A definite observation, read while this node held authority under one
+    /// unchanged loss generation.
+    Known(T),
+    /// The grace ran out with the proof still unknown. The owner ends its
+    /// work as an outage, not as a revocation.
+    Expired,
+    /// The fence is gone (shutdown).
+    Closed,
+}
+
+/// An owner of running work whose authority is its own replicated proof
+/// (a grant, a delivery binding) rather than the fence alone. An unreadable
+/// proof is an outage of this node, resolved through the same
+/// [`SessionGrace`] budget as a published loss; only a definite observation
+/// ends the span. Holding one span per owner shares the budget across every
+/// unknown and published outage that owner sees.
+#[derive(Debug, Default)]
+pub(crate) struct UnknownSpan {
+    grace: SessionGrace,
+}
+
+impl UnknownSpan {
+    /// Re-observe with `look` every `every` until an observation that
+    /// `unknown` rejects arrives while the fence is ready under one loss
+    /// generation for the whole read, or the grace runs out. Not cancel-safe
+    /// with respect to the budget, as [`SessionGrace::resolve_loss`].
+    pub(crate) async fn resolve<T, Look, Read>(
+        &mut self,
+        serving: &mut tokio::sync::watch::Receiver<ServingState>,
+        lost_at: tokio::time::Instant,
+        every: Duration,
+        mut look: Look,
+        unknown: impl Fn(&T) -> bool,
+    ) -> SpanOutcome<T>
+    where
+        Look: FnMut() -> Read,
+        Read: std::future::Future<Output = T>,
+    {
+        let mut known = None;
+        let outcome = self
+            .grace
+            .resolve_from(lost_at, async {
+                loop {
+                    let before = *serving.borrow_and_update();
+                    if !before.ready {
+                        if serving.changed().await.is_err() {
+                            return None;
+                        }
+                        continue;
+                    }
+                    let observed = look().await;
+                    let after = *serving.borrow();
+                    if after.ready
+                        && after.loss_generation == before.loss_generation
+                        && !unknown(&observed)
+                    {
+                        known = Some(observed);
+                        return Some(after.loss_generation);
+                    }
+                    tokio::time::sleep(every).await;
+                }
+            })
+            .await;
+        match (outcome, known) {
+            (LossOutcome::Recovered { .. }, Some(observed)) => SpanOutcome::Known(observed),
+            (LossOutcome::Closed, _) => SpanOutcome::Closed,
+            _ => SpanOutcome::Expired,
         }
     }
 }
@@ -1378,6 +1482,116 @@ impl Drop for PendingLossTransition {
 mod tests {
     use super::*;
     use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+    fn span_fence() -> (
+        tokio::sync::watch::Sender<ServingState>,
+        tokio::sync::watch::Receiver<ServingState>,
+    ) {
+        tokio::sync::watch::channel(ServingState {
+            ready: true,
+            loss_generation: 0,
+        })
+    }
+
+    /// An unknown proof is held for the session grace, not ended at once,
+    /// and the first definite answer ends the span.
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_span_holds_for_the_grace_and_ends_on_a_definite_answer() {
+        let (_fence, mut serving) = span_fence();
+        let mut span = UnknownSpan::default();
+        let mut answers = vec![None, None, Some(7_u8)].into_iter();
+        let started = tokio::time::Instant::now();
+        let outcome = span
+            .resolve(
+                &mut serving,
+                started,
+                Duration::from_secs(1),
+                || std::future::ready(answers.next().flatten()),
+                Option::is_none,
+            )
+            .await;
+        assert_eq!(outcome, SpanOutcome::Known(Some(7)));
+        assert!(started.elapsed() < SERVING_FENCE_SESSION_GRACE);
+
+        // A proof that never becomes known expires at the grace.
+        let mut span = UnknownSpan::default();
+        let started = tokio::time::Instant::now();
+        let outcome = span
+            .resolve(
+                &mut serving,
+                started,
+                Duration::from_secs(1),
+                || std::future::ready(None::<u8>),
+                Option::is_none,
+            )
+            .await;
+        assert_eq!(outcome, SpanOutcome::Expired);
+        assert!(started.elapsed() >= SERVING_FENCE_SESSION_GRACE);
+    }
+
+    /// A definite answer read while the loss generation moved is not
+    /// believed: the read may straddle a loss of authority.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_read_across_a_loss_generation_change_is_discarded() {
+        let (fence, mut serving) = span_fence();
+        let mut span = UnknownSpan::default();
+        let mut reads = 0_u32;
+        let outcome = span
+            .resolve(
+                &mut serving,
+                tokio::time::Instant::now(),
+                Duration::from_secs(1),
+                || {
+                    reads += 1;
+                    if reads == 1 {
+                        fence.send_modify(|state| state.loss_generation += 1);
+                    }
+                    std::future::ready(Some(reads))
+                },
+                Option::is_none,
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            SpanOutcome::Known(Some(2)),
+            "the straddling answer was used"
+        );
+    }
+
+    /// Unknown spans and published losses spend one budget: a node whose
+    /// proof keeps flapping cannot keep work alive past one grace.
+    #[tokio::test(start_paused = true)]
+    async fn flapping_unknown_spans_share_one_outage_budget() {
+        let (_fence, mut serving) = span_fence();
+        let mut span = UnknownSpan::default();
+        let mut answers = vec![None, None, None, Some(1_u8)].into_iter();
+        let first = span
+            .resolve(
+                &mut serving,
+                tokio::time::Instant::now(),
+                Duration::from_secs(1),
+                || std::future::ready(answers.next().flatten()),
+                Option::is_none,
+            )
+            .await;
+        assert_eq!(first, SpanOutcome::Known(Some(1)));
+        // A second span right after the first recovery has only what is left.
+        let started = tokio::time::Instant::now();
+        let second = span
+            .resolve(
+                &mut serving,
+                started,
+                Duration::from_secs(1),
+                || std::future::ready(None::<u8>),
+                Option::is_none,
+            )
+            .await;
+        assert_eq!(second, SpanOutcome::Expired);
+        assert!(
+            started.elapsed() < SERVING_FENCE_SESSION_GRACE,
+            "a fresh budget was granted"
+        );
+    }
 
     /// M2: in the pending-loss window `.admit()` already refuses while the
     /// generation has not moved, so the previous outage's `Recovered` is

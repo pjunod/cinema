@@ -130,6 +130,7 @@ impl TranscodeManager {
             encoder,
             restrictions,
             None,
+            None,
         )
         .await
     }
@@ -147,6 +148,7 @@ impl TranscodeManager {
             encoder,
             &AttemptRestrictions::none(),
             Some(failed_pipeline),
+            None,
         )
         .await
     }
@@ -158,12 +160,17 @@ impl TranscodeManager {
         encoder: Encoder,
         restrictions: &AttemptRestrictions,
         excluded_pipeline: Option<Pipeline>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ResolvedTranscode, String> {
-        let stored_probe = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|error| format!("reading decoder planning facts: {error}"))?;
+        // The create's plan read this revision's probe with the file (D3b).
+        let stored_probe = match plan.and_then(|plan| plan.probe_for(file)) {
+            Some(probe) => probe.map(str::to_owned),
+            None => self
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .map_err(|error| format!("reading decoder planning facts: {error}"))?,
+        };
         let facts = Self::planning_facts(file, stored_probe.as_deref())?;
         let context = self
             .macos_video_report()
@@ -713,7 +720,7 @@ impl TranscodeManager {
         encoder: Encoder,
         held_plan_handle: Arc<std::fs::File>,
     ) -> Result<ResolvedTranscode, String> {
-        self.resolve_vod_movie_plan_with_fonts(file, options, encoder, held_plan_handle, None)
+        self.resolve_vod_movie_plan_with_fonts(file, options, encoder, held_plan_handle, None, None)
             .await
     }
 
@@ -724,6 +731,7 @@ impl TranscodeManager {
         encoder: Encoder,
         held_plan_handle: Arc<std::fs::File>,
         font_digest: Option<&str>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ResolvedTranscode, String> {
         BoundPlanCaller::Vod.finish(
             self.resolve_held_movie_plan_with_fonts(
@@ -739,6 +747,7 @@ impl TranscodeManager {
                 Instant::now() + DECODE_PLAN_PROBE_BUDGET,
                 None,
                 font_digest,
+                plan,
             )
             .await,
         )
@@ -765,6 +774,7 @@ impl TranscodeManager {
             deadline,
             cancelled,
             None,
+            None,
         )
         .await
     }
@@ -779,12 +789,22 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
         font_digest: Option<&str>,
+        plan: Option<&crate::http::hls::start_plan::StartPlan>,
     ) -> Result<ResolvedTranscode, String> {
         let Some(probe) = self.decode_probe_identity.as_ref() else {
             if options.normalized_geometry {
                 return Err("candidate_geometry_unavailable: no bound FFprobe identity".to_owned());
             }
-            return self.resolve_movie_plan(file, options, encoder).await;
+            return self
+                .resolve_movie_plan_with_processing_exclusion(
+                    file,
+                    options,
+                    encoder,
+                    &AttemptRestrictions::none(),
+                    None,
+                    plan,
+                )
+                .await;
         };
         let catalog = DecodeCatalogMetadata::from_media_file(file)
             .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;

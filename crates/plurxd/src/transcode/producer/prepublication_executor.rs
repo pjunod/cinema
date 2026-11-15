@@ -241,6 +241,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
                             session
                                 .rolling_provenance
                                 .as_ref()
+                                .filter(|_| source_input.is_none())
                                 .map(|proof| proof.source_fd()),
                             None,
                             session
@@ -415,6 +416,7 @@ async fn execute_prepublication_copy_retry(
                             session
                                 .rolling_provenance
                                 .as_ref()
+                                .filter(|_| source_input.is_none())
                                 .map(|proof| proof.source_fd()),
                             None,
                             None,

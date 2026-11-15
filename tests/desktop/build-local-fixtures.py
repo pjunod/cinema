@@ -86,7 +86,7 @@ def repackage_macos(original, output, binaries, overlay, source):
     run(["codesign", "--force", "--sign", "-", "--options", "runtime", app])
     symbols = output / "plurxd.dSYM"
     run(["dsymutil", binaries / "plurxd", "-o", symbols], timeout=600)
-    name = f"plurxd-{overlay['version']}-macos-universal"
+    name = f"plurxd-{overlay['version']}-macos-arm64"
     package = output / name
     run([sys.executable, source / "scripts/package-macos", "--daemon", binaries / "plurxd",
          "--ffmpeg-package", media, "--subtitle-engine-package", original / "runtime/subtitle-engine",
@@ -140,15 +140,11 @@ def main():
             env = {**os.environ, "PLURX_BUILD_SHA": overlay["committed_overlay_sha"],
                    "PLURX_BUILD_REF": "qualification-local-only", "PLURX_QUALIFICATION_OVERLAY_SHA": overlay["committed_overlay_sha"]}
             if os.uname().sysname == "Darwin":
-                binaries = a.work / label / "universal"
-                binaries.mkdir()
-                for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
-                    run(["cargo", "build", "--locked", "--release", "--manifest-path", source / "Cargo.toml",
-                         "--target", target, "-p", "plurxd", "-p", "plurx-desktop-control", "--bins"], timeout=7200, env=env)
-                for name in ["plurxd", *BINS]:
-                    run(["lipo", "-create", *(a.work / f"cargo-target/{target}/release/{name}" for target in
-                        ("aarch64-apple-darwin", "x86_64-apple-darwin")), "-output", binaries / name])
-                originals = list((a.output.parent / "macos/extracted").glob("plurxd-*-macos-universal"))
+                run(["cargo", "build", "--locked", "--release", "--manifest-path", source / "Cargo.toml",
+                     "--target", "aarch64-apple-darwin", "-p", "plurxd", "-p", "plurx-desktop-control", "--bins"],
+                    timeout=7200, env=env)
+                binaries = a.work / "cargo-target/aarch64-apple-darwin/release"
+                originals = list((a.output.parent / "macos/extracted").glob("plurxd-*-macos-arm64"))
                 if len(originals) != 1:
                     raise RuntimeError("unchanged-candidate macOS qualification root required")
                 package_root = repackage_macos(originals[0], a.work / label / "assets", binaries, overlay, source)
@@ -173,7 +169,7 @@ def main():
                 "--baseline-overlay", a.work / "baseline/overlay.json", "--target-overlay", a.work / "target/overlay.json",
                 "--assets", a.work / "target/assets", "--signing-key", key, "--openssl", a.openssl,
                 "--platform", "macos" if os.uname().sysname == "Darwin" else "linux",
-                "--arch", "universal" if os.uname().sysname == "Darwin" else arch]
+                "--arch", "arm64" if os.uname().sysname == "Darwin" else arch]
         receipt.check("local-selected-cohort-signature", json.loads(run(sign).stdout))
         key.unlink()
         for startup in ("off", "on"):

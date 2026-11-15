@@ -13,8 +13,9 @@ use crate::domain::DolbyVisionFacts;
 
 mod display_target;
 pub use display_target::{
-    DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline,
-    DvSourceMastering, DISPLAY_TARGET_BUCKETS, DISPLAY_TARGET_METHOD,
+    display_target_max_cll, DvDisplayManagement, DvDisplayTarget, DvDisplayTargetChoice,
+    DvDisplayTargetDecline, DvMasterMetadata, DvSourceMastering, DISPLAY_TARGET_BUCKETS,
+    DISPLAY_TARGET_METHOD,
 };
 
 fn encoder_token(encoder: Encoder) -> &'static str {
@@ -1001,6 +1002,9 @@ pub struct DvProcessingPlan {
     destination: DvDestination,
     graph: DvGraph,
     capability: DvCapabilityEvidence,
+    /// Observed from the validated authored init, never the source DV level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authored_dv_level: Option<u8>,
     /// A completed window's frozen display target: its title mastering peak decides the CM v2.9
     /// trim interpolation. Outside the semantic digest; the window's export policy carries it.
     #[serde(skip)]
@@ -1017,14 +1021,8 @@ impl DvProcessingPlan {
     }
     pub fn profile81_level(&self) -> Option<u8> {
         (self.destination == DvDestination::Profile81 && self.capability.completed_window_checked)
-            .then(|| {
-                self.source
-                    .catalog
-                    .level
-                    .and_then(|level| u8::try_from(level).ok())
-                    .filter(|level| (1..=9).contains(level))
-                    .unwrap_or(1)
-            })
+            .then_some(self.authored_dv_level)
+            .flatten()
     }
     /// Deterministic identity of the selected source/backend/pixel policy.
     pub fn semantic_digest(&self) -> DvDigest {
@@ -1048,9 +1046,13 @@ impl DvProcessingPlan {
             self.capability.max_frames,
             &self.capability.target,
         );
-        DvDigest(hex::encode(Sha256::digest(
-            serde_json::to_vec(&body).expect("validated DV semantic fields serialize"),
-        )))
+        let mut digest = Sha256::new();
+        digest.update(serde_json::to_vec(&body).expect("validated DV semantic fields serialize"));
+        if let Some(level) = self.authored_dv_level {
+            digest.update(b":authored-dv-level-v2:");
+            digest.update([level]);
+        }
+        DvDigest(hex::encode(digest.finalize()))
     }
 }
 #[derive(Debug, Clone, Serialize)]
@@ -1287,11 +1289,41 @@ pub fn dv_validate_encoded_window(
     Ok(payloads)
 }
 
+/// Runtime authoring binds the new RPU/config to the complete frozen budget.
+pub fn dv_author_profile81_window_with_envelope(
+    bytes: &[u8],
+    raster: (u32, u32),
+    timescale: u32,
+    start: u64,
+    frame_ticks: u32,
+    source_rpus: &[Vec<u8>],
+    envelope: super::EnhancementRateEnvelope,
+) -> Result<Vec<u8>, DvContractError> {
+    let invalid = |_| DvContractError::Invalid("frozen P81 coded rate envelope");
+    envelope
+        .validate_picture(raster.0, raster.1, (timescale, frame_ticks))
+        .map_err(invalid)?;
+    super::validate_encoded_enhancement_envelope(bytes, envelope).map_err(invalid)?;
+    let authored = dv_author_profile81_window(
+        bytes,
+        raster,
+        timescale,
+        start,
+        frame_ticks,
+        source_rpus,
+        envelope
+            .dv_level()
+            .ok_or(DvContractError::Invalid("frozen P81 DV level absent"))?,
+    )?;
+    super::validate_encoded_enhancement_envelope(&authored, envelope).map_err(invalid)?;
+    Ok(authored)
+}
+
 /// Author an already encoded, independently checked HDR10 window. Base and
 /// audio samples are reused verbatim; only one associated RPU is appended to
 /// each video sample and the sample entry receives the matching DV record.
-/// The level must come from the held source with unchanged cadence and no
-/// increase in raster. Calling this does not qualify the source graph.
+/// The caller supplies the frozen coded-budget DV level. Calling this does
+/// not qualify the source graph; runtime separately validates its full envelope.
 #[allow(clippy::too_many_arguments)]
 pub fn dv_author_profile81_window(
     bytes: &[u8],
@@ -1314,14 +1346,16 @@ pub fn dv_author_profile81_window(
         source_rpus,
         DvDestination::Hdr10,
     )?;
-    if !(1..=9).contains(&source_level) {
+    if !(1..=13).contains(&source_level) {
         return Err(invalid());
     }
     let mut adapted = Vec::with_capacity(source_rpus.len());
     for raw in source_rpus {
-        // Authoring retains valid opaque display metadata. The completed
-        // pixel-graph factory separately enforces its narrower render subset.
-        DvParsedMetadata::from_raw_rpu(raw)?;
+        // Authoring retains valid opaque display metadata and removes the
+        // already-applied mapping, so the source's reshaping shape does not
+        // enter the authored RPU. Admit exactly what the qualified FEL
+        // reconstruction admits, not the synthetic identity subset.
+        DvFelMetadata::from_raw_rpu(raw, raster)?;
         let mut rpu = DoviRpu::parse_unspec62_nalu(raw).map_err(|_| invalid())?;
         rpu.convert_with_mode(ConversionMode::To81)
             .map_err(|_| invalid())?;
@@ -1530,6 +1564,13 @@ pub enum DvExportPolicy {
     PqBilinearYuv420p10V1 {
         raster: (u32, u32),
     },
+    /// The same master-grade export, with the source's own HDR10 static
+    /// metadata authored onto the encoded window. The declarations are output
+    /// bytes, so they are part of the policy and of its digest.
+    MasterMetadataYuv420p10V1 {
+        raster: (u32, u32),
+        metadata: DvMasterMetadata,
+    },
     DisplayTargetYuv420p10V1 {
         raster: (u32, u32),
         target: DvDisplayTarget,
@@ -1541,6 +1582,19 @@ impl DvExportPolicy {
             Self::DisplayTargetYuv420p10V1 { target, .. } => Some(target),
             _ => None,
         }
+    }
+    pub fn master_metadata(self) -> Option<DvMasterMetadata> {
+        match self {
+            Self::MasterMetadataYuv420p10V1 { metadata, .. } => Some(metadata),
+            _ => None,
+        }
+    }
+    /// The master-grade HDR10 export for `raster`: with the source's static
+    /// metadata when it states any, otherwise exactly the undeclared export.
+    pub fn for_master(raster: (u32, u32), metadata: Option<DvMasterMetadata>) -> Self {
+        metadata.map_or(Self::PqBilinearYuv420p10V1 { raster }, |metadata| {
+            Self::MasterMetadataYuv420p10V1 { raster, metadata }
+        })
     }
     pub fn output_policy(self) -> String {
         self.display_target().map_or_else(
@@ -1567,6 +1621,7 @@ impl DvExportPolicy {
         let raster = match self {
             Self::NativeRgb48V1 => native,
             Self::PqBilinearYuv420p10V1 { raster }
+            | Self::MasterMetadataYuv420p10V1 { raster, .. }
             | Self::DisplayTargetYuv420p10V1 { raster, .. } => raster,
         };
         if raster.0 < 32
@@ -1587,6 +1642,10 @@ impl DvExportPolicy {
             Self::PqBilinearYuv420p10V1 { .. } => {
                 serde_json::to_vec(&("bt2020-pq-master-clip-export-v3", self))
                     .expect("bounded export policy serializes")
+            }
+            Self::MasterMetadataYuv420p10V1 { .. } => {
+                serde_json::to_vec(&("bt2020-pq-master-clip-source-metadata-export-v1", self))
+                    .expect("bounded master export policy serializes")
             }
             Self::DisplayTargetYuv420p10V1 { .. } => {
                 serde_json::to_vec(&(DISPLAY_TARGET_METHOD, self))
@@ -1619,6 +1678,28 @@ pub struct DvCompletedWindowInput<'a> {
     pub decoder: DecodeBackend,
 }
 
+fn completed_authored_dv_level(
+    bytes: &[u8],
+    destination: DvDestination,
+) -> Result<Option<u8>, DvContractError> {
+    if destination != DvDestination::Profile81 {
+        return Ok(None);
+    }
+    let invalid = || DvContractError::Invalid("completed authored Dolby Vision level");
+    let mut reader = crate::fmp4::FragmentReader::new();
+    reader.push(bytes);
+    let Some(crate::fmp4::Unit::Init(init)) = reader.next_unit().map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    let record = crate::fmp4::dolby_vision_record(&init)
+        .map_err(|_| invalid())?
+        .ok_or_else(invalid)?;
+    if record.profile != 8 || !(1..=13).contains(&record.level) {
+        return Err(invalid());
+    }
+    Ok(Some(record.level))
+}
+
 pub fn dv_plan_completed_window(
     input: DvCompletedWindowInput<'_>,
 ) -> Result<DvProcessingPlan, DvContractError> {
@@ -1647,6 +1728,8 @@ pub fn dv_plan_completed_window(
         .is_some_and(|target| target.is_sdr() != (input.destination == DvDestination::Sdr))
         || input.destination == DvDestination::Profile81
             && input.export_policy.display_target().is_some()
+        || input.destination != DvDestination::Hdr10
+            && input.export_policy.master_metadata().is_some()
     {
         return Err(invalid(
             "display targeting cannot change native/P8.1 delivery",
@@ -1700,6 +1783,7 @@ pub fn dv_plan_completed_window(
     if matches!(
         input.export_policy,
         DvExportPolicy::PqBilinearYuv420p10V1 { .. }
+            | DvExportPolicy::MasterMetadataYuv420p10V1 { .. }
             | DvExportPolicy::DisplayTargetYuv420p10V1 { .. }
     ) && export_raster != input.raster
     {
@@ -1748,13 +1832,9 @@ pub fn dv_plan_completed_window(
             target.validate_rpu(raw)?;
         }
         if full_fel {
-            if matches!(input.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
-                DvFelMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
-            } else if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
-                return Err(invalid(
-                    "completed DV window: RPU outside the renderer's supported subset",
-                ));
-            }
+            // One reconstruction for every destination: Profile 8.1 authors a
+            // fresh RPU over the same reconstructed master as HDR10 and SDR.
+            DvFelMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
         } else {
             let metadata = DvBaseMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
             if Some(i64::from(metadata.profile)) != input.source.catalog.profile
@@ -1886,6 +1966,7 @@ pub fn dv_plan_completed_window(
     };
     Ok(DvProcessingPlan {
         display_target: input.export_policy.display_target(),
+        authored_dv_level: completed_authored_dv_level(input.encoded, input.destination)?,
         source: input.source,
         preferences,
         destination: input.destination,
@@ -2032,6 +2113,7 @@ fn resolve_inner(
         destination: input.destination,
         graph,
         capability: cap.clone(),
+        authored_dv_level: None,
         display_target: None,
     })))
 }
@@ -2862,6 +2944,13 @@ pub fn dv_receipt_completed_window(
             let shape = plan.capability.bl_shape;
             let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
             (parsed.applied_operations, parsed.metadata_levels)
+        } else if requires_el && plan.source.el_kind == DvElKind::Fel {
+            // Profile 8.1 authors a fresh RPU over the same reconstructed
+            // master as HDR10/SDR: admit the qualified FEL reconstruction
+            // predicate; the plan's graph names the operations it performs.
+            let shape = plan.capability.bl_shape;
+            let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+            (plan.graph.required_operations(), parsed.metadata_levels)
         } else if requires_el {
             let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
             if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {

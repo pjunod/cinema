@@ -20,7 +20,11 @@ impl Backend for HiqliteAuthStore {
         let rows = self
             .client()
             // authority: admission and lease transitions must use the committed ledger revision.
-            .query_consistent_map::<Payload, _>(SNAPSHOT_SQL, params!(user_id, key, now))
+            .query_consistent_map::<Payload, _>(
+                "read_ledger",
+                SNAPSHOT_SQL,
+                params!(user_id, key, now),
+            )
             .await?;
         let payload = rows
             .first()
@@ -43,7 +47,7 @@ impl Backend for HiqliteAuthStore {
         });
         let counts = self
             .client()
-            .txn(statements)
+            .txn("commit_ledger", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()

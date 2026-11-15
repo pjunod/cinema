@@ -201,7 +201,7 @@ builds and publishes the GitHub release for that tag:
 |---|---|---|
 | `plurxd_X.Y.Z-1_amd64.deb`, `_arm64.deb` | Debian 12+, Ubuntu 24.04+ | installed, started as `plurx` to `/readyz`, force-reinstalled while installed, then removed on Debian 12 and Ubuntu 24.04 |
 | `plurxd-X.Y.Z-1.x86_64.rpm`, `.aarch64.rpm` | Fedora, RHEL 9+ (ffmpeg from RPM Fusion) | the same on Fedora 42; scriptlets and binary on AlmaLinux 9 |
-| `plurxd-X.Y.Z-macos-universal.tar.gz` | macOS, Apple Silicon and Intel | each slice reports its version on its own hardware; complete closure, Developer ID, notarization, stapled ticket and Gatekeeper checks |
+| `plurxd-X.Y.Z-macos-arm64.tar.gz` | macOS on Apple Silicon (no Intel Macs) | the build reports its version on an Apple Silicon runner; complete closure, Developer ID, notarization, stapled ticket and Gatekeeper checks |
 | `plurxd-X.Y.Z-windows-x86_64.zip` | Windows x64 | `scripts/package-windows`; `plurxd.exe --version` on Windows Server 2022 |
 | `SHA256SUMS` | all of the above | computed over exactly the files published |
 
@@ -458,8 +458,16 @@ an ad-hoc `release-macos` workflow artifact without publishing a GitHub release.
 A tag publication uploads only the verified archive under that artifact name;
 the unsigned intermediate is `macos-candidate`. Dispatch the reviewed workflow
 with an existing `release_tag` to publish that tag, or push a new annotated
-release tag. The artifact is `plurxd-X.Y.Z-macos-universal.tar.gz`; unpack it and
+release tag. The artifact is `plurxd-X.Y.Z-macos-arm64.tar.gz`; unpack it and
 run `./install`. Existing published releases are never overwritten.
+
+macOS releases are Apple Silicon only (from 2026-11-12). Releases before that
+shipped `plurxd-X.Y.Z-macos-universal.tar.gz`. An install from one of those
+reads its old `universal` record, and its updater adopts the arm64 release only
+once it runs a controller from this change; an install whose controller
+predates it looks for a universal archive and will not find one, so it needs
+one manual `./install` of an arm64 archive. On an Intel Mac the updater and
+`./install` refuse.
 
 Follow [Apple's Developer ID setup](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
 and [notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)

@@ -2265,3 +2265,224 @@ async fn fragment_index_builders_held_by_names_who_built_what_a_node_holds() {
         .expect("read")
         .is_empty());
 }
+
+async fn fill_backlog(store: &SqliteStore, count: i64, engine: String, prefix: &'static str) {
+    store
+        .with_conn(move |conn| {
+            conn.execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+                 INSERT INTO analysis_requests
+                   (request_id, file_id, source_size, source_mtime, component,
+                    pipeline_version, video_identity, requested_generation,
+                    expected_predecessor_generation, priority, trigger, force_rebuild,
+                    target_node_id, state, fence, attempts, not_before_ms,
+                    cancel_requested, created_at_ms, updated_at_ms)
+                 SELECT ?2 || i, 2, 100, 20, 'fragment_index', ?3, 'v' || i,
+                        ?2 || 'gen' || i, '', 'normal', 'background', 0,
+                        'node-a', 'queued', 0, 0, 0, 0, 1, 1 FROM n",
+                rusqlite::params![count, prefix, engine],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("bulk fill");
+}
+
+/// The active ceiling holds runnable work, not stranded backlog: with the
+/// table at 4,096 active fragment-index rows under a retired engine, a
+/// current-engine enqueue is admitted when the live set is known, refused
+/// when it is not (every active row counts, as before), and the hard bound
+/// of 4 x the ceiling still refuses.
+#[tokio::test]
+async fn stranded_backlog_does_not_hold_the_ceiling_against_runnable_work() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    seed_files(&store).await;
+    let live = "a".repeat(64);
+    let retired = "b".repeat(64);
+    fill_backlog(&store, MAX_ACTIVE_JOBS, retired.clone(), "stranded-").await;
+    let request = |id: &str| NewAnalysisRequest {
+        request_id: id.to_owned(),
+        file_id: 1,
+        source_size: 100,
+        source_mtime: 10,
+        component: "fragment_index".to_owned(),
+        pipeline_version: live.clone(),
+        video_identity: id.to_owned(),
+        requested_generation: format!("{id}-generation"),
+        priority: "normal".to_owned(),
+        trigger: "background".to_owned(),
+        force_rebuild: false,
+        target_node_id: "node-a".to_owned(),
+        not_before_ms: 0,
+        created_at_ms: 2,
+    };
+    let live_set = crate::store::LiveAnalysisEngines {
+        engines: [("node-a".to_owned(), live.clone())].into(),
+        members: None,
+    };
+    let unknown = store.enqueue_analysis_request(&request("unknown")).await;
+    assert!(
+        unknown.is_err(),
+        "an unknown live set counts every active row, and the table is at the ceiling"
+    );
+    store
+        .enqueue_analysis_request_with(&request("runnable"), Some(&live_set))
+        .await
+        .expect("stranded backlog does not hold the ceiling against a live engine");
+
+    // Fill to the hard bound with more backlog: now even runnable work waits.
+    fill_backlog(
+        &store,
+        MAX_ACTIVE_JOBS * crate::store::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR
+            - MAX_ACTIVE_JOBS
+            - 1,
+        retired,
+        "bound-",
+    )
+    .await;
+    assert!(store
+        .enqueue_analysis_request_with(&request("over-bound"), Some(&live_set))
+        .await
+        .is_err());
+}
+
+/// The subtitle-source twin of the cap above (review S6): stranded
+/// fragment-index backlog at the ceiling refused every subtitle source
+/// enqueue too, live set or not. Now the live set admits it, an unknown set
+/// still counts every row, and the hard bound still refuses.
+#[tokio::test]
+async fn stranded_backlog_does_not_hold_the_ceiling_against_a_subtitle_source() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    seed_files(&store).await;
+    let live = crate::store::LiveAnalysisEngines {
+        engines: [("node-a".to_owned(), "a".repeat(64))].into(),
+        members: None,
+    };
+    fill_backlog(&store, MAX_ACTIVE_JOBS, "b".repeat(64), "stranded-").await;
+    let stamp = |file_id: i64, mtime: i64| SubtitleSourceStamp {
+        file_id,
+        source_size: 100,
+        source_mtime: mtime,
+        pipeline_version: "subtitle-source-v1".to_owned(),
+    };
+    assert!(
+        store
+            .enqueue_or_promote_subtitle_source(&stamp(1, 10), "normal", 5)
+            .await
+            .is_err(),
+        "an unknown live set counts every active row, and the table is at the ceiling"
+    );
+    let admitted = store
+        .enqueue_or_promote_subtitle_source_with(&stamp(1, 10), "normal", 5, Some(&live))
+        .await
+        .expect("stranded backlog does not hold the ceiling against a subtitle source")
+        .expect("inside the repair budget");
+    assert_eq!(
+        (admitted.component.as_str(), admitted.state.as_str()),
+        ("subtitle_source", "queued")
+    );
+    fill_backlog(
+        &store,
+        MAX_ACTIVE_JOBS * crate::store::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR
+            - MAX_ACTIVE_JOBS
+            - 1,
+        "b".repeat(64),
+        "bound-",
+    )
+    .await;
+    assert!(store
+        .enqueue_or_promote_subtitle_source_with(&stamp(2, 20), "normal", 6, Some(&live))
+        .await
+        .is_err());
+}
+
+/// Both twins of both enqueues (an analysis request and a subtitle source)
+/// carry the same runnable-versus-backlog cap, through the one stranded rule,
+/// so the SQLite behaviour above is the replicated one too (the replicated
+/// twin cannot be filled to 16,384 rows inside a unit run; store_contract
+/// runs the cap path on both backends with a live set).
+#[test]
+fn both_enqueue_twins_measure_the_ceiling_against_runnable_work() {
+    let sqlite = include_str!("../fragment_index_cluster.rs");
+    let hiqlite = include_str!("../../hiqlite_fragment_index_cluster.rs");
+    for (name, source, placeholders) in [
+        (
+            "sqlite",
+            sqlite,
+            [("?18", "?16 * ?19"), ("?11", "?9 * ?12")],
+        ),
+        (
+            "hiqlite",
+            hiqlite,
+            [("$18", "$16 * $19"), ("$15", "$13 * $16")],
+        ),
+    ] {
+        for (method, (live, factor)) in [
+            "async fn enqueue_analysis_request_with(",
+            "async fn enqueue_or_promote_subtitle_source_with(",
+        ]
+        .into_iter()
+        .zip(placeholders)
+        {
+            let start = source
+                .find(method)
+                .unwrap_or_else(|| panic!("{name}: {method}"));
+            let body = &source[start..];
+            let body = &body[..body[1..]
+                .find("\n    async fn ")
+                .map_or(body.len(), |end| end + 1)];
+            assert!(
+                body.contains(&format!("analysis_request_stranded_sql(\"{live}\")"))
+                    && body.contains("AND NOT {stranded})"),
+                "{name} {method}: runnable rows exclude stranded fragment-index backlog"
+            );
+            assert!(
+                body.contains(factor),
+                "{name} {method}: the hard bound on all active rows"
+            );
+        }
+    }
+}
+
+/// Reopen by cause selects only that cause.
+#[tokio::test]
+async fn reopen_selects_by_last_error_code() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    seed_files(&store).await;
+    store
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO analysis_requests
+                   (request_id, file_id, source_size, source_mtime, component,
+                    pipeline_version, video_identity, requested_generation,
+                    expected_predecessor_generation, priority, trigger, force_rebuild,
+                    target_node_id, state, fence, attempts, not_before_ms,
+                    cancel_requested, last_error_code, created_at_ms, updated_at_ms)
+                 VALUES
+                   ('retired', 1, 100, 10, 'fragment_index', 'e', 'v', 'g1', '', 'normal',
+                    'background', 0, 'node-a', 'failed', 0, 0, 0, 0,
+                    'pipeline_version_unavailable', 1, 1),
+                   ('limit', 2, 100, 20, 'fragment_index', 'e', 'v', 'g2', '', 'normal',
+                    'background', 0, 'node-a', 'failed', 0, 3, 0, 0, 'attempt_limit', 1, 2)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed failed rows");
+    let all = store
+        .reopenable_analysis_requests(None, None, 10)
+        .await
+        .expect("all");
+    assert_eq!(all.len(), 2);
+    let one = store
+        .reopenable_analysis_requests(Some("fragment_index"), Some("attempt_limit"), 10)
+        .await
+        .expect("by code");
+    assert_eq!(
+        one.iter()
+            .map(|row| row.request_id.as_str())
+            .collect::<Vec<_>>(),
+        ["limit"]
+    );
+}

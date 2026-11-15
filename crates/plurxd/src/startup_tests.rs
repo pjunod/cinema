@@ -2547,6 +2547,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
     let config = config_in(dir);
     let store = store_in(dir);
     let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&store));
+    let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
     build_state(
         &config,
         "test-node".to_owned(),
@@ -2556,6 +2557,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
         plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
         plurx_core::cluster::membership::MembershipManager::unavailable(),
         catalogue,
+        applied,
         store,
         create_dirs(dir).expect("dirs"),
         Default::default(),
@@ -2587,12 +2589,14 @@ async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() 
         .await
         .expect("store");
     let catalogue = plurx_core::store::CatalogueReader::authority(handle.store.clone());
+    let applied = plurx_core::store::AppliedView::authority(handle.store.clone());
     let result = boot(
         config,
         Boot {
             source_activation_at_boot: None,
             store: handle.store,
             catalogue,
+            applied,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
             identity: handle.identity,
@@ -3450,6 +3454,7 @@ async fn boot_serve_and_drain_in_runtime(
         .expect("store");
     let store = Arc::clone(&handle.store);
     let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&handle.store));
+    let applied = plurx_core::store::AppliedView::authority(Arc::clone(&handle.store));
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
     let booted = tokio::spawn(boot(
@@ -3458,6 +3463,7 @@ async fn boot_serve_and_drain_in_runtime(
             source_activation_at_boot: None,
             store: handle.store,
             catalogue,
+            applied,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
             identity: handle.identity,

@@ -181,8 +181,8 @@ pub(crate) fn cache_footprint(runtime_cache: &FsPath) -> (u64, u64) {
 
 pub(crate) async fn enabled(state: &AppState) -> bool {
     let value = state
-        .store
-        .get_setting(plurx_core::store::keys::CHAPTER_THUMBNAILS)
+        .applied
+        .setting(plurx_core::store::keys::CHAPTER_THUMBNAILS)
         .await
         .ok()
         .flatten();

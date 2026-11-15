@@ -78,8 +78,8 @@ where
 /// wants it off, a marginal Wi-Fi bridge wants it lower.
 async fn readrate_setting(state: &AppState) -> f64 {
     match state
-        .store
-        .get_setting(plurx_core::store::keys::STREAM_READRATE)
+        .applied
+        .setting(plurx_core::store::keys::STREAM_READRATE)
         .await
     {
         Ok(Some(v)) => parse_readrate(&v),
@@ -617,6 +617,41 @@ fn delivery_plan(
     }
 }
 
+/// Enhancement facts for original-file delivery, before any HLS session exists.
+/// Direct play sends the source unchanged: only a preserved, profile-matching
+/// Dolby Vision delivery with a probed RPU can claim dynamic metadata. Session
+/// routes publish their own facts after their actual processing plan is known.
+fn direct_enhancement(
+    file: &MediaFile,
+    decision: &Decision,
+    delivery: &DeliveryPlan,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
+    let profile = file
+        .dolby_vision
+        .profile
+        .and_then(|value| u8::try_from(value).ok())?;
+    if !matches!(delivery, DeliveryPlan::Direct { .. })
+        || decision.method != playback::PlaybackMethod::DirectPlay
+        || file.hdr.as_deref() != Some("dolby_vision")
+        || !decision.preserve_dolby_vision
+        || decision.convert_dolby_vision
+        || decision.delivered_dynamic_range != "dolby_vision"
+        || decision.delivered_dolby_vision_profile != Some(profile)
+        || file.dolby_vision.rpu_present != Some(true)
+    {
+        return None;
+    }
+    plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
+        source_profile: Some(profile),
+        source_el_present: file.dolby_vision.el_present,
+        route: EnhancementRoute::NativeDolbyVision,
+        hdr_processing_enabled: None,
+        fel_reencode_enabled: None,
+        decline_reason: None,
+    })
+}
+
 /// The sample entry the progressive copy builder will actually write.
 ///
 /// This deliberately mirrors `progressive_hevc_copy_args` rather than the
@@ -751,6 +786,11 @@ pub struct DecisionSelection {
 
 #[derive(Serialize)]
 pub struct DecisionResponse {
+    /// Metadata preserved by original-file delivery. This is delivery evidence,
+    /// not a claim of server processing or measured panel output; clients must
+    /// reconcile it with their active playback format. HLS supplies its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enhancement: Option<plurx_core::playback::enhancement::PlaybackEnhancement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_aware_auto_protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2285,7 +2325,8 @@ pub async fn decision(
         ));
     }
     let network_prior =
-        super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
+        super::network::stored_prior(state.store.as_ref(), &state.applied, identity.as_ref())
+            .await?;
     let file = load_file(&state, id).await?;
     decision_for_file(
         &state,
@@ -2491,8 +2532,8 @@ async fn decision_for_file(
         q.caps_v2.as_ref(),
         plurx_core::store::stored_switch(
             state
-                .store
-                .get_setting(plurx_core::store::keys::DV_HDR_PROCESSING)
+                .applied
+                .setting(plurx_core::store::keys::DV_HDR_PROCESSING)
                 .await?
                 .as_deref(),
             false,
@@ -2643,8 +2684,8 @@ async fn decision_for_file(
     // it. Missing evidence is Unknown; it never refuses the decision.
     let mut advisory = None;
     let quality_candidates = if state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .applied
+        .setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
         .is_some_and(|value| value.trim() == "1")
     {
@@ -2820,6 +2861,7 @@ async fn decision_for_file(
         }
     });
     Ok(DecisionResponse {
+        enhancement: direct_enhancement(&file, &decision, &delivery),
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,
@@ -3078,13 +3120,14 @@ pub async fn direct(
         // repetition is what keeps a live viewer listed, since a direct play
         // has no session to end and a closed tab announces nothing.
         Ok(response) if method == Method::GET && response.status().is_success() => {
-            crate::playstart::note_playback_started(
+            crate::playstart::note_request_started(
                 &state,
                 user.id,
                 &user.username,
                 id,
                 crate::delivery::Method::Direct,
                 q.stream.as_deref(),
+                crate::playstart::request_client_build(&headers),
             )
         }
         // HEAD and rejected ranges carry no media and are not playback.
@@ -3286,10 +3329,12 @@ pub async fn stream_mp4(
     auth: AuthUser,
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
+    headers: HeaderMap,
     query: Query<StreamQuery>,
 ) -> Result<Response, ApiError> {
     let (user_id, start_attempts) = (auth.0.id, std::sync::Arc::clone(&state.start_attempts));
-    let served = serve_stream_mp4(auth, State(state), AxPath(id), query).await;
+    let client_build = crate::playstart::request_client_build(&headers);
+    let served = serve_stream_mp4(auth, State(state), AxPath(id), query, client_build).await;
     // A start request the server refused (C-08 M5 row 4).
     if let Err(error) = &served {
         start_attempts.refused(
@@ -3308,6 +3353,7 @@ async fn serve_stream_mp4(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Query(q): Query<StreamQuery>,
+    client_build: String,
 ) -> Result<Response, ApiError> {
     let mut file = load_file(&state, id).await?;
     file.audio_offset_ms = if file.audio_streams.is_empty() {
@@ -3374,13 +3420,14 @@ async fn serve_stream_mp4(
         },
         "progressive delivery narrowed requested playback policy"
     );
-    crate::playstart::note_playback_started(
+    crate::playstart::note_request_started(
         &state,
         user.id,
         &user.username,
         id,
         crate::delivery::Method::Remux,
         q.stream.as_deref(),
+        client_build,
     );
     let readrate = readrate_setting(&state).await;
     // A remux copies the video untouched, so the wire and the source read both
@@ -3697,7 +3744,7 @@ pub(crate) async fn serve_original_file_range(
     // replicated owner is bound to this exact object before its first read.
     let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(|_| ApiError::NotFound("file on disk"))?;
     let body = crate::source_custody::file_body(source, start, length, request)
         .await
         .map_err(ApiError::Internal)?;

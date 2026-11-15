@@ -1105,6 +1105,18 @@ struct DetailView: View {
 
     @ViewBuilder
     private func content(_ detail: ItemDetail) -> some View {
+        if detail.item.hasOffloadedLeaves {
+            VStack(alignment: .leading, spacing: 16) {
+                OffloadBanner(item: detail.item) { Task { self.detail = try? await model.itemDetail(itemId) } }
+                detailBody(detail)
+            }
+        } else {
+            detailBody(detail)
+        }
+    }
+
+    @ViewBuilder
+    private func detailBody(_ detail: ItemDetail) -> some View {
         #if os(tvOS)
         if Self.presentation(kind: detail.item.kind, compact: false) == .tvSeries {
             tvSeriesContent(detail)

@@ -120,6 +120,29 @@ fn probe_invocation(path: &Path) -> ProbeInvocation {
 /// never a wildcard that matches one.
 pub const REPORTER_FIELD: &str = "plurx_probe_reporter";
 
+/// Every field the application grafts onto a stored FFprobe document after
+/// the scan (parameter-set census, content encoding, Dolby Vision title and
+/// FEL facts, pending FEL requests and variants, the reporter stamp) is named
+/// under this prefix, at the document root, and FFprobe itself never emits a
+/// key that starts with it. A key is an application field by its name, so a
+/// new graft is excluded from the source-identity comparison without anyone
+/// having to list it.
+///
+/// Two rules follow, for whoever adds a graft. Write it at the root under
+/// this prefix (`store_probe_writes_stay_in_the_application_namespace`
+/// checks the store's literal paths). And never graft a fact that identifies
+/// the source bytes here: the comparison ignores this namespace by design,
+/// so such a fact belongs among the FFprobe measurements it compares.
+pub const APPLICATION_FIELD_PREFIX: &str = "plurx_";
+
+/// Whether a root key of a stored probe is application metadata rather than
+/// an FFprobe measurement of the source. The reporter stamp is application
+/// metadata too, but the comparison reads it to tell two builds apart, so it
+/// is the one application field a comparison keeps.
+pub fn is_application_graft(key: &str) -> bool {
+    key.starts_with(APPLICATION_FIELD_PREFIX) && key != REPORTER_FIELD
+}
+
 /// A reporter name longer than this is truncated. The string comes from an
 /// external executable and is stored on every file row.
 const REPORTER_MAX_CHARS: usize = 160;
@@ -2172,5 +2195,61 @@ pub(crate) mod tests {
         ] {
             assert_eq!(ScanType::from_field_order(value), expected, "{value:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    /// Every literal JSON path the store writes into or reads from
+    /// `probe_json` is an FFprobe section or a root key in the application
+    /// namespace. A graft written outside the namespace would make every
+    /// held-source comparison of that title refuse an unchanged source.
+    /// Paths built with `format!` resolve to the graft constants, which the
+    /// comparison's own tests hold to the namespace.
+    #[test]
+    fn store_probe_writes_stay_in_the_application_namespace() {
+        let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store")];
+        let mut checked = 0;
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("store sources") {
+                let path = entry.expect("store entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("store source");
+                for (at, _) in source.match_indices("probe_json") {
+                    let rest = source[at + "probe_json".len()..].trim_start();
+                    let Some(rest) = rest.strip_prefix(',') else {
+                        continue;
+                    };
+                    let Some(rest) = rest.trim_start().strip_prefix("'$.") else {
+                        continue;
+                    };
+                    let key: String = rest
+                        .chars()
+                        .take_while(|c| {
+                            c.is_ascii_alphanumeric() || *c == '_' || *c == '{' || *c == '}'
+                        })
+                        .collect();
+                    if key.starts_with('{') {
+                        continue;
+                    }
+                    assert!(
+                    key == "chapters" || key == "streams" || key.starts_with(super::APPLICATION_FIELD_PREFIX),
+                    "{}: probe_json path '$.{key}' is neither an FFprobe section nor an application graft",
+                    path.display()
+                );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 20,
+            "the scan found only {checked} literal probe_json paths"
+        );
     }
 }

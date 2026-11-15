@@ -97,7 +97,11 @@ the mechanical reason the capability is not a judgement call from here.
 
 ## Decisions taken without the owner present
 
-1. **Tunneling: the successor inherits the incumbent's setting.** On a
+1. **Tunneling: the successor inherits the incumbent's setting.** *Superseded
+   2026-11-12: successors are built untunneled. On the Google TV Streamer the
+   parked tunneled successor's audio output made the MS12 HAL invalidate the
+   incumbent's HW_AV_SYNC stream; the incumbent stalled with runway in hand and
+   the overlap bound abandoned the switch. The original reasoning follows.* On a
    television that means the successor is tunneled too, and that reproduces
    M5.5's only hard failure rather than dodging it. The alternative — forcing
    tunneling off on the successor — would probably make that device pass, but

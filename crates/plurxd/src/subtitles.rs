@@ -1107,8 +1107,14 @@ async fn cluster_vtt_into(
         source_mtime: file.mtime,
         pipeline_version: crate::state::subtitle_source_pipeline_version().await,
     };
+    let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
     let mut request = match store
-        .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+        .enqueue_or_promote_subtitle_source_with(
+            &stamp,
+            "foreground",
+            subtitle_clock_ms(),
+            live.as_deref(),
+        )
         .await
     {
         Ok(Some(request)) => {
@@ -1136,7 +1142,12 @@ async fn cluster_vtt_into(
                     crate::telemetry::SubtitleSourceMetric::Repair,
                 );
                 request = match store
-                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .enqueue_or_promote_subtitle_source_with(
+                        &stamp,
+                        "foreground",
+                        subtitle_clock_ms(),
+                        live.as_deref(),
+                    )
                     .await
                 {
                     Ok(Some(request)) => request,
@@ -1191,9 +1202,10 @@ async fn cluster_vtt_into(
             "queued" if started.elapsed() >= Duration::from_secs(20) && !self_claimed => {
                 self_claimed = true;
                 let runtime_cache = access.root().parent().unwrap_or(access.root());
-                let claimed = jobs
-                    .self_claim_subtitle_source(&request.request_id, runtime_cache)
-                    .await;
+                // Keep the durable job future out of the VTT reader until a self-claim is due.
+                let claimed =
+                    Box::pin(jobs.self_claim_subtitle_source(&request.request_id, runtime_cache))
+                        .await;
                 if !claimed
                     && store
                         .analysis_request(&request.request_id)
@@ -2001,8 +2013,14 @@ async fn cluster_wait_burn(
             _ => return Ok(StoredBurn::Extract),
         }
     }
+    let live = crate::background_jobs::analysis_reconcile::live_engines_snapshot();
     let mut request = match store
-        .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+        .enqueue_or_promote_subtitle_source_with(
+            &stamp,
+            "foreground",
+            subtitle_clock_ms(),
+            live.as_deref(),
+        )
         .await
     {
         Ok(Some(request)) => {
@@ -2031,7 +2049,12 @@ async fn cluster_wait_burn(
                     crate::telemetry::SubtitleSourceMetric::Repair,
                 );
                 request = match store
-                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .enqueue_or_promote_subtitle_source_with(
+                        &stamp,
+                        "foreground",
+                        subtitle_clock_ms(),
+                        live.as_deref(),
+                    )
                     .await
                 {
                     Ok(Some(request)) => request,
@@ -2800,6 +2823,16 @@ async fn write_empty_vtt(tmp: &Path) -> Result<(), String> {
 /// FFmpeg's start time for the original source — what its default timeline
 /// subtracts — measured by the same build that converts the subset. One
 /// probe per source identity: windows ask for it every 200 seconds.
+pub(crate) fn parse_source_start_seconds(text: &str) -> Option<f64> {
+    Some(match text.trim() {
+        "" | "N/A" => 0.0,
+        value => value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())?,
+    })
+}
+
 async fn source_start_seconds(
     source: &crate::fragment_index_cluster::SourceFence,
     file: &MediaFile,
@@ -2867,13 +2900,7 @@ async fn source_start_seconds(
         return None;
     }
     let text = String::from_utf8_lossy(&out.1);
-    let start = match text.trim() {
-        "" | "N/A" => 0.0,
-        value => value
-            .parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite())?,
-    };
+    let start = parse_source_start_seconds(&text)?;
     let mut starts = starts
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3301,6 +3328,51 @@ where
 /// Extract a playback text window. Indexed Matroska seeks skip preceding
 /// clusters. Copy timestamps without output -ss keeps one absolute timeline
 /// on both old and new FFmpeg; Rust filters preroll without rebasing cues.
+/// Shared window argv; the caller supplies its held input and owns the child.
+pub(crate) fn held_window_command(
+    source: &std::fs::File,
+    input: &Path,
+    index: i64,
+    anchor_seconds: i64,
+    end: i64,
+    indexed: bool,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
+    command.args(["-hide_banner", "-loglevel", "error"]);
+    if indexed {
+        command.args([
+            "-copyts",
+            "-start_at_zero",
+            "-ss",
+            &anchor_seconds.saturating_sub(60).max(0).to_string(),
+        ]);
+    }
+    command.arg("-i").arg(input);
+    // Output -ss rebases subtitles on FFmpeg 5 but not 8. With copyts and
+    // no output seek both emit the full-extraction timeline, even when the
+    // first cue is sparse or the container starts at a nonzero timestamp.
+    if !indexed {
+        command.args(["-ss", &anchor_seconds.to_string()]);
+    }
+    command
+        .args([
+            "-to",
+            &end.to_string(),
+            "-map",
+            &format!("0:s:{index}"),
+            "-f",
+            "webvtt",
+        ])
+        .arg("pipe:1")
+        .stdin(std::process::Stdio::null())
+        // Same reason as the whole-track extractor: the bound is a kill, not
+        // merely a stopped wait, or a wedged ffmpeg keeps the stalled mount
+        // open after the future is dropped.
+        .kill_on_drop(true);
+    command
+}
+
 pub(crate) async fn extract_vtt_window(
     tmp: &Path,
     file: &MediaFile,
@@ -3363,40 +3435,9 @@ pub(crate) async fn extract_vtt_window(
     let input = input_bridge
         .as_ref()
         .map_or(input, |bridge| PathBuf::from(bridge.url()));
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
-    command.args(["-hide_banner", "-loglevel", "error"]);
     let indexed = crate::subtitle_ranges::indexed_text(file, index);
-    if indexed {
-        command.args([
-            "-copyts",
-            "-start_at_zero",
-            "-ss",
-            &anchor_seconds.saturating_sub(60).max(0).to_string(),
-        ]);
-    }
-    command.arg("-i").arg(&input);
-    // Output -ss rebases subtitles on FFmpeg 5 but not 8. With copyts and
-    // no output seek both emit the full-extraction timeline, even when the
-    // first cue is sparse or the container starts at a nonzero timestamp.
-    if !indexed {
-        command.args(["-ss", &anchor_seconds.to_string()]);
-    }
-    command
-        .args([
-            "-to",
-            &end.to_string(),
-            "-map",
-            &format!("0:s:{index}"),
-            "-f",
-            "webvtt",
-        ])
-        .arg("pipe:1")
-        .stdin(std::process::Stdio::null())
-        // Same reason as the whole-track extractor: the bound is a kill, not
-        // merely a stopped wait, or a wedged ffmpeg keeps the stalled mount
-        // open after the future is dropped.
-        .kill_on_drop(true);
+    let mut command =
+        held_window_command(&source.handle, &input, index, anchor_seconds, end, indexed);
     #[cfg(windows)]
     if input_bridge.is_none() {
         crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
@@ -3440,6 +3481,27 @@ pub(crate) async fn extract_vtt_window(
     Ok(())
 }
 
+/// Conversion argv for a cue-index subset, shared by Local and Source owners.
+pub(crate) fn held_sparse_window_command(
+    source: &std::fs::File,
+    input: &Path,
+    input_args: &[String],
+    index: i64,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(source, 3)]);
+    command
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(input_args)
+        .arg("-i")
+        .arg(input)
+        .args(["-map", &format!("0:s:{index}"), "-f", "webvtt"])
+        .arg("pipe:1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+
 async fn extract_sparse_window(
     tmp: &Path,
     sparse: &SparseInput,
@@ -3455,17 +3517,7 @@ async fn extract_sparse_window(
     let input = PathBuf::from("/dev/fd/3");
     #[cfg(windows)]
     let input = crate::ffmpeg::windows_source_path(&sparse.handle)?;
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&sparse.handle, 3)]);
-    command
-        .args(["-hide_banner", "-loglevel", "error"])
-        .args(&sparse.input_args)
-        .arg("-i")
-        .arg(&input)
-        .args(["-map", &format!("0:s:{index}"), "-f", "webvtt"])
-        .arg("pipe:1")
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
+    let mut command = held_sparse_window_command(&sparse.handle, &input, &sparse.input_args, index);
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&sparse.handle, &input)?;
     let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
@@ -3975,8 +4027,11 @@ where
     // extractor future (killing its child) while this frame still owns the
     // temp file and can delete it, so a wedge leaves the cache dir as clean as
     // an ordinary failure does.
-    let extraction =
-        tokio::time::timeout(limits.timeout, extract(tmp.to_owned(), file.clone(), index));
+    // Keep the extractor's state off the stack as the timeout moves into the cancellation race.
+    let extraction = tokio::time::timeout(
+        limits.timeout,
+        Box::pin(extract(tmp.to_owned(), file.clone(), index)),
+    );
     let extracted = match cancel {
         Some(cancel) => {
             // The cleanup deliberately happens *after* the select expression

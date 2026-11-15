@@ -224,6 +224,11 @@ incumbent's. Two defensible answers:
   means the successor is not the pipeline that will serve after the switch, so
   a successful prime proves less than it appears to.
 
+*Superseded 2026-11-12: the second is now built (`requestsTunneling`). On the
+Google TV Streamer a parked tunneled successor's audio output made the MS12 HAL
+invalidate the incumbent's HW_AV_SYNC stream; the successor that primes
+untunneled is also the one that serves after commit.*
+
 **Pick the first**, and record the second as the open question it is. A prime
 that succeeds on a pipeline unlike the one that serves is the same class of
 error as M5.5's rejected instrument set: a measurement that cannot fail. If

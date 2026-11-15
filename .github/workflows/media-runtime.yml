@@ -1,0 +1,277 @@
+name: publish media runtime
+run-name: media runtime ${{ github.sha }}
+
+# Media dependency maintenance is explicit; application commits never start it.
+on:
+  workflow_dispatch:
+    inputs:
+      audited_amd64:
+        description: Build the reviewed Dolby amd64 media base required for releases (false builds a local-only ordinary base)
+        type: boolean
+        default: true
+
+concurrency:
+  group: media-runtime
+  cancel-in-progress: false
+
+env:
+  RUNTIME_IMAGE: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-media-runtime
+
+jobs:
+  platform:
+    name: media dependencies (${{ matrix.arch }})
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs_on: '["ci-nonvoter-heavy-amd64"]'
+          - arch: arm64
+            runs_on: '["self-hosted", "Linux", "ARM64", "lab", "release-arm64"]'
+    steps:
+      - name: Verify effective nonvoter resource bounds
+        if: matrix.arch == 'amd64'
+        shell: sh
+        run: |
+          set -eu
+          cgroup_membership=/proc/self/cgroup
+          cgroup_mount=/sys/fs/cgroup
+          # Exactly one unified (cgroup v2) line; unrelated v1 hierarchies such as a
+          # VPN's net_cls may precede it on hybrid hosts and are ignored.
+          relative=
+          while IFS=: read -r hierarchy controllers path; do
+            if [ "$hierarchy" = 0 ]; then
+              if [ -n "$relative" ] || [ -n "$controllers" ]; then exit 1; fi
+              relative=$path
+            fi
+          done < "$cgroup_membership"
+          case "$relative" in /*) ;; *) exit 1 ;; esac
+          case "/$relative/" in */../*|*/./*) exit 1 ;; esac
+          cgroup_root="$cgroup_mount$relative"
+          for limit in memory.max=21474836480 memory.swap.max=0 'cpu.max=400000 100000' cpuset.cpus.effective=0-3 pids.max=4096; do
+            name=${limit%%=*}
+            expected=${limit#*=}
+            actual="$(cat "$cgroup_root/$name")"
+            if [ "$actual" != "$expected" ]; then
+              printf '%s\n' "Unexpected effective $name: $actual (required $expected)" >&2
+              exit 1
+            fi
+          done
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: media-builder
+        uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          name: plurx-media-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+          buildkitd-config-inline: |
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
+      - name: Bound the AMD media builder before compilation
+        if: matrix.arch == 'amd64'
+        env:
+          BUILDER: ${{ steps.media-builder.outputs.name }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER" =~ ^plurx-[a-z0-9_.-]+$ ]] || exit 1
+          builder_info="$(docker buildx inspect "$BUILDER" | python3 -c 'import sys; data = sys.stdin.buffer.read(65537); len(data) <= 65536 or sys.exit("Buildx inspection exceeds 64 KiB"); sys.stdout.buffer.write(data)')"
+          printf '%s\n' "$builder_info" | awk -v expected="$BUILDER" '
+            /^Nodes:[[:space:]]*$/ { nodes = 1 }
+            !nodes && /^[[:space:]]*Name[[:space:]]*:/ {
+              names++
+              if ($0 !~ /^Name:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Name:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != expected) invalid = 1
+            }
+            !nodes && /^[[:space:]]*Driver[[:space:]]*:/ {
+              drivers++
+              if ($0 !~ /^Driver:[[:space:]]+/) invalid = 1
+              value = $0
+              sub(/^Driver:[[:space:]]*/, "", value)
+              sub(/[[:space:]]*$/, "", value)
+              if (value != "docker-container") invalid = 1
+            }
+            END { if (names != 1 || drivers != 1 || !nodes || invalid) exit 1 }
+          '
+          container="buildx_buildkit_${BUILDER}0"
+          test "$(docker inspect --format '{{.Name}}' "$container")" = "/$container"
+          # This dedicated nonvoter builder shares the verified 20-GiB budget.
+          # Bound its sibling container independently of the runner service.
+          docker update --memory 20g --memory-swap 20g --pids-limit 4096 --cpuset-cpus 0-3 --cpu-period 100000 --cpu-quota 400000 "$container"
+          test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.CpuQuota}} {{.HostConfig.CpuPeriod}} {{.HostConfig.CpusetCpus}} {{.HostConfig.PidsLimit}}' "$container")" = '21474836480 21474836480 400000 100000 0-3 4096'
+      - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Build and export the audited amd64 media package
+        if: matrix.arch == 'amd64' && inputs.audited_amd64
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.media-builder.outputs.name }}
+          context: .
+          file: Dockerfile.media-runtime
+          target: linux-dolby-package-export
+          platforms: linux/amd64
+          outputs: type=tar,dest=linux-dolby-export.tar
+          provenance: false
+          sbom: false
+      - name: Validate and unpack the complete audited media export
+        if: matrix.arch == 'amd64' && inputs.audited_amd64
+        run: python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export
+      - name: Build and publish media dependencies
+        id: runtime
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.media-builder.outputs.name }}
+          context: .
+          file: Dockerfile.media-runtime
+          target: ${{ matrix.arch == 'amd64' && inputs.audited_amd64 && 'runtime-assets-dolby-amd64' || 'media-runtime' }}
+          build-contexts: ${{ matrix.arch == 'amd64' && inputs.audited_amd64 && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ env.RUNTIME_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      # The helper bundle is application source and is not built here. Only
+      # the dependencies it compiles and links against are published.
+      - name: Build and publish DV helper build dependencies
+        id: dv-dependencies
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.media-builder.outputs.name }}
+          context: .
+          file: Dockerfile.media-runtime
+          target: dv-processing-dependencies
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ env.RUNTIME_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Stand in for the daemon binaries the candidate qualification does not build
+        run: |
+          set -euo pipefail
+          mkdir media-qualification-build
+          for name in plurxd plurxd.dwp plurx-cluster-check plurx-cluster-check.dwp; do
+            printf '#!/bin/sh\n# media qualification placeholder, never shipped\nexit 0\n' > "media-qualification-build/$name"
+          done
+          # The image build asks the daemon to accept the bundle. No daemon is
+          # built here, so the placeholder answers; application builds ask the real one.
+          chmod 0755 media-qualification-build/plurxd
+      # The application recipe, unchanged, against both candidates: the bundle
+      # must compile from this revision's tools/dv_processing against the new
+      # dependencies and every helper must load in the new runtime.
+      - name: Qualify the application helper bundle against both candidates
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          builder: ${{ steps.media-builder.outputs.name }}
+          context: .
+          file: Dockerfile
+          target: runtime
+          build-contexts: |
+            dv-processing-dependencies=docker-image://${{ env.RUNTIME_IMAGE }}@${{ steps.dv-dependencies.outputs.digest }}
+            runtime-assets=docker-image://${{ env.RUNTIME_IMAGE }}@${{ steps.runtime.outputs.digest }}
+            build=./media-qualification-build
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=cacheonly
+      - name: Smoke the published media platform
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+          DV_DEPENDENCIES_DIGEST: ${{ steps.dv-dependencies.outputs.digest }}
+          AUDITED_AMD64: ${{ matrix.arch == 'amd64' && inputs.audited_amd64 }}
+        run: |
+          set -euo pipefail
+          image="$RUNTIME_IMAGE@$RUNTIME_DIGEST"
+          docker pull "$image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = 'linux/${{ matrix.arch }}'
+          docker run --rm "$image" /usr/lib/jellyfin-ffmpeg/ffmpeg -version
+          docker run --rm "$image" /usr/local/lib/plurx/ffprobe -version
+          docker run --rm "$image" /usr/local/bin/subtitle-engine/whisper-cli --version
+          if test "$AUDITED_AMD64" = true; then
+            docker run --rm --entrypoint sh "$image" -eu -c '
+              provenance=/usr/lib/jellyfin-ffmpeg/provenance
+              test -s "$provenance/linux-dolby-package.json"
+              test -s "$provenance/shipping-system-elf-sha256.txt"
+              sha256sum -c "$provenance/shipping-system-elf-sha256.txt"
+              if dpkg-query -W -f="\${db:Status-Status}" libmfx1 2>/dev/null | grep -qx installed; then
+                echo "Audited media base still contains the competing Debian Media SDK" >&2
+                exit 1
+              fi
+            '
+          fi
+          mkdir -p media-digests
+          printf '%s\n' "$RUNTIME_DIGEST" > 'media-digests/${{ matrix.arch }}.digest'
+          printf '%s\n' "$DV_DEPENDENCIES_DIGEST" > 'media-digests/${{ matrix.arch }}.dv-dependencies.digest'
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: media-digest-${{ matrix.arch }}
+          path: media-digests/
+          retention-days: 30
+
+  index:
+    name: publish private index and candidate receipt
+    needs: platform
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          pattern: media-digest-*
+          merge-multiple: true
+          path: media-digests
+      - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          buildkitd-config-inline: |
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
+      - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Publish immutable private index and prepare public-copy receipt
+        env:
+          AUDITED_AMD64: ${{ inputs.audited_amd64 }}
+        run: |
+          set -euo pipefail
+          amd64=$(cat media-digests/amd64.digest)
+          arm64=$(cat media-digests/arm64.digest)
+          [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          tag="$RUNTIME_IMAGE:source-$GITHUB_SHA"
+          docker manifest create --insecure --amend "$tag" "$RUNTIME_IMAGE@$amd64" "$RUNTIME_IMAGE@$arm64"
+          digest=$(docker manifest push --insecure --purge "$tag" | tail -1)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          dv_amd64=$(cat media-digests/amd64.dv-dependencies.digest)
+          dv_arm64=$(cat media-digests/arm64.dv-dependencies.digest)
+          [[ "$dv_amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$dv_arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          dv_tag="$RUNTIME_IMAGE:dv-dependencies-source-$GITHUB_SHA"
+          docker manifest create --insecure --amend "$dv_tag" "$RUNTIME_IMAGE@$dv_amd64" "$RUNTIME_IMAGE@$dv_arm64"
+          dv_digest=$(docker manifest push --insecure --purge "$dv_tag" | tail -1)
+          [[ "$dv_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p media-candidate
+          printf 'Source-Revision: %s\nMedia-Runtime: %s@%s\nAudited-amd64: %s\namd64: %s\narm64: %s\n' \
+            "$GITHUB_SHA" "$RUNTIME_IMAGE" "$digest" "$AUDITED_AMD64" "$amd64" "$arm64" > media-candidate/receipt.txt
+          printf 'DV-Build-Dependencies: %s@%s\ndv-dependencies-amd64: %s\ndv-dependencies-arm64: %s\n' \
+            "$RUNTIME_IMAGE" "$dv_digest" "$dv_amd64" "$dv_arm64" >> media-candidate/receipt.txt
+          printf '\nNext: run the public media-runtime copy workflow once for each of the two source indexes above.\n' >> media-candidate/receipt.txt
+          printf 'After anonymous public verification, run: scripts/media-runtime pin ghcr.io/pjunod/cinema-media-runtime@%s\n' "$digest" >> media-candidate/receipt.txt
+          printf 'and, from the published source revision: scripts/media-runtime pin-dv-dependencies ghcr.io/pjunod/cinema-media-runtime@%s\n' "$dv_digest" >> media-candidate/receipt.txt
+          printf 'Do not commit a Dockerfile pin that is available only in the private registry.\n' >> media-candidate/receipt.txt
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: media-runtime-candidate
+          path: media-candidate/
+          retention-days: 90

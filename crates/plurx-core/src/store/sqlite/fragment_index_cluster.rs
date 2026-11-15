@@ -4,8 +4,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use super::SqliteStore;
 use crate::error::StoreError;
 use crate::store::fragment_index_cluster::{
-    bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
-    bounded_analysis_max_attempts, valid_subtitle_source_publication,
+    analysis_request_id_is_valid, bounded_analysis_backoff_base_secs,
+    bounded_analysis_backoff_max_secs, bounded_analysis_max_attempts,
+    new_analysis_request_id_is_valid, valid_subtitle_source_publication,
 };
 use crate::store::fragment_index_cluster::{ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE};
 use crate::store::fragment_index_cluster::{
@@ -314,8 +315,7 @@ fn valid_hex_digest(value: &str) -> bool {
 }
 
 fn valid_request(request: &NewAnalysisRequest) -> bool {
-    !request.request_id.is_empty()
-        && request.request_id.len() <= 64
+    new_analysis_request_id_is_valid(&request.request_id)
         && request.file_id > 0
         && request.source_size >= 0
         && matches!(
@@ -406,11 +406,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
-    async fn enqueue_or_promote_subtitle_source(
+    async fn enqueue_or_promote_subtitle_source_with(
         &self,
         stamp: &SubtitleSourceStamp,
         priority: &str,
         now_ms: i64,
+        live_engines: Option<&super::super::LiveAnalysisEngines>,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if stamp.file_id <= 0
             || stamp.source_size < 0
@@ -429,6 +430,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
         self.retire_subtitle_source_ready(stamp, now_ms).await?;
         let stamp = stamp.clone();
         let priority = priority.to_owned();
+        let live = super::super::live_engines_param(live_engines);
+        // The same cap as `enqueue_analysis_request_with`: runnable work holds
+        // the ceiling (?9 + the viewer's headroom ?10), stranded
+        // fragment-index backlog (?11 the live digests) only the hard bound
+        // (?12 x the ceiling).
+        let stranded = super::super::fragment_index_cluster::analysis_request_stranded_sql("?11");
+        let insert = format!("INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT ?1,?2,?3,?4,'subtitle_source',?5,'',?1,'',?6,?7,0,'','queued',NULL,0,NULL,0,?8,NULL,NULL,0,?8,?8 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?2 AND size = ?3 AND mtime = ?4) AND ?9 + CASE WHEN ?6 = 'foreground' THEN ?10 ELSE 0 END > (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted') AND NOT {stranded}) AND ?9 * ?12 + CASE WHEN ?6 = 'foreground' THEN ?10 ELSE 0 END > (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted'))");
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let existing = tx.query_row(
@@ -466,8 +474,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 return Ok(Some(request));
             }
             tx.execute(
-                "INSERT INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT ?1,?2,?3,?4,'subtitle_source',?5,'',?1,'',?6,?7,0,'','queued',NULL,0,NULL,0,?8,NULL,NULL,0,?8,?8 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?2 AND size = ?3 AND mtime = ?4) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < ?9 + CASE WHEN ?6 = 'foreground' THEN ?10 ELSE 0 END",
-                params![generation, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, priority, if priority == "foreground" { "playback" } else { "background" }, now_ms, MAX_ANALYSIS_REQUESTS, super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM],
+                &insert,
+                params![generation, stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version, priority, if priority == "foreground" { "playback" } else { "background" }, now_ms, MAX_ANALYSIS_REQUESTS, super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM, live, super::super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR],
             )?;
             let result = tx.query_row(&format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"), params![generation], request_from_row).optional()?;
             tx.commit()?;
@@ -576,13 +584,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
             Ok(())
         }).await
     }
-    async fn enqueue_analysis_request(
+    async fn enqueue_analysis_request_with(
         &self,
         request: &NewAnalysisRequest,
+        live_engines: Option<&super::super::LiveAnalysisEngines>,
     ) -> Result<AnalysisRequest, StoreError> {
         if !valid_request(request) {
             return Err(StoreError::Task("invalid analysis request".to_owned()));
         }
+        let live = super::super::live_engines_param(live_engines);
+        let stranded = super::super::fragment_index_cluster::analysis_request_stranded_sql("?18");
         let request = request.clone();
         let semantic_fingerprint = crate::segplan::argv_fingerprint(&[
             "timeline-annotations".to_owned(),
@@ -591,7 +602,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
             transaction.execute(
-                "INSERT INTO analysis_requests
+                &format!(
+                    "INSERT INTO analysis_requests
                     (request_id, file_id, source_size, source_mtime, component,
                      pipeline_version, video_identity, requested_generation,
                      expected_predecessor_generation,
@@ -610,7 +622,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                            WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
                              AND argv_fingerprint = ?13 AND publication_priority = 'forced'
                         ) THEN 'ready' ELSE 'queued' END,
-                        NULL, 0, NULL, 0, ?14,
+                        NULL, 0, NULL,
+                    -- A coordinator retired as stranded hands its attempts on.
+                    COALESCE((SELECT MAX(stranded.attempts) FROM analysis_requests stranded
+                      WHERE stranded.file_id = ?2 AND stranded.source_size = ?3
+                        AND stranded.source_mtime = ?4 AND stranded.component = ?5
+                        AND stranded.pipeline_version = ?6 AND stranded.video_identity = ?7
+                        AND stranded.requested_generation = ?8
+                        AND stranded.target_node_id = ?12 AND stranded.state = 'cancelled'
+                        AND stranded.last_error_code = 'coordination_stranded'), 0),
+                    ?14,
                         CASE WHEN ?11 = 0 AND ?5 = 'skip_markers' THEN (
                           SELECT generation_id FROM timeline_annotation_sets
                            WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
@@ -628,10 +649,20 @@ impl ClusterFragmentIndexStore for SqliteStore {
                       AND json_extract(prediction.request_json,'$.component') = ?5
                       AND json_extract(prediction.request_json,'$.pipeline_version') = ?6
                       AND json_extract(prediction.request_json,'$.target_node_id') = ?12))
-                    AND (SELECT COUNT(*) FROM analysis_requests
+                    -- Runnable work holds the ceiling; a stranded
+                    -- fragment-index request (`LiveAnalysisEngines`, ?18 the
+                    -- live digests) is backlog and holds only the hard bound
+                    -- (?19 x the ceiling). ?18 NULL: unknown, every active
+                    -- row counts.
+                    AND ?16 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
+                                   THEN ?17 ELSE 0 END
+                      > (SELECT COUNT(*) FROM analysis_requests
+                          WHERE state IN ('queued', 'running', 'submitted')
+                            AND NOT {stranded})
+                    AND ?16 * ?19 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
+                                        THEN ?17 ELSE 0 END
+                      > (SELECT COUNT(*) FROM analysis_requests
                           WHERE state IN ('queued', 'running', 'submitted'))
-                        < ?16 + CASE WHEN ?9 = 'foreground' AND ?10 = 'playback'
-                                     THEN ?17 ELSE 0 END
                     AND (?11 = 0 OR ?5 <> 'fragment_index' OR NOT EXISTS (
                       SELECT 1 FROM analysis_requests legacy
                        WHERE legacy.file_id = ?2 AND legacy.source_size = ?3
@@ -657,9 +688,14 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         WHERE file_id = ?2 AND source_size = ?3 AND source_mtime = ?4
                           AND component = ?5 AND pipeline_version = ?6
                           AND video_identity = ?7
-                          AND requested_generation = ?8 AND target_node_id = ?12)
+                          AND requested_generation = ?8 AND target_node_id = ?12
+                      -- A coordinator retired as stranded was never worked;
+                      -- it does not use up its generation.
+                      AND NOT (state = 'cancelled'
+                        AND last_error_code = 'coordination_stranded'))
                     ))
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT DO NOTHING"
+                ),
                 params![
                     request.request_id,
                     request.file_id,
@@ -678,6 +714,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     request.created_at_ms,
                     MAX_ANALYSIS_REQUESTS,
                     super::super::fragment_index_cluster::PLAYBACK_ANALYSIS_HEADROOM,
+                    live,
+                    super::super::fragment_index_cluster::ANALYSIS_BACKLOG_BOUND_FACTOR,
                 ],
             )?;
             if request.force_rebuild {
@@ -818,6 +856,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
@@ -826,6 +865,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
         lease_expires_ms: i64,
         viewer_only: bool,
         targeted_only: bool,
+        cross_node: bool,
+        excluded_video_identities: &[String],
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -834,6 +875,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
         {
             return Err(StoreError::Task("invalid analysis claim".to_owned()));
         }
+        let excluded = super::super::fragment_index_cluster::analysis_claim_exclusions_json(
+            excluded_video_identities,
+        )?;
         let node_id = node_id.to_owned();
         let pipeline_version = pipeline_version.map(str::to_owned);
         self.with_conn(move |conn| {
@@ -846,6 +890,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
             } else {
                 "(component IN ('skip_markers','subtitle_source') AND target_node_id = '')"
             };
+            // Another node's fragment-index row, for this exact engine.
+            let cross = if cross_node && pipeline_version.is_some() {
+                super::super::fragment_index_cluster::analysis_cross_node_clause("?1")
+            } else {
+                "0".to_owned()
+            };
+            let exclusion = super::super::fragment_index_cluster::analysis_executor_exclusion_clause(
+                "?1", "?6",
+            );
+            let order = super::super::fragment_index_cluster::analysis_claim_order("?1", "?3", "?4");
             let max_attempts = configured_max_attempts(conn)?;
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
             let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
@@ -897,21 +951,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 .query_row(
                     &format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
-                          WHERE (target_node_id = ?1 OR {untargeted})
+                          WHERE (target_node_id = ?1 OR {untargeted} OR {cross})
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
-                            AND {capacity} AND {viewer}
-                          ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
-                            OR (component = 'fragment_index' AND EXISTS (
-                                SELECT 1 FROM background_job_waiters waiter
-                                WHERE waiter.request_scope = 'playback-analysis'
-                                  AND waiter.job_id = analysis_requests.request_id
-                                  AND waiter.state = 'pending' AND waiter.deadline_ms > ?3))
-                            THEN 0 ELSE 1 END,
-                                   created_at_ms - CASE WHEN priority = 'forced'
-                                     THEN ?4 ELSE 0 END,
-                                   created_at_ms, request_id LIMIT 1"
+                            AND pipeline_version NOT LIKE 'coordination-contract:%'
+                            AND {capacity} AND {viewer} AND {exclusion}
+                          ORDER BY {order} LIMIT 1"
                     ),
                     params![
                         node_id,
@@ -919,6 +965,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         now_ms,
                         super::super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS,
                         pipeline_version.as_deref(),
+                        excluded,
                     ],
                     request_from_row,
                 )
@@ -935,6 +982,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE request_id = ?4 AND fence = ?5
                     AND state = 'queued' AND not_before_ms <= ?3
                     AND (?6 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?6)
+                            AND pipeline_version NOT LIKE 'coordination-contract:%'
                     AND {capacity} AND {viewer}"),
                 params![
                     node_id,
@@ -1480,10 +1528,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
     async fn reopenable_analysis_requests(
         &self,
         component: Option<&str>,
+        error_code: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AnalysisRequest>, StoreError> {
         let limit = limit.clamp(1, MAX_LIST_ROWS);
         let component = component.map(str::to_owned);
+        let error_code = error_code.map(str::to_owned);
         self.with_read(move |conn| {
             let mut statement = conn.prepare(&format!(
                 // Numbered to match the replicated twin, which must bind
@@ -1492,6 +1542,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE terminal.state IN ('failed', 'cancelled')
                     AND terminal.force_rebuild = 0
                     AND (?1 IS NULL OR terminal.component = ?1)
+                    AND (?2 IS NULL OR terminal.last_error_code = ?2)
                     AND NOT EXISTS (
                       SELECT 1 FROM analysis_requests successor
                        WHERE successor.file_id = terminal.file_id
@@ -1502,10 +1553,33 @@ impl ClusterFragmentIndexStore for SqliteStore {
                          AND successor.video_identity = terminal.video_identity
                          AND successor.target_node_id = terminal.target_node_id
                          AND successor.state IN ('queued','running','submitted','ready'))
-                  ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT ?2"
+                  ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT ?3"
             ))?;
-            let rows = statement.query_map(params![component, limit], request_from_row)?;
+            let rows =
+                statement.query_map(params![component, error_code, limit], request_from_row)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn fragment_index_requests_for_files(
+        &self,
+        file_ids: &[i64],
+    ) -> Result<Vec<AnalysisRequest>, StoreError> {
+        let files = super::super::fragment_index_cluster::file_request_lookup_json(file_ids)?;
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_read(move |conn| {
+            let sql = super::super::fragment_index_cluster::fragment_index_requests_for_files_sql(
+                "?1",
+                REQUEST_COLS,
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement
+                .query_map(params![files], request_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
         .await
     }
@@ -1690,8 +1764,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         if candidate.repair_revision != super::super::CONTENT_ANALYSIS_REPAIR_REVISION
             || !candidate.has_valid_id()
             || candidate.eligibility != "eligible"
-            || successor_request_id.is_empty()
-            || successor_request_id.len() > 128
+            || !analysis_request_id_is_valid(successor_request_id)
         {
             return Err(StoreError::Task(
                 "invalid content-analysis repair candidate".to_owned(),

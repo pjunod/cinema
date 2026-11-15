@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "protocol-plane-export-20261112",
+  "author": "Claude Opus 5.5 session_01BCWLA1yYosvau4xhfH6R4S, executing Fable 5.2's item 9 (X1); written after X0's readout and before any X1 output",
+  "status": "Fixed before any output. Git commit time is authoritative.",
+  "trigger": "X0 (protocol-export-floor-20261112.json) decision rule met: on Michael5400 ModelB the oracle Q export's frame-mean shadow (<0.1 nit) p99 is 1.485 against PRE 2.673 (< 0.7x), full mean 0.688 vs 0.847; Michael1800 1.158 vs 1.554, 0.638 vs 0.742. PRE-Q chroma has a systematic -0.20 code bias in Cb and Cr.",
+  "hypothesis": "Feeding the encoder the plane-domain export Q (composition12 rounded to nearest per plane, chroma averaged over the luma positions that map to each BL chroma sample) removes most of the export loss and carries through the encode, lowering total error overall and in shadows.",
+  "input": "Q from make_export_oracle.py on the canonical 48-frame BL/EL capture of each fixture, wrapped as rawvideo NUT; hash bound in each recipe. Q is built from the scoring composition (identity mapping, linear NLQ), not a normative Dolby composer.",
+  "baseline": "protocol-roi-zeromean-qpm6-20261111.json arm_Z6 (identical_to protocol-roi-zeromean-20261111.json; dark block < 1.0 nit; zero-mean)",
+  "dark_offset": "-6 QP (qoffset -6/63)",
+  "arms": {"QZ6": "Q input, Z6 map and policy", "Qbase": "Q input, no map, retained single-pass policy"},
+  "controls": ["Z6 landed on PRE input", "base landed on PRE input (both from protocol-aq-psy-20261112.json runs)"],
+  "rate_rule": "as protocol-aq-psy-20261112.json (land_rate.py, [128.5,130.0] Mb/s)",
+  "readouts": "all-48 lattice both fixtures, four models: full mean, shadow mean/p99, 1-10 nit mean, frames beating F; selected-frame strict bar; 130 Mb/s screen",
+  "accept": "strict bar 16/16 and screen pass; pooled full mean <= landed Z6 - 0.02 on both fixtures in all four models; shadow frames-beating-F >= landed Z6",
+  "production_note": "A pass justifies a production export change in the FEL helper's composition-to-encoder path; that is a separate effort.",
+  "not_claimed": ["normative Dolby composition", "HRD/CPB conformance", "held-out scenes", "playback, packaging or live change"]
+}

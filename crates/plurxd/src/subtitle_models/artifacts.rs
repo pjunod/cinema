@@ -318,14 +318,10 @@ mod local {
         if variants.is_empty() {
             return Ok(None);
         }
-        if ![
-            "linux-x86_64",
-            "linux-amd64",
-            "macos-x86_64",
-            "macos-universal",
-        ]
-        .contains(&platform)
-        {
+        // Historical universal macOS engines carry qualified Intel variant metadata.
+        // Validate it on upgrade, but only Linux x86_64 can select the variant.
+        let linux_x86_64 = ["linux-x86_64", "linux-amd64"].contains(&platform);
+        if !linux_x86_64 && platform != "macos-universal" {
             return Err("packaged_engine_variants_unqualified".into());
         }
         if variants.len() != 1 {
@@ -354,7 +350,7 @@ mod local {
             return Err("packaged_engine_variants_invalid".into());
         }
         engine_dependencies(fact, platform)?;
-        Ok(avx2.then_some(fact))
+        Ok((linux_x86_64 && avx2).then_some(fact))
     }
 
     pub(super) async fn inspect_engine_at(path: PathBuf) -> Result<Engine, String> {
@@ -408,10 +404,11 @@ mod local {
                 }
             }
             let qualified_platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-                ("macos", "aarch64") => ["macos-arm64", "macos-universal"],
-                ("macos", "x86_64") => ["macos-x86_64", "macos-universal"],
-                ("linux", "aarch64") => ["linux-aarch64", "linux-arm64"],
-                ("linux", "x86_64") => ["linux-x86_64", "linux-amd64"],
+                // An engine kept from an earlier universal release still runs
+                // its arm64 slice here; Intel Macs are not supported.
+                ("macos", "aarch64") => &["macos-arm64", "macos-universal"][..],
+                ("linux", "aarch64") => &["linux-aarch64", "linux-arm64"][..],
+                ("linux", "x86_64") => &["linux-x86_64", "linux-amd64"][..],
                 _ => return Err("managed_engine_platform_unqualified".into()),
             };
             if !manifest["platform"]
@@ -1387,14 +1384,29 @@ mod local {
                 engine_cpu_variant(&manifest, &pin, "linux-x86_64", true).expect("optimized"),
                 Some(&manifest["cpu_variants"]["x86_64-avx2"])
             );
-            let mut universal = manifest.clone();
-            universal["cpu_variants"]["x86_64-avx2"]["runtime_dependencies"] =
+            // New thin macOS packages cannot carry an x86_64 variant.
+            for platform in ["macos-arm64", "macos-x86_64"] {
+                assert!(engine_cpu_variant(&manifest, &pin, platform, false).is_err());
+            }
+            // Older universal packages retained the Intel slice's variant facts.
+            let mut historical = manifest.clone();
+            historical["cpu_variants"]["x86_64-avx2"]["runtime_dependencies"] =
                 serde_json::json!(["/usr/lib/libSystem.B.dylib"]);
-            assert!(
-                engine_cpu_variant(&universal, &pin, "macos-universal", false)
-                    .expect("universal ARM")
-                    .is_none()
-            );
+            for avx2 in [false, true] {
+                assert!(
+                    engine_cpu_variant(&historical, &pin, "macos-universal", avx2)
+                        .expect("historical universal package keeps its baseline")
+                        .is_none()
+                );
+                let mut invalid = historical.clone();
+                invalid["cpu_variants"]["x86_64-avx2"]["filename"] =
+                    serde_json::json!("../external");
+                assert!(engine_cpu_variant(&invalid, &pin, "macos-universal", avx2).is_err());
+                invalid = historical.clone();
+                invalid["cpu_variants"]["x86_64-avx2"]["runtime_dependencies"] =
+                    serde_json::json!(["@rpath/libggml.dylib"]);
+                assert!(engine_cpu_variant(&invalid, &pin, "macos-universal", avx2).is_err());
+            }
             assert!(engine_cpu_variant(&manifest, &pin, "linux-aarch64", true).is_err());
             assert!(
                 engine_cpu_variant(&serde_json::json!({}), &pin, "linux-x86_64", true)
@@ -1447,12 +1459,7 @@ mod local {
             let mut manifest = pin.clone();
             manifest["binary_bytes"] = baseline_bytes.len().into();
             manifest["binary_sha256"] = format!("{:x}", Sha256::digest(baseline_bytes)).into();
-            manifest["platform"] = if cfg!(target_os = "macos") {
-                "macos-x86_64"
-            } else {
-                "linux-x86_64"
-            }
-            .into();
+            manifest["platform"] = "linux-x86_64".into();
             engine_companions(&root, &mut manifest);
             let mut fact = variant_fact(&pin, variant_bytes);
             fact["runtime_dependencies"] = manifest["runtime_dependencies"].clone();
@@ -1523,7 +1530,6 @@ mod local {
             manifest["binary_sha256"] = format!("{:x}", Sha256::digest(bytes)).into();
             manifest["platform"] = match (std::env::consts::OS, std::env::consts::ARCH) {
                 ("macos", "aarch64") => "macos-arm64",
-                ("macos", "x86_64") => "macos-x86_64",
                 ("linux", "aarch64") => "linux-aarch64",
                 ("linux", "x86_64") => "linux-x86_64",
                 _ => panic!("test requires qualified host"),

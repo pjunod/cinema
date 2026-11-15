@@ -10,7 +10,7 @@ case "$jobs" in 1|2|3|4) ;; *) echo 'helper build jobs must be 1-4' >&2; exit 2 
 rustc --version | grep -q '^rustc 1\.97\.1 '
 mkdir -p "$root/sources" "$root/include/libdovi" "$root/lib"
 python3 "$inputs/parsed-rpu/fetch_parser.py" "$root/sources"
-python3 "$inputs/libplacebo/fetch_sources.py" "$root/sources"
+python3 "$source_dir/fetch_renderer_sources.py" "$root/sources"
 ffmpeg_revision=bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa
 archive="$root/sources/ffmpeg-source.tar.gz"
 curl --proto '=https' --tlsv1.2 --fail --location --retry 2 \
@@ -25,7 +25,7 @@ cargo rustc --locked --release --jobs "$jobs" --manifest-path "$dovi/Cargo.toml"
     -p dolby_vision --features dolby_vision/capi --crate-type staticlib
 cp "$dovi/target/release/libdolby_vision.a" "$root/lib/libdovi.a"
 cp "$root/sources/include/libdovi/rpu_parser.h" "$root/include/libdovi/rpu_parser.h"
-meson setup "$root/placebo-build" "$root/sources/libplacebo-0d043c7f6f79cd3687c023454bdacbe615e4d96f" \
+meson setup "$root/placebo-build" "$root/sources/libplacebo-v7.387.0" \
     --prefix="$root/placebo" --buildtype=release -Dvulkan=enabled -Dopengl=disabled \
     -Dd3d11=disabled -Dglslang=enabled -Dshaderc=disabled -Ddovi=enabled \
     -Dlibdovi=disabled -Ddemos=false -Dtests=false -Dxxhash=enabled

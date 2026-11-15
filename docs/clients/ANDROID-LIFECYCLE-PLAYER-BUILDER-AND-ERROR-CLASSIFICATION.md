@@ -145,8 +145,9 @@ fence and a `LiveTvLease`.
 | `OfflineDownloads.cacheOnlyPlayer` `:387-395` | default | `CacheDataSource` over `PlaceholderDataSource.FACTORY` | no / no | no | no |
 
 The successor (`buildSuccessorPlayer` `:3991`) is `buildPipeline` with
-volume 0 and no surface; its tunneling inherits the incumbent's on purpose
-(comment at `:3975-3989`).
+volume 0 and no surface, and it is never tunneled (`requestsTunneling`): a
+tunneled successor took the hardware A/V sync from the incumbent on the Google
+TV Streamer (2026-11-12).
 
 ### 2.4 Startup and polling
 

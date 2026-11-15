@@ -137,6 +137,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         validate_sql(sql)?;
         self.client()
             .execute(
+                "put_cache_storage_member",
                 sql,
                 params!(
                     &member.storage_id,
@@ -164,7 +165,11 @@ impl SharedCacheStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<MemberRow, _>(sql, params!(storage_id, node_id))
+            .query_consistent_map::<MemberRow, _>(
+                "cache_storage_member",
+                sql,
+                params!(storage_id, node_id),
+            )
             .await?
             .into_iter()
             .next()
@@ -185,7 +190,11 @@ impl SharedCacheStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .execute(sql, params!(observed_at_ms, storage_id, node_id))
+            .execute(
+                "mark_cache_storage_suspect",
+                sql,
+                params!(observed_at_ms, storage_id, node_id),
+            )
             .await?
             == 1)
     }
@@ -206,7 +215,11 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(sql, params!(recipe_hash, storage_id))
+            .query_consistent_map::<SharedRow, _>(
+                "shared_cache_hit",
+                sql,
+                params!(recipe_hash, storage_id),
+            )
             .await?
             .into_iter()
             .next()
@@ -232,7 +245,11 @@ impl SharedCacheStore for HiqliteAuthStore {
         validate_sql(sql)?;
         Ok(self
             .client()
-            .execute(sql, params!(now_ms, recipe_hash, storage_id, generation_id))
+            .execute(
+                "touch_shared_cache_entry",
+                sql,
+                params!(now_ms, recipe_hash, storage_id, generation_id),
+            )
             .await?
             == 1)
     }
@@ -286,7 +303,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         }
         let results = self
             .client()
-            .txn(statements)
+            .txn("claim_shared_cache_entry", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -381,7 +398,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         }
         let results = self
             .client()
-            .txn(statements)
+            .txn("complete_shared_cache_entry", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -408,6 +425,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "abandon_shared_cache_entry",
                 sql,
                 params!(recipe_hash, storage_id, generation_id, relative_dir),
             )
@@ -448,7 +466,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         }
         let results = self
             .client()
-            .txn(statements)
+            .txn("finalize_abandoned_shared_cache_entry", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -479,7 +497,11 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(sql, params!(storage_id, before_ms, limit))
+            .query_consistent_map::<SharedRow, _>(
+                "stale_shared_cache_claims",
+                sql,
+                params!(storage_id, before_ms, limit),
+            )
             .await?
             .into_iter()
             .map(TryInto::try_into)
@@ -516,6 +538,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "acquire_cache_consumer_pin",
                 sql,
                 params!(
                     &pin.storage_id,
@@ -577,7 +600,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         }
         let changed = self
             .client()
-            .txn(statements)
+            .txn("renew_cache_consumer_pins", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -612,6 +635,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         Ok(self
             .client()
             .execute(
+                "release_cache_consumer_pin",
                 sql,
                 params!(
                     storage_id,
@@ -646,7 +670,11 @@ impl SharedCacheStore for HiqliteAuthStore {
                     LIMIT $3)";
         validate_sql(sql)?;
         self.client()
-            .execute(sql, params!(storage_id, now_ms, limit))
+            .execute(
+                "prune_expired_cache_consumer_pins",
+                sql,
+                params!(storage_id, now_ms, limit),
+            )
             .await
     }
 
@@ -680,7 +708,11 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(sql, params!(storage_id, now_ms, limit))
+            .query_consistent_map::<SharedRow, _>(
+                "shared_cache_gc_candidates",
+                sql,
+                params!(storage_id, now_ms, limit),
+            )
             .await?
             .into_iter()
             .map(TryInto::try_into)
@@ -785,7 +817,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         }
         let results = self
             .client()
-            .txn(statements)
+            .txn("retire_shared_cache_generation", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
@@ -928,7 +960,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         }
         let results = self
             .client()
-            .txn(statements)
+            .txn("finalize_retired_shared_cache_generation", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()

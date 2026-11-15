@@ -270,6 +270,13 @@ internal const val RENDEZVOUS_MAX_REPARKS = 2
  * Not thread-safe: the controller drives it from the player's scope.
  */
 internal class RendezvousHold(
+    /**
+     * The successor's own start in film time, its `media_origin_ms`. Nothing
+     * before it exists in the successor, so no rendezvous is earlier: a
+     * successor staged ahead of the viewer (a processed upgrade begins at the
+     * window its trial already produced) is met where it begins.
+     */
+    private val floorFilmMs: Long = Long.MIN_VALUE,
     private val leadMs: Long = RENDEZVOUS_LEAD_MS,
     private val slackMs: Long = PREPARED_ALIGNMENT_SLACK_MS,
     private val maxReparks: Int = RENDEZVOUS_MAX_REPARKS,
@@ -303,7 +310,8 @@ internal class RendezvousHold(
         private set
 
     /**
-     * How long the last seek to a rendezvous actually took, in wall time.
+     * Wall time until the last park's native seek-ready receipt, independent
+     * of the later contiguous-runway and warm-presentation gates.
      *
      * Measured rather than assumed. [leadMs] is an estimate of a device class;
      * this is what *this* device just did, and a re-park that ignored it would
@@ -313,20 +321,27 @@ internal class RendezvousHold(
         private set
 
     private var parkIssuedAtMs = 0L
-    private var ready = false
+    private var readyAtMs: Long? = null
+    private var seekReadyObserved = false
 
     /** Pick the first rendezvous and send the successor to it, parked. */
     fun park(nowMs: Long, incumbentFilmMs: Long, speed: Double = 1.0): Park =
         repark(nowMs, incumbentFilmMs, speed)
 
-    /** The successor's seek landed and it holds runway through the rendezvous. */
-    fun ready(nowMs: Long) {
-        if (ready) return
-        ready = true
+    /** First owner-fenced native READY at this park; later buffer waits do not overwrite it. */
+    fun seekReady(nowMs: Long) {
+        if (seekReadyObserved) return
+        seekReadyObserved = true
         observedSeekMs = (nowMs - parkIssuedAtMs).coerceAtLeast(0L)
     }
 
-    val isReady: Boolean get() = ready
+    /** The seek, contiguous runway, and any warm-picture gate are all ready. */
+    fun ready(nowMs: Long) {
+        if (readyAtMs != null) return
+        readyAtMs = nowMs
+    }
+
+    val isReady: Boolean get() = readyAtMs != null
 
     /**
      * Wall time until the incumbent reaches the rendezvous.
@@ -386,10 +401,11 @@ internal class RendezvousHold(
         val wallLead = maxOf(leadMs, measuredWallLead)
         val rate = speed.takeIf { it.isFinite() && it > 0 }?.coerceAtMost(16.0) ?: 1.0
         val filmLead = kotlin.math.ceil(wallLead.toDouble() * rate).toLong().coerceAtLeast(1)
-        val target = incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead
+        val target = maxOf(incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead, floorFilmMs)
         rendezvousFilmMs = target
         parkIssuedAtMs = nowMs
-        ready = false
+        readyAtMs = null
+        seekReadyObserved = false
         return Park(target, playWhenReady = false)
     }
 }
@@ -830,9 +846,9 @@ internal data class PreparedReplacementRequirement(
  * [isTelevision] is the axis M5.5's only observed hard failure sat on: both
  * phones passed dual prime 20/20, and the tunneled Google TV failed it 0/3
  * with two successor-prime timeouts and an `ERROR_CODE_AUDIO_TRACK_WRITE_FAILED`.
- * [tunnelingEnabled] is the suspected cause rather than a measured one: the
- * re-run that would name it (same-codec dual prime with tunneling forced off)
- * has not been taken.
+ * [tunnelingEnabled] is the successor's own tunneling: a tunneled successor
+ * was measured to invalidate the incumbent's hardware A/V sync audio on that
+ * Google TV, so successors are built untunneled.
  */
 internal fun preparedReplacementRequirements(
     isTelevision: Boolean,
@@ -857,13 +873,12 @@ internal fun preparedReplacementRequirements(
         label = "Tunneled decoding off",
         met = !tunnelingEnabled,
         detail = if (tunnelingEnabled) {
-            "Tunneling was on for the failure. Two identical tunneled pipelines " +
-                "appear to contend where two different codecs get distinct " +
-                "decoder instances. Suspected, not measured: the re-run that " +
-                "would settle it has not been taken."
+            "A tunneled successor claims the hardware A/V sync the incumbent " +
+                "holds. On the Google TV Streamer that invalidated the " +
+                "incumbent's audio and stalled it before the switch."
         } else {
-            "Not requested on this device, so two pipelines get distinct " +
-                "decoder instances."
+            "By construction: a successor primes and serves untunneled, so " +
+                "it never takes the incumbent's hardware A/V sync."
         },
     ),
     PreparedReplacementRequirement(
