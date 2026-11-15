@@ -1951,7 +1951,10 @@ pattern = "ServingAuthority"
 # Measured on the merge with main at 36: 36 + (-9) = 27.
 # PR1341: +3 in serving_fence.rs: the packed ready+generation word and
 # `admit_or_outage_baseline` project the same ServingAuthority.
-expected_occurrences = 31
+# 31 -> 33 with the cluster facade (B1 slice 1): `crate::cluster`'s import
+# and its `authority()` return type. The facade hands out the fence's own
+# authority; it projects nothing new and owns no producer.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
