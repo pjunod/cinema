@@ -157,6 +157,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("pages/diagnostics.js",                   WebAsset::BodyScript,  include_str!("../web/pages/diagnostics.js")),
     ("pages/activity-starts.js",               WebAsset::BodyScript,  include_str!("../web/pages/activity-starts.js")),
     ("curator-login.js", WebAsset::BodyScript, include_str!("../web/curator-login.js")),
+    ("pages/curation.js",                      WebAsset::BodyScript,  include_str!("../web/pages/curation.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 
