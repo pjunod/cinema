@@ -189,19 +189,19 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "6df2258e3cafa39623051b562f967f0d2f5039958c237692ea9ada5c72ac9938"
+        "sha256": "3c8bef20764367616c41b89f83b56fb78c41f93f8bc69c7e870b1df83e481bc2"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "6df2258e3cafa39623051b562f967f0d2f5039958c237692ea9ada5c72ac9938"
+        "sha256": "3c8bef20764367616c41b89f83b56fb78c41f93f8bc69c7e870b1df83e481bc2"
       },
       {
         "table": "33 local raft metrics authority",
         "source": "vendor/hiqlite/src/client/mgmt.rs",
         "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
-        "sha256": "df88ebbf28672caaf58a6f3e02cc76f1c4d89eb598f8550bf6406941509e22d9"
+        "sha256": "0e4be210532275ed04b80f2c78bed62b9b4a8352e711a0d572937541dba82456"
       },
       {
         "table": "34 scanner page capacity",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "6345825436cb8532b27840ba229767dfa032086292a9cdc47ec2a0401532e1fc"
+        "sha256": "bd302ba506f34b3113b6b6fa90b395aca7869d441c5e9b6d504bffd8438e0458"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
