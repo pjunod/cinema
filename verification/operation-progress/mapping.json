@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "a4c8f3b7721d616c06bbe19b9e66caf6c079dcbeca83014c5cac9de7cac78a7f"
+        "sha256": "5111bdf316a6b8550a666b13d9d0b19cb77734c30d4fe7ab90844dc9160703cc"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "a4c8f3b7721d616c06bbe19b9e66caf6c079dcbeca83014c5cac9de7cac78a7f"
+        "sha256": "5111bdf316a6b8550a666b13d9d0b19cb77734c30d4fe7ab90844dc9160703cc"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "a4c8f3b7721d616c06bbe19b9e66caf6c079dcbeca83014c5cac9de7cac78a7f"
+        "sha256": "5111bdf316a6b8550a666b13d9d0b19cb77734c30d4fe7ab90844dc9160703cc"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -165,7 +165,7 @@
         "table": "27 vendor serial SQLite transaction",
         "source": "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs",
         "anchor": "Query::Transaction(req) => {",
-        "sha256": "f8a650550c2f8c8fb35d642b903d97cf01fb3f71e3a3ded454c4b217f67ccd73"
+        "sha256": "b0794f362b0efcbef75b40886bf04af40deb1634885a25d95090b6b5490c2a8e"
       },
       {
         "table": "28 library completion conditional update",
@@ -189,13 +189,13 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "8a798da68a5bf79312e4d2d0b159c6aef55260d8d77b1431b475d3c416500d95"
+        "sha256": "4b83e14a0559fe55b4be0a38f53c422c60ac9be059c671303c58cefc21b1aa68"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "8a798da68a5bf79312e4d2d0b159c6aef55260d8d77b1431b475d3c416500d95"
+        "sha256": "4b83e14a0559fe55b4be0a38f53c422c60ac9be059c671303c58cefc21b1aa68"
       },
       {
         "table": "33 local raft metrics authority",
