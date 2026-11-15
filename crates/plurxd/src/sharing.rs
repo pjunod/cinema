@@ -148,6 +148,36 @@ async fn enabled_within(
         .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
     Ok(stored_switch(result.as_deref(), false))
 }
+/// The serving listener's switch lives in `settings`.
+const LISTENER_WATCH: &[&str] = &["settings"];
+
+/// When the serving listener next looks at the switch (A6 M3).
+pub(crate) struct ListenerWake<'a> {
+    serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    /// The first look waits one interval: the enable that opened the
+    /// listener was read before any watch existed.
+    watch: plurx_core::store::SharingWatch,
+    arm: Box<dyn Fn() -> plurx_core::store::SharingWatch + Send + Sync + 'a>,
+    looked: tokio::time::Instant,
+    renew_at: tokio::time::Instant,
+}
+
+impl<'a> ListenerWake<'a> {
+    fn new(
+        serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+        arm: Box<dyn Fn() -> plurx_core::store::SharingWatch + Send + Sync + 'a>,
+    ) -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            serving,
+            watch: plurx_core::store::SharingWatch::Interval,
+            arm,
+            looked: now,
+            renew_at: now + Duration::from_secs(86_400 * 365),
+        }
+    }
+}
+
 impl SharingManager {
     /// Dispatch only after B has committed its blocked owner and retained the
     /// Source request identity. A received Source handle must survive a later
@@ -699,7 +729,10 @@ impl SharingManager {
     ) {
         let mut next_renewal = tokio::time::Instant::now();
         let mut span = UnknownSpan::default();
-        let mut serving = state.serving.subscribe();
+        let mut wake = ListenerWake::new(
+            state.serving.subscribe(),
+            Box::new(|| state.applied.sharing_watch(LISTENER_WATCH)),
+        );
         loop {
             if let Ok((pin, expiry)) = identity.status() {
                 self.status
@@ -724,16 +757,19 @@ impl SharingManager {
                 };
                 next_renewal = tokio::time::Instant::now() + Duration::from_secs(3600);
             }
+            wake.renew_at = next_renewal;
             let look = || enabled(state.store.as_ref());
             if !self
-                .next_look(look, &mut span, &mut serving, &lifetime, &stop, &shutdown)
+                .next_look(look, &mut span, &mut wake, &lifetime, &stop, &shutdown)
                 .await
             {
                 return;
             }
         }
     }
-    /// The serving listener's pause and next look at the switch. False means
+    /// The serving listener's pause and next look at the switch: when the
+    /// switch's table changes or the serving fence moves, at most once a
+    /// second (A6 M3). False means
     /// the listener is stopping; `stop` is already cancelled.
     ///
     /// A confirmed disable closes the listener at once. An unreadable switch
@@ -751,7 +787,7 @@ impl SharingManager {
         &self,
         mut look: Look,
         span: &mut UnknownSpan,
-        serving: &mut tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+        wake: &mut ListenerWake<'_>,
         lifetime: &CancellationToken,
         stop: &CancellationToken,
         shutdown: &CancellationToken,
@@ -763,8 +799,20 @@ impl SharingManager {
         tokio::select! {
             () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return false; }
             () = lifetime.cancelled() => { stop.cancel(); return false; }
-            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            () = wake.watch.changed() => {}
+            Ok(()) = wake.serving.changed() => {}
+            // The certificate's hourly renewal is the caller's; no look.
+            () = tokio::time::sleep_until(wake.renew_at) => return true,
         }
+        tokio::select! {
+            () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return false; }
+            () = lifetime.cancelled() => { stop.cancel(); return false; }
+            () = tokio::time::sleep_until(wake.looked + Duration::from_secs(1)) => {}
+        }
+        // Re-armed before the look it follows.
+        wake.watch = (wake.arm)();
+        wake.looked = tokio::time::Instant::now();
+        let serving = &mut wake.serving;
         let mut observed = match look().await {
             Ok(true) => SharingObservation::Current,
             Ok(false) => SharingObservation::Revoked,
@@ -3027,7 +3075,11 @@ mod loop_pacing_tests {
     #[tokio::test(start_paused = true)]
     async fn running_listener_survives_an_unreadable_switch_and_closes_on_a_confirmed_disable() {
         let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
-        let (_fence, mut serving) = ready_fence();
+        let (_fence, serving) = ready_fence();
+        let mut wake = ListenerWake::new(
+            serving,
+            Box::new(|| plurx_core::store::SharingWatch::Interval),
+        );
         // Two missed quorum confirmations, then a readable enable inside the
         // grace: the listener keeps serving and keeps live bodies.
         let manager = running_listener_fixture(43);
@@ -3037,7 +3089,7 @@ mod loop_pacing_tests {
         let reads = scripted(vec![unreadable(), unreadable(), Ok(true)]);
         assert!(
             manager
-                .next_look(reads, &mut span, &mut serving, &bodies, &stop, &shutdown)
+                .next_look(reads, &mut span, &mut wake, &bodies, &stop, &shutdown)
                 .await
         );
         assert!(started.elapsed() < crate::serving_fence::SERVING_FENCE_SESSION_GRACE);
@@ -3056,7 +3108,7 @@ mod loop_pacing_tests {
                 .next_look(
                     scripted(vec![]),
                     &mut span,
-                    &mut serving,
+                    &mut wake,
                     &bodies,
                     &stop,
                     &shutdown
@@ -3077,7 +3129,7 @@ mod loop_pacing_tests {
                 .next_look(
                     scripted(vec![Ok(false)]),
                     &mut span,
-                    &mut serving,
+                    &mut wake,
                     &bodies,
                     &stop,
                     &shutdown
@@ -3093,7 +3145,11 @@ mod loop_pacing_tests {
         let manager = running_listener_fixture(46);
         let lifetime = manager.begin_lifetime();
         let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
-        let (_fence, mut serving) = ready_fence();
+        let (_fence, serving) = ready_fence();
+        let mut wake = ListenerWake::new(
+            serving,
+            Box::new(|| plurx_core::store::SharingWatch::Interval),
+        );
         let mut span = UnknownSpan::default();
         // The real read deadline: a read that never answers maps to unknown;
         // the next read answers, so the span recovers.
@@ -3110,7 +3166,7 @@ mod loop_pacing_tests {
         };
         assert!(
             manager
-                .next_look(reads, &mut span, &mut serving, &lifetime, &stop, &shutdown)
+                .next_look(reads, &mut span, &mut wake, &lifetime, &stop, &shutdown)
                 .await
         );
         assert!(!stop.is_cancelled());

@@ -342,6 +342,11 @@ bump may break compatibility and a **patch** bump never does.
   advisory member-floor answer instead of each proving quorum: a ready answer
   serves for up to five seconds, a not-ready one only the callers already
   waiting on it, and a read survives the caller that gave up on it.
+- Shared-library monitors look again only when a table their authority rests
+  on changes on this replica, when the serving fence moves, or (receiver)
+  when the lease or the original login lapses, at most once a second, instead
+  of every second; an idle shared stream costs no authority reads. Stores
+  without an applied mark keep the one-second look.
 
 ## [0.8.0] — 2026-10-29
 

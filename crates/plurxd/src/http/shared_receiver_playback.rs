@@ -111,6 +111,20 @@ pub(crate) fn absence_given(
     }
 }
 /// How a receiver owner reads one look at its delivery authority.
+/// The tables a receiver connection's authority rests on (A6 M3): the
+/// original login (`tokens`, deletes only; its idle expiry is a time term),
+/// the switch and token policy (`settings`), the import, viewer and
+/// assignment, and the sharing identity. The binding and delivery rows are
+/// rewritten by every renewal and are covered by the owner and the lease.
+const RECEIVER_CONNECTION_WATCH: &[&str] = &[
+    "tokens",
+    "settings",
+    "sharing_imports",
+    "sharing_viewers",
+    "sharing_assignments",
+    "sharing_identity",
+];
+
 pub(crate) fn delivery_observation<T>(
     looked: &Result<T, ReceiverStartError>,
 ) -> crate::sharing::SharingObservation {
@@ -831,6 +845,27 @@ impl ReceiverStartActor {
         self.current_delivery_attachment(state).await?;
         Ok((self.0.intent.user_id, self.0.intent.login_hash.clone()))
     }
+    /// When the connection monitor must look without a change (A6 M3): just
+    /// past the owner's current lease or the original login's expiry,
+    /// whichever is first. Read from the owner's state at each wait, so a
+    /// renewal moves it; the comparisons are strict, hence the 1 ms.
+    fn delivery_due(&self, login_expires_at_ms: Option<i64>) -> tokio::time::Instant {
+        let lease = self
+            .0
+            .state
+            .lock()
+            .expect("receiver owner")
+            .source
+            .as_ref()
+            .map(|retained| retained.owner.lease_expires_at_ms);
+        let now = tokio::time::Instant::now();
+        let Some(lease) = lease else {
+            return now + Duration::from_secs(1);
+        };
+        let deadline = login_expires_at_ms.map_or(lease, |login| login.min(lease));
+        let remaining = u64::try_from(deadline.saturating_sub(clock_ms())).unwrap_or(0);
+        now + Duration::from_millis(remaining.saturating_add(1))
+    }
     async fn current_delivery_attachment(
         &self,
         state: &AppState,
@@ -1297,21 +1332,49 @@ impl ReceiverStartActor {
             // Held for the monitor's whole life: its custody of this
             // connection ends only when the future does.
             let custody = retained;
-            let mut timer = tokio::time::interval(Duration::from_secs(1));
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // One outage budget for this connection's whole life.
             let mut span = crate::serving_fence::UnknownSpan::default();
             let mut serving = state.serving.subscribe();
-            loop {
+            // Looks happen when an authority table changes, the serving
+            // fence moves, or the lease or the original login lapses; at
+            // most once a second (A6 M3). The connection was admitted on a
+            // look made before any watch existed, so the first look waits
+            // one interval.
+            let mut watch = plurx_core::store::SharingWatch::Interval;
+            let mut looked = tokio::time::Instant::now();
+            let mut login_expires_at_ms = None;
+            'monitor: loop {
+                loop {
+                    tokio::select! {
+                        () = closed.wait() => return,
+                        () = actor.0.stop.cancelled() => break 'monitor,
+                        () = watch.changed() => break,
+                        Ok(()) = serving.changed() => break,
+                        () = tokio::time::sleep_until(actor.delivery_due(login_expires_at_ms)) => {
+                            // A renewal moved the lease past this wake: no look.
+                            if actor.delivery_due(login_expires_at_ms) <= tokio::time::Instant::now() {
+                                break;
+                            }
+                        }
+                    }
+                }
                 tokio::select! {
                     () = closed.wait() => return,
-                    () = actor.0.stop.cancelled() => break,
-                    _ = timer.tick() => {}
+                    () = actor.0.stop.cancelled() => break 'monitor,
+                    () = tokio::time::sleep_until(looked + Duration::from_secs(1)) => {}
                 }
+                // Re-armed before the look it follows.
+                watch = state.applied.sharing_watch(RECEIVER_CONNECTION_WATCH);
+                looked = tokio::time::Instant::now();
                 // Original B login and exact delivery binding remain required
                 // while a writer has queued bytes, including after Body EOF.
-                let mut observed =
-                    delivery_observation(&actor.current_delivery_attachment(&state).await);
+                let current = actor.current_delivery_attachment(&state).await;
+                if let Ok((authority, _, _)) = &current {
+                    login_expires_at_ms = authority
+                        .login_expires_at_s()
+                        .map(|seconds| seconds.saturating_mul(1000));
+                }
+                let mut observed = delivery_observation(&current);
                 if observed.is_unknown() {
                     let look = || async {
                         delivery_observation(&actor.current_delivery_attachment(&state).await)

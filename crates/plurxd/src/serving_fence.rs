@@ -720,7 +720,7 @@ impl ServingFence {
     /// advances on every published loss, while the fence is ready with no
     /// loss pending; `None` otherwise, so nothing read then is kept.
     pub(crate) fn advisory_epoch(&self) -> Option<u64> {
-        // The same coherent read as `ServingAuthority::observe`.
+        // The same coherent read the authority projection's `observe` makes.
         loop {
             let pending_before = self.loss_transitions_pending.load(Ordering::Acquire);
             let word = self.word.load();
