@@ -6370,6 +6370,26 @@ fn render_applied_view_metrics(
     out
 }
 
+/// Hiqlite patch 29: replies the SQLite writer produced after the Raft apply
+/// or teardown that asked for them had stopped waiting. Fixed labels, loaded
+/// from atomics at scrape time.
+fn render_writer_abandoned_replies(rows: &[hiqlite::DbWriterAbandonedReplies]) -> String {
+    let mut out = String::from(
+        "# HELP plurx_hiqlite_writer_abandoned_replies_total Replicated-store writer replies whose requester (a cancelled Raft apply, or a teardown) had stopped waiting, by request and by whether the abandoned result was an error. The write itself committed or rolled back as usual; an error's text is in the node log.\n\
+         # TYPE plurx_hiqlite_writer_abandoned_replies_total counter\n",
+    );
+    for row in rows {
+        out.push_str(&format!(
+            "plurx_hiqlite_writer_abandoned_replies_total{{request=\"{request}\",outcome=\"ok\"}} {}\n\
+             plurx_hiqlite_writer_abandoned_replies_total{{request=\"{request}\",outcome=\"error\"}} {}\n",
+            row.ok,
+            row.error,
+            request = row.request,
+        ));
+    }
+    out
+}
+
 fn prometheus_seconds_label(nanos: u64) -> String {
     let whole = nanos / 1_000_000_000;
     let remainder = nanos % 1_000_000_000;
@@ -6632,7 +6652,8 @@ pub(crate) async fn metrics(
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
-        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait());
+        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
+        + &render_writer_abandoned_replies(&hiqlite::db_writer_abandoned_replies());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\

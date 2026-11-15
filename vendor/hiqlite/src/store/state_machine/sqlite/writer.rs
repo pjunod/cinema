@@ -23,6 +23,7 @@ use std::borrow::Cow;
 use std::default::Default;
 use std::ops::Sub;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use thread_priority::ThreadPriority;
@@ -331,8 +332,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                         sm_data.last_applied_log_id,
                                         q.tx,
                                         Err(Error::PrepareStatement(err.to_string().into())),
-                                    )
-                                    .expect("oneshot tx to never be dropped");
+                                        WriterReply::Execute,
+                                    );
                                     continue;
                                 }
                             };
@@ -364,8 +365,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                     sm_data.last_applied_log_id,
                                     q.tx,
                                     Err(err),
-                                )
-                                .expect("oneshot tx to never be dropped");
+                                    WriterReply::Execute,
+                                );
                                 continue;
                             }
 
@@ -378,8 +379,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                             sm_data.last_applied_log_id,
                             q.tx,
                             res,
-                        )
-                        .expect("oneshot tx to never be dropped");
+                            WriterReply::Execute,
+                        );
                     }
 
                     Query::ExecuteReturning(q) => {
@@ -400,8 +401,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                         sm_data.last_applied_log_id,
                                         q.tx,
                                         Err(Error::PrepareStatement(err.to_string().into())),
-                                    )
-                                    .expect("oneshot tx to never be dropped");
+                                        WriterReply::ExecuteReturning,
+                                    );
                                     continue;
                                 }
                             };
@@ -419,8 +420,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                         sm_data.last_applied_log_id,
                                         q.tx,
                                         Err(Error::PrepareStatement(err.to_string().into())),
-                                    )
-                                    .expect("oneshot tx to never be dropped");
+                                        WriterReply::ExecuteReturning,
+                                    );
                                     continue;
                                 }
                             };
@@ -449,8 +450,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                     sm_data.last_applied_log_id,
                                     q.tx,
                                     Err(err),
-                                )
-                                .expect("oneshot tx to never be dropped");
+                                    WriterReply::ExecuteReturning,
+                                );
                                 continue;
                             }
 
@@ -479,8 +480,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                             sm_data.last_applied_log_id,
                             q.tx,
                             res,
-                        )
-                        .expect("oneshot tx to never be dropped");
+                            WriterReply::ExecuteReturning,
+                        );
                     }
 
                     Query::Transaction(req) => {
@@ -504,8 +505,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                     sm_data.last_applied_log_id,
                                     req.tx,
                                     Err(Error::Transaction(err.to_string().into())),
-                                )
-                                .expect("oneshot tx to never be dropped");
+                                    WriterReply::Transaction,
+                                );
                                 continue;
                             }
                         };
@@ -648,8 +649,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 sm_data.last_applied_log_id,
                                 req.tx,
                                 Err(err),
-                            )
-                            .expect("oneshot tx to never be dropped");
+                                WriterReply::Transaction,
+                            );
                         } else {
                             #[cfg(feature = "validation-test-helpers")]
                             if matches_hold && let Some(hold) = precommit_hold.take() {
@@ -669,8 +670,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                         sm_data.last_applied_log_id,
                                         req.tx,
                                         Ok(results),
-                                    )
-                                    .expect("oneshot tx to never be dropped");
+                                        WriterReply::Transaction,
+                                    );
                                 }
                                 Err(err) => {
                                     publish_then_send(
@@ -679,8 +680,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                         sm_data.last_applied_log_id,
                                         req.tx,
                                         Err(Error::Transaction(err.to_string().into())),
-                                    )
-                                    .expect("oneshot tx to never be dropped");
+                                        WriterReply::Transaction,
+                                    );
                                 }
                             }
                         }
@@ -722,8 +723,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 sm_data.last_applied_log_id,
                                 req.tx,
                                 Err(err),
-                            )
-                            .expect("oneshot tx to never be dropped");
+                                WriterReply::Batch,
+                            );
                         } else {
                             publish_then_send(
                                 &mark,
@@ -731,8 +732,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 sm_data.last_applied_log_id,
                                 req.tx,
                                 Ok(res),
-                            )
-                            .expect("oneshot tx to never be dropped");
+                                WriterReply::Batch,
+                            );
                         }
                     }
                 },
@@ -748,8 +749,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                         error!("Error during 'PRAGMA optimize': {}", err);
                     }
 
-                    publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, req.tx, res)
-                        .unwrap();
+                    publish_then_send(
+                        &mark,
+                        Some(&conn),
+                        sm_data.last_applied_log_id,
+                        req.tx,
+                        res,
+                        WriterReply::Migrate,
+                    );
                 }
 
                 WriterRequest::Snapshot(request) => {
@@ -841,12 +848,13 @@ CREATE TABLE IF NOT EXISTS _metadata
                     if result.is_ok() {
                         mark.note_every_table();
                     }
-                    let _ = publish_then_send(
+                    publish_then_send(
                         &mark,
                         Some(&conn),
                         sm_data.last_applied_log_id,
                         ack,
                         result,
+                        WriterReply::SnapshotApply,
                     );
                 }
 
@@ -874,20 +882,32 @@ CREATE TABLE IF NOT EXISTS _metadata
                         }
                     }
 
-                    ack.send(sm_data.clone()).unwrap();
+                    send_read_reply(ack, sm_data.clone());
                 }
 
                 WriterRequest::MetadataMembership(req) => {
                     sm_data.last_membership = req.last_membership;
                     sm_data.last_applied_log_id = req.last_applied_log_id;
-                    publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, req.ack, ())
-                        .unwrap();
+                    publish_then_send(
+                        &mark,
+                        Some(&conn),
+                        sm_data.last_applied_log_id,
+                        req.ack,
+                        (),
+                        WriterReply::Membership,
+                    );
                 }
 
                 WriterRequest::MetadataApplied((log_id, ack)) => {
                     sm_data.last_applied_log_id = log_id;
-                    let _ =
-                        publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, ack, ());
+                    publish_then_send(
+                        &mark,
+                        Some(&conn),
+                        sm_data.last_applied_log_id,
+                        ack,
+                        (),
+                        WriterReply::Applied,
+                    );
                 }
 
                 WriterRequest::Backup(req) => {
@@ -902,12 +922,13 @@ CREATE TABLE IF NOT EXISTS _metadata
                         info!(
                             "Received duplicate backup request within the last 60 seconds - ignoring it"
                         );
-                        let _ = publish_then_send(
+                        publish_then_send(
                             &mark,
                             Some(&conn),
                             sm_data.last_applied_log_id,
                             req.ack,
                             Ok(()),
+                            WriterReply::Backup,
                         );
                         continue;
                     }
@@ -940,12 +961,13 @@ CREATE TABLE IF NOT EXISTS _metadata
                         &rt,
                     ) {
                         error!("Error creating backup: {:?}", err);
-                        let _ = publish_then_send(
+                        publish_then_send(
                             &mark,
                             Some(&conn),
                             sm_data.last_applied_log_id,
                             req.ack,
                             Err(err),
+                            WriterReply::Backup,
                         );
                         continue;
                     }
@@ -967,19 +989,26 @@ CREATE TABLE IF NOT EXISTS _metadata
                     }
 
                     ts_last_backup = Some(now);
-                    let _ = publish_then_send(
+                    publish_then_send(
                         &mark,
                         Some(&conn),
                         sm_data.last_applied_log_id,
                         req.ack,
                         Ok(()),
+                        WriterReply::Backup,
                     );
                 }
 
                 WriterRequest::RTT(req) => {
                     sm_data.last_applied_log_id = req.last_applied_log_id;
-                    publish_then_send(&mark, Some(&conn), sm_data.last_applied_log_id, req.ack, ())
-                        .unwrap();
+                    publish_then_send(
+                        &mark,
+                        Some(&conn),
+                        sm_data.last_applied_log_id,
+                        req.ack,
+                        (),
+                        WriterReply::Rtt,
+                    );
                 }
 
                 WriterRequest::Shutdown(ack) => {
@@ -1020,8 +1049,7 @@ CREATE TABLE IF NOT EXISTS _metadata
         StateMachineSqlite::remove_lock_file(&path_lock_file);
 
         if let Some(ack) = shutdown_ack {
-            ack.send(())
-                .expect("Shutdown handler to always wait for ack from statemachine");
+            send_reply(WriterReply::Shutdown, sm_data.last_applied_log_id, ack, ());
         }
     });
 
@@ -1032,18 +1060,167 @@ CREATE TABLE IF NOT EXISTS _metadata
 /// entry replies through here, early `continue` paths included, so a reply is
 /// never sent before the mark shows the entry: after commit (or rollback) and
 /// before the caller can observe the acknowledgement.
-fn publish_then_send<T>(
+/// Returns nothing on purpose: no arm may make the reply's delivery a
+/// condition of the writer staying alive.
+fn publish_then_send<T: ReplyOutcome>(
     mark: &AppliedMark,
     conn: Option<&rusqlite::Connection>,
     applied: Option<LogId<NodeId>>,
     tx: oneshot::Sender<T>,
     value: T,
-) -> Result<(), T> {
+    kind: WriterReply,
+) {
     if let Some(conn) = conn {
         mark.note_schema_version(schema_version(conn));
     }
     mark.publish(applied.map(|log_id| log_id.index));
-    tx.send(value)
+    send_reply(kind, applied, tx, value);
+}
+
+/// Which request an abandoned reply answered (Plurx patch 29). A fixed set,
+/// so it is safe as a log field and a metric label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriterReply {
+    Execute,
+    ExecuteReturning,
+    Transaction,
+    Batch,
+    Migrate,
+    SnapshotApply,
+    Membership,
+    Applied,
+    Backup,
+    Rtt,
+    Shutdown,
+}
+
+impl WriterReply {
+    pub const ALL: [Self; 11] = [
+        Self::Execute,
+        Self::ExecuteReturning,
+        Self::Transaction,
+        Self::Batch,
+        Self::Migrate,
+        Self::SnapshotApply,
+        Self::Membership,
+        Self::Applied,
+        Self::Backup,
+        Self::Rtt,
+        Self::Shutdown,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Execute => "execute",
+            Self::ExecuteReturning => "execute_returning",
+            Self::Transaction => "transaction",
+            Self::Batch => "batch",
+            Self::Migrate => "migrate",
+            Self::SnapshotApply => "snapshot_apply",
+            Self::Membership => "membership",
+            Self::Applied => "applied",
+            Self::Backup => "backup",
+            Self::Rtt => "rtt",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
+/// Whether a reply carried a failure, and its text. Several arms report a
+/// failed statement, commit or migration only in the reply, so when the
+/// reply has no receiver the log line is the one place it is recorded.
+trait ReplyOutcome {
+    fn failure(&self) -> Option<String>;
+}
+
+impl ReplyOutcome for () {
+    fn failure(&self) -> Option<String> {
+        None
+    }
+}
+
+impl<T, E: std::fmt::Debug> ReplyOutcome for Result<T, E> {
+    fn failure(&self) -> Option<String> {
+        self.as_ref().err().map(|err| format!("{err:?}"))
+    }
+}
+
+/// Abandoned replies by request and by whether the result was an error.
+/// Process-wide, like the snapshot hooks and the read-pool wait.
+static ABANDONED_REPLIES: [[AtomicU64; 2]; WriterReply::ALL.len()] =
+    [const { [const { AtomicU64::new(0) }; 2] }; WriterReply::ALL.len()];
+
+/// One row of [`db_writer_abandoned_replies`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DbWriterAbandonedReplies {
+    pub request: &'static str,
+    /// The abandoned result was `Ok`.
+    pub ok: u64,
+    /// The abandoned result was an error; the log line carries its text.
+    pub error: u64,
+}
+
+/// Replies the SQLite writer produced for a request whose sender had stopped
+/// waiting, since this process started. Loads atomics; no lock, no I/O.
+#[must_use]
+pub fn db_writer_abandoned_replies() -> [DbWriterAbandonedReplies; WriterReply::ALL.len()] {
+    WriterReply::ALL.map(|kind| DbWriterAbandonedReplies {
+        request: kind.as_str(),
+        ok: ABANDONED_REPLIES[kind as usize][0].load(Ordering::Relaxed),
+        error: ABANDONED_REPLIES[kind as usize][1].load(Ordering::Relaxed),
+    })
+}
+
+/// Deliver a reply whose receiver may already be gone (Plurx patch 29).
+/// Every applying request is sent by the Raft state machine's `apply`, which
+/// waits for the reply without a bound, so the receiver is gone only when
+/// that apply was cancelled or torn down: a Raft core shutting down, a
+/// runtime stopping, a startup cleanup aborting. That is abnormal, so it is
+/// logged and counted. The work this replies to has already been committed
+/// or rolled back and stays that way, and the writer carries on with the
+/// next request instead of panicking and taking every later write with it.
+fn send_reply<T: ReplyOutcome>(
+    kind: WriterReply,
+    applied: Option<LogId<NodeId>>,
+    tx: oneshot::Sender<T>,
+    value: T,
+) {
+    let Err(value) = tx.send(value) else {
+        return;
+    };
+    let applied_index = applied.map(|log_id| log_id.index);
+    match value.failure() {
+        None => {
+            ABANDONED_REPLIES[kind as usize][0].fetch_add(1, Ordering::Relaxed);
+            warn!(
+                request = kind.as_str(),
+                applied_index,
+                outcome = "ok",
+                "SQL writer reply abandoned: the Raft apply or teardown that sent this \
+                 request stopped waiting; the result stands"
+            );
+        }
+        Some(error) => {
+            ABANDONED_REPLIES[kind as usize][1].fetch_add(1, Ordering::Relaxed);
+            warn!(
+                request = kind.as_str(),
+                applied_index,
+                outcome = "error",
+                error,
+                "SQL writer reply abandoned: the Raft apply or teardown that sent this \
+                 request stopped waiting; its failure is recorded only here"
+            );
+        }
+    }
+}
+
+/// Reply to a read that applied nothing. An abandoned one changes no state
+/// and loses no result, so it is not counted.
+fn send_read_reply<T>(tx: oneshot::Sender<T>, value: T) {
+    if tx.send(value).is_err() {
+        debug!("SQL writer read reply abandoned by its caller");
+    }
 }
 
 /// The schema cookie: SQLite increments it on every DDL statement, including
@@ -1488,6 +1665,387 @@ mod snapshot_cut_tests {
             .await
             .unwrap();
         rx.await.unwrap();
+        drop(writer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Shut the real writer down, then reopen the database file: what the
+    /// abandoned requests left behind is read from disk, not from the task.
+    async fn reopen_after_shutdown(
+        root: &std::path::Path,
+        writer: flume::Sender<WriterRequest>,
+    ) -> rusqlite::Connection {
+        let (ack, stopped) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Shutdown(ack))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stopped)
+            .await
+            .expect("writer shutdown remains bounded after an abandoned reply")
+            .expect("writer persists metadata before acknowledging shutdown");
+        drop(writer);
+        rusqlite::Connection::open(root.join("live.db")).unwrap()
+    }
+
+    /// A reply sender whose receiver is already gone.
+    fn abandoned<T>() -> oneshot::Sender<T> {
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        tx
+    }
+
+    fn row_ids(connection: &rusqlite::Connection) -> Vec<i64> {
+        connection
+            .prepare("SELECT id FROM rows_at_cut ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// Plurx patch 29. The Raft apply that sent a transaction was cancelled
+    /// or torn down, so its receiver is gone before the writer replies. The
+    /// commit (or the rollback) is what the database
+    /// holds, the writer answers the next request, and the applied-log
+    /// metadata still becomes durable. Before the patch the writer thread
+    /// panicked on the reply and every step after the abandoned request
+    /// failed.
+    async fn abandoned_transaction_reply(rollback: bool) {
+        let (root, writer) = fixture().await;
+        let mut queries = vec![state_machine::Query {
+            sql: "INSERT INTO rows_at_cut VALUES (2, zeroblob(16))".into(),
+            params: vec![],
+        }];
+        if rollback {
+            // A primary-key conflict with the fixture's row 1 rolls the whole
+            // transaction back, row 2 included.
+            queries.push(state_machine::Query {
+                sql: "INSERT INTO rows_at_cut VALUES (1, zeroblob(16))".into(),
+                params: vec![],
+            });
+        }
+        writer
+            .send_async(WriterRequest::Query(Query::Transaction(SqlTransaction {
+                queries,
+                last_applied_log_id: log(3),
+                tx: abandoned(),
+            })))
+            .await
+            .unwrap();
+        // The writer drains its queue in order, so this read is a barrier
+        // behind the abandoned transaction: no sleep, and no retry of it.
+        let state = tokio::time::timeout(Duration::from_secs(5), metadata(&writer))
+            .await
+            .expect("writer remains responsive after a dropped transaction reply");
+        assert_eq!(state.last_applied_log_id, log(3));
+        execute(
+            &writer,
+            "INSERT INTO rows_at_cut VALUES (3, zeroblob(16))".into(),
+            4,
+        )
+        .await;
+        let connection = reopen_after_shutdown(&root, writer).await;
+        assert_eq!(
+            row_ids(&connection),
+            if rollback { vec![1, 3] } else { vec![1, 2, 3] }
+        );
+        assert_eq!(image_metadata(&connection).last_applied_log_id, log(4));
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_transaction_success_reply_preserves_commit_and_writer() {
+        abandoned_transaction_reply(false).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_transaction_error_reply_preserves_rollback_and_writer() {
+        abandoned_transaction_reply(true).await;
+    }
+
+    /// How many replies of one kind the writer has abandoned in this process.
+    /// Tests run in parallel in one process, so callers compare a kind only
+    /// they abandon, or assert a lower bound.
+    fn abandoned_count(kind: WriterReply) -> (u64, u64) {
+        let row = db_writer_abandoned_replies()[kind as usize];
+        assert_eq!(row.request, kind.as_str());
+        (row.ok, row.error)
+    }
+
+    /// Plurx patch 29, arms other than the transaction, each sent with its
+    /// receiver already dropped: Execute (applied, constraint failure,
+    /// failed prepare), ExecuteReturning (applied, failed prepare), Batch
+    /// (applied, failed second statement), a successful Migrate, the
+    /// membership update, the applied-only marker, the RTT probe and the
+    /// metadata read. Not exercised here, and covered only by the source
+    /// pin in `every_applying_reply_publishes_first`: parameter-bind
+    /// errors, the ExecuteReturning column-mapping error, a failed
+    /// transaction open, SnapshotApply and Backup. Each one's effect is what
+    /// the database holds afterwards, and the writer is still there for an
+    /// observed write at the end.
+    #[tokio::test]
+    async fn dropped_reply_on_other_arms_preserves_the_write_and_writer() {
+        let (root, writer) = fixture().await;
+        let send = |request: WriterRequest| {
+            let writer = writer.clone();
+            async move { writer.send_async(request).await.unwrap() }
+        };
+
+        // Execute: applied, a constraint failure, and a statement that does
+        // not prepare.
+        for (sql, index) in [
+            ("INSERT INTO rows_at_cut VALUES (10, zeroblob(16))", 3),
+            ("INSERT INTO rows_at_cut VALUES (1, zeroblob(16))", 4),
+            ("INSERT INTO no_such_table VALUES (1)", 5),
+        ] {
+            send(WriterRequest::Query(Query::Execute(SqlExecute {
+                sql: sql.into(),
+                params: vec![],
+                last_applied_log_id: log(index),
+                tx: abandoned(),
+            })))
+            .await;
+        }
+        // ExecuteReturning: applied, and a statement that does not prepare.
+        for (sql, index) in [
+            (
+                "INSERT INTO rows_at_cut VALUES (11, zeroblob(16)) RETURNING id",
+                6,
+            ),
+            ("INSERT INTO no_such_table VALUES (1) RETURNING 1", 7),
+        ] {
+            send(WriterRequest::Query(Query::ExecuteReturning(
+                SqlExecuteReturning {
+                    sql: sql.into(),
+                    params: vec![],
+                    last_applied_log_id: log(index),
+                    tx: abandoned(),
+                },
+            )))
+            .await;
+        }
+        // Batch: applied, and one that fails to prepare its second statement.
+        for (sql, index) in [
+            (
+                "INSERT INTO rows_at_cut VALUES (12, zeroblob(16)); \
+                 INSERT INTO rows_at_cut VALUES (13, zeroblob(16));",
+                8,
+            ),
+            (
+                "INSERT INTO rows_at_cut VALUES (14, zeroblob(16)); \
+                 INSERT INTO no_such_table VALUES (1);",
+                9,
+            ),
+        ] {
+            send(WriterRequest::Query(Query::Batch(SqlBatch {
+                sql: sql.into(),
+                last_applied_log_id: log(index),
+                tx: abandoned(),
+            })))
+            .await;
+        }
+        // Migrate: one migration that creates a table.
+        send(WriterRequest::Migrate(Migrate {
+            migrations: vec![Migration {
+                id: 1,
+                name: "abandoned".into(),
+                hash: "00".into(),
+                content: b"CREATE TABLE migrated_while_abandoned (id INTEGER PRIMARY KEY);"
+                    .to_vec(),
+            }],
+            last_applied_log_id: log(10),
+            tx: abandoned(),
+        }))
+        .await;
+        // Membership, the applied-only marker, the RTT probe and the
+        // metadata read.
+        let membership =
+            StoredMembership::new(log(11), Membership::new(vec![BTreeSet::from([1])], None));
+        send(WriterRequest::MetadataMembership(MetaMembershipRequest {
+            last_membership: membership.clone(),
+            last_applied_log_id: log(11),
+            ack: abandoned(),
+        }))
+        .await;
+        send(WriterRequest::MetadataApplied((log(12), abandoned()))).await;
+        send(WriterRequest::RTT(RTTRequest {
+            last_applied_log_id: log(13),
+            ack: abandoned(),
+        }))
+        .await;
+        send(WriterRequest::MetadataRead(abandoned())).await;
+
+        // The queue is drained in order: an answered read here means the
+        // writer survived all twelve abandoned replies. Each applying one was
+        // counted; the metadata read is not.
+        for kind in [
+            WriterReply::Execute,
+            WriterReply::ExecuteReturning,
+            WriterReply::Batch,
+            WriterReply::Membership,
+            WriterReply::Applied,
+            WriterReply::Rtt,
+        ] {
+            let (ok, error) = abandoned_count(kind);
+            assert!(ok >= 1, "{kind:?} success reply counted: {ok}/{error}");
+        }
+        for kind in [
+            WriterReply::Execute,
+            WriterReply::ExecuteReturning,
+            WriterReply::Batch,
+        ] {
+            assert!(abandoned_count(kind).1 >= 1, "{kind:?} error reply counted");
+        }
+        let state = tokio::time::timeout(Duration::from_secs(5), metadata(&writer))
+            .await
+            .expect("writer remains responsive after every abandoned reply");
+        assert_eq!(state.last_applied_log_id, log(13));
+        assert_eq!(state.last_membership, membership);
+        execute(
+            &writer,
+            "INSERT INTO rows_at_cut VALUES (20, zeroblob(16))".into(),
+            14,
+        )
+        .await;
+
+        let connection = reopen_after_shutdown(&root, writer).await;
+        // 10, 11, 12, 13 and 14 applied; the duplicate 1 and the unknown
+        // table did not. A batch is not a transaction, so 14 stays.
+        assert_eq!(row_ids(&connection), vec![1, 10, 11, 12, 13, 14, 20]);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = 'migrated_while_abandoned'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let durable = image_metadata(&connection);
+        assert_eq!(durable.last_applied_log_id, log(14));
+        assert_eq!(durable.last_membership, membership);
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Plurx patch 29: failures that exist only in the reply. A migration
+    /// that fails and a transaction whose statements succeed but whose
+    /// commit fails (a deferred foreign key) are sent with the receiver
+    /// already dropped. Neither leaves anything behind, both are counted as
+    /// abandoned errors, and the writer takes the next write.
+    #[tokio::test]
+    async fn dropped_migrate_and_commit_failure_replies_preserve_rollback_and_writer() {
+        let (root, writer) = fixture().await;
+        let migrate_errors = abandoned_count(WriterReply::Migrate).1;
+        let transaction_errors = abandoned_count(WriterReply::Transaction).1;
+
+        writer
+            .send_async(WriterRequest::Migrate(Migrate {
+                migrations: vec![Migration {
+                    id: 1,
+                    name: "fails".into(),
+                    hash: "00".into(),
+                    content: b"CREATE TABLE migrated_then_failed (id INTEGER PRIMARY KEY); \
+                               INSERT INTO no_such_table VALUES (1);"
+                        .to_vec(),
+                }],
+                last_applied_log_id: log(3),
+                tx: abandoned(),
+            }))
+            .await
+            .unwrap();
+
+        for (sql, index) in [
+            ("PRAGMA foreign_keys = ON", 4),
+            ("CREATE TABLE parent (id INTEGER PRIMARY KEY)", 5),
+            (
+                "CREATE TABLE child (id INTEGER PRIMARY KEY, parent INTEGER \
+                 REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)",
+                6,
+            ),
+        ] {
+            execute(&writer, sql.into(), index).await;
+        }
+        // The insert succeeds; the missing parent fails the COMMIT itself.
+        writer
+            .send_async(WriterRequest::Query(Query::Transaction(SqlTransaction {
+                queries: vec![state_machine::Query {
+                    sql: "INSERT INTO child VALUES (1, 99)".into(),
+                    params: vec![],
+                }],
+                last_applied_log_id: log(7),
+                tx: abandoned(),
+            })))
+            .await
+            .unwrap();
+
+        let state = tokio::time::timeout(Duration::from_secs(5), metadata(&writer))
+            .await
+            .expect("writer remains responsive after abandoned failure replies");
+        assert_eq!(state.last_applied_log_id, log(7));
+        assert_eq!(
+            abandoned_count(WriterReply::Migrate).1,
+            migrate_errors + 1,
+            "only this test abandons a Migrate error"
+        );
+        assert!(abandoned_count(WriterReply::Transaction).1 > transaction_errors);
+        execute(
+            &writer,
+            "INSERT INTO rows_at_cut VALUES (3, zeroblob(16))".into(),
+            8,
+        )
+        .await;
+
+        let connection = reopen_after_shutdown(&root, writer).await;
+        assert_eq!(row_ids(&connection), vec![1, 3]);
+        let count = |sql: &str| -> i64 { connection.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(count("SELECT count(*) FROM child"), 0, "the commit failed");
+        assert_eq!(
+            count("SELECT count(*) FROM sqlite_master WHERE name = 'migrated_then_failed'"),
+            0,
+            "the failed migration rolled back"
+        );
+        assert_eq!(image_metadata(&connection).last_applied_log_id, log(8));
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Plurx patch 29: the shutdown acknowledgement is a reply too. With its
+    /// receiver gone the writer still persists the metadata, removes its
+    /// lock file and ends; the abandoned acknowledgement is counted, which
+    /// it can only be if the send returned instead of panicking.
+    #[tokio::test]
+    async fn dropped_shutdown_reply_still_persists_metadata_and_releases_the_lock() {
+        let (root, writer) = fixture().await;
+        let lock = root.join("lock");
+        std::fs::write(&lock, b"").unwrap();
+        let before = abandoned_count(WriterReply::Shutdown).0;
+        writer
+            .send_async(WriterRequest::Shutdown(abandoned()))
+            .await
+            .unwrap();
+        // The count moves after the metadata is persisted and the lock file
+        // is removed; it is the writer's last act.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while abandoned_count(WriterReply::Shutdown).0 == before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("writer finishes an abandoned shutdown");
+        assert_eq!(
+            abandoned_count(WriterReply::Shutdown).0,
+            before + 1,
+            "only this test abandons a shutdown acknowledgement"
+        );
+        assert!(!lock.exists(), "the lock file is removed");
+        let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        assert_eq!(image_metadata(&connection).last_applied_log_id, log(2));
+        drop(connection);
         drop(writer);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2256,7 +2814,9 @@ mod applied_mark_tests {
 
     /// Every reply from an arm that applies a log entry goes through
     /// `publish_then_send`; only the snapshot-successor refusal and the
-    /// metadata read, neither of which applies an entry, reply directly.
+    /// metadata read, neither of which applies an entry, reply directly
+    /// (the metadata read through `send_read_reply`). None of them may panic when
+    /// the caller has dropped its receiver.
     #[test]
     fn every_applying_reply_publishes_first() {
         let source = include_str!("writer.rs");
@@ -2269,7 +2829,6 @@ mod applied_mark_tests {
             .0;
         let allowed = [
             "request.ack.send(Err(StorageError::IO {",
-            "ack.send(sm_data.clone()).unwrap();",
             "let _ = entered.send(());",
             "let _ = registered.send(());",
             "let _ = hold.entered.send(());",
@@ -2311,9 +2870,37 @@ mod applied_mark_tests {
         );
         assert!(
             source.contains(
-                "        mark.note_schema_version(schema_version(conn));\n    }\n    mark.publish(applied.map(|log_id| log_id.index));\n    tx.send(value)"
+                "        mark.note_schema_version(schema_version(conn));\n    }\n    mark.publish(applied.map(|log_id| log_id.index));\n    send_reply(kind, applied, tx, value);"
             ),
             "the helper publishes before it sends"
+        );
+        // Plurx patch 29: no arm may panic on a reply its caller abandoned.
+        assert!(
+            !body.contains("to never be dropped"),
+            "a reply send that panics when its receiver is gone"
+        );
+        for line in body.lines().map(str::trim) {
+            assert!(
+                !(line.contains(".send(") && line.contains(".unwrap()")),
+                "a reply send that panics when its receiver is gone: {line}"
+            );
+        }
+        assert!(
+            body.contains("send_read_reply(ack, sm_data.clone());"),
+            "the metadata read tolerates an abandoned reply"
+        );
+        let after_loop = source
+            .split_once("WriterRequest::Shutdown(ack) => {")
+            .expect("end of writer arms")
+            .1
+            .split_once("\n    tx\n}")
+            .expect("end of spawn_writer")
+            .0;
+        assert!(
+            after_loop.contains(
+                "send_reply(WriterReply::Shutdown, sm_data.last_applied_log_id, ack, ());"
+            ) && !after_loop.contains(".expect(\"Shutdown"),
+            "the shutdown acknowledgement tolerates an abandoned reply"
         );
         let batch = body
             .split_once("Query::Batch(req) => {")
