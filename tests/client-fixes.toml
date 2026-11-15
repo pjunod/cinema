@@ -8778,7 +8778,8 @@ test_anchor = "fun failedOptionalTargetIsWithdrawnEvenAfterTheExecutionMovedUnde
 
 [[fixes]]
 id = "android.prepared-handoff-owns-its-acknowledgement"
-commits = ["64fc34d63292dde9c24feae68d010bf3edda1a02"]
+supplements = "android.optional-auto-withdraw-to-standing"
+commits = []
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
 source_anchor = "fun owns(acknowledgement: ActionAcknowledgement): Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedControlHandoffTest.kt"
