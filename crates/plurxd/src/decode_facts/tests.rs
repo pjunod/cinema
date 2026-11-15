@@ -1881,8 +1881,8 @@ if test "$1" = "-version"; then
 fi
 test ! -e "$PLURX_TEST_PROBE_PATH.used" || exit 93
 touch "$PLURX_TEST_PROBE_PATH.used"
-test "$8" = "/dev/fd/3" || exit 91
-test "$(cat "$8")" = "bound source" || exit 92
+test "$8" = "-blocksize" && test "$9" = "1048576" && test "${10}" = "/dev/fd/3" || exit 91
+test "$(cat "${10}")" = "bound source" || exit 92
 printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001","disposition":{"attached_pic":0}}]}'
 "###,
     );
@@ -1945,8 +1945,8 @@ if test "$1" = "-hide_banner"; then
   printf '%s\n' '[Parsed_idet_2] Multi frame detection: TFF: 0 BFF: 0 Progressive: 91 Undetermined: 9' >&2
   exit 0
 fi
-test "$8" = "/dev/fd/3" || exit 91
-cat "$8" >/dev/null || exit 92
+test "$8" = "-blocksize" && test "$9" = "1048576" && test "${10}" = "/dev/fd/3" || exit 91
+cat "${10}" >/dev/null || exit 92
 printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001","field_order":"tt","disposition":{"attached_pic":0}}]}'
 "###,
     );
@@ -1994,8 +1994,8 @@ if test "$1" = "-hide_banner"; then
   printf '%s\n' '[Parsed_idet_2] Multi frame detection: TFF: 0 BFF: 0 Progressive: 91 Undetermined: 9' >&2
   exit 0
 fi
-test "$8" = "/dev/fd/3" || exit 91
-cat "$8" >/dev/null || exit 92
+test "$8" = "-blocksize" && test "$9" = "1048576" && test "${{10}}" = "/dev/fd/3" || exit 91
+cat "${{10}}" >/dev/null || exit 92
 echo probe >> "$PLURX_TEST_PROBE_PATH.calls"
 printf '%s\n' '{document}'
 "###

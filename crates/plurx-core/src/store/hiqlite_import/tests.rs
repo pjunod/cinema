@@ -478,8 +478,9 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(names.contains(&"background_scan_request_v2"));
     assert!(!names.contains(&"background_scan_request_v2_schema"));
     // 104 with the source arbitration tables (SQLite v122), 105 with the scan
-    // request sidecar (SQLite v125).
-    assert_eq!(names.len(), 105, "review every imported durable table");
+    // request sidecar (SQLite v125), 106 with pending storage-domain changes
+    // (SQLite v131).
+    assert_eq!(names.len(), 106, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its

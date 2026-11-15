@@ -58,7 +58,8 @@ dropped client parks its connection when no reset, cancellation, queued
 request or snapshot attempt touched it. The next `new_client` for the same
 group and target leases it exclusively, so each socket still carries one
 client's RPCs at a time and nothing shares a socket with replication. At most
-eight connections are parked per target. Each parked supervisor owns its
+64 connections are parked per target (first 8; raised after the post-deploy
+measurement below). Each parked supervisor owns its
 30 s idle deadline and closes its socket when it passes, even if the pool is
 never touched again (a former leader). A parked supervisor whose socket ends
 exits instead of reconnecting, and nothing is leased after Raft stops. There
@@ -87,3 +88,15 @@ zero; the `Trying to open WebSocket stream` log rate drops to match;
 originating `append_db` timeouts are counted in the same window as the
 NIC/softnet counter deltas. Any timeout that remains needs its own
 attribution; this change does not explain it.
+
+## Post-deploy measurement, 2026-11-14
+
+With the leader on `8785492b`, its new Raft-port SYNs fell from ~223/s per
+voter to about 1.7/s (lab6) and 2.6/s (lab4) in a 60 s capture. Every one of
+them came in bursts: SYNs appeared in only 9–10 distinct seconds, up to ~55 in
+one second, while `plurx_http_store_operations_by_method_total` showed page
+loads issuing parallel consistent reads (DVR attention and overview,
+`get_setting`, settings snapshots, token checks). A burst wider than the idle
+cap leases every parked socket and dials the rest, so the cap went from 8 to
+64. Batching the reads themselves into one confirmation (read-index batching)
+is the larger fix and belongs to the read-authority work, not this patch.

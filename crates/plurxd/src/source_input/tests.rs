@@ -88,6 +88,7 @@ pub(super) async fn input(
         seek_bootstrap: std::sync::OnceLock::new(),
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
+        read_failed: std::sync::atomic::AtomicBool::new(false),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
         read_gate,
     });
@@ -166,6 +167,7 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
         seek_bootstrap: std::sync::OnceLock::new(),
         source_bytes: AtomicU64::new(0),
         cache_hits: AtomicU64::new(0),
+        read_failed: std::sync::atomic::AtomicBool::new(false),
         cached_bytes: std::sync::atomic::AtomicUsize::new(0),
         read_gate: Some(Arc::clone(&gate)),
     });
@@ -285,6 +287,37 @@ async fn qualification_control_caps_window_and_cache_refuses_source_change() {
     )
     .await
     .is_err());
+    input.close_and_wait().await.expect("close source");
+}
+
+/// A read the bridge fails to serve is recorded, so a consumer that saw the
+/// truncated body is not mistaken for one that judged the whole file.
+#[tokio::test]
+async fn a_failed_served_read_is_recorded_for_the_consumer() {
+    let bytes = vec![3; 2 * 1024 * 1024];
+    let (input, file, _) = input(&bytes, SOURCE_WINDOW_CONTROL, None).await;
+    let client = reqwest::Client::new();
+    let whole = client
+        .get(input.url())
+        .header("range", "bytes=0-15")
+        .send()
+        .await
+        .expect("first range");
+    assert_eq!(whole.bytes().await.expect("first body").len(), 16);
+    assert!(
+        !input.source_read_failed(),
+        "a served read is not a failure"
+    );
+    file.set_len((bytes.len() + 1) as u64)
+        .expect("source replacement mutation");
+    let changed = client
+        .get(input.url())
+        .header("range", format!("bytes={}-", SOURCE_HTTP_CHUNK))
+        .send()
+        .await
+        .expect("changed source range");
+    assert!(changed.bytes().await.is_err(), "the body ends in an error");
+    assert!(input.source_read_failed());
     input.close_and_wait().await.expect("close source");
 }
 

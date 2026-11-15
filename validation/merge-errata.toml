@@ -640,3 +640,97 @@ reason = """Landing commit of #1505 (E1b: settings from the applied view), merge
 [[errata]]
 commit = "90a1bf97bd64e7366f1310a0cedf1b9b5c37db5b"
 reason = """Landing commit of #1542 (F+ helper statistics), merged 2026-11-12 through the API without its Regression-Test lines: the landing-lines helper failed locally (Python 3.10 has no tomllib) and printed nothing, and the merge went ahead with an empty message field. #1542's body names the two lines, which resolve in 90a1bf97's tree for corrective commit db1c581e0: crates/plurx-core/src/transcode/dv_refit/tests.rs::a_whole_helper_run_parses_and_checks and crates/plurx-core/src/transcode/dv_refit/tests.rs::the_helper_adds_the_residual_to_a_nonidentity_mapping. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no additional test execution."""
+
+# PR #1564 used a custom merge title; retain its real immutable landing identity.
+[[landings]]
+commit = "bdbd35286bf2f5f7da54cc558d50a1837c824005"
+tree = "2de55fceaa4972deb52a315fe2630526b574cab6"
+parents = ["d7baa379af3ce4788469fcebd7d9c96c16a69426", "34d16b4e53fde577519f43fca7b2f0806e62b8be"]
+title = "feat(offload): keep offloaded titles, mark them, and get them back from curator"
+pull = "1564"
+reason = "Verified PR1564 main landing: custom title omitted its PR number. Exact tree and ordered parents restore landing recognition only; all six original Regression-Test fields remain mandatory own-tree evidence. No execution or acceptance claim."
+
+# PR #1553 likewise preserved its raw title instead of a PR-numbered merge subject.
+[[landings]]
+commit = "819b5c68de557ff402912a9f73debd3b74d8b66c"
+tree = "f6cba5f5253a361bed9d58bd94cfeade4666b721"
+parents = ["483d2bcf35edde6b8c6d3cb31471257e2e2a03e6", "c086ed6feb6c8475d4c9d2cb015d6ac97fc101b2"]
+title = "perf(ci): retain unit evidence and qualify batched train lanes"
+pull = "1553"
+reason = "Verified PR1553 main landing: custom title omitted its PR number. Exact tree and ordered parents restore landing recognition only; all eleven original Regression-Test fields remain mandatory own-tree evidence. No execution or acceptance claim."
+
+[[errata]]
+commit = "c086ed6feb6c8475d4c9d2cb015d6ac97fc101b2"
+reason = """Corrective commit c086ed6f (`fix(ci): refuse job retries that can discard published artifacts`) reached main on 2026-11-13 through 819b5c68d (`perf(ci): retain unit evidence and qualify batched train lanes`), itself pushed directly to main without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/operations/test_ci_failures.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "a9c551f83c6d3119ba7fb2d1689082ed7c3abfb2"
+reason = """Corrective commit a9c551f8 (`fix(ci): reserve target protocol numbers for branch wire changes`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/operations/test_media_pool_wire.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "603db67c7852a3d3810fe6158265dd4a8ab2347f"
+reason = """Corrective commit 603db67c (`fix(ci): scope media-pool wire checks to the PR merge base`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/operations/test_media_pool_wire.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "a731a9b101fa2ec15e99cdaeef15e723f2f797ea"
+reason = """Corrective commit a731a9b1 (`fix(ci): keep paperwork publication outside PR-controlled workflows`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/operations/test_ci_throughput.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "85bb240f6f735fe19e87e95e944d9e63bb3c9108"
+reason = """Corrective commit 85bb240f (`fix(ci): rerun units when optional receipt history is unreadable`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/validation/test_rust_units.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "a525296007f4422b9809a2d8fbfe7c4f3b4f1970"
+reason = """Corrective commit a5252960 (`fix(ci): include the session layout source census in unit inputs`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches no test file. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "28b6ab7d9f4b0763f7c8afdd8ee9b6bf0aadce69"
+reason = """Corrective commit 28b6ab7d (`fix(ci): select Rust unit probes independently and honor skipped probe preflight`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/validation/test_merge_train.py, tests/validation/test_rust_units.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "6df728645450c68daadc30b3ff479b7f5403fac6"
+reason = """Corrective commit 6df72864 (`fix(ci): preserve full Rust test input coverage in fan-out selection`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/validation/test_rust_units.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "b6e2079f1f4701c15f0036211396f852eb8285a1"
+reason = """Corrective commit b6e2079f (`fix(ci): compare the merge-train switch exactly before selecting heavy jobs`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/validation/test_merge_train.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "b9f3459de39dfec87c2250de656d44f7ef1680d3"
+reason = """Corrective commit b9f3459d (`fix(ci): connect Rust unit fan-out and relocate archived CLI fixtures`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches crates/plurx-notification-broker/tests/cli.rs, crates/plurxd/tests/cluster_activation.rs, crates/plurxd/tests/cluster_activity.rs, crates/plurxd/tests/live_tv_two_node.rs and more. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "a3bed5ca70fc3ad99bdfad5a27dbac2908d08b0c"
+reason = """Corrective commit a3bed5ca (`fix(store): the hand-wound historical fixtures undo v130 offload`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches crates/plurx-core/tests/support/source_extensions_fixture.rs. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "e9aeb74258900e51153f6f0399b86b8f0d28446f"
+reason = """Corrective commit e9aeb742 (`fix(store): offload's replicated statements are visible to the placeholder census`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches no test file. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "36be7e1173ae5824c7b49adfd75477ea43598589"
+reason = """Corrective commit 36be7e11 (`fix(store): order the offload mark's placeholders in the local hiqlite reconcile`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches no test file. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "c3e01c99fc9f556318c0370aa4a33524abe0f254"
+reason = """Corrective commit c3e01c99 (`fix(store): order the offload mark's placeholders for hiqlite`) was pushed directly to main as a first-parent commit on 2026-11-13, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches no test file. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "d8306edb86df6dd361726c8948d850de64ebd89f"
+reason = """Corrective commit d8306edb (`fix(web): stop the offload watch re-render loop on on_disk`) was pushed directly to main as a first-parent commit on 2026-11-12, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/web/offload.test.js. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "dcaac357a949879edf8323cf36c968729b0a1f73"
+reason = """Corrective commit dcaac357 (`fix(ci): bind Rust unit receipts to the stage's own jobs; harden the merge-base check`) was pushed directly to main as a first-parent commit on 2026-11-12, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches tests/validation/test_rust_units.py. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "bbf9da43ecc35625d37cfd6c4bc9d6278df937f1"
+reason = """Corrective commit bbf9da43 (`fix(offload): atomic mark in reconcile, per-request hints, web status watch, compat filters`) was pushed directly to main as a first-parent commit on 2026-11-12, without a pull request, so no landing commit exists whose message could carry its Regression-Test line. Its own change touches clients/android/app/src/test/java/tv/plurx/app/data/OffloadTest.kt, crates/plurx-core/src/scan/tests.rs, crates/plurx-core/tests/store_contract.rs, crates/plurx-core/tests/store_contract/offload.rs and more. Found as an inherited `make history-check` failure on main 6b891f63a while landing #1602. This permanent row records that immutable omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "8785492be3c36ce9bcdab11f637c943fb6f7a52c"
+reason = """Landing commit of #1596 (Raft client connection reuse), merged 2026-11-14 19:43 UTC through the API without Regression-Test lines in its message. It brings in corrective commits a601d3e5 (fix(hiqlite): lease idle Raft client connections instead of dialing per client) and 8bc23e5c (fix(hiqlite): close parked Raft sockets at their own deadline). #1596's body names six lines, all of which resolve in 8785492be's own tree: vendor/hiqlite/src/network/raft_client.rs::read_confirm_cycle_reuses_one_socket_across_answered_rpcs, ::dropped_healthy_client_is_leased_without_a_new_socket, ::timed_out_rpc_closes_its_connection_instead_of_parking_it, ::parked_supervisor_closes_its_socket_at_the_idle_deadline, ::client_reset_during_lease_is_closed_not_reused and ::parked_connection_whose_socket_ends_exits_and_is_not_leased. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "f7232f95a96d38f8d837a300db21425c21900e80"
+reason = """Landing commit of #1599 (a merge-train probe re-runs named Rust unit tests), merged 2026-11-14 23:47 UTC through the API without Regression-Test lines in its message. It brings in corrective commits 066a7cf2 (fix(ci): ABSENT named tests no longer fail the verdict job; unknown crates are ABSENT) and 1ae6412c (fix(ci): skip archive and shards when every named test is absent). #1599's body names three lines, all of which resolve in f7232f95a's own tree: tests/validation/test_rust_units.py::test_all_absent_builds_nothing_and_the_verdict_runs_from_the_select_plan, ::test_a_mixed_probe_reports_absent_and_a_failing_present_test and ::test_an_absent_id_of_a_missing_crate_is_reported_by_the_verdict. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
