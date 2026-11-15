@@ -750,6 +750,8 @@ data class Decision(
      * field that answers "is this Dolby Vision".
      */
     val delivered_dolby_vision_profile: Int? = null,
+    /** Enhancement carried by this direct delivery; session responses replace it. */
+    val enhancement: kotlinx.serialization.json.JsonElement? = null,
 )
 
 /**
@@ -875,10 +877,41 @@ data class PlaybackEnhancement(
     /**
      * This enhancement as it may be shown right now, or null when it must not
      * be: a processed delivery whose report is missing, stale or for another
-     * generation shows neither pills nor the info row.
+     * generation shows neither pills nor the info row. Native DYN also needs
+     * a configured Dolby Vision codec and a Dolby Vision display verdict;
+     * server-applied dynamic mapping remains governed by its processing report.
      */
-    fun shown(report: EffectiveProcessingReport?, activeGeneration: String?, delivered: String?): PlaybackEnhancement? =
-        takeIf { !requiresEffectiveProcessing || report?.matches(activeGeneration, delivered) == true }
+    fun shown(
+        report: EffectiveProcessingReport?,
+        activeGeneration: String?,
+        delivered: String?,
+        rendered: String? = null,
+        selectedCodecMime: String? = null,
+    ): PlaybackEnhancement? {
+        if (requiresEffectiveProcessing) {
+            return takeIf { report?.matches(activeGeneration, delivered) == true }
+        }
+        // A server reports the bytes it sent. Do not award native dynamic
+        // metadata before Media3 initializes a Dolby Vision codec, or after
+        // it chooses an HEVC alternate for the same Dolby Vision input Format.
+        // The two vendor aliases are Media3's configured Dolby Vision MIME types.
+        val nativeCodec = selectedCodecMime?.lowercase() in setOf(
+            "video/dolby-vision", "video/hevcdv", "video/dv_hevc",
+        )
+        if (EnhancementBadge.DYN !in active ||
+            (rendered == DynamicRange.DOLBY_VISION && nativeCodec)) return this
+        val reason = if (selectedCodecMime == null) {
+            "Dynamic metadata is carried by the stream; waiting for the player to initialize a Dolby Vision decoder."
+        } else {
+            "Dynamic metadata is carried by the stream but is not active in the player's current output."
+        }
+        return copy(
+            active = active.filterNot { it == EnhancementBadge.DYN },
+            details = details.map { detail ->
+                if (detail.badge == EnhancementBadge.DYN) detail.copy(active = false, text = reason) else detail
+            },
+        )
+    }
 
     companion object {
         fun fromJson(value: kotlinx.serialization.json.JsonElement?): PlaybackEnhancement? {
