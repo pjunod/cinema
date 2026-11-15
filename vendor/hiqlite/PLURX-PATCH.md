@@ -476,9 +476,10 @@ made-up URL and prevents the fork from being declared fully tracked.
   (`proposal_gate.rs`): `client_write` from the local client paths and from
   the API handlers that serve forwarded writes, and the learner and
   membership changes, all through `StateRaftDB`'s three helpers.
-  `Client::hold_local_db_proposals(deadline)` takes the exclusive side.
-  Proposals already in flight finish, new ones wait rather than fail, and
-  the hold releases on drop on every path. It returns `None` when it cannot
+  `Client::hold_local_db_proposals(deadline)` takes the exclusive side. It
+  waits for in-flight permits, new proposals wait rather than fail, and the
+  hold releases on drop on every path. A blocking learner add holds its
+  permit only for the append; the catch-up wait runs after it drops. It returns `None` when it cannot
   be taken by the deadline. `Client::wait_local_db_metrics` waits on the
   metrics watch for a condition. A leader that hands off
   (`docs/cluster/LEADER-SHUTDOWN-HANDOFF-BUILD.md`) holds its log, waits
@@ -486,8 +487,9 @@ made-up URL and prevents the fork from being declared fully tracked.
   survivor. Before this, a trigger racing an in-flight append was refused
   by the old leader in 5 of 14 daemon runs. Heartbeats append nothing; the
   leader's blank entry comes only at its election. The cache Raft is not
-  gated. Tests: `proposal_gate::tests`, including the source test
-  `every_database_proposal_goes_through_the_gate`, and
+  gated. Tests: `proposal_gate::tests`, including the source tests
+  `every_database_proposal_goes_through_the_gate` and
+  `a_learner_catch_up_wait_holds_no_permit`, and
   `mgmt::tests::proposal_hold_and_metrics_wait_are_local_only`.
   Files: `src/proposal_gate.rs`, `src/app_state.rs`, `src/store/mod.rs`,
   `src/lib.rs`, `src/client/mgmt.rs`, `src/client/execute.rs`,

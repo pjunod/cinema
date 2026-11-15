@@ -5,11 +5,12 @@
 //! client paths and from the API handlers that serve forwarded writes, and the
 //! membership calls — takes a shared [`ProposalPermit`] first, through
 //! [`crate::app_state::StateRaftDB`]'s helpers. A stopping or handing-off
-//! leader takes the exclusive side with [`ProposalGate::hold_until`]: proposals
-//! already in flight finish first, and new ones wait (they are not failed)
-//! until the [`ProposalHold`] drops. With nothing new appended, a successor can
-//! match this leader's last log entry, so its campaign is not refused for being
-//! one entry behind.
+//! leader takes the exclusive side with [`ProposalGate::hold_until`]: it waits
+//! for the permits of proposals in flight, and new ones wait (they are not
+//! failed) until the [`ProposalHold`] drops. A caller cancelled after it sent
+//! its proposal to Raft drops its permit while the entry may still be queued
+//! in the Raft core, so the hold alone does not prove the log has stopped; the
+//! handoff's match check against this leader's last log index covers that.
 //!
 //! The lock is Tokio's `RwLock`, which queues readers and writers in FIFO
 //! order: once the exclusive acquirer waits, later proposals queue behind it,
@@ -117,9 +118,11 @@ mod tests {
             .expect("cancelling the holder releases the gate");
     }
 
-    /// The gate holds only if nothing proposes around it: every database Raft
-    /// proposal in this crate goes through `StateRaftDB`'s three helpers, and
-    /// those helpers are the only callers of the raw OpenRaft methods.
+    /// The gate holds only if nothing proposes around it. Every proposal call
+    /// in this crate must name its receiver as the gated database helper
+    /// (`raft_db.client_write(` and its two siblings), the ungated cache Raft
+    /// (`raft_cache.raft.`), or, inside the helpers only, `self.raft.`. Any
+    /// other receiver, such as a binding to the database `Raft`, fails here.
     #[test]
     fn every_database_proposal_goes_through_the_gate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -133,7 +136,10 @@ mod tests {
                     stack.push(path);
                     continue;
                 }
-                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                // This file proposes nothing; its tests name the calls.
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+                    || path.ends_with("proposal_gate.rs")
+                {
                     continue;
                 }
                 let source: String = std::fs::read_to_string(&path)
@@ -144,14 +150,22 @@ mod tests {
                     .join("\n")
                     .split_whitespace()
                     .collect();
-                for call in ["client_write(", "change_membership(", "add_learner("] {
-                    assert!(
-                        !source.contains(&format!("raft_db.raft.{call}")),
-                        "{} proposes to the database Raft around the gate: {call}",
-                        path.display()
-                    );
-                    if path.ends_with("app_state.rs") {
-                        let raw = format!("self.raft.{call}");
+                let helpers = path.ends_with("app_state.rs");
+                for call in [".client_write(", ".change_membership(", ".add_learner("] {
+                    for (at, _) in source.match_indices(call) {
+                        let receiver = &source[..at];
+                        let allowed = receiver.ends_with("raft_db")
+                            || receiver.ends_with("raft_cache.raft")
+                            || (helpers && receiver.ends_with("self.raft"));
+                        assert!(
+                            allowed,
+                            "{} proposes around the gate: ...{}{call}",
+                            path.display(),
+                            &receiver[receiver.len().saturating_sub(40)..]
+                        );
+                    }
+                    if helpers {
+                        let raw = format!("self.raft{call}");
                         helper_calls += source.matches(&raw).count();
                         gated += source
                             .matches(&format!("self.proposals.permit().await;{raw}"))
@@ -162,6 +176,23 @@ mod tests {
         }
         assert_eq!(helper_calls, 3, "one raw call per helper");
         assert_eq!(gated, 3, "each helper takes its permit before it proposes");
+    }
+
+    /// A blocking learner add appends under the permit but waits for the
+    /// learner to catch up after the permit drops, so a slow or dead learner
+    /// cannot hold off a proposal hold.
+    #[test]
+    fn a_learner_catch_up_wait_holds_no_permit() {
+        let source: String = include_str!("app_state.rs").split_whitespace().collect();
+        let helper = source
+            .split_once("pub(crate)asyncfnadd_learner(")
+            .expect("the add_learner helper")
+            .1;
+        let append = helper
+            .find("{let_permit=self.proposals.permit().await;self.raft.add_learner(id,node,false).await?};")
+            .expect("the permit covers a non-blocking append only");
+        let wait = helper.find(".wait(None)").expect("the catch-up wait");
+        assert!(append < wait, "the catch-up wait runs after the permit drops");
     }
 
     #[tokio::test(start_paused = true)]
@@ -182,5 +213,53 @@ mod tests {
         assert!(later.is_err(), "a later proposal must not overtake the hold");
         drop(first);
         assert!(holder.await.expect("holder task"), "the hold is granted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_queued_hold_releases_the_queue() {
+        let gate = std::sync::Arc::new(ProposalGate::default());
+        let in_flight = gate.permit().await;
+        let queued = {
+            let gate = std::sync::Arc::clone(&gate);
+            tokio::spawn(async move {
+                let _ = gate.hold_until(Instant::now() + Duration::from_secs(60)).await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let later = {
+            let gate = std::sync::Arc::clone(&gate);
+            tokio::spawn(async move {
+                let _permit = gate.permit().await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!later.is_finished(), "a later proposal queues behind the hold");
+        queued.abort();
+        let _ = queued.await;
+        tokio::time::timeout(Duration::from_secs(1), later)
+            .await
+            .expect("cancelling the queued hold lets later proposals proceed")
+            .expect("later proposal task");
+        drop(in_flight);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_hold_leaves_the_gate_open() {
+        let gate = ProposalGate::default();
+        let stuck = gate.permit().await;
+        assert!(gate
+            .hold_until(Instant::now() + Duration::from_millis(100))
+            .await
+            .is_none());
+        let started = Instant::now();
+        let _next = tokio::time::timeout(Duration::from_secs(1), gate.permit())
+            .await
+            .expect("a timed-out hold leaves nothing queued in the gate");
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "after a timed-out hold, a new proposal starts at once"
+        );
+        drop(stuck);
     }
 }

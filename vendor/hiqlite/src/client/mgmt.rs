@@ -562,8 +562,10 @@ impl Client {
     }
 
     /// Plurx patch 30: stop new database proposals on this node until the
-    /// returned hold drops. Proposals already in flight finish first; new ones
-    /// wait rather than fail. Returns `None` when the hold cannot be taken by
+    /// returned hold drops. The hold waits for in-flight permits; new
+    /// proposals wait rather than fail. A cancelled caller's entry may still
+    /// be queued in the Raft core, so callers must not treat the hold as proof
+    /// that the log stopped. Returns `None` when the hold cannot be taken by
     /// `deadline` (an in-flight proposal can hang when quorum is lost), so a
     /// caller never blocks past its own budget. Local clients only; no IO.
     #[cfg(feature = "sqlite")]

@@ -148,9 +148,68 @@ impl StateRaftDB {
         openraft::raft::ClientWriteResponse<TypeConfigSqlite>,
         openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, crate::Node>>,
     > {
-        let _permit = self.proposals.permit().await;
-        self.raft.add_learner(id, node, blocking).await
+        // Only the membership append holds a permit. OpenRaft's blocking form
+        // would wait for the learner to catch up inside it, so a slow or dead
+        // learner would hold off a handing-off leader's proposal hold; the
+        // catch-up wait appends nothing and runs after the permit drops.
+        let response = {
+            let _permit = self.proposals.permit().await;
+            self.raft.add_learner(id, node, false).await?
+        };
+        if blocking && self.raft.metrics().borrow().id != id {
+            // OpenRaft's `blocking = true` condition, unchanged: done once the
+            // membership entry is reported and the learner is removed, this
+            // node stops leading, or the learner's replication lag is within
+            // the configured threshold. Like OpenRaft, the wait is unbounded
+            // and its own result is ignored.
+            let membership_log_id = Some(response.log_id);
+            let lag_threshold = self.raft.config().replication_lag_threshold;
+            let _ = self
+                .raft
+                .wait(None)
+                .metrics(
+                    |metrics| {
+                        learner_caught_up(metrics, id, &membership_log_id, lag_threshold)
+                    },
+                    "wait new learner to become line-rate",
+                )
+                .await;
+        }
+        Ok(response)
     }
+}
+
+/// Plurx patch 30: OpenRaft 0.9's private `check_replication_upto_date`, as
+/// the blocking `add_learner` applies it.
+#[cfg(feature = "sqlite")]
+fn learner_caught_up(
+    metrics: &openraft::RaftMetrics<NodeId, crate::Node>,
+    learner: NodeId,
+    membership_log_id: &Option<openraft::LogId<NodeId>>,
+    lag_threshold: u64,
+) -> bool {
+    if metrics.membership_config.log_id() < membership_log_id {
+        return false;
+    }
+    if metrics
+        .membership_config
+        .membership()
+        .get_node(&learner)
+        .is_none()
+    {
+        return true;
+    }
+    let Some(replication) = &metrics.replication else {
+        return true;
+    };
+    let Some(matched) = replication.get(&learner) else {
+        return false;
+    };
+    // OpenRaft's `replication_lag`: the distance between next indexes.
+    let next = |index: Option<u64>| index.map_or(0, |index| index + 1);
+    let lag = next(metrics.last_log_index)
+        .saturating_sub(next(matched.as_ref().map(|log_id| log_id.index)));
+    lag <= lag_threshold
 }
 
 #[cfg(feature = "cache")]
