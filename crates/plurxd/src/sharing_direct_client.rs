@@ -83,7 +83,14 @@ impl PeerConnection {
             StatusCode::OK | StatusCode::PARTIAL_CONTENT | StatusCode::RANGE_NOT_SATISFIABLE => {}
             StatusCode::UNAUTHORIZED => return Err(PeerError::Authentication),
             StatusCode::UPGRADE_REQUIRED => return Err(PeerError::ProtocolUnsupported),
-            status => return Err(PeerError::Rejected(status)),
+            status => {
+                return Err(crate::sharing_client::peer_status_refusal(
+                    status,
+                    response
+                        .headers()
+                        .contains_key(axum::http::header::RETRY_AFTER),
+                ))
+            }
         }
         let echo = [
             (

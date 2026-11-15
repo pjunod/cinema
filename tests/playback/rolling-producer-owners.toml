@@ -5909,13 +5909,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
 # two 2 s test timeouts (registration seam, staging join) and the 260 ms
 # control-cadence sleep.
+# Sharing outage policy (A6 M1): +4. SessionGrace::resolve_from bounds one
+# recovery wait with timeout_at and UnknownSpan paces its re-reads with
+# sleep, both on the owner's own task (no new task or timer owner); two
+# test-only timeouts bound the outage-retirement fixture's waits.
+# +4 measured on main after #1610 (cb9bba471, a processed trial claims
+# its own viewer's encoder permit), which landed without updating this
+# ledger; reconciled here so every lane's preflight passes again.
 # +1 with #1597 (lease expiry releases source capacity):
 # `Completion::retire_after_release` in background_jobs/source/completion.rs
 # sleeps REAP_CHECK (5 s) between checks of whether the store sweep has
 # released its custody, then removes its local witness. It owns no producer,
 # process or child, spawns nothing, and decides nothing about capacity: the
 # sweep does; the loop only ends the ledger task once there is nothing left.
-expected_occurrences = 2228
+expected_occurrences = 2236
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7157,7 +7164,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Sharing listener (#1598): +5 SharingManager::status() reads in the listener
 # tests, asserting the reported listener state. They read an in-memory status
 # snapshot; none launches a process.
-expected_occurrences = 935
+
+# Sharing outage policy (A6 M1): -1. The listener tests were rewritten
+# around UnknownSpan with one fewer SharingManager::status() read; none of
+# them launches a process.
+expected_occurrences = 934
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7471,7 +7482,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Reader B0/B1: +1 explicit wait for the verified native true fixture. The
 # fixture retains ChildJob through the positive physical join. The output-pipe
 # collision fixture now calls status instead of output (net zero lifecycle).
-expected_occurrences = 393
+
+# Sharing outage policy (A6 M1): +1 closed.wait() in the receiver
+# connection monitor, racing its outage-grace wait against the same accepted
+# transport's closure the loop already waits on. No process is involved.
+expected_occurrences = 394
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
