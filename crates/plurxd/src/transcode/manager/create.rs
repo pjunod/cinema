@@ -3802,13 +3802,14 @@ impl TranscodeManager {
                     // The same explicitly scoped FG/BG owner that prepared
                     // this recipe must own its first actual original reads.
                     // Clone the held descriptor; never reacquire path authority.
+                    let source_open_started = tokio::time::Instant::now();
                     let input=crate::source_input::SourceInput::open_current_held(
                         &runtime.source.handle,"processed-first-window").await?
                         .ok_or("processed first window has no original source read owner")?;
                     let (verified, selected) = match runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
                         entry, &executable.path, admission,
                         Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None,
-                        input, processing_deadline).await {
+                        input, processing_deadline, Some(source_open_started.elapsed())).await {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.
