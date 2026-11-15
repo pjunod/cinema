@@ -1570,7 +1570,7 @@ impl AppState {
                     if pending == 0 {
                         custody_warning.record_good_sample();
                     } else if custody_warning.should_warn(clock_ms()) {
-                        tracing::warn!(pending, "Shared source reads need recovery; affected media jobs cannot start. Inspect the source readers on Activity.");
+                        tracing::warn!(pending, "Source owners are still holding capacity long after their leases lapsed; the source custody sweep is not running on any node.");
                     }
                 }
             }

@@ -5916,7 +5916,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +4 measured on main after #1610 (cb9bba471, a processed trial claims
 # its own viewer's encoder permit), which landed without updating this
 # ledger; reconciled here so every lane's preflight passes again.
-expected_occurrences = 2235
+# +1 with #1597 (lease expiry releases source capacity):
+# `Completion::retire_after_release` in background_jobs/source/completion.rs
+# sleeps REAP_CHECK (5 s) between checks of whether the store sweep has
+# released its custody, then removes its local witness. It owns no producer,
+# process or child, spawns nothing, and decides nothing about capacity: the
+# sweep does; the loop only ends the ledger task once there is nothing left.
+expected_occurrences = 2236
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
