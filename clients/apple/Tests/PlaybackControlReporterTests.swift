@@ -702,7 +702,10 @@ final class PlaybackControlReporterTests: XCTestCase {
         }
         try await assertTerminal(response: prepare { $0.actionId = nil })
         try await assertTerminal(response: prepare { $0.effectiveSelection = nil })
-        try await assertTerminal(response: prepare { $0.mediaOriginMs = -1 })
+        // A1/B1: signed media origins are valid; only values outside the
+        // representable media range are a protocol violation.
+        try await assertTerminal(response: prepare { $0.mediaOriginMs = PlaybackControl.maximumMediaMs + 1 })
+        try await assertTerminal(response: prepare { $0.mediaOriginMs = -PlaybackControl.maximumMediaMs - 1 })
         try await assertTerminal(response: prepare {
             $0.playlistUrl = "http://elsewhere.example/api/v1/hls/\(sessionId)/index.m3u8"
         })
