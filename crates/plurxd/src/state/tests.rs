@@ -1296,9 +1296,15 @@ async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let consumer =
         tokio::spawn(Arc::clone(&jobs).background_work_loop_with_ready(transcode, Some(ready_tx)));
-    // Measure the wake path from an idle subscribed worker. CI can spend
-    // wall time scheduling this test among thousands of concurrent tests.
+    // Measure the wake path from an idle subscribed worker. `ready` fires as
+    // the worker subscribes, before its first pass, and a request enqueued
+    // during that pass is claimed by it with no wake at all. With the clock
+    // paused this sleep returns only once every task is parked, so the first
+    // pass is over and the worker is inside its polling delay (five seconds
+    // or more) when the request arrives: only the wake can admit it within
+    // two.
     ready_rx.await.expect("analysis worker subscribed");
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let request = enqueue_copy_preparation(
         store.as_ref(),
         "test-node",
