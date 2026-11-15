@@ -189,13 +189,13 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "78954807ac3c2bb181953cc5c34f5554be6b3614a90b0472fb17692b621e7558"
+        "sha256": "8a798da68a5bf79312e4d2d0b159c6aef55260d8d77b1431b475d3c416500d95"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "78954807ac3c2bb181953cc5c34f5554be6b3614a90b0472fb17692b621e7558"
+        "sha256": "8a798da68a5bf79312e4d2d0b159c6aef55260d8d77b1431b475d3c416500d95"
       },
       {
         "table": "33 local raft metrics authority",
@@ -255,13 +255,13 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "7a2c037acc4ae187b18ece0e0b2c488bca62a5c4e6c3e0570dbf939f0582766a"
+        "sha256": "81bae83b311f8b8ddf86e3929fd98a53ad5832ba78a50a889a64fc5032803fbb"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "7a2c037acc4ae187b18ece0e0b2c488bca62a5c4e6c3e0570dbf939f0582766a"
+        "sha256": "81bae83b311f8b8ddf86e3929fd98a53ad5832ba78a50a889a64fc5032803fbb"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
@@ -345,7 +345,7 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "e7c36aa391092d744091a20c7f2fd21fca6a6be18109232e0b6f56b9065fd70f"
+        "sha256": "15cb5695992562db7b0a66b5a4bf25fbafe8d9deb23bd4b690e0575153b5e736"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
