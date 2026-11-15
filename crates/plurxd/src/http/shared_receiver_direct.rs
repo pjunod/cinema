@@ -97,7 +97,7 @@ impl ReceiverStartActor {
             lifetime,
         )
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        .map_err(peer_failure)?;
         let known = received
             .lineage()
             .map_err(|_| ReceiverStartError::Unresolved)?;
@@ -111,7 +111,7 @@ impl ReceiverStartActor {
                 &direct,
             )
             .await
-            .map_err(|_| ReceiverStartError::Unresolved)?;
+            .map_err(peer_failure)?;
         // Source IO can park. Reobserve the original B login, exact route,
         // current binding and delivery grant before returning any bytes.
         self.current_delivery_attachment(state).await?;
@@ -307,6 +307,16 @@ pub(super) async fn receiver_direct_actor(
         Ok(opened) => opened,
         Err(ReceiverStartError::Capacity) => {
             return refusal(StatusCode::TOO_MANY_REQUESTS, "sharing_delivery_capacity")
+        }
+        Err(
+            ReceiverStartError::Unknown
+            | ReceiverStartError::PeerUnavailable
+            | ReceiverStartError::Ending,
+        ) => {
+            return refusal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_delivery_unavailable",
+            );
         }
         Err(_) => {
             actor.begin_retirement(

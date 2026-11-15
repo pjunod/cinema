@@ -28,11 +28,16 @@ fn failure(status: StatusCode, code: &'static str) -> ApiError {
 fn invalid() -> ApiError {
     failure(StatusCode::BAD_REQUEST, "sharing_invalid_request")
 }
+/// A store that cannot answer is an outage of this Source, not a refusal:
+/// the typed 503 carries `Retry-After`, which a receiver reads as
+/// "unavailable for now" and never as a revocation.
 fn authority(_: StoreError) -> ApiError {
-    failure(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "sharing_authority_unavailable",
-    )
+    ApiError::TypedRetry {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "sharing_authority_unavailable",
+        message: "sharing authority unavailable".into(),
+        retry_after_seconds: 1,
+    }
 }
 async fn body<T: DeserializeOwned>(body: Body) -> Result<T, ApiError> {
     let bytes = to_bytes(body, BODY_LIMIT).await.map_err(|_| invalid())?;

@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1651: a malformed prepare probes origins outside the signed media range.
+[[fixes]]
+id = "apple.malformed-prepare-outside-signed-origin-range"
+commits = ["38b82fc01f99f5848e753c8cbe858a862c45cf7e"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "(-PlaybackControl.maximumMediaMs...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testAMalformedPrepareStopsTheReporterRatherThanBeingActedOn()"
+
 # PR #1587: retained source/test anchors after adding the active tone-map pill.
 [[fixes]]
 id = "apple.active-tone-mapping-pill"

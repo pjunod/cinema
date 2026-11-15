@@ -6679,7 +6679,7 @@ impl MetricsStore for HiqliteAuthStore {
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
                             + (SELECT COUNT(*) FROM analysis_source_reservations \
                             WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
-                        'source_recovery_pending', (SELECT COUNT(DISTINCT custody_id) FROM source_io_occupancy WHERE custody_id IS NOT NULL AND active_occupancy=1 AND expires_at_ms <= $2 * 1000), \
+                        'source_recovery_pending', (SELECT COUNT(DISTINCT held.custody_id) FROM source_io_occupancy held JOIN background_source_current_owners c ON c.custody_id = held.custody_id WHERE held.active_occupancy=1 AND (CASE WHEN c.authority_expires_at_ms>0 THEN c.authority_expires_at_ms WHEN c.phase='cleanup_pending' THEN c.updated_at_ms WHEN c.phase='paused' THEN 0 ELSE NULL END) <= $2 * 1000 - 180000), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json, ")
                     + &request_health
                     + " FROM offline_packages WHERE node_id = $1",
