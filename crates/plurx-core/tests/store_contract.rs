@@ -110,6 +110,8 @@ mod applied_view;
 mod background_jobs;
 #[path = "store_contract/claim_selection.rs"]
 mod claim_selection;
+#[path = "store_contract/delegation.rs"]
+mod delegation;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -19354,6 +19356,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "cluster_fragment_index_locations",
             "cluster_fragment_index_sources",
             "continuous_quality_ledgers",
+            "delegation_clients",
+            "delegation_codes",
+            "delegation_grants",
             "dv_conversions",
             "dv_recovery_guards",
             "dvr_recordings",

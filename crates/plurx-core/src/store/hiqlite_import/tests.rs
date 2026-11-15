@@ -477,10 +477,21 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // schema marker is installed locally, like the annotations marker.
     assert!(names.contains(&"background_scan_request_v2"));
     assert!(!names.contains(&"background_scan_request_v2_schema"));
+    // Scoped login state is durable account state, imported with its users;
+    // its schema marker is installed locally, like the scan request marker.
+    for name in [
+        "delegation_clients",
+        "delegation_codes",
+        "delegation_grants",
+    ] {
+        assert!(names.contains(&name), "durable scoped login table: {name}");
+    }
+    assert!(!names.contains(&"delegation_schema"));
     // 104 with the source arbitration tables (SQLite v122), 105 with the scan
     // request sidecar (SQLite v125), 106 with pending storage-domain changes
-    // (SQLite v131).
-    assert_eq!(names.len(), 106, "review every imported durable table");
+    // (SQLite v131), 109 with the scoped login clients, codes and grants
+    // (SQLite v133; their schema marker is installed locally).
+    assert_eq!(names.len(), 109, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
