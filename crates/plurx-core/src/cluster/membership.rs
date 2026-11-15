@@ -12936,6 +12936,21 @@ impl MembershipManager {
             return Ok(0);
         };
         let now = unix_seconds()?;
+        // An idle pass is this replica's word that nothing is addressed to
+        // this node, and costs no leader round trip. A probe this replica has
+        // not applied yet is answered on the first pass after it applies; the
+        // removal that asked waits on the answer, not on a particular pass.
+        // Only a hit pays the authoritative read, and that read, not the
+        // hint, decides what is answered.
+        if inner
+            .store
+            .local_pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
+            .await
+            .map_err(|error| MembershipError::Internal(error.to_string()))?
+            .is_empty()
+        {
+            return Ok(0);
+        }
         let pending = inner
             .store
             .pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
@@ -12968,8 +12983,8 @@ impl MembershipManager {
     ///
     /// A removal blocks an operator while it waits for these answers, so the
     /// cadence is the responsiveness of node removal itself, not a background
-    /// housekeeping interval. Idle passes cost one indexed lookup that
-    /// normally returns nothing.
+    /// housekeeping interval. Idle passes cost one indexed lookup on this
+    /// node's own replica that normally returns nothing.
     pub async fn offline_source_probe_loop(self) {
         if self.inner.is_none() {
             return;

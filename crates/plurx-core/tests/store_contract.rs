@@ -881,6 +881,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "offline_transfers_in_flight",
     "request_offline_source_probes",
     "pending_offline_source_probes",
+    "local_pending_offline_source_probes",
     "answer_offline_source_probe",
     "outstanding_offline_source_probes",
     "verified_offline_source_nodes",
@@ -21480,7 +21481,11 @@ fn contract_inventory_matches_every_store_method() {
     // exercised by the source-fenced DV title-job contracts.
     // Current main declares 591 distinct methods; save/apply/state replace
     // one storage-domain method, adding two names without hiding existing APIs.
-    assert_eq!(declared.len(), 593, "review the Store method count");
+    // +1: `local_pending_offline_source_probes` on `OfflinePackageStore`, the
+    // replica read of `pending_offline_source_probes`'s own statement that
+    // decides only whether the probe loop asks the authority; inert on
+    // SQLite like the rest of node removal. No new trait or supertrait.
+    assert_eq!(declared.len(), 594, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

@@ -4863,6 +4863,21 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         requested_since: i64,
     ) -> Result<Vec<OfflinePackage>, StoreError>;
 
+    /// [`pending_offline_source_probes`](Self::pending_offline_source_probes)
+    /// as this node's own replica holds it, read without consensus and
+    /// without a leader round trip.
+    ///
+    /// A hint and never an authorization: a replica that has not applied a
+    /// new probe yet answers empty, and the probe is answered on the first
+    /// pass after it applies. The probe loop uses it only to decide whether
+    /// the authoritative read is owed; that read and the answer's write stay
+    /// the only things that act.
+    async fn local_pending_offline_source_probes(
+        &self,
+        node_id: &str,
+        requested_since: i64,
+    ) -> Result<Vec<OfflinePackage>, StoreError>;
+
     async fn answer_offline_source_probe(
         &self,
         package_id: &str,
