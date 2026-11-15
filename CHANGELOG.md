@@ -308,6 +308,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Optional, explicit Curator household login connections with independent local
+  accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
+  household-only grants on standalone and replicated storage. Cinema credentials,
+  administrator permissions and watch history stay in Cinema.
+
 - `/metrics` attributes the daemon's steady-state replicated reads and writes
   by the method that issued them.
   `plurx_background_store_operations_by_method_total{class,method}` counts
