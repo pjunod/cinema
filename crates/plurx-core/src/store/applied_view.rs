@@ -1362,7 +1362,10 @@ impl AppliedView {
         accept: impl Fn(Option<&super::PlaybackPlanningSnapshot>) -> bool,
     ) -> Result<Option<(super::PlaybackPlanningSnapshot, ViewSource)>, StoreError> {
         let table = AppliedTable::Files;
-        let local = match &self.mode {
+        // Named because, without `hiqlite-store`, no arm below yields an `Ok`
+        // for inference to read the snapshot type from (E0282).
+        let local: Result<Option<super::PlaybackPlanningSnapshot>, ViewFallback> = match &self.mode
+        {
             Mode::Standalone => {
                 let snapshot = self
                     .authority
