@@ -76,6 +76,12 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // The sharing listener and claim loops' switch between passes; every
     // step that acts on an import re-reads `sharing::enabled` from the Store.
     ("sharing.rs", "loop_enabled", 1, true),
+    // The background work lanes' switches and tunables between passes; the
+    // claim, the output drain and every build or publication read the Store.
+    ("state.rs", "lane_analysis_retry_policy", 1, true),
+    ("state.rs", "lane_cluster_fragment_index_enabled", 1, true),
+    ("state.rs", "lane_subtitle_source_queue_enabled", 1, true),
+    ("state.rs", "read_preparation_lanes", 1, true),
 ];
 
 /// The direct callers of each helper above, `(helper file, helper,
@@ -249,7 +255,13 @@ const STAYS_CHAINS: &[(&str, &str, &str, &str)] = &[(
 /// stale by at most the proof lease plus apply lag, shorter than any of
 /// their periods. Every other read in these files, and every read before a
 /// write or a fence in them, stays a Store read. `(file, function)`.
-const IDLE_LOOP_READS: &[(&str, &str)] = &[("playback_cache.rs", "read_max_gb")];
+const IDLE_LOOP_READS: &[(&str, &str)] = &[
+    ("playback_cache.rs", "read_max_gb"),
+    ("state.rs", "lane_analysis_retry_policy"),
+    ("state.rs", "lane_cluster_fragment_index_enabled"),
+    ("state.rs", "lane_subtitle_source_queue_enabled"),
+    ("state.rs", "read_preparation_lanes"),
+];
 
 /// How a helper is called: bare in its own file and `module::name(`
 /// elsewhere, or as a method on a field of this name.

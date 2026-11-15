@@ -1243,6 +1243,7 @@ impl AppState {
                     .then(|| data_dir.join("source-attestation-checkpoints")),
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
+            .with_applied_view(applied.clone())
             .with_membership(membership.clone())
             .with_peer_activity(peer_activity.clone()),
         );
@@ -1801,6 +1802,10 @@ pub(crate) const TITLE_SCAN_INDEX_WAIT: std::time::Duration =
 pub struct JobManager {
     pub(crate) copy_analysis: Arc<crate::copy_analysis::CopyAnalysisRegistry>,
     store: Arc<dyn Store>,
+    /// This node's applied settings view, for the background lanes' idle
+    /// looks at their switches and tunables (A4). Every read before a claim,
+    /// a cancel or a publication stays on `store`.
+    applied: plurx_core::store::AppliedView,
     /// Durable source continuation root. Standalone test managers omit it.
     source_checkpoint_dir: Option<PathBuf>,
     source_identity: std::sync::RwLock<Option<crate::source_custody::SourceIdentity>>,
@@ -3910,8 +3915,12 @@ impl JobManager {
     ) -> Self {
         let coordinator = StoreCoordinator::new(Arc::clone(&store), node_id)
             .expect("configured node id is a valid lease owner");
+        // A standalone view over the same store until the daemon hands over
+        // its own (`with_applied_view`): every look then reads the store.
+        let applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
         JobManager {
             store,
+            applied,
             source_checkpoint_dir: None,
             source_identity: std::sync::RwLock::new(None),
             identity_repairs: Default::default(),
@@ -3965,6 +3974,11 @@ impl JobManager {
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
             last_genre_backfill: Mutex::new(None),
         }
+    }
+
+    fn with_applied_view(mut self, applied: plurx_core::store::AppliedView) -> Self {
+        self.applied = applied;
+        self
     }
 
     fn with_membership(
@@ -6695,7 +6709,11 @@ impl JobManager {
                     && last_drain.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
                 {
                     last_drain = Some(std::time::Instant::now());
-                    self.drain_disabled_output_preparation(lanes.output).await;
+                    // The drain cancels queued rows, so it acts on the
+                    // Store's switch, not the view the lanes opened on.
+                    if let Some(mode) = self.output_preparation_for_drain().await {
+                        self.drain_disabled_output_preparation(mode).await;
+                    }
                 }
                 let lanes = self.executable_lanes(lanes).await;
                 if !lanes.is_empty() {
@@ -6726,7 +6744,7 @@ impl JobManager {
                     let jobs = Arc::clone(&self);
                     let transcode = Arc::clone(&transcode);
                     tokio::spawn(async move {
-                        let policy = jobs.analysis_retry_policy().await;
+                        let policy = jobs.lane_analysis_retry_policy().await;
                         let context = crate::copy_analysis::CopyAnalysisContext {
                             store: Arc::clone(&jobs.store),
                             node_id: jobs.coordinator.node_id().to_owned(),
@@ -6748,7 +6766,7 @@ impl JobManager {
                     .job_authority
                     .may_execute_job(JobKind::FragmentIndexBuild)
                     .await
-                    && self.cluster_fragment_index_enabled().await
+                    && self.lane_cluster_fragment_index_enabled().await
                     && (!self.cluster_analysis_working.load(Ordering::Acquire)
                         || !self.cluster_index_working.load(Ordering::Acquire))
                 {
@@ -11289,6 +11307,50 @@ impl JobManager {
         AnalysisRetryPolicy::from_settings(&settings)
     }
 
+    /// [`Self::cluster_fragment_index_enabled`] from the applied settings
+    /// view, for the fragments lane's look between passes (A4). The pass it
+    /// opens re-reads the switch from the Store before it builds or
+    /// publishes.
+    async fn lane_cluster_fragment_index_enabled(&self) -> bool {
+        self.applied
+            .setting(keys::VOD_INDEX_CLUSTER_CACHE)
+            .await
+            .ok()
+            .is_some_and(setting_enabled)
+    }
+
+    /// [`Self::analysis_retry_policy`] from the applied settings view, for
+    /// the copy-observation pass the fragments lane starts every tick (A4):
+    /// tunables (lease, renewal and backoff lengths), never a guard on a
+    /// write.
+    async fn lane_analysis_retry_policy(&self) -> AnalysisRetryPolicy {
+        let settings = self
+            .applied
+            .settings_snapshot()
+            .await
+            .map(|snapshot| snapshot.values)
+            .unwrap_or_default();
+        AnalysisRetryPolicy::from_settings(&settings)
+    }
+
+    /// [`Self::subtitle_source_queue_enabled`] from the applied settings
+    /// view, for the subtitle lane's look between passes (A4). Both switches
+    /// in one read; an unreadable view closes the lane for the tick, as an
+    /// unreadable Store did.
+    pub(crate) async fn lane_subtitle_source_queue_enabled(&self) -> bool {
+        match self
+            .applied
+            .setting_pair(
+                keys::VOD_INDEX_CLUSTER_CACHE,
+                keys::SUBTITLE_CLUSTER_SOURCES,
+            )
+            .await
+        {
+            Ok((index, sources)) => setting_enabled(index) && setting_enabled(sources),
+            Err(_) => false,
+        }
+    }
+
     /// The source-capacity decision the claim made, asked again of the
     /// claimed request (`analysis_source_capacity_clause`, read from the
     /// Store's ledger rows with the request's own holdings left out). A
@@ -12608,8 +12670,23 @@ impl JobManager {
         /// One warning per run of failures, debug for the rest of the run.
         static OUTPUT_SWITCH_UNREADABLE: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
-        let speculative = self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0;
-        let (output, read) = match self.store.get_setting(keys::VOD_OUTPUT_PREPARATION).await {
+        // Both lanes' settings in one read of the applied view (A4): which
+        // lanes open is decided again every tick, and nothing is claimed,
+        // cancelled or published on this answer alone (the claim and the
+        // drain read the Store). An unreadable view closes both lanes for the
+        // tick, as an unreadable cadence read did.
+        let read = self
+            .applied
+            .setting_pair(keys::JOB_CACHE_PRODUCE_MINS, keys::VOD_OUTPUT_PREPARATION)
+            .await;
+        let speculative = read.as_ref().is_ok_and(|(minutes, _)| {
+            minutes
+                .as_deref()
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .unwrap_or(0)
+                > 0
+        });
+        let (output, read) = match read.map(|(_, output)| output) {
             Ok(value) => {
                 OUTPUT_SWITCH_UNREADABLE.store(false, Ordering::Relaxed);
                 (
@@ -12633,6 +12710,18 @@ impl JobManager {
             },
             read,
         )
+    }
+
+    /// The output switch as the Store holds it, for the drain that cancels
+    /// what it no longer admits; `None` (no drain this time) when unreadable.
+    async fn output_preparation_for_drain(&self) -> Option<crate::vodserve::OutputPreparation> {
+        match self.store.get_setting(keys::VOD_OUTPUT_PREPARATION).await {
+            Ok(value) => Some(crate::vodserve::OutputPreparation::parse(value.as_deref())),
+            Err(error) => {
+                tracing::debug!(%error, "output preparation switch unreadable; drain skipped");
+                None
+            }
+        }
     }
 
     /// `lanes` narrowed to what this node's job authority lets it execute.
