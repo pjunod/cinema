@@ -263,6 +263,67 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual((root / "CHANGELOG.md").read_text(encoding="utf-8"), empty)
         self.assertEqual((root / "Cargo.toml").read_text(encoding="utf-8"), CARGO)
 
+    def fragments(self, root: Path, **files: str) -> None:
+        (root / "changelog.d").mkdir(exist_ok=True)
+        (root / "changelog.d" / "README.md").write_text("# Changelog fragments\n")
+        for name, text in files.items():
+            (root / "changelog.d" / f"{name}.md").write_text(text, encoding="utf-8")
+
+    def test_fragments_are_folded_into_the_dated_section_and_deleted(self):
+        root = self.tree()
+        self.fragments(
+            root,
+            zebra="### Added\n\n- A new thing.\n",
+            apple="### Fixed\n\n- A fragment fix.\n",
+        )
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "## [Unreleased]\n\n## [0.3.1] — 2026-09-28\n\n"
+            "### Added\n\n- A new thing.\n\n"
+            "### Fixed\n\n- A fragment fix.\n"
+            "- **Something a server operator will notice.**\n\n"
+            "## [0.3.0] — 2026-08-31\n",
+            changelog,
+        )
+        self.assertEqual(
+            sorted(path.name for path in (root / "changelog.d").iterdir()), ["README.md"]
+        )
+        self.assertIn("changed changelog.d/apple.md", result.stdout)
+
+    def test_fragments_alone_are_a_release(self):
+        empty = CHANGELOG.replace(
+            "### Fixed\n\n- **Something a server operator will notice.**\n\n", ""
+        )
+        root = self.tree(empty)
+        self.fragments(root, only="### Fixed\n\n- The only entry.\n")
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "## [0.3.1] — 2026-09-28\n\n### Fixed\n\n- The only entry.\n\n## [0.3.0]",
+            (root / "CHANGELOG.md").read_text(encoding="utf-8"),
+        )
+
+    def test_a_malformed_fragment_refuses_the_cut_and_nothing_is_written(self):
+        root = self.tree()
+        self.fragments(root, bad="- An entry under no category.\n")
+        result = self.run_cut(root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("changelog.d/bad.md", result.stderr)
+        self.assertEqual((root / "CHANGELOG.md").read_text(encoding="utf-8"), CHANGELOG)
+        self.assertTrue((root / "changelog.d" / "bad.md").is_file())
+
+    def test_a_release_commit_that_still_carries_a_fragment_is_refused(self):
+        root = self.tree()
+        self.assertEqual(self.run_cut(root, "--date", "2026-09-28").returncode, 0)
+        self.fragments(root, late="### Fixed\n\n- Not in the dated section.\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "release: v0.3.1")
+        refused = self.run_cut(root, "--pending")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("still carries changelog fragments", refused.stderr)
+
     def test_an_existing_tag_or_section_is_refused(self):
         root = self.tree()
         subprocess.run(["git", "tag", "v0.3.1"], cwd=root, check=True)
@@ -411,6 +472,7 @@ class HistoryAnchorsSurviveACutCase(unittest.TestCase):
         import tomllib
 
         registries = [ROOT / "tests" / "client-fixes.toml", ROOT / "validation" / "merge-errata.toml"]
+        registries += sorted((ROOT / "tests" / "client-fixes.d").glob("*.toml"))
         registries += sorted((ROOT / "validation" / "regressions.d").glob("*.toml"))
 
         def walk(node, where):
