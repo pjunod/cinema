@@ -3582,7 +3582,7 @@ impl<K: PartialEq + Send + Sync + 'static> FloorAdvisory<K> {
 const SHARING_FLOOR_ADVISORY_READ_BOUND: Duration = Duration::from_secs(1);
 
 async fn floor_advisory_key(
-    client: &Client,
+    client: &CountedClient,
     epoch: u64,
 ) -> Result<FloorAdvisoryKey, MembershipError> {
     let metrics = client.metrics_db().await?;
@@ -12343,8 +12343,7 @@ impl MembershipManager {
     ) -> Result<bool, MembershipError> {
         let inner = Arc::clone(self.inner.as_ref().ok_or(MembershipError::Unavailable)?);
         let Some(epoch) = epoch else {
-            return sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required)
-                .await;
+            return member_floor_ready(&inner.client, inner.identity.raft_id, required).await;
         };
         let advisory = Arc::clone(&inner.floor_advisories[required.index()]);
         let keyed = Arc::clone(&inner);
@@ -12358,7 +12357,7 @@ impl MembershipManager {
                 async move {
                     tokio::time::timeout(
                         SHARING_FLOOR_ADVISORY_READ_BOUND,
-                        sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required),
+                        member_floor_ready(&inner.client, inner.identity.raft_id, required),
                     )
                     .await
                     .map_err(|_| MembershipError::Unavailable)?
