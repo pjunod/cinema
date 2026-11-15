@@ -42,7 +42,7 @@ CATALOG = (
 )
 STATUS_OLD = (
     "# Status\n\n**Updated:** 2026-11-13\n<!-- status: insert new efforts below this line -->\n"
-    "- **2026-11-13 · Trim fidelity:** Owner Codex. Built; [ledger](docs/x.md).\n\n"
+    "- **2026-11-13 · Trim fidelity:** Owner Codex. Built; [ledger](notes/x.md).\n\n"
     "## Older efforts — where each one now lives\n\n| a | b |\n"
 )
 STATUS_NEW = "# Status\n\nEach effort is a file under status.d/.\n\n## Older efforts — where each one now lives\n\n| a | b |\n"
@@ -83,7 +83,7 @@ class MigrateBookkeepingCase(unittest.TestCase):
         # The target adopts the per-change layout.
         for path, text in {
             "changelog.d/README.md": "# Changelog fragments\n", "STATUS.md": STATUS_NEW,
-            "status.d/2026-11-13-trim-fidelity.md": "# Trim fidelity\n\nOwner Codex. Built; [ledger](../docs/x.md).\n",
+            "status.d/2026-11-13-trim-fidelity.md": "# Trim fidelity\n\nOwner Codex. Built; [ledger](../notes/x.md).\n",
             "clients/android/README.md": README_NEW,
             "clients/android/app/build.gradle.kts": GRADLE.replace("{n}", "1"),
             "clients/apple/project.yml": PROJECT.replace("{n}", "1"),
@@ -130,7 +130,7 @@ class MigrateBookkeepingCase(unittest.TestCase):
         self.write("validation/points.toml", CATALOG.replace('  "b",\n', '  "b",\n  "scripts/new-tool",\n'))
         self.write("STATUS.md", STATUS_OLD.replace(
             "this line -->\n",
-            "this line -->\n- **2026-11-15 · New effort:** Owner Claude. Draft; [plan](docs/p.md).\n", 1,
+            "this line -->\n- **2026-11-15 · New effort:** Owner Claude. Draft; [plan](notes/p.md).\n", 1,
         ).replace("Owner Codex. Built;", "Owner Codex. Qualified;"))
         self.write("clients/android/app/build.gradle.kts", GRADLE.replace("{n}", "208"))
         self.write("clients/apple/project.yml", PROJECT.replace("{n}", "302"))
@@ -184,12 +184,12 @@ class MigrateBookkeepingCase(unittest.TestCase):
         )
         self.assertEqual(
             self.read("status.d/2026-11-15-new-effort.md"),
-            "# New effort\n\nOwner Claude. Draft; [plan](../docs/p.md).\n",
+            "# New effort\n\nOwner Claude. Draft; [plan](../notes/p.md).\n",
         )
         # The branch's update to an effort the target already moved lands on its file.
         self.assertEqual(
             self.read("status.d/2026-11-13-trim-fidelity.md"),
-            "# Trim fidelity\n\nOwner Codex. Qualified; [ledger](../docs/x.md).\n",
+            "# Trim fidelity\n\nOwner Codex. Qualified; [ledger](../notes/x.md).\n",
         )
         # The patch the branch numbered 3 is a file keyed by name; the ledger,
         # its count and its row lists are the target's again.
