@@ -2075,7 +2075,10 @@ pattern = "media_session_route_for_playback"
 # active state, and usable control response. This is a test-only observation of
 # the Store-published successor; it does not make a read-then-act decision or
 # change the Store CAS as the sole pointer authority.
-expected_occurrences = 29
+# +2 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
+# two route-read assertions proving the cancelled successor never reserved.
+
+expected_occurrences = 31
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -3985,7 +3988,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # even after request cancellation; contention returns unavailable, never queues.
 # #1602: +1 joined test-only probe worker in http::tests::seeded_write_surface;
 # the test cancels its token and awaits the JoinHandle before asserting.
-expected_occurrences = 1159
+# +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
+# clock and its handoff tests, each on its owning task (reviewed in #1645).
+# +1 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
+# the staging task, joined by tokio::time::timeout on its JoinHandle.
+
+expected_occurrences = 1161
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5896,7 +5904,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # closes that gate after deterministic admission. Expiry fails the test and
 # drops the joined observation futures; it proves no terminal mutation, child
 # reap or resource settlement. No production timer, task or process is added.
-expected_occurrences = 2223
+# +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
+# clock and its handoff tests, each on its owning task (reviewed in #1645).
+# +3 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
+# two 2 s test timeouts (registration seam, staging join) and the 260 ms
+# control-cadence sleep.
+
+expected_occurrences = 2227
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5942,7 +5956,9 @@ pattern = "use\\s+tokio::time"
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
 # PR1341: +1 test-only `use tokio::time` in authority_recovery.rs.
-expected_occurrences = 7
+# +1 #1609 (da8f9357d, processed-window stage timings): dv_segment's stage
+# clock and its handoff tests, each on its owning task (reviewed in #1645).
+expected_occurrences = 8
 
 [[module_structures]]
 id = "process-command-construction"
