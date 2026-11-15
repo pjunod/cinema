@@ -98,8 +98,11 @@ pub struct NetworkStreaming {
 
 /// Most idle connections kept per target. OpenRaft 0.9 opens one client per
 /// voter for every linearizable read, so this bounds the parked sockets left
-/// by a burst of concurrent reads; a lease beyond it dials as before.
-const IDLE_CONNECTIONS_PER_TARGET: usize = 8;
+/// by a burst of concurrent reads; a lease beyond it dials as before. Sized
+/// to the measured fleet peak: with 8, the leader still dialed in bursts of up
+/// to ~55 per voter per second (page loads issuing parallel consistent reads).
+/// Each parked socket closes after `IDLE_CONNECTION_TTL` unused.
+const IDLE_CONNECTIONS_PER_TARGET: usize = 64;
 /// An idle connection unused for longer than this is closed at the next pool
 /// access rather than leased.
 const IDLE_CONNECTION_TTL: Duration = Duration::from_secs(30);
@@ -2862,6 +2865,67 @@ mod tests {
         );
         assert!(last_shutdown.is_requested());
         assert_eq!(accepted_rx.len(), IDLE_CONNECTIONS_PER_TARGET + 1);
+
+        drop(factory);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// The measured fleet burst (~55 concurrent read-confirms per voter in one
+    /// second) must fit in the pool, or every burst dials again.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_measured_read_burst_parks_every_connection() {
+        const MEASURED_BURST: usize = 56;
+        let (mut factory, node, accepted_rx, server) = answering_fixture().await;
+        let mut clients = Vec::new();
+        for _ in 0..MEASURED_BURST {
+            let mut client =
+                <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+                    &mut factory,
+                    node.id,
+                    &node,
+                )
+                .await;
+            client
+                .append_entries(empty_append(), RPCOption::new(Duration::from_secs(2)))
+                .await
+                .expect("answered empty append");
+            clients.push(client);
+        }
+        drop(clients);
+        assert_eq!(
+            factory.idle_connections.parked(&idle_key(&node)),
+            MEASURED_BURST
+        );
+        // The fixture reports each accept before it answers that socket's
+        // first append, so every dial above is already counted.
+        assert_eq!(accepted_rx.len(), MEASURED_BURST);
+
+        // A second burst of the same width, all leases held at once.
+        let mut leased = Vec::new();
+        for _ in 0..MEASURED_BURST {
+            let client = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+                &mut factory,
+                node.id,
+                &node,
+            )
+            .await;
+            assert!(client.task.is_some(), "each lease owns a live supervisor");
+            leased.push(client);
+        }
+        assert_eq!(factory.idle_connections.parked(&idle_key(&node)), 0);
+        drop(leased);
+        assert_eq!(
+            factory.idle_connections.parked(&idle_key(&node)),
+            MEASURED_BURST
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            accepted_rx.len(),
+            MEASURED_BURST,
+            "a repeated burst must not dial"
+        );
 
         drop(factory);
         server.abort();

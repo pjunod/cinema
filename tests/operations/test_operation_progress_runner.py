@@ -28,8 +28,17 @@ class OperationProgressPackageTests(unittest.TestCase):
             with self.subTest(command=command):
                 args = formal.parser().parse_args([command, "--package", "operation-progress"])
                 self.assertEqual(args.package, "operation-progress")
-        with self.assertRaises(SystemExit):
+        # The refusal is captured and read: left on stderr it lands in the middle of whichever
+        # run loaded this module, and without a fixed prog it carried that run's name
+        # ("ci-image-probe smoke: error: ..." in ci-image.yml run 7649).
+        refusal = io.StringIO()
+        with self.assertRaises(SystemExit) as stopped, contextlib.redirect_stderr(refusal):
             formal.parser().parse_args(["smoke", "--package", "../operation-progress"])
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertIn(
+            "check-formal smoke: error: argument --package: invalid choice: '../operation-progress'",
+            refusal.getvalue(),
+        )
         self.assertEqual(formal.parser().parse_args(["smoke"]).package, "durable-jobs")
 
     def test_registry_fixes_model_configs_smoke_and_deadlock_semantics(self) -> None:

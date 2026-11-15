@@ -5199,6 +5199,13 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             convert_dolby_vision: false,
             dual_layer_as_copied: false,
         };
+        // Keep the recorded provenance consistent with the edited descriptor
+        // (2f33da401 refuses a catalog whose caps disagree with its query), so
+        // only the absence of the physical source is under test here.
+        if let Some(query) = unavailable_catalog.catalog_query.as_mut() {
+            query.caps = unavailable_catalog.caps.clone();
+            query.copy_contract = unavailable_request.kind.copy_contract();
+        }
         let unavailable = serde_json::to_value(unavailable_catalog).expect("bounded descriptor");
         let error = manager
             .restore_queued_candidate(

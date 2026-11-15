@@ -484,3 +484,266 @@ async fn a_scheduled_processed_handoff_meets_the_actual_prepared_entry() {
     assert_eq!(position, window.start, "staging uses produced media, not an earlier clamp");
     assert!(waited);
 }
+
+/// Exercise the real priming arm after its final planning awaits. An accepted
+/// incumbent wait cancels only the pending child; releasing the session cancels
+/// the parent too. The stage must preserve that distinction through the same
+/// completion path production uses, without reserving or priming a successor.
+#[tokio::test]
+async fn a_late_staging_cancellation_rearms_only_a_live_processed_upgrade() {
+    use super::preparation::{
+        AcceptedAsk, PreparationPurpose, PreparationStageOutcome, StagedSuccessorIds,
+    };
+    for release_parent in [false, true] {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback = unique_playback_id("upgrade-late-stage-cancel");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback).await;
+        let (intent, run, mut control) =
+            upgrade_after_playing_to(&fixture, &session_id, &route, 30_000).await;
+        let pending = super::preparation::begin_processed_upgrade(&playback, run.cancelled())
+            .expect("the trial owns the pending claim");
+        let cancellation = pending.cancellation_token();
+        let registration = pending.registration();
+        let source = staging_source(&fixture).await;
+        let predecessor: RemoteStartRequest =
+            serde_json::from_str(&route.recipe_json).expect("predecessor recipe");
+        let candidate = intent.request.clone();
+        let ids = StagedSuccessorIds::mint();
+        let staged_incarnation = ids.incarnation_id.clone();
+        super::hooks::prime_prepared_successors(&fixture.state, true);
+        let pause = super::hooks::pause_before_preparation_registered(&fixture.state, &playback);
+        let state = fixture.state.clone();
+        let staging_route = route.clone();
+        let staging_session = session_id.clone();
+        let staging = tokio::spawn(async move {
+            super::preparation::stage_prepared_successor_as(
+                &state,
+                &staging_session,
+                &staging_route,
+                &predecessor,
+                &candidate,
+                Some(&source),
+                &state.node_id,
+                PreparationPurpose::SelectionChange,
+                AcceptedAsk {
+                    prepared_proof: None,
+                    film_time_ms: 30_000,
+                    desired_digest: None,
+                    planning_cancellation: Some(cancellation),
+                    planning_registration: Some(registration),
+                    quality_intent: None,
+                },
+                true,
+                ids,
+            )
+            .await
+        });
+        let held = tokio::time::timeout(Duration::from_secs(2), pause.reached())
+            .await
+            .expect("the real stage reached its registration seam");
+        if release_parent {
+            super::processed_upgrade::cancel_for_session(&session_id);
+        } else {
+            // Honour the real control cadence. This is an accepted wait from
+            // the same generation, not a direct test-only token cancellation.
+            tokio::time::sleep(Duration::from_millis(260)).await;
+            control.sequence += 1;
+            control.render_state = crate::playback_control::RenderState::Waiting;
+            let (status, body) = control_body(
+                control_local_inner(
+                    &fixture.state,
+                    &route,
+                    control,
+                    unix_ms().saturating_add(4_000),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "the incumbent wait was accepted: {body}"
+            );
+        }
+        assert!(pending.cancelled(), "the pending claim lost its owner");
+        assert_eq!(run.cancelled().is_cancelled(), release_parent);
+        held.release();
+        let staged = tokio::time::timeout(Duration::from_secs(2), staging)
+            .await
+            .expect("staging finishes")
+            .expect("staging task");
+        assert_eq!(staged, PreparationStageOutcome::Cancelled);
+        assert!(super::preparation::active_preparation(&staged_incarnation).is_none());
+        assert!(
+            fixture
+                .store
+                .media_session_route_by_incarnation(&staged_incarnation)
+                .await
+                .expect("successor read")
+                .is_none(),
+            "cancelled before reservation"
+        );
+        assert!(fixture
+            .store
+            .staged_media_session_for_playback(&route.principal, &playback)
+            .await
+            .expect("ledger read")
+            .is_none());
+        let current = fixture
+            .store
+            .media_session_route_for_playback(&route.principal, &playback)
+            .await
+            .expect("pointer read")
+            .expect("the incumbent remains");
+        assert_eq!(current.incarnation_id, route.incarnation_id);
+        assert_eq!(current.owner_epoch, route.owner_epoch);
+        assert!(fixture
+            .state
+            .transcode
+            .session_preparation_gate(&session_id)
+            .await
+            .is_some());
+        let outcome = run.finish_staging(staged);
+        assert_eq!(outcome, "cancelled");
+        drop(pending);
+        let completed = super::processed_upgrade::finish_upgrade_run(intent, run, outcome);
+        assert_eq!(
+            completed,
+            if release_parent {
+                "cancelled"
+            } else {
+                "displaced"
+            }
+        );
+        assert!(
+            super::processed_upgrade::processing_skip(&session_id, &route.incarnation_id).is_none()
+        );
+        assert_eq!(
+            super::processed_upgrade::is_waiting(&session_id),
+            !release_parent
+        );
+        if !release_parent {
+            // This is the exact take hook invoked by the next accepted
+            // Rendering exchange. It can take this generation once only.
+            let user = route.principal.local_user_id().expect("local viewer");
+            let (_, next_run) = super::processed_upgrade::take_on_rendering(
+                user,
+                &session_id,
+                &route.incarnation_id,
+            )
+            .expect("the live generation may try again when rendering");
+            assert!(
+                super::processed_upgrade::take_on_rendering(
+                    user,
+                    &session_id,
+                    &route.incarnation_id,
+                )
+                .is_none(),
+                "no duplicate rendering run"
+            );
+            super::processed_upgrade::cancel_for_session(&session_id);
+            drop(next_run);
+        }
+    }
+}
+
+/// Cleanup cancels the pending child after a real reservation refusal too.
+/// That later cancellation must never turn the refused stage into a retry.
+#[tokio::test]
+async fn a_refused_upgrade_reservation_is_not_rearmed_by_its_cleanup() {
+    use super::preparation::{
+        AcceptedAsk, PreparationPurpose, PreparationStageOutcome, PreparationStageRefusal,
+        StagedSuccessorIds,
+    };
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("upgrade-stage-refused");
+    let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let (intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 30_000).await;
+    let pending = super::preparation::begin_processed_upgrade(&playback, run.cancelled())
+        .expect("the trial owns the pending claim");
+    let source = staging_source(&fixture).await;
+    let predecessor: RemoteStartRequest = serde_json::from_str(&route.recipe_json).expect("recipe");
+    let mut stale_owner = route.clone();
+    stale_owner.owner_epoch += 1;
+    let ids = StagedSuccessorIds::mint();
+    let staged_incarnation = ids.incarnation_id.clone();
+    let staged = super::preparation::stage_prepared_successor_as(
+        &fixture.state,
+        &session_id,
+        &stale_owner,
+        &predecessor,
+        &intent.request,
+        Some(&source),
+        &fixture.state.node_id,
+        PreparationPurpose::SelectionChange,
+        AcceptedAsk {
+            prepared_proof: None,
+            film_time_ms: 30_000,
+            desired_digest: None,
+            planning_cancellation: Some(pending.cancellation_token()),
+            planning_registration: Some(pending.registration()),
+            quality_intent: None,
+        },
+        true,
+        ids,
+    )
+    .await;
+    // The existing five-second phase includes cleanup of the refused owner.
+    // Either its known refusal or its settlement deadline stays terminal; a
+    // cleanup token must not turn either result into a rendering retry.
+    assert!(matches!(
+        staged,
+        PreparationStageOutcome::Refused(
+            PreparationStageRefusal::ReservationRefused
+                | PreparationStageRefusal::ReservationSettlementDeadline
+        )
+    ));
+    assert!(
+        pending.cancelled(),
+        "the detached refusal owner performs its cleanup"
+    );
+    assert!(
+        !run.cancelled().is_cancelled(),
+        "the predecessor did not end"
+    );
+    assert!(super::preparation::active_preparation(&staged_incarnation).is_none());
+    assert!(fixture
+        .store
+        .media_session_route_by_incarnation(&staged_incarnation)
+        .await
+        .expect("successor read")
+        .is_none());
+    let current = fixture
+        .store
+        .media_session_route_for_playback(&route.principal, &playback)
+        .await
+        .expect("pointer read")
+        .expect("the incumbent remains");
+    assert_eq!(current.incarnation_id, route.incarnation_id);
+    assert_eq!(
+        current.owner_epoch, route.owner_epoch,
+        "stale staging changed no owner fence"
+    );
+    let outcome = run.finish_staging(staged);
+    assert_eq!(outcome, "not_staged");
+    drop(pending);
+    assert_eq!(
+        super::processed_upgrade::finish_upgrade_run(intent, run, outcome),
+        "not_staged"
+    );
+    assert!(!super::processed_upgrade::is_waiting(&session_id));
+    assert!(
+        super::processed_upgrade::processing_skip(&session_id, &route.incarnation_id).is_some()
+    );
+    assert!(
+        super::processed_upgrade::take_on_rendering(
+            route.principal.local_user_id().expect("local viewer"),
+            &session_id,
+            &route.incarnation_id,
+        )
+        .is_none(),
+        "a real refusal has no rendering retry"
+    );
+    super::processed_upgrade::cancel_for_session(&session_id);
+}

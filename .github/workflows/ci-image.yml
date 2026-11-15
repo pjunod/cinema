@@ -1,0 +1,140 @@
+name: ci image
+
+# Builds the `ci` stage of Dockerfile, publishes it to the fleet registry, and
+# then runs, inside the image it just published and on the general lane's own
+# label and limits, both preflight Python suites: a failure, or a skip without
+# a reviewed reason, fails the run. Dispatch only, on the branch that changed
+# the stage; pin the digest it prints in every job that names plurx-ci.
+# docs/ci/GENERAL-LANE-IMAGE.md is the reference.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish the ci image
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 60
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build, smoke and publish the image
+        id: publish
+        env:
+          REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One tag per publication attempt, named by the source it was built
+          # from. The build is not reproducible, so a tag that moved would
+          # leave an already pinned digest untagged and open to registry
+          # cleanup: the attempt is part of the name and an existing tag is
+          # never overwritten.
+          tag="$REGISTRY/noirr/plurx-ci:source-$GITHUB_SHA-run$GITHUB_RUN_ID-attempt$GITHUB_RUN_ATTEMPT"
+          # A job-local Docker config: the registry login never lands in the
+          # runner user's ~/.docker on a shared host.
+          export DOCKER_CONFIG="$RUNNER_TEMP/ci-image-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'docker image rm "$tag" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s\n' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u fleet --password-stdin
+          # Only "the registry has no such manifest" lets the build go on. Any
+          # other failure (auth, network, a registry error) says nothing about
+          # the tag and fails the job. No insecure flag: it permits a plain HTTP
+          # fallback that would carry the fleet credential, and the push below
+          # relies on the same daemon registry configuration without it.
+          if inspected="$(docker manifest inspect "$tag" 2>&1)"; then
+            echo "::error::$tag already exists; a publication never replaces a tag."
+            exit 1
+          elif ! printf '%s\n' "$inspected" | grep -qiE 'no such manifest|manifest unknown|name unknown|not found'; then
+            echo "::error::could not tell whether $tag exists: $inspected"
+            exit 1
+          fi
+          # The media runtime base comes from the fleet registry, as in
+          # ci.yml's runtime build; the three toolchain images are pinned by
+          # digest and reused from the host's store when it holds them.
+          DOCKER_BUILDKIT=1 docker build --platform linux/amd64 --target ci \
+            --build-arg "PLURX_MEDIA_RUNTIME_REPOSITORY=$REGISTRY/noirr/plurx-media-runtime" \
+            --build-arg "PLURX_CI_SOURCE_SHA=$GITHUB_SHA" -t "$tag" .
+          docker run --rm "$tag" sh -ec '
+            python3 -c "import sys, tomllib, playwright; assert sys.version_info[:3] == (3, 12, 15), sys.version"
+            /usr/bin/python3 --version | grep -Fx "Python 3.12.15"
+            rustc +1.97.1 --version | grep -F "rustc 1.97.1 "
+            node --version | grep -Fx v22.23.4
+            npm --version
+            ffmpeg -version | grep -E "^ffmpeg version n?8"
+            test "$(readlink -f "$(command -v ffmpeg)")" = /usr/lib/jellyfin-ffmpeg/ffmpeg
+            curl -q --version | sed -n 1p | grep -E "^curl 8\.([4-9]|[1-9][0-9])\."
+            docker --version
+            docker compose version
+            autoconf --version | sed -n 1p
+            aclocal --version | sed -n 1p
+            command -v dbus-run-session pgrep openssl
+            pkg-config --exists openssl "gtk4 >= 4.0" dbus-1'
+          test "$(docker image inspect "$tag" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          docker push "$tag"
+          image="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" \
+            | grep -F "$REGISTRY/noirr/plurx-ci@sha256:" | head -n 1)"
+          test -n "$image"
+          echo "ci-image digest: $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ci image"
+            echo "source \`$GITHUB_SHA\`, published \`$image\` (not yet probed; do not pin it until the probe job passes)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The image just published, where the general lane runs it and with the
+  # lane's limits, before any lane is pointed at it: both preflight suites,
+  # whole, on the image's own interpreter. A failure, an error, or a skip that
+  # tests/ci-image-skips.toml does not carry with a reason fails the run.
+  probe:
+    name: preflight suites on the published image, no unreviewed skip
+    needs: publish
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ needs.publish.outputs.image }}
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 45
+    steps:
+      # Full history and every branch, as the lane's preflight checks out:
+      # tests that compare against origin/main skip on a shallow clone.
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Provision checksummed public K08 oracle sources
+        run: |
+          set -eu
+          fixture="$RUNNER_TEMP/hiqlite-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
+          printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
+      - name: Run both preflight suites; an unreviewed skip is a failure
+        run: python3 scripts/ci-image-probe
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+      # Last, and only when every step above passed: the instruction to pin
+      # is written by the run that proved the digest, never by the publish.
+      - name: Digest to pin
+        if: success()
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          {
+            echo "### ci image probe passed"
+            echo "pin \`${IMAGE#*@}\` in every job that names \`plurx-ci@sha256:\`"
+          } >> "$GITHUB_STEP_SUMMARY"

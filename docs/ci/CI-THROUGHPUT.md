@@ -142,6 +142,14 @@ the nonvoter compile pool because the idle high-CPU runners do not apply the
 job's CPU, PID and swap limits. Details and timings:
 [RUST-GATE-IMAGE.md](RUST-GATE-IMAGE.md).
 
+### 4. The general lane
+
+Paperwork, scope, preflight, the web gate, the Rust unit select / verdict /
+gate jobs and the promotion gate run in the pinned `plurx-ci` image the unit
+shards use, so a result no longer depends on which `general` runner took the
+job. What the image holds, what it lacks and which jobs stay on the host:
+[GENERAL-LANE-IMAGE.md](GENERAL-LANE-IMAGE.md).
+
 ## Native build-counter boundary
 
 The Apple project’s generated numeric `CURRENT_PROJECT_VERSION` may advance

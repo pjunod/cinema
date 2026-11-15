@@ -1,4 +1,5 @@
 //! Process-local sharing transport. Saved enablement is never a readiness gate.
+use crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
 use crate::state::{clock_ms, AppState};
 use plurx_core::{
     config::{SharingEgressConfig, SharingNetworkConfig},
@@ -131,12 +132,20 @@ pub(crate) struct ReceiverSourceStartRequest<'a> {
     pub rejoin_window: Option<tokio::time::Instant>,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
+    enabled_within(
         store.get_setting(setting_keys::SHARING_ENABLED),
+        Duration::from_secs(1),
     )
     .await
-    .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
+}
+/// The switch from one bounded read; a read past `deadline` is unknown.
+async fn enabled_within(
+    read: impl std::future::Future<Output = Result<Option<String>, StoreError>>,
+    deadline: Duration,
+) -> Result<bool, StoreError> {
+    let result = tokio::time::timeout(deadline, read)
+        .await
+        .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
     Ok(stored_switch(result.as_deref(), false))
 }
 /// [`enabled`] as this node's applied settings view holds it, for the
@@ -596,8 +605,21 @@ impl SharingManager {
         };
         status.host_setup = setup;
     }
+    /// The listener's state is the only record of why peers are refused, so
+    /// every change is logged with the state it left.
     fn listener_status(&self, status: &'static str) {
-        self.status.write().expect("sharing status lock").listener = status;
+        let mut current = self.status.write().expect("sharing status lock");
+        let previous = current.listener;
+        if previous == status {
+            return;
+        }
+        current.listener = status;
+        drop(current);
+        if status == "listening" {
+            tracing::info!(target: "plurx::sharing", from = previous, to = status, "sharing listener status changed");
+        } else {
+            tracing::warn!(target: "plurx::sharing", from = previous, to = status, "sharing listener status changed");
+        }
     }
     pub async fn run(self: Arc<Self>, state: AppState, shutdown: CancellationToken) {
         loop {
@@ -694,6 +716,7 @@ impl SharingManager {
         shutdown: CancellationToken,
     ) {
         let mut next_renewal = tokio::time::Instant::now();
+        let mut unreadable_since = None;
         loop {
             if let Ok((pin, expiry)) = identity.status() {
                 self.status
@@ -718,25 +741,83 @@ impl SharingManager {
                 };
                 next_renewal = tokio::time::Instant::now() + Duration::from_secs(3600);
             }
-            tokio::select! {
-                () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return; }
-                () = lifetime.cancelled() => { stop.cancel(); return; }
-                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            let look = || enabled(state.store.as_ref());
+            if !self
+                .next_look(look, &mut unreadable_since, &lifetime, &stop, &shutdown)
+                .await
+            {
+                return;
             }
-            match enabled(state.store.as_ref()).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.listener_status("disabled");
-                    self.disable_bodies();
-                    stop.cancel();
-                    return;
+        }
+    }
+    /// The serving listener's pause and next look at the switch. False means
+    /// the listener is stopping; `stop` is already cancelled.
+    async fn next_look<Look, Read>(
+        &self,
+        look: Look,
+        unreadable_since: &mut Option<tokio::time::Instant>,
+        lifetime: &CancellationToken,
+        stop: &CancellationToken,
+        shutdown: &CancellationToken,
+    ) -> bool
+    where
+        Look: FnOnce() -> Read,
+        Read: std::future::Future<Output = Result<bool, StoreError>>,
+    {
+        tokio::select! {
+            () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return false; }
+            () = lifetime.cancelled() => { stop.cancel(); return false; }
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+        let observed = look().await;
+        if self.running_listener_closes(observed, unreadable_since, tokio::time::Instant::now()) {
+            stop.cancel();
+            return false;
+        }
+        true
+    }
+    /// One look at the saved switch by a listener that is already serving.
+    ///
+    /// A confirmed disable closes it at once. An unreadable switch is unknown,
+    /// not off: `enabled` is a linearizable read with a one-second deadline, and
+    /// one slow quorum confirmation must not refuse every peer for
+    /// `LISTENER_IDLE_POLL` and end live shared bodies. Unknown is bounded by
+    /// the same [`SERVING_FENCE_SESSION_GRACE`] local sessions get across an
+    /// authority loss; past it the listener closes and bodies end, as for a
+    /// disable, so a node cut off from quorum cannot keep streaming after a
+    /// disable written elsewhere. Admission never depends on this look:
+    /// `peer_guard` reads the switch per request and refuses while it is
+    /// unreadable. A listener is still first opened only after a confirmed
+    /// enable.
+    fn running_listener_closes(
+        &self,
+        observed: Result<bool, StoreError>,
+        unreadable_since: &mut Option<tokio::time::Instant>,
+        now: tokio::time::Instant,
+    ) -> bool {
+        match observed {
+            Ok(true) => {
+                *unreadable_since = None;
+                self.listener_status("listening");
+                false
+            }
+            Ok(false) => {
+                self.listener_status("disabled");
+                self.disable_bodies();
+                true
+            }
+            Err(error) => {
+                if unreadable_since.is_none() {
+                    tracing::warn!(target: "plurx::sharing", %error, "sharing switch unreadable; serving within the session grace");
                 }
-                Err(_) => {
-                    self.listener_status("authority_unavailable");
-                    self.disable_bodies();
-                    stop.cancel();
-                    return;
+                let since = *unreadable_since.get_or_insert(now);
+                if now.saturating_duration_since(since) < SERVING_FENCE_SESSION_GRACE {
+                    self.listener_status("listening_switch_unreadable");
+                    return false;
                 }
+                self.listener_status("authority_unavailable");
+                self.disable_bodies();
+                true
             }
         }
     }
@@ -2874,6 +2955,95 @@ mod catalogue_cache_tests {
 #[cfg(test)]
 mod loop_pacing_tests {
     use super::*;
+    fn running_listener_fixture(seed: u8) -> SharingManager {
+        SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([seed; 32])),
+            PathBuf::from("unused-running-listener-fixture"),
+            SharingNetworkConfig::default(),
+        )
+    }
+    fn unreadable() -> Result<bool, StoreError> {
+        Err(StoreError::Identity("sharing authority unavailable".into()))
+    }
+    #[test]
+    fn running_listener_survives_an_unreadable_switch_and_closes_on_a_confirmed_disable() {
+        let manager = running_listener_fixture(43);
+        let bodies = manager.begin_lifetime();
+        let mut since = None;
+        let t0 = tokio::time::Instant::now();
+        let just_short = t0 + SERVING_FENCE_SESSION_GRACE - Duration::from_millis(1);
+        // A missed quorum confirmation is not a disable: keep serving and keep
+        // live bodies for the whole session grace.
+        assert!(!manager.running_listener_closes(unreadable(), &mut since, t0));
+        assert_eq!(manager.status().listener, "listening_switch_unreadable");
+        assert!(!manager.running_listener_closes(unreadable(), &mut since, just_short));
+        assert!(!bodies.is_cancelled());
+        // A readable enable clears the unknown span and restores the status.
+        assert!(!manager.running_listener_closes(Ok(true), &mut since, just_short));
+        assert_eq!(manager.status().listener, "listening");
+        assert_eq!(since, None);
+        // A fresh span starts its own grace, and past it the listener closes
+        // and bodies end as for a disable.
+        let t1 = just_short + Duration::from_secs(1);
+        assert!(!manager.running_listener_closes(unreadable(), &mut since, t1));
+        assert!(manager.running_listener_closes(
+            unreadable(),
+            &mut since,
+            t1 + SERVING_FENCE_SESSION_GRACE
+        ));
+        assert_eq!(manager.status().listener, "authority_unavailable");
+        assert!(bodies.is_cancelled());
+        // A confirmed disable closes at once.
+        let manager = running_listener_fixture(44);
+        let bodies = manager.begin_lifetime();
+        assert!(manager.running_listener_closes(Ok(false), &mut None, t0));
+        assert_eq!(manager.status().listener, "disabled");
+        assert!(bodies.is_cancelled());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn serving_listener_look_keeps_the_listener_through_an_unreadable_read() {
+        let manager = running_listener_fixture(45);
+        let lifetime = manager.begin_lifetime();
+        let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
+        let mut since = None;
+        // The real read deadline: a read that never answers maps to unknown.
+        let hung = || async {
+            enabled_within(
+                std::future::pending::<Result<Option<String>, StoreError>>(),
+                Duration::from_secs(1),
+            )
+            .await
+        };
+        assert!(
+            manager
+                .next_look(hung, &mut since, &lifetime, &stop, &shutdown)
+                .await
+        );
+        assert!(!stop.is_cancelled());
+        assert!(!lifetime.is_cancelled());
+        assert_eq!(manager.status().listener, "listening_switch_unreadable");
+        let off = || async { Ok(false) };
+        assert!(
+            !manager
+                .next_look(off, &mut since, &lifetime, &stop, &shutdown)
+                .await
+        );
+        assert!(stop.is_cancelled());
+        assert!(lifetime.is_cancelled());
+    }
+    #[test]
+    fn serving_listener_observer_takes_every_look_through_next_look() {
+        let source = include_str!("sharing.rs");
+        let start = source.find("async fn observe_listener(").expect("observer");
+        let end = start
+            + source[start..]
+                .find("async fn next_look<")
+                .expect("next_look");
+        let observer = &source[start..end];
+        assert!(observer.contains(".next_look(look,"));
+        assert!(!observer.contains("running_listener_closes"));
+        assert!(!observer.contains("enabled(state.store.as_ref()).await"));
+    }
     #[test]
     fn sharing_claim_schedule_refreshes_healthy_active_imports_at_the_backoff_ceiling() {
         assert_eq!(claim_retry_delay(0, true), ACTIVE_IMPORT_REFRESH);
