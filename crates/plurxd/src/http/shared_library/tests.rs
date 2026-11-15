@@ -3457,31 +3457,19 @@ async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_e
         vod: true,
         control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
     };
-    let response = prepared
-        .start_response(&fixture.state, &info, &incarnation, 7)
-        .await
-        .expect("complete Source response");
-    assert_eq!(response.session_id, session);
-    assert_eq!(response.playlist_url, info.playlist_url);
-    assert_eq!(response.duration_ms, info.duration_ms);
-    assert_eq!(response.height, info.target_height);
-    assert_eq!(response.encoder, info.encoder);
-    assert_eq!(response.media_origin_ms, Some(0));
-    assert!(response.vod);
-    assert_eq!(response.prior_kbps, None);
-    assert_eq!(response.plan_notes, prepared.plan_notes());
-    let control = response.control.as_ref().expect("private control");
-    assert_eq!(control.generation, incarnation);
-    assert_eq!(control.control_epoch, 7);
-    assert_eq!(control.url, format!("/api/v1/hls/{session}/control"));
-    assert!(prepared
-        .start_response(&fixture.state, &info, &incarnation, 0)
-        .await
-        .is_err());
-    assert!(prepared
-        .start_response(&fixture.state, &info, "not-an-incarnation", 7)
-        .await
-        .is_err());
+    // The presentation (and with it the media origin) is minted only by the
+    // exact bound durable invocation, never by preparation alone. This
+    // single-store fixture has no Source session schema or cluster member
+    // floor to claim with; the bound projection is proven over the real
+    // Source fixture by shared_source_playback::tests::
+    // sharing_source_bound_invocation_projects_the_complete_start_response.
+    assert!(
+        prepared
+            .start_response(&fixture.state, &info, &incarnation, 7)
+            .await
+            .is_err(),
+        "an unbound preparation has no presentation to describe"
+    );
     let decision_input = || super::super::shared_playback::SourceDecisionRequest {
         reference: target.clone(),
         caps: caps.clone(),
