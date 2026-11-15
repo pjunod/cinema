@@ -2181,6 +2181,7 @@ impl HiqliteAuthStore {
         store.install_library_annotations_schema(None).await?;
         store.install_dv_title_jobs_schema(None).await?;
         store.install_playback_handoffs_schema(None).await?;
+        store.install_delegation_schema(None).await?;
         store.install_dispatch_turns(None).await?;
         store.install_scan_request_v2_schema(None).await?;
         store.install_custody_retention_schema(None).await?;
@@ -2387,6 +2388,7 @@ impl HiqliteAuthStore {
                     self.install_library_annotations_schema(admission).await?;
                     self.install_dv_title_jobs_schema(admission).await?;
                     self.install_playback_handoffs_schema(admission).await?;
+                    self.install_delegation_schema(admission).await?;
                     self.install_dispatch_turns(admission).await?;
                     self.install_scan_request_v2_schema(admission).await?;
                     self.install_custody_retention_schema(admission).await?;
@@ -4731,6 +4733,63 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn delegation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            // authority: committed handoff shape fences extension migration and admission.
+            .query_consistent_map::<RemoteShapeRow, _>(
+                "delegation_schema_version",
+                super::delegation::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::delegation::version(&shape)?;
+        if version == Some(1) {
+            let rows = self
+                .client()
+                // authority: admission must observe the committed marker paired with the shape.
+                .query_consistent_map::<CountRow, _>(
+                    "delegation_schema_version",
+                    super::delegation::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration(
+                    "delegated login schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_delegation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.delegation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::delegation::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.delegation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "delegated login schema install did not settle".into(),
+        ))
+    }
+
     async fn scan_request_v2_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -5744,6 +5803,9 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM delegation_grants".to_owned(), params!()),
+            ("DELETE FROM delegation_codes".to_owned(), params!()),
+            ("DELETE FROM delegation_clients".to_owned(), params!()),
             ("DELETE FROM background_job_commands".to_owned(), params!()),
             ("DELETE FROM background_predictions".to_owned(), params!()),
             ("DELETE FROM background_embeddings".to_owned(), params!()),
