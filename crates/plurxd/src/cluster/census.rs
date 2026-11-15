@@ -245,11 +245,10 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("http/internal_media_sessions.rs", "membership", 2),
     ("http/internal_media_sessions.rs", "serving", 6),
     ("http/internal_media_sessions.rs", "type", 4),
-    ("http/live_tv.rs", "membership", 8),
+    ("http/live_tv.rs", "membership", 1),
     ("http/live_tv.rs", "serving", 7),
     ("http/live_tv.rs", "type", 1),
     ("http/live_tv.rs", "transport", 1),
-    ("http/live_tv.rs", "role", 7),
     ("http/mod.rs", "membership", 5),
     ("http/mod.rs", "replication", 1),
     ("http/mod.rs", "serving", 6),
@@ -293,11 +292,9 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("main.rs", "serving", 7),
     ("main.rs", "type", 5),
     ("main.rs", "hiqlite", 2),
-    ("media_pool.rs", "membership", 1),
     ("media_pool.rs", "serving", 3),
     ("media_pool.rs", "type", 3),
     ("media_pool.rs", "transport", 1),
-    ("media_pool.rs", "role", 1),
     ("media_sessions.rs", "membership", 2),
     ("media_sessions.rs", "type", 2),
     ("media_sessions.rs", "transport", 1),
@@ -338,7 +335,7 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 660;
+const CEILING: usize = 646;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| {

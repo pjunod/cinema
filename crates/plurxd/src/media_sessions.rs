@@ -3928,16 +3928,15 @@ impl MediaSessionCoordinator {
         node_id: &str,
         deadline: tokio::time::Instant,
     ) -> Result<String, PeerTransportError> {
-        tokio::time::timeout_at(
-            deadline,
-            self.directory.peers(crate::cluster::Purpose::MediaWorkers),
+        owner_base(
+            tokio::time::timeout_at(
+                deadline,
+                self.directory.peers(crate::cluster::Purpose::MediaWorkers),
+            )
+            .await
+            .ok(),
+            node_id,
         )
-        .await
-        .map_err(|_| PeerTransportError::TimedOut)?
-        .map_err(|_| PeerTransportError::Unreachable)?
-        .find(node_id)
-        .map(|(_, base)| base)
-        .ok_or(PeerTransportError::Unreachable)
     }
 
     /// Shared receiver bytes retain the existing authenticated streaming driver.
@@ -7702,6 +7701,21 @@ fn take_stale_settlement_candidates(
         fresh_capacity -= 1;
     }
     candidates
+}
+
+/// A relay owner's HTTP base from one media-worker answer: `None` is the
+/// deadline passing, an error is a roster read that failed, and an owner
+/// that is not a reachable worker with a base is unreachable.
+fn owner_base(
+    answer: Option<Result<crate::cluster::Peers, crate::cluster::ClusterError>>,
+    node_id: &str,
+) -> Result<String, PeerTransportError> {
+    answer
+        .ok_or(PeerTransportError::TimedOut)?
+        .map_err(|_| PeerTransportError::Unreachable)?
+        .find(node_id)
+        .map(|(_, base)| base)
+        .ok_or(PeerTransportError::Unreachable)
 }
 
 #[cfg(test)]

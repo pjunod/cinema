@@ -90,9 +90,11 @@ async fn directory_invalidation_fixture() {
     .await
     .expect("actual singleton activation");
     let manager = selected.membership_manager();
-    let directory = PeerDirectory::new(manager.clone());
+    let directory = RosterDirectory::new(manager.clone());
     let leader = manager.replicated_inner().expect("actual leader");
-    let now = || unix_ms().expect("now");
+    // One instant for the whole test: rows are written at it and every
+    // purpose is evaluated at it, so nothing depends on how long a step took.
+    let t0 = unix_ms().expect("t0");
 
     // No roster write: one read, then the same snapshot, counted as hits.
     let first = directory.snapshot().await.expect("first read");
@@ -117,7 +119,7 @@ async fn directory_invalidation_fixture() {
             uncached: 0
         }
     );
-    assert!(first.operations(now()).expect("bounded").is_empty());
+    assert!(first.operations(t0).expect("bounded").is_empty());
 
     // A row: the redeemed learner's identity, not yet a Raft member.
     let token = manager
@@ -152,7 +154,7 @@ async fn directory_invalidation_fixture() {
         "a written row is a new snapshot"
     );
     assert!(
-        staged.operations(now()).expect("bounded").is_empty(),
+        staged.operations(t0).expect("bounded").is_empty(),
         "a staged row is not a member until Raft admits it"
     );
 
@@ -189,13 +191,25 @@ async fn directory_invalidation_fixture() {
     .await
     .expect("bounded learner startup")
     .expect("actual learner");
-    let admitted = leader.local_metrics.membership_snapshot();
-    assert!(admitted.committed && admitted.members.contains(&token.raft_id));
+    // The admission commits through Raft; wait for this node's watch to
+    // apply it rather than assume it already has.
+    let mut watch = leader.local_metrics.clone();
+    let admitted = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let membership = watch.membership_snapshot();
+            if membership.committed && membership.members.contains(&token.raft_id) {
+                return membership;
+            }
+            assert!(watch.wait_for_change().await, "the Raft watch closed");
+        }
+    })
+    .await
+    .expect("the learner's admission commits");
     assert!(!admitted.voters.contains(&token.raft_id));
     let member = directory.snapshot().await.expect("member read");
     assert_eq!(
         member
-            .operations(now())
+            .operations(t0)
             .expect("bounded")
             .into_iter()
             .map(|peer| peer.node_id)
@@ -203,16 +217,13 @@ async fn directory_invalidation_fixture() {
         vec![learner_id.clone()],
         "the admitted learner is a committed member on the next read"
     );
-    assert!(
-        member.voters(now()).is_empty(),
-        "a learner is never a voter"
-    );
+    assert!(member.voters(t0).is_empty(), "a learner is never a voter");
     assert_eq!(member.voter_count(), 1);
 
     // A progress row: ready, then unready. Each changes the next answer.
     let workers = |snapshot: &RosterSnapshot| {
         snapshot
-            .media_workers(now(), true)
+            .media_workers(t0, true)
             .expect("known roles")
             .into_iter()
             .map(|peer| peer.node_id)
@@ -227,7 +238,7 @@ async fn directory_invalidation_fixture() {
              ON CONFLICT(node_id) DO UPDATE SET bounded_read_ready = excluded.bounded_read_ready, \
                  observed_at = excluded.observed_at",
             i64::from(ready),
-            now()
+            t0
         )
     };
     leader
@@ -253,13 +264,13 @@ async fn directory_invalidation_fixture() {
         .client
         .execute(
             "UPDATE cluster_nodes SET last_seen_at = $1 WHERE node_id = $2",
-            params!(now(), learner_id.as_str()),
+            params!(t0, learner_id.as_str()),
         )
         .await
         .expect("fresh heartbeat row");
     let seen = directory.snapshot().await.expect("seen read");
     let before = directory.reads();
-    let at = now();
+    let at = t0;
     let reachable = |snapshot: &RosterSnapshot, at: i64| {
         snapshot
             .operations(at)
@@ -294,7 +305,7 @@ async fn directory_invalidation_fixture() {
             ),
             (
                 BEGIN_REMOVAL_FENCE_SQL.to_owned(),
-                params!(learner_id.as_str(), now(), attempt.as_str()),
+                params!(learner_id.as_str(), t0, attempt.as_str()),
             ),
         ])
         .await
@@ -305,7 +316,7 @@ async fn directory_invalidation_fixture() {
     assert_eq!(written, vec![1, 1, 1], "the fence row was written");
     let fenced = directory.snapshot().await.expect("fenced read");
     assert!(
-        fenced.operations(now()).expect("bounded").is_empty(),
+        fenced.operations(t0).expect("bounded").is_empty(),
         "a removal fence leaves at once"
     );
     assert_eq!(directory.reads().uncached, 0, "every read was stamped");

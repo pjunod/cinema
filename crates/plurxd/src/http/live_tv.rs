@@ -143,7 +143,7 @@ pub(crate) async fn owner_guide(
     if let Some(cached) = state.live_tv.relayed_guide(config.generation).await {
         return cached.clipped(&window);
     }
-    if state.membership.is_replicated() {
+    if state.cluster.role().is_clustered() {
         if let Ok(peers) = voters(state).await {
             for node_id in guide_relay_candidates(&peers) {
                 let mut candidate = config.clone();
@@ -182,7 +182,7 @@ pub(crate) async fn guide_replica_loop(
 }
 
 async fn relay_guide(state: &AppState, config: &LiveTvConfig) -> Result<LiveTvGuide, String> {
-    if !state.membership.is_replicated() {
+    if !state.cluster.role().is_clustered() {
         return Err("the selected owner is not this single-node server".to_owned());
     }
     let peer = voter(state, &config.owner_node_id)
@@ -299,7 +299,7 @@ pub(crate) async fn guide_readiness(
     });
     checks.push(LiveTvReadinessCheck {
         id: "owner_node",
-        ready: owner_is_local || state.membership.is_replicated(),
+        ready: owner_is_local || state.cluster.role().is_clustered(),
         message: if owner_is_local {
             "This node owns the tuner, so it fetches the guide and other nodes relay its answer."
                 .to_owned()
@@ -778,7 +778,7 @@ async fn select_start_worker(
         return Ok(config);
     }
     let mut candidates = vec![state.node_id.clone()];
-    if state.membership.is_replicated() {
+    if state.cluster.role().is_clustered() {
         let peers = voters(state)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -1810,7 +1810,7 @@ impl LiveTvPeers {
 /// still be feeding. A fleet deploy fences peers for a fraction of a second
 /// several times a night; that window lands here.
 async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String), ApiError> {
-    if !state.membership.is_replicated() {
+    if !state.cluster.role().is_clustered() {
         return Err(api_error_from(
             LiveTvError::OwnerUnavailable(
                 "the selected owner is not this single-node server".into(),
@@ -1926,7 +1926,7 @@ async fn owner_snapshot(
     let deadline = deadline_after(PUBLIC_START_DEADLINE);
     let mut candidate = config.clone();
     let mut nodes = vec![state.node_id.clone()];
-    if state.membership.is_replicated() {
+    if state.cluster.role().is_clustered() {
         if let Ok(peers) = voters(state).await {
             nodes.extend(snapshot_candidates(&peers));
         }
@@ -1978,7 +1978,7 @@ async fn owner_snapshot_within(
         .await
         .map_err(|_| LiveTvError::OwnerUnavailable("tuner observation timed out".into()))?;
     }
-    if !state.membership.is_replicated() {
+    if !state.cluster.role().is_clustered() {
         return Err(LiveTvError::OwnerUnavailable(
             "the selected owner is not this single-node server".to_owned(),
         ));
@@ -2314,7 +2314,7 @@ mod tests {
             "node-c has no HTTP row: {candidates:?}"
         );
         assert_eq!(candidates, ["node-d", "node-e", "node-a"]);
-        let lookups = crate::cluster::Peers::for_test(peers, 6, Some(true));
+        let lookups = crate::cluster::Peers::for_test(peers);
         for node in &candidates {
             assert!(
                 lookups.find(node).is_some(),
@@ -2342,7 +2342,7 @@ mod tests {
                 .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)));
             assert_eq!(was_194_2018, was_1852, "{node}");
             assert_eq!(
-                crate::cluster::Peers::for_test(peers.clone(), 6, Some(true)).find(node),
+                crate::cluster::Peers::for_test(peers.clone()).find(node),
                 was_194_2018,
                 "{node}"
             );

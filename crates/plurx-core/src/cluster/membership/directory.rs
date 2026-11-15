@@ -16,7 +16,7 @@
 //! stamp if the image generation is odd, the membership is not committed, or
 //! a table has no slot in the applied mark; read; reload `s1`; keep the stamp
 //! only if `s0 == s1`. A cache of the snapshot is current only while
-//! [`MembershipManager::roster_stamp`] still equals `s0`: [`PeerDirectory`]
+//! [`MembershipManager::roster_stamp`] still equals `s0`: [`RosterDirectory`]
 //! keeps that cache. A miss is one local read. No timer, no TTL, no
 //! background task.
 //!
@@ -72,6 +72,19 @@ pub struct RosterSnapshot {
     stamp: Option<RosterStamp>,
 }
 
+/// One roster row for [`RosterSnapshot::for_tests`], in Raft id order.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct TestRosterRow {
+    pub node_id: String,
+    pub raft_id: u64,
+    pub last_seen_at: i64,
+    pub role: Option<String>,
+    pub http_base: Option<String>,
+    pub bounded_read_ready: bool,
+    pub observed_at: Option<i64>,
+}
+
 /// This node's standing in the applied Raft membership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppliedStanding {
@@ -94,6 +107,37 @@ impl RosterSnapshot {
             members: BTreeSet::new(),
             voters: BTreeSet::new(),
             rows: Vec::new(),
+            stamp: None,
+        }
+    }
+
+    /// A clustered snapshot over fixed rows, for tests outside this crate
+    /// that need a roster without a replicated node. Never cached.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_tests(
+        local_raft_id: u64,
+        members: &[u64],
+        voters: &[u64],
+        rows: Vec<TestRosterRow>,
+    ) -> Self {
+        Self {
+            clustered: true,
+            local_raft_id,
+            members: members.iter().copied().collect(),
+            voters: voters.iter().copied().collect(),
+            rows: rows
+                .into_iter()
+                .map(|row| MediaPeerRow {
+                    node_id: row.node_id,
+                    admitted_role: row.role,
+                    raft_id: row.raft_id,
+                    last_seen_at: row.last_seen_at,
+                    http_base: row.http_base,
+                    bounded_read_ready: row.bounded_read_ready,
+                    observed_at: row.observed_at,
+                })
+                .collect(),
             stamp: None,
         }
     }
@@ -264,7 +308,7 @@ impl MembershipManager {
     }
 }
 
-/// Reads answered by a [`PeerDirectory`], by outcome: `hit` from the cached
+/// Reads answered by a [`RosterDirectory`], by outcome: `hit` from the cached
 /// snapshot, `reload` a read that replaced it, `uncached` a read that could
 /// not be cached (no stamp, or the roster moved during the read).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -281,19 +325,55 @@ struct DirectoryReads {
     uncached: AtomicU64,
 }
 
+/// The applied mark and the roster tables' four slots, resolved once.
+#[derive(Clone)]
+struct RosterMark {
+    handle: hiqlite::AppliedMarkHandle,
+    slots: [hiqlite::AppliedSlot; 4],
+}
+
+impl RosterMark {
+    fn of(inner: &ReplicatedMembership) -> Option<Self> {
+        let handle = inner.client.local_db_applied_mark().ok()?;
+        let mut slots = Vec::with_capacity(ROSTER_TABLES.len());
+        for table in ROSTER_TABLES {
+            slots.push(handle.slot(table)?);
+        }
+        Some(Self {
+            slots: slots.try_into().ok()?,
+            handle,
+        })
+    }
+
+    /// Whether the image and every roster table are still as `stamp` saw
+    /// them: atomic loads only. The membership half is checked after this.
+    fn tables_match(&self, stamp: &RosterStamp) -> bool {
+        let generation = self.handle.generation();
+        generation.is_multiple_of(2)
+            && generation == stamp.image_generation
+            && self
+                .slots
+                .iter()
+                .zip(stamp.revisions)
+                .all(|(slot, revision)| self.handle.revision(*slot) == revision)
+    }
+}
+
 /// The cached roster of one membership manager. Clones share the cache.
 #[derive(Clone)]
-pub struct PeerDirectory {
+pub struct RosterDirectory {
     membership: MembershipManager,
+    mark: Option<RosterMark>,
     cached: Arc<Mutex<Option<Arc<RosterSnapshot>>>>,
     standalone: Arc<RosterSnapshot>,
     reads: Arc<DirectoryReads>,
 }
 
-impl PeerDirectory {
+impl RosterDirectory {
     #[must_use]
     pub fn new(membership: MembershipManager) -> Self {
         Self {
+            mark: membership.inner.as_deref().and_then(RosterMark::of),
             membership,
             cached: Arc::default(),
             standalone: Arc::new(RosterSnapshot::standalone()),
@@ -301,23 +381,41 @@ impl PeerDirectory {
         }
     }
 
+    /// The cached snapshot if it is still current. The table revisions are
+    /// compared first (atomic loads), the membership log only after them; a
+    /// node with no applied mark never caches.
+    fn current(&self, inner: &ReplicatedMembership) -> Option<Arc<RosterSnapshot>> {
+        let mark = self.mark.as_ref()?;
+        let cached = self
+            .cached
+            .lock()
+            .expect("roster directory cache")
+            .clone()?;
+        let stamp = cached.stamp?;
+        if !mark.tables_match(&stamp) {
+            return None;
+        }
+        // The vendor watch has no IO-free accessor for the membership log
+        // alone, so this builds the (at most 64-entry) member sets.
+        let membership = inner.local_metrics.membership_snapshot();
+        (membership.committed && membership.membership_log == stamp.membership_log)
+            .then_some(cached)
+    }
+
     /// The current applied roster. An unclustered process answers its empty
     /// roster with no read, counted as a hit.
     pub async fn snapshot(&self) -> Result<Arc<RosterSnapshot>, MembershipError> {
-        if !self.membership.is_replicated() {
+        let Some(inner) = self.membership.inner.as_deref() else {
             self.reads.hit.fetch_add(1, Ordering::Relaxed);
             return Ok(Arc::clone(&self.standalone));
-        }
-        if let Some(current) = self.membership.roster_stamp() {
-            let cached = self.cached.lock().expect("peer directory cache").clone();
-            if let Some(cached) = cached.filter(|cached| cached.stamp == Some(current)) {
-                self.reads.hit.fetch_add(1, Ordering::Relaxed);
-                return Ok(cached);
-            }
+        };
+        if let Some(cached) = self.current(inner) {
+            self.reads.hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached);
         }
         let snapshot = Arc::new(self.membership.roster_snapshot().await?);
         if snapshot.stamp.is_some() {
-            *self.cached.lock().expect("peer directory cache") = Some(Arc::clone(&snapshot));
+            *self.cached.lock().expect("roster directory cache") = Some(Arc::clone(&snapshot));
             self.reads.reload.fetch_add(1, Ordering::Relaxed);
         } else {
             self.reads.uncached.fetch_add(1, Ordering::Relaxed);

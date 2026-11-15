@@ -546,17 +546,11 @@ impl SharedCacheCoordinator {
         // ran and the shared cache root was never published there.
         let directory = self
             .directory
-            .peers(crate::cluster::Purpose::Voters)
+            .voters()
             .await
             .map_err(|error| error.to_string())?;
-        let voter_count = directory.voter_count();
-        let local_is_voter = directory
-            .local_is_voter()
-            .map_err(|error| error.to_string())?;
-        if !directory.complete().map_err(|error| error.to_string())? {
-            return Err("the complete voter directory is not available".to_owned());
-        }
-        let peers = directory.all();
+        let (voter_count, local_is_voter) = canary_voter_facts(&directory)?;
+        let peers = directory.peers().all();
         // No peer to probe is the honest condition for the local-only canary.
         // Testing `voter_count == 1` said the same thing only for a voter.
         if peers.is_empty() {
@@ -1596,8 +1590,50 @@ fn unix_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+/// The canary's voter facts — how many voters, whether this node is one —
+/// or why it must not run: an unclustered process, or a voter it cannot see.
+fn canary_voter_facts(voters: &crate::cluster::Voters) -> Result<(usize, bool), String> {
+    let local_is_voter = voters.local_is_voter().map_err(|error| error.to_string())?;
+    if !voters.complete().map_err(|error| error.to_string())? {
+        return Err("the complete voter directory is not available".to_owned());
+    }
+    Ok((voters.voter_count(), local_is_voter))
+}
+
 #[cfg(test)]
 mod tests {
+    /// The canary's completeness as behaviour: a learner counts no self, a
+    /// voter counts itself, an invisible voter refuses, and an unclustered
+    /// process has no membership to check.
+    #[test]
+    fn the_canary_runs_only_with_every_voter_visible() {
+        let peer = |node: &str| plurx_core::cluster::membership::ActivityPeer {
+            node_id: node.to_owned(),
+            raft_id: 2,
+            http_base: Some(format!("http://{node}.invalid")),
+            reachable: true,
+        };
+        let facts = |peers: &[&str], count, local| {
+            super::canary_voter_facts(&crate::cluster::Voters::for_test(
+                peers.iter().map(|node| peer(node)).collect(),
+                count,
+                local,
+            ))
+        };
+        assert_eq!(facts(&["peer-a"], 2, Some(true)), Ok((2, true)));
+        assert_eq!(facts(&["peer-a", "peer-b"], 2, Some(false)), Ok((2, false)));
+        assert_eq!(facts(&[], 1, Some(true)), Ok((1, true)));
+        assert_eq!(
+            facts(&["peer-a"], 3, Some(true)),
+            Err("the complete voter directory is not available".to_owned())
+        );
+        assert_eq!(
+            facts(&["peer-a"], 2, Some(false)),
+            Err("the complete voter directory is not available".to_owned())
+        );
+        assert!(facts(&[], 1, None).is_err(), "unclustered");
+    }
+
     // Same defect, same shape, different file: the canary refused to run at all
     // on a learner because it counted this node into the voter directory. Pin
     // the call site — a helper test would not have caught the original.
@@ -1611,12 +1647,8 @@ mod tests {
             .expect("verify_once_inner never closes at fn indent")
             .0;
         assert!(
-            body.contains(".local_is_voter()"),
-            "the canary must read the local committed role, not assume it",
-        );
-        assert!(
-            body.contains(".complete()"),
-            "the visible-voter count must depend on the local role (Peers::complete)",
+            body.contains("canary_voter_facts(&directory)"),
+            "the canary must take the voter facts from one directory snapshot",
         );
         assert!(
             body.contains("if peers.is_empty()"),

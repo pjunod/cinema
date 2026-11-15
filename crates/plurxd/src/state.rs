@@ -1478,6 +1478,17 @@ impl AppState {
         }
     }
 
+    /// Point this state at another membership manager, and the cluster
+    /// facade with it, so a fixture can never leave the two disagreeing.
+    #[cfg(test)]
+    pub(crate) fn replace_membership(
+        &mut self,
+        membership: plurx_core::cluster::membership::MembershipManager,
+    ) {
+        self.cluster = crate::cluster::Cluster::new(self.serving.clone(), membership.clone());
+        self.membership = membership;
+    }
+
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
     /// A failure preserves the previous sample and increments its bounded
     /// source counter.

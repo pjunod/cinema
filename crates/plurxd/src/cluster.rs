@@ -49,7 +49,7 @@
 //! custody observations, and every membership mutation.
 
 use plurx_core::cluster::membership::directory::{
-    roster_now, AppliedStanding, DirectoryReadCounts, PeerDirectory, RosterSnapshot,
+    roster_now, AppliedStanding, DirectoryReadCounts, RosterDirectory, RosterSnapshot,
 };
 use plurx_core::cluster::membership::{
     ActivityPeer, LocalServingRole, MembershipError, MembershipManager,
@@ -111,6 +111,11 @@ impl Cluster {
         self.directory.peers(purpose).await
     }
 
+    /// The other committed voters with the voter facts of one snapshot.
+    pub(crate) async fn voters(&self) -> Result<Voters, ClusterError> {
+        self.directory.voters().await
+    }
+
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
@@ -122,6 +127,13 @@ impl Cluster {
 pub(crate) struct LocalRole {
     pub(crate) standing: Standing,
     pub(crate) admission: Admission,
+}
+
+impl LocalRole {
+    /// Whether this process is part of a replicated cluster at all.
+    pub(crate) fn is_clustered(self) -> bool {
+        self.standing != Standing::Standalone
+    }
 }
 
 /// Where the applied Raft membership puts this node.
@@ -167,31 +179,40 @@ impl std::fmt::Display for ClusterError {
 
 impl std::error::Error for ClusterError {}
 
+impl ClusterError {
+    /// A roster read that failed, for tests of how callers report one.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self(MembershipError::Unavailable)
+    }
+}
+
 /// The peer directory (B2): one cached roster snapshot per process, kept
 /// current by the applied mark and the applied Raft membership, never by a
 /// timer. A hit costs atomic loads and the membership watch; a miss is one
 /// local read.
 #[derive(Clone)]
 pub(crate) struct Directory {
-    inner: PeerDirectory,
+    inner: RosterDirectory,
 }
 
 impl Directory {
     pub(crate) fn new(membership: MembershipManager) -> Self {
         Self {
-            inner: PeerDirectory::new(membership),
+            inner: RosterDirectory::new(membership),
         }
     }
 
     /// The peers for `purpose`, evaluated now against the current snapshot.
     pub(crate) async fn peers(&self, purpose: Purpose) -> Result<Peers, ClusterError> {
         let snapshot = self.inner.snapshot().await.map_err(ClusterError)?;
-        let now = roster_now().map_err(ClusterError)?;
-        let list = match purpose {
-            Purpose::Voters => snapshot.voters(now),
-            Purpose::MediaWorkers => snapshot.media_workers(now, true).map_err(ClusterError)?,
-        };
-        Ok(Peers::new(&snapshot, list))
+        Peers::of(&snapshot, purpose, roster_now().map_err(ClusterError)?)
+    }
+
+    /// The other committed voters with the voter facts of the same snapshot.
+    pub(crate) async fn voters(&self) -> Result<Voters, ClusterError> {
+        let snapshot = self.inner.snapshot().await.map_err(ClusterError)?;
+        Ok(Voters::of(&snapshot, roster_now().map_err(ClusterError)?))
     }
 
     pub(crate) fn reads(&self) -> DirectoryReadCounts {
@@ -199,35 +220,25 @@ impl Directory {
     }
 }
 
-/// One purpose's peers, and the voter facts of the snapshot they came from.
+/// One purpose's peers.
 pub(crate) struct Peers {
     list: Vec<ActivityPeer>,
-    voter_count: usize,
-    /// `None` for an unclustered process, which has no membership.
-    local_is_voter: Option<bool>,
 }
 
 impl Peers {
-    fn new(snapshot: &RosterSnapshot, list: Vec<ActivityPeer>) -> Self {
-        Self {
-            list,
-            voter_count: snapshot.voter_count(),
-            local_is_voter: snapshot.local_is_voter().ok(),
-        }
+    /// `purpose`'s rule over `snapshot` at `now`.
+    fn of(snapshot: &RosterSnapshot, purpose: Purpose, now: i64) -> Result<Self, ClusterError> {
+        let list = match purpose {
+            Purpose::Voters => snapshot.voters(now),
+            Purpose::MediaWorkers => snapshot.media_workers(now, true).map_err(ClusterError)?,
+        };
+        Ok(Self { list })
     }
 
-    /// Peers over a fixed list and voter facts.
+    /// Peers over a fixed list.
     #[cfg(test)]
-    pub(crate) fn for_test(
-        list: Vec<ActivityPeer>,
-        voter_count: usize,
-        local_is_voter: Option<bool>,
-    ) -> Self {
-        Self {
-            list,
-            voter_count,
-            local_is_voter,
-        }
+    pub(crate) fn for_test(list: Vec<ActivityPeer>) -> Self {
+        Self { list }
     }
 
     /// Every peer the purpose admits, reachable or not, in roster order.
@@ -252,6 +263,52 @@ impl Peers {
                     .map(|base| (peer.node_id.clone(), base))
             })
     }
+}
+
+/// The other committed voters ([`Purpose::Voters`]) and the voter facts of
+/// the snapshot they came from. Only a voter list can say whether every
+/// voter is visible, so only this type has [`Voters::complete`].
+pub(crate) struct Voters {
+    peers: Peers,
+    voter_count: usize,
+    /// `None` for an unclustered process, which has no membership.
+    local_is_voter: Option<bool>,
+}
+
+impl Voters {
+    fn of(snapshot: &RosterSnapshot, now: i64) -> Self {
+        Self {
+            peers: Peers {
+                list: snapshot.voters(now),
+            },
+            voter_count: snapshot.voter_count(),
+            local_is_voter: snapshot.local_is_voter().ok(),
+        }
+    }
+
+    /// Voters over a fixed list and voter facts.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        list: Vec<ActivityPeer>,
+        voter_count: usize,
+        local_is_voter: Option<bool>,
+    ) -> Self {
+        Self {
+            peers: Peers { list },
+            voter_count,
+            local_is_voter,
+        }
+    }
+
+    /// The other voters.
+    pub(crate) fn peers(&self) -> &Peers {
+        &self.peers
+    }
+
+    /// Whether this process is clustered at all.
+    pub(crate) fn is_clustered(&self) -> bool {
+        self.local_is_voter.is_some()
+    }
 
     /// Whether this node is a committed voter, on the same snapshot; an
     /// unclustered process has no membership to be one of.
@@ -261,11 +318,11 @@ impl Peers {
     }
 
     /// Whether every committed voter is visible: the other voters plus this
-    /// node when it is one (audit F1). Meaningful for [`Purpose::Voters`];
-    /// the three facts come from one snapshot, so a membership change cannot
-    /// fall between them.
+    /// node when it is one (audit F1). The three facts come from one
+    /// snapshot, so a membership change cannot fall between them.
     pub(crate) fn complete(&self) -> Result<bool, ClusterError> {
         Ok(self
+            .peers
             .list
             .len()
             .saturating_add(usize::from(self.local_is_voter()?))
@@ -279,8 +336,11 @@ impl Peers {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use plurx_core::cluster::membership::directory::TestRosterRow;
+
+    pub(crate) const NOW: i64 = 1_800_000_000_000;
 
     fn peer(node: &str, reachable: bool, base: bool) -> ActivityPeer {
         ActivityPeer {
@@ -291,38 +351,116 @@ mod tests {
         }
     }
 
+    /// A clustered roster row: `(raft id, role, reachable, has base, ready)`.
+    pub(crate) fn row(
+        raft_id: u64,
+        role: &str,
+        reachable: bool,
+        base: bool,
+        ready: bool,
+    ) -> TestRosterRow {
+        let seen = if reachable { NOW - 1_000 } else { NOW - 60_000 };
+        TestRosterRow {
+            node_id: format!("node-{raft_id}"),
+            raft_id,
+            last_seen_at: seen,
+            role: Some(role.to_owned()),
+            http_base: base.then(|| format!("http://node-{raft_id}.invalid")),
+            bounded_read_ready: ready,
+            observed_at: Some(NOW - 1_000),
+        }
+    }
+
+    /// Local node 1. Voters 1, 2, 3, 4; learner 5; 6 a row that Raft does
+    /// not list.
+    fn roster(local: u64) -> RosterSnapshot {
+        RosterSnapshot::for_tests(
+            local,
+            &[1, 2, 3, 4, 5],
+            &[1, 2, 3, 4],
+            [
+                row(1, "voter", true, true, true),
+                row(2, "voter", true, true, true),
+                row(3, "voter", false, true, true),
+                row(4, "voter", true, false, false),
+                row(5, "learner", true, true, true),
+                row(6, "voter", true, true, true),
+            ]
+            .into_iter()
+            .filter(|row| row.raft_id != local)
+            .collect(),
+        )
+    }
+
+    fn ids(peers: &Peers) -> Vec<String> {
+        peers
+            .all()
+            .iter()
+            .map(|peer| peer.node_id.clone())
+            .collect()
+    }
+
+    /// Each purpose maps to its own rule on a clustered snapshot, not to
+    /// another purpose's.
+    #[test]
+    fn each_purpose_maps_to_its_rule_on_a_clustered_snapshot() {
+        let snapshot = roster(1);
+        assert_eq!(
+            ids(&Peers::of(&snapshot, Purpose::Voters, NOW).expect("voters")),
+            ["node-2", "node-3", "node-4"],
+            "voters: every other committed voter, reachable or not"
+        );
+        assert_eq!(
+            ids(&Peers::of(&snapshot, Purpose::MediaWorkers, NOW).expect("roles")),
+            ["node-2", "node-3", "node-5"],
+            "media workers: ready members, learners included"
+        );
+    }
+
+    /// `Voters` carries the voter facts of the same snapshot.
+    #[test]
+    fn voters_take_their_facts_from_the_snapshot() {
+        let voter = Voters::of(&roster(1), NOW);
+        assert_eq!(voter.voter_count(), 4);
+        assert!(voter.local_is_voter().expect("clustered"));
+        assert!(voter.is_clustered());
+        assert!(
+            voter.complete().expect("clustered"),
+            "3 others + this voter"
+        );
+        let learner = Voters::of(&roster(5), NOW);
+        assert!(!learner.local_is_voter().expect("clustered"));
+        assert!(learner.complete().expect("clustered"), "4 others, no self");
+        let standalone = Voters::of(&RosterSnapshot::standalone(), NOW);
+        assert!(!standalone.is_clustered());
+        assert!(standalone.complete().is_err());
+    }
+
     /// F1: "every voter is visible" counts this node only when it is a
     /// voter. Counting it unconditionally made the clause `n != n + 1` on a
     /// learner, in two files; it now exists once.
     #[test]
     fn complete_counts_this_node_only_when_it_votes() {
         let one = vec![peer("peer-a", true, true)];
-        assert!(Peers::for_test(one.clone(), 2, Some(true))
-            .complete()
-            .expect("clustered"));
-        assert!(!Peers::for_test(one.clone(), 3, Some(true))
-            .complete()
-            .expect("clustered"));
-        assert!(Peers::for_test(one.clone(), 1, Some(false))
-            .complete()
-            .expect("clustered"));
-        assert!(!Peers::for_test(one.clone(), 2, Some(false))
-            .complete()
-            .expect("clustered"));
-        assert!(Peers::for_test(one, 1, None).complete().is_err());
+        let complete = |count, local| {
+            Voters::for_test(one.clone(), count, local)
+                .complete()
+                .expect("clustered")
+        };
+        assert!(complete(2, Some(true)));
+        assert!(!complete(3, Some(true)));
+        assert!(complete(1, Some(false)));
+        assert!(!complete(2, Some(false)));
+        assert!(Voters::for_test(one, 1, None).complete().is_err());
     }
 
     #[test]
     fn find_names_only_a_reachable_peer_with_a_base() {
-        let peers = Peers::for_test(
-            vec![
-                peer("up", true, true),
-                peer("down", false, true),
-                peer("baseless", true, false),
-            ],
-            4,
-            Some(true),
-        );
+        let peers = Peers::for_test(vec![
+            peer("up", true, true),
+            peer("down", false, true),
+            peer("baseless", true, false),
+        ]);
         assert_eq!(
             peers.find("up"),
             Some(("up".to_owned(), "http://up.invalid".to_owned()))
@@ -349,8 +487,9 @@ mod tests {
                 admission: Admission::Open
             }
         );
-        let voters = cluster.peers(Purpose::Voters).await.expect("standalone");
-        assert!(voters.all().is_empty());
+        assert!(!cluster.role().is_clustered());
+        let voters = cluster.voters().await.expect("standalone");
+        assert!(voters.peers().all().is_empty());
         assert_eq!(voters.voter_count(), 1);
         assert!(voters.local_is_voter().is_err());
         assert!(cluster

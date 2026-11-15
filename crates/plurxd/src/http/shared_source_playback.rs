@@ -2649,7 +2649,7 @@ async fn build_real_source_start_fixture(
         selected.identity.node_id.clone(),
     ));
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
-    state_mut.membership = selected.membership_manager();
+    state_mut.replace_membership(selected.membership_manager());
     state_mut.clock_observer = if let Some(clock) = &startup_clock {
         clock
             .observer()

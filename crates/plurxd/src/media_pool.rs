@@ -990,7 +990,6 @@ struct RootProbeRegistry {
 
 #[derive(Clone)]
 pub(crate) struct MediaPool {
-    membership: MembershipManager,
     directory: crate::cluster::Directory,
     transport: PeerTransport,
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
@@ -1083,8 +1082,7 @@ impl MediaPool {
         directory: crate::cluster::Directory,
     ) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport: PeerTransport::new(membership),
             directory,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
@@ -1551,22 +1549,18 @@ impl MediaPool {
     /// learner, so it was structurally false there and no learner could ever
     /// accept a delegated session or place one.
     pub(crate) async fn remote_rollout_ready(&self) -> bool {
-        if !self.membership.is_replicated() {
+        let deadline = deadline_after(SNAPSHOT_DEADLINE);
+        let directory = tokio::time::timeout_at(deadline, self.directory.voters()).await;
+        let Ok(Ok(voters)) = directory else {
+            return false;
+        };
+        if !voters.is_clustered() {
             return false;
         }
         self.expire().await;
-        let deadline = deadline_after(SNAPSHOT_DEADLINE);
-        let directory =
-            tokio::time::timeout_at(deadline, self.directory.peers(Purpose::Voters)).await;
-        let Ok(Ok(peers)) = directory else {
-            return false;
-        };
-        if peers.voter_count() <= 1 {
-            return false;
-        }
         let snapshots = self.snapshots.read().await;
-        remote_directory_ready(
-            &peers,
+        rollout_ready(
+            &voters,
             std::ops::Deref::deref(&snapshots),
             tokio::time::Instant::now(),
         )
@@ -1970,13 +1964,25 @@ fn select_live_tv_worker(
         .map_or_else(|| local_node_id.to_owned(), |n| n.node_id)
 }
 
-fn remote_directory_ready(
-    peers: &crate::cluster::Peers,
+/// The advisory rollout answer for one voter snapshot: clustered, more than
+/// one voter, and every voter visible on the current protocol.
+fn rollout_ready(
+    voters: &crate::cluster::Voters,
     snapshots: &BTreeMap<String, CachedSnapshot>,
     now: tokio::time::Instant,
 ) -> bool {
-    peers.complete().unwrap_or(false)
-        && peers.all().iter().all(|peer| {
+    voters.is_clustered()
+        && voters.voter_count() > 1
+        && remote_directory_ready(voters, snapshots, now)
+}
+
+fn remote_directory_ready(
+    voters: &crate::cluster::Voters,
+    snapshots: &BTreeMap<String, CachedSnapshot>,
+    now: tokio::time::Instant,
+) -> bool {
+    voters.complete().unwrap_or(false)
+        && voters.peers().all().iter().all(|peer| {
             peer.reachable
                 && peer.http_base.is_some()
                 && snapshots.get(&peer.node_id).is_some_and(|cached| {
@@ -3221,39 +3227,50 @@ mod tests {
         assert!(!snapshot_is_bounded(&incompatible, "peer-a"));
     }
 
-    // The arithmetic above is only right where it is used, and a helper test
-    // leaves the call site free: the defect was one `+ 1` inside
-    // `remote_rollout_ready`. Pin that it asks membership for the local role
-    // and hands it through, and that the old unconditional form is gone.
+    /// The rollout answer as behaviour, on the facts one voter snapshot
+    /// carries: not clustered, a single voter, a voter invisible, and the
+    /// local node a voter or a learner.
     #[test]
-    fn advisory_rollout_observation_asks_membership_whether_this_node_is_a_voter() {
-        let body = include_str!("media_pool.rs")
-            .split_once("pub(crate) async fn remote_rollout_ready(")
-            .expect("remote_rollout_ready was renamed")
-            .1
-            .split_once("\n    }\n")
-            .expect("remote_rollout_ready never closes at fn indent")
-            .0;
+    fn advisory_rollout_observation_counts_this_node_only_when_it_votes() {
+        let now = tokio::time::Instant::now();
+        let peer = |node: &str| ActivityPeer {
+            node_id: node.to_owned(),
+            raft_id: 2,
+            http_base: Some(format!("http://{node}:8080")),
+            reachable: true,
+        };
+        let snapshots = ["peer-a", "peer-b"]
+            .into_iter()
+            .map(|node| {
+                (
+                    node.to_owned(),
+                    CachedSnapshot {
+                        snapshot: snapshot(node, &["h264"], 1080),
+                        expires_at: now + Duration::from_secs(1),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let ready = |peers: &[&str], count, local| {
+            rollout_ready(
+                &crate::cluster::Voters::for_test(
+                    peers.iter().map(|node| peer(node)).collect(),
+                    count,
+                    local,
+                ),
+                &snapshots,
+                now,
+            )
+        };
+        assert!(!ready(&[], 1, None), "not clustered");
+        assert!(!ready(&[], 1, Some(true)), "a single voter");
+        assert!(ready(&["peer-a"], 2, Some(true)), "a voter sees the other");
+        assert!(!ready(&["peer-a"], 3, Some(true)), "a voter is invisible");
         assert!(
-            body.contains("self.directory.peers(Purpose::Voters)"),
-            "the rollout gate must read the voters and the local committed role \
-             from one directory snapshot, not assume the role",
+            ready(&["peer-a", "peer-b"], 2, Some(false)),
+            "a learner sees both"
         );
-        let ready = include_str!("media_pool.rs")
-            .split_once("fn remote_directory_ready(")
-            .expect("remote_directory_ready was renamed")
-            .1
-            .split_once("\n}\n")
-            .expect("remote_directory_ready never closes")
-            .0;
-        assert!(
-            ready.contains("peers.complete()"),
-            "the visible-voter count must depend on the local role (Peers::complete)",
-        );
-        assert!(
-            !body.contains("peers.len().saturating_add(1)"),
-            "the unconditional +1 is what made this unsatisfiable on a learner",
-        );
+        assert!(!ready(&["peer-a"], 2, Some(false)), "a learner misses one");
     }
 
     #[test]
@@ -3273,7 +3290,7 @@ mod tests {
             },
         )]);
         let directory = |voter_count, local_is_voter| {
-            crate::cluster::Peers::for_test(peers.clone(), voter_count, Some(local_is_voter))
+            crate::cluster::Voters::for_test(peers.clone(), voter_count, Some(local_is_voter))
         };
         assert!(remote_directory_ready(&directory(2, true), &snapshots, now));
         assert!(!remote_directory_ready(
