@@ -240,6 +240,10 @@ impl SessionHelper {
     }
 }
 
+/// `[from, end)` of a window's carried soundtrack, as exact rationals on the
+/// source clock.
+pub(crate) type SoundtrackInterval = ((i64, u32), (i64, u32));
+
 /// What one window of a session needs: its encoder, its bounds and its
 /// soundtrack interval, its deadline and the rendition's producer slot.
 pub(crate) struct SessionWindowRequest {
@@ -250,7 +254,7 @@ pub(crate) struct SessionWindowRequest {
     pub(crate) window: SegmentWindow,
     pub(crate) frames: u8,
     /// `[from, end)` of the carried soundtrack, on the source clock.
-    pub(crate) audio: Option<((i64, u32), (i64, u32))>,
+    pub(crate) audio: Option<SoundtrackInterval>,
     pub(crate) deadline: Instant,
     pub(crate) cancel: CancellationToken,
     pub(crate) stages: Arc<WindowStageClock>,

@@ -30,6 +30,7 @@ mod stage_clock;
 #[cfg(target_os = "linux")]
 pub(crate) use session::{
     HelperSession, HelperSessionSlot, SessionEnd, SessionHelper, SessionWindowRequest,
+    SoundtrackInterval,
 };
 #[cfg(target_os = "linux")]
 pub(crate) use stage_clock::{HelperStages, WindowStage, WindowStageClock};

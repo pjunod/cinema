@@ -128,7 +128,7 @@ pub(crate) fn window_soundtrack(
     end_ticks: u64,
     timescale: u32,
     start_seconds: f64,
-) -> Result<((i64, u32), (i64, u32)), String> {
+) -> Result<crate::dv_segment::SoundtrackInterval, String> {
     let origin = i128::from(source_clock.origin_microseconds());
     let seek = i128::from(plurx_core::transcode::vod_audio_preroll_samples(
         start_seconds,
