@@ -913,6 +913,34 @@ async fn sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end() {
     Box::pin(actual_source_resource_delivery(SourceFixtureMode::Hdr10)).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_preserved_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionPreserved,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_converted_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionConverted,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_native_hdr10_copy_h1_h2_vtt_and_held_body_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::NativeHdr10Copy,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_dolby_vision_base_encoded_to_sdr_h1_h2_and_confirmed_end() {
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionCompatibleEncoded,
+    ))
+    .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no_cleanup() {
     use axum::response::IntoResponse;
     let fixture =
@@ -1126,7 +1154,13 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     let fixture = real_source_start_fixture_with(mode, None).await;
     let native = matches!(
         mode,
-        SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
+        SourceFixtureMode::NativeCopy
+            | SourceFixtureMode::NativeEncoded
+            | SourceFixtureMode::NativeHdr10Copy
+    );
+    let dolby_vision = matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
     );
     let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
@@ -1171,16 +1205,46 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         .await
         .expect("full DTO");
     let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
-        .expect("strict actual Start");
-    if matches!(mode, SourceFixtureMode::Hdr10 | SourceFixtureMode::Hdr10Sdr) {
+        .unwrap_or_else(|error| {
+            panic!(
+                "strict actual Start: {error:?}: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    let expected_range = match mode {
+        SourceFixtureMode::Hdr10 | SourceFixtureMode::NativeHdr10Copy => Some("hdr10"),
+        SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::DolbyVisionCompatibleEncoded => {
+            Some("sdr")
+        }
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted => {
+            Some("dolby_vision")
+        }
+        _ => None,
+    };
+    if let Some(range) = expected_range {
         assert_eq!(
             decoded.response().delivered_dynamic_range.as_deref(),
-            Some(if matches!(mode, SourceFixtureMode::Hdr10) {
-                "hdr10"
-            } else {
-                "sdr"
-            })
+            Some(range)
         );
+        // The Start B relays: its own decoder and presentability check admit
+        // exactly what the Source delivered for the caps it forwarded.
+        let session = serde_json::to_string(
+            &serde_json::from_slice::<Value>(&fixture.request).expect("recipe")["session"],
+        )
+        .expect("session JSON");
+        assert!(
+            super::super::sharing_start_decode::delivered_range_presentable(
+                &session,
+                decoded.response()
+            ),
+            "B must present the {range} Start the Source planned for these caps"
+        );
+    }
+    if dolby_vision {
+        // Profile 8.1 preserved, and Profile 7 converted to 8.1.
+        assert_eq!(decoded.response().delivered_dolby_vision_profile, Some(8));
+    } else {
+        assert_eq!(decoded.response().delivered_dolby_vision_profile, None);
     }
     let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     let request = recipe["session"]["request_id"]
@@ -1308,6 +1372,32 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                 .expect("actual streamed file bytes");
             assert_eq!(bytes.len(), len);
             assert!(bytes.len() > 8);
+            if dolby_vision && resource == "init.mp4" {
+                let mut reader = plurx_core::fmp4::FragmentReader::new();
+                reader.push(&bytes);
+                let Some(plurx_core::fmp4::Unit::Init(init)) =
+                    reader.next_unit().expect("delivered init")
+                else {
+                    panic!("a delivered init");
+                };
+                let record = plurx_core::fmp4::dolby_vision_record(&init)
+                    .expect("readable Dolby Vision record")
+                    .expect("the delivered init declares Dolby Vision");
+                assert_eq!(record.profile, 8, "{mode:?} delivers Profile 8");
+                assert_eq!(record.bl_signal_compatibility_id, 1);
+                assert!(!record.el_present);
+                assert!(
+                    bytes.windows(4).any(|part| part == b"dvvC"),
+                    "Profile 8 is declared in dvvC"
+                );
+            }
+            if dolby_vision && resource != "init.mp4" {
+                // Every copied sample still carries its RPU (NAL type 62).
+                assert!(
+                    bytes.windows(2).any(|pair| pair == [62 << 1, 1]),
+                    "{mode:?} segment carries Dolby Vision RPUs"
+                );
+            }
             assert!(
                 bytes.windows(4).any(|part| part
                     == if resource == "init.mp4" {
@@ -1362,6 +1452,14 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                                 .contains("subs/1/index.m3u8"),
                             "wrong selected track exists and is actually advertised"
                         );
+                        if matches!(mode, SourceFixtureMode::NativeHdr10Copy) {
+                            assert!(
+                                std::str::from_utf8(&bytes)
+                                    .expect("actual master")
+                                    .contains("VIDEO-RANGE=PQ"),
+                                "an HDR10 copy beside native subtitles declares its range"
+                            );
+                        }
                     }
                     assert_eq!(mime, "application/vnd.apple.mpegurl");
                     plurx_core::sharing_resources::validate_sharing_playlist(

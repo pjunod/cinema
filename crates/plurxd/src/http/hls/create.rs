@@ -6609,16 +6609,13 @@ impl PreparedSourcePlayback {
             info.playlist_url.clone()
         };
         Ok(StartResponse {
-            enhancement: session_enhancement(
-                Some(&self.file),
-                &info.kind,
-                info.grade,
-                info.processed_dv_profile,
-                info.processed_fel,
-                None,
-                None,
-                None,
-            ),
+            // The FEL / RPU / DYN rows are a local response field that
+            // `StartResponse` never deserializes, so the receiver's closed
+            // Start decoder cannot relay them: a Source Start carrying them
+            // for a Dolby Vision source is refused by every receiver as a
+            // protocol violation. The delivered range and profile above are
+            // what a shared Start carries.
+            enhancement: None,
             effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,
