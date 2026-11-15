@@ -131,6 +131,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Check the ci image toolchain
+        run: bash scripts/ci-toolchain-check
       - name: Restore attributable Python successes
         if: ${{ !inputs.compile_only }}
         id: receipts

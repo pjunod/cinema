@@ -294,6 +294,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Check the ci image toolchain
+        run: bash scripts/ci-toolchain-check
       - name: Audit corrective-history evidence
         env:
           GITHUB_TOKEN: ${{ github.token }}

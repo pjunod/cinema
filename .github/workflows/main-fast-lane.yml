@@ -317,6 +317,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Check the ci image toolchain
+        run: bash scripts/ci-toolchain-check
       - name: Restore attributable main Python successes
         id: receipts
         env:

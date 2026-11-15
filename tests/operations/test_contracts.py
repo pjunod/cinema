@@ -5185,6 +5185,16 @@ assert.equal(context.ACT_TIMER, null);
         ):
             self.assertIn(needed, ci_stage)
         self.assertNotIn("&& python3 -m venv", ci_stage)
+        # Each preflight refuses an image that lacks the 3.12 interpreter or a
+        # toolchain command before it runs a suite, so a stale digest fails
+        # instead of skipping its way to green.
+        for relative in (".github/workflows/ci.yml", ".github/workflows/effort-ci.yml", ".github/workflows/main-fast-lane.yml"):
+            job = workflow_job_blocks(relative)["preflight"]
+            self.assertIn("      - name: Check the ci image toolchain\n        run: bash scripts/ci-toolchain-check\n", job, relative)
+            self.assertIn("          fetch-depth: 0\n      - name: Check the ci image toolchain\n", job, relative)
+        toolchain = read("scripts/ci-toolchain-check")
+        self.assertIn('"Python 3.12.15"', toolchain)
+        self.assertIn("for tool in docker npm autoconf aclocal dbus-run-session; do", toolchain)
         self.assertRegex(
             dockerfile,
             r"(?m)^FROM docker:[0-9.]+-cli@sha256:[0-9a-f]{64} AS ci-docker-cli$",
