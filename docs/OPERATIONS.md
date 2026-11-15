@@ -4893,13 +4893,13 @@ and give the daemon uid permission to create, rename, read, and remove entries.
 The id is combined with the durable cluster identity, so the same operator name
 in two unrelated clusters does not alias replicated cache state.
 
-Startup does not trust matching configuration. Every committed voter must pass
-an authenticated two-way canary: each node writes unpredictable bytes, a peer
-reads them and writes a response, and the origin reads that response back. Only
-then does the node classify completed portable generations as shared. A
-one-voter cluster performs the same write/read proof locally. Missing mounts,
-read-only mounts, different filesystems, identity mismatches, and unreachable
-voters leave the fast path unavailable while P5 local-holder routing continues.
+Startup does not trust matching configuration. Each node runs an authenticated
+two-way canary against the voters: it writes unpredictable bytes, a voter reads
+them and writes a response, and the origin reads that back. A node treats
+portable generations as shared only while a majority of voters, itself
+included, agrees with it. A one-voter cluster proves it locally. A missing,
+read-only or different mount cannot reach a majority, so that node's fast path
+stays off while P5 local-holder routing continues.
 
 Portable, manifest-fenced speculative generations are copied into immutable
 shared generation directories after local publication succeeds. A nonproducer

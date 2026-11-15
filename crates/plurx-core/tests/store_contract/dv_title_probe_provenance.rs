@@ -115,7 +115,10 @@ async fn title_decorations_preserve_queued_running_published_and_cancelled_gener
                             .expect("same scanner"),
                         Some(current.probe_revision)
                     );
-                    let eligible = store.dv_title_demands(&scanner, 0).await.expect("demand");
+                    let eligible = store
+                        .dv_title_demands(&scanner, 0, 1_000)
+                        .await
+                        .expect("demand");
                     if matches!(state, "published" | "cancelled") {
                         assert!(
                             !eligible.iter().any(|d| d.file_id == file.id),
@@ -202,7 +205,7 @@ async fn title_source_only_invalidation_cannot_be_undone_by_any_decoration() {
                 decorate(&store, &file, kind, value).await;
                 assert!(
                     !store
-                        .dv_title_demands(&scanner, 0)
+                        .dv_title_demands(&scanner, 0, 1_000)
                         .await
                         .expect("no stale demand")
                         .iter()

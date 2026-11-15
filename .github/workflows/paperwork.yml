@@ -17,15 +17,21 @@ jobs:
   paperwork:
     name: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22.23.4"
       - name: Check index rows, release counters, names and Regression-Test fields
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -51,3 +57,8 @@ jobs:
           # one commit to this head; its bot push starts the replacement lane.
           echo "Paperwork failed. Use make paperwork-fix locally, or inspect the trusted publisher status; no compiler jobs started."
           exit 1
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
