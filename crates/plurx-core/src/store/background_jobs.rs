@@ -4700,8 +4700,13 @@ LIMIT 1
         let rows = match admissible {
             Some(rows) => rows,
             None => {
-                self.queue_sql(candidate_listing_sql(CANDIDATE_BASE_SQL), body, false, false)
-                    .await?
+                self.queue_sql(
+                    candidate_listing_sql(CANDIDATE_BASE_SQL),
+                    body,
+                    false,
+                    false,
+                )
+                .await?
             }
         };
         #[derive(Deserialize)]
