@@ -76,7 +76,7 @@ One mechanism, one call site.
    - Local metrics: `current_leader` is not this node: `NotLeader`. One
      voter: `SoleVoter`. Neither touches the network.
    - Otherwise `status()` then the existing `handoff_leadership(self,
-     &status)`, unchanged, under one `tokio::time::timeout` of
+     &status)` (a transfer since build, step 4), under one `tokio::time::timeout` of
      `SHUTDOWN_HANDOFF_WAIT = SURVIVOR_LEADER_WAIT + 2 s` (the trigger's
      1 s plus one probe round's 1 s). Outcomes: `HandedOff { successor }`,
      `NoCandidate`, `TimedOut`, `Failed`.
@@ -93,18 +93,23 @@ One mechanism, one call site.
    `http::router(state)` takes the state. Placing it first means the
    drain's own writes go to the successor instead of racing a leadership
    change.
-4. **A real transfer inside `handoff_leadership`** (added at build; also
-   used by maintenance enter and exit). Fork patch 30 puts every database
-   Raft proposal behind one gate. The leader then:
-   (a) holds its proposals, so in-flight ones finish and new ones wait;
-   (b) waits on its metrics watch until an eligible voter's matched index
-   equals its last log index, preferring the voter the old rule picked;
-   (c) triggers that voter once;
-   (d) keeps the hold until it follows a named new leader;
-   (e) confirms with `await_survivor_leader`.
-   All phases share one `SURVIVOR_LEADER_WAIT` deadline. The hold lives
-   at most `PROPOSAL_HOLD_WAIT` (2 s); if it cannot be taken in that time,
-   the handoff proceeds ungated.
+4. **A real transfer inside `handoff_leadership`** (added at build), used
+   by shutdown, maintenance enter and exit, and a leader's self-leave.
+   Fork patch 30 gates every database Raft proposal. With no eligible voter
+   it answers `NoCandidate` at once, holding nothing. Otherwise:
+   (a) it holds proposals: new ones wait, and the hold gets 0.5 s;
+   (b) it waits on the metrics watch until an eligible voter's matched
+   index equals its last log index (none in time: `NoCandidate`);
+   (c) it triggers that voter once;
+   (d) it waits until it follows a named new leader, then drops the hold;
+   (e) it confirms with `await_survivor_leader`.
+   Everything under the hold ends 2 s after it began
+   (`PROPOSAL_HOLD_WAIT`), so writers here wait at most that long. All
+   phases share one `SURVIVOR_LEADER_WAIT` deadline. Operator force election
+   is still a plain trigger. With three voters the candidate plus the old
+   leader is a quorum; with five, the other followers' live leases refuse
+   the first round, and the candidate needs a second round after they
+   expire.
 
 No metric: no leader, election or handoff counter family exists in
 `crates/` to extend.
@@ -120,7 +125,7 @@ and nothing elsewhere. Bounded phases then total about 50 s against the
 | Follower or learner | `NotLeader`, no network, no wait | Nothing to move. |
 | Single voter | `SoleVoter`, no wait | No successor exists; the outage is the documented one. |
 | No caught-up reachable voter | `NoCandidate` at once, drain continues | Waiting cannot produce one; elections stay disabled here. |
-| Leadership does not move | `TimedOut` at 10 s, drain continues | One bounded wait; the survivors then elect as today. |
+| Leadership does not move | Usually `Failed` (trigger error or 8 s survivor wait); `TimedOut` only at the 10 s backstop | Elections stay off here (S4 ruling): a won-back leader that then stops cold would cost a second outage. The cluster is leaderless until a survivor's lease plus election timeout, about 6–8 s (measured 7.5–7.8 s), and this node's drain writes fail in that window. The transfer is what makes this path rare. |
 | Second signal during the wait | No effect, as everywhere in the drain today | The wait is bounded. An immediate exit would skip the WAL and writer drain. |
 | Requests after a successful handoff | Served as any follower serves them | Writes forward to the successor; media starts are already blocked. |
 | Maintenance already entered | `NotLeader` | Maintenance handed off before its row committed. |
@@ -137,69 +142,25 @@ leader's sessions is still maintenance's job.
 
 ## 5. Milestones
 
-Each test must be shown failing with its subject removed.
+Each test is shown failing with its subject removed (hand-back reports).
 
-**M1 — the core call and patch 29** (planned as 30; the ledger is contiguous).
-- `plurx-core/src/cluster/membership/tests.rs::`
-  `shutdown_handoff_without_a_replicated_store_returns_at_once`,
-  `shutdown_handoff_wait_is_bounded` (paused clock, a pending attempt,
-  `TimedOut` at exactly the bound),
-  `shutdown_handoff_reuses_the_one_handoff_and_writes_nothing` (source
-  shape: calls `handoff_leadership`; no `execute`, `txn` or
-  `query_consistent`).
-- `plurx-core/src/cluster/migration/membership_api.rs::`
-  `a_sole_voter_shutdown_handoff_returns_at_once` (real voter).
-- `vendor/hiqlite/src/client/mgmt.rs::`
-  `local_election_switch_has_no_remote_fallback`.
-- Check: `cargo test --locked -p plurx-core --lib shutdown_handoff` and
-  `make hiqlite-vendor-clippy`.
-
-**M2 — three processes.** New harness requests `ShutdownHandoff` and a
-`leader-shutdown` subcommand, added to `controller()`, in
-`plurx-cluster-check/src/lib.rs`:
-- `run_leader_shutdown_handoff_case`: leader older than 4 s, heartbeat
-  loops on. Sample both survivors' `Metrics` every 100 ms. After the
-  request returns `HandedOff`: survivors name the successor, and the
-  longest sampled leaderless gap is under 2.4 s (so no timeout election
-  ran; record the number against the 1 s lease in §7). Kill the old
-  leader; for 10 s leader and term do not change.
-- `run_follower_shutdown_noop_case`: `NotLeader`, under 100 ms, leader and
-  term unchanged.
-- `run_shutdown_without_successor_case`: both followers paused; returns
-  `Failed` or `TimedOut` within 11 s and the process exits orderly.
-- `run_departing_voter_never_campaigns_case`: after the request on a
-  follower, kill the leader and pause the third voter; this node's term
-  does not move for 10 s.
-- Extend `tests/harness.rs::`
-  `a_one_voter_cluster_proves_the_whole_request_protocol` (`SoleVoter`),
-  the encoding test and the argument-rejection test.
-- Check: `cargo run --locked -p plurx-cluster-check -- leader-shutdown`.
-
-**M3 — the daemon.**
-- `plurxd/src/startup_tests.rs::`
-  `the_signal_path_hands_leadership_off_before_any_listener_stops`
-  (source shape: one call in `main.rs`, before `leave_shutdown.cancel()`
-  and `public_listener_stop.cancel()`).
-- `plurxd/tests/cluster_activity.rs::`
-  `sigterm_on_the_leader_moves_leadership_before_its_raft_stops`
-  (`ThreeVoters`; within 3 s of SIGTERM both survivors name a surviving
-  leader while the old process is still running; no sample without a
-  leader until 10 s after it exits) and
-  `sigterm_on_a_follower_changes_no_leader`. The fixture's `Daemon` needs
-  a SIGTERM method.
-- Check: `cargo test --locked -p plurxd --features
-  cluster-integration-tests --test cluster_activity sigterm_on --
-  --test-threads=1`.
-
-**M4 — paperwork.** Index row in `docs/cluster/README.md`.
-`docs/OPERATIONS.md`, "Planned node maintenance": reword in place to say
-a plain stop of the leader hands leadership off and that maintenance is
-still what drains sessions; the file must not grow (292 bytes under its
-ceiling; lower the ceiling if it shrinks). Mark C2 in the audit. No
-`validation/points.toml` change: every touched path is already mapped
-(`cluster.membership`, `crates/plurx-cluster-check/**`, `vendor/**`).
-Then `cargo fmt --check`, clippy on the three crates with `-D warnings`,
-`scripts/paperwork`, and one adversarial review of the whole diff.
+- **M1, core call and patch 29** (planned as 30; the ledger is
+  contiguous): `membership/tests.rs` `shutdown_handoff_*`, the real-voter
+  `membership_api.rs::a_sole_voter_shutdown_handoff_returns_at_once`, and
+  `mgmt.rs::local_election_switch_has_no_remote_fallback`.
+- **M2, three processes:** the `leader-shutdown` mode, also in
+  `controller()`. Its cases: the handoff (survivors name the successor,
+  no sampled leaderless gap of 2.4 s, held 10 s after the kill), the same
+  under two writers (`leader-shutdown-load`), the follower no-op, the
+  leader with both followers paused, and the departing voter that never
+  campaigns.
+- **M3, the daemon:** `startup_tests.rs`, a source test that the call is
+  the drain's first await, plus `cluster_activity.rs`. The leader SIGTERM
+  test requires both survivors to name the successor within 3 s and before
+  the old process exits, observed by a dedicated `waitid` thread. There is
+  also a follower guard.
+- **M4, paperwork:** index row; `docs/OPERATIONS.md` reworded in place,
+  not grown; audit C2 marked; no `validation/points.toml` change.
 
 ## 6. Non-goals
 
@@ -221,6 +182,7 @@ Then `cargo fmt --check`, clippy on the three crates with `-D warnings`,
 | 2026-11-15 | Design | claude-fable-5-2 | this document |
 | 2026-11-15 | M1–M4 | claude-opus-5-5 | As planned; patch 29 (not 30). |
 | 2026-11-15 | Transfer | claude-opus-5-5 | §3 step 4, patch 30. |
+| 2026-11-15 | Review fixes | claude-opus-5-5 | Learner catch-up outside the gate; the hold bounds the trigger; `NoCandidate` at once; self-leave uses the transfer. |
 
 Session `session_01BCWLA3JD1HCNMEid3AZrc3` throughout.
 
@@ -229,7 +191,7 @@ Session `session_01BCWLA3JD1HCNMEid3AZrc3` throughout.
 | Cold stop, leader killed (harness) | 7.50–7.60 s to a new leader, 3 runs | — |
 | Harness, quiet | won 5/5, 763–771 ms | won 1/1, 536 ms |
 | Harness, two writers through the handoff | won 0/10; 7.1–8.1 s without a leader; failed writes in 7 of 10 runs (127–151 each) | won 20/20; 532–785 ms; 0 failed; slowest write 72 ms; committed = acknowledged |
-| Daemon SIGTERM to the leader (3 s bound) | won 9/14; losses cost 7.8 s or more | won 20/20; successor named 123–138 ms after SIGTERM; old process exited 0.69–0.93 s after it |
+| Daemon SIGTERM to the leader (3 s bound) | won 9/14; losses cost 7.8 s or more | won 20/20, twice; second set, with the exit-based test: both survivors named the successor 123–134 ms after SIGTERM, before the old process exited (0.63–0.91 s) |
 | Survivors' switch, old leader to successor | ≤ 101 ms when won | ≤ 102 ms |
 
 Findings: the old leader grants the vote only to a candidate that has
