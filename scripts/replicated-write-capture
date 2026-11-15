@@ -359,6 +359,9 @@ def after_metrics(raw):
         "local_is_voter": scalar("plurx_cluster_local_is_voter"),
         "uptime_seconds": scalar("plurx_uptime_seconds"),
         "commit_index": scalar("plurx_raft_commit_index"),
+        # From the 2026-11-14 build these two also count the membership
+        # manager's operations and the 2 Hz quorum watermark sampler, which
+        # counted nothing before; a before/after pair must not straddle it.
         "authority_reads": total("plurx_store_operations_total", {"class": "authority_read"}),
         "writes": total("plurx_store_operations_total", {"class": "write"}),
         "snapshot_builds": total("plurx_raft_snapshot_seconds_count", {"operation": "build"}),

@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-eight patches for clustered deployments. An
+Apache-2.0. Plurx carries twenty-nine patches for clustered deployments. An
 upstream release can retire the nine generic bugs and the one dependency-only
-constraint; it cannot retire the eighteen Plurx policies:
+constraint; it cannot retire the nineteen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -39,6 +39,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
 | 27 | Applied mark: registered-table revisions, applied index and image generation, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
+| 29 | `DbRaftMetrics` type re-export | plurx policy | — | Never; it only names a type Plurx's counted membership client forwards. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -459,6 +460,12 @@ made-up URL and prevents the fork from being declared fully tracked.
   `parked_supervisor_closes_its_socket_at_the_idle_deadline`,
   `parked_connection_whose_socket_ends_exits_and_is_not_leased`.
   Files: `src/network/raft_client.rs`, `src/store/mod.rs`.
+- `hiqlite::DbRaftMetrics` names `openraft::RaftMetrics<NodeId, Node>`, the
+  type `Client::metrics_db` returns. Plurx's counted membership client
+  (`plurx_core::store::CountedClient`) forwards that call by name, and this
+  alias lets it do so without a direct `openraft` dependency. A type alias
+  only; no behaviour.
+  Files: `src/lib.rs`.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
 was accepted on 2026-10-05 as
@@ -511,7 +518,7 @@ Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 28: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25 and 27) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27 and 29) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

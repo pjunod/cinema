@@ -1942,6 +1942,7 @@ async fn actual_precommit_activation_fixture(
                 inner
                     .client
                     .execute(
+                        "membership_test_fixture",
                         "DROP TRIGGER IF EXISTS cluster_node_removal_insert_guard",
                         params!(),
                     )
@@ -2455,6 +2456,7 @@ async fn aged_committed_learner_clock_response_fixture() {
         leader
             .client
             .execute(
+                "membership_test_fixture",
                 "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id=$2",
                 params!(aged, learner_id.as_str())
             )
@@ -2520,6 +2522,7 @@ async fn aged_committed_learner_clock_response_fixture() {
     leader
         .client
         .execute(
+            "membership_test_fixture",
             "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id=$2",
             params!(unix_ms().expect("current heartbeat"), learner_id.as_str()),
         )
@@ -2539,6 +2542,7 @@ async fn aged_committed_learner_clock_response_fixture() {
     leader
         .client
         .execute(
+            "membership_test_fixture",
             "UPDATE cluster_nodes SET removed_at=$1 WHERE node_id=$2",
             params!(unix_ms().expect("actual removal time"), learner_id.as_str()),
         )
@@ -5871,7 +5875,7 @@ fn change_refuses_unbounded_clock() {
     assert!(
         redeem.find(".revalidate_for(").expect("fence")
             < redeem
-                .find("inner.client.txn(statements).await")
+                .find("inner.client.txn(\"redeem_for_role\", statements).await")
                 .expect("submission")
     );
     let promotion = method_body(source, "pub async fn promote_learner(");
@@ -7450,7 +7454,7 @@ fn the_learner_capability_is_written_inside_the_heartbeat_transaction() {
         "and inside the heartbeat's single Raft transaction"
     );
     assert!(
-        commit_heartbeat.contains(".txn(statements)"),
+        commit_heartbeat.contains(".txn(\"commit_heartbeat_admitted\", statements)"),
         "which must be the statement list the heartbeat just built"
     );
     assert_eq!(
