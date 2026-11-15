@@ -3964,7 +3964,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Reader B0/B1: +1 bounded source-recovery diagnostic spawn_blocking. One
 # try-acquired owned semaphore permit remains in the closure through completion
 # even after request cancellation; contention returns unavailable, never queues.
-expected_occurrences = 1153
+# #1602: +1 joined test-only probe worker in http::tests::seeded_write_surface;
+# the test cancels its token and awaits the JoinHandle before asserting.
+expected_occurrences = 1154
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -7112,7 +7114,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Control refusal diagnostics: +2 HTTP Response::status() assertions, one
 # in the process-free release-interleaving fixture and one in the privacy
 # observer fixture. Both inspect returned values; neither launches a process.
-expected_occurrences = 929
+# Sharing listener (#1598): +5 SharingManager::status() reads in the listener
+# tests, asserting the reported listener state. They read an in-memory status
+# snapshot; none launches a process.
+expected_occurrences = 934
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
