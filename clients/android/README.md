@@ -20,7 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.8.0**, build `207` — prepared Dolby Vision handoffs retain
+> Status: **v0.8.0**, build `208` — custom tags: Home follows the reader's
+> order with custom tag rows, and movies and shows have a Tags checklist.
+>
+> Build `207` — prepared Dolby Vision handoffs retain
 > the executing choice and film position after optional Auto failures, and
 > the control playhead stays in title time for streams that began mid-title.
 >
