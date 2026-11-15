@@ -130,19 +130,9 @@ function layoutRegion(name, region, model){
 // It is the zero-diff baseline every other layout is measured against, so this
 // function changes only when the shipped app is meant to change.
 function classicHomeBody(p){
-  let hubs=installBannerHtml(), soon="", previews="";
-  // The first two rails pass watchCtx: those rows are about where you are in
-  // something, so the card carries "23m left" / "watched Tuesday".
-  if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join(""),"watch"); }
-  if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join(""),"watch"); }
-  hubs+=listRails(p);
-  if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
-  // Coming soon: what Curator expects. Absent entirely when nothing is paired
-  // or Curator had nothing to say — an empty rail is worse than no rail.
-  if(p.soon && p.soon.entries && p.soon.entries.length){
-    soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
-  }
-  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  // Shelves, Coming soon and custom rows come from homeRegions() in the
+  // reader's chosen order (CUSTOM-TAGS-PLAN.md §2.2); previews stay per layout.
+  let previews="";
   if(p.previewsPending){
     previews+=`<div class="empty">Loading library previews…</div>`;
   }else if(p.previewsError){
@@ -157,21 +147,7 @@ function classicHomeBody(p){
   } else {
     previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</div>`;
   }
-  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
-    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
-    `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
-}
-// The reader's watchlist and favorites, newest first; a list with nothing on
-// it is no rail at all. The last tile opens the whole list.
-function listRails(p){
-  const lists=p.lists||{};
-  let out="";
-  for(const [key,heading] of [["watchlist","Watchlist"],["favorite","Favorites"]]){
-    const items=lists[key]||[];
-    if(!items.length) continue;
-    out+=rail(heading, items.map(i=>card(i)).join("")+`<a class="seeall" href="#/list/${key}">See all</a>`, "list");
-  }
-  return out;
+  return homeRegions(p,previews);
 }
 // One rail: a heading, and a strip with an arrow at each end.
 //

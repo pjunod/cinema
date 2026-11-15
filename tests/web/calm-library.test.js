@@ -62,12 +62,18 @@ assert.equal(hero({hubs:{continue_watching:[continued]}}).resuming,true);
 assert.equal(hero({hubs:{recently_added:[],next_up:[continued]}}),null);
 assert.match(declaration('theaterHomeBody'), /theaterHeroHtml/);
 assert.match(declaration('theaterHomeBody'), /data-home-slot="hero"/);
+// Every layout draws its shelves through the one ordered composition
+// (CUSTOM-TAGS-PLAN.md §2.2), which keeps the original rails and watch cards.
 for (const name of ['classicHomeBody', 'catalogHomeBody', 'theaterHomeBody']) {
   const body = declaration(name);
+  assert.match(body, /homeRegions\(p,previews\)/);
+  assert.doesNotMatch(body, /calmHomeBody|<details/);
+}
+{
+  const body = declaration('homeRegions');
   assert.match(body, /rail\("Continue watching"/);
   assert.match(body, /rail\("Next up"/);
   assert.match(body, /card\(i,true\)/);
-  assert.doesNotMatch(body, /calmHomeBody|<details/);
 }
 assert.doesNotMatch(source, /function viewingHubs\(|function viewingCard\(|function homeSavedHtml\(/);
 assert.doesNotMatch(source, /calm-home|resume-strip|home-explore|watch-cards|watch-next/);
@@ -127,6 +133,7 @@ function libraryHarness(pages, state) {
       // Layout recomposition after a layout switch is not this test's subject.
       "function registerLayoutPresentation(){}",
       "function libraryBrowseTools(){return '';}",
+      "function curationLibraryTools(){return '';} function libraryTagFilter(items){return items;} function libraryTagFilterActive(){return false;}",
       "async function libsCached(){return [{id:1}];}",
       // Only "unwatched" is modelled: enough to hide some cards and show them again.
       "function matchWatch(it,f){return f==='unwatched'?!it.watched:true;}",

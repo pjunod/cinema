@@ -229,7 +229,8 @@ had to be edited.
 | 97 | [`pages/diagnostics.js`](../../crates/plurxd/src/web/pages/diagnostics.js) | Help/report dialog, frozen capture, portable export, consented send, phone approval and bounded checks. | **New.** Remote diagnostics. |
 | 98 | [`pages/activity-starts.js`](../../crates/plurxd/src/web/pages/activity-starts.js) | Activity → Starts: one row per playback start across the cluster (each media-session create, and each direct or progressive request that opened one), with outcome (an unobserved row says why), time to first frame, where the time went, the title's index state and the `Index now` action. | **New.** Playback-start attribution. |
 | 99 | [`curator-login.js`](../../crates/plurxd/src/web/curator-login.js) | Explicit household-only Curator consent and local administrator connection registration. | **New.** Optional Curator login. |
-| 100 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
+| 100 | [`pages/curation.js`](../../crates/plurxd/src/web/pages/curation.js) | Custom tags, saved rows and Home order: `homeRegions`, Customize Home, the row editor, detail tags, the library tag filter and bulk tagging, tag pages and the suggestions review queue. | **New.** Custom tags. |
+| 101 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
 
 ## 3. Adding a file
 
