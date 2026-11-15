@@ -3450,8 +3450,9 @@ fn production() { let _ = "SELECT $1 FROM b"; }
 /// either would change rows without moving its revision, and an applied view
 /// would keep answering from a memo the replica no longer matches.
 ///
-/// It reads string literals, so SQL assembled with `format!` is invisible
-/// to it, and it covers this binary only: an entry an older binary wrote is
+/// It reads string literals (a `format!` template is one, so only an
+/// interpolated table name is invisible, and a DELETE may not interpolate
+/// one), and it covers this binary only: an entry an older binary wrote is
 /// applied as written (PLAYBACK-START-E1-BUILD.md §4.1).
 #[test]
 fn applied_view_tables_never_escape_the_update_hook() {
@@ -3473,7 +3474,15 @@ fn applied_view_tables_never_escape_the_update_hook() {
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_ascii_lowercase();
-            for table in super::APPLIED_VIEW_TABLES {
+            // An interpolated table name would hide a registered table from
+            // the delete check below (A6 M3): every DELETE names its table.
+            if text.contains("delete from {") {
+                offenders.push(format!(
+                    "{name}:{}: a DELETE interpolates its table name",
+                    literal.line
+                ));
+            }
+            for table in super::applied_mark_tables() {
                 for statement in text.split(';') {
                     let statement = statement.trim();
                     let delete = format!("delete from {table}");

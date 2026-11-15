@@ -716,6 +716,21 @@ impl ServingFence {
         self.state.subscribe()
     }
 
+    /// The epoch an advisory answer is read under: the loss generation, which
+    /// advances on every published loss, while the fence is ready with no
+    /// loss pending; `None` otherwise, so nothing read then is kept.
+    pub(crate) fn advisory_epoch(&self) -> Option<u64> {
+        // The same coherent read the authority projection's `observe` makes.
+        loop {
+            let pending_before = self.loss_transitions_pending.load(Ordering::Acquire);
+            let word = self.word.load();
+            let pending_after = self.loss_transitions_pending.load(Ordering::Acquire);
+            if pending_before == pending_after {
+                return (word.ready && pending_after == 0).then_some(word.loss_generation);
+            }
+        }
+    }
+
     pub(crate) fn authority(&self) -> ServingAuthority {
         ServingAuthority {
             word: self.word.clone(),
