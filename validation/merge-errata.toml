@@ -738,3 +738,15 @@ reason = """Landing commit of #1599 (a merge-train probe re-runs named Rust unit
 [[errata]]
 commit = "789f4467c91e79203dc7464de57c437cc7ac3669"
 reason = """Landing commit of #1598 (the sharing listener keeps serving through an unreadable switch), merged 2026-11-15 12:42 UTC by the merge train without Regression-Test lines in its message. It brings in corrective commits 4d1fa63b (fix(sharing): keep a serving listener through an unreadable switch), 70563fa0 (fix(sharing): bound an unreadable switch by the serving-fence session grace) and dbfd42c4 (fix(sharing): log every sharing listener status change). #1598's body names three lines, all of which resolve in this commit's own tree: crates/plurxd/src/sharing.rs::running_listener_survives_an_unreadable_switch_and_closes_on_a_confirmed_disable, ::serving_listener_look_keeps_the_listener_through_an_unreadable_read and ::serving_listener_observer_takes_every_look_through_next_look. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "22ec9dc3b39edffa31e170a9305c9653f3bb028b"
+reason = """Landing commit of #1592 (schedule live FEL qualification without maintenance starvation), merged 2026-11-15 13:37 UTC through the API while merge train 13 was stalled, without Regression-Test lines in its message. Its pull request body names 27 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "d722b0c3604dae1aa60609316e299d901dc8f861"
+reason = """Landing commit of #1595 (keep prepared Dolby Vision handoffs on the viewer and the executing route), merged 2026-11-15 13:26 UTC through the API while merge train 13 was stalled, without Regression-Test lines in its message. Its pull request body names 13 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "b9201c6a4ac343a63906593fc5cdaf36a4e0bb20"
+reason = """Landing commit of #1608 (share one pooled client across signed peer requests), merged 2026-11-15 13:24 UTC through the API while merge train 13 was stalled, without Regression-Test lines in its message. Its pull request body names 2 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
