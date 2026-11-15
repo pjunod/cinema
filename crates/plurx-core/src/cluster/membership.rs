@@ -226,6 +226,19 @@ impl SharingMemberFloor {
             ],
         }
     }
+
+    const COUNT: usize = 6;
+
+    fn index(self) -> usize {
+        match self {
+            Self::SessionPrincipal => 0,
+            Self::CatalogueItemIdentity => 1,
+            Self::PrincipalAndCatalogue => 2,
+            Self::PurposeKeys => 3,
+            Self::IngressCustody => 4,
+            Self::AllSharing => 5,
+        }
+    }
 }
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
@@ -3449,6 +3462,138 @@ async fn member_floor_ready(
 
 const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
 
+/// What an advisory floor answer was read under. A change in the caller's
+/// serving-loss generation, the applied membership log or the known leader
+/// discards the answer before its age does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FloorAdvisoryKey {
+    epoch: u64,
+    /// The applied membership log id, serialized as the Source admission
+    /// observation records it (`membership_log_json`).
+    membership_log_json: String,
+    leader: Option<u64>,
+}
+
+/// One floor read and when it ran. `ready` is `None` for a read that failed.
+struct FloorAnswer<K> {
+    ready: Option<bool>,
+    started: tokio::time::Instant,
+    completed: tokio::time::Instant,
+    key: K,
+}
+
+/// One shared answer to "is this sharing member floor ready", for read-only
+/// observers only: stream monitors and serving-read admission. Concurrent
+/// callers wait on the one read in flight instead of each proving quorum.
+///
+/// - A ready answer serves later callers for up to
+///   `SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS`, because readiness also rests on
+///   replicated heartbeat, capability and join rows that the key does not see.
+/// - A not-ready answer serves only the callers that were already waiting
+///   while it was read. Keeping it would hold an outage past its recovery
+///   and spend the monitors' whole outage grace on one stale answer.
+/// - A failed read likewise answers only the callers already waiting on it,
+///   so callers queued behind a slow quorum share one failure rather than
+///   each reading again after its own caller has gone.
+///
+/// Guarded writes take `observe_*_members` instead, which stay fresh reads:
+/// this is advisory evidence, never a readiness permission.
+struct FloorAdvisory<K> {
+    held: tokio::sync::Mutex<Option<FloorAnswer<K>>>,
+}
+
+impl<K> Default for FloorAdvisory<K> {
+    fn default() -> Self {
+        Self {
+            held: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl<K: PartialEq> FloorAdvisory<K> {
+    async fn answer<E, KF, KFut, R>(
+        &self,
+        arrived: tokio::time::Instant,
+        max_age: Duration,
+        key: KF,
+        read: R,
+        failed: fn() -> E,
+    ) -> Result<bool, E>
+    where
+        KF: Fn() -> KFut,
+        KFut: Future<Output = Result<K, E>>,
+        R: Future<Output = Result<bool, E>>,
+    {
+        let mut held = self.held.lock().await;
+        let before = key().await?;
+        // Strictly after: an answer that completed before this caller arrived
+        // never serves it unless it is ready and young. A not-ready or failed
+        // answer left in `held` is therefore never served to a later caller.
+        if let Some(answer) = held.as_ref().filter(|answer| {
+            answer.key == before
+                && (answer.completed > arrived
+                    || (answer.ready == Some(true) && answer.started.elapsed() < max_age))
+        }) {
+            return answer.ready.ok_or_else(failed);
+        }
+        *held = None;
+        let started = tokio::time::Instant::now();
+        let read = read.await;
+        // An answer read across a change of key answers this caller but is
+        // not kept for the next.
+        if key().await.is_ok_and(|after| after == before) {
+            *held = Some(FloorAnswer {
+                ready: read.as_ref().ok().copied(),
+                started,
+                completed: tokio::time::Instant::now(),
+                key: before,
+            });
+        }
+        read
+    }
+}
+
+impl<K: PartialEq + Send + Sync + 'static> FloorAdvisory<K> {
+    /// The read runs on its own task, so a caller that gives up (its own
+    /// timeout, a dropped request) leaves it running for the callers waiting
+    /// behind it. `failed` answers a caller served a failed read, or whose
+    /// task did not complete.
+    async fn answer_detached<E, KF, KFut, R>(
+        self: Arc<Self>,
+        max_age: Duration,
+        key: KF,
+        read: R,
+        failed: fn() -> E,
+    ) -> Result<bool, E>
+    where
+        E: Send + 'static,
+        KF: Fn() -> KFut + Send + 'static,
+        KFut: Future<Output = Result<K, E>> + Send,
+        R: Future<Output = Result<bool, E>> + Send + 'static,
+    {
+        let arrived = tokio::time::Instant::now();
+        tokio::spawn(async move { self.answer(arrived, max_age, key, read, failed).await })
+            .await
+            .unwrap_or_else(|_| Err(failed()))
+    }
+}
+
+/// One floor read on its own task never holds the advisory longer than this.
+const SHARING_FLOOR_ADVISORY_READ_BOUND: Duration = Duration::from_secs(1);
+
+async fn floor_advisory_key(
+    client: &Client,
+    epoch: u64,
+) -> Result<FloorAdvisoryKey, MembershipError> {
+    let metrics = client.metrics_db().await?;
+    Ok(FloorAdvisoryKey {
+        epoch,
+        membership_log_json: serde_json::to_string(&metrics.membership_config.log_id())
+            .map_err(|_| MembershipError::Incompatible)?,
+        leader: metrics.current_leader,
+    })
+}
+
 /// Server-derived membership inputs for a Source admission write. There is no
 /// wire decoder or caller-supplied roster constructor. This observation alone
 /// never authorizes allocation: its closed guard must run in the mutation.
@@ -5068,6 +5213,7 @@ struct ReplicatedMembership {
     replication: ReplicationMonitor,
     membership_metrics: PassiveMembershipMetrics,
     heartbeat_writes: HeartbeatWriteGate,
+    floor_advisories: [Arc<FloorAdvisory<FloorAdvisoryKey>>; SharingMemberFloor::COUNT],
     /// Fast request-path projection of committed role plus the local route
     /// fence. Heartbeats refresh it from local applied SQL and Raft metrics
     /// before publishing progress, so removal cannot cross its barrier while
@@ -5873,6 +6019,7 @@ impl MembershipManager {
                 replication,
                 membership_metrics,
                 heartbeat_writes: HeartbeatWriteGate::default(),
+                floor_advisories: Default::default(),
                 local_serving_role: AtomicU8::new(LocalServingRole::Fenced.encoded()),
                 local_maintenance: AtomicBool::new(true),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
@@ -12182,6 +12329,43 @@ impl MembershipManager {
     ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         member_floor_ready(&inner.client, inner.identity.raft_id, required).await
+    }
+
+    /// The shared advisory answer for read-only observers (see
+    /// `FloorAdvisory`). `epoch` is the caller's serving-loss generation while
+    /// its serving fence is ready, so a published outage discards the answer
+    /// at once; `None` (not ready, or a loss still pending) reads fresh and
+    /// keeps nothing.
+    pub async fn sharing_member_floor_advisory(
+        &self,
+        required: SharingMemberFloor,
+        epoch: Option<u64>,
+    ) -> Result<bool, MembershipError> {
+        let inner = Arc::clone(self.inner.as_ref().ok_or(MembershipError::Unavailable)?);
+        let Some(epoch) = epoch else {
+            return sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required)
+                .await;
+        };
+        let advisory = Arc::clone(&inner.floor_advisories[required.index()]);
+        let keyed = Arc::clone(&inner);
+        advisory
+            .answer_detached(
+                Duration::from_millis(SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS.unsigned_abs()),
+                move || {
+                    let keyed = Arc::clone(&keyed);
+                    async move { floor_advisory_key(&keyed.client, epoch).await }
+                },
+                async move {
+                    tokio::time::timeout(
+                        SHARING_FLOOR_ADVISORY_READ_BOUND,
+                        sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required),
+                    )
+                    .await
+                    .map_err(|_| MembershipError::Unavailable)?
+                },
+                || MembershipError::Unavailable,
+            )
+            .await
     }
 
     /// Observe the actual serving member and both Source writer capabilities.

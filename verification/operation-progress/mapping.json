@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "573d091245ea239c077f12c1cb94665e84abb2fa0f2beabfd26e25ad8f0ebd13"
+        "sha256": "0aad7704fd77b91a5df47fd921914bb92d053252ee1ddca1a677e5b2cb703ab5"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "573d091245ea239c077f12c1cb94665e84abb2fa0f2beabfd26e25ad8f0ebd13"
+        "sha256": "0aad7704fd77b91a5df47fd921914bb92d053252ee1ddca1a677e5b2cb703ab5"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "573d091245ea239c077f12c1cb94665e84abb2fa0f2beabfd26e25ad8f0ebd13"
+        "sha256": "0aad7704fd77b91a5df47fd921914bb92d053252ee1ddca1a677e5b2cb703ab5"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -165,7 +165,7 @@
         "table": "27 vendor serial SQLite transaction",
         "source": "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs",
         "anchor": "Query::Transaction(req) => {",
-        "sha256": "f8a650550c2f8c8fb35d642b903d97cf01fb3f71e3a3ded454c4b217f67ccd73"
+        "sha256": "b0794f362b0efcbef75b40886bf04af40deb1634885a25d95090b6b5490c2a8e"
       },
       {
         "table": "28 library completion conditional update",

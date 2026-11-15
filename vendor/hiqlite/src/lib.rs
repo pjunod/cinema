@@ -64,7 +64,7 @@ pub use crate::client::{
 pub type DbRaftMetrics = openraft::RaftMetrics<u64, Node>;
 #[cfg(feature = "sqlite")]
 pub use crate::applied_mark::{
-    APPLIED_MARK_MAX_TABLES, AppliedMarkHandle, AppliedMarkObservation, AppliedSlot,
+    APPLIED_MARK_MAX_TABLES, AppliedMarkHandle, AppliedMarkObservation, AppliedSlot, AppliedWatch,
     DB_READ_POOL_WAIT_BOUNDS_NANOS, DbReadPoolWait, db_read_pool_wait,
 };
 #[cfg(feature = "validation-test-helpers")]

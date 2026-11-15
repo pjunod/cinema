@@ -52,6 +52,12 @@ pub struct ReceiverSessionWriteAuthority {
 impl ReceiverSessionWriteAuthority {
     /// Finite delivery deadline from this actual Store observation. The issuing
     /// transaction still repeats the current login and exact owner guards.
+    /// The original login's expiry, in seconds, if its policy sets one.
+    #[must_use]
+    pub fn login_expires_at_s(&self) -> Option<i64> {
+        self.login_expires_at_s
+    }
+
     pub fn receiver_delivery_deadline(&self, owner_lease_ms: i64) -> Option<i64> {
         delivery_deadline(self.observed_at_ms, owner_lease_ms, self.login_expires_at_s)
     }
