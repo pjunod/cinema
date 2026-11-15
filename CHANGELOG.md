@@ -10,13 +10,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- An idle cluster no longer pays a quorum read per background-loop tick to learn that nothing
-  changed. The offline source probe loop and the media-session lease loop check this node's own
+- An idle cluster no longer pays a settings quorum read per background-loop tick to learn that
+  nothing changed. The offline source probe loop and the media-session lease loop check this node's own
   replica (and, for leases, its own registry) before their authoritative read; the playback cache
   ceiling, the sharing listener and claim switch, the background work lanes, the subtitle
   worker passes and the Live TV loops read their settings from the applied settings view; the
-  heartbeat looks at the sharing switch locally. Every read before a write or a fence is unchanged
-  (cluster layer audit, item A4, [build plan](docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md)).
+  heartbeat looks at the sharing switch locally. Every read before a write or a fence is unchanged.
+  Still paid every tick: the recording loop's row listings, the reminder loop's transition write,
+  and the background lanes' and subtitle passes' queue reads (cluster layer audit, item A4,
+  [build plan](docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md)).
 - Signed node-to-node requests (`PeerTransport`) reuse connections: the membership manager owns
   one pooled client with a two-second connect bound, and every peer transport takes it. Before, each of about twenty
   call sites built its own client — the peer-status loop a new one every three seconds — so
