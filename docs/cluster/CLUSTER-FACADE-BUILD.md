@@ -440,3 +440,13 @@ other `hiqlite::` 10 in 4, `PeerTransport::new` 19 in 17, role 62 in 27,
 roster 33 in 22, and the new `manager` class 115 in 35. The first two
 classes moved against §10.1 because test-only `cfg(all(test, ..))` code is
 no longer counted and patterns and shorthand fields now are.
+
+**The mark has no room for the roster yet.** Main's A6 M3 (#1622) widened
+the applied mark to sixteen slots and registered thirteen (the two applied
+views and eleven sharing watch tables), so §4.3's four roster tables do not
+fit. Until a later change widens the mark again (a vendor patch, which this
+slice may not make) and registers them, the directory stamps with the
+applied index: any applied entry on this node ends a hit. That is coarser
+than planned — the cache holds between writes, not between roster writes —
+but never stale, and it needs no timer. The per-table stamp is kept and
+takes over once all four tables have slots.
