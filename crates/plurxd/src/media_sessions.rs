@@ -5418,12 +5418,15 @@ async fn lease_tick_inventory(
     idle_process: bool,
     now_ms: i64,
 ) -> Option<Vec<OwnedMediaSessionLease>> {
+    // One deadline for the hint and the inventory together: an idle tick
+    // that times out on its local read cannot then spend a second one.
+    let deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
     if idle_process
         && lease_tick_live(state.transcode.renewable_session_ids().await).is_empty()
         && !state.media_sessions.has_lease_seeds().await
         && matches!(
-            tokio::time::timeout(
-                LEASE_RENEWAL_DEADLINE,
+            tokio::time::timeout_at(
+                deadline,
                 state
                     .store
                     .owned_media_sessions_hint(&state.node_id, now_ms),
@@ -5434,8 +5437,8 @@ async fn lease_tick_inventory(
     {
         return Some(Vec::new());
     }
-    match tokio::time::timeout(
-        LEASE_RENEWAL_DEADLINE,
+    match tokio::time::timeout_at(
+        deadline,
         state.store.owned_media_sessions(&state.node_id, now_ms),
     )
     .await
