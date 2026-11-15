@@ -1,6 +1,6 @@
 # Playback reads keep a valid recovery witness
 
-**Status:** implementation in progress; [execution status](PLAYBACK-READER-WITNESS-STATUS.md) · revised after Fable review · plan only, nothing built ·
+**Status:** superseded (2026-11-15) — phases B0–B3 strengthened the reader-witness model that [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) step 2 deletes; lease expiry now releases source capacity. The launch access declarations from B0/B1 remain as launch verification. Earlier: implementation in progress; [execution status](PLAYBACK-READER-WITNESS-STATUS.md) · revised after Fable review ·
 **Updated:** 2026-11-12 · **Source baseline:** `origin/main` at `54aebebf9`;
 in-flight `effort/playback-start-phase2` at `50fa67f41`; census stopgap
 PR #1561 (`claude/playback-census-recovery`)
@@ -22,7 +22,7 @@ a restart during playback settles itself through the existing v2 path: the
 kernel lock is released when the daemon dies, the kernel is the same, and
 the anchor is untouched.
 
-Companion: [source custody recovery](SOURCE-CUSTODY-RECOVERY.md) §1.1–1.3,
+Companion: [source custody recovery](../archive/SOURCE-CUSTODY-RECOVERY.md) §1.1–1.3,
 [job queue RCA](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md),
 [storage domains deferred apply](STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md).
 
@@ -481,7 +481,7 @@ AGENTS.md.
 
 ## 13. Docs touched
 
-- `docs/server/SOURCE-CUSTODY-RECOVERY.md` §1.1 (classes, allowlist), §1.2a
+- `docs/archive/SOURCE-CUSTODY-RECOVERY.md` §1.1 (classes, allowlist), §1.2a
   (declared raw and the lifetime lock), §1.3 (census as fallback).
 - `docs/OPERATIONS.md`: the Developer card and when a census is needed.
 - `docs/API.md`: `GET /api/v1/developer/source-recovery`.

@@ -1,6 +1,6 @@
 # Playback reader witnesses — implementation and qualification status
 
-**Status:** open · **Owner:** Codex · **Updated:** 2026-11-13
+**Status:** superseded (2026-11-15) by [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) step 2, which removes the witnesses this ledger tracks · **Owner:** Codex · **Updated:** 2026-11-15
 
 Companion to [the implementation plan](PLAYBACK-READER-WITNESS-PLAN.md).
 The independent attribution/no-input batch integrated through PR #1576 on
@@ -31,7 +31,7 @@ through the fast lane on 2026-11-13. This does not qualify the whole project.
 3. **Namespace recovery has a narrower implemented contract.** Main's #1566
    records namespace/init evidence and recovers only through its old-init,
    new-init, different-namespace and free-anchor proof. This does not claim
-   general native recovery; [the recovery reference](SOURCE-CUSTODY-RECOVERY.md)
+   general native recovery; [the recovery reference](../archive/SOURCE-CUSTODY-RECOVERY.md)
    defines its deployment ordering assumptions.
 4. **B9 remains scoped.** Standalone SQLite lacks the authoritative witness
    backend; its existing recovery behavior is unchanged. A read-only card

@@ -1,9 +1,9 @@
 # Source lease release — lease expiry frees source capacity, nothing else does
 
-**Status:** step 1 open (PR #1597) · steps 2–4 proposed · **Owner:** Claude
+**Status:** step 1 open (PR #1597) · step 2 built on branch `claude/source-lease-steps-2-4` (on #1597; not yet a PR) · steps 3–4 proposed · **Owner:** Claude
 Opus 5.5 (session_01BCWLA1BAXKSuq2TLMK9Zna) · **Written:** 2026-11-14
 
-Companion to [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md), which
+Companion to [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md), which
 records the physical-proof model this plan retires, and
 [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md), which owns
 the wider queue work. Read §1 for why, §2 for the rule, and §4 for the steps.
@@ -161,7 +161,7 @@ one node from serialising the cluster.
 - **#1561** (census recovery for playback owners) is on a merge train owned
   by another session. It becomes unnecessary after step 1 and is removed in
   step 2.
-- [SOURCE-CUSTODY-RECOVERY.md](SOURCE-CUSTODY-RECOVERY.md) is retired to
+- [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md) is retired to
   `archive/` in step 2.
 
 ## Execution log
@@ -171,3 +171,4 @@ one node from serialising the cluster.
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Incident | Custody `7c92c813` released on its voter via the fresh-namespace restart |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 | PR #1597 opened as a draft |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 review | Fable review: 5 should-fix, 3 nits, all addressed (stamped grace, veto removed, witness retirement, role unpinning, shared lapse expression) |
+| 2026-11-15 | Claude Opus 5.5 · session_01BCWL9zn5U4msvhC85BdESw | Step 2 | proof machinery removed (branch claude/source-lease-steps-2-4) |

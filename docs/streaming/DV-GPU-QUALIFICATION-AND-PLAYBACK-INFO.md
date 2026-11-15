@@ -164,7 +164,7 @@ explicit join. The old container's json-file logs went with it, so why the
 cancelled job never joined is not recoverable. A read-only kernel census on
 the owner host shows no open file description, lock, silly-rename or argv
 reference for its exact source. The new
-[source-open census model](../server/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census)
+[source-open census model](../archive/SOURCE-CUSTODY-RECOVERY.md#13-a-dead-owners-poisoned-witness-uses-a-host-source-open-census)
 releases it once deployed and published; nothing has been released yet.
 
 ### Hardware qualification, 2026-11-11

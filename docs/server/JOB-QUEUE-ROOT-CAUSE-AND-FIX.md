@@ -16,12 +16,12 @@ Nine manual Movies requests shared a scan, completed at 18:19:41 UTC. TV complet
 
 A completed subtitle job retained a reader. A second failure at library completion held the job-fence lock while a source-pressure check waited for it. The repair verifies the immutable claim identity in the Store. The active Dolby Vision scan finished its pass.
 
-Refused claims create no running attempts. The incident changes identify the blocking reader in both Activity views and monitoring, flag manual library requests after five eligible minutes, and report five-minute successful and failed attempts per minute for the cluster and each worker. Ready manual requests get the next eligible source turn across job types, subject to playback and bounded maintenance service. These incident changes are live; all four workers report capacity. [Activity API](../API.md#56-activity) · [Recovery ledger](SOURCE-CUSTODY-RECOVERY.md)
+Refused claims create no running attempts. The incident changes identify the blocking reader in both Activity views and monitoring, flag manual library requests after five eligible minutes, and report five-minute successful and failed attempts per minute for the cluster and each worker. Ready manual requests get the next eligible source turn across job types, subject to playback and bounded maintenance service. These incident changes are live; all four workers report capacity. [Activity API](../API.md#56-activity) · [Recovery ledger](../archive/SOURCE-CUSTODY-RECOVERY.md)
 
 November 8: same-kernel reader witnesses cover native macOS/Linux and containers.
 Seven Mac and eleven Linux cases pass; legacy migration is pending.
-Cinema recovery needs no host reboot. M1 proof and acceptance remain
-in the [recovery ledger](SOURCE-CUSTODY-RECOVERY.md).
+Cinema recovery needs no host reboot; lease expiry now releases custody
+([ledger](../archive/SOURCE-CUSTODY-RECOVERY.md), archived).
 
 ## 1. The immediate failure is an abandoned shared reader
 
@@ -456,8 +456,8 @@ polling, and test mixed-version, partial-cluster, and non-admin responses.
 ## 7. Build and accept the repair in separate milestones
 
 **Execution:** Codex owns the initial independent main-bound incident recovery
-fix on `codex/source-custody-recovery`; see [the task ledger](SOURCE-CUSTODY-RECOVERY.md)
-for its narrower proof boundary. Remaining containment and M2–M4 use
+fix on `codex/source-custody-recovery` (archived
+[ledger](../archive/SOURCE-CUSTODY-RECOVERY.md)). Remaining containment and M2–M4 use
 `effort/cinema-job-queue`; reviewed task branches target that effort.
 Shared store, scanner, worker, and UI files make the independent
 file-ownership exception inappropriate. Follow
