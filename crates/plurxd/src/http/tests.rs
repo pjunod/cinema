@@ -2209,7 +2209,8 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
         );
     }
     assert_catalogue_methods(
-        &compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse"),
+        // The whole handler, through its `tag:` early return.
+        &compact_handler(browse, "pub async fn search", "#[cfg(test)]"),
         &["search_items"],
     );
 
