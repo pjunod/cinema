@@ -35,8 +35,14 @@ CGROUP_PARSE_JOB = 'c337a99f0dd97cbb824ce3207cf11abb81f2bab1768db7ddf6214ccfdc81
 # nonvoter the full suite needs ~175 minutes (run 7243 timed out at 4,870 of
 # ~7,850 cases with none failed). Checkout, image, toolchain, Cargo flags,
 # job/test threads and every resource limit are unchanged.
-CURRENT_JOB = '5ed443546bfbd4d4cfea28aeccd3add213f3dcc61a1be65f99a4a65822478668'
-HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, CURRENT_JOB)
+TIMEOUT_180_JOB = '5ed443546bfbd4d4cfea28aeccd3add213f3dcc61a1be65f99a4a65822478668'
+# Reviewed image pin only (#1607, 2026-11-15): the job's container moves from
+# plurx-ci@sha256:3d84b711... to the probed plurx-ci@sha256:6a989b4d... that
+# every general lane job now uses. Checkout, toolchain, Cargo flags, job/test
+# threads, timeout and resource limits are unchanged. Passes recorded under
+# the previous image stay historical and are not current evidence.
+CURRENT_JOB = 'ea8ae633cfe0e1b489dfa9295b7ab83a8b0b1d54564ac8c9312197be16df5e77'
+HISTORICAL_JOBS = (ORIGINAL_JOB, PRE_NONVOTER_JOB, NONVOTER_JOB, CGROUP_PARSE_JOB, TIMEOUT_180_JOB, CURRENT_JOB)
 ROOT_SOURCES = {'tests/operations/test_source_custody_recovery.py', 'scripts/source-custody-recovery'}
 PROTECTED = {'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Makefile'}
 NATIVE_ACTIONS = ('.cargo/', '.github/actions/rust-native-deps/', '.github/actions/ffmpeg/',
