@@ -1951,7 +1951,10 @@ rest, in the groups that matter:
   priority before its first control exchange. Omission uses finite transfer
   service until actual accepted film telemetry permanently establishes rolling
   service. When ordinary control is off, the server clears the declaration; quality-ledger
-  receipts alone do not supply source-demand freshness. This field
+  receipts alone do not supply source-demand freshness. Successors the server
+  stages under control (a selection change, a processed Dolby Vision / HDR10-E
+  upgrade) declare it themselves, since the viewer's control stream commits
+  them. This field
   does not change media identity or enable a feature; unknown labels retain
   legacy transfer service.
 - **Evidence** — `caps` (the same v2 document), `overrides`, `presentation`
