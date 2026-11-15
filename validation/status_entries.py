@@ -40,6 +40,55 @@ def title(text: str) -> str:
     return first[2:].strip() if first.startswith("# ") else ""
 
 
+_DATED_BULLET = re.compile(r"- \*\*(\d{4}-\d{2}-\d{2}) · (.+?):?\*\*:?\s*(.*)$")
+_SECTION = re.compile(r"## (?:(\d{4}-\d{2}-\d{2}) · )?(.+)$")
+_RELATIVE_LINK = re.compile(r"\]\((?![a-z][a-z0-9+.-]*:|#|/|\.\./)([^)\s]+)\)")
+LEGACY_INDEX = "## Older efforts — where each one now lives"
+
+
+def legacy_blocks(page: str) -> list[dict]:
+    """The efforts of a pre-2026-11-15 STATUS.md, one dict per effort.
+
+    An effort was either a dated bullet (`- **<date> · <title>:** …`) or a
+    `## ` section; anything else belongs to the effort above it. Each dict
+    carries `date` (None for an undated section), `title`, the `first` and
+    `last` line indexes it spans, and its `body` without the heading.
+    """
+
+    lines = page.split("\n")
+    stop = next((i for i, line in enumerate(lines) if line == LEGACY_INDEX), len(lines))
+    blocks: list[dict] = []
+    for index in range(stop):
+        line = lines[index]
+        bullet, section = _DATED_BULLET.match(line), _SECTION.match(line)
+        if bullet:
+            blocks.append({"date": bullet.group(1), "title": bullet.group(2).rstrip(":"),
+                           "first": index, "body": [bullet.group(3)], "bullet": True})
+        elif section:
+            blocks.append({"date": section.group(1), "title": section.group(2),
+                           "first": index, "body": [], "bullet": False})
+        elif blocks:
+            current = blocks[-1]
+            current["body"].append(line[2:] if current["bullet"] and line.startswith("  ") else line)
+        if blocks:
+            blocks[-1]["last"] = index
+    for block in blocks:
+        block["text"] = "\n".join(lines[block["first"] : block["last"] + 1]).rstrip("\n")
+        block["body"] = "\n".join(block["body"]).strip("\n")
+    return blocks
+
+
+def entry_slug(title: str) -> str:
+    words = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-").split("-")
+    return "-".join(words[:6])
+
+
+def entry_text(title: str, body: str) -> str:
+    """An effort file's text; root-relative links are rebased onto status.d/."""
+
+    return f"# {title}\n\n{_RELATIVE_LINK.sub(r'](../\1)', body)}\n"
+
+
 def validate(root: Path = REPO_ROOT) -> tuple[str, ...]:
     errors = []
     for path in entry_paths(root):

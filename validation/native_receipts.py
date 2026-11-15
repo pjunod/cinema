@@ -77,10 +77,11 @@ BUILD_SPECS = {
     # fast-rust-gate/paperwork-fix targets and offload web-test registration.
     # Recipe changes still require review; project-counter normalization below
     # does not authorize different recipe bytes or transfer native passes.
-    # 2026-11-15: apple-build-bump is replaced by mobile-build-number, and
+    # 2026-11-15: apple-build-bump is replaced by mobile-build-number and
+    # migrate-bookkeeping is added; android-publish refuses build 1; and
     # android-release passes the release-assigned build number to Gradle
     # (validation/mobile_build.py). No native test recipe changes.
-    'Makefile': 'a08e6ee88c436a1d5dfcf871d4ed0b9d7c4a5ab016ce203c21b86f553ea80200',
+    'Makefile': '0cfc81923e27ee944e1abe9c9145d2c05557c8dfb6142eae573b6b575b5156b0',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag

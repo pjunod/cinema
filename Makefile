@@ -166,6 +166,10 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 paperwork: ## Fast bookkeeping checks (index rows, per-change files, names, Regression-Test) with fixes
 	@python3 scripts/paperwork
 
+.PHONY: migrate-bookkeeping
+migrate-bookkeeping: ## After `git merge origin/main`: move an older branch's shared-file bookkeeping into per-change files
+	@python3 scripts/migrate-bookkeeping
+
 .PHONY: paperwork-fix
 paperwork-fix: ## Apply the derivable paperwork fixes (a claimed build number, Markdown host names, index rows) to the working tree
 	@python3 scripts/paperwork-fix
@@ -2094,7 +2098,7 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	@test -f "$${PLURX_ANDROID_OLD_KEYSTORE:-}" || { echo "set PLURX_ANDROID_OLD_KEYSTORE to the audited original signer"; exit 1; }
 	@test -f "$${PLURX_ANDROID_LINEAGE:-}" || { echo "set PLURX_ANDROID_LINEAGE to the signed debug-to-release lineage"; exit 1; }
 	build="$${PLURX_BUILD_NUMBER:-$$(PYTHONPATH="$(PLURX_SOURCE_ROOT)" python3 -m validation.mobile_build number --repo "$(PLURX_SOURCE_ROOT)")}" && \
-	test -n "$$build" && \
+	{ test "$$build" -gt 1 || { echo "no build number for this release build (got '$$build'); it would ship as development build 1"; exit 1; }; } && \
 	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
 	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
 	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \
@@ -2136,6 +2140,7 @@ android-publish: android-release ## Build the signed APK + serve it from the web
 	  mapping="$(ANDROID_OUTPUTS)/mapping/release/mapping.txt"; \
 	  code="$$(sed -n 's/.*"versionCode": *\([0-9][0-9]*\).*/\1/p' "$$metadata" | head -1)"; \
 	  test -n "$$code" || { echo "no versionCode in $$metadata; nothing published"; exit 1; }; \
+	  test "$$code" -gt 1 || { echo "$$metadata is development build $$code; nothing published (build it with make android-release, which numbers it)"; exit 1; }; \
 	  test -s "$$mapping" || { echo "no R8 mapping at $$mapping; nothing published (a release APK without its mapping cannot be de-obfuscated)"; exit 1; }; \
 	  kept="$(ANDROID_DATA_DIR)/plurx-android-$$code.mapping.txt"; \
 	  if [ -e "$$kept" ] && ! cmp -s "$$mapping" "$$kept"; then \

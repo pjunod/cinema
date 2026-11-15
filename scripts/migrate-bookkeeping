@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""Move a branch's shared-file bookkeeping into per-change files, in one step.
+
+docs/ci/SHARED-BOOKKEEPING.md: a changelog entry, a client fix anchor, a
+reviewed count change, a governed path and an effort's status are each a file
+of their own now. A branch cut before that still carries them as edits to
+CHANGELOG.md, tests/client-fixes.toml, tests/playback/rolling-producer-owners.toml,
+validation/points.toml and STATUS.md, and claims a build number.
+
+    git merge origin/main          # conflicts in those files are expected
+    scripts/migrate-bookkeeping    # writes the fragments, settles those files
+    git commit
+
+For each file it works out what the branch added since it left the target
+(HEAD against the merge base), writes that as a fragment named after the
+branch, takes the additions back out of the branch's copy, and three-way
+merges what is left with the target's. A file whose remaining edits still
+conflict is left as it was and named at the end; nothing else in a conflicted
+merge is touched. Everything written is staged; nothing is committed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+if sys.version_info < (3, 11):
+    raise SystemExit(
+        f"migrate-bookkeeping needs Python 3.11+ (this is {sys.version.split()[0]}), as scripts/paperwork does"
+    )
+
+import tomllib  # noqa: E402
+
+TOOL_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TOOL_ROOT))
+
+from validation import changelog_fragments, status_entries  # noqa: E402
+from validation.mobile_build import ANDROID, APPLE  # noqa: E402
+
+CHANGELOG = "CHANGELOG.md"
+CLIENT_FIXES = "tests/client-fixes.toml"
+OWNERS = "tests/playback/rolling-producer-owners.toml"
+CATALOG = "validation/points.toml"
+STATUS = "STATUS.md"
+ANDROID_README = "clients/android/README.md"
+OWNER_TABLES = ("symbols", "module_symbols", "module_structures")
+_NUMBER_LINES = {
+    ANDROID: re.compile(r"(?m)^\s*versionCode\s*=\s*\d+\s*$"),
+    APPLE: re.compile(r'(?m)^\s*CURRENT_PROJECT_VERSION:\s*"\d+"\s*$'),
+}
+
+
+class Migration:
+    def __init__(self, root: Path, theirs: str, slug: str) -> None:
+        self.root, self.theirs, self.slug = root, theirs, slug
+        self.base = self.git("merge-base", "HEAD", theirs).strip()
+        self.done: list[str] = []
+        self.manual: list[str] = []
+
+    def git(self, *args: str, check: bool = True) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=self.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        if check and result.returncode != 0:
+            raise SystemExit(f"migrate-bookkeeping: git {' '.join(args)} failed: {result.stderr.strip()}")
+        return result.stdout
+
+    def show(self, revision: str, path: str) -> str | None:
+        result = subprocess.run(
+            ["git", "show", f"{revision}:{path}"], cwd=self.root, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        return result.stdout if result.returncode == 0 else None
+
+    def versions(self, path: str) -> tuple[str, str, str] | None:
+        """(base, ours, theirs) for a file all three have, when ours changed it."""
+
+        base, ours, theirs = (self.show(rev, path) for rev in (self.base, "HEAD", self.theirs))
+        if base is None or ours is None or theirs is None or ours == base:
+            return None
+        return base, ours, theirs
+
+    def write(self, path: str, text: str) -> None:
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        self.git("add", "--", path)
+
+    def fragment(self, directory: str, suffix: str, text: str, *, append: bool = True) -> str:
+        path = f"{directory}/{self.slug}{suffix}"
+        existing = self.root / path
+        if append and existing.is_file() and existing.read_text(encoding="utf-8") != text:
+            text = existing.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + text
+        self.write(path, text)
+        return path
+
+    def settle(self, path: str, stripped: str, base: str, theirs: str, what: str) -> bool:
+        """Three-way merge the branch's copy, less its bookkeeping, with the target's."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            names = []
+            for name, text in (("ours", stripped), ("base", base), ("theirs", theirs)):
+                (Path(temporary) / name).write_text(text, encoding="utf-8")
+                names.append(str(Path(temporary) / name))
+            merged = subprocess.run(
+                ["git", "merge-file", "-p", *names], text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+        if merged.returncode != 0:
+            self.manual.append(
+                f"{path}: {what} moved out, but the branch's other edits to this file "
+                "conflict with the target's; resolve it by hand"
+            )
+            return False
+        self.write(path, merged.stdout)
+        self.done.append(f"{path}: {what}")
+        return True
+
+    @staticmethod
+    def same_but_for_blank_lines(stripped: str, base: str) -> str:
+        """`base` itself when taking the additions out left only spacing behind."""
+
+        text = lambda value: [line for line in value.split("\n") if line.strip()]  # noqa: E731
+        return base if text(stripped) == text(base) else stripped
+
+    # --- CHANGELOG.md -----------------------------------------------------
+
+    def changelog(self) -> None:
+        versions = self.versions(CHANGELOG)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        remaining: dict[str, int] = {}
+        for line in changelog_fragments.unreleased_body(base).splitlines():
+            remaining[line] = remaining.get(line, 0) + 1
+        lines = ours.split("\n")
+        start = lines.index(changelog_fragments.UNRELEASED) + 1
+        end = next(
+            (i for i in range(start, len(lines)) if lines[i].startswith("## [")), len(lines)
+        )
+        category, added, drop = None, {}, set()
+        for index in range(start, end):
+            line = lines[index]
+            if remaining.get(line, 0):
+                remaining[line] -= 1
+                if line.startswith("### "):
+                    category = line[4:].strip()
+                continue
+            if line.startswith("### "):
+                category = line[4:].strip()
+                drop.add(index)
+            elif line.strip():
+                added.setdefault(category or "Changed", []).append(line)
+                drop.add(index)
+        if not added:
+            return
+        text = "".join(
+            f"### {name}\n\n" + "\n".join(entries) + "\n\n" for name, entries in added.items()
+        ).rstrip("\n") + "\n"
+        changelog_fragments.parse(text, "the migrated changelog fragment")
+        path = self.fragment(changelog_fragments.DIRECTORY, ".md", text)
+        kept: list[str] = []
+        for index, line in enumerate(lines):
+            if index in drop:
+                continue
+            # The blank line that separated a removed entry from its neighbour.
+            if index - 1 in drop and not line.strip() and kept and not kept[-1].strip():
+                continue
+            kept.append(line)
+        stripped = self.same_but_for_blank_lines("\n".join(kept), base)
+        self.settle(CHANGELOG, stripped, base, theirs, f"{sum(map(len, added.values()))} changelog line(s) -> {path}")
+
+    # --- tests/client-fixes.toml ------------------------------------------
+
+    def client_fixes(self) -> None:
+        versions = self.versions(CLIENT_FIXES)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        known = {row["id"] for text in (base, theirs) for row in tomllib.loads(text).get("fixes", [])}
+        blocks = ours.split("\n\n")
+        moved, kept = [], []
+        for block in blocks:
+            found = re.search(r'(?m)^id = "([^"]+)"$', block) if "[[fixes]]" in block else None
+            if found and found.group(1) not in known:
+                moved.append(block.strip("\n"))
+            else:
+                kept.append(block)
+        if not moved:
+            return
+        text = "\n\n".join(moved) + "\n"
+        stripped = "\n\n".join(kept)
+        left = {row["id"] for row in tomllib.loads(stripped).get("fixes", [])}
+        if len(tomllib.loads(text)["fixes"]) != len(moved) or not left <= known:
+            self.manual.append(f"{CLIENT_FIXES}: could not isolate the new rows; move them by hand")
+            return
+        path = self.fragment("tests/client-fixes.d", ".toml", text)
+        self.settle(CLIENT_FIXES, stripped, base, theirs, f"{len(moved)} client fix row(s) -> {path}")
+
+    # --- tests/playback/rolling-producer-owners.toml ----------------------
+
+    @staticmethod
+    def owner_totals(text: str) -> dict[str, int]:
+        catalog = tomllib.loads(text)
+        return {row["id"]: row["expected_occurrences"] for table in OWNER_TABLES for row in catalog[table]}
+
+    def owners(self) -> None:
+        versions = self.versions(OWNERS)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        before, now = self.owner_totals(base), self.owner_totals(ours)
+        changed = {i: now[i] - before[i] for i in before.keys() & now.keys() if now[i] != before[i]}
+        if not changed:
+            return
+        base_lines = set(base.split("\n"))
+        # A row runs from its `[[table]]` line to the next; its comments (the
+        # review each edit used to add) may hold blank lines.
+        kept: list[str] = []
+        review: dict[str, list[str]] = {}
+        current = None
+        for line in ours.split("\n"):
+            if line.startswith("[["):
+                current = None
+            found = re.fullmatch(r'id = "([^"]+)"', line)
+            if found:
+                current = found.group(1)
+            if current in changed:
+                if line.startswith("#") and line not in base_lines:
+                    review.setdefault(current, []).append(line.lstrip("# ").rstrip())
+                    continue
+                if re.fullmatch(r"expected_occurrences = \d+", line):
+                    line = f"expected_occurrences = {before[current]}"
+            kept.append(line)
+        stripped = "\n".join(kept)
+        if self.owner_totals(stripped) != before:
+            self.manual.append(f"{OWNERS}: could not put the totals back; move the change by hand")
+            return
+        rows = []
+        for identifier in sorted(changed):
+            reason = " ".join(part for part in review.get(identifier, []) if part) or (
+                f"Count moved from {before[identifier]} to {now[identifier]} on {self.slug}; "
+                "the ownership review is in that pull request."
+            )
+            rows.append(
+                f'[[changes]]\nid = "{identifier}"\ndelta = {changed[identifier]}\n'
+                f"reason = {json.dumps(reason, ensure_ascii=False)}\n"
+            )
+        text = "\n".join(rows)
+        tomllib.loads(text)
+        path = self.fragment("tests/rolling-producer-owners.d", ".toml", text, append=False)
+        self.settle(OWNERS, stripped, base, theirs, f"{len(rows)} count change(s) -> {path}")
+
+    # --- validation/points.toml -------------------------------------------
+
+    def catalog(self) -> None:
+        versions = self.versions(CATALOG)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        paths = lambda text: {p["id"]: list(p["paths"]) for p in tomllib.loads(text)["points"]}  # noqa: E731
+        before, now = paths(base), paths(ours)
+        added = {
+            identifier: [path for path in now[identifier] if path not in before[identifier]]
+            for identifier in before.keys() & now.keys()
+        }
+        added = {identifier: extra for identifier, extra in added.items() if extra}
+        if not added:
+            return
+        pieces = re.split(r"(?m)^(?=\[\[points\]\])", ours)
+        for index, piece in enumerate(pieces):
+            found = re.search(r'(?m)^id = "([^"]+)"$', piece)
+            if not found or found.group(1) not in added:
+                continue
+            drop = {f'"{path}"' for path in added[found.group(1)]}
+            pieces[index] = "\n".join(
+                line for line in piece.split("\n") if line.strip().rstrip(",") not in drop
+            )
+        stripped = "".join(pieces)
+        if paths(stripped) != before:
+            self.manual.append(
+                f"{CATALOG}: paths were added to an inline `paths = [...]` list; move them "
+                "to validation/points.d/<slug>.toml by hand"
+            )
+            return
+        text = "".join(
+            f'[[paths]]\npoint = "{identifier}"\nadd = {json.dumps(extra)}\n\n'
+            for identifier, extra in sorted(added.items())
+        ).rstrip("\n") + "\n"
+        path = self.fragment("validation/points.d", ".toml", text)
+        self.settle(CATALOG, stripped, base, theirs, f"{sum(map(len, added.values()))} governed path(s) -> {path}")
+
+    # --- STATUS.md --------------------------------------------------------
+
+    def status(self) -> None:
+        versions = self.versions(STATUS)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        before = {(b["date"], b["title"]): b for b in status_entries.legacy_blocks(base)}
+        before_text = {b["text"] for b in before.values()}
+        lines = ours.split("\n")
+        written = 0
+        for block in reversed(status_entries.legacy_blocks(ours)):
+            if block["text"] in before_text:
+                continue
+            original = before.get((block["date"], block["title"]))
+            slug = status_entries.entry_slug(block["title"])
+            name = None
+            if block["date"] is None:
+                # An undated section keeps whatever file the target gave it.
+                existing = sorted((self.root / status_entries.DIRECTORY).glob(f"*-{slug}.md"))
+                name = existing[-1].name if existing else None
+            date = block["date"] or dt.date.today().isoformat()
+            name = name or f"{date}-{slug}.md"
+            self.write(
+                f"{status_entries.DIRECTORY}/{name}",
+                status_entries.entry_text(block["title"], block["body"]),
+            )
+            written += 1
+            replacement = original["text"].split("\n") if original else []
+            lines[block["first"] : block["last"] + 1] = replacement
+        if not written:
+            return
+        stripped = self.same_but_for_blank_lines("\n".join(lines), base)
+        self.settle(STATUS, stripped, base, theirs, f"{written} effort(s) -> {status_entries.DIRECTORY}/")
+
+    # --- build numbers ----------------------------------------------------
+
+    def build_numbers(self) -> None:
+        for path, pattern in _NUMBER_LINES.items():
+            versions = self.versions(path)
+            if versions is None:
+                continue
+            base, ours, theirs = versions
+            base_line, ours_line = pattern.findall(base), pattern.findall(ours)
+            if len(base_line) != 1 or len(ours_line) != 1 or base_line == ours_line:
+                continue
+            self.settle(path, ours.replace(ours_line[0], base_line[0], 1), base, theirs,
+                        "claimed build number dropped (the release assigns it)")
+
+    def android_readme(self) -> None:
+        versions = self.versions(ANDROID_README)
+        if versions is None:
+            return
+        base, ours, theirs = versions
+        quote = re.compile(r"(?ms)^> Status.*?(?=\n(?!>))")
+        base_quote, ours_quote = quote.search(base), quote.search(ours)
+        if not base_quote or not ours_quote or base_quote.group(0) == ours_quote.group(0):
+            return
+        stripped = ours[: ours_quote.start()] + base_quote.group(0) + ours[ours_quote.end() :]
+        old = set(base_quote.group(0).split("\n"))
+        narrative = [line[2:] for line in ours_quote.group(0).split("\n") if line not in old and line.strip(">").strip()]
+        if self.settle(ANDROID_README, stripped, base, theirs, "status-line build narrative dropped") and narrative:
+            print("  The Android status narrative this branch added is not kept in the README;\n"
+                  "  if it is not already your changelog entry, add it to your fragment:")
+            for line in narrative:
+                print(f"    {line}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--target", default="origin/main", help="the branch this work merges into")
+    parser.add_argument("--slug", help="name for the fragments (default: the branch name)")
+    args = parser.parse_args(argv)
+
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], text=True, stdout=subprocess.PIPE)
+    if top.returncode != 0:
+        print("migrate-bookkeeping: not inside a git repository", file=sys.stderr)
+        return 2
+    root = Path(top.stdout.strip())
+    merging = subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=root, text=True, stdout=subprocess.PIPE
+    )
+    theirs = merging.stdout.strip() if merging.returncode == 0 else args.target
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root, text=True, stdout=subprocess.PIPE
+    ).stdout.strip()
+    slug = re.sub(r"[^a-z0-9]+", "-", (args.slug or branch).lower()).strip("-")
+    if not slug or slug == "head":
+        print("migrate-bookkeeping: name the fragments with --slug <name>", file=sys.stderr)
+        return 2
+
+    migration = Migration(root, theirs, slug)
+    if migration.show(theirs, "changelog.d/README.md") is None:
+        print(f"migrate-bookkeeping: {theirs} does not have the per-change layout yet "
+              "(no changelog.d/); nothing to migrate to", file=sys.stderr)
+        return 2
+    for step in (migration.changelog, migration.client_fixes, migration.owners, migration.catalog,
+                 migration.status, migration.build_numbers, migration.android_readme):
+        step()
+
+    for line in migration.done:
+        print(f"moved   {line}")
+    for line in migration.manual:
+        print(f"MANUAL  {line}")
+    if not migration.done and not migration.manual:
+        print("migrate-bookkeeping: this branch has no shared-file bookkeeping to move")
+    unmerged = [line for line in migration.git("diff", "--name-only", "--diff-filter=U").splitlines() if line]
+    if unmerged:
+        print("still conflicted (not bookkeeping this tool moves):")
+        for path in unmerged:
+            print(f"  {path}")
+    print("Everything moved is staged. Review `git diff --cached`, then commit; "
+          "`scripts/paperwork` names anything left.")
+    return 1 if migration.manual else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

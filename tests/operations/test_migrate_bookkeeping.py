@@ -1,0 +1,208 @@
+"""`scripts/migrate-bookkeeping` moves an open branch onto the per-change layout.
+
+A branch cut before docs/ci/SHARED-BOOKKEEPING.md landed carries its changelog
+entry, client fix row, count change, governed path, status entry and claimed
+build number as edits to shared files. After `git merge <target>` one run of
+the tool has to leave those files exactly as the target has them, with the
+branch's bookkeeping in fragments and nothing lost.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import tomllib
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts/migrate-bookkeeping"
+SHARED = (
+    "CHANGELOG.md", "tests/client-fixes.toml", "tests/playback/rolling-producer-owners.toml",
+    "validation/points.toml", "STATUS.md", "clients/android/app/build.gradle.kts",
+    "clients/apple/project.yml", "clients/android/README.md",
+)
+
+CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- An old fix.\n\n## [0.8.0] — 2026-10-29\n\n- Released.\n"
+FIX = (
+    '[[fixes]]\nid = "{id}"\ncommits = ["1111111"]\nsource = "a.kt"\nsource_anchor = "fun a()"\n'
+    'test = "a_test.kt"\ntest_anchor = "fun testA()"\n'
+)
+LEDGER = 'version = 1\nenforce_after = "abcdef1"\n\n# An old row.\n' + FIX.format(id="old")
+OWNERS = (
+    'version = 1\n\n[[symbols]]\nid = "legacy-flag"\npattern = "FLAG"\nexpected_occurrences = 3\n\n'
+    '[[module_symbols]]\nid = "sentinel"\npattern = "S"\nexpected_occurrences = 0\n\n'
+    '[[module_structures]]\nid = "task-spawn"\n# Reviewed: ten owned spawns.\n\n# A second paragraph.\n'
+    'pattern = "spawn"\nexpected_occurrences = 10\n'
+)
+CATALOG = (
+    'version = 1\n\n[[points]]\nid = "one"\ntitle = "One"\ncontract = "c"\npaths = [\n  "a/**",\n  "b",\n]\n'
+    'checks = []\n\n[[points]]\nid = "two"\ntitle = "Two"\ncontract = "c"\npaths = ["c/**"]\nchecks = []\n'
+)
+STATUS_OLD = (
+    "# Status\n\n**Updated:** 2026-11-13\n<!-- status: insert new efforts below this line -->\n"
+    "- **2026-11-13 · Trim fidelity:** Owner Codex. Built; [ledger](docs/x.md).\n\n"
+    "## Older efforts — where each one now lives\n\n| a | b |\n"
+)
+STATUS_NEW = "# Status\n\nEach effort is a file under status.d/.\n\n## Older efforts — where each one now lives\n\n| a | b |\n"
+GRADLE = "android {\n        versionCode = {n}\n        versionName = \"0.8.0\"\n}\n"
+PROJECT = 'settings:\n    MARKETING_VERSION: "0.8.0"\n    CURRENT_PROJECT_VERSION: "{n}"\n'
+README_OLD = "# Android\n\nIntro.\n\n> Status: **v0.8.0**, build `207` — an old change.\n>\n> Build `206` — older.\n\nBody.\n"
+README_NEW = "# Android\n\nIntro.\n\n> Status: **v0.8.0** — native viewer.\n\nBody.\n"
+
+
+class MigrateBookkeepingCase(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "t")
+        self.git("config", "user.email", "t@example.invalid")
+        for path, text in {
+            "CHANGELOG.md": CHANGELOG, "tests/client-fixes.toml": LEDGER,
+            "tests/playback/rolling-producer-owners.toml": OWNERS, "validation/points.toml": CATALOG,
+            "STATUS.md": STATUS_OLD, "clients/android/README.md": README_OLD,
+            "clients/android/app/build.gradle.kts": GRADLE.replace("{n}", "207"),
+            "clients/apple/project.yml": PROJECT.replace("{n}", "301"),
+        }.items():
+            self.write(path, text)
+        self.commit("old layout")
+        self.git("branch", "old")
+        # The target adopts the per-change layout.
+        for path, text in {
+            "changelog.d/README.md": "# Changelog fragments\n", "STATUS.md": STATUS_NEW,
+            "status.d/2026-11-13-trim-fidelity.md": "# Trim fidelity\n\nOwner Codex. Built; [ledger](../docs/x.md).\n",
+            "clients/android/README.md": README_NEW,
+            "clients/android/app/build.gradle.kts": GRADLE.replace("{n}", "1"),
+            "clients/apple/project.yml": PROJECT.replace("{n}", "1"),
+        }.items():
+            self.write(path, text)
+        self.commit("per-change layout")
+
+    def git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=self.root, check=check, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+
+    def write(self, path: str, text: str) -> None:
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def read(self, path: str) -> str:
+        return (self.root / path).read_text(encoding="utf-8")
+
+    def commit(self, message: str) -> None:
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+
+    def migrate(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--target", "main", *args], cwd=self.root, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+
+    def old_style_branch(self) -> None:
+        self.git("checkout", "-q", "-b", "codex/In_Flight", "old")
+        self.write("CHANGELOG.md", CHANGELOG.replace(
+            "### Fixed\n\n", "### Fixed\n\n- A new fix that runs\n  onto a second line.\n", 1
+        ).replace("## [0.8.0]", "### Added\n\n- A new thing.\n\n## [0.8.0]", 1))
+        self.write("tests/client-fixes.toml", LEDGER.replace(
+            "# An old row.", "# The branch's row.\n" + FIX.format(id="new") + "\n# An old row.", 1))
+        self.write("tests/playback/rolling-producer-owners.toml", OWNERS.replace(
+            'pattern = "spawn"\nexpected_occurrences = 10',
+            '# Branch: +2 joined fixture tasks,\n# both awaited.\npattern = "spawn"\nexpected_occurrences = 12',
+        ).replace("expected_occurrences = 3", "expected_occurrences = 2"))
+        self.write("validation/points.toml", CATALOG.replace('  "b",\n', '  "b",\n  "scripts/new-tool",\n'))
+        self.write("STATUS.md", STATUS_OLD.replace(
+            "this line -->\n",
+            "this line -->\n- **2026-11-15 · New effort:** Owner Claude. Draft; [plan](docs/p.md).\n", 1,
+        ).replace("Owner Codex. Built;", "Owner Codex. Qualified;"))
+        self.write("clients/android/app/build.gradle.kts", GRADLE.replace("{n}", "208"))
+        self.write("clients/apple/project.yml", PROJECT.replace("{n}", "302"))
+        self.write("clients/android/README.md", README_OLD.replace(
+            "> Status: **v0.8.0**, build `207` — an old change.",
+            "> Status: **v0.8.0**, build `208` — the branch's change.\n>\n> Build `207` — an old change.",
+        ))
+        self.write("src/code.rs", "fn main() {}\n")
+        self.commit("old-layout edits")
+
+    def test_one_run_after_the_merge_moves_everything_and_leaves_no_conflict(self) -> None:
+        self.old_style_branch()
+        merged = self.git("merge", "main", check=False)
+        self.assertNotEqual(merged.returncode, 0, "the old layout conflicts with the new")
+        self.assertIn("CONFLICT", merged.stdout)
+
+        result = self.migrate()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.git("diff", "--name-only", "--diff-filter=U").stdout, "")
+        # Every shared file is exactly the target's again.
+        for path in SHARED:
+            with self.subTest(path=path):
+                self.assertEqual(self.read(path), self.git("show", f"main:{path}").stdout)
+        slug = "codex-in-flight"
+        self.assertEqual(
+            self.read(f"changelog.d/{slug}.md"),
+            "### Fixed\n\n- A new fix that runs\n  onto a second line.\n\n### Added\n\n- A new thing.\n",
+        )
+        fixes = tomllib.loads(self.read(f"tests/client-fixes.d/{slug}.toml"))["fixes"]
+        self.assertEqual([row["id"] for row in fixes], ["new"])
+        self.assertIn("# The branch's row.", self.read(f"tests/client-fixes.d/{slug}.toml"))
+        changes = tomllib.loads(self.read(f"tests/rolling-producer-owners.d/{slug}.toml"))["changes"]
+        self.assertEqual(
+            [(row["id"], row["delta"]) for row in changes], [("legacy-flag", -1), ("task-spawn", 2)]
+        )
+        self.assertEqual(changes[1]["reason"], "Branch: +2 joined fixture tasks, both awaited.")
+        self.assertIn("Count moved from 3 to 2", changes[0]["reason"])
+        self.assertEqual(
+            tomllib.loads(self.read(f"validation/points.d/{slug}.toml"))["paths"],
+            [{"point": "one", "add": ["scripts/new-tool"]}],
+        )
+        self.assertEqual(
+            self.read("status.d/2026-11-15-new-effort.md"),
+            "# New effort\n\nOwner Claude. Draft; [plan](../docs/p.md).\n",
+        )
+        # The branch's update to an effort the target already moved lands on its file.
+        self.assertEqual(
+            self.read("status.d/2026-11-13-trim-fidelity.md"),
+            "# Trim fidelity\n\nOwner Codex. Qualified; [ledger](../docs/x.md).\n",
+        )
+        self.assertIn("the branch's change.", result.stdout, "the dropped narrative is shown")
+        # Work that is not bookkeeping is untouched, and the merge can be committed.
+        self.assertEqual(self.read("src/code.rs"), "fn main() {}\n")
+        self.git("commit", "-q", "-m", "merge main")
+        # A second run finds nothing left to move.
+        again = self.migrate()
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertIn("no shared-file bookkeeping to move", again.stdout)
+
+    def test_a_branch_edit_that_really_conflicts_is_left_and_named(self) -> None:
+        self.git("checkout", "-q", "-b", "feature", "old")
+        self.write("STATUS.md", STATUS_OLD.replace(
+            "this line -->\n", "this line -->\n- **2026-11-15 · New effort:** Owner Claude.\n", 1
+        ).replace("**Updated:** 2026-11-13", "**Updated:** 2026-11-15"))
+        self.commit("status with a header edit")
+        self.git("merge", "main", check=False)
+        result = self.migrate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MANUAL  STATUS.md", result.stdout)
+        # The effort itself was still written; only the page is left to settle.
+        self.assertTrue((self.root / "status.d/2026-11-15-new-effort.md").is_file())
+        self.assertIn("STATUS.md", self.git("diff", "--name-only", "--diff-filter=U").stdout)
+
+    def test_a_target_without_the_layout_is_refused(self) -> None:
+        self.git("checkout", "-q", "-b", "feature", "old")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--target", "old"], cwd=self.root, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("does not have the per-change layout", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
