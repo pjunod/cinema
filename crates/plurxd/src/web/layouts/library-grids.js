@@ -424,6 +424,7 @@ async function libraryView(o){
     if(count) count.innerHTML=failed?`Incomplete results · ${all.length} items loaded`:layoutRegion("library","count",m);
     if(!rows)tagAlpha(page, sort);
     else libraryUpdateIndex();
+    curationRepaintPicks();
     const error=document.getElementById("library-load-error");
     if(error)error.innerHTML=failed?`<p>Some items could not be loaded. The groups and counts are incomplete. <button class="ghost sm" onclick="${o.reload}">Retry</button></p>`:"";
   };

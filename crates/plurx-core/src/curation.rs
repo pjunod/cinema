@@ -346,6 +346,9 @@ pub struct RuleQuery<'a> {
     pub only_items: Option<&'a [i64]>,
     /// Seed for `ShuffleDaily`: the same order all day, a new one tomorrow.
     pub day: i64,
+    /// Offload presence, as a library grid has it: Home rows and search show
+    /// what plays now; tag management sees everything.
+    pub presence: crate::domain::ItemPresence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

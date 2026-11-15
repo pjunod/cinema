@@ -10,7 +10,9 @@ const TAG_SWATCH={violet:"#a78bfa",blue:"#60a5fa",teal:"#2dd4bf",green:"#4ade80"
 const HOME_BUILTIN=["continue_watching","next_up","watchlist","favorites","recently_added","coming_soon","libraries"];
 const HOME_BUILTIN_NAMES={continue_watching:"Continue watching",next_up:"Next up",watchlist:"Watchlist",
   favorites:"Favorites",recently_added:"Recently added",coming_soon:"Coming soon",libraries:"Library previews"};
-const HOME_ORDER_KEY="plurx.home.order.v1";
+// Per person: the next account signed in on this browser must not paint in
+// the previous one's order.
+function homeOrderKey(){return `plurx.home.order.v1.${ME&&ME.id!=null?ME.id:"anon"}`;}
 /** @param {string} id */
 function dialogById(id){return /** @type {HTMLDialogElement|null} */(document.getElementById(id));}
 /** @param {string} id */
@@ -38,7 +40,7 @@ function tagChip(t,extra=""){
 // the default order first and then jump.
 function homeOrder(p){
   if(p.homeRows&&Array.isArray(p.homeRows.layout)) return p.homeRows.layout.map(e=>e.key);
-  try{const cached=JSON.parse(localStorage.getItem(HOME_ORDER_KEY)||"null");if(Array.isArray(cached))return cached;}catch(e){/* storage may be unavailable */}
+  try{const cached=JSON.parse(localStorage.getItem(homeOrderKey())||"null");if(Array.isArray(cached))return cached;}catch(e){/* storage may be unavailable */}
   return HOME_BUILTIN;
 }
 function homeRowRail(id,row){
@@ -81,7 +83,7 @@ function homeRegions(p,previews){
 function homeRowsArrived(p,value){
   const before=homeOrder(p).join(",");
   p.homeRows=value;
-  try{localStorage.setItem(HOME_ORDER_KEY,JSON.stringify((value.layout||[]).map(e=>e.key)));}catch(e){/* best effort */}
+  try{localStorage.setItem(homeOrderKey(),JSON.stringify((value.layout||[]).map(e=>e.key)));}catch(e){/* best effort */}
   return homeOrder(p).join(",")!==before;
 }
 
@@ -142,7 +144,11 @@ function moveHomeEntry(i,step){
 async function saveHomeLayout(household){
   const d=dialogById("customize-home");
   try{
-    await api(household?"/home/default-layout":"/home/layout",{method:"PUT",body:{entries:HOME_EDIT.entries}});
+    // The household default can only place household rows: the admin's own
+    // private rows stay in their own layout, not everyone's.
+    const privateKeys=new Set(HOME_EDIT.rows.filter(r=>r.scope==="private").map(r=>`row:${r.id}`));
+    const entries=household?HOME_EDIT.entries.filter(e=>!privateKeys.has(e.key)):HOME_EDIT.entries;
+    await api(household?"/home/default-layout":"/home/layout",{method:"PUT",body:{entries}});
     if(d)d.close();toast(household?"Household default saved":"Home saved");
     if(location.hash==="#/"||location.hash===""||location.hash==="#") render();
   }catch(e){const el=d&&d.querySelector("#customize-home-error");if(el)el.textContent=e.message;}
@@ -158,6 +164,9 @@ async function openRowEditor(rowId){
   const [tags,libs]=await Promise.all([curationTags(true),libsCached()]);
   const existing=rowId?(HOME_EDIT&&HOME_EDIT.rows||[]).find(r=>r.id===rowId):null;
   const spec=existing?JSON.parse(JSON.stringify(existing.spec)):{all_of:[],any_of:[],none_of:[],libraries:[],kinds:[],sort:"recently_tagged",unwatched:"first"};
+  // A deleted tag's condition matches nothing; editing the row drops it.
+  const known=new Set(tags.map(t=>t.id));
+  for(const g of ["all_of","any_of","none_of"]) spec[g]=(spec[g]||[]).filter(t=>t.tag==null||known.has(t.tag));
   ROW_EDIT={id:rowId||null,title:existing?existing.title:"",scope:existing?existing.scope:"private",spec,tags:tags.filter(t=>!t.archived),libs};
   const d=curationDialog("row-editor",rowId?"Edit row":"New row","");
   paintRowEditor(d);
@@ -413,12 +422,15 @@ async function applyBulkTag(){
   try{
     const newName=(inputIn(d,"#bulk-new-tag")?.value||"").trim();
     const jobs=[];
-    if(newName){const t=await api("/tags",{method:"POST",body:{name:newName,scope:"private"}});jobs.push(api(`/tags/${t.id}/items`,{method:"POST",body:{add:picked}}));}
+    // The server takes at most 5000 titles a request; a large selection is
+    // sent in slices.
+    const send=(id,field)=>{for(let i=0;i<picked.length;i+=5000)jobs.push(api(`/tags/${id}/items`,{method:"POST",body:{[field]:picked.slice(i,i+5000)}}));};
+    if(newName){const t=await api("/tags",{method:"POST",body:{name:newName,scope:"private"}});send(t.id,"add");}
     for(const box of inputsIn(d,"input[data-tag]")){
       if(box.indeterminate)continue;
       const id=Number(box.dataset.tag),was=box.dataset.was;
-      if(box.checked&&was!=="all")jobs.push(api(`/tags/${id}/items`,{method:"POST",body:{add:picked}}));
-      if(!box.checked&&was!=="none")jobs.push(api(`/tags/${id}/items`,{method:"POST",body:{remove:picked}}));
+      if(box.checked&&was!=="all")send(id,"add");
+      if(!box.checked&&was!=="none")send(id,"remove");
     }
     await Promise.all(jobs);
     LIB_TAGS.sets.clear();CURATION.at=0;
@@ -527,3 +539,11 @@ async function paintUserGrants(){
 function queueUserGrants(){queueMicrotask(paintUserGrants);return "";}
 // A selection bar belongs to the grid it was opened on.
 window.addEventListener("hashchange",()=>{document.getElementById("library-select-bar")?.remove();LIB_TAGS.select=null;});
+// A grid redraw rebuilds the cards; selected ones keep their highlight.
+function curationRepaintPicks(){
+  if(!LIB_TAGS.select)return;
+  document.querySelectorAll("#libbody [data-remote-item]").forEach(c=>{
+    const el=/** @type {HTMLElement} */(c);
+    el.classList.toggle("tag-picked",LIB_TAGS.select.has(Number(el.dataset.remoteItem)));
+  });
+}

@@ -69,8 +69,10 @@ library_curation_rows(id PK, owner_user_id NULL=household → users CASCADE, tit
 library_curation_home(user_id PK → users CASCADE, layout TEXT json, updated_at_ms)
 ```
 
-- `name_key` = NFKC + Unicode lowercase + trim + collapsed whitespace
-  (`plurx_core::curation::tag_key`). The display name is kept as typed.
+- `name_key` = Unicode lowercase + trim + collapsed whitespace
+  (`plurx_core::curation::tag_key`; no NFKC — the tree has no normalization
+  crate). The display name is kept as typed. Tag and row ids are
+  `AUTOINCREMENT`, so a stored layout or a client never sees an id reused.
 - **Shows carry tags.** Rows, grids and search list top-level titles (movies,
   shows), so tagging a show covers it everywhere a show appears. Tagging
   episodes and seasons directly is deferred (§9).
@@ -205,6 +207,7 @@ Changes to existing routes:
 | When | Who (model · session) | What |
 |---|---|---|
 | 2026-11-15 | Claude Opus 5.5 · 01BCWLA1Vd3M7YPaN8tUssxh | Proposal and renderings; owner rulings; plan written; T1 started |
+| 2026-11-15 | Claude Opus 5.5 · 01BCWLA1Vd3M7YPaN8tUssxh | T1–T3 built; T4/T5 built by Claude Sonnet 5.5 sub-agents; Fable adversarial review (14 findings) addressed: deleting a tag leaves rows to match nothing (never widens, never rewrites or names another person's row), visibility in the recently-tagged sort, top-level-only memberships and suggestions, AUTOINCREMENT ids, presence/facts/sort on tag-filtered grids, undecodable rows skipped, checklist PUT keeps archived and current tags, per-user Home order cache, chunked bulk tagging |
 
 ## 9. Deferred (not v1)
 

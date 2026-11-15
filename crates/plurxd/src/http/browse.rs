@@ -528,6 +528,8 @@ pub async fn list_items(
         q.not_tags.as_deref(),
         genre,
         q.sort.as_deref(),
+        presence,
+        q.facts == Some(1),
         offset,
         limit,
         read_after,

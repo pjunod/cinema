@@ -478,7 +478,9 @@ final class AppModel: ObservableObject {
             homeRowsTask = Task { [weak self] in
                 let rows = try? await api.homeRows()
                 guard let self, !Task.isCancelled, self.ownsHomeLoadIgnoringCancel(owner) else { return }
-                self.homeRows = rows
+                // A failed refresh keeps the order already shown; only a
+                // Home that never loaded one stays on the default.
+                if let rows { self.homeRows = rows }
             }
             async let h = api.hubs()
             async let l = api.libraries()

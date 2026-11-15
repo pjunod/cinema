@@ -72,6 +72,8 @@ class CustomTagsTest {
         )
         assertEquals(listOf(1L, 3L, 4L), tagIdsToSend(catalog, setOf(1, 2, 3, 4, 77)))
         assertEquals(listOf(1L), tagIdsToSend(catalog, setOf(1, 2)))
+        // The catalogue failed to load: the title's own editable tags still count.
+        assertEquals(listOf(7L), tagIdsToSend(emptyList(), setOf(7, 8), listOf(Tag(7, "on title", editable = true))))
         assertEquals(listOf(1L, 3L), checklistTags(catalog).map { it.id }.filter { it != 4L })
         assertTrue(checklistTags(catalog).none { it.archived || !it.editable })
         assertEquals("""{"tag_ids":[1,3]}""", json.encodeToString(TagIdsBody(listOf(1, 3))))

@@ -133,7 +133,7 @@ function libraryHarness(pages, state) {
       // Layout recomposition after a layout switch is not this test's subject.
       "function registerLayoutPresentation(){}",
       "function libraryBrowseTools(){return '';}",
-      "function curationLibraryTools(){return '';} function libraryTagFilter(items){return items;} function libraryTagFilterActive(){return false;}",
+      "function curationLibraryTools(){return '';} function libraryTagFilter(items){return items;} function libraryTagFilterActive(){return false;} function curationRepaintPicks(){}",
       "async function libsCached(){return [{id:1}];}",
       // Only "unwatched" is modelled: enough to hide some cards and show them again.
       "function matchWatch(it,f){return f==='unwatched'?!it.watched:true;}",

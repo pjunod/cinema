@@ -37,20 +37,26 @@ impl From<&mut Row<'_>> for TagRow {
     }
 }
 
-struct SavedRowRow(SavedRow);
+/// `None` for a stored rule this build cannot read: skipped, never read as
+/// an empty rule (which would match the whole library).
+struct SavedRowRow(Option<SavedRow>);
 
 impl From<&mut Row<'_>> for SavedRowRow {
     fn from(row: &mut Row<'_>) -> Self {
         let spec: String = row.get("spec");
-        Self(SavedRow {
-            id: row.get("id"),
-            owner_user_id: row.get("owner_user_id"),
-            title: row.get("title"),
-            spec: serde_json::from_str::<RowSpec>(&spec).unwrap_or_default(),
-            created_by: row.get("created_by"),
-            created_at_ms: row.get("created_at_ms"),
-            updated_at_ms: row.get("updated_at_ms"),
-        })
+        Self(
+            serde_json::from_str::<RowSpec>(&spec)
+                .ok()
+                .map(|spec| SavedRow {
+                    id: row.get("id"),
+                    owner_user_id: row.get("owner_user_id"),
+                    title: row.get("title"),
+                    spec,
+                    created_by: row.get("created_by"),
+                    created_at_ms: row.get("created_at_ms"),
+                    updated_at_ms: row.get("updated_at_ms"),
+                }),
+        )
     }
 }
 
@@ -166,7 +172,7 @@ impl HiqliteAuthStore {
             .map_err(database_error)?
             .into_iter()
             .next()
-            .map(|row| row.0))
+            .and_then(|row| row.0))
     }
 }
 
@@ -445,7 +451,7 @@ impl CurationStore for HiqliteAuthStore {
             .await
             .map_err(database_error)?
             .into_iter()
-            .map(|row| row.0)
+            .filter_map(|row| row.0)
             .collect())
     }
 
@@ -460,7 +466,7 @@ impl CurationStore for HiqliteAuthStore {
             .await
             .map_err(database_error)?
             .into_iter()
-            .map(|row| row.0)
+            .filter_map(|row| row.0)
             .collect())
     }
 

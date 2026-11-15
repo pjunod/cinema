@@ -130,8 +130,12 @@ enum HomeSectionOrder {
 enum TagSelection {
     /// The ids a PUT carries: every ticked tag the reader may edit, in the
     /// checklist's order. The server leaves tags the reader cannot edit alone.
-    static func putIds(tags: [PlurxTag], ticked: Set<Int>) -> [Int] {
-        tags.filter { $0.editable && !$0.archived && ticked.contains($0.id) }.map(\.id)
+    /// Every ticked editable tag, archived ones included: the server removes
+    /// every editable tag the body leaves out, so dropping one strips it.
+    /// `current` (the title's own tags) counts even when the catalogue failed.
+    static func putIds(tags: [PlurxTag], ticked: Set<Int>, current: [PlurxTag] = []) -> [Int] {
+        let merged = tags + current.filter { c in !tags.contains { $0.id == c.id } }
+        return merged.filter { $0.editable && ticked.contains($0.id) }.map(\.id).sorted()
     }
     /// Tags the checklist lists.
     static func choosable(_ tags: [PlurxTag]) -> [PlurxTag] { tags.filter { $0.editable && !$0.archived } }
@@ -302,7 +306,7 @@ struct TagChecklist: View {
     }
 
     private func save(_ next: Set<Int>) {
-        let ids = TagSelection.putIds(tags: all, ticked: next)
+        let ids = TagSelection.putIds(tags: all, ticked: next, current: current)
         busy = true; message = nil
         Task {
             defer { busy = false }

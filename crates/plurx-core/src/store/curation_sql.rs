@@ -7,10 +7,21 @@
 //! twins from drifting into two different meanings of "visible" or "matches".
 
 use crate::curation::{RowSort, RuleQuery, Term, Unwatched};
+use crate::domain::ItemPresence;
 
 /// The visibility predicate for a tag aliased `t`, viewer bound at `$N`.
 fn visible(alias: &str, viewer: &str) -> String {
     format!("({alias}.owner_user_id IS NULL OR {alias}.owner_user_id = {viewer})")
+}
+
+/// `TOP_LEVEL_ITEM_PREDICATE` as a literal, so constant statements can embed
+/// it (a test pins the two equal): tags go on titles, never on seasons or
+/// episodes, and suggestions offer only what a grid could show.
+macro_rules! top_level {
+    () => {
+        "(kind IN ('movie','show','book','audiobook') OR \
+     (kind IN ('folder','video','photo') AND parent_id IS NULL))"
+    };
 }
 
 macro_rules! tag_cols {
@@ -65,14 +76,20 @@ pub(crate) const MERGE_REJECTIONS: &str = "INSERT INTO library_curation_rejectio
 /// Add the items in JSON array `$5` to tag `$1`. Items that no longer exist
 /// are skipped rather than failing the batch; existing memberships keep
 /// their original time, so "recently tagged" means when it was first tagged.
-pub(crate) const ADD_MEMBERS: &str = "INSERT INTO library_curation_item_tags(tag_id, item_id, added_by, added_at_ms, source) \
-     SELECT $1, j.value, $2, $3, $4 FROM json_each($5) j WHERE EXISTS (SELECT 1 FROM items WHERE id = j.value) \
-     ON CONFLICT(tag_id, item_id) DO NOTHING";
+pub(crate) const ADD_MEMBERS: &str = concat!(
+    "INSERT INTO library_curation_item_tags(tag_id, item_id, added_by, added_at_ms, source) \
+     SELECT $1, j.value, $2, $3, $4 FROM json_each($5) j WHERE EXISTS (SELECT 1 FROM items WHERE id = j.value AND ",
+    top_level!(),
+    ") ON CONFLICT(tag_id, item_id) DO NOTHING"
+);
 pub(crate) const REMOVE_MEMBERS: &str = "DELETE FROM library_curation_item_tags \
      WHERE tag_id = $1 AND item_id IN (SELECT value FROM json_each($2))";
-pub(crate) const REJECT: &str = "INSERT INTO library_curation_rejections(tag_id, item_id, rejected_by, rejected_at_ms) \
-     SELECT $1, j.value, $2, $3 FROM json_each($4) j WHERE EXISTS (SELECT 1 FROM items WHERE id = j.value) \
-     ON CONFLICT(tag_id, item_id) DO NOTHING";
+pub(crate) const REJECT: &str = concat!(
+    "INSERT INTO library_curation_rejections(tag_id, item_id, rejected_by, rejected_at_ms) \
+     SELECT $1, j.value, $2, $3 FROM json_each($4) j WHERE EXISTS (SELECT 1 FROM items WHERE id = j.value AND ",
+    top_level!(),
+    ") ON CONFLICT(tag_id, item_id) DO NOTHING"
+);
 pub(crate) const UNREJECT: &str = "DELETE FROM library_curation_rejections \
      WHERE tag_id = $1 AND item_id IN (SELECT value FROM json_each($2))";
 pub(crate) const REJECTED_ITEMS: &str = "SELECT r.item_id FROM library_curation_rejections r \
@@ -88,9 +105,14 @@ pub(crate) const ITEM_TAG_IDS: &str = "SELECT it.tag_id FROM library_curation_it
 /// provider keywords as TMDB spells them and `dimension:value` labels.
 const SUGGEST_MATCH: &str = "EXISTS (SELECT 1 FROM json_each(c.terms) k \
      WHERE lower(k.value) IN (SELECT value FROM json_each(t.suggest_terms)))";
-const SUGGEST_FROM: &str = "FROM media_classifications c \
+const SUGGEST_FROM: &str = concat!(
+    "FROM media_classifications c \
      JOIN library_curation_tags t ON t.id = $1 \
-     JOIN items i ON i.id = c.item_id";
+     JOIN items i ON i.id = c.item_id \
+     AND EXISTS (SELECT 1 FROM items WHERE id = c.item_id AND ",
+    top_level!(),
+    ")"
+);
 const SUGGEST_OPEN: &str = "NOT EXISTS (SELECT 1 FROM library_curation_item_tags m WHERE m.tag_id = t.id AND m.item_id = c.item_id) \
      AND NOT EXISTS (SELECT 1 FROM library_curation_rejections r WHERE r.tag_id = t.id AND r.item_id = c.item_id)";
 
@@ -192,6 +214,9 @@ pub(crate) fn rule_sql(query: &RuleQuery<'_>, page: Option<(i64, i64)>) -> (Stri
     // As written, so SQLite can serve the scan from the partial top-level
     // index exactly as it does for a library grid.
     let mut wheres = vec![super::TOP_LEVEL_ITEM_PREDICATE.to_owned()];
+    if query.presence != ItemPresence::Everything {
+        wheres.push(query.presence.sql().to_owned());
+    }
 
     let term_sql = |b: &mut Builder, term: &Term| -> String {
         match term {
@@ -265,9 +290,16 @@ pub(crate) fn rule_sql(query: &RuleQuery<'_>, page: Option<(i64, i64)>) -> (Stri
                 let ids = b.bind(Arg::Text(
                     serde_json::to_string(&tags).expect("ids serialize"),
                 ));
+                // Only memberships of tags the viewer can see may order the
+                // page; otherwise a private tag id would leak its titles
+                // through the sort.
+                let viewer = b.viewer();
                 order.push(format!(
                     "(SELECT max(it.added_at_ms) FROM library_curation_item_tags it \
-                      WHERE it.item_id = items.id AND it.tag_id IN (SELECT value FROM json_each({ids}))) DESC"
+                      JOIN library_curation_tags t ON t.id = it.tag_id \
+                      WHERE it.item_id = items.id AND it.tag_id IN (SELECT value FROM json_each({ids})) \
+                      AND {}) DESC",
+                    visible("t", &viewer)
                 ));
             }
             order.push("items.added_at DESC".into());
@@ -348,6 +380,7 @@ mod tests {
                 spec: &spec,
                 only_items: Some(&ids),
                 day: 20_000,
+                presence: ItemPresence::OnDisk,
             };
             let (sql, args) = rule_sql(&q, Some((0, 20)));
             numbered_in_order(&sql, args.len());
@@ -378,6 +411,38 @@ mod tests {
     }
 
     #[test]
+    fn recently_tagged_orders_only_by_tags_the_viewer_can_see() {
+        let spec = RowSpec {
+            any_of: vec![Term::Tag(3), Term::Tag(4)],
+            sort: RowSort::RecentlyTagged,
+            ..Default::default()
+        };
+        let q = RuleQuery {
+            viewer: 7,
+            spec: &spec,
+            only_items: None,
+            day: 0,
+            presence: ItemPresence::Everything,
+        };
+        let (sql, _) = rule_sql(&q, Some((0, 20)));
+        let order = &sql[sql.find("ORDER BY").expect("order")..];
+        assert!(
+            order.contains("t.owner_user_id IS NULL OR t.owner_user_id = $"),
+            "{order}"
+        );
+    }
+
+    #[test]
+    fn the_embedded_top_level_predicate_is_the_grids() {
+        assert_eq!(
+            top_level!().split_whitespace().collect::<Vec<_>>(),
+            super::super::TOP_LEVEL_ITEM_PREDICATE
+                .split_whitespace()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn a_tag_term_is_matched_only_through_the_viewers_visibility() {
         let spec = RowSpec {
             all_of: vec![Term::Tag(3)],
@@ -388,6 +453,7 @@ mod tests {
             spec: &spec,
             only_items: None,
             day: 0,
+            presence: ItemPresence::Everything,
         };
         let (sql, args) = rule_sql(&q, None);
         assert!(

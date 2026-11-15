@@ -23862,6 +23862,18 @@ async fn tags_filter_the_grid_drive_search_and_fill_home_rows() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(body.to_string().contains("Date night"), "{body}");
+    // Forcing it leaves the row alone: its condition now matches nothing, so
+    // it leaves Home instead of widening to everything.
+    let (status, _) = call(
+        &app,
+        delete_req(&format!("/api/v1/tags/{tag}?force=1"), Some(&admin)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, rows) = call(&app, get("/api/v1/rows", Some(&admin))).await;
+    assert_eq!(rows["rows"].as_array().expect("rows").len(), 1, "{rows}");
+    let (_, home) = call(&app, get("/api/v1/home/rows", Some(&admin))).await;
+    assert!(home["rows"].get(row_id.to_string()).is_none(), "{home}");
 }
 
 /// §2.3: nothing outside the native API reads curation, so a tag cannot

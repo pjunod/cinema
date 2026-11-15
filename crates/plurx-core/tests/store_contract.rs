@@ -34656,6 +34656,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &spec,
                     only_items: None,
                     day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 0,
                 20,
@@ -34674,6 +34675,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &spec,
                     only_items: None,
                     day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 0,
                 20,
@@ -34699,6 +34701,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &spec,
                     only_items: Some(&only),
                     day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 0,
                 20,
@@ -34713,6 +34716,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &spec,
                     only_items: None,
                     day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 5,
                 20,
@@ -34737,6 +34741,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &only_unwatched,
                     only_items: None,
                     day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 0,
                 20,
@@ -34757,6 +34762,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &first,
                     only_items: None,
                     day: 0,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 0,
                 20,
@@ -34777,6 +34783,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &shuffle,
                     only_items: None,
                     day: 20_400,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 0,
                 20,
@@ -34790,6 +34797,7 @@ async fn curation_contract_runs_through_dyn_store() {
                     spec: &shuffle,
                     only_items: None,
                     day: 20_400,
+                    presence: plurx_core::domain::ItemPresence::Everything,
                 },
                 0,
                 20,
@@ -34896,6 +34904,110 @@ async fn curation_contract_runs_through_dyn_store() {
                 .expect("s")
                 .total,
             0,
+            "{backend}"
+        );
+
+        // Tags go on titles: a season or an episode id is skipped, so a tag's
+        // count can never include something its page cannot show.
+        let show = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Low Orbit".into(),
+                year: Some(2024),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("show");
+        let season = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Season,
+                parent_id: Some(show),
+                title: "Season 1".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: None,
+            })
+            .await
+            .expect("season");
+        let episode = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Episode,
+                parent_id: Some(season),
+                title: "Pilot".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: Some(1),
+            })
+            .await
+            .expect("episode");
+        let before = store
+            .curation_tag(household.id)
+            .await
+            .expect("t")
+            .expect("t")
+            .item_count;
+        store
+            .set_tag_members(
+                household.id,
+                &[season, episode],
+                &[],
+                owner.id,
+                TagSource::Manual,
+                250,
+            )
+            .await
+            .expect("tag");
+        assert_eq!(
+            store
+                .curation_tag(household.id)
+                .await
+                .expect("t")
+                .expect("t")
+                .item_count,
+            before,
+            "{backend}: seasons and episodes are not taggable"
+        );
+
+        // Ids are never reused: a stored layout or a client holding row:N or
+        // tag N must not silently point at something new.
+        let gone = store
+            .create_tag(
+                &NewTag {
+                    name: "ephemeral".into(),
+                    owner_user_id: None,
+                    color: "slate".into(),
+                    created_by: owner.id,
+                },
+                260,
+            )
+            .await
+            .expect("create")
+            .expect("new");
+        assert!(
+            store.delete_tag(gone.id).await.expect("delete"),
+            "{backend}"
+        );
+        let next = store
+            .create_tag(
+                &NewTag {
+                    name: "ephemeral".into(),
+                    owner_user_id: None,
+                    color: "slate".into(),
+                    created_by: owner.id,
+                },
+                261,
+            )
+            .await
+            .expect("create")
+            .expect("new");
+        assert!(next.id > gone.id, "{backend}: tag id {} reused", gone.id);
+        assert!(
+            store.delete_tag(next.id).await.expect("delete"),
             "{backend}"
         );
 

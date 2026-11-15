@@ -38,17 +38,23 @@ fn tag_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Tag> {
     })
 }
 
-fn row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SavedRow> {
+/// `None` for a row whose stored rule this build cannot read (written by a
+/// newer build, say): such a row is skipped, never read as an empty rule,
+/// which would match the whole library.
+fn row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SavedRow>> {
     let spec: String = row.get(3)?;
-    Ok(SavedRow {
+    let Ok(spec) = serde_json::from_str::<RowSpec>(&spec) else {
+        return Ok(None);
+    };
+    Ok(Some(SavedRow {
         id: row.get(0)?,
         owner_user_id: row.get(1)?,
         title: row.get(2)?,
-        spec: serde_json::from_str::<RowSpec>(&spec).unwrap_or_default(),
+        spec,
         created_by: row.get(4)?,
         created_at_ms: row.get(5)?,
         updated_at_ms: row.get(6)?,
-    })
+    }))
 }
 
 fn ids_json(ids: &[i64]) -> String {
@@ -309,7 +315,7 @@ impl CurationStore for SqliteStore {
             let rows = statement
                 .query_map(params![viewer], row_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
+            Ok(rows.into_iter().flatten().collect())
         })
         .await
     }
@@ -318,7 +324,8 @@ impl CurationStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn
                 .query_row(q::ROW_BY_ID, params![id], row_from_row)
-                .optional()?)
+                .optional()?
+                .flatten())
         })
         .await
     }
@@ -329,7 +336,7 @@ impl CurationStore for SqliteStore {
             let rows = statement
                 .query_map(params![tag_id], row_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
+            Ok(rows.into_iter().flatten().collect())
         })
         .await
     }
@@ -350,7 +357,8 @@ impl CurationStore for SqliteStore {
                 params![owner_user_id, title, spec, by, at_ms],
                 |row| row.get(0),
             )?;
-            Ok(conn.query_row(q::ROW_BY_ID, params![id], row_from_row)?)
+            conn.query_row(q::ROW_BY_ID, params![id], row_from_row)?
+                .ok_or_else(|| StoreError::Database("created row unreadable".into()))
         })
         .await
     }

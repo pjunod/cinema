@@ -117,5 +117,8 @@ fun checklistTags(catalog: List<Tag>): List<Tag> = catalog.filter { it.editable 
  * editable set are never sent (the server leaves those alone); an archived
  * editable tag already on the title stays ticked so saving does not strip it.
  */
-fun tagIdsToSend(catalog: List<Tag>, ticked: Set<Long>): List<Long> =
-    catalog.filter { it.editable && it.id in ticked }.map { it.id }.sorted()
+fun tagIdsToSend(catalog: List<Tag>, ticked: Set<Long>, current: List<Tag> = emptyList()): List<Long> =
+    // The title's own editable tags count even when the catalogue did not
+    // load: the server removes every editable tag the body leaves out.
+    (catalog + current.filter { c -> catalog.none { it.id == c.id } })
+        .filter { it.editable && it.id in ticked }.map { it.id }.sorted()

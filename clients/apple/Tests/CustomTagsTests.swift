@@ -55,9 +55,12 @@ final class CustomTagsTests: XCTestCase {
             PlurxTag(id: 4, name: "d", scope: "private", editable: true),
         ]
         let ids = TagSelection.putIds(tags: tags, ticked: [1, 2, 3, 4])
-        XCTAssertEqual(ids, [1, 4])
+        XCTAssertEqual(ids, [1, 3, 4], "an archived tag still on the title is kept")
         let body = try JSONSerialization.jsonObject(with: PlurxAPI.setTagsBody(ids)) as? [String: [Int]]
-        XCTAssertEqual(body, ["tag_ids": [1, 4]])
+        XCTAssertEqual(body, ["tag_ids": [1, 3, 4]])
+        // The catalogue failed to load: the title's own editable tags still count.
+        let current = [PlurxTag(id: 7, name: "on title", editable: true)]
+        XCTAssertEqual(TagSelection.putIds(tags: [], ticked: [7, 8], current: current), [7])
         XCTAssertEqual(TagSelection.choosable(tags).map(\.id), [1, 4])
     }
 }

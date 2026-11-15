@@ -114,7 +114,7 @@ private fun TagChecklistDialog(
         busy = true
         scope.launch {
             try {
-                val answer = vm.setItemTags(itemId, tagIdsToSend(all, next))
+                val answer = vm.setItemTags(itemId, tagIdsToSend(all, next, current))
                 onTags(answer); ticked = answer.map { it.id }.toSet(); message = null
             } catch (e: CancellationException) {
                 throw e

@@ -18,7 +18,7 @@ use plurx_core::curation::{
     Grant, HomeEntry, HomeLayout, NewTag, RowSort, RowSpec, RuleQuery, SavedRow, Scope, Tag,
     TagEdit, TagSource, Term, MAX_BULK_ITEMS, TAG_COLORS,
 };
-use plurx_core::domain::{Item, ItemKind, User, WatchState};
+use plurx_core::domain::{Item, ItemKind, ItemPresence, User, WatchState};
 use plurx_core::store::keys;
 use serde::{Deserialize, Serialize};
 
@@ -163,6 +163,7 @@ async fn rule_page(
     only_items: Option<&[i64]>,
     offset: i64,
     limit: i64,
+    presence: ItemPresence,
     read_after: ReadAfter,
 ) -> Result<ItemPage, ApiError> {
     let query = RuleQuery {
@@ -170,6 +171,7 @@ async fn rule_page(
         spec,
         only_items,
         day: today(),
+        presence,
     };
     let ids = state.store.rule_items(&query, offset, limit).await?;
     Ok(ItemPage {
@@ -330,8 +332,8 @@ pub struct ForceQuery {
     pub force: Option<u8>,
 }
 
-/// Drop a tag from a rule, or swap it for another. `None` when what is left
-/// has no condition at all, i.e. the row should go.
+/// Swap one tag for another in a rule (a merge). `None` when what is left
+/// would not validate — the row should go rather than change meaning.
 fn rewrite_rule(spec: &RowSpec, from: i64, into: Option<i64>) -> Option<RowSpec> {
     let map = |terms: &[Term]| -> Vec<Term> {
         let mut out = Vec::new();
@@ -374,9 +376,11 @@ async fn rewrite_rows(state: &AppState, from: i64, into: Option<i64>) -> Result<
     Ok(())
 }
 
-/// DELETE /api/v1/tags/{id} — refused with the rows that use it unless
-/// `?force=1`; forcing drops the tag from those rules (a rule left with no
-/// condition is deleted). Archiving is the gentler answer and the UI offers it.
+/// DELETE /api/v1/tags/{id} — refused while rows use it unless `?force=1`.
+/// Rows are left as they are: a condition on a deleted tag matches nothing
+/// (an `all_of` row empties and leaves Home, `any_of`/`none_of` lose one
+/// term), so a delete can never widen a row, and nobody else's private row
+/// is rewritten or named. Archiving is the gentler answer and the UI offers it.
 pub async fn delete_tag(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -386,19 +390,32 @@ pub async fn delete_tag(
     editable_tag(&state, &user, id).await?;
     let rows = state.store.rows_naming_tag(id).await?;
     if !rows.is_empty() && q.force != Some(1) {
-        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        let titles: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.visible_to(user.id))
+            .map(|r| r.title.as_str())
+            .collect();
+        let others = rows.len() - titles.len();
+        let mut named = titles.join(", ");
+        if others > 0 {
+            if !named.is_empty() {
+                named.push_str(", and ");
+            }
+            named.push_str(&format!(
+                "{others} other person's row{}",
+                if others == 1 { "" } else { "s" }
+            ));
+        }
         return Err(ApiError::Typed {
             status: StatusCode::CONFLICT,
             code: "tag_in_use",
             message: format!(
-                "Used by {} Home row{}: {}. Archive it instead, or delete anyway.",
+                "Used by {} Home row{}: {named}. Archive it instead, or delete anyway.",
                 rows.len(),
                 if rows.len() == 1 { "" } else { "s" },
-                titles.join(", ")
             ),
         });
     }
-    rewrite_rows(&state, id, None).await?;
     state.store.delete_tag(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -586,13 +603,16 @@ pub struct PageQuery {
     pub sort: Option<String>,
 }
 
-fn row_sort(sort: Option<&str>) -> RowSort {
+/// A grid sort name as a rule sort. Sorts a rule cannot express (resolution,
+/// recorded) and absent or unknown names take `fallback`.
+fn row_sort(sort: Option<&str>, fallback: RowSort) -> RowSort {
     match sort.unwrap_or("") {
         "added" => RowSort::Added,
         "year" | "released" => RowSort::Released,
         "title" => RowSort::Title,
         "shuffle_daily" => RowSort::ShuffleDaily,
-        _ => RowSort::RecentlyTagged,
+        "recently_tagged" => RowSort::RecentlyTagged,
+        _ => fallback,
     }
 }
 
@@ -608,11 +628,21 @@ pub async fn tag_items(
     let (offset, limit) = page(q.offset, q.limit, 60);
     let spec = RowSpec {
         all_of: vec![Term::Tag(id)],
-        sort: row_sort(q.sort.as_deref()),
+        sort: row_sort(q.sort.as_deref(), RowSort::RecentlyTagged),
         ..Default::default()
     };
     Ok(Json(
-        rule_page(&state, &user, &spec, None, offset, limit, read_after).await?,
+        rule_page(
+            &state,
+            &user,
+            &spec,
+            None,
+            offset,
+            limit,
+            ItemPresence::Everything,
+            read_after,
+        )
+        .await?,
     ))
 }
 
@@ -639,12 +669,22 @@ pub async fn tag_item_ids(
         spec: &spec,
         only_items: None,
         day: 0,
+        presence: ItemPresence::Everything,
     };
-    let limit = i64::try_from(MAX_BULK_ITEMS * 4).unwrap_or(i64::MAX);
-    let ids = state.store.rule_items(&query, 0, limit).await?;
-    Ok(Json(ItemIdsResponse {
-        item_ids: ids.item_ids,
-    }))
+    // Every id, a page at a time: a client filtering a library it already
+    // holds is wrong if this list is silently cut short.
+    let step = i64::try_from(MAX_BULK_ITEMS * 4).unwrap_or(i64::MAX);
+    let mut item_ids = Vec::new();
+    loop {
+        let offset = i64::try_from(item_ids.len()).unwrap_or(i64::MAX);
+        let page = state.store.rule_items(&query, offset, step).await?;
+        let got = page.item_ids.len();
+        item_ids.extend(page.item_ids);
+        if i64::try_from(got).unwrap_or(0) < step {
+            break;
+        }
+    }
+    Ok(Json(ItemIdsResponse { item_ids }))
 }
 
 #[derive(Serialize)]
@@ -795,6 +835,8 @@ pub(crate) async fn tag_filtered_grid(
     not_tags: Option<&str>,
     genre: Option<&str>,
     sort: Option<&str>,
+    presence: ItemPresence,
+    facts: bool,
     offset: i64,
     limit: i64,
     read_after: ReadAfter,
@@ -804,11 +846,17 @@ pub(crate) async fn tag_filtered_grid(
     if tags.is_empty() && not_tags.is_empty() && sort != Some("recently_tagged") {
         return Ok(None);
     }
+    if tags.len().max(not_tags.len()) > plurx_core::curation::MAX_TERMS_PER_GROUP {
+        return Err(bad(format!(
+            "At most {} tags per filter.",
+            plurx_core::curation::MAX_TERMS_PER_GROUP
+        )));
+    }
     let terms: Vec<Term> = tags.into_iter().map(Term::Tag).collect();
     let mut spec = RowSpec {
         libraries: vec![library_id],
         none_of: not_tags.into_iter().map(Term::Tag).collect(),
-        sort: row_sort(sort.or(Some("title"))),
+        sort: row_sort(sort, RowSort::Title),
         ..Default::default()
     };
     if tag_mode == Some("all") {
@@ -819,12 +867,33 @@ pub(crate) async fn tag_filtered_grid(
     if let Some(genre) = genre {
         spec.all_of.push(Term::Genre(genre.to_owned()));
     }
-    if sort == Some("recently_tagged") {
-        spec.sort = RowSort::RecentlyTagged;
+    let mut page = rule_page(
+        state, user, &spec, None, offset, limit, presence, read_after,
+    )
+    .await?;
+    if facts {
+        // The same opt-in spec columns the unfiltered grid gives.
+        let file_backed: Vec<i64> = page
+            .items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.kind,
+                    ItemKind::Movie | ItemKind::Video | ItemKind::Book | ItemKind::Audiobook
+                )
+            })
+            .map(|i| i.id)
+            .collect();
+        let mut media = state.catalogue.item_media_facts(&file_backed).await?;
+        page.items = std::mem::take(&mut page.items)
+            .into_iter()
+            .map(|dto| {
+                let facts = media.remove(&dto.id);
+                dto.with_media(facts)
+            })
+            .collect();
     }
-    Ok(Some(
-        rule_page(state, user, &spec, None, offset, limit, read_after).await?,
-    ))
+    Ok(Some(page))
 }
 
 /// Split `tag:` / `-tag:` tokens (`tag:"two words"` quotes a name) out of a
@@ -898,14 +967,17 @@ pub(crate) async fn tag_search(
             }
             return Ok(Some(Vec::new()));
         }
-        // A name can be both a household and a private tag: either counts.
-        let terms: Vec<Term> = ids.into_iter().map(Term::Tag).collect();
+        // A name can be both a household and a private tag; the reader's
+        // own wins, so each name is one condition and `tag:a tag:b` stays AND.
+        let id = visible
+            .iter()
+            .filter(|t| ids.contains(&t.id))
+            .max_by_key(|t| t.owner_user_id.is_some())
+            .map_or(ids[0], |t| t.id);
         if negate {
-            spec.none_of.extend(terms);
-        } else if terms.len() == 1 {
-            spec.all_of.extend(terms);
+            spec.none_of.push(Term::Tag(id));
         } else {
-            spec.any_of.extend(terms);
+            spec.all_of.push(Term::Tag(id));
         }
     }
     if spec.all_of.is_empty() && spec.any_of.is_empty() {
@@ -913,9 +985,18 @@ pub(crate) async fn tag_search(
     }
     if text.trim().is_empty() {
         return Ok(Some(
-            rule_page(state, user, &spec, None, 0, limit, read_after)
-                .await?
-                .items,
+            rule_page(
+                state,
+                user,
+                &spec,
+                None,
+                0,
+                limit,
+                ItemPresence::OnDisk,
+                read_after,
+            )
+            .await?
+            .items,
         ));
     }
     let hits = state.catalogue.search_items(&text, PAGE_MAX).await?;
@@ -925,6 +1006,7 @@ pub(crate) async fn tag_search(
         spec: &spec,
         only_items: Some(&hit_ids),
         day: today(),
+        presence: ItemPresence::Everything,
     };
     let kept: BTreeSet<i64> = state
         .store
@@ -1127,7 +1209,17 @@ pub async fn row_items(
         .ok_or(ApiError::NotFound("row"))?;
     let (offset, limit) = page(q.offset, q.limit, 60);
     Ok(Json(
-        rule_page(&state, &user, &row.spec, None, offset, limit, read_after).await?,
+        rule_page(
+            &state,
+            &user,
+            &row.spec,
+            None,
+            offset,
+            limit,
+            ItemPresence::OnDisk,
+            read_after,
+        )
+        .await?,
     ))
 }
 
@@ -1148,7 +1240,17 @@ pub async fn preview_row(
     check_rule(&state, &user, &mut body.spec, Scope::Private).await?;
     let limit = body.limit.unwrap_or(body.spec.limit()).clamp(1, PAGE_MAX);
     Ok(Json(
-        rule_page(&state, &user, &body.spec, None, 0, limit, read_after).await?,
+        rule_page(
+            &state,
+            &user,
+            &body.spec,
+            None,
+            0,
+            limit,
+            ItemPresence::OnDisk,
+            read_after,
+        )
+        .await?,
     ))
 }
 
@@ -1350,7 +1452,17 @@ pub async fn home_rows(
         let user = &user;
         async move {
             let limit = row.spec.limit();
-            let page = rule_page(state, user, &row.spec, None, 0, limit, read_after).await?;
+            let page = rule_page(
+                state,
+                user,
+                &row.spec,
+                None,
+                0,
+                limit,
+                ItemPresence::OnDisk,
+                read_after,
+            )
+            .await?;
             Ok::<_, ApiError>((row.id, row.title.clone(), page))
         }
     }))
@@ -1501,7 +1613,14 @@ mod tests {
 
     #[test]
     fn row_sort_names() {
-        assert_eq!(row_sort(Some("title")), RowSort::Title);
-        assert_eq!(row_sort(None), RowSort::RecentlyTagged);
+        assert_eq!(
+            row_sort(Some("title"), RowSort::RecentlyTagged),
+            RowSort::Title
+        );
+        assert_eq!(
+            row_sort(None, RowSort::RecentlyTagged),
+            RowSort::RecentlyTagged
+        );
+        assert_eq!(row_sort(Some("resolution"), RowSort::Title), RowSort::Title);
     }
 }

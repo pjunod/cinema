@@ -15,7 +15,7 @@ CREATE TABLE library_curation_grants(
 ) STRICT;
 -- next statement
 CREATE TABLE library_curation_tags(
- id INTEGER PRIMARY KEY,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 256),
  name_key TEXT NOT NULL,
  owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -47,8 +47,10 @@ CREATE TABLE library_curation_rejections(
  PRIMARY KEY(tag_id,item_id)
 ) STRICT;
 -- next statement
+CREATE INDEX library_curation_rejections_item ON library_curation_rejections(item_id);
+-- next statement
 CREATE TABLE library_curation_rows(
- id INTEGER PRIMARY KEY,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
  owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
  title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 320),
  spec TEXT NOT NULL CHECK(json_valid(spec) AND json_type(spec)='object'),
