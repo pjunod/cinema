@@ -15,7 +15,10 @@
 #include <libavutil/opt.h>
 #include <libavutil/sha.h>
 #include <limits.h>
+#include <signal.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -27,6 +30,19 @@ static int source_profile;
 static int expected_w[2], expected_h[2], frame_cap, emitted;
 static bool debug_frames, initialized, window_mode, window_done, first_pair;
 static bool source_eof, discover_el;
+// --session CONTROL_FD: one helper produces consecutive windows of one
+// rendition. Demuxer, decoders, VA-API and Vulkan/libplacebo state carry
+// over; the keyframe seek and its preroll happen only for the session's first
+// window. Every window still has its own bounds, outputs, evidence directory
+// and observations, and the daemon verifies and publishes each one alone.
+static bool session_mode, positioned;
+static int control_fd = -1, devnull_fd = -1;
+// The window's private evidence directory (single-shot: OUTPUT_DIR). Every
+// evidence file is opened relative to it; the helper never changes directory.
+static int window_dir = -1, rpu_dir = -1;
+// --audio-ordinal K: the session carries the selected soundtrack's packets,
+// unchanged, to each window's encoder, so the encoder never opens the source.
+static int audio_ordinal = -1, audio_index = -1;
 // --refit-stats / --dump-composed (refit_mode.h): CPU-only F+ statistics.
 // Decoded pairs go to refit_pairs instead of the renderer.
 static bool refit_mode;
@@ -63,12 +79,27 @@ static FILE *rgb_output, *timing_output;
 // refused, and nothing reads it back to decide anything.
 static FILE *stage_output;
 static struct timespec helper_started;
+// A session opens its source before any window exists. Those rows are kept
+// here and written at the head of the first window's stages.tsv, whose clock
+// starts at the session's start; later windows' clocks start at their command.
+static char session_stage_rows[512];
+static size_t session_stage_length;
+static bool session_stage_written;
 static void stage_mark(const char *name) {
   struct timespec now;
-  if (!stage_output || clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+  if ((!stage_output && (!session_mode || session_stage_written)) ||
+      clock_gettime(CLOCK_MONOTONIC, &now) != 0)
     return;
   long long us = (long long)(now.tv_sec - helper_started.tv_sec) * 1000000LL +
                  (now.tv_nsec - helper_started.tv_nsec) / 1000;
+  if (!stage_output) {
+    int length = snprintf(session_stage_rows + session_stage_length,
+                          sizeof(session_stage_rows) - session_stage_length,
+                          "%s\t%lld\t%u\t%u\t%d\n", name, us, preroll, paired, emitted);
+    if (length > 0 && (size_t)length < sizeof(session_stage_rows) - session_stage_length)
+      session_stage_length += (size_t)length;
+    return;
+  }
   if (fprintf(stage_output, "%s\t%lld\t%u\t%u\t%d\n", name, us, preroll,
               paired, emitted) < 0 ||
       fflush(stage_output) != 0) {
@@ -91,6 +122,35 @@ struct coded_input {
 };
 static struct coded_input coded_window[64];
 static unsigned coded_count;
+// Session carry-over across a window boundary. Coded AUs at or after the
+// window end were demuxed and decoded for the decoder's reorder lookahead;
+// the next window inspects them again against its own bounds. Video AUs
+// demuxed after the window ended (while its soundtrack tail was read) were
+// never decoded; the next window decodes them first.
+#define CARRIED_CODED_LIMIT 64
+#define PENDING_VIDEO_LIMIT 256
+static AVPacket *carried_coded[CARRIED_CODED_LIMIT];
+static unsigned carried_coded_count;
+static AVPacket *pending_video[PENDING_VIDEO_LIMIT];
+static unsigned pending_video_count;
+
+// The selected soundtrack. Each window's packets [from, end) are written,
+// unchanged, to the window's Matroska audio pipe. The session keeps a bounded
+// ring of recent packets so the next window's preroll starts where its own
+// encoder needs it, without a second source read.
+// TrueHD carries about 1200 packets a second; the ring holds the window's
+// soundtrack from a cold seek's keyframe onwards.
+#define AUDIO_RING_LIMIT 65536
+#define AUDIO_RING_BYTES (64U * 1024U * 1024U)
+static AVStream *audio_stream;
+static AVPacket **audio_ring;
+static size_t audio_ring_count, audio_ring_bytes;
+// End (audio ticks) of the newest packet trimmed from the ring, and of the
+// newest packet demuxed. A window whose preroll reaches before the first is
+// refused: its encoder would be handed a soundtrack with a hole.
+static int64_t audio_trimmed_end = INT64_MIN, audio_have_end = INT64_MIN;
+static bool window_audio;
+static struct rational audio_from, audio_end;
 
 struct layer {
   AVBSFContext *split;
@@ -215,7 +275,7 @@ static void movie_reader_interrupt(void *opaque) {
   struct budget_io *io = opaque;
   if (io->interrupt) movie_source_interrupt_stop(io->interrupt);
 }
-static const struct source_reader_io movie_reader_source = {
+static struct source_reader_io movie_reader_source = {
   .context = &movie_io, .read = movie_reader_raw_read, .seek = movie_reader_raw_seek,
   .charged = movie_reader_charged, .limit = WINDOW_READ_LIMIT,
   .exhausted = &movie_io.exhausted, .prepare = movie_reader_prepare,
@@ -339,6 +399,8 @@ static void write_rgb(const uint8_t *rgb, size_t bytes, void *unused) {
 }
 static void writer_start(void) {
   dv_threads_live = true;
+  // A session starts one writer per window.
+  writer.pending = writer.busy = writer.stop = false;
   need(pthread_create(&writer_thread, NULL, writer_main, NULL) == 0,
        "export writer thread");
 }
@@ -348,7 +410,8 @@ static void writer_finish(void) {
   pthread_cond_broadcast(&writer_cond);
   pthread_mutex_unlock(&writer_lock);
   need(pthread_join(writer_thread, NULL) == 0, "export writer join");
-  dv_threads_live = false;
+  // A session's soundtrack writer and later windows keep threads alive.
+  dv_threads_live = session_mode;
 }
 static void write_frame(const uint8_t *rgb, size_t bytes, int64_t pts,
                         int64_t duration) {
@@ -489,6 +552,209 @@ static void hash_bytes(const uint8_t *bytes, size_t size, char hex[65]) {
   for (int i = 0; i < 32; i++)
     snprintf(hex + 2 * i, 3, "%02x", out[i]);
 }
+// One exclusive evidence file in a private directory the daemon created for
+// this window. Opened relative to that directory, never through the process
+// working directory, so a session's windows cannot reach each other's files.
+static FILE *evidence_file(int directory, const char *name, int access, const char *mode) {
+  int fd = openat(directory, name, access | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return NULL;
+  FILE *file = fdopen(fd, mode);
+  if (!file)
+    close(fd);
+  return file;
+}
+// The renderer reports its Vulkan runtime and GPU context once, when it
+// creates them. A session's later windows render with that same context, so
+// their own observations carry the same report.
+static char *gpu_lines;
+static size_t gpu_lines_size;
+static off_t gpu_lines_mark(void) {
+  need(fflush(stdout) == 0, "observations flush");
+  off_t at = lseek(STDOUT_FILENO, 0, SEEK_CUR);
+  need(at >= 0, "window observation offset");
+  return at;
+}
+static void gpu_lines_keep(off_t before) {
+  off_t after = gpu_lines_mark();
+  need(after >= before && after - before <= 65536, "bounded GPU runtime report");
+  gpu_lines_size = (size_t)(after - before);
+  gpu_lines = malloc(gpu_lines_size + 1);
+  need(gpu_lines != NULL &&
+           pread(STDOUT_FILENO, gpu_lines, gpu_lines_size, before) == (ssize_t)gpu_lines_size,
+       "GPU runtime report copy");
+}
+
+// The window's soundtrack goes to its own Matroska pipe on a writer thread,
+// so a blocked audio pipe never stalls decoding and a blocked video pipe
+// never starves the encoder's audio input. Matroska, not NUT: NUT has no
+// codec tag for TrueHD, and the packets are carried unchanged.
+static AVFormatContext *audio_output;
+static int audio_output_fd = -1;
+static bool audio_consumer_done;
+static pthread_t audio_thread;
+static pthread_mutex_t audio_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t audio_cond = PTHREAD_COND_INITIALIZER;
+static struct {
+  AVPacket *queue[AUDIO_RING_LIMIT];
+  size_t head, count;
+  bool stop;
+} audio_writer;
+static void *audio_writer_main(void *unused) {
+  (void)unused;
+  pthread_mutex_lock(&audio_lock);
+  for (;;) {
+    while (!audio_writer.count && !audio_writer.stop)
+      pthread_cond_wait(&audio_cond, &audio_lock);
+    if (!audio_writer.count)
+      break;
+    AVPacket *packet = audio_writer.queue[audio_writer.head];
+    audio_writer.head = (audio_writer.head + 1) % AUDIO_RING_LIMIT;
+    audio_writer.count--;
+    pthread_mutex_unlock(&audio_lock);
+    if (!audio_consumer_done) {
+      packet->stream_index = 0;
+      av_packet_rescale_ts(packet, audio_stream->time_base,
+                           audio_output->streams[0]->time_base);
+      int written = av_write_frame(audio_output, packet);
+      // Close the cluster now: the encoder reads this pipe as it is written.
+      if (written >= 0)
+        written = av_write_frame(audio_output, NULL);
+      if (written >= 0) {
+        avio_flush(audio_output->pb);
+        written = audio_output->pb->error;
+      }
+      // The encoder stops reading its soundtrack once its output bound is
+      // reached; what follows the window is no longer wanted. Any other
+      // write failure refuses the window.
+      if (written == AVERROR(EPIPE))
+        audio_consumer_done = true;
+      else
+        need(written >= 0, "soundtrack packet write");
+    }
+    av_packet_free(&packet);
+    pthread_mutex_lock(&audio_lock);
+  }
+  pthread_mutex_unlock(&audio_lock);
+  return NULL;
+}
+static void audio_queue(const AVPacket *packet) {
+  AVPacket *copy = av_packet_clone(packet);
+  need(copy != NULL, "queued soundtrack packet");
+  pthread_mutex_lock(&audio_lock);
+  if (audio_writer.count == AUDIO_RING_LIMIT) {
+    pthread_mutex_unlock(&audio_lock);
+    need(0, "bounded queued soundtrack");
+  }
+  audio_writer.queue[(audio_writer.head + audio_writer.count) % AUDIO_RING_LIMIT] = copy;
+  audio_writer.count++;
+  pthread_cond_broadcast(&audio_cond);
+  pthread_mutex_unlock(&audio_lock);
+}
+static void open_audio_output(int fd) {
+  char path[32];
+  snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+  need(avformat_alloc_output_context2(&audio_output, NULL, "matroska", path) >= 0 &&
+           audio_output,
+       "soundtrack output context");
+  AVStream *out = avformat_new_stream(audio_output, NULL);
+  need(out != NULL && avcodec_parameters_copy(out->codecpar, audio_stream->codecpar) >= 0,
+       "soundtrack output stream");
+  out->codecpar->codec_tag = 0;
+  out->time_base = audio_stream->time_base;
+  need(avio_open(&audio_output->pb, path, AVIO_FLAG_WRITE) >= 0, "soundtrack output open");
+  need(avformat_write_header(audio_output, NULL) >= 0, "soundtrack output header");
+  avio_flush(audio_output->pb);
+  audio_output_fd = fd;
+  audio_writer.head = audio_writer.count = 0;
+  audio_writer.stop = false;
+  audio_consumer_done = false;
+  need(pthread_create(&audio_thread, NULL, audio_writer_main, NULL) == 0,
+       "soundtrack writer thread");
+}
+static void close_audio_output(void) {
+  pthread_mutex_lock(&audio_lock);
+  audio_writer.stop = true;
+  pthread_cond_broadcast(&audio_cond);
+  pthread_mutex_unlock(&audio_lock);
+  need(pthread_join(audio_thread, NULL) == 0, "soundtrack writer join");
+  if (!audio_consumer_done) {
+    int closed = av_write_trailer(audio_output);
+    if (closed >= 0)
+      closed = audio_output->pb->error;
+    need(closed >= 0 || closed == AVERROR(EPIPE), "soundtrack trailer");
+  }
+  avio_closep(&audio_output->pb);
+  avformat_free_context(audio_output);
+  audio_output = NULL;
+  need(close(audio_output_fd) == 0, "soundtrack pipe close");
+  audio_output_fd = -1;
+}
+static int audio_compare(int64_t ticks, struct rational value) {
+  return av_compare_ts(ticks, audio_stream->time_base, value.num,
+                       (AVRational){1, value.den});
+}
+// A packet belongs to a window when any of its samples fall in [from, end).
+static bool audio_in_window(const AVPacket *packet) {
+  return audio_compare(packet->pts + packet->duration, audio_from) > 0 &&
+         audio_compare(packet->pts, audio_end) < 0;
+}
+static int64_t video_demuxed_pts = AV_NOPTS_VALUE;
+static bool audio_source_ended;
+// More soundtrack is read only while the selected video is not far past the
+// window's audio end. Interleaved sources keep both within a few seconds; a
+// soundtrack that ends early is then padded by the encoder, never read for.
+static bool audio_wanted(void) {
+  if (!window_audio || audio_source_ended)
+    return false;
+  if (audio_have_end != INT64_MIN && audio_compare(audio_have_end, audio_end) >= 0)
+    return false;
+  struct rational horizon = {audio_end.num + 3LL * audio_end.den, audio_end.den};
+  return video_demuxed_pts == AV_NOPTS_VALUE || compare_window(video_demuxed_pts, horizon) < 0;
+}
+static int64_t audio_last_pts = AV_NOPTS_VALUE;
+static void audio_packet(const AVPacket *packet) {
+  need(packet->pts != AV_NOPTS_VALUE && packet->duration >= 0 &&
+           packet->pts <= INT64_MAX - packet->duration &&
+           (audio_last_pts == AV_NOPTS_VALUE || packet->pts >= audio_last_pts),
+       "timestamped monotonic soundtrack packet");
+  audio_last_pts = packet->pts;
+  need(audio_ring_count < AUDIO_RING_LIMIT &&
+           audio_ring_bytes + (size_t)packet->size <= AUDIO_RING_BYTES,
+       "bounded carried soundtrack");
+  AVPacket *copy = av_packet_clone(packet);
+  need(copy != NULL, "carried soundtrack packet");
+  audio_ring[audio_ring_count++] = copy;
+  audio_ring_bytes += (size_t)copy->size;
+  if (audio_have_end == INT64_MIN || copy->pts + copy->duration > audio_have_end)
+    audio_have_end = copy->pts + copy->duration;
+  if (window_audio && audio_in_window(copy))
+    audio_queue(copy);
+}
+// Keep what the next window's soundtrack preroll can need. Consecutive
+// windows' preroll starts advance by the window's length to within two AAC
+// frames; half a second of margin keeps every packet that start can reach.
+static void audio_trim(void) {
+  int64_t start_us = av_rescale(window_start.num, 1000000, window_start.den);
+  int64_t end_us = av_rescale(window_end.num, 1000000, window_end.den);
+  int64_t from_us = av_rescale(audio_from.num, 1000000, audio_from.den);
+  int64_t keep = av_rescale_q(from_us + (end_us - start_us) - 500000,
+                              (AVRational){1, 1000000}, audio_stream->time_base);
+  size_t kept = 0;
+  for (size_t i = 0; i < audio_ring_count; i++) {
+    AVPacket *packet = audio_ring[i];
+    if (packet->pts + packet->duration <= keep) {
+      if (audio_trimmed_end == INT64_MIN || packet->pts + packet->duration > audio_trimmed_end)
+        audio_trimmed_end = packet->pts + packet->duration;
+      audio_ring_bytes -= (size_t)packet->size;
+      av_packet_free(&packet);
+    } else {
+      audio_ring[kept++] = packet;
+    }
+  }
+  audio_ring_count = kept;
+}
+
 // Four-byte hvcC packet framing, one first slice per BL/EL picture and one
 // fresh RPU. This independent coded-stage trace predates either decoder or GPU.
 static void inspect_coded(AVPacket *packet) {
@@ -496,8 +762,17 @@ static void inspect_coded(AVPacket *packet) {
        "coded AU needs original PTS/positive duration");
   // Decode-order references can follow the requested presentation interval.
   // Their Dolby metadata does not describe any picture this window emits.
-  if (compare_window(packet->pts, window_end) >= 0)
+  // A session's next window inspects them again against its own bounds.
+  if (compare_window(packet->pts, window_end) >= 0) {
+    if (session_mode) {
+      need(carried_coded_count < CARRIED_CODED_LIMIT,
+           "bounded coded lookahead across a session window");
+      carried_coded[carried_coded_count] = av_packet_clone(packet);
+      need(carried_coded[carried_coded_count] != NULL, "carried coded AU");
+      carried_coded_count++;
+    }
     return;
+  }
   int bl = 0, el = 0, rpu = 0;
   size_t at = 0;
   const uint8_t *rpu_bytes = NULL;
@@ -546,6 +821,7 @@ static void inspect_coded(AVPacket *packet) {
     struct coded_input *input = &coded_window[coded_count++];
     input->pts = packet->pts;
     input->duration = packet->duration;
+    input->emitted = false;
     hash_bytes(packet->data, packet->size, input->packet_sha);
     hash_bytes(rpu_bytes, rpu_len, input->rpu_sha);
     printf("{\"kind\":\"coded_window_input\",\"pts_ticks\":%lld,\"duration_"
@@ -555,7 +831,7 @@ static void inspect_coded(AVPacket *packet) {
   }
 }
 static void render_pairs(void) {
-  while (layers[0].count && (base_only || layers[1].count)) {
+  while (!window_done && layers[0].count && (base_only || layers[1].count)) {
     AVFrame *bl = layers[0].queue[0],
             *el = base_only ? bl : layers[1].queue[0];
     need(bl->pts == el->pts && bl->duration == el->duration && bl->duration > 0,
@@ -574,11 +850,15 @@ static void render_pairs(void) {
       }
       // Observe the exclusive boundary before interpreting its RPU. A fresh
       // unsupported RPU belongs to the next window, which must refuse it there.
+      // A session keeps the boundary pair queued: it is the next window's
+      // first picture.
       if (compare_window(bl->pts, window_end) >= 0) {
-        last_pts = bl->pts;
         boundary_pts = bl->pts;
         window_done = true;
-        drop_pair();
+        if (!session_mode) {
+          last_pts = bl->pts;
+          drop_pair();
+        }
         return;
       }
     }
@@ -616,12 +896,16 @@ static void render_pairs(void) {
         (base_only || mapped) && !diagnostic_hashes ? NULL : pack(bl),
         base_only || (mapped && !diagnostic_hashes) ? NULL : pack(el)};
     const AVFrame *hardware[2] = {bl, el};
-    if (!initialized) {
+    if (emitted == 0)
       stage_mark("first_frame");
+    if (!initialized) {
+      off_t before = session_mode ? gpu_lines_mark() : -1;
       if (base_only)
         base_gpu_init(expected_w[0], expected_h[0]);
       else
         gpu_init(expected_w[0], expected_h[0], expected_w[1], expected_h[1]);
+      if (session_mode)
+        gpu_lines_keep(before);
       initialized = true;
       stage_mark("gpu_ready");
     }
@@ -678,9 +962,9 @@ static void render_pairs(void) {
       hold_rendered_pair();
     char rpu_path[64];
     int rpu_length =
-        snprintf(rpu_path, sizeof(rpu_path), "rpus/frame-%03d.nal", emitted);
+        snprintf(rpu_path, sizeof(rpu_path), "frame-%03d.nal", emitted);
     need(rpu_length > 0 && (size_t)rpu_length < sizeof(rpu_path), "RPU path");
-    FILE *rpu_output = fopen(rpu_path, "wbx");
+    FILE *rpu_output = evidence_file(rpu_dir, rpu_path, O_WRONLY, "wb");
     need(rpu_output != NULL, "exclusive accepted RPU output");
     need(fwrite(nalu, 1, raw->size + 2, rpu_output) == raw->size + 2,
          "complete accepted RPU write");
@@ -734,10 +1018,14 @@ static void receive(struct layer *layer) {
       refit_pairs();
     else
       render_pairs();
-    if (window_done)
+    // A session keeps decoding what it was handed: frames past the window
+    // end stay queued for the next window, and the other layer must see
+    // every packet this one saw.
+    if (window_done && !session_mode)
       break;
   }
-  need(window_done || result == AVERROR(EAGAIN) || result == AVERROR_EOF,
+  need((window_done && !session_mode) || result == AVERROR(EAGAIN) ||
+           result == AVERROR_EOF,
        "decoder receive");
   av_frame_free(&frame);
 }
@@ -836,23 +1124,504 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
          "actual split PTS and decoder send");
     receive(layer);
     av_packet_unref(out);
-    if (window_done)
+    if (window_done && !session_mode)
       break;
   }
-  need(window_done || result == AVERROR(EAGAIN) || result == AVERROR_EOF,
+  need((window_done && !session_mode) || result == AVERROR(EAGAIN) ||
+           result == AVERROR_EOF,
        "split receive");
   av_packet_free(&out);
 }
 #include "refit_mode.h"
+// What one window needs: its exact bounds and picture caps, its soundtrack
+// interval, and where its outputs go. Single-shot reads it from argv, a
+// session from each command on its control socket.
+struct window_request {
+  struct rational start, end;
+  int frames;
+  unsigned max_preroll;
+  bool audio;
+  struct rational audio_from, audio_end;
+  const char *nut_path;
+  int nut_fd, audio_fd;
+};
+static AVFormatContext *input;
+static AVStream *stream;
+static int stream_index;
+static AVPacket *packet;
+static bool streaming, decoders_open, decoders_drained;
+static struct rational previous_end;
+static void check_window_bounds(struct rational start, struct rational end) {
+  need(av_compare_ts(start.num, (AVRational){1, start.den}, end.num,
+                     (AVRational){1, end.den}) < 0,
+       "ordered nonempty window");
+  __int128 delta = (__int128)end.num * start.den - (__int128)start.num * end.den;
+  need(delta <= (__int128)3 * start.den * end.den,
+       "initial window duration at most three seconds");
+}
+static bool same_rational(struct rational a, struct rational b) {
+  return (__int128)a.num * b.den == (__int128)b.num * a.den;
+}
+static void open_decoders(void) {
+  const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
+  if (decode_device && *decode_device) {
+    if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
+                               decode_device, NULL, 0) < 0) {
+      hw_device = NULL;
+      software_reason = "decode-device-unavailable";
+    } else if (!decodes_hevc_main10(hw_device)) {
+      av_buffer_unref(&hw_device);
+      software_reason = "no-hevc-main10-decode";
+    }
+  }
+  layers[0] = open_layer(stream, 0);
+  if (!base_only)
+    layers[1] = open_layer(stream, 1);
+  decoders_open = true;
+  stage_mark("decoders");
+}
+// The keyframe seek a window's first picture needs, made once per session.
+// When the window carries its soundtrack, the seek also reaches the start of
+// the soundtrack's preroll, so the encoder is handed what it would have read.
+static void seek_window(void) {
+  need(compare_window(source_origin_ticks, window_start) <= 0,
+       "window starts before frozen source origin");
+  struct rational at = window_start;
+  if (window_audio &&
+      av_compare_ts(audio_from.num, (AVRational){1, audio_from.den}, at.num,
+                    (AVRational){1, at.den}) < 0)
+    at = audio_from;
+  int64_t target = av_rescale_q_rnd(at.num, (AVRational){1, at.den},
+                                    source_time_base, AV_ROUND_DOWN);
+  need(target >= 0 && target < INT64_MAX, "representable seek target");
+  need(avformat_seek_file(input, stream_index, INT64_MIN, target, target,
+                          AVSEEK_FLAG_BACKWARD) >= 0,
+       "keyframe seek before exact window start");
+  stage_mark("seeked");
+}
+static const char *decoder_mode(void) {
+  return !hw_device ? "software"
+         : hw_fell_back ? "vaapi-software-fallback"
+         : dv_hw_host_copy ? "vaapi-host-copy"
+                           : "vaapi";
+}
+static const char *decoder_reason(void) {
+  return !hw_device ? software_reason
+         : hw_fell_back ? "no-gpu-surface-offered"
+         : dv_hw_host_copy ? "surface-import-failed"
+                           : "";
+}
+static void video_packet(AVPacket *video) {
+  if (window_mode)
+    inspect_coded(video);
+  send_layer(&layers[0], video);
+  // A session's other layer sees every packet the first one decoded.
+  if (!base_only && (session_mode || !window_done))
+    send_layer(&layers[1], video);
+}
+// One packet: a pending video AU the previous window demuxed, else the next
+// demuxed packet, routed to the decoders, the soundtrack, or (past the window
+// end) the next window's pending AUs. Returns av_read_frame's result.
+static int pump(unsigned *packets, unsigned *video_packets) {
+  if (!window_done && pending_video_count) {
+    AVPacket *next = pending_video[0];
+    memmove(pending_video, pending_video + 1,
+            --pending_video_count * sizeof(*pending_video));
+    av_packet_move_ref(packet, next);
+    av_packet_free(&next);
+    need(++*video_packets <= 2 * (preroll_cap + frame_cap + 1),
+         "bounded video access units");
+    video_packet(packet);
+    av_packet_unref(packet);
+    return 0;
+  }
+  int result = av_read_frame(input, packet);
+  if (result < 0)
+    return result;
+  // The soundtrack is bounded by its own ring; every other packet by the
+  // window's packet envelope.
+  need((packet->stream_index == audio_index || ++*packets <= 4096) &&
+           packet->size <= 16 * 1024 * 1024,
+       "finite segment packet/byte envelope");
+  if (packet->stream_index == stream_index) {
+    if (packet->pts != AV_NOPTS_VALUE &&
+        (video_demuxed_pts == AV_NOPTS_VALUE || packet->pts > video_demuxed_pts))
+      video_demuxed_pts = packet->pts;
+    if (window_done) {
+      need(pending_video_count < PENDING_VIDEO_LIMIT,
+           "bounded video read past a session window");
+      pending_video[pending_video_count] = av_packet_clone(packet);
+      need(pending_video[pending_video_count] != NULL, "pending video AU");
+      pending_video_count++;
+    } else {
+      need(++*video_packets <= (window_mode ? 2 * (preroll_cap + frame_cap + 1) : 256),
+           "bounded video access units");
+      video_packet(packet);
+    }
+  } else if (packet->stream_index == audio_index) {
+    audio_packet(packet);
+  }
+  av_packet_unref(packet);
+  return 0;
+}
+static void run_window(const struct window_request *request) {
+  window_start = request->start;
+  window_end = request->end;
+  frame_cap = request->frames;
+  preroll_cap = request->max_preroll;
+  window_audio = request->audio;
+  audio_from = request->audio_from;
+  audio_end = request->audio_end;
+  emitted = 0;
+  preroll = paired = coded_count = 0;
+  window_done = source_eof = audio_source_ended = false;
+  first_emitted_pts = last_emitted_end = boundary_pts = AV_NOPTS_VALUE;
+  unsigned packets = 0, video_packets = 0;
+  uint64_t bytes_at_start = movie_io.bytes;
+  // The read envelope, the packet envelope and the picture caps bound each
+  // window; a session never spends one window's budget on the next.
+  uint64_t charged = movie_reader_charged(&movie_io);
+  need(charged <= UINT64_MAX - WINDOW_READ_LIMIT, "window read envelope overflow");
+  movie_io.read_limit = charged + WINDOW_READ_LIMIT;
+  movie_reader_source.limit = movie_io.read_limit;
+  movie_io.exhausted = false;
+  bool warm = positioned;
+  if (warm) {
+    need(!decoders_drained && same_rational(window_start, previous_end),
+         "contiguous session window");
+    // The picture chain began at the session's keyframe.
+    first_pair = true;
+    need(!window_audio || audio_trimmed_end == INT64_MIN ||
+             audio_compare(audio_trimmed_end, audio_from) <= 0,
+         "carried soundtrack covers the window's preroll");
+  } else if (window_mode) {
+    first_pair = false;
+    seek_window();
+  }
+  if (window_mode) {
+    // require() refusals in shared renderer code must also avoid destructors
+    // throughout the reader-only interval before the export writer starts.
+    dv_threads_live = true;
+    need(source_reader_start(&movie_reader, &movie_reader_source) == 0,
+         "start owned source reader");
+  }
+  char nut_path[32];
+  if (streaming) {
+    if (request->nut_fd >= 0)
+      snprintf(nut_path, sizeof(nut_path), "/proc/self/fd/%d", request->nut_fd);
+    open_nut(request->nut_fd >= 0 ? nut_path : request->nut_path);
+  }
+  if (window_audio) {
+    open_audio_output(request->audio_fd);
+    for (size_t i = 0; i < audio_ring_count; i++)
+      if (audio_in_window(audio_ring[i]))
+        audio_queue(audio_ring[i]);
+  }
+  writer_start();
+  if (!decoders_open)
+    open_decoders();
+  if (warm) {
+    need(fwrite(gpu_lines, 1, gpu_lines_size, stdout) == gpu_lines_size,
+         "GPU runtime report");
+    AVPacket *carried[CARRIED_CODED_LIMIT];
+    unsigned count = carried_coded_count;
+    memcpy(carried, carried_coded, count * sizeof(*carried));
+    carried_coded_count = 0;
+    for (unsigned i = 0; i < count; i++) {
+      inspect_coded(carried[i]);
+      av_packet_free(&carried[i]);
+    }
+    render_pairs();
+  }
+  int result = 0;
+  while (!window_done && (result = pump(&packets, &video_packets)) >= 0) {
+  }
+  need(!session_mode || result >= 0 || result == AVERROR_EOF, "source read");
+  source_eof = result == AVERROR_EOF;
+  audio_source_ended = source_eof;
+  need(window_done || source_eof, "complete bounded source read");
+  for (int k = 0; !window_done && k < (base_only ? 1 : 2); k++) {
+    need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
+    receive(&layers[k]);
+    decoders_drained = true;
+  }
+  // Every frame is rendered: finish its writes before the window checks.
+  writer_finish();
+  stage_mark("rendered");
+  // The encoder has every picture: end its video now, before any soundtrack
+  // tail is read, so it never waits on video while the tail is demuxed.
+  if (streaming) {
+    need(av_write_trailer(nut_output) >= 0, "NUT trailer");
+    need(avio_closep(&nut_output->pb) >= 0, "NUT output close");
+    avformat_free_context(nut_output);
+    nut_output = NULL;
+    // The NUT was written through /proc/self/fd; the received end is ours to
+    // close, which is the encoder's end of video.
+    if (request->nut_fd >= 0)
+      need(close(request->nut_fd) == 0, "NUT pipe close");
+  }
+  // The soundtrack's tail past the window; video read meanwhile is the next
+  // window's.
+  int tail = 0;
+  while (session_mode && window_done && audio_wanted() &&
+         (tail = pump(&packets, &video_packets)) >= 0) {
+  }
+  need(tail >= 0 || tail == AVERROR_EOF, "source read");
+  if (tail == AVERROR_EOF)
+    audio_source_ended = true;
+  need(source_reader_stop(&movie_reader) == 0, "stop and join owned source reader");
+  need(!movie_io.exhausted, "window source read budget exhausted");
+  release_held();
+  need(emitted > 0 &&
+           (window_done || (layers[0].count == 0 && layers[1].count == 0)),
+       "nonempty complete pair coverage");
+  if (window_mode) {
+    need(coded_count == (unsigned)emitted,
+         "missing decoded coded-window picture");
+    for (unsigned i = 0; i < coded_count; i++)
+      need(coded_window[i].emitted, "coded window picture never emitted");
+  }
+  if (window_mode && !window_done) {
+    need(source_eof && last_emitted_end != AV_NOPTS_VALUE &&
+             compare_window(last_emitted_end, window_end) >= 0,
+         "source EOF before requested window end");
+    need(last_emitted_end < INT64_MAX, "EOF extent overflow");
+    if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
+      int64_t endpoint;
+      need(declared_video_endpoint(source_origin_ticks, stream->duration, &endpoint) &&
+               last_emitted_end + 1 >= endpoint && last_emitted_end - 1 <= endpoint,
+           "source EOF disagrees with declared video extent");
+    } else if (av_dict_get(stream->metadata, "DURATION", NULL, 0)) {
+      const AVDictionaryEntry *declared = av_dict_get(stream->metadata, "DURATION", NULL, 0);
+      int64_t endpoint_ns;
+      need(video_duration_ns(declared->value, &endpoint_ns),
+           "invalid declared video DURATION extent");
+      need(av_compare_ts(last_emitted_end + 1, source_time_base,
+                         endpoint_ns, (AVRational){1, 1000000000}) >= 0 &&
+               av_compare_ts(last_emitted_end - 1, source_time_base,
+                             endpoint_ns, (AVRational){1, 1000000000}) <= 0,
+           "source EOF disagrees with declared video DURATION extent");
+      // A known container maximum may contradict the selected video, but
+      // can never supply its missing declaration (other tracks may outlast it).
+      need(input->duration == AV_NOPTS_VALUE || input->duration <= 0 ||
+               av_compare_ts(last_emitted_end - 1, source_time_base,
+                             input->duration, (AVRational){1, AV_TIME_BASE}) <= 0,
+           "source EOF extent unavailable or inconsistent");
+    } else {
+      need(input->nb_streams == 1 &&
+               input->duration != AV_NOPTS_VALUE && input->duration > 0 &&
+               av_compare_ts(last_emitted_end + 1, source_time_base,
+                             input->duration,
+                             (AVRational){1, AV_TIME_BASE}) >= 0 &&
+               av_compare_ts(last_emitted_end - 1, source_time_base,
+                             input->duration,
+                             (AVRational){1, AV_TIME_BASE}) <= 0,
+           "source EOF extent unavailable or inconsistent");
+    }
+  }
+  if (window_audio)
+    close_audio_output();
+  need((!rgb_output || fclose(rgb_output) == 0) && fclose(timing_output) == 0,
+       "close completed outputs");
+  rgb_output = timing_output = NULL;
+  if (window_mode) {
+    printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
+           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"
+           "%d\",\"origin_provenance\":\"%s\","
+           "\"frames\":%d,\"preroll_pairs\":%u,\"paired_pictures\":%u,"
+           "\"boundary_pts_ticks\":%lld,\"boundary_observed\":%s,\"source_eof_"
+           "observed\":%s,\"first_emitted_pts_ticks\":%lld,\"last_emitted_end_"
+           "ticks\":%lld,\"source_time_base\":\"%d/"
+           "%d\",\"source_bytes_read\":%llu,\"duration_provenance\":\"decoder_"
+           "observed\",\"membership\":\"frame_pts_in_half_open_window_"
+           "durations_unclipped\",\"production_qualified\":false}\n",
+           (long long)window_start.num, window_start.den,
+           (long long)window_end.num, window_end.den,
+           (long long)source_origin.num, source_origin.den, source_origin_provenance,
+           emitted, preroll, paired,
+           (long long)boundary_pts, window_done ? "true" : "false",
+           source_eof ? "true" : "false", (long long)first_emitted_pts,
+           (long long)last_emitted_end, source_time_base.num,
+           source_time_base.den, (unsigned long long)(movie_io.bytes - bytes_at_start));
+  }
+  printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
+         decoder_mode(), decoder_reason());
+  printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
+         "16,\"gpu_contexts\":1,\"output_policy\":\"%s\","
+         "\"production_qualified\":false}\n",
+         emitted, dv_target_policy_name());
+  if (base_only)
+    printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
+           "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
+           "\"fel_contributed\":false,"
+           "\"production_qualified\":false}\n", source_profile, emitted);
+  need(fflush(stdout) == 0, "observations flush");
+  stage_mark("complete");
+  if (stage_output)
+    fclose(stage_output);
+  stage_output = NULL;
+  if (session_mode) {
+    if (window_audio)
+      audio_trim();
+    positioned = true;
+    previous_end = window_end;
+  }
+}
+static void close_source(void) {
+  if (initialized) {
+    if (base_only)
+      base_gpu_close();
+    else
+      gpu_close();
+  }
+  for (int k = 0; decoders_open && k < (base_only ? 1 : 2); k++) {
+    for (int i = 0; i < layers[k].count; i++)
+      av_frame_free(&layers[k].queue[i]);
+    av_bsf_free(&layers[k].split);
+    avcodec_free_context(&layers[k].decoder);
+  }
+  av_buffer_unref(&hw_device);
+  av_packet_free(&packet);
+  for (unsigned i = 0; i < carried_coded_count; i++)
+    av_packet_free(&carried_coded[i]);
+  for (unsigned i = 0; i < pending_video_count; i++)
+    av_packet_free(&pending_video[i]);
+  for (size_t i = 0; i < audio_ring_count; i++)
+    av_packet_free(&audio_ring[i]);
+  free(audio_ring);
+  free(gpu_lines);
+  avformat_close_input(&input);
+  if (movie_avio) {
+    av_freep(&movie_avio->buffer);
+    avio_context_free(&movie_avio);
+    movie_source_close(&movie_io);
+  }
+  source_reader_destroy(&movie_reader);
+  if (movie_interrupt_initialized) movie_source_interrupt_destroy(&movie_interrupt);
+}
+// One window command: "window START END FRAMES MAX_PREROLL [AUDIO_FROM
+// AUDIO_END]", with the window's NUT pipe, its private evidence directory
+// and, when it carries the soundtrack, its audio pipe as SCM_RIGHTS. Zero
+// means the daemon ended the session.
+static int receive_window(struct window_request *request, int *directory) {
+  char text[256];
+  struct iovec iov = {.iov_base = text, .iov_len = sizeof(text) - 1};
+  union {
+    char buffer[CMSG_SPACE(3 * sizeof(int))];
+    struct cmsghdr align;
+  } control;
+  struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1,
+                           .msg_control = control.buffer,
+                           .msg_controllen = sizeof(control.buffer)};
+  ssize_t length;
+  do
+    length = recvmsg(control_fd, &message, 0);
+  while (length < 0 && errno == EINTR);
+  if (length == 0)
+    return 0;
+  need(length > 0 && !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)),
+       "bounded session window command");
+  text[length] = 0;
+  int fds[3], count = 0;
+  for (struct cmsghdr *header = CMSG_FIRSTHDR(&message); header;
+       header = CMSG_NXTHDR(&message, header)) {
+    need(header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
+             header->cmsg_len >= CMSG_LEN(0),
+         "session window descriptors");
+    size_t received = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+    need(count + received <= 3, "bounded session window descriptors");
+    memcpy(fds + count, CMSG_DATA(header), received * sizeof(int));
+    count += (int)received;
+  }
+  char *fields[8], *cursor = NULL;
+  int n = 0;
+  for (char *field = strtok_r(text, " \n", &cursor); field && n < 8;
+       field = strtok_r(NULL, " \n", &cursor))
+    fields[n++] = field;
+  need((n == 5 || n == 7) && !strcmp(fields[0], "window"), "session window command");
+  *request = (struct window_request){
+      .start = rational(fields[1]), .end = rational(fields[2]),
+      .frames = number(fields[3], 1, frame_cap),
+      .max_preroll = (unsigned)number(fields[4], 0, (int)preroll_cap),
+      .audio = n == 7, .nut_fd = -1, .audio_fd = -1};
+  need(request->audio == (audio_index >= 0), "session soundtrack membership");
+  if (request->audio) {
+    request->audio_from = rational(fields[5]);
+    request->audio_end = rational(fields[6]);
+    need(av_compare_ts(request->audio_from.num, (AVRational){1, request->audio_from.den},
+                       request->audio_end.num, (AVRational){1, request->audio_end.den}) < 0,
+         "ordered soundtrack interval");
+  }
+  need(count == (request->audio ? 3 : 2), "session window descriptor count");
+  check_window_bounds(request->start, request->end);
+  request->nut_fd = fds[0];
+  *directory = fds[1];
+  if (request->audio)
+    request->audio_fd = fds[2];
+  return 1;
+}
+static void session_loop(void) {
+  unsigned window_cap = (unsigned)frame_cap, preroll_bound = preroll_cap;
+  for (;;) {
+    // Each window's caps are its own, within the session's argv bounds.
+    frame_cap = (int)window_cap;
+    preroll_cap = preroll_bound;
+    struct window_request request;
+    if (!receive_window(&request, &window_dir))
+      return;
+    if (positioned && clock_gettime(CLOCK_MONOTONIC, &helper_started) != 0)
+      helper_started = (struct timespec){0};
+    need(mkdirat(window_dir, "rpus", 0700) == 0, "fresh accepted RPU directory");
+    rpu_dir = openat(window_dir, "rpus", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    need(rpu_dir >= 0, "accepted RPU directory");
+    timing_output = evidence_file(window_dir, "timing.tsv", O_WRONLY, "w");
+    need(timing_output != NULL, "exclusive private output files");
+    stage_output = evidence_file(window_dir, "stages.tsv", O_WRONLY, "w");
+    if (stage_output && !session_stage_written &&
+        fwrite(session_stage_rows, 1, session_stage_length, stage_output) != session_stage_length) {
+      fclose(stage_output);
+      stage_output = NULL;
+    }
+    session_stage_written = true;
+    if (positioned)
+      stage_mark("started");
+    // This window's observations go to its own evidence file.
+    int events = openat(window_dir, "renderer.jsonl",
+                        O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    need(events >= 0 && fflush(stdout) == 0 && dup2(events, STDOUT_FILENO) == STDOUT_FILENO &&
+             close(events) == 0,
+         "window observation output");
+    run_window(&request);
+    need(fflush(stdout) == 0 && dup2(devnull_fd, STDOUT_FILENO) == STDOUT_FILENO,
+         "window observation close");
+    need(close(rpu_dir) == 0 && close(window_dir) == 0, "window evidence close");
+    rpu_dir = window_dir = -1;
+    static const char done[] = "done";
+    need(send(control_fd, done, sizeof(done) - 1, 0) == (ssize_t)(sizeof(done) - 1),
+         "session window acknowledgement");
+  }
+}
 int main(int argc, char **argv) {
   if (argc >= 2 && (!strcmp(argv[1], "--refit-stats") || !strcmp(argv[1], "--dump-composed")))
     return refit_main(argc, argv);
   if (clock_gettime(CLOCK_MONOTONIC, &helper_started) != 0)
     helper_started = (struct timespec){0};
-  bool held_origin = argc >= 3 && !strcmp(argv[argc - 2], "--held-source-origin");
+  bool held_origin = false;
   struct rational supplied_origin = {0, 1};
-  if (held_origin) {
-    supplied_origin = rational(argv[argc - 1]);
+  // Trailing options, each a name and one value, in any order.
+  while (argc >= 3) {
+    const char *name = argv[argc - 2], *value = argv[argc - 1];
+    if (!strcmp(name, "--held-source-origin") && !held_origin) {
+      supplied_origin = rational(value);
+      held_origin = true;
+    } else if (!strcmp(name, "--session") && !session_mode) {
+      control_fd = number(value, 3, 1023);
+      session_mode = true;
+    } else if (!strcmp(name, "--audio-ordinal") && audio_ordinal < 0) {
+      audio_ordinal = number(value, 0, 255);
+    } else {
+      break;
+    }
     argc -= 2;
   }
   need(argc == 11 || argc == 12 || argc == 15 ||
@@ -862,25 +1631,29 @@ int main(int argc, char **argv) {
        "usage: segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX "
        "MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START "
        "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY "
-       "[TITLE_MIN_1E4 TITLE_PEAK]]]]] [--held-source-origin N/D]");
-  bool streaming = argc >= 12;
+       "[TITLE_MIN_1E4 TITLE_PEAK]]]]] [--held-source-origin N/D] "
+       "[--session CONTROL_FD [--audio-ordinal K]]; a session passes '-' for "
+       "OUTPUT_DIR, NUT_OUTPUT, START and END");
+  streaming = argc >= 12;
   base_only = argc >= 16 && !strcmp(argv[15], "base-rpu");
   window_mode = argc >= 15;
   need(!held_origin || window_mode, "held source origin requires a bounded window");
+  need(!session_mode ||
+           (window_mode && !strcmp(argv[2], "-") && !strcmp(argv[11], "-") &&
+            !strcmp(argv[12], "-") && !strcmp(argv[13], "-")),
+       "a session takes its windows and outputs from its control socket");
+  need(audio_ordinal < 0 || session_mode, "a carried soundtrack requires a session");
+  struct window_request single = {.nut_fd = -1, .audio_fd = -1};
   if (window_mode) {
-    window_start = rational(argv[12]);
-    window_end = rational(argv[13]);
     preroll_cap = (unsigned)number(argv[14], 0, 512);
-    need(av_compare_ts(window_start.num, (AVRational){1, window_start.den},
-                       window_end.num, (AVRational){1, window_end.den}) < 0,
-         "ordered nonempty window");
-    __int128 delta = (__int128)window_end.num * window_start.den -
-                     (__int128)window_start.num * window_end.den;
-    need(delta <= (__int128)3 * window_start.den * window_end.den,
-         "initial window duration at most three seconds");
+    if (!session_mode) {
+      single.start = rational(argv[12]);
+      single.end = rational(argv[13]);
+      check_window_bounds(single.start, single.end);
+    }
     av_max_alloc(64ULL * 1024 * 1024);
   }
-  int stream_index = number(argv[3], 0, 255);
+  stream_index = number(argv[3], 0, 255);
   frame_cap = number(argv[4], 1, 64);
   expected_w[0] = number(argv[5], 64, 4096);
   expected_h[0] = number(argv[6], 64, 2160);
@@ -908,6 +1681,7 @@ int main(int argc, char **argv) {
   need(!base_only || (expected_w[1] == 0 && expected_h[1] == 0),
        "base-only mode has no declared EL");
   debug_frames = number(argv[9], 0, 1) != 0;
+  need(!debug_frames || !session_mode, "debug frame dumps are single-shot only");
   // Explicit control API only. Session/caps selection is a later PR.
   need(argc == 21 ? dv_target_policy(argv[10], argv[19], argv[20]) :
                        strcmp(argv[10], "bt2020-pq-master-clip") == 0,
@@ -923,21 +1697,39 @@ int main(int argc, char **argv) {
   need(streaming || (uint64_t)frame_cap * expected_w[0] * expected_h[0] * 6 <=
                         512ULL * 1024 * 1024,
        "bounded segment RGB scratch budget");
-  struct stat st;
-  need(stat(argv[2], &st) == 0 && S_ISDIR(st.st_mode),
-       "private output directory");
-  need(chdir(argv[2]) == 0, "output directory enter");
-  need(mkdir("rpus", 0700) == 0, "fresh accepted RPU directory");
-  if (debug_frames)
-    need(mkdir("outputs", 0700) == 0, "fresh debug output directory");
-  if (!streaming)
-    rgb_output = fopen("reconstructed.rgb48le", "wbx");
-  timing_output = fopen("timing.tsv", "wx");
-  need((streaming || rgb_output) && timing_output,
-       "exclusive private output files");
-  stage_output = fopen("stages.tsv", "wx");
+  if (session_mode) {
+    // A closed pipe is an error result, never a signal: the encoder ends
+    // its soundtrack input once its output bound is reached.
+    struct sigaction ignore = {.sa_handler = SIG_IGN};
+    need(sigemptyset(&ignore.sa_mask) == 0 && sigaction(SIGPIPE, &ignore, NULL) == 0,
+         "session pipe signal disposition");
+    devnull_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    need(devnull_fd >= 0 && fflush(stdout) == 0 &&
+             dup2(devnull_fd, STDOUT_FILENO) == STDOUT_FILENO,
+         "session observation sink");
+  } else {
+    struct stat st;
+    need(stat(argv[2], &st) == 0 && S_ISDIR(st.st_mode),
+         "private output directory");
+    window_dir = open(argv[2], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    need(window_dir >= 0, "output directory enter");
+    // Debug dumps keep their legacy relative paths; production never sets it.
+    if (debug_frames)
+      need(fchdir(window_dir) == 0, "output directory enter");
+    need(mkdirat(window_dir, "rpus", 0700) == 0, "fresh accepted RPU directory");
+    rpu_dir = openat(window_dir, "rpus", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    need(rpu_dir >= 0, "fresh accepted RPU directory");
+    if (debug_frames)
+      need(mkdirat(window_dir, "outputs", 0700) == 0, "fresh debug output directory");
+    if (!streaming)
+      rgb_output = evidence_file(window_dir, "reconstructed.rgb48le", O_WRONLY, "wb");
+    timing_output = evidence_file(window_dir, "timing.tsv", O_WRONLY, "w");
+    need((streaming || rgb_output) && timing_output,
+         "exclusive private output files");
+    stage_output = evidence_file(window_dir, "stages.tsv", O_WRONLY, "w");
+  }
   stage_mark("started");
-  AVFormatContext *input = avformat_alloc_context();
+  input = avformat_alloc_context();
   need(input != NULL, "input context");
   input->probesize = 1024 * 1024;
   input->max_analyze_duration = AV_TIME_BASE;
@@ -982,10 +1774,25 @@ int main(int argc, char **argv) {
                AVMEDIA_TYPE_VIDEO &&
            input->streams[stream_index]->codecpar->codec_id == AV_CODEC_ID_HEVC,
        "selected absolute HEVC video stream");
+  // The soundtrack is the encoder's ordinal: the K-th audio stream, in the
+  // container's order, exactly as `-map 0:a:K` selects it.
+  if (audio_ordinal >= 0) {
+    for (unsigned i = 0, seen = 0; i < input->nb_streams && audio_index < 0; i++)
+      if (input->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
+          seen++ == (unsigned)audio_ordinal)
+        audio_index = (int)i;
+    need(audio_index >= 0, "selected soundtrack stream");
+    audio_stream = input->streams[audio_index];
+    need(audio_stream->time_base.num > 0 && audio_stream->time_base.den > 0,
+         "positive soundtrack time base");
+    audio_ring = calloc(AUDIO_RING_LIMIT, sizeof(*audio_ring));
+    need(audio_ring != NULL, "carried soundtrack ring");
+  }
   for (unsigned i = 0; i < input->nb_streams; i++)
-    if (i != (unsigned)stream_index)
-      input->streams[i]->discard = AVDISCARD_ALL;
-  AVStream *stream = input->streams[stream_index];
+    input->streams[i]->discard =
+        i == (unsigned)stream_index || (int)i == audio_index ? AVDISCARD_DEFAULT
+                                                             : AVDISCARD_ALL;
+  stream = input->streams[stream_index];
   source_time_base = stream->time_base;
   if (base_only) {
     const AVPacketSideData *config = av_packet_side_data_get(
@@ -1019,191 +1826,18 @@ int main(int argc, char **argv) {
     source_origin_provenance = held_origin
         ? "observed_held_format_and_selected_video_probe"
         : "observed_stream_start_time";
-    need(compare_window(source_origin_ticks, window_start) <= 0,
-         "window starts before frozen source origin");
-    int64_t target =
-        av_rescale_q_rnd(window_start.num, (AVRational){1, window_start.den},
-                         source_time_base, AV_ROUND_DOWN);
-    need(target >= 0 && target < INT64_MAX, "representable seek target");
-    need(avformat_seek_file(input, stream_index, INT64_MIN, target, target,
-                            AVSEEK_FLAG_BACKWARD) >= 0,
-         "keyframe seek before exact window start");
-    stage_mark("seeked");
-    // require() refusals in shared renderer code must also avoid destructors
-    // throughout the reader-only interval before the export writer starts.
-    dv_threads_live = true;
-    need(source_reader_start(&movie_reader, &movie_reader_source) == 0,
-         "start owned source reader");
   }
-  if (streaming)
-    open_nut(argv[11]);
   dv_host_pack = pack;
-  writer_start();
-  const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
-  if (decode_device && *decode_device) {
-    if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
-                               decode_device, NULL, 0) < 0) {
-      hw_device = NULL;
-      software_reason = "decode-device-unavailable";
-    } else if (!decodes_hevc_main10(hw_device)) {
-      av_buffer_unref(&hw_device);
-      software_reason = "no-hevc-main10-decode";
-    }
-  }
-  layers[0] = open_layer(stream, 0);
-  if (!base_only)
-    layers[1] = open_layer(stream, 1);
-  stage_mark("decoders");
-  AVPacket *packet = av_packet_alloc();
+  packet = av_packet_alloc();
   need(packet != NULL, "demux packet");
-  int result;
-  unsigned packets = 0, video_packets = 0;
-  while ((result = av_read_frame(input, packet)) >= 0) {
-    need(++packets <= 4096 && packet->size <= 16 * 1024 * 1024,
-         "finite segment packet/byte envelope");
-    if (packet->stream_index == stream_index) {
-      need(++video_packets <=
-               (window_mode ? 2 * (preroll_cap + frame_cap + 1) : 256),
-           "bounded video access units");
-      if (window_mode)
-        inspect_coded(packet);
-      send_layer(&layers[0], packet);
-      if (!window_done && !base_only)
-        send_layer(&layers[1], packet);
-    }
-    av_packet_unref(packet);
-    if (window_done)
-      break;
+  if (session_mode) {
+    session_loop();
+  } else {
+    single.frames = frame_cap;
+    single.max_preroll = preroll_cap;
+    single.nut_path = streaming ? argv[11] : NULL;
+    run_window(&single);
   }
-  need(source_reader_stop(&movie_reader) == 0, "stop and join owned source reader");
-  need(!movie_io.exhausted, "window source read budget exhausted");
-  source_eof = result == AVERROR_EOF;
-  need(window_done || source_eof, "complete bounded source read");
-  for (int k = 0; !window_done && k < (base_only ? 1 : 2); k++) {
-    need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
-    receive(&layers[k]);
-  }
-  // Every frame is rendered: finish its writes before the window checks.
-  writer_finish();
-  stage_mark("rendered");
-  release_held();
-  need(emitted > 0 &&
-           (window_done || (layers[0].count == 0 && layers[1].count == 0)),
-       "nonempty complete pair coverage");
-  if (window_mode) {
-    need(coded_count == (unsigned)emitted,
-         "missing decoded coded-window picture");
-    for (unsigned i = 0; i < coded_count; i++)
-      need(coded_window[i].emitted, "coded window picture never emitted");
-  }
-  if (window_mode && !window_done) {
-    need(source_eof && last_emitted_end != AV_NOPTS_VALUE &&
-             compare_window(last_emitted_end, window_end) >= 0,
-         "source EOF before requested window end");
-    need(last_emitted_end < INT64_MAX, "EOF extent overflow");
-    if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
-      int64_t endpoint;
-      need(declared_video_endpoint(source_origin_ticks, stream->duration, &endpoint) &&
-               last_emitted_end + 1 >= endpoint && last_emitted_end - 1 <= endpoint,
-           "source EOF disagrees with declared video extent");
-    } else if (av_dict_get(stream->metadata, "DURATION", NULL, 0)) {
-      const AVDictionaryEntry *declared = av_dict_get(stream->metadata, "DURATION", NULL, 0);
-      int64_t endpoint_ns;
-      need(video_duration_ns(declared->value, &endpoint_ns),
-           "invalid declared video DURATION extent");
-      need(av_compare_ts(last_emitted_end + 1, source_time_base,
-                         endpoint_ns, (AVRational){1, 1000000000}) >= 0 &&
-               av_compare_ts(last_emitted_end - 1, source_time_base,
-                             endpoint_ns, (AVRational){1, 1000000000}) <= 0,
-           "source EOF disagrees with declared video DURATION extent");
-      // A known container maximum may contradict the selected video, but
-      // can never supply its missing declaration (other tracks may outlast it).
-      need(input->duration == AV_NOPTS_VALUE || input->duration <= 0 ||
-               av_compare_ts(last_emitted_end - 1, source_time_base,
-                             input->duration, (AVRational){1, AV_TIME_BASE}) <= 0,
-           "source EOF extent unavailable or inconsistent");
-    } else {
-      need(input->nb_streams == 1 && input->duration != AV_NOPTS_VALUE &&
-               input->duration > 0 &&
-               av_compare_ts(last_emitted_end + 1, source_time_base,
-                             input->duration,
-                             (AVRational){1, AV_TIME_BASE}) >= 0 &&
-               av_compare_ts(last_emitted_end - 1, source_time_base,
-                             input->duration,
-                             (AVRational){1, AV_TIME_BASE}) <= 0,
-           "source EOF extent unavailable or inconsistent");
-    }
-  }
-  if (streaming) {
-    need(av_write_trailer(nut_output) >= 0, "NUT trailer");
-    need(avio_closep(&nut_output->pb) >= 0, "NUT output close");
-    avformat_free_context(nut_output);
-    nut_output = NULL;
-  }
-  need((!rgb_output || fclose(rgb_output) == 0) && fclose(timing_output) == 0,
-       "close completed outputs");
-  if (base_only)
-    base_gpu_close();
-  else
-    gpu_close();
-  for (int k = 0; k < (base_only ? 1 : 2); k++) {
-    for (int i = 0; i < layers[k].count; i++)
-      av_frame_free(&layers[k].queue[i]);
-    av_bsf_free(&layers[k].split);
-    avcodec_free_context(&layers[k].decoder);
-  }
-  const char *decoder_mode = !hw_device       ? "software"
-                             : hw_fell_back     ? "vaapi-software-fallback"
-                             : dv_hw_host_copy  ? "vaapi-host-copy"
-                                                : "vaapi";
-  const char *decoder_reason = !hw_device       ? software_reason
-                               : hw_fell_back    ? "no-gpu-surface-offered"
-                               : dv_hw_host_copy ? "surface-import-failed"
-                                                 : "";
-  av_buffer_unref(&hw_device);
-  av_packet_free(&packet);
-  avformat_close_input(&input);
-  if (movie_avio) {
-    av_freep(&movie_avio->buffer);
-    avio_context_free(&movie_avio);
-    movie_source_close(&movie_io);
-  }
-  source_reader_destroy(&movie_reader);
-  if (movie_interrupt_initialized) movie_source_interrupt_destroy(&movie_interrupt);
-  if (window_mode) {
-    printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
-           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"
-           "%d\",\"origin_provenance\":\"%s\","
-           "\"frames\":%d,\"preroll_pairs\":%u,\"paired_pictures\":%u,"
-           "\"boundary_pts_ticks\":%lld,\"boundary_observed\":%s,\"source_eof_"
-           "observed\":%s,\"first_emitted_pts_ticks\":%lld,\"last_emitted_end_"
-           "ticks\":%lld,\"source_time_base\":\"%d/"
-           "%d\",\"source_bytes_read\":%llu,\"duration_provenance\":\"decoder_"
-           "observed\",\"membership\":\"frame_pts_in_half_open_window_"
-           "durations_unclipped\",\"production_qualified\":false}\n",
-           (long long)window_start.num, window_start.den,
-           (long long)window_end.num, window_end.den,
-           (long long)source_origin.num, source_origin.den, source_origin_provenance,
-           emitted, preroll, paired,
-           (long long)boundary_pts, window_done ? "true" : "false",
-           source_eof ? "true" : "false", (long long)first_emitted_pts,
-           (long long)last_emitted_end, source_time_base.num,
-           source_time_base.den, (unsigned long long)movie_io.bytes);
-  }
-  printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
-         decoder_mode, decoder_reason);
-  printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
-         "16,\"gpu_contexts\":1,\"output_policy\":\"%s\","
-         "\"production_qualified\":false}\n",
-         emitted, dv_target_policy_name());
-  if (base_only)
-    printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
-           "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
-           "\"fel_contributed\":false,"
-           "\"production_qualified\":false}\n", source_profile, emitted);
-  need(fflush(stdout) == 0, "observations flush");
-  stage_mark("complete");
-  if (stage_output)
-    fclose(stage_output);
+  close_source();
   return 0;
 }
