@@ -1151,6 +1151,10 @@ fn the_request_and_response_encoding_is_stable() {
         r#""ShutdownHandoff""#
     );
     assert_eq!(
+        serde_json::to_string(&Request::StartWriteLoad { writer: 2 }).expect("encode"),
+        r#"{"StartWriteLoad":{"writer":2}}"#
+    );
+    assert_eq!(
         serde_json::to_string(&Response::ShutdownHandoff {
             outcome: "handed_off".to_owned(),
             successor: Some(2),
@@ -1190,6 +1194,10 @@ async fn every_argument_rejection_names_what_was_wrong() {
         (
             vec!["harness", "leader-shutdown", "extra"],
             "leader-shutdown accepts no arguments",
+        ),
+        (
+            vec!["harness", "leader-shutdown-load", "extra"],
+            "leader-shutdown-load accepts no arguments",
         ),
         (
             vec!["harness", "node"],

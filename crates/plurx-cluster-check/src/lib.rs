@@ -105,6 +105,7 @@ mod storage_evidence;
 mod topology;
 mod transport_recovery;
 mod transport_recovery_diagnostics;
+mod write_load;
 pub use failure_drills::{
     validate_failure_drill_artifact, ClusterFailureDrillArtifact,
     FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
@@ -352,6 +353,12 @@ pub async fn run(args: Vec<String>) -> Result<()> {
                 bail!("leader-shutdown accepts no arguments");
             }
             run_leader_shutdown_cases().await
+        }
+        Some("leader-shutdown-load") => {
+            if args.get(2).is_some() {
+                bail!("leader-shutdown-load accepts no arguments");
+            }
+            run_leader_shutdown_under_write_load_case().await
         }
         Some("learner") => run_learner_membership_case().await.map(|_| ()),
         Some("proxy-fixture") => failure_drills::run_proxy_fixture_command().await,
@@ -5442,6 +5449,8 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
 async fn run_leader_shutdown_cases() -> Result<()> {
     println!("cluster-check: a stopping leader hands off before it stops");
     run_leader_shutdown_handoff_case().await?;
+    println!("cluster-check: a stopping leader hands off under write load");
+    run_leader_shutdown_under_write_load_case().await?;
     println!("cluster-check: a stopping follower moves nothing");
     run_follower_shutdown_noop_case().await?;
     println!("cluster-check: a stopping leader with no live follower stops in order");
@@ -5693,6 +5702,106 @@ async fn run_leader_shutdown_handoff_case() -> Result<()> {
         handover.as_millis(),
         samples.len()
     );
+    cluster.shutdown_all().await?;
+    Ok(())
+}
+
+/// The stop-time handoff while both the leader and a follower write back to
+/// back. Before the proposal hold this lost its vote race: the triggered
+/// candidate was behind an append in flight from the leader, the old leader
+/// refused it, and the survivors went one election without a leader. Now the
+/// candidate wins at once, no writer sees a failure, and every acknowledged
+/// row is committed.
+async fn run_leader_shutdown_under_write_load_case() -> Result<()> {
+    let (mut cluster, _root, leader) = start_leader_shutdown_cluster("write load").await?;
+    let survivors = (1..=3)
+        .filter(|node_id| *node_id != leader)
+        .collect::<Vec<_>>();
+    let follower = survivors[0];
+    let term_before = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { current_term, .. } => current_term,
+        other => bail!("leader metrics: {other:?}"),
+    };
+    for writer in [leader, follower] {
+        cluster
+            .request(writer, Request::StartWriteLoad { writer })
+            .await?
+            .require_ok()?;
+    }
+    // Let both writers reach their steady rate before the handoff.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (response, took, mut samples) = cluster
+        .request_while_sampling(
+            leader,
+            Request::ShutdownHandoff,
+            &survivors,
+            LEADER_SHUTDOWN_SAMPLE_EVERY,
+        )
+        .await?;
+    let (outcome, successor, elapsed_ms) = shutdown_handoff_response(response)?;
+    let started = Instant::now() - took;
+    for survivor in survivors.iter().copied() {
+        samples.push(leader_sample(cluster.node_mut(survivor)?, started).await?);
+    }
+    // Writers keep going through the change and past it.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut reports = Vec::new();
+    for writer in [leader, follower] {
+        match cluster.request(writer, Request::StopWriteLoad).await? {
+            Response::WriteLoad {
+                acknowledged,
+                failed,
+                first_error,
+                slowest_ms,
+            } => reports.push((writer, acknowledged, failed, first_error, slowest_ms)),
+            other => bail!("writer {writer} report: {other:?}"),
+        }
+    }
+    let gap = longest_leaderless_gap(&samples);
+    let term_after = samples.last().map_or(0, |sample| sample.term);
+    let handover = successor.map_or(Duration::MAX, |successor| {
+        longest_handover(&samples, leader, successor)
+    });
+    let won = outcome == "handed_off"
+        && term_after == term_before + 1
+        && gap < LEADER_SHUTDOWN_GAP_CEILING
+        && took < LEADER_SHUTDOWN_GAP_CEILING;
+    let mut committed = Vec::new();
+    let observer = successor.unwrap_or(follower);
+    for (writer, ..) in &reports {
+        match cluster
+            .request(observer, Request::CountWriteLoad { writer: *writer })
+            .await?
+        {
+            Response::Count { count } => committed.push(count),
+            other => bail!("count for writer {writer}: {other:?}"),
+        }
+    }
+    println!(
+        "cluster-check: leader-shutdown under load won={won} outcome={outcome} \
+         leader={leader} successor={successor:?} term={term_before}->{term_after} \
+         handoff_ms={elapsed_ms} request_ms={} longest_leaderless_gap_ms={} \
+         longest_handover_ms={} writers={reports:?} committed={committed:?}",
+        took.as_millis(),
+        gap.as_millis(),
+        handover.as_millis(),
+    );
+    if !won {
+        bail!("the handoff under write load lost its vote race: {samples:?}");
+    }
+    for ((writer, acknowledged, failed, first_error, _), committed) in
+        reports.iter().zip(&committed)
+    {
+        if *failed != 0 {
+            bail!("writer {writer} saw {failed} failed writes, first: {first_error:?}");
+        }
+        if committed != acknowledged {
+            bail!("writer {writer}: {acknowledged} acknowledged but {committed} committed");
+        }
+        if *acknowledged == 0 {
+            bail!("writer {writer} wrote nothing, so the case proved nothing");
+        }
+    }
     cluster.shutdown_all().await?;
     Ok(())
 }
@@ -8435,6 +8544,18 @@ pub enum Request {
     /// own elections off and, if it leads, hand leadership to a caught-up
     /// survivor under the one bound. The process keeps serving afterwards.
     ShutdownHandoff,
+    /// Start one writer on this voter that inserts `(writer, seq)` rows into
+    /// `c2_handoff_load` back to back through the ordinary client write path,
+    /// forwarding to the leader when this voter follows.
+    StartWriteLoad {
+        writer: u64,
+    },
+    /// Stop this voter's writer and report what it observed.
+    StopWriteLoad,
+    /// Count one writer's committed rows with a quorum read.
+    CountWriteLoad {
+        writer: u64,
+    },
     RemoveVoter {
         node_id: String,
     },
@@ -8661,6 +8782,17 @@ pub enum Response {
         outcome: String,
         successor: Option<u64>,
         elapsed_ms: u64,
+    },
+    /// What one writer saw: writes acknowledged, writes that returned an
+    /// error (with the first error), and the slowest acknowledged write.
+    WriteLoad {
+        acknowledged: u64,
+        failed: u64,
+        first_error: Option<String>,
+        slowest_ms: u64,
+    },
+    Count {
+        count: u64,
     },
     RaftDebug {
         summary: String,
@@ -11418,6 +11550,22 @@ async fn handle_request(
             membership_ref(membership)?.trigger_local_election().await?;
             Ok(Response::Ok)
         }
+        Request::StartWriteLoad { writer } => {
+            write_load::start(client.clone(), writer).await?;
+            Ok(Response::Ok)
+        }
+        Request::StopWriteLoad => {
+            let report = write_load::stop().await?;
+            Ok(Response::WriteLoad {
+                acknowledged: report.acknowledged,
+                failed: report.failed,
+                first_error: report.first_error,
+                slowest_ms: report.slowest_ms,
+            })
+        }
+        Request::CountWriteLoad { writer } => Ok(Response::Count {
+            count: write_load::count(client, writer).await?,
+        }),
         Request::ShutdownHandoff => {
             let started = Instant::now();
             let outcome = membership_ref(membership)?.handoff_for_shutdown().await;
