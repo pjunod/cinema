@@ -57,11 +57,16 @@ struct AppliedCeilingSource {
 #[async_trait::async_trait]
 impl CacheCeilingSource for AppliedCeilingSource {
     async fn read_max_gb(&self) -> io::Result<Option<String>> {
-        self.applied
-            .setting(keys::CACHE_MAX_GB)
-            .await
-            .map_err(io::Error::other)
+        ceiling_setting(&self.applied).await
     }
+}
+
+/// `cache.max_gb` as the applied settings view holds it.
+async fn ceiling_setting(applied: &AppliedView) -> io::Result<Option<String>> {
+    applied
+        .setting(keys::CACHE_MAX_GB)
+        .await
+        .map_err(io::Error::other)
 }
 
 /// The last ceiling the settings task read.

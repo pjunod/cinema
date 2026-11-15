@@ -8145,7 +8145,9 @@ async fn live_tv_delete_defers_response_pins_and_retries_after_playlist_promotio
 /// applied settings view (a standalone view counts a `view` read) and do
 /// not take the Store's configuration read, which is what observes the
 /// configuration into the projection: it stays unobserved here. The view's
-/// answer parses exactly as the Store's does.
+/// answer parses exactly as the Store's does. This covers the settings
+/// reads only: the recording loop's row listings and the reminder loop's
+/// transition write still run every tick.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_live_tv_loops_look_through_the_applied_view() {
     use plurx_core::store::{AppliedTable, AppliedView, ViewSource};
@@ -8190,7 +8192,9 @@ async fn idle_live_tv_loops_look_through_the_applied_view() {
     );
     assert!(!super::dvr::recordings_library_viewed_ours(&applied, "node-a").await);
 
-    let (viewed, _) = manager.loop_configs().await.expect("view configuration");
+    let (viewed, _) = crate::live_tv::viewed_configs(&applied, "node-a")
+        .await
+        .expect("view configuration");
     let (stored, _) = manager.dvr_configs().await.expect("Store configuration");
     assert_eq!(viewed, stored);
 }

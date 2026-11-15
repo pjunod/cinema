@@ -72,7 +72,7 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // A4 (`docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md`): background loops
     // that read a switch or tunable to decide their next tick. Each is in a
     // stays file and is pinned again in `IDLE_LOOP_READS` below.
-    ("playback_cache.rs", "read_max_gb", 1, true),
+    ("playback_cache.rs", "ceiling_setting", 1, true),
     // The sharing listener and claim loops' switch between passes; every
     // step that acts on an import re-reads `sharing::enabled` from the Store.
     ("sharing.rs", "loop_enabled", 1, true),
@@ -90,7 +90,7 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // Live TV loops: whether this node has recording, reminder, library or
     // guide work. Each pays the Store's read and acts on it when it does.
     ("http/live_tv.rs", "guide_viewed_on", 1, true),
-    ("live_tv.rs", "loop_configs", 1, true),
+    ("live_tv.rs", "viewed_configs", 1, true),
     ("live_tv/dvr.rs", "recordings_library_viewed_ours", 1, true),
 ];
 
@@ -248,6 +248,56 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "live_tv/dvr.rs",
         "sweep_recordings_library",
     ),
+    (
+        "playback_cache.rs",
+        "ceiling_setting",
+        "playback_cache.rs",
+        "read_max_gb",
+    ),
+    (
+        "state.rs",
+        "lane_analysis_retry_policy",
+        "state.rs",
+        "background_work_loop_with_ready",
+    ),
+    (
+        "state.rs",
+        "lane_cluster_fragment_index_enabled",
+        "state.rs",
+        "background_work_loop_with_ready",
+    ),
+    (
+        "state.rs",
+        "lane_subtitle_source_queue_enabled",
+        "subtitle_work.rs",
+        "work_subtitle_queue",
+    ),
+    (
+        "state.rs",
+        "read_preparation_lanes",
+        "state.rs",
+        "background_work_loop_with_ready",
+    ),
+    // The scheduler's produce-cache wake opens the same lanes.
+    (
+        "state.rs",
+        "read_preparation_lanes",
+        "state.rs",
+        "run_due_jobs",
+    ),
+    ("live_tv.rs", "viewed_configs", "live_tv/dvr.rs", "dvr_loop"),
+    (
+        "live_tv.rs",
+        "viewed_configs",
+        "live_tv/dvr.rs",
+        "reminder_loop",
+    ),
+    (
+        "live_tv.rs",
+        "viewed_configs",
+        "live_tv/dvr.rs",
+        "reminder_tick_at",
+    ),
     ("sharing.rs", "loop_enabled", "sharing.rs", "claim_loop"),
     ("sharing.rs", "loop_enabled", "sharing.rs", "run"),
     (
@@ -290,7 +340,7 @@ const STAYS_CHAINS: &[(&str, &str, &str, &str)] = &[(
 /// their periods. Every other read in these files, and every read before a
 /// write or a fence in them, stays a Store read. `(file, function)`.
 const IDLE_LOOP_READS: &[(&str, &str)] = &[
-    ("playback_cache.rs", "read_max_gb"),
+    ("playback_cache.rs", "ceiling_setting"),
     ("state.rs", "lane_analysis_retry_policy"),
     ("state.rs", "lane_cluster_fragment_index_enabled"),
     ("state.rs", "lane_subtitle_source_queue_enabled"),
@@ -744,8 +794,13 @@ fn every_settings_view_read_and_its_callers_are_pinned_by_function() {
                     caller.as_str(),
                 )
         });
+        // An idle-loop helper's callers sit in its own stays file; they are
+        // pinned one by one in `HELPER_CALLERS` above.
+        let idle_loop = IDLE_LOOP_READS
+            .iter()
+            .any(|(defining, name)| (*defining, *name) == (file.as_str(), helper.as_str()));
         assert!(
-            !in_stays(path) || pinned,
+            !in_stays(path) || pinned || idle_loop,
             "{path}::{caller} reaches the view through {helper} from a stays file"
         );
     }

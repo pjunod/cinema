@@ -1564,14 +1564,17 @@ impl LiveTvManager {
             // and the tick acts on the Store's answer; the other branches
             // close what this process holds, and finalization re-reads the
             // Store before it writes.
-            let configs = match self.loop_configs().await {
-                Ok((live_tv, dvr))
-                    if live_tv.owner_node_id == self.node_id && live_tv.enabled && dvr.enabled =>
-                {
-                    self.dvr_configs().await
-                }
-                viewed => viewed,
-            };
+            let configs =
+                match crate::live_tv::viewed_configs(&self.applied_view(), &self.node_id).await {
+                    Ok((live_tv, dvr))
+                        if live_tv.owner_node_id == self.node_id
+                            && live_tv.enabled
+                            && dvr.enabled =>
+                    {
+                        self.dvr_configs().await
+                    }
+                    viewed => viewed,
+                };
             if let Ok((live_tv, dvr)) = configs {
                 let ours = live_tv.owner_node_id == self.node_id;
                 if ours && live_tv.enabled && dvr.enabled && self.serving.admit().is_some() {
@@ -3919,12 +3922,13 @@ pub(crate) async fn reminder_loop(
         // decides nothing but whether settings are readable at all; the
         // applied view answers that without a leader round trip (A4). The
         // tick's own reads and writes go through the Store.
-        let ours_and_serving = match manager.loop_configs().await {
-            Ok((live_tv, _)) => {
-                live_tv.owner_node_id == manager.node_id && manager.serving.admit().is_some()
-            }
-            Err(_) => false,
-        };
+        let ours_and_serving =
+            match crate::live_tv::viewed_configs(&manager.applied_view(), &manager.node_id).await {
+                Ok((live_tv, _)) => {
+                    live_tv.owner_node_id == manager.node_id && manager.serving.admit().is_some()
+                }
+                Err(_) => false,
+            };
         if ours_and_serving {
             if let Err(error) = reminder_tick(&manager, &events).await {
                 tracing::warn!(
@@ -3983,7 +3987,10 @@ async fn reminder_tick_at(
     // someone to the wrong thing. Without a guide there is nothing to
     // compare: the applied view says so without a leader round trip (A4),
     // and a guide it shows on is confirmed by the Store's read.
-    if matches!(manager.loop_configs().await, Ok((live_tv, _)) if !live_tv.guide_fetches()) {
+    if matches!(
+        crate::live_tv::viewed_configs(&manager.applied_view(), &manager.node_id).await,
+        Ok((live_tv, _)) if !live_tv.guide_fetches()
+    ) {
         return Ok(());
     }
     let (live_tv, _) = manager.dvr_configs().await?;

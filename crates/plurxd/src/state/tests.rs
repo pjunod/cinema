@@ -2910,13 +2910,13 @@ async fn background_lanes_look_at_their_settings_through_the_applied_view() {
     let artwork = crate::test_tempdir().expect("artwork");
     let jobs = manager(Arc::clone(&store) as Arc<dyn Store>, artwork.path());
     let look = |jobs: Arc<JobManager>| async move {
-        let (lanes, read) = jobs.read_preparation_lanes().await;
+        let (lanes, read) = read_preparation_lanes(&jobs.applied).await;
         assert!(read, "a readable view is a read switch");
         (
             lanes,
-            jobs.lane_cluster_fragment_index_enabled().await,
-            jobs.lane_subtitle_source_queue_enabled().await,
-            jobs.lane_analysis_retry_policy().await,
+            lane_cluster_fragment_index_enabled(&jobs.applied).await,
+            lane_subtitle_source_queue_enabled(&jobs.applied).await,
+            lane_analysis_retry_policy(&jobs.applied).await,
         )
     };
 

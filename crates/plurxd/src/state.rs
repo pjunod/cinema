@@ -2656,6 +2656,111 @@ fn setting_enabled(value: Option<String>) -> bool {
     plurx_core::store::stored_switch(value.as_deref(), false)
 }
 
+/// [`JobManager::cluster_fragment_index_enabled`] from the applied settings
+/// view, for the fragments lane's look between passes (A4). The pass it opens
+/// re-reads the switch from the Store before it builds or publishes.
+async fn lane_cluster_fragment_index_enabled(applied: &plurx_core::store::AppliedView) -> bool {
+    applied
+        .setting(keys::VOD_INDEX_CLUSTER_CACHE)
+        .await
+        .ok()
+        .is_some_and(setting_enabled)
+}
+
+/// The settings [`AnalysisRetryPolicy::from_settings`] reads.
+const ANALYSIS_RETRY_KEYS: [&str; 4] = [
+    keys::ANALYSIS_LEASE_SECS,
+    keys::ANALYSIS_BACKOFF_BASE_SECS,
+    keys::ANALYSIS_BACKOFF_MAX_SECS,
+    keys::ANALYSIS_MAX_ATTEMPTS,
+];
+
+/// [`JobManager::analysis_retry_policy`] from the applied settings view, for
+/// the copy-observation pass the fragments lane starts every tick (A4):
+/// tunables (lease, renewal and backoff lengths), never a guard on a write.
+/// Its own keys only, so a settings write elsewhere costs a keyed local read
+/// and not a reload of the table.
+async fn lane_analysis_retry_policy(
+    applied: &plurx_core::store::AppliedView,
+) -> AnalysisRetryPolicy {
+    let settings = applied
+        .setting_values(&ANALYSIS_RETRY_KEYS)
+        .await
+        .unwrap_or_default();
+    AnalysisRetryPolicy::from_settings(&settings)
+}
+
+/// [`JobManager::subtitle_source_queue_enabled`] from the applied settings
+/// view, for the subtitle lane's look between passes (A4). Both switches in
+/// one read; an unreadable view closes the lane for the tick, as an
+/// unreadable Store did.
+async fn lane_subtitle_source_queue_enabled(applied: &plurx_core::store::AppliedView) -> bool {
+    match applied
+        .setting_pair(
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        )
+        .await
+    {
+        Ok((index, sources)) => setting_enabled(index) && setting_enabled(sources),
+        Err(_) => false,
+    }
+}
+
+/// The preparation lanes the settings open (the speculative discovery
+/// schedule and the `vod.output_preparation` Developer switch), from the
+/// applied settings view, and whether the output switch was actually read.
+/// A read error is not "off": the output lane stays closed for this tick
+/// (nothing is claimed under a switch nobody read) and the caller must not
+/// drain on it.
+///
+/// Both lanes' settings in one read of the view (A4): which lanes open is
+/// decided again every tick, and nothing is claimed, cancelled or published
+/// on this answer alone (the claim and the drain read the Store). An
+/// unreadable view closes both lanes for the tick, as an unreadable cadence
+/// read did.
+async fn read_preparation_lanes(
+    applied: &plurx_core::store::AppliedView,
+) -> (crate::background_jobs::PreparationLanes, bool) {
+    /// One warning per run of failures, debug for the rest of the run.
+    static OUTPUT_SWITCH_UNREADABLE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let read = applied
+        .setting_pair(keys::JOB_CACHE_PRODUCE_MINS, keys::VOD_OUTPUT_PREPARATION)
+        .await;
+    let speculative = read.as_ref().is_ok_and(|(minutes, _)| {
+        minutes
+            .as_deref()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+            > 0
+    });
+    let (output, read) = match read.map(|(_, output)| output) {
+        Ok(value) => {
+            OUTPUT_SWITCH_UNREADABLE.store(false, Ordering::Relaxed);
+            (
+                crate::vodserve::OutputPreparation::parse(value.as_deref()),
+                true,
+            )
+        }
+        Err(error) => {
+            if OUTPUT_SWITCH_UNREADABLE.swap(true, Ordering::Relaxed) {
+                tracing::debug!(%error, "output preparation switch still unreadable; lane and drain skipped");
+            } else {
+                tracing::warn!(%error, "could not read the output preparation switch; its lane and drain are skipped until it reads");
+            }
+            (crate::vodserve::OutputPreparation::Off, false)
+        }
+    };
+    (
+        crate::background_jobs::PreparationLanes {
+            speculative,
+            output,
+        },
+        read,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AnalysisRetryPolicy {
     lease_ms: i64,
@@ -3977,7 +4082,7 @@ impl JobManager {
         }
     }
 
-    fn with_applied_view(mut self, applied: plurx_core::store::AppliedView) -> Self {
+    pub(crate) fn with_applied_view(mut self, applied: plurx_core::store::AppliedView) -> Self {
         self.applied = applied;
         self
     }
@@ -6705,16 +6810,14 @@ impl JobManager {
                 // every node whether or not anything here can execute them.
                 // An unreadable switch closes the output lane for this tick
                 // and skips the drain: an error is not the operator saying off.
-                let (lanes, output_read) = self.read_preparation_lanes().await;
+                let (lanes, output_read) = read_preparation_lanes(&self.applied).await;
                 if output_read
                     && last_drain.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
                 {
                     last_drain = Some(std::time::Instant::now());
                     // The drain cancels queued rows, so it acts on the
                     // Store's switch, not the view the lanes opened on.
-                    if let Some(mode) = self.output_preparation_for_drain().await {
-                        self.drain_disabled_output_preparation(mode).await;
-                    }
+                    self.drain_output_preparation_from_store().await;
                 }
                 let lanes = self.executable_lanes(lanes).await;
                 if !lanes.is_empty() {
@@ -6745,7 +6848,7 @@ impl JobManager {
                     let jobs = Arc::clone(&self);
                     let transcode = Arc::clone(&transcode);
                     tokio::spawn(async move {
-                        let policy = jobs.lane_analysis_retry_policy().await;
+                        let policy = lane_analysis_retry_policy(&jobs.applied).await;
                         let context = crate::copy_analysis::CopyAnalysisContext {
                             store: Arc::clone(&jobs.store),
                             node_id: jobs.coordinator.node_id().to_owned(),
@@ -6767,7 +6870,7 @@ impl JobManager {
                     .job_authority
                     .may_execute_job(JobKind::FragmentIndexBuild)
                     .await
-                    && self.lane_cluster_fragment_index_enabled().await
+                    && lane_cluster_fragment_index_enabled(&self.applied).await
                     && (!self.cluster_analysis_working.load(Ordering::Acquire)
                         || !self.cluster_index_working.load(Ordering::Acquire))
                 {
@@ -7026,7 +7129,7 @@ impl JobManager {
                 // this pass also runs the node's local cachekeep sweep, which
                 // a node owes its own cache whatever rows it may execute.
                 // `claim_pretranscode` still checks authority per kind.
-                let lanes = state.preparation_lanes().await;
+                let lanes = read_preparation_lanes(&state.applied).await.0;
                 if !lanes.is_empty() {
                     Arc::clone(&state)
                         .work_pretranscode_queue(transcode, lanes)
@@ -11308,50 +11411,6 @@ impl JobManager {
         AnalysisRetryPolicy::from_settings(&settings)
     }
 
-    /// [`Self::cluster_fragment_index_enabled`] from the applied settings
-    /// view, for the fragments lane's look between passes (A4). The pass it
-    /// opens re-reads the switch from the Store before it builds or
-    /// publishes.
-    async fn lane_cluster_fragment_index_enabled(&self) -> bool {
-        self.applied
-            .setting(keys::VOD_INDEX_CLUSTER_CACHE)
-            .await
-            .ok()
-            .is_some_and(setting_enabled)
-    }
-
-    /// [`Self::analysis_retry_policy`] from the applied settings view, for
-    /// the copy-observation pass the fragments lane starts every tick (A4):
-    /// tunables (lease, renewal and backoff lengths), never a guard on a
-    /// write.
-    async fn lane_analysis_retry_policy(&self) -> AnalysisRetryPolicy {
-        let settings = self
-            .applied
-            .settings_snapshot()
-            .await
-            .map(|snapshot| snapshot.values)
-            .unwrap_or_default();
-        AnalysisRetryPolicy::from_settings(&settings)
-    }
-
-    /// [`Self::subtitle_source_queue_enabled`] from the applied settings
-    /// view, for the subtitle lane's look between passes (A4). Both switches
-    /// in one read; an unreadable view closes the lane for the tick, as an
-    /// unreadable Store did.
-    pub(crate) async fn lane_subtitle_source_queue_enabled(&self) -> bool {
-        match self
-            .applied
-            .setting_pair(
-                keys::VOD_INDEX_CLUSTER_CACHE,
-                keys::SUBTITLE_CLUSTER_SOURCES,
-            )
-            .await
-        {
-            Ok((index, sources)) => setting_enabled(index) && setting_enabled(sources),
-            Err(_) => false,
-        }
-    }
-
     /// The source-capacity decision the claim made, asked again of the
     /// claimed request (`analysis_source_capacity_clause`, read from the
     /// Store's ledger rows with the request's own holdings left out). A
@@ -12658,59 +12717,9 @@ impl JobManager {
 
     /// The preparation lanes the settings open: the speculative discovery
     /// schedule and the `vod.output_preparation` Developer switch.
+    #[cfg(test)]
     pub(crate) async fn preparation_lanes(&self) -> crate::background_jobs::PreparationLanes {
-        self.read_preparation_lanes().await.0
-    }
-
-    /// [`Self::preparation_lanes`], and whether the output switch was actually
-    /// read. A store error is not "off": the output lane stays closed for this
-    /// tick (nothing is claimed under a switch nobody read) and the caller
-    /// must not drain on it, because draining cancels queued work the
-    /// operator may well have switched on.
-    async fn read_preparation_lanes(&self) -> (crate::background_jobs::PreparationLanes, bool) {
-        /// One warning per run of failures, debug for the rest of the run.
-        static OUTPUT_SWITCH_UNREADABLE: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        // Both lanes' settings in one read of the applied view (A4): which
-        // lanes open is decided again every tick, and nothing is claimed,
-        // cancelled or published on this answer alone (the claim and the
-        // drain read the Store). An unreadable view closes both lanes for the
-        // tick, as an unreadable cadence read did.
-        let read = self
-            .applied
-            .setting_pair(keys::JOB_CACHE_PRODUCE_MINS, keys::VOD_OUTPUT_PREPARATION)
-            .await;
-        let speculative = read.as_ref().is_ok_and(|(minutes, _)| {
-            minutes
-                .as_deref()
-                .and_then(|value| value.trim().parse::<i64>().ok())
-                .unwrap_or(0)
-                > 0
-        });
-        let (output, read) = match read.map(|(_, output)| output) {
-            Ok(value) => {
-                OUTPUT_SWITCH_UNREADABLE.store(false, Ordering::Relaxed);
-                (
-                    crate::vodserve::OutputPreparation::parse(value.as_deref()),
-                    true,
-                )
-            }
-            Err(error) => {
-                if OUTPUT_SWITCH_UNREADABLE.swap(true, Ordering::Relaxed) {
-                    tracing::debug!(%error, "output preparation switch still unreadable; lane and drain skipped");
-                } else {
-                    tracing::warn!(%error, "could not read the output preparation switch; its lane and drain are skipped until it reads");
-                }
-                (crate::vodserve::OutputPreparation::Off, false)
-            }
-        };
-        (
-            crate::background_jobs::PreparationLanes {
-                speculative,
-                output,
-            },
-            read,
-        )
+        read_preparation_lanes(&self.applied).await.0
     }
 
     /// The output switch as the Store holds it, for the drain that cancels
@@ -12722,6 +12731,17 @@ impl JobManager {
                 tracing::debug!(%error, "output preparation switch unreadable; drain skipped");
                 None
             }
+        }
+    }
+
+    /// The preparation lane's minute drain: cancel the queued rows the
+    /// Store's output switch no longer admits. Never the view's switch: the
+    /// drain cancels work, and a view that has not applied an enable yet
+    /// would cancel what the operator just asked for.
+    pub(crate) async fn drain_output_preparation_from_store(&self) -> usize {
+        match self.output_preparation_for_drain().await {
+            Some(mode) => self.drain_disabled_output_preparation(mode).await,
+            None => 0,
         }
     }
 
