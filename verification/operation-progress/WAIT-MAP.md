@@ -212,7 +212,7 @@ Store into custody journal cleanup without changing the selected token,
 heartbeat, publication or domain-release lock order.
 
 [Startup](../../crates/plurxd/src/main.rs) registers the exact Store/backend
-and awaits [verified recovery](../../crates/plurxd/src/source_custody/recovery.rs)
+and awaits verified recovery (`crates/plurxd/src/source_custody/recovery.rs`, removed)
 before producers. [The scheduler](../../crates/plurxd/src/state.rs) retries it
 before ordinary settled-source replay. The new path clones its Store context
 before filesystem/Store work; its registry mutex is not held across an await.
@@ -222,7 +222,7 @@ steps, active-reader journals, abort cleanup, or physical custody states.
 
 The mapping refreshes 11 existing rows and adds four external dependency pins:
 the exact resource lookup, [custody integration](../../crates/plurxd/src/source_custody.rs),
-the recovery module, and [challenge preparation](../../scripts/source-custody-recovery).
+the recovery module, and challenge preparation (`scripts/source-custody-recovery`, removed).
 This expands drift detection, not modeled coverage. Trusted host identity,
 changed-kernel-boot proof, terminated descendants, fsync publication,
 exact-Store/fallback isolation and lost-ack abort reconciliation remain
@@ -680,13 +680,23 @@ nonce. A raw descriptor handoff disqualifies that witness, including when
 a bounded command clears its environment. For one audited legacy DV
 activation, the Linux host helper instead requires two complete matching
 reader censuses under the launch fence. An unknown reader keeps the slot.
-[Witness replay](../../crates/plurxd/src/source_custody/recovery/reader.rs) ·
+Witness replay (`crates/plurxd/src/source_custody/recovery/reader.rs`, removed) ·
 [Child launch](../../crates/plurx-core/src/process/bounded.rs) ·
-[Host census](../../scripts/source-custody-reader-stop)
+Host census (`scripts/source-custody-reader-stop`, removed)
 
 Each recovery path still waits for the exact Store settlement and release.
 A lost acknowledgement leaves evidence for retry. These kernel and host
 checks are covered by focused implementation tests. Their success and the
 time until a slot reopens lie outside the modeled request's progress guarantee.
-[Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
-[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)
+Native witness tests (`crates/plurxd/src/source_custody/recovery/reader/tests.rs`, removed) ·
+Legacy custody tests (`crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs`, removed)
+
+## Source lease step 2 — proof machinery removed, 2026-11-15
+
+[SOURCE-LEASE-RELEASE-PLAN.md](../../docs/server/SOURCE-LEASE-RELEASE-PLAN.md)
+step 2 deletes the recovery module, its reader witnesses and host census,
+the background completion ledger and the host helper. Startup and the
+scheduler no longer await verified recovery; the store sweep releases an
+owner whose authority lapsed. The recovery-module and challenge-preparation
+pins are removed with their sources. Links above to the removed files are
+kept as plain text for history. No modeled wait changes.

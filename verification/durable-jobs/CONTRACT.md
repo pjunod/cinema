@@ -278,8 +278,8 @@ transitions or an eventual-recovery guarantee.
 
 The mapping refreshes 17 existing rows and adds four explicit dependency pins
 for startup, [custody integration](../../crates/plurxd/src/source_custody.rs),
-[recovery](../../crates/plurxd/src/source_custody/recovery.rs), and the
-[host helper](../../scripts/source-custody-recovery). Those pins expose future
+recovery (`crates/plurxd/src/source_custody/recovery.rs`, removed), and the
+host helper (`scripts/source-custody-recovery`, removed). Those pins expose future
 drift; they do not map physical reboot proof into `DurableJobs`. Same-machine
 boot identity, descendant termination, fsync durability, aborted-activation
 reconciliation, exact-Store isolation and safe legacy challenge preparation
@@ -1063,13 +1063,13 @@ same typed settlement and release selectors as normal cleanup. A lost Store
 reply leaves evidence for retry. Physical-stop evidence cannot grant a new
 activation or stand in for a worker join.
 [Activation](../../crates/plurxd/src/source_custody.rs) ·
-[Settlement](../../crates/plurxd/src/source_custody/recovery.rs)
+Settlement (`crates/plurxd/src/source_custody/recovery.rs`, removed)
 
 The model takes reader termination as a premise. Separate runtime tests cover
 the native same-kernel witness and the Linux host census for one audited
 legacy DV activation. An unknown reader or inconclusive witness keeps custody
-held. [Native witness tests](../../crates/plurxd/src/source_custody/recovery/reader/tests.rs) ·
-[Legacy custody tests](../../crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs)
+held. Native witness tests (`crates/plurxd/src/source_custody/recovery/reader/tests.rs`, removed) ·
+Legacy custody tests (`crates/plurxd/src/source_custody/recovery/physical_stop/tests.rs`, removed)
 
 ## Pipeline-v2 and HDR integration — source correspondence, 2026-11-09
 
@@ -1080,3 +1080,15 @@ bodies retain both parents' source. The Store parent registers both sets of
 conformance tests. Refresh only those whole-file source hashes after checking
 the existing anchors; model/configuration bytes and qualification identities
 are unchanged. This is source correspondence, not model execution evidence.
+
+## Source lease step 2 — proof machinery removed, 2026-11-15
+
+[SOURCE-LEASE-RELEASE-PLAN.md](../../docs/server/SOURCE-LEASE-RELEASE-PLAN.md)
+step 2 deletes the reader-witness, census and physical-stop recovery module,
+the background completion ledger and the host recovery helper. Lease expiry
+is the release: the store sweep deletes an owner whose authority lapsed
+60 s ago. The three recovery dependency pins (exact-Store boot replay, the
+prepared host-reboot challenge and the startup configuration call) are
+removed with their sources; the activation pin and the refreshed rows stay.
+Links above to the removed files are kept as plain text for history. No
+modeled transition changes.

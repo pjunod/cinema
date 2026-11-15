@@ -9,43 +9,43 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8752c54cf1731a8daaa2fdad46408f7b558cc118b7c7baa3ee8fb55cc6894e16"
+        "sha256": "f73e4d7c6aaa2e321508f1373b3cd649a29584e09932dac056d5552bd8dc31f0"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "8752c54cf1731a8daaa2fdad46408f7b558cc118b7c7baa3ee8fb55cc6894e16"
+        "sha256": "f73e4d7c6aaa2e321508f1373b3cd649a29584e09932dac056d5552bd8dc31f0"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "8752c54cf1731a8daaa2fdad46408f7b558cc118b7c7baa3ee8fb55cc6894e16"
+        "sha256": "f73e4d7c6aaa2e321508f1373b3cd649a29584e09932dac056d5552bd8dc31f0"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "8752c54cf1731a8daaa2fdad46408f7b558cc118b7c7baa3ee8fb55cc6894e16"
+        "sha256": "f73e4d7c6aaa2e321508f1373b3cd649a29584e09932dac056d5552bd8dc31f0"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "8752c54cf1731a8daaa2fdad46408f7b558cc118b7c7baa3ee8fb55cc6894e16"
+        "sha256": "f73e4d7c6aaa2e321508f1373b3cd649a29584e09932dac056d5552bd8dc31f0"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "8752c54cf1731a8daaa2fdad46408f7b558cc118b7c7baa3ee8fb55cc6894e16"
+        "sha256": "f73e4d7c6aaa2e321508f1373b3cd649a29584e09932dac056d5552bd8dc31f0"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "8752c54cf1731a8daaa2fdad46408f7b558cc118b7c7baa3ee8fb55cc6894e16"
+        "sha256": "f73e4d7c6aaa2e321508f1373b3cd649a29584e09932dac056d5552bd8dc31f0"
       },
       {
         "table": "08 worker acquisition and cleanup",
@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "c178f37f6791929ce9697ad5c0e2a5337d48a7875a2c623cec30cd6130f2c063"
+        "sha256": "d7aba2f693a635d78c418c4a869c0cb610a38e656bcb40939ea0a82400bd1ca5"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "c178f37f6791929ce9697ad5c0e2a5337d48a7875a2c623cec30cd6130f2c063"
+        "sha256": "d7aba2f693a635d78c418c4a869c0cb610a38e656bcb40939ea0a82400bd1ca5"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "6005810f3f8a63abe0ce2364ae1119085e0518d89cf6b2aa82f594a9958664e1"
+        "sha256": "073ef54ef96ad722f669803e129f9f9d55cc661134d83b3ccf3f5e59dac4f00c"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -345,19 +345,7 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "15cb5695992562db7b0a66b5a4bf25fbafe8d9deb23bd4b690e0575153b5e736"
-      },
-      {
-        "table": "recovery dependency outside model: exact-Store verified boot replay",
-        "source": "crates/plurxd/src/source_custody/recovery.rs",
-        "anchor": "pub(super) fn configure_backend(",
-        "sha256": "252ce1e43ede3e1991793c3bb482e5a5cbd72021b675bf0c777a0a804e2ddc17"
-      },
-      {
-        "table": "recovery dependency outside model: prepared host-reboot challenge",
-        "source": "scripts/source-custody-recovery",
-        "anchor": "def validated_challenge(data_dir: Path, expected_node: str, challenge: str):",
-        "sha256": "388c8b40ac12eae5645aa038b66a7e2782f7e5068f5eae967edabe218c53be22"
+        "sha256": "06f7eae8f3270eafd37c4030d813a7e01d9d29eb2219d43774a295fdfe54e5fa"
       },
       {
         "table": "recovery dependency outside model: immutable physical custody lookup",
