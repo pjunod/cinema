@@ -801,6 +801,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         &manager.admissions,
         store.as_ref(),
         Instant::now() + Duration::from_secs(10),
+        manager.dv_strippable(),
     ));
     let bytes = std::mem::size_of_val(admission.as_ref().get_ref());
     eprintln!("Source copy admission future: {bytes} bytes");
@@ -4194,5 +4195,65 @@ fn source_delivery_policy_refuses_only_profile5_encodes_until_the_proof_is_owned
     assert_eq!(
         source_delivery_refusal(&burn, &hdr10, (false, None)),
         Some(SourceDeliveryRefusal::Unsupported)
+    );
+}
+
+#[tokio::test]
+async fn source_copy_identity_for_dolby_vision_equals_the_local_index_identity() {
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let directory = crate::test_tempdir().expect("work directory");
+    for dv_strippable in [false, true] {
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            directory.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_dv_strippable(dv_strippable);
+        for (name, file) in [
+            ("P8.1", delivery_policy_profile8_1()),
+            ("P7", delivery_policy_profile7()),
+            ("P5", delivery_policy_profile5()),
+        ] {
+            for (shape, preserve, convert) in [
+                ("strip", false, false),
+                ("preserve", true, false),
+                ("convert", false, true),
+            ] {
+                let source = manager.source_copy_video_options(&file, None, preserve, convert);
+                let local = crate::vodserve::copy_video_pipeline(
+                    &file,
+                    None,
+                    dv_strippable,
+                    preserve,
+                    convert,
+                );
+                assert_eq!(
+                    crate::fragindex::identity_for(&file, source),
+                    crate::fragindex::identity_for(&file, local),
+                    "{name} {shape} dovi_rpu={dv_strippable}: the Source must cut the pipeline local indexed"
+                );
+            }
+        }
+    }
+    // The strip is the shape `dovi_rpu` decides: with it the Source strips
+    // with `dovi_rpu=strip=1`, which is a different identity from the
+    // `filter_units`-only pipeline a hard-coded `false` named.
+    let file = delivery_policy_profile8_1();
+    let measured = TranscodeManager::new(
+        Arc::clone(&store),
+        directory.path().to_owned(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dv_strippable(true)
+    .source_copy_video_options(&file, None, false, false);
+    assert_ne!(
+        crate::fragindex::identity_for(&file, measured),
+        crate::fragindex::identity_for(
+            &file,
+            crate::vodserve::copy_video_pipeline(&file, None, false, false, false)
+        ),
     );
 }

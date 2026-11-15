@@ -2248,9 +2248,10 @@ impl VodServe {
         admissions: &crate::admission::Admissions,
         store: &dyn plurx_core::store::Store,
         deadline: Instant,
+        have_dovi: bool,
     ) -> Result<AdmittedSourceVodRendition, String> {
         Box::pin(self.prepare_admitted_source_vod(
-            source, assignment, settings, admissions, store, deadline, None,
+            source, assignment, settings, admissions, store, deadline, None, have_dovi,
         ))
         .await
     }
@@ -2265,6 +2266,7 @@ impl VodServe {
         store: &dyn plurx_core::store::Store,
         deadline: Instant,
         encoding: Option<Arc<crate::vodencode::Encoding>>,
+        have_dovi: bool,
     ) -> Result<AdmittedSourceVodRendition, String> {
         // A burn is always encoded; its sidecar is owned by the encoding the
         // Source preparation built, never looked up here.
@@ -2317,12 +2319,15 @@ impl VodServe {
             }
             Err(_) => return Err("Source physical VOD admission timed out".into()),
         };
-        let pending = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            Box::pin(self.prepare_source_vod_rendition(source, assignment, settings, encoding)),
-        )
-        .await
-        .map_err(|_| "Source VOD preparation timed out".to_owned())??;
+        let pending =
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                Box::pin(self.prepare_source_vod_rendition(
+                    source, assignment, settings, encoding, have_dovi,
+                )),
+            )
+            .await
+            .map_err(|_| "Source VOD preparation timed out".to_owned())??;
         Ok(AdmittedSourceVodRendition { pending, permit })
     }
 
@@ -2335,6 +2340,7 @@ impl VodServe {
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
         settings: &VodSettings,
         encoding: Option<Arc<crate::vodencode::Encoding>>,
+        have_dovi: bool,
     ) -> Result<PreparedSourceVodRendition, String> {
         if !source.matches_assignment(assignment) {
             return Err("Source prepared request differs from its immutable assignment".to_owned());
@@ -2361,6 +2367,7 @@ impl VodServe {
             settings,
             &fences,
             Some(assignment.binding()),
+            have_dovi,
         ))
         .await?;
         Ok(PreparedSourceVodRendition {
@@ -2605,6 +2612,9 @@ impl VodServe {
         settings: &VodSettings,
         fences: &VodCreateFences<'_>,
         source_binding: Option<&plurx_core::sharing_source_sessions::SourceBindingHandle>,
+        // The node's boot-measured `dovi_rpu` (`TranscodeManager::dv_strippable`),
+        // the same value local index analysis builds its identity from.
+        have_dovi: bool,
     ) -> Result<PreparedVodRendition, String> {
         // The one funnel every create passes through: the plain entry point,
         // the cluster one that every shipped caller actually uses, and the
@@ -2654,13 +2664,6 @@ impl VodServe {
                 "vod_source_unsupported",
                 "the file has no probed duration, so no immutable plan can be built",
             ));
-        };
-        // Source SDR preparation already owns its actual engine capture. A
-        // generic capability probe here would create an unowned child.
-        let have_dovi = if source_binding.is_some() {
-            false
-        } else {
-            crate::ffmpeg::has_dovi_rpu().await
         };
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.

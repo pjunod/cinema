@@ -3854,3 +3854,78 @@ async fn shared_auto_preserves_unindexed_hdr10_hevc_before_source_start() {
         .expect("cold H264 decision");
     assert_eq!(cold.decision.method, PlaybackMethod::Remux);
 }
+
+/// A Dolby Vision title the node indexed for local playback is indexed for
+/// a shared start too: the Source decision derives the copy identity from the
+/// node's boot-measured `dovi_rpu`, the value local analysis built it from,
+/// not a hard-coded `false` that names a different (never-built) pipeline.
+#[tokio::test]
+async fn shared_decision_reports_a_locally_indexed_dolby_vision_title_as_indexed() {
+    use plurx_core::playback::PlaybackMethod;
+    let _serial = BODY_FIXTURES.lock().await;
+    let mut fixture = body_fixture().await;
+    fixture.state.system = Arc::new(crate::state::SystemInfo {
+        dovi_rpu: true,
+        ..(*fixture.state.system).clone()
+    });
+    let source = fixture._directory.path().join("indexed-dv.mkv");
+    std::fs::write(&source, b"planning fixture source presence").expect("source");
+    let writer = rusqlite::Connection::open(&fixture.path).expect("writer");
+    writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,hdr,hdr_format,dv_profile,dv_level,dv_bl_compat_id,dv_el_present,dv_rpu_present,audio_streams) VALUES(0,?1,?2,20,1000,60000,'mkv','hevc',3840,2160,10,1000000,'dolby_vision','Dolby Vision · Profile 8.1 (HDR10-compatible)',8,6,1,0,1,'[{\"index\":0,\"codec\":\"aac\",\"channels\":2,\"default\":true}]')",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("Source file");
+    // An HDR10 player with no Dolby Vision decoder: the planner strips to
+    // the HDR10 base, the one copy whose identity depends on `dovi_rpu`.
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(json!({
+        "v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]},{"codec":"hevc","max_height":2160,"present":["sdr","pq"]}],
+        "audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]
+    })).expect("caps");
+    let query = || super::super::stream::Caps {
+        caps_v2: Some(caps.clone()),
+        force: Some("original".to_owned()),
+        ..Default::default()
+    };
+    let file = fixture
+        .state
+        .store
+        .get_file(0)
+        .await
+        .expect("file read")
+        .expect("file");
+    let unindexed =
+        super::super::stream::decision_for_source_file(&fixture.state, file.clone(), query())
+            .await
+            .expect("unindexed decision");
+    assert_eq!(unindexed.decision.method, PlaybackMethod::Remux);
+    assert!(!unindexed.decision.preserve_dolby_vision);
+    assert!(!unindexed.decision.convert_dolby_vision);
+    assert_eq!(unindexed.decision.delivered_dynamic_range, "hdr10");
+    assert!(!unindexed.vod_indexed);
+    // The strip identity local playback builds and serves
+    // (`copy_video_pipeline` with the node's `dovi_rpu`).
+    let local = crate::vodserve::copy_video_pipeline(&file, None, true, false, false);
+    let index = plurx_core::segplan::FragmentIndex::new(
+        16_000,
+        vec![plurx_core::segplan::IndexRow {
+            dts: 0,
+            duration: 96_000,
+            bytes: 100_000,
+            video_bytes: 99_000,
+            class: plurx_core::fmp4::CutClass::CleanIdr,
+        }],
+        "sha",
+        crate::fragindex::identity_for(&file, local),
+    );
+    fixture
+        .state
+        .store
+        .put_fragment_index(0, &index)
+        .await
+        .expect("local Dolby Vision strip index");
+    let indexed = super::super::stream::decision_for_source_file(&fixture.state, file, query())
+        .await
+        .expect("indexed decision");
+    assert_eq!(indexed.decision.method, PlaybackMethod::Remux);
+    assert!(
+        indexed.vod_indexed,
+        "the Source decision must find the index local playback built for this Dolby Vision copy"
+    );
+}

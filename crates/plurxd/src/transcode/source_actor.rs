@@ -1143,6 +1143,30 @@ impl SourceProducerAuthority {
 }
 
 impl TranscodeManager {
+    /// The copy pipeline a Source cuts for a prepared copy recipe.
+    ///
+    /// Exactly the options local VOD builds (`copy_video_pipeline`) from the
+    /// same inputs, with the node's boot-measured `dovi_rpu`
+    /// ([`Self::dv_strippable`]): a Dolby Vision copy then has the
+    /// fragment-index identity local analysis built, and a base strip uses
+    /// `dovi_rpu=strip=1` rather than leaving a stale `dvcC` behind
+    /// `filter_units`.
+    pub(crate) fn source_copy_video_options(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        probe: Option<&str>,
+        preserve_dolby_vision: bool,
+        convert_dolby_vision: bool,
+    ) -> plurx_core::transcode::CopyVideoOptions {
+        plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            probe,
+            self.dv_strippable(),
+            preserve_dolby_vision,
+        )
+        .with_dolby_vision_conversion(convert_dolby_vision)
+    }
+
     pub(crate) fn lookup_source_worker(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -1325,12 +1349,7 @@ impl TranscodeManager {
         }
         // Match Source VOD's exact recipe, including parameter-set promotion
         // and retention. A plain-copy identity cannot stand in for either.
-        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
-            file,
-            stored_probe.as_deref(),
-            false,
-            false,
-        );
+        let video = self.source_copy_video_options(file, stored_probe.as_deref(), false, false);
         let identity = crate::fragindex::identity_for(file, video);
         if self
             .store
@@ -1656,6 +1675,7 @@ impl TranscodeManager {
                     self.store.as_ref(),
                     deadline,
                     encoding,
+                    self.dv_strippable(),
                 ))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;

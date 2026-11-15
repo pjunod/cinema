@@ -2563,7 +2563,14 @@ async fn decision_for_file(
         // anonymous census. Actual Source preparation owns physical work.
         state.store.get_file_probe_json(id).await?
     };
-    let have_dovi = local_derivation && crate::ffmpeg::has_dovi_rpu().await;
+    // Source planning uses the node's boot-measured `dovi_rpu` — the value
+    // the strip decision above was made from and Source preparation cuts
+    // with — so a Dolby Vision copy indexed locally is the one it finds.
+    let have_dovi = if local_derivation {
+        crate::ffmpeg::has_dovi_rpu().await
+    } else {
+        state.system.dovi_rpu
+    };
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
