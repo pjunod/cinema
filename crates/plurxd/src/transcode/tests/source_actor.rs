@@ -177,6 +177,25 @@ enum SourceFixtureVideo {
     Hdr10,
     Hdr10Promotion,
     Hdr10Retention,
+    /// The HDR10 source scanned as Dolby Vision Profile 8.1 on a node with
+    /// `dovi_rpu`, started by an HDR10 player: the planner strips to the
+    /// HDR10 base. The generated stream carries no RPU (no fixture encoder
+    /// writes one), so this proves the Source's cold Dolby Vision strip
+    /// index and HDR10 delivery are wired, not RPU removal itself.
+    DolbyVisionStrip,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_actor_builds_cold_dolby_vision_strip_index_and_serves_hdr10_bytes() {
+    if !crate::ffmpeg::has_dovi_rpu().await {
+        eprintln!("SKIP: this ffmpeg has no dovi_rpu bitstream filter to strip with");
+        return;
+    }
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::DolbyVisionStrip,
+    ))
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -254,6 +273,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     let mut state = source_fixture_state();
     let state_mut = Arc::get_mut(&mut state).expect("sole fixture state");
     eprintln!("Source fixture: state constructed without Router");
+    let dolby_vision = matches!(video, SourceFixtureVideo::DolbyVisionStrip);
+    if dolby_vision {
+        state_mut.system = Arc::new(crate::state::SystemInfo {
+            dovi_rpu: true,
+            ..(*state_mut.system).clone()
+        });
+    }
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = membership.clone();
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
@@ -406,6 +432,9 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',128,72,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,probe,crate::fragment_index_cluster::unix_ms()/1000)).await.expect("actual file facts");
     if hdr10 {
         client.execute("UPDATE files SET video_codec='hevc',bit_depth=10,hdr='hdr10',audio_streams='[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]' WHERE id=1", hiqlite::params!()).await.expect("actual HDR10 scan facts");
+    }
+    if dolby_vision {
+        client.execute("UPDATE files SET hdr='dolby_vision',hdr_format='Dolby Vision · Profile 8.1 (HDR10-compatible)',dv_profile=8,dv_level=6,dv_bl_compat_id=1,dv_el_present=0,dv_rpu_present=1 WHERE id=1", hiqlite::params!()).await.expect("Dolby Vision Profile 8.1 scan facts");
     }
     if mode >= 21 {
         client
@@ -715,6 +744,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         EncoderCaps::default(),
         Pipeline::Cpu,
     );
+    let manager = manager.with_dv_strippable(dolby_vision);
     let manager = Arc::new(if hdr10 {
         manager.with_cache(
             directory.path().join("cache"),
@@ -1115,7 +1145,9 @@ async fn source_actual_actor(
     mode: u8,
     client: hiqlite::Client,
 ) {
-    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10");
+    // A Dolby Vision Profile 8.1 strip delivers exactly the HDR10 base.
+    let dolby_vision_strip = prepared.file().hdr.as_deref() == Some("dolby_vision");
+    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10") || dolby_vision_strip;
     let delivered_fixture = prepared.file().path.with_extension("delivered.mp4");
     if mode == 55 {
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
@@ -1734,12 +1766,15 @@ async fn source_actual_actor(
             .get_file_probe_json(1)
             .await
             .expect("retained recipe facts");
-        let options = plurx_core::transcode::CopyVideoOptions::from_probe(
-            &file,
-            probe.as_deref(),
-            false,
-            false,
-        );
+        // The Source's own copy options: for a Dolby Vision strip this is
+        // the `dovi_rpu=strip=1` identity local indexes, not `filter_units`.
+        let options = manager.source_copy_video_options(&file, probe.as_deref(), false, false);
+        if dolby_vision_strip {
+            assert_eq!(
+                options,
+                crate::vodserve::copy_video_pipeline(&file, probe.as_deref(), true, false, false)
+            );
+        }
         let index = state
             .store
             .fragment_index(1, &crate::fragindex::identity_for(&file, options))
@@ -2898,6 +2933,13 @@ async fn source_actual_actor(
         );
         assert!(init.bytes.windows(4).any(|bytes| bytes == b"mdcv"));
         assert!(init.bytes.windows(4).any(|bytes| bytes == b"clli"));
+        assert!(
+            !init
+                .bytes
+                .windows(4)
+                .any(|bytes| bytes == b"dvvC" || bytes == b"dvcC" || bytes == b"dby1"),
+            "an HDR10 delivery, a Dolby Vision strip included, declares no Dolby Vision"
+        );
         let opened = actor
             .open_resource(
                 &SharingHlsResource::parse("seg00000.m4s").expect("typed copied HDR10 segment"),

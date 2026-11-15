@@ -2245,3 +2245,60 @@ exec /bin/sleep 60
         );
     }
 }
+
+#[test]
+fn source_index_accepts_a_dolby_vision_converting_pass() {
+    let mut profile7 = hevc_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+    );
+    profile7.dolby_vision.profile = Some(7);
+    profile7.dolby_vision.level = Some(6);
+    profile7.dolby_vision.bl_compat_id = Some(6);
+    profile7.dolby_vision.el_present = Some(true);
+    profile7.dolby_vision.rpu_present = Some(true);
+    let mut profile8 = hevc_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+    );
+    profile8.dolby_vision.profile = Some(8);
+    profile8.dolby_vision.bl_compat_id = Some(1);
+    for file in [&profile7, &profile8] {
+        assert!(
+            source_index_admits(file),
+            "a Source may index a Dolby Vision copy: {:?}",
+            file.hdr_format
+        );
+    }
+    // The Source's own pass over its held descriptor: the converting
+    // identity indexes the rewritten bytes and declares the 8.1 record.
+    let converting =
+        transcode::CopyVideoOptions::new(true, true).with_dolby_vision_conversion(true);
+    let pass = index_pass(
+        &profile7,
+        converting,
+        Some("/dev/fd/3"),
+        VideoCompletionExpectation {
+            stream_index: 0,
+            duration_num: 60,
+            duration_den: 1,
+            provenance: CompletionProvenance::StreamSeconds,
+            source_object_version: "test".to_owned(),
+        },
+        None,
+    )
+    .expect("a converting Source pass");
+    assert!(pass.args.iter().any(|arg| arg == "/dev/fd/3"));
+    let [output] = pass.outputs.as_slice() else {
+        panic!("one converting output");
+    };
+    let DolbyVisionPass::Rewrite(record) = &output.dolby_vision else {
+        panic!("a converting pass rewrites the record");
+    };
+    assert_eq!(record.profile, 8);
+    assert_eq!(
+        identity_for(&profile7, converting),
+        identity_for(&profile7, output.video),
+        "the Source pass indexes the identity its copy is cut with"
+    );
+}

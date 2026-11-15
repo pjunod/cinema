@@ -1309,12 +1309,13 @@ impl TranscodeManager {
         work: &mut Option<crate::fragindex::SourceIndexOperation>,
     ) -> Result<(), SourceWorkerError> {
         let file = prepared.file();
-        if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
-            || plurx_core::playback::is_dolby_vision(file)
-        {
+        if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265")) {
             // Existing warm indexes retain their established support policy.
             return Ok(());
         }
+        // A Dolby Vision copy (strip, preserve or the Profile 7 conversion)
+        // is indexed exactly as local indexes it: `index_pass` takes the
+        // Dolby Vision passes from the same options the copy is cut with.
         let SessionKind::Copy {
             preserve_dolby_vision,
             convert_dolby_vision,
@@ -1323,9 +1324,6 @@ impl TranscodeManager {
         else {
             return Err(SourceWorkerError::Unsupported);
         };
-        if preserve_dolby_vision || convert_dolby_vision {
-            return Err(SourceWorkerError::Unsupported);
-        }
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
         let stored_probe = self
             .store
@@ -1349,7 +1347,12 @@ impl TranscodeManager {
         }
         // Match Source VOD's exact recipe, including parameter-set promotion
         // and retention. A plain-copy identity cannot stand in for either.
-        let video = self.source_copy_video_options(file, stored_probe.as_deref(), false, false);
+        let video = self.source_copy_video_options(
+            file,
+            stored_probe.as_deref(),
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        );
         let identity = crate::fragindex::identity_for(file, video);
         if self
             .store
