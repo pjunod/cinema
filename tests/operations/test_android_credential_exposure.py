@@ -626,6 +626,21 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
         self.assertEqual(len(kept), 1, sorted(p.name for p in self.data.iterdir()))
         self.assertEqual(kept[0].read_bytes(), b"mapping-a")
 
+    def test_publish_refuses_a_development_build(self) -> None:
+        """The tree carries build 1; only a numbered build may be served."""
+        self._build(1, b"apk-dev", b"mapping-dev")
+        result = self._publish()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("development build 1; nothing published", result.stdout)
+        self.assertFalse((self.data / "plurx-android.apk").exists())
+
+    def test_release_refuses_to_build_without_a_number(self) -> None:
+        self.env["PLURX_BUILD_NUMBER"] = "1"
+        result = self._make("android-release")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("would ship as development build 1", result.stdout)
+        self.assertFalse(self.docker_log.exists())
+
     def test_publish_refuses_a_build_without_its_mapping(self) -> None:
         """A served APK always has its mapping: nothing is published without it."""
         self._build(120, b"apk-120", None)

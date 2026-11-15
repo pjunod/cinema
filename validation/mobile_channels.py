@@ -21,44 +21,6 @@ from validation.mobile_versions import (
 )
 
 
-def pinned_source(source: Path, state: Path, commit: str, build: int) -> tuple[Path, str]:
-    """A bare repository whose ``main`` is ``commit`` stamped as ``build``.
-
-    The controller fetches ``origin/main`` before building and again before
-    publishing, and refuses when the two differ. Pointed at the live checkout
-    that comparison fails whenever anything merges during a build, which on
-    this repository is most builds. Its remote is itself, so both fetches see
-    the commit this job chose; objects come from the source checkout.
-
-    The controller also reads the build number from the two manifests of the
-    commit it checks out, and refuses a platform whose client paths changed
-    after the manifest's number last changed. The tree carries no claimed
-    number (validation/mobile_build.py), so ``main`` here is the stamp commit:
-    ``commit`` plus one child that writes ``build`` into both manifests. That
-    child is the newest change to each number, so the controller's guard sees
-    every client path as released with it. Returns the pin and the stamp.
-    """
-    pin = state / "pinned-source.git"
-    if not (pin / "HEAD").is_file():
-        subprocess.run(["git", "init", "--bare", "--quiet", str(pin)], check=True)
-    common = Path(git(source, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    (pin / "objects" / "info").mkdir(parents=True, exist_ok=True)
-    (pin / "objects" / "info" / "alternates").write_text(f"{common / 'objects'}\n")
-    # The pin owns only its stamp commits. Drop the refs an earlier run left so
-    # a replaced or rewritten source clone cannot leave one naming objects it
-    # no longer has.
-    for ref in git(pin, "for-each-ref", "--format=%(refname)", "refs/remotes").splitlines():
-        subprocess.run(["git", "-C", str(pin), "update-ref", "-d", ref], check=True)
-    subprocess.run(["git", "-C", str(pin), "worktree", "prune"], check=True)
-    subprocess.run(["git", "-C", str(pin), "config", "remote.origin.url", str(pin)], check=True)
-    try:
-        stamped = mobile_build.stamp_commit(pin, commit, build)
-    except mobile_build.MobileBuildError as exc:
-        raise ValueError(str(exc)) from exc
-    subprocess.run(["git", "-C", str(pin), "update-ref", "refs/heads/main", stamped], check=True)
-    return pin, stamped
-
-
 def platforms_for_paths(paths: tuple[str, ...]) -> list[str]:
     platforms = []
     if any(p in APPLE_RELEASE_FILES or p.startswith(APPLE_RELEASE_PATHS) for p in paths):
@@ -133,10 +95,15 @@ def release(base: str, head: str) -> None:
             print("No mobile release inputs changed.")
             return
         try:
+            # Stores take main only, a number above the last one published
+            # here, and the tree mobile_build stamps: the one place a build
+            # tree comes from.
+            mobile_build.require_main(source, current)
             build = mobile_build.build_number(source, current)
+            mobile_build.require_above_published(state, platforms, build)
+            pin, stamped = mobile_build.release_source(source, state, current, build)
         except mobile_build.MobileBuildError as exc:
             raise ValueError(str(exc)) from exc
-        pin, stamped = pinned_source(source, state, current, build)
         print(f"Publishing Cinema {current} as build {build} (stamp commit {stamped}): "
               f"{', '.join(platforms)}", flush=True)
         variables = {
@@ -148,6 +115,10 @@ def release(base: str, head: str) -> None:
             # The commit the controller checks out and names in its receipts:
             # `current` plus the build-number stamp.
             "mobile_release_expected_commits": {"cinema": stamped},
+            # What the stamp was made from, for the controller's receipts:
+            # the stamp exists only in the pin, the source commit is on main.
+            "mobile_release_source_commits": {"cinema": current},
+            "mobile_release_build_numbers": {"cinema": build},
             "mobile_release_repositories": {
                 "cinema": {"source_path": str(pin), "metadata_kind": "plurx"},
             },
@@ -158,6 +129,8 @@ def release(base: str, head: str) -> None:
         # Enforce app, track and real uploads after any local signing overrides.
         command.extend(("-e", json.dumps(variables)))
         subprocess.run(command, cwd=ansible.parent, check=True)
+        mobile_build.record_published(state, platforms, build, current, stamped)
+        print(f"Recorded build {build} of {current} in {state / mobile_build.LEDGER}", flush=True)
 
 
 def main() -> int:

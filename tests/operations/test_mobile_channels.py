@@ -17,7 +17,6 @@ from validation import mobile_build
 from validation.mobile_channels import (
     changed_platforms,
     main,
-    pinned_source,
     platforms_for_paths,
     release,
     scope_platforms,
@@ -140,6 +139,8 @@ class MobileChannelsCase(unittest.TestCase):
         stamped = self.pin_git(pin, "rev-parse", "main")
         self.assertEqual(self.pin_git(pin, "rev-parse", "main^"), head)
         self.assertEqual(variables["mobile_release_expected_commits"], {"cinema": stamped})
+        # Receipts get the commit on main as well as the stamp made from it.
+        self.assertEqual(variables["mobile_release_source_commits"], {"cinema": head})
         build = int(self.run_git("rev-list", "--count", head))
         self.assertEqual(
             self.pin_git(pin, "show", "main:clients/android/app/build.gradle.kts"),
@@ -149,6 +150,16 @@ class MobileChannelsCase(unittest.TestCase):
             self.pin_git(pin, "show", "main:clients/apple/project.yml"),
             f'CURRENT_PROJECT_VERSION: "{build}"',
         )
+        self.assertEqual(variables["mobile_release_build_numbers"], {"cinema": build})
+        ledger = [
+            json.loads(line)
+            for line in (self.root / "state" / mobile_build.LEDGER).read_text().splitlines()
+        ]
+        self.assertEqual([row["platform"] for row in ledger], ["ios", "tvos", "android"])
+        for row in ledger:
+            self.assertEqual(
+                (row["build"], row["source_commit"], row["stamp_commit"]), (build, head, stamped)
+            )
 
     def test_store_failure_is_not_reported_as_success(self) -> None:
         head = self.change("android", 2)
@@ -242,6 +253,34 @@ class MobileChannelsCase(unittest.TestCase):
             previous = head
         self.assertEqual(builds, sorted(set(builds)))
 
+    def test_a_number_at_or_below_the_last_published_one_is_refused(self) -> None:
+        head = self.change("android", 1)
+        release(self.base, head)
+        (self.root / "command.json").unlink()
+        # The same commit again: the same number, already published.
+        with self.assertRaisesRegex(ValueError, "not above android build"):
+            release(self.base, head)
+        self.assertFalse((self.root / "command.json").exists())
+        # Apple has published nothing yet, so the same commit may still go.
+        apple = self.change("apple", 1)
+        release(head, apple)
+        # A rewritten main with fewer commits than the published one.
+        self.run_git("reset", "-q", "--hard", self.base)
+        rewritten = self.change("android", 2)
+        (self.root / "command.json").unlink()
+        with self.assertRaisesRegex(ValueError, "not above android build"):
+            release(self.base, rewritten)
+        self.assertFalse((self.root / "command.json").exists())
+
+    def test_a_failed_upload_records_nothing_and_may_be_retried(self) -> None:
+        head = self.change("android", 1)
+        with patch.dict(os.environ, {"PLAY_EXIT": "9"}):
+            with self.assertRaises(subprocess.CalledProcessError):
+                release(self.base, head)
+        self.assertFalse((self.root / "state" / mobile_build.LEDGER).exists())
+        release(self.base, head)
+        self.assertTrue((self.root / "state" / mobile_build.LEDGER).is_file())
+
     def test_a_comment_only_client_change_publishes_nothing(self) -> None:
         self.commit("clients/android/app/src/main/Player.kt", "val revision = 1\n")
         before = self.run_git("rev-parse", "HEAD")
@@ -291,10 +330,10 @@ class MobileChannelsCase(unittest.TestCase):
         state = self.root / "state"
         state.mkdir()
         first = self.change("android", 2)
-        pin, _ = pinned_source(self.source, state, first, 7)
+        pin, _ = mobile_build.release_source(self.source, state, first, 7)
         subprocess.run(["git", "-C", str(pin), "update-ref", "refs/remotes/origin/stale", first], check=True)
         second = self.change("android", 3)
-        _, stamped = pinned_source(self.source, state, second, 8)
+        _, stamped = mobile_build.release_source(self.source, state, second, 8)
         refs = subprocess.check_output(["git", "-C", str(pin), "for-each-ref", "--format=%(refname)"], text=True).split()
         self.assertEqual(refs, ["refs/heads/main"])
         self.assertEqual(self.pin_git(pin, "rev-parse", "main"), stamped)
@@ -306,6 +345,64 @@ class MobileChannelsCase(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             release(self.base, trigger)
         self.assertFalse((self.root / "command.json").exists())
+
+
+class EveryBuildPathStampsCase(unittest.TestCase):
+    """No path builds, uploads or installs the tree's development build.
+
+    The tree carries build 1. `validation/mobile_build.py` is the one place a
+    build tree comes from, and each path below goes through it; the Ansible
+    plays refuse a tree without a number (`noirr_mobile_metadata`, in the
+    Ansible repository).
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def read(self, path: str) -> str:
+        return (self.ROOT / path).read_text(encoding="utf-8")
+
+    def test_ship_hands_ansible_a_stamped_checkout_never_the_working_tree(self) -> None:
+        ship = self.read("scripts/ship")
+        self.assertIn('python3 -m validation.mobile_build "${STAMP_ARGS[@]}"', ship)
+        self.assertIn('STAMP_ARGS=(checkout --repo "$ROOT" --commit HEAD --fetch)', ship)
+        self.assertIn('-e "plurx_repo=$MOBILE_REPO"', ship)
+        self.assertNotIn('plurx_repo=$ROOT"', ship)
+        # A TestFlight upload is a store upload: main only.
+        self.assertIn('[ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store)', ship)
+
+    def test_ship_physical_builds_only_the_stamped_checkout(self) -> None:
+        script = self.read("scripts/ship-physical")
+        self.assertIn('checkout --repo "$SOURCE_REPO" --commit "$COMMIT" --state "$RELEASE_ROOT"', script)
+        self.assertIn('require-stamped "$WORKTREE"', script)
+        self.assertNotIn('worktree add', script)
+        self.assertLess(script.index('require-stamped "$WORKTREE"'), script.index("xcodegen generate"))
+
+    def test_the_release_job_takes_its_tree_number_and_floor_from_mobile_build(self) -> None:
+        channels = self.read("validation/mobile_channels.py")
+        for call in ("mobile_build.require_main(", "mobile_build.build_number(",
+                     "mobile_build.require_above_published(", "mobile_build.release_source(",
+                     "mobile_build.record_published("):
+            self.assertIn(call, channels)
+        self.assertLess(channels.index("mobile_build.require_above_published("),
+                        channels.index('"ansible-playbook"'))
+        self.assertLess(channels.index("subprocess.run(command, cwd=ansible.parent, check=True)"),
+                        channels.index("mobile_build.record_published("))
+
+    def test_no_other_script_or_recipe_runs_a_release_build(self) -> None:
+        """A new path that assembles a release would bypass the number."""
+        owners = {"Makefile", "scripts/ship-physical"}
+        found = set()
+        for path in [self.ROOT / "Makefile", *sorted((self.ROOT / "scripts").iterdir())]:
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if ":app:assembleRelease" in text or ":app:bundleRelease" in text:
+                found.add(str(path.relative_to(self.ROOT)))
+        self.assertEqual(found - owners, set(), "these build a release without a build number")
+        self.assertIn("-PplurxBuildNumber=$$build :app:assembleRelease", self.read("Makefile"))
 
 
 if __name__ == "__main__":

@@ -170,45 +170,24 @@ log "resolving origin/main in $SOURCE_REPO"
 git -C "$SOURCE_REPO" fetch origin '+refs/heads/main:refs/remotes/origin/main' --quiet
 COMMIT="$(git -C "$SOURCE_REPO" rev-parse origin/main)"
 SHORT="${COMMIT:0:12}"
-WORKTREE="$RELEASE_ROOT/plurx-$SHORT"
 
 log "release commit $SHORT — $(git -C "$SOURCE_REPO" log -1 --format=%s "$COMMIT")"
 
-mkdir -p "$RELEASE_ROOT"
-# /private/tmp is swept by macOS, which leaves the registration behind and
-# breaks every later `worktree add`. Prune before touching anything.
-git -C "$SOURCE_REPO" worktree prune
-
-if [[ ! -d "$WORKTREE" ]]; then
-  log "creating release worktree at $WORKTREE"
-  run git -C "$SOURCE_REPO" worktree add --detach "$WORKTREE" "$COMMIT"
-else
-  log "reusing release worktree at $WORKTREE"
-fi
-
+# The tree carries no store build number. validation/mobile_build.py is the
+# one place a build tree comes from: it numbers the commit (the count of
+# commits it contains) and hands back a checkout of that commit plus a stamp
+# commit carrying the number in both manifests. It lives under RELEASE_ROOT,
+# so the working checkout is never touched; a reused checkout keeps its build
+# output and has tracked drift discarded.
+MOBILE_BUILD=(env PYTHONPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" python3 -m validation.mobile_build)
+PIN="$RELEASE_ROOT/pinned-source.git"
 if [[ $DRY_RUN -eq 0 ]]; then
-  ACTUAL="$(git -C "$WORKTREE" rev-parse HEAD)"
-  [[ "$ACTUAL" == "$COMMIT" ]] || fail \
-    "worktree $WORKTREE is at $ACTUAL, not $COMMIT. Clear it with: git -C $SOURCE_REPO worktree remove --force $WORKTREE"
-  # A matching sha says nothing about the files. Restore tracked drift rather
-  # than shipping somebody's edit; untracked build output is left alone so
-  # artifact reuse still works.
-  # The two manifests are excluded: a reused worktree carries the build number
-  # this script stamped into them last time, which is restored and re-stamped
-  # below rather than reported as somebody's edit.
-  MANIFESTS=(clients/android/app/build.gradle.kts clients/apple/project.yml)
-  if [[ -n "$(git -C "$WORKTREE" status --porcelain --untracked-files=no -- . \
-      ":(exclude)${MANIFESTS[0]}" ":(exclude)${MANIFESTS[1]}")" ]]; then
-    warn "release worktree had tracked drift; restoring to $SHORT"
-    git -C "$WORKTREE" reset --hard "$COMMIT" --quiet
-  fi
-  # The tree carries no store build number: it is the count of commits in the
-  # commit being shipped (validation/mobile_build.py), written into this
-  # disposable worktree's manifests so both builds and the downgrade check
-  # below see the number the stores would give the same commit.
-  git -C "$WORKTREE" checkout --quiet "$COMMIT" -- "${MANIFESTS[@]}"
-  (cd "$WORKTREE" && python3 -m validation.mobile_build stamp-tree "$WORKTREE" --commit "$COMMIT" >/dev/null) \
-    || fail "could not assign a build number to $SHORT"
+  WORKTREE="$("${MOBILE_BUILD[@]}" checkout --repo "$SOURCE_REPO" --commit "$COMMIT" --state "$RELEASE_ROOT")" \
+    || fail "could not prepare a stamped release checkout of $SHORT"
+  log "release checkout $WORKTREE"
+else
+  WORKTREE="$RELEASE_ROOT/checkouts/plurx-<stamp of $SHORT>"
+  log "[dry-run] would check out $SHORT stamped as build $("${MOBILE_BUILD[@]}" number --repo "$SOURCE_REPO" --commit "$COMMIT" 2>/dev/null || echo '?')"
 fi
 
 APPLE_DIR="$WORKTREE/clients/apple"
@@ -263,6 +242,12 @@ if [[ $DRY_RUN -eq 0 ]]; then
   [[ -n "$VERSION" && -n "$APPLE_BUILD" && -n "$ANDROID_CODE" ]] || fail "version check returned nothing"
 else
   VERSION="?"; APPLE_BUILD="?"; ANDROID_CODE="?"
+fi
+
+if [[ $DRY_RUN -eq 0 ]]; then
+  # Nothing is built, signed or installed from a tree that still carries the
+  # development build.
+  "${MOBILE_BUILD[@]}" require-stamped "$WORKTREE" >/dev/null || fail "refusing to ship an unstamped tree"
 fi
 
 log "shipping plurx $VERSION — Apple build $APPLE_BUILD, Android versionCode $ANDROID_CODE"
@@ -529,8 +514,8 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
 fi
 
 if [[ $KEEP_WORKTREE -eq 0 ]]; then
-  git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE" 2>/dev/null || true
-  git -C "$SOURCE_REPO" worktree prune
+  git -C "$PIN" worktree remove --force "$WORKTREE" 2>/dev/null || true
+  git -C "$PIN" worktree prune
 else
   log "release worktree kept at $WORKTREE"
 fi

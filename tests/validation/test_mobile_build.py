@@ -15,9 +15,17 @@ from validation.mobile_build import (
     APPLE,
     MobileBuildError,
     build_number,
+    declared_builds,
+    on_main,
+    published,
+    record_published,
+    release_checkout,
+    release_source,
+    require_above_published,
+    require_main,
+    require_stamped,
     stamp_commit,
     stamp_manifests,
-    stamp_tree,
 )
 
 ANDROID_TEXT = 'android {\n    defaultConfig {\n        versionCode = 1\n        versionName = "0.8.0"\n    }\n}\n'
@@ -57,7 +65,12 @@ class MobileBuildCase(unittest.TestCase):
     def commit(self, message: str) -> str:
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "--allow-empty", "-m", message)
+        self.sync_main()
         return git(self.root, "rev-parse", "HEAD")
+
+    def sync_main(self) -> None:
+        """`origin/main` follows the local `main`, as after a fetch."""
+        git(self.root, "update-ref", "refs/remotes/origin/main", git(self.root, "rev-parse", "main"))
 
     def branch(self, name: str, path: str) -> None:
         git(self.root, "checkout", "-q", "-b", name, self.base)
@@ -67,6 +80,7 @@ class MobileBuildCase(unittest.TestCase):
 
     def merge(self, name: str) -> str:
         git(self.root, "merge", "-q", "--no-ff", "-m", f"merge {name}", name)
+        self.sync_main()
         return git(self.root, "rev-parse", "HEAD")
 
     def test_two_client_branches_merge_in_either_order_and_every_release_rises(self):
@@ -75,6 +89,7 @@ class MobileBuildCase(unittest.TestCase):
         for order in (("apple-change", "android-change"), ("android-change", "apple-change")):
             with self.subTest(order=order):
                 git(self.root, "reset", "-q", "--hard", self.base)
+                self.sync_main()
                 numbers = [build_number(self.root, self.base)]
                 for name in order:
                     numbers.append(build_number(self.root, self.merge(name)))
@@ -88,7 +103,7 @@ class MobileBuildCase(unittest.TestCase):
         self.assertEqual(build_number(self.root, head), 2)
         self.assertEqual(build_number(self.root, head), build_number(self.root, "HEAD"))
         clone = self.root.parent / "clone"
-        subprocess.run(["git", "clone", "-q", str(self.root), str(clone)], check=True)
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(self.root), str(clone)], check=True)
         self.assertEqual(build_number(clone, head), 2)
 
     def test_a_fast_forward_of_main_to_a_side_history_still_rises(self):
@@ -102,6 +117,7 @@ class MobileBuildCase(unittest.TestCase):
         git(self.root, "merge", "-q", "--no-ff", "-m", "merge main into effort", "main")
         git(self.root, "checkout", "-q", "main")
         git(self.root, "merge", "-q", "--ff-only", "effort")
+        self.sync_main()
         self.assertGreater(build_number(self.root, "main"), before)
 
     def test_a_shallow_clone_or_a_foreign_history_is_refused(self):
@@ -129,13 +145,99 @@ class MobileBuildCase(unittest.TestCase):
         with self.assertRaisesRegex(MobileBuildError, "exactly one"):
             stamp_manifests(ANDROID_TEXT, APPLE_TEXT * 2, 15680)
 
-    def test_a_disposable_checkout_is_stamped_in_place(self):
-        stamp_tree(self.root, 42)
-        self.assertIn("versionCode = 42\n", (self.root / ANDROID).read_text())
-        self.assertIn('CURRENT_PROJECT_VERSION: "42"\n', (self.root / APPLE).read_text())
+    def test_a_branch_build_takes_the_number_of_the_main_commit_it_left(self):
+        base_number = build_number(self.root, self.base)
+        git(self.root, "checkout", "-q", "-b", "feature")
+        for index in range(5):
+            self.write("clients/android/app/src/main/F.kt", f"val f = {index}\n")
+            git(self.root, "add", "-A")
+            git(self.root, "commit", "-q", "-m", f"feature {index}")
+        feature = git(self.root, "rev-parse", "HEAD")
+        self.assertFalse(on_main(self.root, feature))
+        # Five commits ahead, and still numbered as its base: it does not
+        # outrank the main build that follows, so a device upgrades from it.
+        self.assertEqual(build_number(self.root, feature), base_number)
+        git(self.root, "checkout", "-q", "main")
+        later = self.commit("main moves on")
+        self.assertGreater(build_number(self.root, later), build_number(self.root, feature))
+        with self.assertRaisesRegex(MobileBuildError, "is not on origin/main"):
+            require_main(self.root, feature)
+        require_main(self.root, later)
+        # A hotfix cut from an old main commit is a branch too, until it lands.
+        git(self.root, "checkout", "-q", "-b", "hotfix", self.base)
+        self.write("clients/android/app/src/main/H.kt", "val h = 1\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "hotfix")
+        self.assertEqual(build_number(self.root, "hotfix"), base_number)
+        git(self.root, "checkout", "-q", "main")
+        landed = self.merge("hotfix")
+        self.assertGreater(build_number(self.root, landed), build_number(self.root, later))
+
+    def test_a_repository_without_origin_main_cannot_number_a_build(self):
+        git(self.root, "update-ref", "-d", "refs/remotes/origin/main")
+        with self.assertRaisesRegex(MobileBuildError, "has no origin/main"):
+            build_number(self.root)
+
+    def test_an_unstamped_or_half_stamped_checkout_is_refused(self):
+        with self.assertRaisesRegex(MobileBuildError, "is not a release source"):
+            require_stamped(self.root)
+        self.write(ANDROID, ANDROID_TEXT.replace("versionCode = 1", "versionCode = 42"))
+        with self.assertRaisesRegex(MobileBuildError, "is not a release source"):
+            require_stamped(self.root)
+        self.write(APPLE, APPLE_TEXT.replace('VERSION: "1"', 'VERSION: "42"'))
+        self.assertEqual(require_stamped(self.root), {"android": 42, "apple": 42})
+
+    def test_a_release_checkout_is_stamped_reused_and_restored(self):
+        self.write("clients/android/app/src/main/B.kt", "fun b() {}\n")
+        head = self.commit("client change")
+        state = self.root.parent / "state"
+        checkout, build, stamped = release_checkout(self.root, state, "HEAD")
+        self.assertEqual(build, build_number(self.root, head))
+        self.assertEqual(declared_builds(checkout), {"android": build, "apple": build})
+        self.assertEqual(git(checkout, "rev-parse", "HEAD^"), head)
+        self.assertEqual(checkout.name, f"plurx-{stamped[:12]}")
+        # Build output survives a second call; an edit to a tracked file does not.
+        (checkout / "build-output").write_text("kept")
+        (checkout / ANDROID).write_text("versionCode = 1\n")
+        again, _, _ = release_checkout(self.root, state, head)
+        self.assertEqual(again, checkout)
+        self.assertEqual((checkout / "build-output").read_text(), "kept")
+        self.assertEqual(declared_builds(checkout)["android"], build)
+        # The working checkout was never touched.
+        self.assertEqual(git(self.root, "status", "--porcelain"), "")
+        self.assertEqual((self.root / ANDROID).read_text(), ANDROID_TEXT)
+        # The next commit gets its own directory.
+        self.commit("another")
+        newer, newer_build, _ = release_checkout(self.root, state, "HEAD")
+        self.assertNotEqual(newer, checkout)
+        self.assertGreater(newer_build, build)
+
+    def test_the_publication_ledger_is_a_high_water_mark_per_platform(self):
+        state = self.root.parent / "state"
+        with patch.dict(mobile_build.LAST_CLAIMED, {"apple": 301, "android": 207}):
+            # Nothing recorded yet: the floor is the last hand-claimed build.
+            require_above_published(state, ["android"], 208)
+            with self.assertRaisesRegex(MobileBuildError, "not above android build 207"):
+                require_above_published(state, ["android"], 207)
+            with self.assertRaisesRegex(MobileBuildError, "not above ios build 301"):
+                require_above_published(state, ["ios", "android"], 250)
+        record_published(state, ["ios", "tvos"], 500, "a" * 40, "b" * 40)
+        record_published(state, ["android"], 480, "c" * 40, "d" * 40)
+        record_published(state, ["android"], 470, "e" * 40, "f" * 40)
+        latest = published(state)
+        self.assertEqual({key: row["build"] for key, row in latest.items()},
+                         {"ios": 500, "tvos": 500, "android": 480})
         self.assertEqual(
-            git(self.root, "status", "--porcelain").split(), ["M", ANDROID, "M", APPLE]
+            (latest["ios"]["source_commit"], latest["ios"]["stamp_commit"]), ("a" * 40, "b" * 40)
         )
+        require_above_published(state, ["android"], 481)
+        for platforms, build in ((["android"], 480), (["android"], 479), (["tvos", "android"], 500)):
+            with self.subTest(platforms=platforms, build=build):
+                with self.assertRaisesRegex(MobileBuildError, "cannot be published again"):
+                    require_above_published(state, platforms, build)
+        (state / mobile_build.LEDGER).write_text("not json\n")
+        with self.assertRaisesRegex(MobileBuildError, "not a publication record"):
+            published(state)
 
     def pin(self) -> Path:
         pin = self.root.parent / "pin.git"
@@ -181,10 +283,9 @@ class MobileBuildCase(unittest.TestCase):
         self.write("clients/android/app/src/main/B.kt", "fun b() {}\n")
         self.write("clients/apple/Sources/A.swift", "let a = 1\n")
         head = self.commit("client changes after the seed")
-        pin = self.pin()
         build = build_number(self.root, head)
-        stamped = stamp_commit(pin, head, build)
-        git(pin, "update-ref", "refs/heads/main", stamped)
+        pin, stamped = release_source(self.root, self.root.parent / "state", head, build)
+        self.assertEqual(git(pin, "rev-parse", "main"), stamped)
         checkout = self.root.parent / "release"
         git(pin, "worktree", "add", "-q", "--detach", str(checkout), "main")
 

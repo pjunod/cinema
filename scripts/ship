@@ -171,12 +171,30 @@ if [ $((DO_APPLE + DO_ANDROID)) -gt 0 ]; then
     MOBILE_TAGS="${MOBILE_TAGS}android"
   fi
 
+  # The tree carries no store build number, so the play never builds this
+  # checkout. validation/mobile_build.py — the one place a build tree comes
+  # from — numbers the commit and hands back a checkout of it plus a stamp
+  # commit carrying the number in both manifests; the play refuses a tree
+  # without one. A TestFlight upload takes a commit on main only: a branch
+  # commit shares its number with the main commit it left.
+  MOBILE_REPO="$ROOT"
+  if [ "$DRY" -eq 0 ]; then
+    if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
+      note "uncommitted changes are not shipped: the build is of $(git -C "$ROOT" rev-parse --short HEAD)"
+    fi
+    STAMP_ARGS=(checkout --repo "$ROOT" --commit HEAD --fetch)
+    [ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store)
+    MOBILE_REPO="$(PYTHONPATH="$ROOT" python3 -m validation.mobile_build "${STAMP_ARGS[@]}")" \
+      || die "could not prepare a stamped release checkout (see above)"
+    note "release checkout: $MOBILE_REPO"
+  fi
+
   MOBILE_ARGS=(
     ansible-playbook
     -i "$ANSIBLE_INVENTORY"
     "$ANSIBLE_DIR/mobile.yml"
     --tags "$MOBILE_TAGS"
-    -e "plurx_repo=$ROOT"
+    -e "plurx_repo=$MOBILE_REPO"
   )
   if [ -n "$MOBILE_VARS_FILE" ]; then
     MOBILE_ARGS+=(-e "@$MOBILE_VARS_FILE")
