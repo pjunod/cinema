@@ -76,8 +76,7 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           {
             echo "### ci image"
-            echo "source \`$GITHUB_SHA\`, published \`$image\`"
-            echo "pin \`${image#*@}\` in every job that names \`plurx-ci@sha256:\`"
+            echo "source \`$GITHUB_SHA\`, published \`$image\` (not yet probed; do not pin it until the probe job passes)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The image just published, where the general lane runs it and with the
@@ -118,3 +117,14 @@ jobs:
         run: |
           owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
           chown -R "$owner" "$GITHUB_WORKSPACE"
+      # Last, and only when every step above passed: the instruction to pin
+      # is written by the run that proved the digest, never by the publish.
+      - name: Digest to pin
+        if: success()
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          {
+            echo "### ci image probe passed"
+            echo "pin \`${IMAGE#*@}\` in every job that names \`plurx-ci@sha256:\`"
+          } >> "$GITHUB_STEP_SUMMARY"

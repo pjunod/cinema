@@ -5236,6 +5236,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("          fetch-depth: 0\n", probe)
         self.assertIn("python3 scripts/provision-hiqlite-upstream", probe)
         self.assertIn("        run: python3 scripts/ci-image-probe\n", probe)
+        # Only the probe's last step, on success, tells the reader to pin.
+        self.assertNotIn("pin \\`", publish)
+        self.assertIn("      - name: Digest to pin\n        if: success()\n", probe)
+        self.assertGreater(probe.index("      - name: Digest to pin"), probe.index("python3 scripts/ci-image-probe"))
         probe_script = read("scripts/ci-image-probe")
         self.assertIn('SUITES = ("tests/validation", "tests/operations")', probe_script)
         # The reviewed skips: every entry has a reason, and none excuses a
