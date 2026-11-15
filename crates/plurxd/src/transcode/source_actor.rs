@@ -2146,13 +2146,15 @@ impl TranscodeManager {
 /// planner, never a B claim — and its own scanned file facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceDeliveryRefusal {
-    /// Any Dolby Vision delivery: preservation, the Profile 7 conversion, a
-    /// re-encode of a Dolby Vision source (the RPU renderer's per-source
-    /// proof is not Source-owned work yet) or native subtitles beside one.
+    /// A re-encode of a Profile 5 source: the only Dolby Vision shape whose
+    /// encode needs the RPU renderer, and that renderer's per-source pixel
+    /// proof is not Source-owned work yet. Preservation, the Profile 7
+    /// conversion (an in-process fragment rewrite), a compatible-base encode
+    /// (the ordinary HDR10/HLG base route) and native subtitles beside Dolby
+    /// Vision are all delivered exactly as local playback delivers them.
     DolbyVision,
-    /// A shape this Source does not build: native subtitles over an HDR
-    /// source, a burn beside native subtitles, a burn of a downloaded sidecar
-    /// or of a track the scan does not hold.
+    /// A shape this Source does not build: a burn beside native subtitles, a
+    /// burn of a downloaded sidecar or of a track the scan does not hold.
     Unsupported,
 }
 
@@ -2167,22 +2169,10 @@ pub(crate) fn source_delivery_refusal(
     file: &plurx_core::domain::MediaFile,
     (native, _): (bool, Option<i64>),
 ) -> Option<SourceDeliveryRefusal> {
-    if let SessionKind::Copy {
-        preserve_dolby_vision,
-        convert_dolby_vision,
-        ..
-    } = request.kind
-    {
-        if preserve_dolby_vision || convert_dolby_vision {
-            return Some(SourceDeliveryRefusal::DolbyVision);
-        }
-    }
-    if plurx_core::playback::is_dolby_vision(file) && (source_recipe_is_encoded(request) || native)
+    if source_recipe_is_encoded(request)
+        && plurx_core::playback::dolby_vision_needs_rpu_render(file)
     {
         return Some(SourceDeliveryRefusal::DolbyVision);
-    }
-    if native && plurx_core::playback::hdr_route(file).is_some() {
-        return Some(SourceDeliveryRefusal::Unsupported);
     }
     if let Some(index) = request.subtitle_burn {
         let embedded = usize::try_from(index)

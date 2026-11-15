@@ -2550,8 +2550,10 @@ pub(crate) enum SourceFixtureMode {
     /// PQ on HEVC Main10 and asks HDR10, on a node with the HDR10 passthrough
     /// proof: the Source encodes Main10 PQ.
     Hdr10,
-    /// The Encoded fixture scanned as Dolby Vision: refused before a claim.
-    DolbyVisionEncoded,
+    /// The Encoded fixture scanned as Dolby Vision Profile 5 (no compatible
+    /// base): the one encode whose RPU renderer proof is not Source-owned yet,
+    /// refused before a claim.
+    DolbyVisionProfile5Encoded,
 }
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture_with(
@@ -2731,7 +2733,7 @@ async fn build_real_source_start_fixture(
             | SourceFixtureMode::BurnBitmap
             | SourceFixtureMode::Hdr10Sdr
             | SourceFixtureMode::Hdr10
-            | SourceFixtureMode::DolbyVisionEncoded
+            | SourceFixtureMode::DolbyVisionProfile5Encoded
     );
     let (width, height) = if matches!(mode, SourceFixtureMode::Hdr10) {
         (1920, 1080)
@@ -2937,10 +2939,10 @@ async fn build_real_source_start_fixture(
             .await
             .expect("actual scanned HDR10 facts");
     }
-    if matches!(mode, SourceFixtureMode::DolbyVisionEncoded) {
+    if matches!(mode, SourceFixtureMode::DolbyVisionProfile5Encoded) {
         client
             .execute(
-                "UPDATE files SET hdr='dolby_vision' WHERE id=1",
+                "UPDATE files SET hdr='dolby_vision',hdr_format='Dolby Vision · Profile 5',dv_profile=5,dv_bl_compat_id=0,dv_rpu_present=1 WHERE id=1",
                 hiqlite::params!(),
             )
             .await

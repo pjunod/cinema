@@ -3923,3 +3923,276 @@ async fn source_native_control_returns_while_parked_caption_work_retains_one_gua
 async fn source_sparse_input_reserves_before_write_and_releases_only_after_close() {
     Box::pin(source_copy_preadmission_fixture(65)).await;
 }
+
+fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> SessionRequest {
+    SessionRequest {
+        source_telemetry: None,
+        continuous_media: None,
+        dv_processing_destination: None,
+        sdr_master_codecs: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        audio_delivery: None,
+        audio_claim: None,
+        quality_catalog: None,
+        candidate_context: None,
+        control_sequence: None,
+        file_id: 1,
+        playback_id: "source-delivery-policy".into(),
+        request_id: None,
+        automatic: false,
+        previous_session_id: None,
+        reopen_reason: None,
+        kind,
+        start_seconds: 0.0,
+        audio_index: None,
+        subtitle_burn,
+        audio_offset_ms: 0,
+        hdr10: false,
+        presentation: Default::default(),
+        block_budget_secs: None,
+        transport: None,
+    }
+}
+
+fn delivery_policy_copy(preserve: bool, convert: bool) -> SessionKind {
+    SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: preserve,
+        convert_dolby_vision: convert,
+        dual_layer_as_copied: false,
+    }
+}
+
+/// A scanned HEVC source with the given coarse range, label and Dolby Vision
+/// record — the three facts the delivery policy reads.
+fn delivery_policy_file(
+    hdr: Option<&str>,
+    hdr_format: Option<&str>,
+    profile: Option<i64>,
+    bl_compat_id: Option<i64>,
+) -> plurx_core::domain::MediaFile {
+    plurx_core::domain::MediaFile {
+        downloaded_subtitles: Vec::new(),
+        id: 1,
+        item_id: 1,
+        path: std::path::PathBuf::from("/media/source-delivery-policy.mkv"),
+        size: 1,
+        mtime: 1,
+        duration_ms: Some(1_000),
+        container: Some("matroska".into()),
+        video_codec: Some("hevc".into()),
+        video_codec_tag: None,
+        field_order: None,
+        video_profile: Some("Main 10".into()),
+        width: Some(3840),
+        height: Some(2160),
+        bit_depth: Some(10),
+        hdr: hdr.map(Into::into),
+        hdr_format: hdr_format.map(Into::into),
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
+        bitrate: Some(20_000_000),
+        audio_streams: vec![],
+        subtitle_streams: vec![],
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+        dolby_vision: plurx_core::domain::DolbyVisionFacts {
+            profile,
+            level: profile.map(|_| 6),
+            bl_compat_id,
+            el_present: Some(profile == Some(7)),
+            rpu_present: profile.map(|_| true),
+        },
+    }
+}
+
+fn delivery_policy_profile8_1() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+        Some(8),
+        Some(1),
+    )
+}
+
+fn delivery_policy_profile8_4() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.4 (HLG-compatible)"),
+        Some(8),
+        Some(4),
+    )
+}
+
+fn delivery_policy_profile7() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        Some(7),
+        Some(6),
+    )
+}
+
+fn delivery_policy_profile5() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 5"),
+        Some(5),
+        Some(0),
+    )
+}
+
+#[test]
+fn source_delivery_policy_admits_dolby_vision_preserve_and_convert_copies() {
+    let no_native = (false, None);
+    for (name, file, preserve, convert) in [
+        ("P8.1 preserve", delivery_policy_profile8_1(), true, false),
+        ("P8.4 preserve", delivery_policy_profile8_4(), true, false),
+        ("P5 preserve", delivery_policy_profile5(), true, false),
+        (
+            "P7 to P8.1 convert",
+            delivery_policy_profile7(),
+            false,
+            true,
+        ),
+        ("P7 base strip", delivery_policy_profile7(), false, false),
+        (
+            "P8.1 base strip",
+            delivery_policy_profile8_1(),
+            false,
+            false,
+        ),
+    ] {
+        let request = delivery_policy_request(delivery_policy_copy(preserve, convert), None);
+        assert_eq!(
+            source_delivery_refusal(&request, &file, no_native),
+            None,
+            "{name}: a Dolby Vision copy is an in-process rewrite local delivers; the Source must too"
+        );
+    }
+}
+
+#[test]
+fn source_delivery_policy_admits_native_subtitles_over_hdr10_hlg_and_dolby_vision() {
+    let native = (true, Some(0));
+    for (name, file, kind) in [
+        (
+            "HDR10 copy",
+            delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None),
+            delivery_policy_copy(false, false),
+        ),
+        (
+            "HLG copy",
+            delivery_policy_file(Some("hlg"), Some("HLG"), None, None),
+            delivery_policy_copy(false, false),
+        ),
+        (
+            "HDR10 encode",
+            delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None),
+            SessionKind::Transcode { height: 1080 },
+        ),
+        (
+            "P8.1 preserve",
+            delivery_policy_profile8_1(),
+            delivery_policy_copy(true, false),
+        ),
+        (
+            "P7 convert",
+            delivery_policy_profile7(),
+            delivery_policy_copy(false, true),
+        ),
+        (
+            "P5 preserve",
+            delivery_policy_profile5(),
+            delivery_policy_copy(true, false),
+        ),
+        (
+            "P7 compatible-base encode",
+            delivery_policy_profile7(),
+            SessionKind::Transcode { height: 1080 },
+        ),
+    ] {
+        let request = delivery_policy_request(kind, None);
+        assert_eq!(
+            source_delivery_refusal(&request, &file, native),
+            None,
+            "{name}: native subtitles beside HDR or Dolby Vision need nothing range-specific"
+        );
+    }
+}
+
+#[test]
+fn source_delivery_policy_admits_compatible_base_dolby_vision_encodes() {
+    for (name, file) in [
+        ("P7 HDR10 base", delivery_policy_profile7()),
+        ("P8.1 HDR10 base", delivery_policy_profile8_1()),
+        ("P8.4 HLG base", delivery_policy_profile8_4()),
+        (
+            "label-only P8.1",
+            delivery_policy_file(
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+                None,
+                None,
+            ),
+        ),
+    ] {
+        assert!(
+            !plurx_core::playback::dolby_vision_needs_rpu_render(&file),
+            "{name}: a compatible base encodes through the ordinary base route"
+        );
+        for native in [(false, None), (true, Some(0))] {
+            let request = delivery_policy_request(SessionKind::Transcode { height: 1080 }, None);
+            assert_eq!(
+                source_delivery_refusal(&request, &file, native),
+                None,
+                "{name} {native:?}: a compatible-base encode spawns no RPU proof"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_delivery_policy_refuses_only_profile5_encodes_until_the_proof_is_owned() {
+    let profile5 = delivery_policy_profile5();
+    assert!(plurx_core::playback::dolby_vision_needs_rpu_render(
+        &profile5
+    ));
+    let encode = delivery_policy_request(SessionKind::Transcode { height: 1080 }, None);
+    assert_eq!(
+        source_delivery_refusal(&encode, &profile5, (false, None)),
+        Some(SourceDeliveryRefusal::DolbyVision)
+    );
+    assert_eq!(
+        source_delivery_refusal(&encode, &profile5, (true, Some(0))),
+        Some(SourceDeliveryRefusal::DolbyVision)
+    );
+    // A burn always encodes, so a burn over Profile 5 needs the renderer too.
+    let burn = delivery_policy_request(delivery_policy_copy(false, false), Some(0));
+    assert_eq!(
+        source_delivery_refusal(&burn, &profile5, (false, None)),
+        Some(SourceDeliveryRefusal::DolbyVision)
+    );
+    // Copies of the same source need no renderer.
+    for kind in [
+        delivery_policy_copy(true, false),
+        delivery_policy_copy(false, false),
+    ] {
+        let request = delivery_policy_request(kind, None);
+        assert_eq!(
+            source_delivery_refusal(&request, &profile5, (true, Some(0))),
+            None
+        );
+    }
+    // The burn arm is unchanged: a burn of a track the scan does not hold.
+    let hdr10 = delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None);
+    assert_eq!(
+        source_delivery_refusal(&burn, &hdr10, (false, None)),
+        Some(SourceDeliveryRefusal::Unsupported)
+    );
+}

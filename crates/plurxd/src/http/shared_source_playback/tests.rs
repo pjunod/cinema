@@ -915,7 +915,8 @@ async fn sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no_cleanup() {
     use axum::response::IntoResponse;
-    let fixture = real_source_start_fixture_with(SourceFixtureMode::DolbyVisionEncoded, None).await;
+    let fixture =
+        real_source_start_fixture_with(SourceFixtureMode::DolbyVisionProfile5Encoded, None).await;
     let start = || {
         fixture_start(
             axum::extract::State((*fixture.state).clone()),
@@ -939,7 +940,7 @@ async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no
     refused(
         start()
             .await
-            .expect_err("DV encode has no Source-owned RPU preparation"),
+            .expect_err("a Profile 5 encode has no Source-owned RPU preparation"),
     )
     .await;
     let entries = fixture
