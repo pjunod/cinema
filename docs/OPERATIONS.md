@@ -2136,11 +2136,11 @@ stays `max_in_snapshot_log_to_keep = 1`.
 
 Snapshot builds check `2 × live DB bytes + max(live WAL bytes, 32 MiB) +
 64 MiB` on the state-machine filesystem before requesting the writer cut.
-Insufficient or unknown space defers for ten seconds per recheck, bounded
-by ten minutes; expiry attempts the existing path and cannot claim success
-on a full disk. `plurx_raft_snapshot_deferrals_total{reason="storage"}` counts
-retries; `plurx_raft_snapshot_required_storage_bytes` is the last known local
-floor, not a promise about current free space. Promotion needs the target's
+Below `DB + max(WAL, 32 MiB) + 64 MiB` a build cannot fit and waits,
+rechecked every 10 s, unbounded. Short of the floor but able to fit, or
+unknown, waits at most ten minutes, then attempts.
+`plurx_raft_snapshot_deferrals_total{reason="storage"}` counts retries;
+`plurx_raft_snapshot_required_storage_bytes` is the last known local floor. Promotion needs the target's
 fresh same-heartbeat floor proof and `max(512 MiB, floor)` headroom. Upgrade a
 legacy target before promotion; its old 512 MiB-only readiness is unknown for
 this proof. No new Developer toggle gates this automatic correctness path.
