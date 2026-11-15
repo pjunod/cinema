@@ -5913,7 +5913,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # recovery wait with timeout_at and UnknownSpan paces its re-reads with
 # sleep, both on the owner's own task (no new task or timer owner); two
 # test-only timeouts bound the outage-retirement fixture's waits.
-expected_occurrences = 2231
+# +4 measured on main after #1610 (cb9bba471, a processed trial claims
+# its own viewer's encoder permit), which landed without updating this
+# ledger; reconciled here so every lane's preflight passes again.
+expected_occurrences = 2235
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
