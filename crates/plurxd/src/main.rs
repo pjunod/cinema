@@ -2547,6 +2547,13 @@ async fn boot_observing(
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
     let membership_shutdown = state.membership.clone();
+    // The database Raft core's own terminal state. A core that quit on a
+    // fatal error (a full disk, a storage error, a panic) never serves again
+    // in this process, so it resolves the same drain a signal does and the
+    // process then exits non-zero for its supervisor to restart.
+    let raft_core_failure = state.replication.raft_core_failure();
+    let raft_core_fatal = Arc::new(std::sync::OnceLock::<String>::new());
+    let raft_core_fatal_drain = Arc::clone(&raft_core_fatal);
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let desktop_server = if let Some(desktop) = &desktop {
@@ -2611,6 +2618,14 @@ async fn boot_observing(
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
                 tracing::info!("local shutdown requested, draining");
+            }
+            error = raft_core_failure => {
+                tracing::error!(
+                    target: "plurx::cluster",
+                    %error,
+                    "the database Raft core stopped with a fatal error; draining and exiting"
+                );
+                let _ = raft_core_fatal_drain.set(error);
             }
         }
         // The drain's first act, while Raft and every listener are still
@@ -2697,7 +2712,19 @@ async fn boot_observing(
     {
         tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
-    served.map(|_| ())
+    served?;
+    exit_after_drain(raft_core_fatal.get())
+}
+
+/// How a drained daemon ends: cleanly after a signal or a leave, with an
+/// error, and so a non-zero exit status, after its database Raft core died.
+fn exit_after_drain(raft_core_fatal: Option<&String>) -> anyhow::Result<()> {
+    match raft_core_fatal {
+        None => Ok(()),
+        Some(error) => Err(anyhow::anyhow!(
+            "the database Raft core stopped with a fatal error: {error}"
+        )),
+    }
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
