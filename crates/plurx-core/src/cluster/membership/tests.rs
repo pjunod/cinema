@@ -10249,3 +10249,130 @@ fn media_route_directory_excludes_learners_when_the_route_requires_a_voter() {
         vec![2, 3, 4]
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_handoff_without_a_replicated_store_returns_at_once() {
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        MembershipManager::unavailable()
+            .handoff_for_shutdown()
+            .await,
+        super::ShutdownHandoff::NotReplicated,
+        "a node without Raft has no leadership to move"
+    );
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "a node without Raft must not wait at all before it drains"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_handoff_wait_is_bounded() {
+    use super::{bounded_shutdown_handoff, ShutdownHandoff, SHUTDOWN_HANDOFF_WAIT};
+
+    assert_eq!(
+        SHUTDOWN_HANDOFF_WAIT,
+        Duration::from_secs(10),
+        "the survivor wait plus the trigger's and one probe round's second each"
+    );
+    let started = tokio::time::Instant::now();
+    let (outcome, error) = tokio::time::timeout(
+        SHUTDOWN_HANDOFF_WAIT + Duration::from_secs(1),
+        bounded_shutdown_handoff(std::future::pending()),
+    )
+    .await
+    .expect("an attempt that never finishes must end at the handoff's own bound");
+    assert_eq!(outcome, ShutdownHandoff::TimedOut);
+    assert!(error.is_none());
+    assert_eq!(
+        started.elapsed(),
+        SHUTDOWN_HANDOFF_WAIT,
+        "the stop waits exactly the one bound"
+    );
+
+    assert_eq!(
+        bounded_shutdown_handoff(async { Ok(7) }).await.0,
+        ShutdownHandoff::HandedOff { successor: 7 }
+    );
+    assert_eq!(
+        bounded_shutdown_handoff(async { Err(MembershipError::ElectionCandidateUnavailable) })
+            .await
+            .0,
+        ShutdownHandoff::NoCandidate
+    );
+    let (failed, error) = bounded_shutdown_handoff(async {
+        Err(MembershipError::Internal(
+            "leadership did not move".to_owned(),
+        ))
+    })
+    .await;
+    assert_eq!(failed, ShutdownHandoff::Failed);
+    assert!(
+        error.is_some(),
+        "a failure keeps its error for the log line"
+    );
+    for (outcome, settled) in [
+        (ShutdownHandoff::NotReplicated, true),
+        (ShutdownHandoff::NotLeader, true),
+        (ShutdownHandoff::SoleVoter, true),
+        (ShutdownHandoff::HandedOff { successor: 2 }, true),
+        (ShutdownHandoff::NoCandidate, false),
+        (ShutdownHandoff::TimedOut, false),
+        (ShutdownHandoff::Failed, false),
+    ] {
+        assert_eq!(outcome.settled(), settled, "{outcome:?}");
+    }
+}
+
+#[test]
+fn shutdown_handoff_reuses_the_one_handoff_and_writes_nothing() {
+    let source = include_str!("../membership.rs");
+    let entry = method_body(source, "pub async fn handoff_for_shutdown(");
+    let outcome = method_body(source, "async fn shutdown_handoff_outcome(");
+    assert!(entry.contains("self.shutdown_handoff_outcome().await"));
+    let disable = outcome
+        .find("inner.client.disable_local_db_elections()")
+        .expect("every replicated stopping node switches its own elections off");
+    let leader = outcome
+        .find("metrics.current_leader != Some(inner.identity.raft_id)")
+        .expect("a non-leader returns without touching the network");
+    let sole = outcome
+        .find("voter_ids().count() <= 1")
+        .expect("a sole voter returns without touching the network");
+    let bounded = outcome
+        .find("bounded_shutdown_handoff(")
+        .expect("the handoff runs under the one bound");
+    let handoff = outcome
+        .find("self.handoff_leadership(inner.identity.raft_id, &status)")
+        .expect("the stop reuses the one existing handoff");
+    assert!(
+        disable < leader && leader < sole && sole < bounded && bounded < handoff,
+        "switch elections off first, then the local checks, then the bounded handoff"
+    );
+    assert_eq!(outcome.matches("handoff_leadership(").count(), 1);
+    assert!(
+        !outcome.contains("trigger_election("),
+        "no second election path"
+    );
+    let mut bodies = vec![entry, outcome];
+    for signature in [
+        "async fn handoff_leadership(",
+        "async fn await_survivor_leader(",
+        "async fn trigger_election(",
+        "pub async fn status(",
+        "async fn protocol_status_for_committed_members(",
+        "async fn committed_unready_nodes(",
+    ] {
+        bodies.push(method_body(source, signature));
+    }
+    for body in &bodies {
+        for forbidden in [".execute", ".txn(", "query_consistent", "Read::Quorum"] {
+            assert!(
+                !body.contains(forbidden),
+                "a stopping node's handoff writes nothing and reads only local state: \
+                 found {forbidden}"
+            );
+        }
+    }
+}

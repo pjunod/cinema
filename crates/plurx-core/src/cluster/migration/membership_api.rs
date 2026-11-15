@@ -568,3 +568,44 @@ async fn artwork_claims() {
         .is_none());
     selected.shutdown().await.expect("stop singleton");
 }
+
+#[test]
+fn a_sole_voter_shutdown_handoff_returns_at_once() {
+    startup_observer::run_plural_fixture("singleton-shutdown-handoff", sole_voter_handoff);
+}
+
+async fn sole_voter_handoff() {
+    use crate::cluster::membership::ShutdownHandoff;
+
+    let (_directory, selected) = singleton().await;
+    let manager = selected.membership_manager();
+    let client = selected.local_client().expect("local voter client");
+    let before = client.metrics_db().await.expect("sole voter metrics");
+    assert_eq!(
+        before.current_leader,
+        Some(before.id),
+        "the sole voter leads"
+    );
+    let started = Instant::now();
+    assert_eq!(
+        manager.handoff_for_shutdown().await,
+        ShutdownHandoff::SoleVoter,
+        "a sole voter has no successor to hand leadership to"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "a sole voter's stop must not wait for a successor: {:?}",
+        started.elapsed()
+    );
+    let after = client.metrics_db().await.expect("sole voter metrics");
+    assert_eq!(
+        after.current_leader,
+        Some(after.id),
+        "it still leads its drain"
+    );
+    assert_eq!(
+        after.current_term, before.current_term,
+        "nothing campaigned"
+    );
+    selected.shutdown().await.expect("stop singleton");
+}

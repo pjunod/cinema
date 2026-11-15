@@ -132,6 +132,10 @@ const OFFLINE_RESOLVE_ROUNDS: u32 = 3;
 /// Bound the required odd-voter handoff. Survivor probes run in parallel, so
 /// one unavailable voter cannot multiply this deadline.
 const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
+/// The one bound on a stopping leader's handoff: the survivor wait plus the
+/// election trigger's own 1 s budget and one more 1 s survivor probe round.
+/// A stop never waits longer than this for leadership to move.
+const SHUTDOWN_HANDOFF_WAIT: Duration = SURVIVOR_LEADER_WAIT.saturating_add(Duration::from_secs(2));
 /// A committed self-removal must return to the HTTP layer promptly so the
 /// daemon can drain. The durable pending-removal row is already authoritative
 /// if this best-effort final tombstone write does not finish in time.
@@ -1141,6 +1145,77 @@ pub fn prometheus_cluster_activity_authority() -> String {
 /// timer so a second claimant cannot win in the gap between replicated claim
 /// commit and local monotonic-fence installation.
 const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration = Duration::from_secs(5);
+
+/// What a stopping node did about Raft leadership before its drain.
+///
+/// [`MembershipManager::handoff_for_shutdown`] never fails: whatever it
+/// returns, the caller carries on stopping. The value exists so the one log
+/// line, and the tests, can say what happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShutdownHandoff {
+    /// SQLite or a process without a replicated store: there is no Raft.
+    NotReplicated,
+    /// This node does not lead, so there is nothing to move.
+    NotLeader,
+    /// This node is the only voter; no successor can exist.
+    SoleVoter,
+    /// A majority of the survivors confirmed `successor` as leader.
+    HandedOff { successor: u64 },
+    /// No reachable, caught-up voter outside maintenance could campaign.
+    NoCandidate,
+    /// Leadership had not moved when the one bounded wait ran out.
+    TimedOut,
+    /// Reading status, triggering the election or confirming it failed.
+    Failed,
+}
+
+impl ShutdownHandoff {
+    /// The stable word logged for this outcome.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReplicated => "not_replicated",
+            Self::NotLeader => "not_leader",
+            Self::SoleVoter => "sole_voter",
+            Self::HandedOff { .. } => "handed_off",
+            Self::NoCandidate => "no_candidate",
+            Self::TimedOut => "timed_out",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// The confirmed successor's Raft id, when leadership moved.
+    #[must_use]
+    pub const fn successor(self) -> Option<u64> {
+        match self {
+            Self::HandedOff { successor } => Some(successor),
+            _ => None,
+        }
+    }
+
+    /// Whether the stop left leadership where it should be. Only the last
+    /// three outcomes mean the survivors elect on their own timers.
+    #[must_use]
+    pub const fn settled(self) -> bool {
+        !matches!(self, Self::NoCandidate | Self::TimedOut | Self::Failed)
+    }
+}
+
+/// Run one handoff attempt under [`SHUTDOWN_HANDOFF_WAIT`] and name its
+/// outcome. Kept apart from the manager so the bound itself is testable
+/// without a cluster.
+async fn bounded_shutdown_handoff(
+    attempt: impl Future<Output = Result<u64, MembershipError>>,
+) -> (ShutdownHandoff, Option<MembershipError>) {
+    match tokio::time::timeout(SHUTDOWN_HANDOFF_WAIT, attempt).await {
+        Ok(Ok(successor)) => (ShutdownHandoff::HandedOff { successor }, None),
+        Ok(Err(MembershipError::ElectionCandidateUnavailable)) => {
+            (ShutdownHandoff::NoCandidate, None)
+        }
+        Ok(Err(error)) => (ShutdownHandoff::Failed, Some(error)),
+        Err(_) => (ShutdownHandoff::TimedOut, None),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
@@ -8468,6 +8543,73 @@ impl MembershipManager {
         trigger_election(candidate_api, &inner.secrets.api).await?;
         self.await_survivor_leader(departed, &remaining, &survivor_nodes, &inner.secrets.api)
             .await
+    }
+
+    /// Move Raft leadership off this node before it stops, and stop this
+    /// node from ever campaigning again in this process.
+    ///
+    /// The first act of a plurxd drain, while its Raft node and listeners
+    /// are still fully up. Every replicated node switches its own election
+    /// timer off (Hiqlite patch 29), leader or not, so a stopping node never
+    /// wins leadership back. A non-leader or a sole voter returns without
+    /// touching the network. A leader runs the one existing handoff,
+    /// [`Self::handoff_leadership`], under one bound,
+    /// [`SHUTDOWN_HANDOFF_WAIT`]. It writes nothing and never returns an
+    /// error: the caller always continues its drain.
+    pub async fn handoff_for_shutdown(&self) -> ShutdownHandoff {
+        let started = tokio::time::Instant::now();
+        let (outcome, error) = self.shutdown_handoff_outcome().await;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let error = error.map(|error| error.to_string());
+        if outcome.settled() {
+            tracing::info!(
+                target: "plurx::cluster",
+                outcome = outcome.as_str(),
+                successor = outcome.successor(),
+                elapsed_ms,
+                "shutdown leadership handoff"
+            );
+        } else {
+            tracing::warn!(
+                target: "plurx::cluster",
+                outcome = outcome.as_str(),
+                elapsed_ms,
+                error = error.as_deref(),
+                "shutdown leadership handoff did not move leadership; the survivors elect on their own timers"
+            );
+        }
+        outcome
+    }
+
+    async fn shutdown_handoff_outcome(&self) -> (ShutdownHandoff, Option<MembershipError>) {
+        let Some(inner) = self.inner.as_deref() else {
+            return (ShutdownHandoff::NotReplicated, None);
+        };
+        if let Err(error) = inner.client.disable_local_db_elections() {
+            // Only a remote client refuses, and a daemon's client is local.
+            // A node that could not switch its timer off still hands off.
+            tracing::warn!(
+                target: "plurx::cluster",
+                %error,
+                "could not stop this node's own elections before shutdown"
+            );
+        }
+        let metrics = match inner.client.metrics_db().await {
+            Ok(metrics) => metrics,
+            Err(error) => return (ShutdownHandoff::Failed, Some(error.into())),
+        };
+        if metrics.current_leader != Some(inner.identity.raft_id) {
+            return (ShutdownHandoff::NotLeader, None);
+        }
+        if metrics.membership_config.voter_ids().count() <= 1 {
+            return (ShutdownHandoff::SoleVoter, None);
+        }
+        bounded_shutdown_handoff(async {
+            let status = self.status().await?;
+            self.handoff_leadership(inner.identity.raft_id, &status)
+                .await
+        })
+        .await
     }
 
     async fn campaign_without_leader(

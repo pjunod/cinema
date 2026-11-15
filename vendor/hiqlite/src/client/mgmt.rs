@@ -304,6 +304,21 @@ impl Client {
         Ok(state.raft_db.applied_mark.handle())
     }
 
+    /// Plurx patch 29: stop this node's database Raft from starting an
+    /// election on its own timer, for the rest of this process. A stopping
+    /// node calls it first so that it never campaigns again; it still votes,
+    /// replicates and answers an explicit election trigger. Not persisted:
+    /// the next start campaigns normally. Remote clients return an error;
+    /// this method never performs IO and has no HTTP fallback.
+    #[cfg(feature = "sqlite")]
+    pub fn disable_local_db_elections(&self) -> Result<(), Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("the local election switch requires a local node client".to_owned())
+        })?;
+        state.raft_db.raft.runtime_config().elect(false);
+        Ok(())
+    }
+
     /// The same caller-owned admission installed before listeners. Remote or
     /// unguarded local clients cannot manufacture a replacement context.
     pub fn local_membership_admission(
@@ -1446,6 +1461,24 @@ mod tests {
         assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
         assert!(!accessor.contains("build_addr"));
         assert!(!accessor.contains("get_metrics_remote"));
+        assert!(!accessor.contains("send_with_retry"));
+        assert!(!accessor.contains(".await"));
+    }
+
+    #[test]
+    fn local_election_switch_has_no_remote_fallback() {
+        let source = include_str!("mgmt.rs");
+        let accessor = source
+            .split_once("pub fn disable_local_db_elections")
+            .expect("local election switch")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of local election switch")
+            .0;
+        assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
+        assert!(accessor.contains("raft_db.raft.runtime_config().elect(false)"));
+        assert!(!accessor.contains("raft_cache"));
+        assert!(!accessor.contains("build_addr"));
         assert!(!accessor.contains("send_with_retry"));
         assert!(!accessor.contains(".await"));
     }
