@@ -30,7 +30,8 @@ def workflow_gate(**outputs):
     gate = workflow.split("\n  gate:\n", 1)[1]
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     values = dict(SELECT="success", BUILD="true", ARCHIVE="success", SHARDS="[1, 2]",
-                  SHARD="success", VERDICT="success", COMPLETE="true", FAILURES="false", BASELINE="success")
+                  SHARD="success", VERDICT="success", COMPLETE="true", FAILURES="false", BASELINE="success",
+                  ABSENT_ONLY="false", ABSENT="false", TRAIN_TESTS="")
     values.update(outputs)
     environment = os.environ.copy()
     for name, value in values.items():
@@ -392,7 +393,7 @@ class ReceiptAuthenticationTests(unittest.TestCase):
         produced = dict(call.args for call in emitted.call_args_list)
         self.assertEqual(produced["shards"], [])
         self.assertEqual(produced["tests"], "0")
-        result = workflow_gate(SHARDS=json.dumps(produced["shards"]), SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="")
+        result = workflow_gate(SHARDS=json.dumps(produced["shards"]), SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="", ABSENT="")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_valid_empty_selection_produces_explicit_false_without_a_workflow_default(self):
@@ -663,7 +664,8 @@ class NamedVerdictTests(unittest.TestCase):
 
     def test_the_all_absent_wiring_skips_archive_and_shards_and_the_gate_fails(self):
         stage = (ROOT / ".github/workflows/rust-units.yml").read_text()
-        self.assertIn("absent_only: ${{ steps.adopt.outputs.absent_only || 'false' }}", stage)
+        # Raw producer output: a missing `absent_only` must not default to false.
+        self.assertIn("absent_only: ${{ steps.adopt.outputs.absent_only }}\n", stage)
         self.assertIn("needs.select.outputs.absent_only == 'true'", stage)
         self.assertIn('[ "$ABSENT_ONLY" = true ]', stage)
         self.assertNotIn("none()", (ROOT / "validation/rust_units.py").read_text())
@@ -671,7 +673,7 @@ class NamedVerdictTests(unittest.TestCase):
     def test_the_gate_fails_on_absent_but_the_verdict_job_does_not(self):
         stage = (ROOT / ".github/workflows/rust-units.yml").read_text()
         self.assertIn("absent: ${{ steps.verdict.outputs.absent }}", stage)
-        self.assertIn('[ "$ABSENT" != true ]', stage)
+        self.assertIn('[ "$ABSENT" = false ]', stage)
 
     def test_the_absent_status_reaches_the_json_and_the_receipt(self):
         self.run_verdict(passed=["app t::a"], absent=["app t::b"])
@@ -853,7 +855,7 @@ class StrictGateTests(unittest.TestCase):
         missing_build = workflow_gate(BUILD="", ARCHIVE="skipped", SHARDS="", SHARD="skipped",
                                       VERDICT="skipped", COMPLETE="", FAILURES="")
         self.assertNotEqual(missing_build.returncode, 0)
-        missing_plan = workflow_gate(SHARDS="", SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="")
+        missing_plan = workflow_gate(SHARDS="", SHARD="skipped", VERDICT="skipped", COMPLETE="", FAILURES="", ABSENT="")
         self.assertNotEqual(missing_plan.returncode, 0)
 
     def test_baseline_failure_never_substitutes_for_a_positive_pass(self):
@@ -863,7 +865,7 @@ class StrictGateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_missing_malformed_and_unknown_required_outputs_fail_closed(self):
-        for name in ("SELECT", "BUILD", "ARCHIVE", "SHARD", "VERDICT", "COMPLETE", "FAILURES"):
+        for name in ("SELECT", "BUILD", "ABSENT_ONLY", "ARCHIVE", "SHARD", "VERDICT", "COMPLETE", "FAILURES", "ABSENT"):
             for value in (None, "", "unknown", "TRUE"):
                 with self.subTest(name=name, value=value):
                     result = workflow_gate(**{name: value})
@@ -880,11 +882,64 @@ class StrictGateTests(unittest.TestCase):
 
     def test_no_due_cases_require_literal_false_and_skipped_downstream_jobs(self):
         fields = dict(BUILD="false", ARCHIVE="skipped", SHARDS="", SHARD="skipped", VERDICT="skipped",
-                      COMPLETE="", FAILURES="")
+                      COMPLETE="", FAILURES="", ABSENT="")
         result = workflow_gate(**fields)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         fields["ARCHIVE"] = "failure"
         self.assertNotEqual(workflow_gate(**fields).returncode, 0)
+
+
+class NamedProbeGateTests(unittest.TestCase):
+    """The strict gate on a Train-Tests probe: ABSENT is a result, never a pass."""
+
+    NAMED = dict(TRAIN_TESTS="app t::a,app t::b", SHARDS="[1]")
+
+    def gate(self, **fields):
+        return workflow_gate(**{**self.NAMED, **fields})
+
+    def test_every_named_test_passing_is_the_only_green(self):
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Every named test ran and passed.", result.stdout)
+
+    def test_an_absent_named_test_is_never_a_positive_pass(self):
+        result = self.gate(ABSENT="true")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("absent is never a pass", result.stdout)
+
+    def test_a_missing_or_malformed_named_output_fails_closed(self):
+        for name in ("COMPLETE", "FAILURES", "ABSENT"):
+            for value in (None, "", "unknown", "TRUE"):
+                with self.subTest(name=name, value=value):
+                    self.assertNotEqual(self.gate(**{name: value}).returncode, 0)
+        for fields in ({"COMPLETE": "false"}, {"FAILURES": "true"}, {"SHARDS": "[]"}, {"BUILD": "false"},
+                       {"SHARD": "skipped"}, {"VERDICT": "failure"}, {"ARCHIVE": "skipped"}):
+            with self.subTest(fields=fields):
+                self.assertNotEqual(self.gate(**fields).returncode, 0)
+
+    def test_a_baseline_never_excuses_a_named_failure(self):
+        for baseline in ("success", "failure", "skipped", ""):
+            with self.subTest(baseline=baseline):
+                self.assertNotEqual(self.gate(FAILURES="true", BASELINE=baseline).returncode, 0)
+
+    def test_an_all_absent_probe_reports_absent_from_a_successful_verdict(self):
+        # The archive and shards are skipped; the verdict job ran and succeeded
+        # (ABSENT is its result), and the gate alone says absent is not a pass.
+        fields = dict(BUILD="false", ABSENT_ONLY="true", ARCHIVE="skipped", SHARDS="", SHARD="skipped",
+                      VERDICT="success", COMPLETE="true", FAILURES="false", ABSENT="true")
+        result = self.gate(**fields)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("every named test is absent", result.stdout)
+        self.assertNotIn("unexpected", result.stdout)
+        # A verdict that did not run is a broken probe, reported as such.
+        broken = self.gate(**{**fields, "VERDICT": "skipped"})
+        self.assertNotEqual(broken.returncode, 0)
+        self.assertIn("the verdict ended with skipped", broken.stdout)
+
+    def test_absent_outputs_outside_a_named_probe_fail_closed(self):
+        for fields in ({"ABSENT_ONLY": "true"}, {"ABSENT": "true"}):
+            with self.subTest(fields=fields):
+                self.assertNotEqual(workflow_gate(**fields).returncode, 0)
 
 
 if __name__ == "__main__":

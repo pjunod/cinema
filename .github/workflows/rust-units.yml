@@ -611,10 +611,12 @@ jobs:
             [ "$ABSENT" = false ] || { echo "a named test is absent (see the verdict's ABSENT lines); absent is never a pass"; exit 1; }
             echo "Every named test ran and passed."; exit 0
           fi
+          # Not a probe: nothing may be named, so nothing may be absent.
+          [ "$ABSENT_ONLY" = false ] || { echo "missing or invalid absent-only selection"; exit 1; }
           case "$BUILD" in
             false)
               [ "$ARCHIVE" = skipped ] && [ "$SHARD" = skipped ] && [ "$VERDICT" = skipped ] || { echo "unexpected jobs after no-build selection"; exit 1; }
-              [ -z "$SHARDS$COMPLETE$FAILURES" ] || { echo "unexpected outputs after no-build selection"; exit 1; }
+              [ -z "$SHARDS$COMPLETE$FAILURES$ABSENT" ] || { echo "unexpected outputs after no-build selection"; exit 1; }
               echo "No due Rust unit test: all affected cases already have authenticated same-key passes, or none is affected."
               exit 0 ;;
             true) ;;
@@ -634,7 +636,7 @@ jobs:
           then exit 1; fi
           if [ "$SHARDS" = '[]' ]; then
             [ "$SHARD" = skipped ] && [ "$VERDICT" = skipped ] || { echo "unexpected jobs after an all-adopted plan"; exit 1; }
-            [ -z "$COMPLETE$FAILURES" ] || { echo "unexpected outputs after an all-adopted plan"; exit 1; }
+            [ -z "$COMPLETE$FAILURES$ABSENT" ] || { echo "unexpected outputs after an all-adopted plan"; exit 1; }
             echo "Every due test already passed under the same keys."
             exit 0
           fi
@@ -642,3 +644,4 @@ jobs:
           [ "$VERDICT" = success ] || { echo "the verdict ended with $VERDICT"; exit 1; }
           [ "$COMPLETE" = true ] || { echo "missing or incomplete positive-pass coverage"; exit 1; }
           [ "$FAILURES" = false ] || { echo "every required Rust case needs a positive pass; baseline failures cannot authorize promotion"; exit 1; }
+          [ "$ABSENT" = false ] || { echo "an unnamed run reported an absent test"; exit 1; }

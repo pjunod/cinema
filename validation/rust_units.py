@@ -1156,7 +1156,9 @@ def command_adopt(args):
     # here with no shards, and the verdict job reports the ABSENT lines directly.
     only_absent = bool(pending["absent"]) and not pending["crates"]
     if only_absent:
-        plan = make_plan(doc, pending, {}, config, int(os.environ.get("GITHUB_RUN_ID", "0")))
+        # No archive exists to list; an explicit empty listing keeps the plan
+        # on the same structural check as a real one.
+        plan = make_plan(doc, pending, {"rust-suites": {}}, config, int(os.environ.get("GITHUB_RUN_ID", "0")))
         plan["shards"] = 0
         write_json(STATE / "plan.json", plan)
     emit("absent_only", "true" if only_absent else "false")
