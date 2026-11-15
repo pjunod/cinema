@@ -34,9 +34,7 @@ pub(crate) use metrics::{accepted_claims, prometheus};
 pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
-pub(crate) use source::{
-    budgeted, source_budget, SourcePacingClock, SourceReadBudget,
-};
+pub(crate) use source::{budgeted, source_budget, SourcePacingClock, SourceReadBudget};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
@@ -417,9 +415,7 @@ pub(crate) async fn settle_joined_source_custody(
     loop {
         match store.mark_background_source_settled(receipt.clone()).await {
             Ok(false) => {
-                if let Err(error) =
-                    crate::source_custody::clear_background_settlement(store, &receipt)
-                {
+                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
                     tracing::warn!(%error,"background source journal cleanup will replay");
                 }
                 return;
@@ -438,9 +434,7 @@ pub(crate) async fn settle_joined_source_custody(
         let deleted = faults::after_commit(faults::SOURCE_RELEASE, deleted);
         match deleted {
             Ok(_) => {
-                if let Err(error) =
-                    crate::source_custody::clear_background_settlement(store, &receipt)
-                {
+                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
                     tracing::warn!(%error,"background source journal cleanup will replay");
                 }
                 return;
@@ -3656,21 +3650,6 @@ pub(crate) mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let (id, active) = claimed_on(Arc::clone(&store), local_deadline, authority).await;
         (store, id, active)
-    }
-
-    /// The exact source custody a fixture job registered.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn source_custody(
-        active: &ActiveBackgroundJob,
-    ) -> Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken> {
-        active.fence.0.source_custody.clone()
-    }
-
-    /// A real claimed job on a caller-configured Store (e.g. one whose exact
-    /// source-custody backend is enabled).
-    #[cfg(target_os = "linux")]
-    pub(crate) async fn active_on(store: Arc<dyn Store>) -> (String, ActiveBackgroundJob) {
-        claimed_on(store, None, Arc::new(UnclusteredJobAuthority)).await
     }
 
     async fn claimed_on(

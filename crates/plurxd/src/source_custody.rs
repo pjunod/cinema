@@ -19,69 +19,6 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, oneshot};
 
 mod diagnostics;
-mod recovery;
-
-pub(crate) fn validate_recovery_startup(authoritative: bool) -> Result<(), String> {
-    recovery::validate_startup(authoritative)
-}
-
-pub(crate) fn configure_recovery_backend(
-    store: &Arc<dyn Store>,
-    data_dir: &Path,
-    authoritative: bool,
-) -> Result<(), String> {
-    recovery::configure_backend(store, data_dir, authoritative)
-}
-
-pub(crate) async fn replay_verified_recovery(
-    store: &Arc<dyn Store>,
-    node: &str,
-) -> Result<(), String> {
-    recovery::replay(store, node).await
-}
-
-pub(crate) fn declared_background_spawn<T>(
-    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
-    spawn: impl FnOnce() -> T,
-) -> T {
-    recovery::declared_background_spawn(receipt, spawn)
-}
-/// How a live owner may publish its joined proof once every registered
-/// holder has retired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LiveJoin {
-    /// The witness saw no unknown launch.
-    Clean,
-    /// An unknown launch at this boot tick could have handed a child the
-    /// source; every daemon descendant started since must exit first.
-    EscapedSince(u64),
-    /// No witness is kept on this backend; treat every child launched since
-    /// the owner started as a possible holder.
-    Unwitnessed,
-    Refused(&'static str),
-}
-
-pub(crate) fn live_background_join(
-    store: &Arc<dyn Store>,
-    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
-) -> LiveJoin {
-    recovery::live_background_join(store, receipt)
-}
-
-static PROCESS_STARTED_MS: OnceLock<i64> = OnceLock::new();
-
-/// Record this daemon process's wall-clock start before any job can claim.
-/// Captured once, so a later wall-clock step cannot move it.
-pub(crate) fn note_process_start() {
-    PROCESS_STARTED_MS.get_or_init(crate::state::clock_ms);
-}
-
-/// Wall-clock start of this daemon process; `None` only before
-/// `note_process_start` (test binaries).
-#[cfg(target_os = "linux")]
-pub(crate) fn process_started_ms() -> Option<i64> {
-    PROCESS_STARTED_MS.get().copied()
-}
 
 /// Configure the process-wide verifier once from startup's canonical managed
 /// roots. Unit AppStates do not mutate this registry or inherit test roots.
@@ -192,113 +129,17 @@ fn access_roots_fact_from(configured: bool, startup_error: Option<&str>) -> serd
 }
 
 /// Local observations only; source recovery never uses these diagnostics as proof.
-pub(crate) fn recovery_status(store: &Arc<dyn Store>) -> serde_json::Value {
-    recovery::status(store)
-}
-
 pub(crate) fn launch_prometheus() -> String {
     diagnostics::prometheus()
-}
-
-/// Bind the exact inode an enrolled owner opened to its live witness, so a
-/// later host census can refuse a path that now names another file.
-pub(crate) fn record_background_source(
-    store: &Arc<dyn Store>,
-    receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
-    source: &std::fs::File,
-) -> Result<(), String> {
-    recovery::record_background_source(store, receipt, source)
-}
-
-/// Monotonic boot-clock time in the kernel's process start-time units
-/// (`/proc/<pid>/stat` field 22), so it orders against child start times.
-pub(crate) fn boot_tick() -> u64 {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    #[cfg(target_os = "linux")]
-    let clock = libc::CLOCK_BOOTTIME;
-    #[cfg(not(target_os = "linux"))]
-    let clock = libc::CLOCK_MONOTONIC;
-    // SAFETY: clock_gettime writes one initialized timespec.
-    unsafe { libc::clock_gettime(clock, &mut now) };
-    // SAFETY: sysconf has no pointer arguments.
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
-    now.tv_sec as u64 * hz + now.tv_nsec as u64 * hz / 1_000_000_000
-}
-
-/// Every orphaned descendant is reparented to this process, so its own tree
-/// is the complete set of processes it ever launched that remain alive.
-#[cfg(target_os = "linux")]
-pub(crate) fn process_tree_complete() -> bool {
-    let mut subreaper: libc::c_int = 0;
-    // SAFETY: PR_GET_CHILD_SUBREAPER writes one int through the pointer.
-    std::process::id() == 1
-        || unsafe {
-            libc::prctl(
-                libc::PR_GET_CHILD_SUBREAPER,
-                &mut subreaper as *mut libc::c_int,
-            )
-        } == 0
-            && subreaper != 0
-}
-
-/// Live (non-zombie) descendants of this process that started at or after
-/// `tick`. A zombie has already released every descriptor.
-#[cfg(target_os = "linux")]
-pub(crate) fn live_descendants_since(tick: u64) -> std::io::Result<Vec<u32>> {
-    let mut pending = vec![std::process::id()];
-    let mut found = Vec::new();
-    let mut visited = 0usize;
-    while let Some(pid) = pending.pop() {
-        visited += 1;
-        if visited > 65_536 {
-            return Err(std::io::Error::other("descendant census exceeds its bound"));
-        }
-        let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
-            Ok(tasks) => tasks,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        for task in tasks {
-            let children = match std::fs::read_to_string(task?.path().join("children")) {
-                Ok(children) => children,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            for child in children.split_whitespace() {
-                let child: u32 = child.parse().map_err(std::io::Error::other)?;
-                pending.push(child);
-                let stat = match std::fs::read_to_string(format!("/proc/{child}/stat")) {
-                    Ok(stat) => stat,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
-                };
-                let fields: Vec<&str> = stat
-                    .rsplit_once(')')
-                    .map(|(_, rest)| rest.split_whitespace().collect())
-                    .unwrap_or_default();
-                let started: u64 = fields
-                    .get(19)
-                    .and_then(|value| value.parse().ok())
-                    .ok_or_else(|| std::io::Error::other("unparsable child start time"))?;
-                // Tick resolution: a child started in the escape's tick counts.
-                if fields.first() != Some(&"Z") && started + 1 >= tick {
-                    found.push(child);
-                }
-            }
-        }
-    }
-    Ok(found)
 }
 
 const LEASE_MS: i64 = 30_000;
 pub(crate) const SERVICE_EPOCH_MS: i64 = 5_000;
 pub(crate) const BACKGROUND_QUANTUM: u64 = 1_048_576;
 
-/// Local, fsynced evidence closes the store-outage/restart window after a
-/// physical join. Files live under data_dir, never the disposable runtime cache.
+/// Local, fsynced intents close the store-outage/restart window around an
+/// activation or a release. Files live under data_dir, never the disposable
+/// runtime cache.
 static SETTLEMENT_JOURNAL: OnceLock<PathBuf> = OnceLock::new();
 type ReceiptLock = tokio::sync::Mutex<()>;
 static ACTIVATION_LOCKS: OnceLock<
@@ -391,27 +232,14 @@ fn write_settlement_receipt_at(dir: &Path, receipt: &SettlementReceipt) -> Resul
     result.map_err(|error| error.to_string())
 }
 
-fn clear_settlement_receipt(
-    store: &Arc<dyn Store>,
-    receipt: &SettlementReceipt,
-) -> Result<(), String> {
+fn clear_settlement_receipt(receipt: &SettlementReceipt) -> Result<(), String> {
     let Some(dir) = SETTLEMENT_JOURNAL.get() else {
         return Ok(());
     };
-    clear_settlement_receipt_at(dir, receipt)?;
-    recovery::clear(store, receipt)
+    clear_settlement_receipt_at(dir, receipt)
 }
 
 fn clear_settlement_receipt_at(dir: &Path, receipt: &SettlementReceipt) -> Result<(), String> {
-    #[cfg(test)]
-    if matches!(
-        receipt,
-        SettlementReceipt::ForegroundActivation { .. }
-            | SettlementReceipt::BackgroundActivation { .. }
-    ) && recovery::fail_activation_clear_for_test()
-    {
-        return Err("injected activation-intent unlink failure".into());
-    }
     match std::fs::remove_file(dir.join(settlement_name(receipt))) {
         Ok(()) => std::fs::File::open(dir)
             .and_then(|file| file.sync_all())
@@ -437,25 +265,11 @@ pub(crate) async fn activate_foreground_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
-    let reader = recovery::foreground(store, &token, activation_id)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_foreground_source_custody(token.clone(), activation_id.clone())
         .await;
-    let reader_armed = if activated.as_ref().is_ok_and(|value| *value) {
-        reader
-            .as_ref()
-            .map_or(Ok(()), |reader| reader.arm(activation_id))
-    } else {
-        Ok(())
-    };
-    if let Err(error) = &reader_armed {
-        tracing::warn!(%error, "reader activation proof needs abort reconciliation");
-    }
-    if activated.as_ref().is_ok_and(|value| *value)
-        && reader_armed.is_ok()
-        && clear_settlement_receipt(store, &receipt).is_ok()
-    {
+    if activated.as_ref().is_ok_and(|value| *value) && clear_settlement_receipt(&receipt).is_ok() {
         return Ok(());
     }
     if let Err(error) = activated {
@@ -488,19 +302,7 @@ pub(crate) async fn activate_foreground_with_journal(
                         }
                     }
                 }
-                match recovery::clear_aborted_if_absent(store, &receipt).await {
-                    Ok(false) if aborted => {
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "foreground abort evidence cleanup will retry");
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        continue;
-                    }
-                    _ => {}
-                }
-                clear_settlement_receipt(store, &receipt)?;
+                clear_settlement_receipt(&receipt)?;
                 return Err("foreground source activation did not settle".into());
             }
             Err(error) => tracing::warn!(%error,"foreground activation abort will retry"),
@@ -522,25 +324,11 @@ pub(crate) async fn activate_background_with_journal(
     };
     let lock = receipt_lock(&settlement_name(&receipt));
     let _guard = lock.lock().await;
-    let reader = recovery::background(store, &token, activation_id)?;
     write_settlement_receipt(&receipt)?;
     let activated = store
         .activate_background_source_custody(token.clone(), activation_id.clone())
         .await;
-    let reader_armed = if activated.as_ref().is_ok_and(|value| *value) {
-        reader
-            .as_ref()
-            .map_or(Ok(()), |reader| reader.arm(activation_id))
-    } else {
-        Ok(())
-    };
-    if let Err(error) = &reader_armed {
-        tracing::warn!(%error, "reader activation proof needs abort reconciliation");
-    }
-    if activated.as_ref().is_ok_and(|value| *value)
-        && reader_armed.is_ok()
-        && clear_settlement_receipt(store, &receipt).is_ok()
-    {
+    if activated.as_ref().is_ok_and(|value| *value) && clear_settlement_receipt(&receipt).is_ok() {
         return Ok(());
     }
     if let Err(error) = activated {
@@ -565,19 +353,7 @@ pub(crate) async fn activate_background_with_journal(
                         }
                     }
                 }
-                match recovery::clear_aborted_if_absent(store, &receipt).await {
-                    Ok(false) if aborted => {
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "background abort evidence cleanup will retry");
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        continue;
-                    }
-                    _ => {}
-                }
-                clear_settlement_receipt(store, &receipt)?;
+                clear_settlement_receipt(&receipt)?;
                 return Err("background source activation did not settle".into());
             }
             Err(error) => tracing::warn!(%error,"background activation abort will retry"),
@@ -600,14 +376,13 @@ pub(crate) fn persist_background_settlement(
 }
 
 pub(crate) fn clear_background_settlement(
-    store: &Arc<dyn Store>,
     receipt: &plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
 ) -> Result<(), String> {
-    clear_settlement_receipt(store, &SettlementReceipt::Background(receipt.clone()))
+    clear_settlement_receipt(&SettlementReceipt::Background(receipt.clone()))
 }
 
-/// Replay is owned by recurring queue upkeep. Only files written after a
-/// physical join (or exact no-reader scope) can authorize a deletion.
+/// Replay is owned by recurring queue upkeep. It finishes an activation abort
+/// or a release whose acknowledgement was lost.
 pub(crate) async fn replay_local_settlements(store: &Arc<dyn Store>) -> Result<(), String> {
     let Some(dir) = SETTLEMENT_JOURNAL.get() else {
         return Ok(());
@@ -677,9 +452,6 @@ async fn replay_local_settlements_at(store: &Arc<dyn Store>, dir: &Path) -> Resu
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                if !recovery::clear_aborted_if_absent(store, &receipt).await? && aborted {
-                    return Err("background abort release has not reconciled".into());
-                }
             }
             SettlementReceipt::ForegroundActivation {
                 token,
@@ -700,9 +472,6 @@ async fn replay_local_settlements_at(store: &Arc<dyn Store>, dir: &Path) -> Resu
                             .await
                             .map_err(|error| error.to_string())?;
                     }
-                }
-                if !recovery::clear_aborted_if_absent(store, &receipt).await? && aborted {
-                    return Err("foreground abort release has not reconciled".into());
                 }
             }
             SettlementReceipt::Background(token) => {
@@ -737,7 +506,6 @@ async fn replay_local_settlements_at(store: &Arc<dyn Store>, dir: &Path) -> Resu
             }
         }
         clear_settlement_receipt_at(dir, &receipt)?;
-        recovery::clear(store, &receipt)?;
     }
     Ok(())
 }
@@ -1477,10 +1245,8 @@ async fn run_owner(
                 match store.mark_foreground_source_settled(token.clone()).await {
                     Ok(true) => proof_recorded = true,
                     Ok(false) => {
-                        let _ = clear_settlement_receipt(
-                            &store,
-                            &SettlementReceipt::Foreground(token.clone()),
-                        );
+                        let _ =
+                            clear_settlement_receipt(&SettlementReceipt::Foreground(token.clone()));
                         source_pressure_changed().notify_waiters();
                         return;
                     }
@@ -1491,10 +1257,9 @@ async fn run_owner(
             if proof_recorded {
                 match release_settled(store.as_ref(), &mut token, now).await {
                     Ok(()) => {
-                        if let Err(error) = clear_settlement_receipt(
-                            &store,
-                            &SettlementReceipt::Foreground(token.clone()),
-                        ) {
+                        if let Err(error) =
+                            clear_settlement_receipt(&SettlementReceipt::Foreground(token.clone()))
+                        {
                             tracing::warn!(%error,"foreground source journal cleanup will replay");
                         }
                         source_pressure_changed().notify_waiters();

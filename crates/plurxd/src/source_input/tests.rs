@@ -19,14 +19,6 @@ pub(crate) struct ReadGate {
     changed: std::sync::Condvar,
 }
 impl ReadGate {
-    #[cfg(target_os = "linux")]
-    pub(super) fn new(reached: tokio::sync::oneshot::Sender<()>) -> Self {
-        Self {
-            reached: std::sync::Mutex::new(Some(reached)),
-            released: std::sync::Mutex::new(false),
-            changed: std::sync::Condvar::new(),
-        }
-    }
     pub(super) fn park(&self) -> std::io::Result<()> {
         if let Some(reached) = self.reached.lock().expect("read gate").take() {
             let _ = reached.send(());

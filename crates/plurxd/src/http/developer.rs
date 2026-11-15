@@ -3740,28 +3740,14 @@ async fn display_target_hdr10(
     }
 }
 
-/// Node-local observations only. No enable or recovery path reads this route.
-static SOURCE_RECOVERY_SCAN: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
-
-fn unavailable_source_recovery(node_name: &str, launches: serde_json::Value) -> serde_json::Value {
-    local_source_diagnostics(
-        serde_json::json!({"error": "unavailable", "poisoned": null}),
-        node_name,
-        launches,
-        crate::source_custody::access_roots_fact(),
-    )
-}
-
-/// Process-local readings every answer carries, including an unavailable one.
+/// Node-local launch-verification readings. Advisory: nothing reads this
+/// route to allow or refuse work.
 fn local_source_diagnostics(
-    mut reading: serde_json::Value,
     node_name: &str,
     launches: serde_json::Value,
     roots: serde_json::Value,
 ) -> serde_json::Value {
-    reading["node_name"] = serde_json::json!(node_name);
-    reading["launches"] = launches;
+    let mut reading = serde_json::json!({"node_name": node_name, "launches": launches});
     for key in ["roots_configured", "roots_unconfigured_reason"] {
         reading[key] = roots[key].clone();
     }
@@ -3772,32 +3758,10 @@ pub async fn source_recovery(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
-    let node_name = state
-        .node_hostname
-        .as_deref()
-        .unwrap_or(&state.node_id)
-        .to_owned();
-    let launches = serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot());
-    let permit = match SOURCE_RECOVERY_SCAN.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Json(unavailable_source_recovery(&node_name, launches));
-        }
-    };
-    let store = std::sync::Arc::clone(&state.store);
-    let reading = match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        crate::source_custody::recovery_status(&store)
-    })
-    .await
-    {
-        Ok(reading) => reading,
-        Err(_) => return Json(unavailable_source_recovery(&node_name, launches)),
-    };
+    let node_name = state.node_hostname.as_deref().unwrap_or(&state.node_id);
     Json(local_source_diagnostics(
-        reading,
-        &node_name,
-        launches,
+        node_name,
+        serde_json::json!(plurx_core::process::source_lifetime::launch_snapshot()),
         crate::source_custody::access_roots_fact(),
     ))
 }
@@ -3807,29 +3771,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unavailable_source_recovery_preserves_local_diagnostics_without_a_poison_count() {
-        let launches = serde_json::json!({"total": 3});
-        let response = unavailable_source_recovery("media1", launches.clone());
-        assert_eq!(response["error"], "unavailable");
-        assert!(response["poisoned"].is_null());
-        assert_eq!(response["node_name"], "media1");
-        assert_eq!(response["launches"], launches);
-        assert!(response["roots_configured"].is_boolean());
-    }
-
-    #[test]
     fn source_recovery_names_unconfigured_roots_and_their_reason() {
         let roots = serde_json::json!({
             "roots_configured": false,
             "roots_unconfigured_reason": "reader roots cannot be empty",
         });
-        let response = local_source_diagnostics(
-            serde_json::json!({"supported": true}),
-            "media1",
-            serde_json::json!({"unverified": 2}),
-            roots,
-        );
-        assert_eq!(response["supported"], true);
+        let launches = serde_json::json!({"unverified": 2});
+        let response = local_source_diagnostics("media1", launches.clone(), roots);
+        assert_eq!(response["node_name"], "media1");
+        assert_eq!(response["launches"], launches);
         assert_eq!(response["roots_configured"], false);
         assert_eq!(
             response["roots_unconfigured_reason"],

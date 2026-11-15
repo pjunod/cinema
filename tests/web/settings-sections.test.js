@@ -879,7 +879,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     dvr_webhook_url: "",
   };
   const httpsCard = '<div id="settings-https">Node-local HTTPS</div>';
-  const sourceRecovery = '<div id="settings-source-recovery">Playback restart recovery</div>';
+  const sourceRecovery = '<div id="settings-source-recovery">Source launch verification</div>';
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness, httpsCard, sourceRecovery),
   );
@@ -887,7 +887,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.ok(html.indexOf("</nav>") < html.indexOf(httpsCard), "everyday destinations precede HTTPS");
   assert.ok(html.indexOf(httpsCard) < html.indexOf("CARDHEAD:Diagnostic ZIP reports"), "HTTPS stays inside the Developer card list");
   assert.ok(html.indexOf(httpsCard) < html.indexOf(sourceRecovery), "node-local status follows HTTPS");
-  assert.ok(html.indexOf(sourceRecovery) < html.indexOf("CARDHEAD:Diagnostic ZIP reports"), "recovery status stays in the Developer card list");
+  assert.ok(html.indexOf(sourceRecovery) < html.indexOf("CARDHEAD:Diagnostic ZIP reports"), "launch status stays in the Developer card list");
   for (const id of ["hevc-unverified", "pabr"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Graduated 2026-10-10 (Paul: "clean up developer settings"). Each switch
@@ -2446,41 +2446,30 @@ test("Mac processing exposes every independent implemented graph while preservin
   assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
 });
 
-test("playback restart recovery is node-local, read-only, and conservative when unavailable",()=>{
+test("source launch verification is node-local, read-only, and conservative when unavailable",()=>{
   const render=new Function("esc","setCard","cardHead","devGraduation",`${shippedSource("sourceRecoveryCard")}\nreturn sourceRecoveryCard;`)(
     esc,body=>body,(title,sub,tools)=>`CARD:${title}|${sub}|${tools}`, (waiting,then)=>`LEAVES:${waiting}|THEN:${then}`,
   );
-  const html=render({node_name:"lab4",supported:false,authoritative_backend:true,kernel_available:true,local_filesystem:true,daemon_init_or_subreaper:null,
-    launches:{mediated:6,verified:12,no_source:4,metadata_only:2,brokered:6,unverified:1,unknown:3,latest_unknown:{purpose:"session transcode",observed_at_ms:1000}},poisoned:null},"");
-  assert.match(html,/This node: lab4/);
+  const html=render({node_name:"lab4",
+    launches:{mediated:6,verified:12,no_source:4,metadata_only:2,brokered:6,unverified:1,unknown:3,latest_unknown:{purpose:"session transcode",observed_at_ms:1000}}},"");
+  assert.match(html,/CARD:Source launch verification\|This node: lab4/);
   assert.match(html,/Verified attempts since process start[\s\S]*?12/);
   assert.match(html,/Verified no-source attempts[\s\S]*?4/);
   assert.match(html,/Verified metadata-only attempts[\s\S]*?2/);
   assert.match(html,/Verified brokered attempts[\s\S]*?6/);
   assert.match(html,/Unknown attempts since process start[\s\S]*?3/);
   assert.match(html,/Explicitly unverified attempts[\s\S]*?1 · subset of unknown/);
-  assert.doesNotMatch(html,/Broker-declared attempts/);
+  assert.doesNotMatch(html,/Broker-declared attempts|witness|Reader recovery support/i);
   assert.match(html,/Latest unknown launch: session transcode/);
-  assert.match(html,/Poisoned witness status is unavailable/);
-  assert.doesNotMatch(html,/Poisoned witnesses:<\/b> 0/);
-  assert.match(html,/native Linux\/macOS crash recovery and performance qualification are accepted/);
+  assert.match(html,/every production launch carries a verified source access declaration/);
   assert.doesNotMatch(html,/TOG:|onclick="[^\"]*(?:save|enable)/i);
   assert.match(html,/onclick="reloadSourceRecovery\(this\)"/);
   assert.match(html,/Source-access roots configured<\/b><br>Unknown \(advisory/,"a payload without the fact is unobservable, not healthy");
-  const rootless=render({node_name:"lab4",supported:true,roots_configured:false,roots_unconfigured_reason:"reader roots <cannot> be empty",launches:{},poisoned:null},"");
+  const rootless=render({node_name:"lab4",roots_configured:false,roots_unconfigured_reason:"reader roots <cannot> be empty",launches:{}},"");
   assert.match(rootless,/Source-access roots configured<\/b><br>No · reader roots &lt;cannot&gt; be empty\. Every launch on this node runs unverified[^<]*nothing is blocked\./);
-  assert.doesNotMatch(render({node_name:"lab4",roots_configured:true,roots_unconfigured_reason:null,launches:{},poisoned:null},""),/runs unverified until/);
-  const errored=render({node_name:"lab4",error:"partial source status",supported:true,launches:{mediated:0,unknown:0},poisoned:{total:0,witnesses:[]}},"");
-  assert.match(errored,/Poisoned witness status is unavailable/);
-  assert.doesNotMatch(errored,/Poisoned witnesses:<\/b> 0/);
-  const poisoned=render({node_name:"lab4",supported:true,authoritative_backend:true,kernel_available:true,local_filesystem:true,
-    launches:{mediated:0,unknown:0,latest_unknown:null},poisoned:{total:33,witnesses:Array.from({length:33},(_,index)=>({family:"playback",owner_id:String(index),purpose:"unverified child",boot_tick:index}))}},"");
-  assert.match(poisoned,/Verified attempts since process start[\s\S]*?Unknown/,"missing counter fields remain unobservable, not healthy zeroes");
-  assert.match(poisoned,/owner-stop proof, namespace teardown, or reboot/);
-  assert.match(poisoned,/Confined-reader recovery is future work/);
-  assert.match(poisoned,/this status does not make a playback census safe/);
-  assert.match(poisoned,/Showing (?:up to )?the first 32 witnesses/);
-  assert.equal((poisoned.match(/<li>/g)||[]).length,32);
+  assert.match(rootless,/Verified attempts since process start[\s\S]*?Unknown/,"missing counter fields remain unobservable, not healthy zeroes");
+  assert.doesNotMatch(render({node_name:"lab4",roots_configured:true,roots_unconfigured_reason:null,launches:{}},""),/runs unverified until/);
+  assert.match(render(null,"offline"),/offline[\s\S]*Retry/);
 });
 
 test("HTTPS card keeps exact node revision, env ownership, public facts and a token-free IPv6 link",()=>{
