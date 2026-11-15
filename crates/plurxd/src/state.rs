@@ -1394,6 +1394,7 @@ impl AppState {
             runtime_cache.join("live-tv"),
         );
         live_tv.set_settings_changes(settings_changes.clone());
+        live_tv.set_applied_view(applied.clone());
         let copy_analysis = Arc::clone(&jobs.copy_analysis);
 
         AppState {

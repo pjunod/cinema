@@ -87,6 +87,11 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // writes read the Store.
     ("subtitle_models/config.rs", "read_applied", 1, true),
     ("subtitle_transcription.rs", "pass_settings", 1, true),
+    // Live TV loops: whether this node has recording, reminder, library or
+    // guide work. Each pays the Store's read and acts on it when it does.
+    ("http/live_tv.rs", "guide_viewed_on", 1, true),
+    ("live_tv.rs", "loop_configs", 1, true),
+    ("live_tv/dvr.rs", "recordings_library_viewed_ours", 1, true),
 ];
 
 /// The direct callers of each helper above, `(helper file, helper,
@@ -230,6 +235,18 @@ const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
         "pass_settings",
         "subtitle_transcription.rs",
         "pass",
+    ),
+    (
+        "http/live_tv.rs",
+        "guide_viewed_on",
+        "http/live_tv.rs",
+        "guide_replica_loop",
+    ),
+    (
+        "live_tv/dvr.rs",
+        "recordings_library_viewed_ours",
+        "live_tv/dvr.rs",
+        "sweep_recordings_library",
     ),
     ("sharing.rs", "loop_enabled", "sharing.rs", "claim_loop"),
     ("sharing.rs", "loop_enabled", "sharing.rs", "run"),

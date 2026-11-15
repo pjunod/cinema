@@ -8139,3 +8139,58 @@ async fn live_tv_delete_defers_response_pins_and_retries_after_playlist_promotio
         .is_success());
     assert!(!root.path().join("segment-000001.ts").exists());
 }
+
+/// A4: with Live TV off, the recording and reminder loops look at the
+/// configuration every tick on every node. They look through the node's
+/// applied settings view (a standalone view counts a `view` read) and do
+/// not take the Store's configuration read, which is what observes the
+/// configuration into the projection: it stays unobserved here. The view's
+/// answer parses exactly as the Store's does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_live_tv_loops_look_through_the_applied_view() {
+    use plurx_core::store::{AppliedTable, AppliedView, ViewSource};
+    let root = tempfile::tempdir().expect("live TV idle fixture");
+    let manager = test_manager(root.path());
+    let applied = AppliedView::authority(Arc::clone(&manager.store));
+    manager.set_applied_view(applied.clone());
+    let reads = |source| {
+        applied
+            .observation()
+            .view_total(AppliedTable::Settings, source)
+    };
+    let shutdown = CancellationToken::new();
+    let (recordings, _) = super::webhook::channel();
+    let (reminders, _) = super::webhook::channel();
+    let dvr = tokio::spawn(Arc::clone(&manager).dvr_loop(recordings, shutdown.clone()));
+    let reminder = tokio::spawn(super::dvr::reminder_loop(
+        Arc::clone(&manager),
+        reminders,
+        shutdown.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reads(ViewSource::View) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both loops look through the view");
+    shutdown.cancel();
+    dvr.await.expect("recording loop");
+    reminder.await.expect("reminder loop");
+    assert_eq!(reads(ViewSource::Authority), 0);
+    assert!(
+        manager
+            .metrics
+            .projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .is_none(),
+        "an idle tick takes no Store configuration read"
+    );
+    assert!(!super::dvr::recordings_library_viewed_ours(&applied, "node-a").await);
+
+    let (viewed, _) = manager.loop_configs().await.expect("view configuration");
+    let (stored, _) = manager.dvr_configs().await.expect("Store configuration");
+    assert_eq!(viewed, stored);
+}

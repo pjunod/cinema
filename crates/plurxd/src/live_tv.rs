@@ -3627,6 +3627,10 @@ pub(crate) struct LiveTvManager {
     observer_wake: tokio::sync::Notify,
     /// What that loop parks on; taken once when it starts.
     settings_changes: StdMutex<Option<SettingsChangeSource>>,
+    /// This node's applied settings view, for the recording and reminder
+    /// loops' look at whether this node has Live TV work (A4); the store
+    /// itself until the daemon hands its view over.
+    applied: StdMutex<Option<plurx_core::store::AppliedView>>,
     /// Sessions that left the registry with a child or a directory still to
     /// confirm gone (plan L-02 §3.4). Held only for bookkeeping: no holder
     /// waits on the filesystem, because each orphan's directory removal runs
@@ -3714,6 +3718,7 @@ impl LiveTvManager {
             fence: FenceObserver::new(Arc::clone(&metrics)),
             observer_wake: tokio::sync::Notify::new(),
             settings_changes: StdMutex::new(Some(SettingsChangeSource::LocalOnly)),
+            applied: StdMutex::new(None),
             orphans: tokio::sync::Mutex::new(Vec::new()),
             incarnation,
             #[cfg(test)]
@@ -5440,6 +5445,40 @@ impl LiveTvManager {
 
     pub(crate) fn metrics_handle(&self) -> Arc<LiveTvMetrics> {
         Arc::clone(&self.metrics)
+    }
+
+    pub(crate) fn set_applied_view(&self, applied: plurx_core::store::AppliedView) {
+        *self
+            .applied
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(applied);
+    }
+
+    /// Both halves of the configuration as this node's applied settings view
+    /// holds them, for a loop's look at whether this node has Live TV work
+    /// between passes (A4). Never a decision: a loop that sees work here
+    /// takes [`Self::dvr_configs`] and acts on that. Not observed into the
+    /// guide cache or the projection, which follow the Store's copy.
+    pub(crate) async fn loop_configs(&self) -> Result<(LiveTvConfig, DvrConfig), LiveTvError> {
+        let applied = self
+            .applied
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let snapshot = match applied {
+            Some(applied) => applied
+                .settings_snapshot()
+                .await
+                .map(|snapshot| snapshot.values),
+            None => self.settings_snapshot().await.map(Arc::new),
+        }
+        .map_err(|error| {
+            LiveTvError::DeviceUnavailable(format!("reading live-TV settings: {error}"))
+        })?;
+        Ok((
+            LiveTvConfig::from_snapshot(&snapshot, &self.node_id),
+            DvrConfig::from_snapshot(&snapshot),
+        ))
     }
 
     pub(crate) fn set_settings_changes(&self, changes: SettingsChangeSource) {

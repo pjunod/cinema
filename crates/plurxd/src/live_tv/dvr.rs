@@ -1559,7 +1559,20 @@ impl LiveTvManager {
     ) {
         let mut last_retention = 0_i64;
         loop {
-            if let Ok((live_tv, dvr)) = self.dvr_configs().await {
+            // The applied view says whether this node records (Live TV and
+            // recording both on, A4). Only that case pays the Store's read,
+            // and the tick acts on the Store's answer; the other branches
+            // close what this process holds, and finalization re-reads the
+            // Store before it writes.
+            let configs = match self.loop_configs().await {
+                Ok((live_tv, dvr))
+                    if live_tv.owner_node_id == self.node_id && live_tv.enabled && dvr.enabled =>
+                {
+                    self.dvr_configs().await
+                }
+                viewed => viewed,
+            };
+            if let Ok((live_tv, dvr)) = configs {
                 let ours = live_tv.owner_node_id == self.node_id;
                 if ours && live_tv.enabled && dvr.enabled && self.serving.admit().is_some() {
                     self.dvr_storage_free_bytes.store(
@@ -1594,7 +1607,18 @@ impl LiveTvManager {
                 // Disabling capture must still preserve useful partial work.
                 if self.serving.admit().is_some() {
                     if !live_tv.enabled || !dvr.enabled {
-                        if let Ok(rows) = self.dvr_rows(&[DvrState::Recording]).await {
+                        // A finish is a write fenced on the generation: take
+                        // both from the Store, and only when there is a row.
+                        let finishing = match self.dvr_rows(&[DvrState::Recording]).await {
+                            Ok(rows) if !rows.is_empty() => match self.dvr_configs().await {
+                                Ok((live_tv, dvr)) if !live_tv.enabled || !dvr.enabled => {
+                                    Some((rows, live_tv.generation))
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some((rows, generation)) = finishing {
                             for row in rows {
                                 let _ = self.stop_sink(&row.id, row.attempt).await;
                                 if let Err(error) = self
@@ -1605,7 +1629,7 @@ impl LiveTvManager {
                                         (row.capture_end - unix_seconds()).max(0),
                                         None,
                                         "recording disabled",
-                                        live_tv.generation,
+                                        generation,
                                     )
                                     .await
                                 {
@@ -3891,7 +3915,11 @@ pub(crate) async fn reminder_loop(
     shutdown: CancellationToken,
 ) {
     loop {
-        let ours_and_serving = match manager.dvr_configs().await {
+        // The configuration's owner is the node reading it, so the read
+        // decides nothing but whether settings are readable at all; the
+        // applied view answers that without a leader round trip (A4). The
+        // tick's own reads and writes go through the Store.
+        let ours_and_serving = match manager.loop_configs().await {
             Ok((live_tv, _)) => {
                 live_tv.owner_node_id == manager.node_id && manager.serving.admit().is_some()
             }
@@ -3952,7 +3980,12 @@ async fn reminder_tick_at(
 
     // A programme that moved is worth saying so about: the reminder names a
     // time that no longer has that programme in it, and firing it would send
-    // someone to the wrong thing.
+    // someone to the wrong thing. Without a guide there is nothing to
+    // compare: the applied view says so without a leader round trip (A4),
+    // and a guide it shows on is confirmed by the Store's read.
+    if matches!(manager.loop_configs().await, Ok((live_tv, _)) if !live_tv.guide_fetches()) {
+        return Ok(());
+    }
     let (live_tv, _) = manager.dvr_configs().await?;
     if !live_tv.guide_fetches() {
         return Ok(());
@@ -4053,6 +4086,23 @@ async fn reminder_tick_at(
 /// that finishes while the scanner is busy, or while this node is restarting,
 /// still has to reach the shelf. A row with no `item_id` is a standing request
 /// that survives both.
+/// Whether this node's applied settings view holds recording on, a root, and
+/// this node as the owner; an unreadable view answers yes, so the Store
+/// decides.
+pub(super) async fn recordings_library_viewed_ours(
+    applied: &plurx_core::store::AppliedView,
+    node_id: &str,
+) -> bool {
+    match applied.settings_snapshot().await {
+        Ok(snapshot) => {
+            let live_tv = LiveTvConfig::from_snapshot(&snapshot.values, node_id);
+            let dvr = DvrConfig::from_snapshot(&snapshot.values);
+            dvr.enabled && !dvr.root.is_empty() && live_tv.owner_node_id == node_id
+        }
+        Err(_) => true,
+    }
+}
+
 pub(crate) async fn dvr_library_loop(state: crate::state::AppState, shutdown: CancellationToken) {
     const SWEEP: std::time::Duration = std::time::Duration::from_secs(60);
     loop {
@@ -4069,6 +4119,11 @@ pub(crate) async fn dvr_library_loop(state: crate::state::AppState, shutdown: Ca
 async fn sweep_recordings_library(
     state: &crate::state::AppState,
 ) -> Result<(), plurx_core::error::StoreError> {
+    // The applied view says whether recording is on with a root here (A4);
+    // only then is the configuration read from the Store and acted on.
+    if !recordings_library_viewed_ours(&state.applied, &state.node_id).await {
+        return Ok(());
+    }
     let settings = state.store.settings_snapshot().await?;
     let live_tv = LiveTvConfig::from_snapshot(&settings, &state.node_id);
     let dvr = DvrConfig::from_snapshot(&settings);
