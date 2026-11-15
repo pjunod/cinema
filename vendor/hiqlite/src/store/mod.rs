@@ -59,7 +59,10 @@ pub(crate) async fn start_raft_db(
     .await?;
     startup_owner.protect_wal(log_store.shutdown_handle());
     let wal_status = log_store.status_handle();
-    let applied_mark = crate::applied_mark::AppliedMark::new(&node_config.applied_mark_tables);
+    let applied_mark = crate::applied_mark::AppliedMark::with_deletes_only(
+        &node_config.applied_mark_tables,
+        &node_config.applied_mark_deletes_only,
+    );
     let state_machine_store = if staged_startup {
         let data_dir = node_config.data_dir.clone();
         let filename = node_config.filename_db.clone();
