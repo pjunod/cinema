@@ -5,6 +5,13 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from validation.owner_counts import (
+    DIRECTORY as CHANGES_DIRECTORY,
+    OwnerCountError,
+    how_to_record,
+    load_changes,
+    reviewed_counts,
+)
 from validation.rust_modules import module_source, split_children
 
 
@@ -205,6 +212,9 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.catalog = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+        # Each shape's base count plus the per-change differences recorded in
+        # tests/rolling-producer-owners.d/ (validation/owner_counts.py).
+        cls.reviewed = reviewed_counts(cls.catalog, ROOT / CHANGES_DIRECTORY)
         cls.source_path = ROOT / cls.catalog["source"]
         cls.source = module_source(cls.source_path)
         cls.source_children = split_children(cls.source_path)
@@ -438,11 +448,13 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     self.fail(f"invalid pattern for {row['id']}: {error}")
                 scope, scope_name = self.symbol_scope(row)
                 actual = len(pattern.findall(scope))
+                expected = self.reviewed[row["id"]]
+                self.assertGreater(expected, 0, f"{row['id']} is reviewed down to zero; delete its row")
                 self.assertEqual(
                     actual,
-                    row["expected_occurrences"],
-                    f"{row['id']} changed in {scope_name}; update the "
-                    "source and ownership ledger together",
+                    expected,
+                    f"{row['id']} changed in {scope_name}; "
+                    + how_to_record(row["id"], expected, actual),
                 )
 
     def test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts(self) -> None:
@@ -453,12 +465,13 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 except re.error as error:
                     self.fail(f"invalid module pattern for {row['id']}: {error}")
                 actual = len(pattern.findall(self.module_source))
+                expected = self.reviewed[row["id"]]
                 self.assertEqual(
                     actual,
-                    row["expected_occurrences"],
+                    expected,
                     f"{row['id']} changed anywhere under "
                     f"{', '.join(self.module_roots)}; "
-                    "update the module-wide owner allowlist in the same reviewed change",
+                    + how_to_record(row["id"], expected, actual),
                 )
 
     def test_module_wide_task_timer_and_process_shapes_have_reviewed_counts(self) -> None:
@@ -469,14 +482,62 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 except re.error as error:
                     self.fail(f"invalid structural pattern for {row['id']}: {error}")
                 actual = len(pattern.findall(self.module_structural_source))
+                expected = self.reviewed[row["id"]]
                 self.assertEqual(
                     actual,
-                    row["expected_occurrences"],
+                    expected,
                     f"{row['id']} changed anywhere under "
-                    f"{', '.join(self.module_roots)}; "
-                    "new task, timer, process, or alias shapes require an explicit "
-                    "ownership review and allowlist update",
+                    f"{', '.join(self.module_roots)}; new task, timer, process, or "
+                    "alias shapes require an explicit ownership review: "
+                    + how_to_record(row["id"], expected, actual),
                 )
+
+    def test_recorded_changes_add_up_and_refuse_unreviewed_rows(self) -> None:
+        import tempfile
+
+        known = frozenset({"namespaced-task-spawn", "method-spawn"})
+        row = '[[changes]]\nid = "{}"\ndelta = {}\nreason = "{}"\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.assertEqual(load_changes(directory / "absent", known), {})
+            # Two changes, written on two branches, each add one spawn. Neither
+            # edits a shared total, and the sum is right in either merge order.
+            (directory / "b.toml").write_text(row.format("namespaced-task-spawn", 1, "joined fixture task"))
+            (directory / "a.toml").write_text(
+                row.format("namespaced-task-spawn", 1, "awaited cache read")
+                + row.format("method-spawn", -2, "two JoinSet spawns removed")
+            )
+            self.assertEqual(
+                load_changes(directory, known),
+                {"namespaced-task-spawn": 2, "method-spawn": -2},
+            )
+            catalog = {
+                "symbols": [],
+                "module_symbols": [],
+                "module_structures": [
+                    {"id": "namespaced-task-spawn", "expected_occurrences": 10},
+                    {"id": "method-spawn", "expected_occurrences": 5},
+                ],
+            }
+            self.assertEqual(
+                reviewed_counts(catalog, directory),
+                {"namespaced-task-spawn": 12, "method-spawn": 3},
+            )
+            refused = {
+                "unknown id": row.format("no-such-shape", 1, "x"),
+                "zero delta": row.format("method-spawn", 0, "x"),
+                "no reason": row.format("method-spawn", 1, " "),
+                "repeated id": row.format("method-spawn", 1, "x") * 2,
+                "extra key": row.format("method-spawn", 1, "x") + "note = 1\n",
+                "other table": 'version = 1\n' + row.format("method-spawn", 1, "x"),
+                "float delta": '[[changes]]\nid = "method-spawn"\ndelta = 1.0\nreason = "x"\n',
+                "empty": "",
+            }
+            for name, text in refused.items():
+                with self.subTest(refused=name):
+                    (directory / "c.toml").write_text(text)
+                    with self.assertRaises(OwnerCountError):
+                        load_changes(directory, known)
 
     def test_promised_syntax_forms_hit_structural_sentinels(self) -> None:
         patterns = {
