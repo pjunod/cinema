@@ -12966,13 +12966,11 @@ impl MembershipManager {
         // removal that asked waits on the answer, not on a particular pass.
         // Only a hit pays the authoritative read, and that read, not the
         // hint, decides what is answered.
-        if inner
+        let hint = inner
             .store
             .local_pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
-            .await
-            .map_err(|error| MembershipError::Internal(error.to_string()))?
-            .is_empty()
-        {
+            .await;
+        if !probe_hint_owes_authority(&hint) {
             return Ok(0);
         }
         let pending = inner
@@ -13029,6 +13027,14 @@ impl MembershipManager {
             }
         }
     }
+}
+
+/// Whether the offline probe pass owes the authoritative read, given this
+/// replica's answer. An empty answer is the idle case. A replica that cannot
+/// answer says nothing about the leader, which may well hold a probe a
+/// removal is waiting on: that is a hit, as the lease loop treats its hint.
+fn probe_hint_owes_authority<T>(hint: &Result<Vec<T>, crate::error::StoreError>) -> bool {
+    !matches!(hint, Ok(rows) if rows.is_empty())
 }
 
 /// Positive proof that *this* machine can read a package's exact source.
