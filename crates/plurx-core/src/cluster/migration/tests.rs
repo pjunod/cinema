@@ -5900,3 +5900,50 @@ async fn an_idle_offline_probe_pass_asks_the_authority_nothing() {
 
     selected.shutdown().await.expect("stop the voter");
 }
+
+/// A4: the heartbeat's sharing purpose factory runs every ten seconds on
+/// every node. With sharing off it asks the authority nothing; with sharing
+/// on it still takes the factory's authoritative read of the switch.
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_heartbeat_purpose_factory_reads_no_authority_while_sharing_is_off() {
+    install_default_crypto_provider();
+    let directory = tempfile::tempdir().expect("heartbeat factory data");
+    let config = membership_test_config(directory.path());
+    drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+    let selected = startup_observer::select_applied_singleton(&config)
+        .await
+        .expect("actual one voter selection");
+    let membership = selected.membership_manager();
+
+    for saved in [None, Some("false")] {
+        if let Some(value) = saved {
+            selected
+                .store
+                .put_setting("sharing_enabled", value)
+                .await
+                .expect("saved choice");
+        }
+        let (result, authority) = authority_reads_of(membership.heartbeat_purpose_keys()).await;
+        result.expect("sharing off");
+        assert_eq!(
+            authority,
+            Vec::new(),
+            "sharing {saved:?}: the heartbeat must not read the authority"
+        );
+    }
+
+    selected
+        .store
+        .put_setting("sharing_enabled", "1")
+        .await
+        .expect("sharing on");
+    let (result, authority) = authority_reads_of(membership.heartbeat_purpose_keys()).await;
+    result.expect("no master yet: the factory waits");
+    assert!(
+        authority.iter().any(|(method, _)| *method == "get_setting"),
+        "sharing on takes the factory's authoritative read: {authority:?}"
+    );
+
+    selected.shutdown().await.expect("stop the voter");
+}

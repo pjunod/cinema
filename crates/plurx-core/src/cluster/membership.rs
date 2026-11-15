@@ -10069,7 +10069,7 @@ impl MembershipManager {
                 Ok(()) => {
                     match tokio::time::timeout(
                         Duration::from_secs(5),
-                        self.coordinate_purpose_keys(),
+                        self.heartbeat_purpose_keys(),
                     )
                     .await
                     {
@@ -11962,6 +11962,30 @@ impl MembershipManager {
         self.commit_heartbeat(inner).await?;
         *committed = Some(tokio::time::Instant::now());
         Ok(())
+    }
+
+    /// The heartbeat's turn of [`Self::coordinate_purpose_keys`], every ten
+    /// seconds on every node: the sharing switch is looked at in this node's
+    /// own replica first, as the clock guard's `enforcement_hint` looks at
+    /// its switch, and only a switch this replica holds on pays the
+    /// factory's authoritative read and what follows it. Sharing is off on
+    /// most clusters, so this is the whole idle cost. An enable this replica
+    /// has not applied yet is coordinated on the first heartbeat after it
+    /// applies; startup and the Source schema step still call the factory
+    /// itself.
+    pub async fn heartbeat_purpose_keys(&self) -> Result<(), MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        let hint = inner
+            .store
+            .local_setting_hint("sharing_enabled")
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        if !crate::store::stored_switch(hint.as_deref(), false) {
+            return Ok(());
+        }
+        self.coordinate_purpose_keys().await
     }
 
     /// Bounded explicit startup/heartbeat factory. A member completing a later
