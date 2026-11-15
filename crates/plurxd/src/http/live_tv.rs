@@ -2210,12 +2210,14 @@ async fn voter(
         .find(node_id))
 }
 
-/// Up to three voters to ask for a relayed guide, in Raft order: reachable.
-/// (The directory never names this node, so no self filter is needed.)
+/// Up to three voters to ask for a relayed guide, in Raft order: reachable,
+/// with an HTTP base — the rule `relay_guide` resolves the owner by, so a
+/// voter with no HTTP row cannot spend one of the three attempts. (The
+/// directory never names this node, so no self filter is needed.)
 fn guide_relay_candidates(peers: &[plurx_core::cluster::membership::ActivityPeer]) -> Vec<String> {
     peers
         .iter()
-        .filter(|peer| peer.reachable)
+        .filter(|peer| peer.reachable && peer.http_base.is_some())
         .take(3)
         .map(|peer| peer.node_id.clone())
         .collect()
@@ -2271,16 +2273,12 @@ mod tests {
     fn each_live_tv_roster_site_keeps_its_candidates() {
         let peers = roster();
         let local = "node-local";
-        // owner_guide (was :147): reachable, not self, take 3.
-        let old = peers
-            .clone()
-            .into_iter()
-            .filter(|p| p.reachable && p.node_id != local)
-            .take(3)
-            .map(|p| p.node_id)
-            .collect::<Vec<_>>();
-        assert_eq!(super::guide_relay_candidates(&peers), old);
-        assert_eq!(old, ["node-d", "node-c", "node-e"]);
+        // owner_guide (was :147) changed on purpose; see
+        // `a_voter_with_no_http_row_never_takes_a_guide_relay_attempt`.
+        assert_eq!(
+            super::guide_relay_candidates(&peers),
+            ["node-d", "node-e", "node-a"]
+        );
         // worker selection (was :794): reachable, has base, not self, by id.
         let mut old = peers
             .clone()
@@ -2300,6 +2298,29 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(super::snapshot_candidates(&peers), old);
         assert_eq!(old, ["node-d", "node-e", "node-a"]);
+    }
+
+    /// A guide relay goes to `relay_guide`, which resolves its owner only if
+    /// it is reachable and has an HTTP base. The candidate list once checked
+    /// reachability alone, so a voter with no HTTP row took one of the three
+    /// attempts and failed in `relay_guide`, and a third healthy voter was
+    /// never asked.
+    #[test]
+    fn a_voter_with_no_http_row_never_takes_a_guide_relay_attempt() {
+        let peers = roster();
+        let candidates = super::guide_relay_candidates(&peers);
+        assert!(
+            !candidates.iter().any(|node| node == "node-c"),
+            "node-c has no HTTP row: {candidates:?}"
+        );
+        assert_eq!(candidates, ["node-d", "node-e", "node-a"]);
+        let lookups = crate::cluster::Peers::for_test(peers, 6, Some(true));
+        for node in &candidates {
+            assert!(
+                lookups.find(node).is_some(),
+                "every relay candidate is one relay_guide can resolve: {node}"
+            );
+        }
     }
 
     /// The three owner lookups (was :194, :1852, :2018) were one rule:
