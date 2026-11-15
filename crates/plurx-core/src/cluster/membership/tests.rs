@@ -10293,3 +10293,238 @@ fn a_probe_hint_error_still_owes_the_authoritative_read() {
     assert!(super::probe_hint_owes_authority(&hit));
     assert!(super::probe_hint_owes_authority(&failed));
 }
+
+mod floor_advisory {
+    use super::{FloorAdvisory, SharingMemberFloor};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    const AGE: Duration = Duration::from_secs(5);
+
+    async fn ask(
+        advisory: &FloorAdvisory<u32>,
+        key: &Mutex<u32>,
+        reads: &AtomicUsize,
+        answer: Result<bool, ()>,
+    ) -> Result<bool, ()> {
+        advisory
+            .answer(
+                tokio::time::Instant::now(),
+                AGE,
+                || async { Ok(*key.lock().expect("key")) },
+                async {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    answer
+                },
+                || (),
+            )
+            .await
+    }
+
+    fn fixture() -> (FloorAdvisory<u32>, Mutex<u32>, AtomicUsize) {
+        (FloorAdvisory::default(), Mutex::new(1), AtomicUsize::new(0))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ready_floor_answer_serves_until_its_age_or_key_changes() {
+        let (advisory, key, reads) = fixture();
+        assert_eq!(ask(&advisory, &key, &reads, Ok(true)).await, Ok(true));
+        tokio::time::advance(Duration::from_millis(4_900)).await;
+        assert_eq!(ask(&advisory, &key, &reads, Ok(false)).await, Ok(true));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_millis(200)).await;
+        assert_eq!(ask(&advisory, &key, &reads, Ok(true)).await, Ok(true));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        *key.lock().expect("key") = 2;
+        assert_eq!(ask(&advisory, &key, &reads, Ok(false)).await, Ok(false));
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_not_ready_floor_answer_never_outlives_its_waiters() {
+        let (advisory, key, reads) = fixture();
+        assert_eq!(ask(&advisory, &key, &reads, Ok(false)).await, Ok(false));
+        tokio::time::advance(Duration::from_millis(100)).await;
+        // The floor recovered: the next look sees it at once.
+        assert_eq!(ask(&advisory, &key, &reads, Ok(true)).await, Ok(true));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_floor_read_or_key_is_never_kept() {
+        let (advisory, key, reads) = fixture();
+        assert_eq!(ask(&advisory, &key, &reads, Ok(true)).await, Ok(true));
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert_eq!(ask(&advisory, &key, &reads, Err(())).await, Err(()));
+        // The expired answer was dropped with the failure, not restored.
+        assert_eq!(ask(&advisory, &key, &reads, Ok(false)).await, Ok(false));
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        let unkeyed = advisory
+            .answer(
+                tokio::time::Instant::now(),
+                AGE,
+                || async { Err::<u32, ()>(()) },
+                async {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                },
+                || (),
+            )
+            .await;
+        assert_eq!(unkeyed, Err(()));
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        // A key that fails after the read still answers its caller, uncached.
+        let keyed = AtomicUsize::new(0);
+        let late = advisory
+            .answer(
+                tokio::time::Instant::now(),
+                AGE,
+                || async {
+                    if keyed.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(1)
+                    } else {
+                        Err(())
+                    }
+                },
+                async { Ok(true) },
+                || (),
+            )
+            .await;
+        assert_eq!(late, Ok(true));
+        assert_eq!(ask(&advisory, &key, &reads, Ok(false)).await, Ok(false));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_floor_observers_share_one_read_even_when_not_ready() {
+        let (advisory, key, reads) = fixture();
+        let slow = advisory.answer(
+            tokio::time::Instant::now(),
+            AGE,
+            || async { Ok::<_, ()>(*key.lock().expect("key")) },
+            async {
+                reads.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(false)
+            },
+            || (),
+        );
+        let (first, second) = tokio::join!(slow, ask(&advisory, &key, &reads, Ok(true)));
+        assert_eq!((first, second), (Ok(false), Ok(false)));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_floor_answer_read_across_a_key_change_is_not_kept() {
+        let (advisory, key, reads) = fixture();
+        let moved = advisory
+            .answer(
+                tokio::time::Instant::now(),
+                AGE,
+                || async { Ok::<_, ()>(*key.lock().expect("key")) },
+                async {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    *key.lock().expect("key") = 2;
+                    Ok(true)
+                },
+                || (),
+            )
+            .await;
+        assert_eq!(moved, Ok(true));
+        assert_eq!(ask(&advisory, &key, &reads, Ok(false)).await, Ok(false));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_floor_read_outlives_the_caller_that_gave_up_on_it() {
+        let advisory = Arc::new(FloorAdvisory::<u32>::default());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let first = Arc::clone(&advisory).answer_detached(
+            AGE,
+            || async { Ok(1) },
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(false)
+            },
+            || (),
+        );
+        assert!(tokio::time::timeout(Duration::from_millis(100), first)
+            .await
+            .is_err());
+        let counted = Arc::clone(&reads);
+        let second = Arc::clone(&advisory)
+            .answer_detached(
+                AGE,
+                || async { Ok(1) },
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                },
+                || (),
+            )
+            .await;
+        assert_eq!(second, Ok(false));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn callers_queued_behind_a_failed_floor_read_share_its_failure() {
+        let (advisory, key, reads) = fixture();
+        let failing = advisory.answer(
+            tokio::time::Instant::now(),
+            AGE,
+            || async { Ok::<_, ()>(*key.lock().expect("key")) },
+            async {
+                reads.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                Err(())
+            },
+            || (),
+        );
+        let (first, second, third) = tokio::join!(
+            failing,
+            ask(&advisory, &key, &reads, Ok(true)),
+            ask(&advisory, &key, &reads, Ok(true)),
+        );
+        assert_eq!((first, second, third), (Err(()), Err(()), Err(())));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        // A caller arriving after the failure reads again.
+        assert_eq!(ask(&advisory, &key, &reads, Ok(true)).await, Ok(true));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn every_sharing_member_floor_has_its_own_advisory_slot() {
+        let every = [
+            SharingMemberFloor::SessionPrincipal,
+            SharingMemberFloor::CatalogueItemIdentity,
+            SharingMemberFloor::PrincipalAndCatalogue,
+            SharingMemberFloor::PurposeKeys,
+            SharingMemberFloor::IngressCustody,
+            SharingMemberFloor::AllSharing,
+        ];
+        for floor in every {
+            // A new floor fails to compile here until it is listed above.
+            match floor {
+                SharingMemberFloor::SessionPrincipal
+                | SharingMemberFloor::CatalogueItemIdentity
+                | SharingMemberFloor::PrincipalAndCatalogue
+                | SharingMemberFloor::PurposeKeys
+                | SharingMemberFloor::IngressCustody
+                | SharingMemberFloor::AllSharing => {}
+            }
+        }
+        let slots = every.map(SharingMemberFloor::index);
+        assert_eq!(slots.len(), SharingMemberFloor::COUNT);
+        assert!(slots.iter().all(|slot| *slot < SharingMemberFloor::COUNT));
+        assert_eq!(
+            slots
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            SharingMemberFloor::COUNT
+        );
+    }
+}

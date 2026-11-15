@@ -78,10 +78,12 @@ BUILD_SPECS = {
     # Recipe changes still require review; project-counter normalization below
     # does not authorize different recipe bytes or transfer native passes.
     # #1653 removed only `@scripts/knowledge lint --scope pilot --body-env`
-    # from the validation-lint recipe (the retired knowledge pilot), and PR
-    # #1586 adds only the web curator-login-browser-check target (Playwright,
-    # same shape as web-shared-library-browser-check); no native recipe changes.
-    'Makefile': 'b975ec1e5af9003671ee846fc9c4c367cb9dcffcafa1bf389010c50ad2640567',
+    # #1653 removed only `@scripts/knowledge lint --scope pilot --body-env`
+    # from the validation-lint recipe (the retired knowledge pilot), PR #1586
+    # adds only the web curator-login-browser-check target, and A6 M3 adds the
+    # vendor hiqlite `applied_mark::watch_tests` run to cluster-wal-check; no
+    # native build recipe changed.
+    'Makefile': 'f1b4c9732821a6c423590e9e733d78a50572532ccfe9b6a2ffc38362f7fe066f',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag
