@@ -530,6 +530,21 @@ macro_rules! claim_identity {
     };
 }
 
+/// A subtitle extraction is claimable only while its analysis request is
+/// live. Every candidate listing applies this one predicate, filtered or
+/// not, as the listing did before the claim statement was split: a settled
+/// request's job is not work on any backend.
+macro_rules! claim_subtitle_extract_demand {
+    () => {
+        r#"(kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
+        AND file.size = request.source_size AND file.mtime = request.source_mtime
+      WHERE request.request_id = json_extract(background_jobs.payload_json, '$.source_generation')
+        AND request.file_id = json_extract(background_jobs.payload_json, '$.file_id')
+        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
+        AND request.cancel_requested = 0))"#
+    };
+}
+
 /// Per-kind demand and configuration admission.
 macro_rules! claim_kind_demand {
     () => {
@@ -558,12 +573,9 @@ macro_rules! claim_kind_demand {
   AND (kind!='subtitle_transcribe_managed' OR EXISTS (SELECT 1 FROM files file WHERE file.id=json_extract(background_jobs.payload_json,'$.file_id') AND file.size=json_extract(background_jobs.payload_json,'$.source_size') AND file.mtime=json_extract(background_jobs.payload_json,'$.source_mtime') AND file.probe_json IS NOT NULL))
   -- Match the subtitle projection's preconditions before its trigger runs. A
   -- settled request is an ordinary lost claim, never an ambiguous SQL failure.
-  AND (kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
-        AND file.size = request.source_size AND file.mtime = request.source_mtime
-      WHERE request.request_id = json_extract(background_jobs.payload_json, '$.source_generation')
-        AND request.file_id = json_extract(background_jobs.payload_json, '$.file_id')
-        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
-        AND request.cancel_requested = 0))
+  AND "#,
+    claim_subtitle_extract_demand!(),
+    r#"
   AND (kind != 'media_probe' OR (EXISTS (SELECT 1 FROM job_leases lease
  WHERE lease.resource = json_extract(background_jobs.payload_json,'$.coordinator.resource')
  AND lease.owner_node_id = json_extract(background_jobs.payload_json,'$.coordinator.node_id')
@@ -881,8 +893,18 @@ const CANDIDATE_ADMISSION_SQL: &str = concat!(
     ")"
 );
 
+/// What every listing requires of a job, on either backend and whether or
+/// not the caller asked for an admissible listing: the subtitle-extraction
+/// demand the listing has always applied.
+const CANDIDATE_BASE_SQL: &str = concat!(
+    "EXISTS (SELECT 1 FROM background_jobs WHERE background_jobs.id = job.id\n  AND ",
+    claim_subtitle_extract_demand!(),
+    ")"
+);
+
 /// The candidate listing, with `admission` as one more predicate on each
-/// listed job: `1`, or [`CANDIDATE_ADMISSION_SQL`] for an admissible listing.
+/// listed job: [`CANDIDATE_BASE_SQL`], or [`CANDIDATE_ADMISSION_SQL`] (which
+/// includes it through the kind-demand group) for an admissible listing.
 fn candidate_listing_sql(admission: &str) -> String {
     format!(
         r#"WITH selection AS (
@@ -962,7 +984,7 @@ pub mod claim_sql_fixture {
         super::candidate_listing_sql(if admissible {
             super::CANDIDATE_ADMISSION_SQL
         } else {
-            "1"
+            super::CANDIDATE_BASE_SQL
         })
     }
 }
@@ -4678,7 +4700,7 @@ LIMIT 1
         let rows = match admissible {
             Some(rows) => rows,
             None => {
-                self.queue_sql(candidate_listing_sql("1"), body, false, false)
+                self.queue_sql(candidate_listing_sql(CANDIDATE_BASE_SQL), body, false, false)
                     .await?
             }
         };
