@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirty patches for clustered deployments. An
+Apache-2.0. Plurx carries thirty-one patches for clustered deployments. An
 upstream release can retire the nine generic bugs and the one dependency-only
-constraint; it cannot retire the twenty Plurx policies:
+constraint; it cannot retire the twenty-one Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -41,6 +41,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
 | 29 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
 | 30 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
+| 31 | A dead database Raft core is reported, and a known-short disk never starts a snapshot build | plurx policy | — | Never; Plurx ends a process whose core quit and owns its snapshot storage policy; OpenRaft 0.9 makes any build storage error fatal. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -306,8 +307,10 @@ made-up URL and prevents the fork from being declared fully tracked.
   boundary without proposing an entry, so Plurx's portable backup can anchor
   its cut through the forwarding `WriteAck` write (row 21) on whichever voter
   holds the backup lease. Target-local storage admission runs
-  before the writer request with a size-based floor, ten-second retries and
-  a ten-minute maximum (then existing error semantics), exposed through
+  before the writer request with a size-based floor and ten-second retries.
+  Storage known to be short keeps waiting (row 31); only storage that
+  cannot be measured is bounded at ten minutes (then the existing path),
+  exposed through
   passive fixed-label metrics. This changes no replicated enum ordinal,
   metadata encoding, completed image format, or install format.
   Files: `src/store/state_machine/sqlite/writer.rs`,
@@ -496,6 +499,25 @@ made-up URL and prevents the fork from being declared fully tracked.
   `src/client/transaction.rs`, `src/client/batch.rs`, `src/client/migrate.rs`,
   `src/client/backup.rs`, `src/backup.rs`, `src/helpers.rs`,
   `src/network/api.rs`, `src/network/management.rs`, `src/dashboard/query.rs`.
+- `LocalDbRaftMetrics::core_stopped` waits on the local Raft watch until the
+  core stops, and returns `LocalDbCoreStop`. `Stopped` means OpenRaft's
+  `Fatal::Stopped` (an ordinary `Raft::shutdown`). `Fatal(text)` means any
+  other terminal `running_state`, or a watch that closed without one (a
+  panic). plurxd ends the process on `Fatal`
+  (`docs/cluster/DEAD-RAFT-CORE-EXIT-BUILD.md`). In OpenRaft 0.9.25 the
+  core turns a `build_snapshot` storage error into its own fatal quit
+  (`raft_core.rs`: `command_result.result?`), so admission no longer
+  attempts a build on storage known to be short: it waits, and only an
+  unmeasurable disk keeps the ten-minute bound. A build that fails before
+  its rename removes its `<uuid>.temp` and `-journal`, and startup removes
+  any abandoned ones. Tests:
+  `mgmt::tests::the_core_stop_names_a_fatal_quit_and_ignores_an_ordinary_stop`,
+  `snapshot_admission::tests::known_insufficient_storage_never_attempts_the_build`,
+  `a_known_answer_restarts_the_unknown_bound` and the snapshot builder's
+  temp-removal tests.
+  Files: `src/client/mgmt.rs`, `src/client/mod.rs`, `src/lib.rs`,
+  `src/snapshot_admission.rs`, `src/store/state_machine/sqlite/snapshot_builder.rs`,
+  `src/store/state_machine/sqlite/state_machine.rs`.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
 was accepted on 2026-10-05 as
@@ -548,7 +570,7 @@ Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 28: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29 and 30) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30 and 31) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

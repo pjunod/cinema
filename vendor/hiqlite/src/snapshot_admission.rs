@@ -49,13 +49,20 @@ pub(crate) async fn wait_for_storage(database: &Path, limit: Duration) {
     .await;
 }
 
+/// Wait until a build can fit. Storage KNOWN to be short keeps the build
+/// waiting, re-probed every [`RETRY`]: attempting it could only fail, and in
+/// OpenRaft 0.9 a `build_snapshot` storage error ends the Raft core for good,
+/// while waiting delays nothing but the next snapshot (and so log purging and
+/// a snapshot-anchored backup, which carries its own deadline). Only storage
+/// that cannot be measured is bounded by `limit`: an unknown answer stays
+/// unknown, so after `limit` of it the existing path is attempted.
 async fn wait_with_probe(
     mut limit: Duration,
     mut probe: impl FnMut() -> io::Result<StorageSample>,
 ) {
     limit = limit.min(DEFAULT_SNAPSHOT_STORAGE_DEFERRAL);
     let start = tokio::time::Instant::now();
-    let deadline = start + limit;
+    let mut unknown_since = None::<tokio::time::Instant>;
     let mut next_warning = start;
     loop {
         let sample = probe();
@@ -66,8 +73,17 @@ async fn wait_with_probe(
             return;
         }
         let now = tokio::time::Instant::now();
-        if now >= deadline {
-            tracing::warn!("snapshot storage deferral expired; attempting existing snapshot path");
+        let deadline = match &sample {
+            Ok(_) => {
+                unknown_since = None;
+                None
+            }
+            Err(_) => Some(*unknown_since.get_or_insert(now) + limit),
+        };
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            tracing::warn!(
+                "snapshot storage stayed unknown past its deferral; attempting existing snapshot path"
+            );
             return;
         }
         crate::snapshot_metrics::record_storage_deferral();
@@ -80,7 +96,8 @@ async fn wait_with_probe(
             );
             next_warning = now + Duration::from_secs(60);
         }
-        tokio::time::sleep_until((now + RETRY).min(deadline)).await;
+        let retry = now + RETRY;
+        tokio::time::sleep_until(deadline.map_or(retry, |deadline| retry.min(deadline))).await;
     }
 }
 
@@ -142,6 +159,62 @@ mod tests {
                 .snapshot()
                 .storage_deferrals_total
                 >= before + 60
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn known_insufficient_storage_never_attempts_the_build() {
+        let start = tokio::time::Instant::now();
+        let mut probes = 0_u32;
+        // Short for 30 minutes, three times the unknown bound, then enough.
+        let waited = tokio::time::timeout(
+            Duration::from_secs(3_600),
+            wait_with_probe(DEFAULT_SNAPSHOT_STORAGE_DEFERRAL, || {
+                probes += 1;
+                Ok(StorageSample {
+                    required: 2,
+                    available: if tokio::time::Instant::now() - start
+                        >= Duration::from_secs(1_800)
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                })
+            }),
+        )
+        .await;
+        assert!(waited.is_ok(), "the build proceeds once storage fits");
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(1_800),
+            "storage known to be short is never attempted, however long it lasts"
+        );
+        assert_eq!(probes, 181);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_known_answer_restarts_the_unknown_bound() {
+        let start = tokio::time::Instant::now();
+        let mut probes = 0_u32;
+        wait_with_probe(DEFAULT_SNAPSHOT_STORAGE_DEFERRAL, || {
+            probes += 1;
+            // Unknown for five minutes, short for five, then unknown again.
+            let elapsed = tokio::time::Instant::now() - start;
+            if elapsed >= Duration::from_secs(300) && elapsed < Duration::from_secs(600) {
+                Ok(StorageSample {
+                    required: 2,
+                    available: 1,
+                })
+            } else {
+                Err(io::Error::other("unknown filesystem"))
+            }
+        })
+        .await;
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(600) + DEFAULT_SNAPSHOT_STORAGE_DEFERRAL,
+            "only a continuous unknown stretch is bounded"
         );
     }
 }

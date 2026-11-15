@@ -56,7 +56,7 @@ pub const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(14);
 #[cfg(feature = "sqlite")]
 pub use crate::client::{
     DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbMembershipSnapshot,
-    LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
+    LocalDbCoreStop, LocalDbRaftMetrics, LocalDbRaftSnapshot, WriteAck,
 };
 #[cfg(feature = "sqlite")]
 pub use crate::applied_mark::{

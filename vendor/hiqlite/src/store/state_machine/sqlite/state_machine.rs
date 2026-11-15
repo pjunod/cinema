@@ -342,8 +342,11 @@ impl StateMachineSqlite {
             PathSnapshots(path_snapshots),
             PathLockFile(path_lock_file),
         ) = Self::build_folders(data_dir, true).await;
-
         Self::check_set_lock_file(&path_lock_file, &path_db, &mut db_exists).await;
+        // Plurx patch 31: this process now owns the directory and nothing
+        // builds yet, so a build temporary here was abandoned by a crash or
+        // a full disk.
+        super::snapshot_builder::remove_abandoned_build_temps(&path_snapshots).await;
 
         // Always start the writer first! -> creates mandatory tables
         let conn = Self::connect(

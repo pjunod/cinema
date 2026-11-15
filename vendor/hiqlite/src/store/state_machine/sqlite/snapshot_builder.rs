@@ -70,7 +70,7 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfigSqlite>, StorageError<NodeId>> {
         let timer = SnapshotTimer::start(SnapshotOperation::Build);
         // Storage-only admission owns no publication state. Incoming receive
-        // and install must remain live throughout a bounded deferral.
+        // and install must remain live throughout a deferral.
         crate::snapshot_admission::wait_for_storage(&self.database_path, self.storage_deferral)
             .await;
         // Snapshot construction and installation both replace the current
@@ -110,13 +110,26 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
             .await
             .expect("Sender to always be listening");
 
-        let resp = rx.await.expect("to always receive a snapshot response")?;
-        sync_file(&path_temp).await?;
-        fs::rename(&path_temp, &path)
-            .await
-            .map_err(|err| StorageError::IO {
-                source: StorageIOError::write_state_machine(&err),
-            })?;
+        // Plurx patch 31: a build that fails before its image is renamed into
+        // place removes what it wrote, the image and SQLite's rollback
+        // journal, so a full disk is not kept full by a dead build.
+        let written = async {
+            let resp = rx.await.expect("to always receive a snapshot response")?;
+            sync_file(&path_temp).await?;
+            fs::rename(&path_temp, &path)
+                .await
+                .map_err(|err| StorageError::IO {
+                    source: StorageIOError::write_state_machine(&err),
+                })?;
+            Ok::<_, StorageError<NodeId>>(resp)
+        };
+        let resp = match written.await {
+            Ok(resp) => resp,
+            Err(error) => {
+                remove_build_temp(&path_temp).await;
+                return Err(error);
+            }
+        };
         sync_directory(&self.path_snapshots).await?;
         let snapshot = fs::File::open(&path)
             .await
@@ -148,6 +161,45 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
         ));
         timer.success();
         Ok(snapshot)
+    }
+}
+
+/// Plurx patch 31: remove one build's temporary image and its SQLite
+/// rollback journal. Best effort: a file that is already gone is fine, and a
+/// failure is logged rather than hiding the build's own error.
+pub(crate) async fn remove_build_temp(path_temp: &str) {
+    for path in [path_temp.to_owned(), format!("{path_temp}-journal")] {
+        match fs::remove_file(&path).await {
+            Ok(()) => info!("removed the failed snapshot build's {path}"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!("could not remove the failed snapshot build's {path}: {error}"),
+        }
+    }
+}
+
+/// Plurx patch 31: at startup no build is running, so any `<uuid>.temp` or
+/// `<uuid>.temp-journal` left in the snapshots directory belongs to a build a
+/// crash or a full disk abandoned. Peer receive's `temp` and the pointers'
+/// `current.temp` / `pending.temp` are not build temporaries and stay.
+pub(crate) async fn remove_abandoned_build_temps(path_snapshots: &str) {
+    let Ok(mut list) = fs::read_dir(path_snapshots).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = list.next_entry().await {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let stem = name
+            .strip_suffix(".temp-journal")
+            .or_else(|| name.strip_suffix(".temp"));
+        if stem.is_some_and(|stem| Uuid::parse_str(stem).is_ok()) {
+            let path = format!("{path_snapshots}/{name}");
+            match fs::remove_file(&path).await {
+                Ok(()) => info!("removed an abandoned snapshot build file {path}"),
+                Err(error) => warn!("could not remove abandoned snapshot build file {path}: {error}"),
+            }
+        }
     }
 }
 
@@ -515,5 +567,72 @@ mod snapshot_metrics_cleanup_contract {
         fs::remove_dir_all(root)
             .await
             .expect("remove snapshot cleanup root");
+    }
+
+    #[tokio::test]
+    async fn abandoned_build_temporaries_are_removed_and_nothing_else() {
+        let root = std::env::temp_dir().join(format!("hiqlite-build-temps-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.expect("create snapshots root");
+        let build = Uuid::now_v7();
+        let kept = Uuid::now_v7();
+        let removed = [format!("{build}.temp"), format!("{build}.temp-journal")];
+        let survivors = [
+            kept.to_string(),
+            "temp".to_owned(),
+            CURRENT_SNAPSHOT_POINTER.to_owned(),
+            CURRENT_SNAPSHOT_POINTER_TEMP.to_owned(),
+            PENDING_SNAPSHOT_POINTER_TEMP.to_owned(),
+            "not-a-uuid.temp".to_owned(),
+        ];
+        for name in removed.iter().chain(&survivors) {
+            fs::write(root.join(name), b"x").await.expect("seed file");
+        }
+        let root_str = root.to_str().expect("UTF-8 root").to_owned();
+        remove_abandoned_build_temps(&root_str).await;
+        for name in &removed {
+            assert!(!root.join(name).exists(), "{name} was abandoned and must go");
+        }
+        for name in &survivors {
+            assert!(root.join(name).exists(), "{name} is not a build temporary");
+        }
+
+        // A failed build's own pair goes too.
+        let failed = format!("{root_str}/{}.temp", Uuid::now_v7());
+        fs::write(&failed, b"x").await.expect("seed image");
+        fs::write(format!("{failed}-journal"), b"x").await.expect("seed journal");
+        remove_build_temp(&failed).await;
+        assert!(!std::path::Path::new(&failed).exists());
+        assert!(!std::path::Path::new(&format!("{failed}-journal")).exists());
+        fs::remove_dir_all(root).await.expect("remove snapshots root");
+    }
+
+    #[test]
+    fn a_failed_build_removes_what_it_wrote_and_startup_removes_what_was_abandoned() {
+        let builder: String = include_str!("snapshot_builder.rs").split_whitespace().collect();
+        let build = builder
+            .split_once("asyncfnbuild_snapshot(")
+            .expect("build_snapshot")
+            .1
+            .split_once("Ok(snapshot)}")
+            .expect("end of build_snapshot")
+            .0;
+        assert!(
+            build.contains("Err(error)=>{remove_build_temp(&path_temp).await;returnErr(error);}"),
+            "every failure between the image write and its rename removes the image"
+        );
+        let state_machine: String =
+            include_str!("state_machine.rs").split_whitespace().collect();
+        let startup = state_machine
+            .split_once("pub(crate)asyncfnnew(")
+            .expect("state machine constructor")
+            .1;
+        let lock = startup
+            .find("Self::check_set_lock_file(")
+            .expect("the lock check");
+        let sweep = startup
+            .find("remove_abandoned_build_temps(&path_snapshots).await;")
+            .expect("startup sweeps abandoned build temporaries");
+        let writer = startup.find("spawn_writer(").expect("the writer start");
+        assert!(lock < sweep && sweep < writer, "swept after the lock, before any build can run");
     }
 }
