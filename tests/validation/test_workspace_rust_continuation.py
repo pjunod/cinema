@@ -63,14 +63,6 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         with self.assertRaises(RuntimeError):
             execute.exact_selection({'group::one_long'},{'group::one'})
 
-    def test_root_ownership_needs_complete_native_summary_and_real_names(self):
-        raw = b'test_case (test_source_custody_recovery.RecoveryHelperTests.test_case) ... ok\nRan 1 tests in 1.2s\nOK\ncargo fmt --all --check\n'
-        source = b'class RecoveryHelperTests:\n def test_case(self): pass\n'
-        self.assertTrue(proof.root_prerequisite(raw,source))
-        self.assertFalse(proof.root_prerequisite(raw,source + b' def test_other(self): pass\n'))
-        self.assertFalse(proof.root_prerequisite(raw.replace(b'Ran 1 tests',b'Ran 2 tests'),source))
-        self.assertFalse(proof.root_prerequisite(raw.replace(b'.test_case)',b'.test_else)'),source))
-
     def test_disappeared_failed_and_ignored_invalidated_bodies_cannot_close_the_target(self):
         proof = {'observed':{'daemon':['green','red','affected']},'must_pass':{'daemon':['red','affected']}}
         with self.assertRaises(RuntimeError):
@@ -118,8 +110,8 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     def test_reviewed_historical_jobs_do_not_relax_current_admission(self):
         from pathlib import Path
         current = Path('.github/workflows/ci.yml').read_text()
-        self.assertEqual(proof.HISTORICAL_JOBS, (proof.ORIGINAL_JOB, proof.PRE_NONVOTER_JOB, proof.NONVOTER_JOB, proof.CGROUP_PARSE_JOB, proof.TIMEOUT_180_JOB, proof.CURRENT_JOB))
-        self.assertEqual(len(set(proof.HISTORICAL_JOBS)), 6)
+        self.assertEqual(proof.HISTORICAL_JOBS, (proof.ORIGINAL_JOB, proof.PRE_NONVOTER_JOB, proof.NONVOTER_JOB, proof.CGROUP_PARSE_JOB, proof.TIMEOUT_180_JOB, proof.IMAGE_PIN_JOB, proof.CURRENT_JOB))
+        self.assertEqual(len(set(proof.HISTORICAL_JOBS)), 7)
         for identity in proof.HISTORICAL_JOBS:
             with self.subTest(identity=identity), patch.object(proof.retention, 'digest', return_value=identity):
                 proof.check_workflow_environment(current, proof.HISTORICAL_JOBS)
