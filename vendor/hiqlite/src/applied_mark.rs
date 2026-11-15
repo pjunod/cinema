@@ -156,8 +156,11 @@ impl AppliedMark {
         let mut watched = false;
         for (slot, revision) in self.tables.iter().enumerate().take(self.names.len()) {
             if pending & (1 << slot) != 0 {
-                revision.fetch_add(1, Ordering::Release);
-                watched |= self.interest[slot].load(Ordering::Acquire) > 0;
+                // SeqCst with `watch`: bump-then-load against add-then-load
+                // on two atomics is store buffering; weaker orders could let
+                // both sides miss each other.
+                revision.fetch_add(1, Ordering::SeqCst);
+                watched |= self.interest[slot].load(Ordering::SeqCst) > 0;
             }
         }
         if let Some(index) = applied_index {
@@ -278,13 +281,13 @@ impl AppliedMarkHandle {
     #[must_use]
     pub fn watch(&self, slots: &[AppliedSlot]) -> AppliedWatch {
         for slot in slots {
-            self.mark.interest[slot.0].fetch_add(1, Ordering::AcqRel);
+            self.mark.interest[slot.0].fetch_add(1, Ordering::SeqCst);
         }
         AppliedWatch {
             mark: Arc::clone(&self.mark),
             revisions: slots
                 .iter()
-                .map(|slot| (*slot, self.revision(*slot)))
+                .map(|slot| (*slot, self.mark.tables[slot.0].load(Ordering::SeqCst)))
                 .collect(),
             generation: self.generation(),
         }

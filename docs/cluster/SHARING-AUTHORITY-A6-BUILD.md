@@ -1,6 +1,6 @@
 # Sharing authority through the cluster layer — A6 build plan
 
-**Status:** plan rev 5: M1 and M2 built and reviewed; M3 reviewed and confirmed sound to build (Fable) · **Owner:** Claude Opus 5.5, session_01BCWLA21tCtxWeNBWRHWsWn ·
+**Status:** built (plan rev 5): M1, M2 and M3 built and adversarially reviewed (Fable); landing in progress · **Owner:** Claude Opus 5.5, session_01BCWLA21tCtxWeNBWRHWsWn ·
 **Implements:** the cluster layer audit (PR #1604) finding D4, action item A6 ·
 **Base:** stacked on #1598 (`claude/sharing-listener-unknown-not-disabled`), on top of `main @ 8785492be`
 
@@ -80,7 +80,7 @@ Rev 5: rev 4 detailed from the code after M1 and M2 were built, then adversarial
 
 The owner loops are the lease's heartbeat and keep their 10 s interval and full look; M3 does not touch them, and the acceptance line counts monitors only.
 
-**The wake primitive (vendored Hiqlite, patch 28).** Only the writer thread sees remote applies, so the primitive belongs there.
+**The wake primitive (vendored Hiqlite, an extension of patch 27, the applied mark).** Only the writer thread sees remote applies, so the primitive belongs there.
 - The pending mask widens from `AtomicU8` to `AtomicU16` (`applied_mark.rs:46`, `:74-94`, `:124`), and `APPLIED_MARK_MAX_TABLES` rises from 8 to 16. With 13 tables an 8-bit mask aliases slots 8–12 onto 0–4 in release. A test registers a slot at index ≥ 8 and proves it moves alone.
 - A registered table may be **delete-only**: the update hook's action (`writer.rs:289`) decides whether the row change bumps the slot. `tokens` registers delete-only, because every active device rewrites its token every 60 s (`auth.rs:76`, `store/hiqlite.rs:6170`); token idle expiry is a time term instead.
 - `AppliedMark` gains one `tokio::sync::Notify` and an **interest count per slot** for the watches alive (a count, so one watch dropping never clears a slot another still holds). `publish` bumps revisions first, then notifies only when a bumped slot has a nonzero interest count, so `media_sessions` renewals cost the writer thread one mask test. `begin_replacement` and `complete` always notify.
@@ -106,8 +106,8 @@ The owner loops are the lease's heartbeat and keep their 10 s interval and full 
   - The member floor (M2) is no longer re-observed on an idle stream. Damage to item identity moves the watched rows; a floor that lapses without a row change is caught at the next look. This is a deliberate change from M1, which ended an idle stream after a persistent not-ready floor.
 - **Receiver connection:**
   - **Waits on:** `tokens` (deletes), `settings`, `sharing_imports`, `sharing_viewers`, `sharing_assignments`, `sharing_identity` and serving loss.
-  - **Wakes at:** the earliest of the lease, the delivery-grant deadline and the token idle deadline, plus 1 ms, because the lease comparison is strict `>`.
-  - **Where the deadlines come from:** the owner's in-memory state, through a `watch` channel the owner updates on every renewal (`shared_receiver_playback.rs:969-975`). A value from the last look would go stale at each 10 s renewal.
+  - **Wakes at:** the earlier of the lease and the original login's expiry, plus 1 ms, because the comparisons are strict `>`. The delivery-grant deadline needs no term of its own: it is `min(observed + 30 s, lease, login)` (`sharing_receiver_sessions.rs:66-79`) and is renewed with the lease.
+  - **Where the deadlines come from:** the lease is read from the owner's in-memory state at every wait (`delivery_deadline_ms`), so a renewal moves it; a deadline wake re-checks and looks only if the term has really lapsed. A value from the last look would go stale at each 10 s renewal.
   - **New accessors:** the look returns the delivery deadline, which is read and discarded today (`:940-946`). An accessor exposes `login_expires_at_s` (`sharing_receiver_sessions.rs:48`).
   - **Not watched:** `users`. The predicate uses it only for existence (`:667`), and deleting a user cascades to `tokens`, `sharing_viewers` and `sharing_assignments`, all of which are watched.
   - **Also not watched:** the relay and delivery tables, which every 10 s renewal writes. A binding taken or ended elsewhere is seen by this owner's next renewal, which fails and retires through M1, and by the lease deadline. Nothing calls `revoke_receiver_delivery` outside retirement.
@@ -118,7 +118,7 @@ The owner loops are the lease's heartbeat and keep their 10 s interval and full 
 - That proof is a quorum confirmation with `applied_index >= committed_index`, kept inside its own 1 s lease (`QUORUM_WATERMARK_LEASE`) and never restamped (`migration.rs:5593`, `:6250-6316`, `:6452-6466`).
 - So a ready node has applied a commit index that a quorum confirmed within the last second. Otherwise the fence drops and the monitors' serving-loss arm fires.
 - M3 adds no sharing-side timer.
-- The build checks one more thing: a confirmation's `committed_index` must be sampled no earlier than its anchor `started_nanos`, or the bound stretches by that gap.
+- The anchor precedes the sample: `started_nanos` is taken before `source.sample()` (`migration.rs:7076`, `:7083`), the sample is a fresh leader read index (`get_read_log_id`, `client/mgmt.rs:170`), and `publish_watermark` refuses a sample whose anchor is already past its lease.
 
 **Coverage proofs (prerequisites, each its own commit).**
 1. `applied_view_tables_never_escape_the_update_hook` (`placeholder_census.rs:3445`) moves from `APPLIED_VIEW_TABLES` to the full registered set. The unqualified deletes in `validation_reset_contract_state` (`store/hiqlite.rs:5871-5893`) gain `WHERE true`, as `:5835` already has.

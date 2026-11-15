@@ -110,7 +110,24 @@ pub(crate) fn absence_given(
         absence(owner)
     }
 }
-/// How a receiver owner reads one look at its delivery authority.
+/// How long a connection monitor sleeps for its time term: just past the
+/// deadline (the lease and login comparisons are strict), or one second
+/// without one.
+fn until_past(deadline_ms: Option<i64>, now_ms: i64) -> Duration {
+    deadline_ms.map_or(Duration::from_secs(1), |deadline| {
+        Duration::from_millis(
+            u64::try_from(deadline.saturating_sub(now_ms))
+                .unwrap_or(0)
+                .saturating_add(1),
+        )
+    })
+}
+
+/// Whether the time term has lapsed, so a deadline wake must look.
+fn lapsed(deadline_ms: Option<i64>, now_ms: i64) -> bool {
+    deadline_ms.is_none_or(|deadline| now_ms > deadline)
+}
+
 /// The tables a receiver connection's authority rests on (A6 M3): the
 /// original login (`tokens`, deletes only; its idle expiry is a time term),
 /// the switch and token policy (`settings`), the import, viewer and
@@ -125,6 +142,7 @@ const RECEIVER_CONNECTION_WATCH: &[&str] = &[
     "sharing_identity",
 ];
 
+/// How a receiver owner reads one look at its delivery authority.
 pub(crate) fn delivery_observation<T>(
     looked: &Result<T, ReceiverStartError>,
 ) -> crate::sharing::SharingObservation {
@@ -845,11 +863,13 @@ impl ReceiverStartActor {
         self.current_delivery_attachment(state).await?;
         Ok((self.0.intent.user_id, self.0.intent.login_hash.clone()))
     }
-    /// When the connection monitor must look without a change (A6 M3): just
-    /// past the owner's current lease or the original login's expiry,
-    /// whichever is first. Read from the owner's state at each wait, so a
-    /// renewal moves it; the comparisons are strict, hence the 1 ms.
-    fn delivery_due(&self, login_expires_at_ms: Option<i64>) -> tokio::time::Instant {
+    /// The wall-clock millisecond at which the connection monitor must look
+    /// without a change (A6 M3): the owner's current lease or the original
+    /// login's expiry, whichever is first. Read from the owner's state at
+    /// each wait, so a renewal moves it. `None` without a retained Source.
+    /// The delivery grant needs no term of its own: its deadline is at most
+    /// the lease and the login, and is renewed with the lease.
+    fn delivery_deadline_ms(&self, login_expires_at_ms: Option<i64>) -> Option<i64> {
         let lease = self
             .0
             .state
@@ -857,14 +877,8 @@ impl ReceiverStartActor {
             .expect("receiver owner")
             .source
             .as_ref()
-            .map(|retained| retained.owner.lease_expires_at_ms);
-        let now = tokio::time::Instant::now();
-        let Some(lease) = lease else {
-            return now + Duration::from_secs(1);
-        };
-        let deadline = login_expires_at_ms.map_or(lease, |login| login.min(lease));
-        let remaining = u64::try_from(deadline.saturating_sub(clock_ms())).unwrap_or(0);
-        now + Duration::from_millis(remaining.saturating_add(1))
+            .map(|retained| retained.owner.lease_expires_at_ms)?;
+        Some(login_expires_at_ms.map_or(lease, |login| login.min(lease)))
     }
     async fn current_delivery_attachment(
         &self,
@@ -1344,16 +1358,22 @@ impl ReceiverStartActor {
             let mut looked = tokio::time::Instant::now();
             let mut login_expires_at_ms = None;
             'monitor: loop {
-                loop {
-                    tokio::select! {
-                        () = closed.wait() => return,
-                        () = actor.0.stop.cancelled() => break 'monitor,
-                        () = watch.changed() => break,
-                        Ok(()) = serving.changed() => break,
-                        () = tokio::time::sleep_until(actor.delivery_due(login_expires_at_ms)) => {
-                            // A renewal moved the lease past this wake: no look.
-                            if actor.delivery_due(login_expires_at_ms) <= tokio::time::Instant::now() {
-                                break;
+                {
+                    // Pinned once per wait: an interval watch keeps its own
+                    // deadline across re-sleeps for a moved lease.
+                    let mut changed = std::pin::pin!(watch.changed());
+                    loop {
+                        let due = actor.delivery_deadline_ms(login_expires_at_ms);
+                        tokio::select! {
+                            () = closed.wait() => return,
+                            () = actor.0.stop.cancelled() => break 'monitor,
+                            () = changed.as_mut() => break,
+                            Ok(()) = serving.changed() => break,
+                            () = tokio::time::sleep(until_past(due, clock_ms())) => {
+                                // A renewal moved the lease past this wake: no look.
+                                if lapsed(actor.delivery_deadline_ms(login_expires_at_ms), clock_ms()) {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -3677,6 +3697,26 @@ mod outage_policy_tests {
     /// An empty exact read inside the owner's own lease can only be a
     /// non-temporal fact (a revoked grant, a logout, a replaced owner): it
     /// revokes at once. Only after the lease has passed is it unknown.
+
+    /// A6 M3: the connection monitor's time term. A lapsed deadline wakes a
+    /// look at once (1 ms past it), not a re-sleep; one still ahead (a
+    /// renewal moved it) waits for it again.
+    #[test]
+    fn a_lapsed_delivery_deadline_looks_and_a_moved_one_waits() {
+        assert_eq!(super::until_past(Some(100), 40), Duration::from_millis(61));
+        assert_eq!(super::until_past(Some(100), 200), Duration::from_millis(1));
+        assert_eq!(super::until_past(None, 200), Duration::from_secs(1));
+        assert!(!super::lapsed(Some(100), 100));
+        assert!(super::lapsed(Some(100), 101));
+        assert!(super::lapsed(None, 0));
+        let source = include_str!("shared_receiver_playback.rs");
+        let monitor = &source[source.find("'monitor: loop {").expect("monitor")..];
+        let wait = &monitor[..monitor.find("Re-armed before the look").expect("wait")];
+        assert!(
+            wait.contains("if lapsed(actor.delivery_deadline_ms(login_expires_at_ms), clock_ms())")
+        );
+        assert!(wait.contains("std::pin::pin!(watch.changed())"));
+    }
     #[test]
     fn receiver_absence_inside_the_lease_is_affirmative_and_after_it_unknown() {
         let owner = |now_ms, lease_expires_at_ms| {
