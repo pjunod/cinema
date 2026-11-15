@@ -489,7 +489,7 @@ classes that must stay linearizable.
 | ID | Change | Fixes |
 |---|---|---|
 | C1 | Coalesce read confirmations in the fork: one round in flight; a reader shares a round only if it arrived before that round started, later arrivals wait for the next; the read index is honoured; one failed round fails every waiter on it. The fence sampler becomes a reader of the same round. Owned by the in-flight proposal above. | §4.1 |
-| C2 | A leader never restarts cold: plurxd's graceful shutdown hands leadership off first, and the deploy path puts a leader through maintenance (restart-preparation refuses a leader). Read the playbooks first. | R3 |
+| C2 | A leader never restarts cold: plurxd's graceful shutdown hands leadership off first, and the deploy path puts a leader through maintenance (restart-preparation refuses a leader). Read the playbooks first. **Built in this PR, not merged:** the shutdown half, [build plan and log](LEADER-SHUTDOWN-HANDOFF-BUILD.md); the deploy-path half waits on the playbooks. | R3 |
 | C3 | The single timing module; derive lease, grace, `STORE_TIMEOUT` and feature timeouts from it. | R2, R4 |
 | C4 | Election behaviour under a starved voter: verify the mechanism against OpenRaft 0.9.25, then pre-vote if 0.10 is taken, otherwise a wider floor chosen from a measurement. | R1 |
 | C5 | Open a tracked item for OpenRaft 0.10 and retire patches 4, 6 and 28 against it. | R6 |

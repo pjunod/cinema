@@ -1,6 +1,6 @@
 # Leader handoff on shutdown — a leader never restarts cold
 
-**Status:** open — plan, not built · **Executes:** C2 of the cluster layer
+**Status:** built — fleet verification pending · **Executes:** C2 of the cluster layer
 audit (`CLUSTER-LAYER-AUDIT-2026-11-14.md` §R3, ruling §8-3) · **Design:**
 Claude (Fable 5.2), session `session_01BCWLA3JD1HCNMEid3AZrc3` ·
 **Verified against:** `main @ e228ab3ed` · **Written:** 2026-11-15
@@ -209,3 +209,70 @@ Then `cargo fmt --check`, clippy on the three crates with `-D warnings`,
 | Date | Milestone | Agent-Model | Agent-Session | Result |
 |---|---|---|---|---|
 | 2026-11-15 | Design | claude-fable-5-2 | session_01BCWLA3JD1HCNMEid3AZrc3 | this document |
+| 2026-11-15 | M1 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Built as planned, except the patch is **29**, not 30: the ledger ends at 28 and its test requires contiguous rows. Four core tests and the vendor test pass; `make hiqlite-vendor-clippy` passes. Each test fails with its subject mutated (see "Mutations"). |
+| 2026-11-15 | M2 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Four cases built; `leader-shutdown` passed 5 of 5 runs on media1. Handoff 763–771 ms, term +1 and the triggered candidate won every time; survivors moved from old leader to successor within one 100 ms sample (no sample without a leader); successor and term held 10 s after the kill. Cold-stop baseline (leader killed, no handoff): survivors named a new leader after 7.50, 7.60 and 7.50 s. |
+| 2026-11-15 | M3 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Built as planned; `the_signal_path_…` passes. **The leader test is not reliable: the handoff lost the vote race in 5 of 14 runs.** In the 9 won runs both survivors named the triggered candidate 122–131 ms after SIGTERM, the old process exited 0.92–0.94 s after it, and the leader and term then held for 10 s. In each lost run the candidate was behind an append in flight from the old leader, so the old leader refused its vote and was deposed, as §2's second bullet warns. With its elections off the old leader never won back, but no leader existed for about one election. The 3 lost runs under a 40 s diagnostic bound: two recovered in 7.80 and 7.84 s, which matches the 7.5 s cold-stop baseline. In the third the handoff gave up (`failed`, 8127 ms), and there was still no leader when the old process exited 8.2 s after SIGTERM. The other 2 lost runs failed at the committed 3 s bound. M2's quieter harness never lost (0 of 5). No retry was added (§6); the root-cause follow-up is a transfer that does not trigger while the candidate is behind the leader's last log entry (OpenRaft 0.10's `transfer_leader`, or the leader-side replication match §6 defers). The follower test passed 1 of 1 runs. | |
+| 2026-11-15 | M4 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Index row, `docs/OPERATIONS.md` reworded in place (418524 → 418519 bytes, ceiling lowered to match), audit C2 marked built in this PR. Paperwork and the adversarial review are left to the main session. |
+
+### Source claims, as found
+
+- **§2 Store row — false for the daemon.** `SelectedStore::shutdown` calls
+  `shutdown_voter`, which takes Hiqlite's `shutdown_retained_startup`
+  whenever staged-startup listeners are retained (patch 23). That path has
+  no 9.5 s sleep, no wait for a leader and no 30 s bound. Every M3 run's old
+  process exited 0.92–0.94 s after SIGTERM. The design does not depend on
+  the sleep; "the 9.5 s sleep is spent as a follower" simply does not arise.
+- **The old leader grants the triggered candidate's vote** — true when the
+  candidate's log is not behind: 5 of 5 M2 runs. In M3 the daemon's
+  background writes race the trigger: see the M3 row. In both lost runs the
+  old leader's replication stream to the candidate met the higher vote
+  first, which is the "candidate one entry behind" case of §2: the old
+  leader refuses, is deposed, and, with its elections off, cannot win back.
+- **`runtime_config().elect(false)` stops this node campaigning** — true.
+  With the call removed, the stopping voter campaigned 8.8 s after the
+  leader died; with it, its term held for 10 s.
+- **A leader with both followers paused still reports itself leader** —
+  true in 5 of 5 runs.
+- **The harness uses production Raft timing** — true
+  (`production_hiqlite_defaults_with_read_pool`: 800 ms heartbeat,
+  2.4–4.0 s election timeout).
+- **`status()` is local reads only** — true for an embedded voter: local
+  metrics, `query_map` on the local state machine, `Read::Local` protocol
+  reads and the replication monitor's local metrics. The M1 source test
+  pins it.
+- **Fork patch counting** — `tests/operations/test_hiqlite_patch_ledger.py`
+  counts rows, bullets, the intro's number words and the removal paragraph;
+  updated for 29. Nothing else counts them.
+- **Telemetry drain and Live TV stop** — the telemetry drain owns a 2 s
+  bound; Live TV's worker waits are deadline-bounded.
+- **Tokio signals after the first** — the handler stays installed for the
+  process lifetime, so later signals are swallowed: a second signal does
+  nothing, as §4 decides. Read, not run.
+- **`-p plurx-core --lib shutdown_handoff`** — selects all four core tests,
+  but only with `--features hiqlite-store`; the membership module is behind
+  that feature.
+- **Cold-stop gap** — measured 7.5–7.6 s from loss to a named successor,
+  matching the 6.4–8.0 s source reading, not the audit's ~2.5 s.
+
+### Mutations (each test shown failing with its subject removed)
+
+| Test | Mutation | Failure |
+|---|---|---|
+| `shutdown_handoff_without_a_replicated_store_returns_at_once` | 1 ms sleep before `NotReplicated` | elapsed not zero |
+| `shutdown_handoff_wait_is_bounded` | no `tokio::time::timeout` | outer 11 s guard fires |
+| `shutdown_handoff_reuses_the_one_handoff_and_writes_nothing` | no `disable_local_db_elections` call | "every replicated stopping node switches its own elections off" |
+| `a_sole_voter_shutdown_handoff_returns_at_once` | no `SoleVoter` check | `NoCandidate` |
+| `local_election_switch_has_no_remote_fallback` | `elect(true)` | missing `elect(false)` |
+| `run_leader_shutdown_handoff_case` | handoff returns `ElectionCandidateUnavailable` | "did not hand off: no_candidate" |
+| `run_follower_shutdown_noop_case` | no `NotLeader` check | "a follower's stop reported handed_off" |
+| `run_departing_voter_never_campaigns_case` | no `disable_local_db_elections` call | term 1 → 2 at 8.8 s |
+| `run_shutdown_without_successor_case` | no outer timeout, and an attempt whose trigger fails never ends | request timed out at 15 s |
+| `the_signal_path_hands_leadership_off_before_any_listener_stops` | handoff call removed from `main.rs` | "exactly one stop-time handoff call" |
+| `sigterm_on_the_leader_moves_leadership_before_its_raft_stops` | handoff call removed from `main.rs` (the old code) | old leader exited with both survivors still naming it at term 1 |
+| `sigterm_on_a_follower_changes_no_leader` | the follower triggers an election on itself before returning `NotLeader` | leadership changed 136 ms after SIGTERM |
+
+The two follower tests also pass on the old code, because a follower's stop
+never moved anything there. They guard the `NotLeader` branch. With only the
+`NotLeader` check removed, the M3 follower test still passes, because the
+first candidate is then the leader itself and triggering an election on a
+leader moves nothing.

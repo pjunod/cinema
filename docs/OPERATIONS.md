@@ -1081,15 +1081,16 @@ point of that view. It defers under a dialog like everything else.
 
 Use **Enter maintenance** for an update or reboot. Do not use **Remove** or
 **Leave this cluster**: those permanently tombstone the node identity, while
-maintenance is a reversible replicated fence.
+maintenance is a reversible replicated fence. A plain stop of the leader
+(SIGTERM) also hands leadership to a caught-up voter before it drains, but
+only maintenance drains its sessions first.
 
 The server accepts maintenance only when every active member proves it runs a
 binary that understands the fence, no join, promotion, removal, or other
 maintenance is pending, and taking the target offline still leaves the current
-reachable voter quorum. This is based on live reachability, not only the
-configured voter count: a three-voter cluster with one voter already down also
-refuses maintenance on either survivor. A one-voter cluster may enter
-maintenance with an expected service outage.
+reachable voter quorum, by live reachability rather than voter count: a
+three-voter cluster with one voter down refuses maintenance on either survivor.
+A one-voter cluster may enter maintenance with an expected service outage.
 
 Open the exact target backend before choosing **Enter maintenance**. In a
 multi-voter cluster, the target-specific maintenance preflight requires fresh
@@ -1098,18 +1099,18 @@ leaves the current quorum. Unlike the stricter rollout candidate, it may approve
 the current leader or a node with existing streams: the maintenance operation
 first fences new admissions, hands leadership off when needed, and lets that
 existing work drain. A stable caught-up learner may also enter maintenance
-without subtracting a vote. A directly observed one-voter server is the explicit
-service-outage exception. Sending either action through another cluster node or
-a non-sticky load balancer is refused because only the target can linearize its
-own work admissions and inspect its local process registries.
+without subtracting a vote; a directly observed one-voter server is the
+service-outage exception. Either action sent through another node or a
+non-sticky load balancer is refused: only the target can linearize its own
+work admissions and inspect its local process registries.
 
-Before that local fence begins, the target atomically acquires the same
-replicated planned-outage lease used by ordinary restart preparation. Only one
-node can hold it. A maintenance claimant converts its exact lease into the
-durable maintenance row in one replicated transaction after any leader
-handoff; failure releases the claim, while heartbeat cleanup expires a claim
-left by a crashed caller. That cleanup is a replicated schema trigger, so even
-a previous-release heartbeat ages out an expired claim after a full rollback.
+Before that local fence begins, the target atomically acquires the one
+replicated planned-outage lease that ordinary restart preparation also uses.
+A maintenance claimant converts its exact lease into the durable maintenance
+row in one replicated transaction after any leader handoff; failure releases
+the claim, while heartbeat cleanup expires a claim left by a crashed caller.
+That cleanup is a replicated schema trigger, so even a previous-release
+heartbeat ages out an expired claim after a full rollback.
 Replicated schema guards also reject lifecycle-begin writes from a
 previous-release join, promotion, or removal coordinator while the lease
 exists, so the exclusion remains effective throughout a rolling upgrade or
@@ -1134,8 +1135,7 @@ snapshot, protocol, media, and build evidence:
    the existing work from step 1 has drained.
 5. **Ready to update or reboot** means the target acknowledged the fence, is
    not leader, is reachable with zero apply lag, and the directly observed
-   process owns no local work or admission in flight. You may then update or
-   reboot it.
+   process owns no local work or admission in flight.
 6. After restart, wait for a fresh heartbeat and zero apply lag, then choose
    **Resume service on that exact backend**. The target must directly prove its
    current maintenance acknowledgement and empty local workload; another node
@@ -1148,7 +1148,7 @@ snapshot, protocol, media, and build evidence:
 The maintenance row is replicated and survives the target process restarting.
 `GET /readyz` answers `503 maintenance`, new application work answers the typed
 `node_maintenance` refusal, and the target remains a Raft member. Losing the UI
-or restarting the process cannot silently reopen it. A binary that predates
+cannot silently reopen it. A binary that predates
 maintenance cannot publish the transaction-local heartbeat intent; replicated
 SQLite rejects that heartbeat while the fence exists, so an accidental code
 rollback fails closed instead of serving through maintenance.
