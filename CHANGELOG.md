@@ -10,6 +10,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux replicated servers validate actual-host reboot identity before serving;
+  required deployment mounts preserve source-custody recovery after a reboot.
 - Android prepared Dolby Vision handoffs now keep the executing playback choice
   and film position through optional Auto failures, later seeks, and the
   accepted switch to the processed stream.
