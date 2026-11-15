@@ -474,7 +474,7 @@ mod tests {
             let conn = rusqlite::Connection::open_in_memory().expect("fixture");
             super::super::sqlite::SqliteStore::migrate(&conn).expect("current schema");
             conn.execute_batch(mutation).expect("invalid predecessor");
-            conn.pragma_update(None, "user_version", 131)
+            conn.pragma_update(None, "user_version", 132)
                 .expect("old marker");
             let before = rows(&conn).expect("before shape");
             assert!(super::super::sqlite::SqliteStore::migrate(&conn).is_err());
@@ -482,7 +482,7 @@ mod tests {
             let ordinal: i64 = conn
                 .pragma_query_value(None, "user_version", |r| r.get(0))
                 .expect("ordinal");
-            assert_eq!(ordinal, 131);
+            assert_eq!(ordinal, 132);
         }
     }
 

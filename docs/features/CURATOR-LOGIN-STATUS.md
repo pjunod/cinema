@@ -68,7 +68,7 @@ Curator session. Browser callback state does not contain a bearer or owner key.
 
 ## Storage and migration
 
-SQLite migration **132** installs the independently recognized extension. The
+SQLite migration **133** installs the independently recognized extension. The
 same schema is recognized/installed on Hiqlite's fresh/current-schema paths;
 partial or incompatible shapes are refused. Clients, codes and grants live in
 `delegation_*` tables. Grants never enter `tokens`, so older native-token lookups
@@ -77,7 +77,7 @@ transaction primitive on both stores, with a unique claim nonce rather than a
 matching timestamp. Expiry cleanup is bounded during consent minting.
 
 The standalone-to-replicated import inventory preserves these records starting
-at schema 132. Source-native tokens and stable user identities remain their
+at schema 133. Source-native tokens and stable user identities remain their
 revocation/incarnation authorities. Client/grant secrets are stored only as
 SHA-256 digests in Cinema; the plaintext client secret is returned at registration
 and the plaintext grant only at successful redemption. These responses are
@@ -112,11 +112,11 @@ The reviewed fixes mount the shipped layout on cold consent/management routes,
 require the exact Curator callback path, enforce an atomic 100-active-client
 limit matching the complete disconnect inventory, order replicated expiry
 cleanup by expiry and digest, and recheck code expiry after queued commit and
-post-commit source validation before returning a grant. SQLite v132 preflights
+post-commit source validation before returning a grant. SQLite v133 preflights
 existing objects and verifies final shape inside the migration transaction.
-Historical v43/v14 helpers first validate and remove only an exact empty v132
+Historical v43/v14 helpers first validate and remove only an exact empty v133
 extension; registrations, codes, grants, altered objects or missing markers
-refuse without mutation. The census includes v132.
+refuse without mutation. The census includes v133.
 
 Core/backend, HTTP and actual shipped-shell Chromium fixtures were authored
 before the static review gate; the final local results are recorded below. Curator separately requires app-verifier plus consenting-device

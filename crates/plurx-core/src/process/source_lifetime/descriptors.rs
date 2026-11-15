@@ -1,6 +1,7 @@
 //! Pinned descriptor evidence supplied only by the audited child builder.
 //! Regular files remain Source unless their exact identity has an active
 //! daemon-asset registration. A role such as "output" grants no authority.
+use super::arguments::ArgumentProfile;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
@@ -113,6 +114,8 @@ pub struct DescriptorManifest {
     inherited: Vec<InheritedFd>,
     pub(super) stdio: StdioFacts,
     pub(super) cwd_target: Option<i32>,
+    /// Constrains argument grammar only; it is never proof of source identity.
+    pub(super) argument_profile: ArgumentProfile,
     binding: OnceLock<CommandBinding>,
 }
 impl DescriptorManifest {
@@ -120,6 +123,15 @@ impl DescriptorManifest {
         inherited: Vec<InheritedFd>,
         stdio: StdioFacts,
         cwd_target: Option<i32>,
+    ) -> io::Result<Self> {
+        Self::new_with_profile(inherited, stdio, cwd_target, ArgumentProfile::Default)
+    }
+
+    pub fn new_with_profile(
+        inherited: Vec<InheritedFd>,
+        stdio: StdioFacts,
+        cwd_target: Option<i32>,
+        argument_profile: ArgumentProfile,
     ) -> io::Result<Self> {
         #[cfg(unix)]
         let inherited = {
@@ -180,10 +192,12 @@ impl DescriptorManifest {
         if !inherited.is_empty() || cwd_target.is_some() {
             return Err(io::Error::other("descriptor manifests require Unix"));
         }
+        argument_profile.validate_descriptors(&inherited, cwd_target)?;
         Ok(Self {
             inherited,
             stdio,
             cwd_target,
+            argument_profile,
             binding: OnceLock::new(),
         })
     }

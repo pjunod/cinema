@@ -1328,7 +1328,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v113: item ratings and per-person item lists (watchlist, favorites).
     super::library_annotations_schema::SCHEMA,
     // v114: source-revision title acquisition, independent of ordinary probes.
-    super::dv_title_jobs::SCHEMA,
+    super::dv_title_jobs::SCHEMA_V1,
     // v115: one-time playback handoff codes and their file-scoped tokens.
     super::playback_handoffs::SCHEMA,
     // v116: centrally fenced recomputable text subtitle translation slices.
@@ -1363,7 +1363,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::offload::SQLITE_MIGRATION,
     // v131: storage-domain changes are saved at once and applied when safe.
     super::storage_domain_pending::SCHEMA,
-    // v132: optional scoped application login, separate from native sessions.
+    // v132: exact FEL outbox continuity and independent quality waiters.
+    super::dv_title_jobs::MIGRATION_V2,
+    // v133: optional scoped application login, separate from native sessions.
     super::delegation::SCHEMA,
 ];
 
@@ -1822,7 +1824,7 @@ impl SqliteStore {
         already_applied: bool,
     ) -> Result<(), StoreError> {
         let tx = conn.unchecked_transaction()?;
-        if version == 132 {
+        if version == 133 {
             super::delegation::verify_predecessor(&tx)?;
         }
         if !already_applied {
@@ -1844,7 +1846,7 @@ impl SqliteStore {
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
         }
-        if version == 132 {
+        if version == 133 {
             super::delegation::verify_sqlite(&tx)?;
         }
         // Foreign keys are OFF for the step (see the caller), so integrity is

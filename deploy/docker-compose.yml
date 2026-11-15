@@ -165,6 +165,20 @@ services:
       # unit tests and failed on the device.
       # PLURX_HLS_FORCED_AUTOSELECT: "1"
     volumes:
+      # Linux source ownership must survive a host reboot, including raw readers.
+      # Long bind syntax refuses missing sources instead of creating directories.
+      - type: bind
+        source: /etc/machine-id
+        target: /run/plurx-host-machine-id
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /proc/sys/kernel/random/boot_id
+        target: /run/plurx-host-boot-id
+        read_only: true
+        bind:
+          create_host_path: false
       # The database and everything else that must survive a rebuild. Create
       # it first, owned by the same uid the container runs as:
       #   sudo install -d -o $(id -u) -g $(id -g) /srv/plurx

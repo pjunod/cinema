@@ -1604,7 +1604,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 88] = [
+        const DROPPED_BY_THE_FIXTURE: &[&str] = &[
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1775,7 +1775,10 @@ mod tests {
             // v131: the shared queue helper drops every background_* object,
             // including the pending storage-domain table, views and marker.
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
- "CREATE TABLE IF NOT EXISTS delegation_schema",
+            // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
+            "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
+            // v133: the empty delegation tail is removed first by the shared title rewind.
+            "CREATE TABLE IF NOT EXISTS delegation_schema",
         ];
 
         assert!(
@@ -1815,7 +1818,7 @@ mod tests {
             1
         );
 
-        for table in DROPPED_BY_THE_FIXTURE {
+        for &table in DROPPED_BY_THE_FIXTURE {
             assert!(
                 crate::store::sqlite::MIGRATIONS[GUARD_SCHEMA_VERSION as usize..]
                     .iter()

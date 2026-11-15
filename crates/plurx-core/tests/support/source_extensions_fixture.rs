@@ -1,4 +1,6 @@
 //! Source-only fixture helpers shared without discovering extra test bodies.
+#[path = "title_extension_fixture.rs"]
+pub(crate) mod title_extension_fixture;
 
 #[allow(dead_code)]
 pub(crate) const MANAGED_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'subtitle_managed_*' OR name GLOB 'subtitle_model_receipts*' OR tbl_name GLOB 'subtitle_managed_*' OR tbl_name GLOB 'subtitle_model_receipts*' OR name='background_job_required_resources') AND sql IS NOT NULL ORDER BY name";
@@ -564,11 +566,50 @@ fn published_trigger(migration: &str, name: &str) -> String {
     statement
 }
 
+pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
+    rewind_empty_delegation_to_v132(connection);
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("title continuation ordinal");
+    if version != 132 {
+        return;
+    }
+    title_extension_fixture::require_fixture_marker(connection, "dv_title_jobs_schema", 2);
+    let actual = connection
+        .prepare(title_extension_fixture::TITLE_FIXTURE_SHAPE_SQL)
+        .expect("title v2 shape")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("title v2 shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete title v2 shape");
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM dv_title_jobs_schema WHERE singleton=1 AND version=2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("exact title v2 marker");
+    let retained: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM dv_title_jobs_demand) + (SELECT count(*) FROM background_jobs WHERE kind='dv_title_scan') + (SELECT count(*) FROM background_job_commands WHERE operation IN ('bind_dv_title','publish_dv_title')) + (SELECT count(*) FROM files WHERE json_valid(probe_json) AND (json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL OR json_type(probe_json,'$.plurx_dv_fel_requests_v3') IS NOT NULL))",
+        [], |row| row.get(0)).expect("complete title v2 retained data");
+    let _ = title_extension_fixture::validated_empty_title_rewind(&actual, 2, marker, retained);
+    within_fixture_savepoint(connection, || {
+        connection
+            .execute_batch(&title_extension_fixture::published_title_v1_restore_plan())
+            .expect("restore exact published v1 title topology");
+        title_extension_fixture::assert_title_fixture_generation(connection, 1);
+        connection
+            .execute_batch("PRAGMA user_version=131;")
+            .expect("owned empty title v2 tail");
+    });
+}
+
 /// Rewind an owned, empty v131 storage-domain extension to published v130.
 /// Desired configuration is user data, including an already settled revision,
 /// so no pending-table row may be discarded by a historical fixture.
 fn rewind_empty_storage_domain_pending_to_v130(connection: &rusqlite::Connection) {
-    rewind_empty_delegation_to_v131(connection);
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("fixture storage domain pending ordinal");
@@ -721,10 +762,11 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
         .expect("published custody retention rewind");
 }
 
-/// Rewind an owned, empty v127-v131 coordination tail to published v126;
+/// Rewind an owned, empty v127-v132 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
+    rewind_title_v2_to_v131(connection);
     rewind_empty_storage_domain_pending_to_v130(connection);
     rewind_offload_to_v129(connection);
     rewind_custody_retention_to_v128(connection);
@@ -750,17 +792,17 @@ pub(crate) fn rewind_empty_source_extensions_to_v121(connection: &rusqlite::Conn
     });
 }
 
-/// Remove only the exact, entirely empty v132 extension before older tails.
+/// Remove only the exact, entirely empty v133 extension before older tails.
 /// Read and validate the complete removal plan before changing any object.
 #[allow(dead_code)]
-pub(crate) fn rewind_empty_delegation_to_v131(conn: &rusqlite::Connection) {
+pub(crate) fn rewind_empty_delegation_to_v132(conn: &rusqlite::Connection) {
     let ordinal: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .expect("delegation ordinal");
-    if ordinal < 132 {
+    if ordinal < 133 {
         return;
     };
-    assert_eq!(ordinal, 132, "only published delegation tail can rewind");
+    assert_eq!(ordinal, 133, "only published delegation tail can rewind");
     const QUERY: &str = "SELECT name,sql FROM sqlite_master WHERE (name GLOB 'delegation*' OR tbl_name GLOB 'delegation*') AND sql IS NOT NULL ORDER BY name";
     let shape = |db: &rusqlite::Connection| {
         db.prepare(QUERY)
@@ -805,7 +847,7 @@ pub(crate) fn rewind_empty_delegation_to_v131(conn: &rusqlite::Connection) {
             "cannot discard delegation user data"
         )
     }
-    conn.execute_batch("DROP TABLE delegation_grants;DROP TABLE delegation_codes;DROP TABLE delegation_clients;DROP TABLE delegation_schema;PRAGMA user_version=131;").expect("empty delegation rewind");
+    conn.execute_batch("DROP TABLE delegation_grants;DROP TABLE delegation_codes;DROP TABLE delegation_clients;DROP TABLE delegation_schema;PRAGMA user_version=132;").expect("empty delegation rewind");
 }
 
 #[cfg(test)]
@@ -837,17 +879,17 @@ mod delegation_rewind_tests {
             .expect("dependency");
         c.execute_batch(include_str!("../../src/store/delegation.sql"))
             .expect("delegation");
-        c.pragma_update(None, "user_version", 132).expect("ordinal");
+        c.pragma_update(None, "user_version", 133).expect("ordinal");
         c
     }
     #[test]
     fn empty_delegation_rewind_is_strict_and_preserves_user_data() {
         let empty = fixture();
-        rewind_empty_delegation_to_v131(&empty);
+        rewind_empty_delegation_to_v132(&empty);
         let ordinal: i64 = empty
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("ordinal");
-        assert_eq!(ordinal, 131);
+        assert_eq!(ordinal, 132);
         for mutation in [
             "INSERT INTO delegation_clients(id,name,secret_hash,redirect) VALUES('keep','keep','hash','https://keep')",
             "INSERT INTO delegation_codes VALUES('keep','client',1,1,'subject','source','challenge','redirect',9999999999,'')",
@@ -863,7 +905,7 @@ mod delegation_rewind_tests {
             c.execute_batch(mutation).expect("refusal fixture");
             let before = snapshot(&c);
             let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                within_fixture_savepoint(&c, || rewind_empty_delegation_to_v131(&c))
+                within_fixture_savepoint(&c, || rewind_empty_delegation_to_v132(&c))
             }));
             assert!(refused.is_err());
             let after = snapshot(&c);
