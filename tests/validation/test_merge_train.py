@@ -14,7 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from validation.merge_train import lane_enabled, scope, selection  # noqa: E402
+from validation.merge_train import lane_enabled, scope, selection, train_tests  # noqa: E402
 
 LANE = ROOT / ".github/workflows/main-fast-lane.yml"
 SCOPE_LINES = ["rust=false", "apple=false", "desktop_macos=false", "android_jvm=false", "web_layout=true",
@@ -51,7 +51,7 @@ class SelectionCase(unittest.TestCase):
     def test_outside_a_probe_the_scope_passes_through(self):
         out = scope(SCOPE_LINES, None)
         self.assertEqual(out[: len(SCOPE_LINES)], SCOPE_LINES)
-        self.assertEqual(out[len(SCOPE_LINES):], ["rust_units=true", "preflight=true", "worker_control=true", "train_selected=false", "run_lane=true"])
+        self.assertEqual(out[len(SCOPE_LINES):], ["rust_units=true", "train_tests=", "preflight=true", "worker_control=true", "train_selected=false", "run_lane=true"])
 
     def test_rust_compile_and_unit_probes_select_independent_stages(self):
         for selected, rust, units in (("rust_compile", "true", "false"), ("rust_units", "false", "true")):
@@ -91,6 +91,47 @@ class SelectionCase(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("android_jvm=true", result.stdout.split())
             self.assertIn("preflight=false", result.stdout.split())
+
+
+TESTS_BODY = "Train-Jobs: rust_units\nTrain-Tests: plurxd::bin/plurxd decode_facts::tests::foo, plurx-core store::a::b\n"
+
+
+class TrainTestsCase(unittest.TestCase):
+    def test_a_bot_probe_names_its_tests(self):
+        ids = train_tests(event(body=TESTS_BODY), "train-bot")
+        self.assertEqual(ids, ["plurx-core store::a::b", "plurxd::bin/plurxd decode_facts::tests::foo"])
+        out = dict(line.split("=", 1) for line in scope(SCOPE_LINES, selection(event(body=TESTS_BODY), "train-bot"), tests=ids))
+        self.assertEqual(out["train_tests"], ",".join(ids))
+        self.assertEqual(out["rust_units"], "true")
+
+    def test_only_the_bots_train_heads_are_believed(self):
+        for case in (event(head="feature/x", body=TESTS_BODY), event(author="someone", body=TESTS_BODY),
+                     event(body="Train-Jobs: rust_units\n"), {"pull_request": None}, {}):
+            self.assertIsNone(train_tests(case, "train-bot"), case)
+
+    def test_ordinary_scope_names_no_tests(self):
+        for out in (scope(SCOPE_LINES, None), scope(SCOPE_LINES, ["rust_units"]), scope(SCOPE_LINES, None, enabled=False)):
+            self.assertIn("train_tests=", out)
+
+    def test_bad_lists_fail_the_scope_instead_of_widening_the_run(self):
+        for body in ("Train-Jobs: rust_units\nTrain-Tests:\n", "Train-Jobs: rust_units\nTrain-Tests: nospace\n",
+                     "Train-Jobs: rust_units\nTrain-Tests: a b c\n", "Train-Jobs: rust_units\nTrain-Tests: a $(x)\n"):
+            with self.subTest(body=body), self.assertRaises(SystemExit):
+                train_tests(event(body=body), "train-bot")
+
+    def test_named_tests_need_the_unit_job(self):
+        ids = ["plurx-core store::a"]
+        with self.assertRaises(SystemExit):
+            scope(SCOPE_LINES, ["rust_compile"], tests=ids)
+        with self.assertRaises(SystemExit):
+            scope(SCOPE_LINES, None, tests=ids)
+
+    def test_the_lane_threads_the_named_tests_to_the_unit_stage(self):
+        self.assertIn("train_tests: ${{ steps.scope.outputs.train_tests }}", job_block("scope"))
+        self.assertIn("tests: ${{ needs.scope.outputs.train_tests }}", job_block("rust_units"))
+        stage = (ROOT / ".github/workflows/rust-units.yml").read_text()
+        self.assertIn('--tests "$TRAIN_TESTS"', stage)
+        self.assertIn("inputs.tests == ''", stage)  # no merge-base excuse for a named test
 
 
 class LaneCase(unittest.TestCase):

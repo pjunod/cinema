@@ -617,6 +617,41 @@ fn delivery_plan(
     }
 }
 
+/// Enhancement facts for original-file delivery, before any HLS session exists.
+/// Direct play sends the source unchanged: only a preserved, profile-matching
+/// Dolby Vision delivery with a probed RPU can claim dynamic metadata. Session
+/// routes publish their own facts after their actual processing plan is known.
+fn direct_enhancement(
+    file: &MediaFile,
+    decision: &Decision,
+    delivery: &DeliveryPlan,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
+    let profile = file
+        .dolby_vision
+        .profile
+        .and_then(|value| u8::try_from(value).ok())?;
+    if !matches!(delivery, DeliveryPlan::Direct { .. })
+        || decision.method != playback::PlaybackMethod::DirectPlay
+        || file.hdr.as_deref() != Some("dolby_vision")
+        || !decision.preserve_dolby_vision
+        || decision.convert_dolby_vision
+        || decision.delivered_dynamic_range != "dolby_vision"
+        || decision.delivered_dolby_vision_profile != Some(profile)
+        || file.dolby_vision.rpu_present != Some(true)
+    {
+        return None;
+    }
+    plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
+        source_profile: Some(profile),
+        source_el_present: file.dolby_vision.el_present,
+        route: EnhancementRoute::NativeDolbyVision,
+        hdr_processing_enabled: None,
+        fel_reencode_enabled: None,
+        decline_reason: None,
+    })
+}
+
 /// The sample entry the progressive copy builder will actually write.
 ///
 /// This deliberately mirrors `progressive_hevc_copy_args` rather than the
@@ -751,6 +786,11 @@ pub struct DecisionSelection {
 
 #[derive(Serialize)]
 pub struct DecisionResponse {
+    /// Metadata preserved by original-file delivery. This is delivery evidence,
+    /// not a claim of server processing or measured panel output; clients must
+    /// reconcile it with their active playback format. HLS supplies its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enhancement: Option<plurx_core::playback::enhancement::PlaybackEnhancement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_aware_auto_protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2821,6 +2861,7 @@ async fn decision_for_file(
         }
     });
     Ok(DecisionResponse {
+        enhancement: direct_enhancement(&file, &decision, &delivery),
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,

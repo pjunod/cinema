@@ -123,12 +123,13 @@ internal fun playerMediaFacts(
     effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? = null,
     activeGeneration: String? = null,
     enhancement: tv.plurx.app.data.PlaybackEnhancement? = null,
+    selectedCodecMime: String? = null,
     toneMapPeakNits: Long? = null,
     toneMapPeakSource: String? = null,
 ): List<MediaFact> = buildList {
     resolutionFact(file)?.let(::add)
     dynamicRangeFact(file, delivered, rendered, deliveredDolbyVisionProfile, effectiveProcessing, activeGeneration)?.let(::add)
-    addAll(enhancementFacts(enhancement?.shown(effectiveProcessing, activeGeneration, delivered)))
+    addAll(enhancementFacts(enhancement?.shown(effectiveProcessing, activeGeneration, delivered, rendered, selectedCodecMime)))
     val cpuMapping = (toneMapPeakNits ?: 0) > 0 &&
         toneMapPeakSource?.lowercase(java.util.Locale.US) in setOf("cll", "mdcv", "default")
     val effectiveMapping = effectiveProcessing?.takeIf { it.matches(activeGeneration, delivered) }
@@ -136,6 +137,7 @@ internal fun playerMediaFacts(
     if (cpuMapping || effectiveMapping) {
         add(MediaFact(MediaFactKind.ToneMapping, "Tone mapping", "Cinema tone mapping active", FactState.Active))
     }
+
     audio?.let { audioFact(it.codec, it.channels, it.title) }?.let(::add)
 }
 
