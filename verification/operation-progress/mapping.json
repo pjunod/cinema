@@ -147,19 +147,19 @@
         "table": "24 vendor transaction rate limit",
         "source": "vendor/hiqlite/src/client/transaction.rs",
         "anchor": "self.rate_limit_db().await?;",
-        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+        "sha256": "cdfcba45d5401192f02273204e2179bb27d45a753aa9eb9b36257ef91c1864a6"
       },
       {
         "table": "25 vendor leader transaction write",
         "source": "vendor/hiqlite/src/client/transaction.rs",
         "anchor": ".client_write(QueryWrite::Transaction(queries))",
-        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+        "sha256": "cdfcba45d5401192f02273204e2179bb27d45a753aa9eb9b36257ef91c1864a6"
       },
       {
         "table": "26 vendor follower transaction reply",
         "source": "vendor/hiqlite/src/client/transaction.rs",
         "anchor": ".send_async(ClientStreamReq::Transaction(ClientTransactionPayload {",
-        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+        "sha256": "cdfcba45d5401192f02273204e2179bb27d45a753aa9eb9b36257ef91c1864a6"
       },
       {
         "table": "27 vendor serial SQLite transaction",
@@ -189,19 +189,19 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "8a798da68a5bf79312e4d2d0b159c6aef55260d8d77b1431b475d3c416500d95"
+        "sha256": "6df2258e3cafa39623051b562f967f0d2f5039958c237692ea9ada5c72ac9938"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "8a798da68a5bf79312e4d2d0b159c6aef55260d8d77b1431b475d3c416500d95"
+        "sha256": "6df2258e3cafa39623051b562f967f0d2f5039958c237692ea9ada5c72ac9938"
       },
       {
         "table": "33 local raft metrics authority",
         "source": "vendor/hiqlite/src/client/mgmt.rs",
         "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
-        "sha256": "5e78ddcbe108eb1a1f4f27b2d23d51f4a360d899307df5deb69a84951a706178"
+        "sha256": "df88ebbf28672caaf58a6f3e02cc76f1c4d89eb598f8550bf6406941509e22d9"
       },
       {
         "table": "34 scanner page capacity",
@@ -267,7 +267,7 @@
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "6005810f3f8a63abe0ce2364ae1119085e0518d89cf6b2aa82f594a9958664e1"
+        "sha256": "6345825436cb8532b27840ba229767dfa032086292a9cdc47ec2a0401532e1fc"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
