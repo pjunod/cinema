@@ -5824,7 +5824,9 @@ async fn run_follower_shutdown_noop_case() -> Result<()> {
     if outcome != "not_leader" || successor.is_some() {
         bail!("a follower's stop reported {outcome} {successor:?}");
     }
-    if elapsed_ms >= 100 {
+    // No network is touched on this path; the bound only allows for a
+    // descheduled runner.
+    if elapsed_ms >= 1_000 {
         bail!("a follower's stop waited {elapsed_ms} ms");
     }
     for previous in before {

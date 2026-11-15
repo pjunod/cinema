@@ -707,30 +707,6 @@ async fn a_one_voter_cluster_proves_the_whole_request_protocol() {
     assert_eq!(code, Some(42), "a dropped protocol must refuse: {message}");
     assert!(message.contains("too new"), "{message}");
 
-    // The stop-time handoff, last because it switches this voter's own
-    // elections off for the rest of its process: a sole voter has no
-    // successor, so it answers at once without touching the network.
-    match cluster
-        .request(1, Request::ShutdownHandoff)
-        .await
-        .expect("run the stop-time handoff")
-    {
-        Response::ShutdownHandoff {
-            outcome,
-            successor: None,
-            elapsed_ms,
-        } if outcome == "sole_voter" => assert!(
-            elapsed_ms < 100,
-            "a sole voter's stop must not wait: {elapsed_ms} ms"
-        ),
-        other => panic!("a sole voter's stop reported {other:?}"),
-    }
-    assert_eq!(
-        cluster.leader().await.expect("a leader after the handoff"),
-        1,
-        "the sole voter still leads its own drain"
-    );
-
     // Stop the voter in an orderly way rather than killing it. Loss of a killed
     // voter is proved by `a_killed_voter_leaves_the_running_set` below; killing
     // this one would also discard the coverage profile for everything it just

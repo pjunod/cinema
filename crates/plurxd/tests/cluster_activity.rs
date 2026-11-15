@@ -146,6 +146,25 @@ impl Daemon {
     fn exited(&mut self) -> Option<std::process::ExitStatus> {
         self.child.try_wait().expect("daemon status")
     }
+
+    /// The instant the process exits, from a dedicated thread blocked in
+    /// `waitid(WNOWAIT)`: it observes the exit without reaping, so `exited`
+    /// still reads the status afterwards.
+    fn exit_watch(&self) -> std::sync::mpsc::Receiver<Instant> {
+        let pid = libc::id_t::from(self.child.id());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // SAFETY: an all-zero `siginfo_t` is a valid out-parameter, and
+            // `pid` is this test's own child.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let waited =
+                unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+            if waited == 0 {
+                let _ = sender.send(Instant::now());
+            }
+        });
+        receiver
+    }
 }
 
 impl Drop for Daemon {
@@ -1857,78 +1876,114 @@ async fn sigterm_on_the_leader_moves_leadership_before_its_raft_stops() {
     assert!(before.is_leader, "node {leader} leads: {before:?}");
     let survivors = (0..3).filter(|index| *index != leader).collect::<Vec<_>>();
 
+    let survivor_count = survivors.len();
+    let exit = cluster.daemon(leader).exit_watch();
     cluster.daemon(leader).terminate();
     let signalled = Instant::now();
-    let (successor, term) = loop {
-        let mut views = Vec::new();
-        for index in survivors.iter().copied() {
-            views.push((index, raft_view(&client, &cluster.bases[index]).await));
-        }
-        if let Some((successor, term)) = surviving_leader(&views) {
-            if term > before.term {
-                break (successor, term);
-            }
-        }
-        assert!(
-            cluster.daemon(leader).exited().is_none(),
-            "the old leader exited before the survivors named a successor: {views:?}\n{}",
-            cluster.diagnostics()
-        );
-        assert!(
-            signalled.elapsed() < Duration::from_secs(3),
-            "no surviving leader within 3 s of SIGTERM: {views:?}\n{}",
-            cluster.diagnostics()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let named_after = signalled.elapsed();
-    assert!(
-        cluster.daemon(leader).exited().is_none(),
-        "the successor must lead while the old process still drains"
-    );
-
-    let mut exited_at = None;
-    let mut samples = 0_u32;
+    // Evidence only from answered samples: a sample a busy survivor does not
+    // answer in time proves nothing either way.
+    let mut first_named = vec![None::<(Instant, u64)>; 3];
+    let mut successor = None::<(usize, u64)>;
+    let mut answered = 0_u32;
+    let mut exited_at = None::<Instant>;
     loop {
-        let mut views = Vec::new();
         for index in survivors.iter().copied() {
-            views.push((index, raft_view(&client, &cluster.bases[index]).await));
-        }
-        samples += 1;
-        assert_eq!(
-            surviving_leader(&views),
-            Some((successor, term)),
-            "leadership moved off node {successor} in term {term} after the handoff \
-             ({:?} after SIGTERM, old process exited: {exited_at:?})\n{}",
-            signalled.elapsed(),
-            cluster.diagnostics()
-        );
-        if exited_at.is_none() {
-            if let Some(status) = cluster.daemon(leader).exited() {
+            let Some(view) = raft_view(&client, &cluster.bases[index]).await else {
+                continue;
+            };
+            answered += 1;
+            if view.term > before.term && view.is_leader {
+                match successor {
+                    None => successor = Some((index, view.term)),
+                    Some(known) => assert_eq!(
+                        known,
+                        (index, view.term),
+                        "two survivors led after the handoff\n{}",
+                        cluster.diagnostics()
+                    ),
+                }
+            }
+            if let Some((at, named_term)) = first_named[index] {
+                // Once a survivor follows the successor it must keep doing so.
                 assert!(
-                    status.success(),
-                    "the old leader's drain ended {status}\n{}",
+                    view.leader_known && view.term == named_term,
+                    "survivor {index} stopped following the successor {:?} after SIGTERM \
+                     (named at {:?}): {view:?}\n{}",
+                    signalled.elapsed(),
+                    at - signalled,
                     cluster.diagnostics()
                 );
-                exited_at = Some(Instant::now());
-            } else {
-                assert!(
-                    signalled.elapsed() < Duration::from_secs(120),
-                    "the old leader never finished its drain\n{}",
-                    cluster.diagnostics()
-                );
+            } else if view.leader_known && view.term > before.term {
+                first_named[index] = Some((Instant::now(), view.term));
             }
         }
+        if exited_at.is_none() {
+            exited_at = exit.try_recv().ok();
+        }
+        let named = survivors
+            .iter()
+            .filter(|index| first_named[**index].is_some())
+            .count();
+        assert!(
+            named == survivor_count || signalled.elapsed() < Duration::from_secs(3),
+            "no surviving leader named by both survivors within 3 s of SIGTERM: \
+             {first_named:?}\n{}",
+            cluster.diagnostics()
+        );
+        assert!(
+            signalled.elapsed() < Duration::from_secs(120),
+            "the old leader never finished its drain\n{}",
+            cluster.diagnostics()
+        );
         if exited_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(10)) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let exited_at = exited_at.expect("the loop ends after the exit");
+    let status = cluster
+        .daemon(leader)
+        .exited()
+        .expect("the dedicated wait saw the old leader exit");
+    assert!(
+        status.success(),
+        "the old leader's drain ended {status}\n{}",
+        cluster.diagnostics()
+    );
+    let (successor, term) = successor.expect("a survivor led after the handoff");
+    for index in survivors.iter().copied() {
+        let (named, named_term) = first_named[index].expect("both survivors named the successor");
+        assert_eq!(
+            named_term, term,
+            "survivor {index} named a leader in another term"
+        );
+        assert!(
+            named < exited_at,
+            "survivor {index} first named the successor {:?} after SIGTERM, but the old \
+             process exited at {:?}\n{}",
+            named - signalled,
+            exited_at - signalled,
+            cluster.diagnostics()
+        );
+    }
+    // At least half the 100 ms rounds over the whole window were answered by
+    // each survivor on average: enough samples that "held" means something.
+    let rounds = (exited_at - signalled + Duration::from_secs(10)).as_millis() / 100;
+    assert!(
+        u128::from(answered) >= rounds,
+        "only {answered} survivor samples answered over {rounds} rounds"
+    );
     println!(
         "sigterm on the leader: node {leader} -> node {successor}, term {} -> {term}, \
-         named {named_after:?} after SIGTERM, old process drained in {:?}, {samples} samples",
+         named {:?} after SIGTERM, old process exited {:?} after it, {answered} answered samples",
         before.term,
-        exited_at.map(|at| at - signalled).unwrap_or_default()
+        survivors
+            .iter()
+            .filter_map(|index| first_named[*index].map(|(at, _)| at))
+            .max()
+            .map(|at| at - signalled)
+            .unwrap_or_default(),
+        exited_at - signalled
     );
 }
 
