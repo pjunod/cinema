@@ -1107,6 +1107,27 @@
         assert!(extra.contains("\"client_disposition\":\"unknown\""));
     }
 
+    /// A processed upgrade is staged and committed by the viewer's control
+    /// stream, so its request declares film demand whatever the client's own
+    /// request promised; its windows' source owners then register as rolling.
+    /// Nothing else about the request changes.
+    #[test]
+    fn a_processed_upgrade_request_declares_the_viewers_film_demand() {
+        let ordinary = reopen_request(7039, "playback", "incarnation", "previous");
+        assert_eq!(ordinary.source_telemetry, None);
+        let processed = crate::transcode::manager_create::processed_upgrade_request(&ordinary);
+        assert_eq!(
+            processed.source_telemetry,
+            Some(crate::transcode::SourceTelemetry::FilmV1)
+        );
+        let mut restored = processed.clone();
+        restored.source_telemetry = ordinary.source_telemetry;
+        assert_eq!(
+            serde_json::to_value(&restored).expect("serialize"),
+            serde_json::to_value(&ordinary).expect("serialize"),
+        );
+    }
+
     fn reopen_request(
         file_id: i64,
         playback_id: &str,

@@ -2336,6 +2336,7 @@ impl TranscodeManager {
             else {
                 return Ok(None);
             };
+            let request = &processed_upgrade_request(request);
             let Some(destination) =
                 Self::processed_upgrade_gates(request, &planning, hdr10_intent)?
             else {
@@ -6290,6 +6291,23 @@ impl TranscodeManager {
         };
         Ok((normalized, Some(target_height)))
     }
+}
+
+/// The request a processed upgrade plans, trials and stages its successor
+/// from. The upgrade exists only for a playback the viewer drives through the
+/// control protocol: it starts after the viewer reports its first frame, and
+/// its successor is staged and committed by that control stream. Like the
+/// successors preparation plans for a selection change, it therefore declares
+/// the viewer's film demand, so each processed window's source owner registers
+/// as rolling. Without it the owner stays in the finite transfer class, and a
+/// long-GOP window with its audio input spends that class's grant within one
+/// epoch and misses its deadline waiting for the next. The declaration is
+/// source-service metadata, outside the recipe's identity.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn processed_upgrade_request(request: &SessionRequest) -> SessionRequest {
+    let mut request = request.clone();
+    request.source_telemetry = Some(SourceTelemetry::FilmV1);
+    request
 }
 
 /// Both plain copies and copies with a known empty burn track share the same
