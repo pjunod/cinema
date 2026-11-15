@@ -2593,9 +2593,10 @@ fn the_process_wide_method_tables_are_capped_and_overflow_is_counted() {
             .iter()
             .map(|(m, c)| (*m, *c))
             .collect::<Vec<_>>(),
-        vec![("a", [0, 2, 0]), ("b", [0, 1, 0]), ("other", [0, 2, 0])],
-        "known methods keep counting past the cap; new ones fold into the overflow label"
+        vec![("a", [0, 2, 0]), ("other", [0, 3, 0])],
+        "the cap counts the overflow label: known methods keep counting, new ones fold into it"
     );
+    assert_eq!(table.by_method.len(), 2, "never more keys than the cap");
 
     let metrics: &'static StoreOperationMetrics =
         Box::leak(Box::new(StoreOperationMetrics::default()));
@@ -2605,8 +2606,15 @@ fn the_process_wide_method_tables_are_capped_and_overflow_is_counted() {
         metrics.attribute(StoreOperationClass::LocalRead, label, Duration::ZERO, true);
     }
     for snapshot in [metrics.background_snapshot(), metrics.membership_snapshot()] {
-        assert_eq!(snapshot.len(), MAX_ATTRIBUTED_METHODS + 1);
-        assert!(snapshot.contains(&(super::super::METHOD_OVERFLOW_LABEL, [extra as u64, 0, 0])));
+        assert_eq!(
+            snapshot.len(),
+            MAX_ATTRIBUTED_METHODS,
+            "exactly the cap, overflow included"
+        );
+        assert!(snapshot.contains(&(
+            super::super::METHOD_OVERFLOW_LABEL,
+            [extra as u64 + 1, 0, 0]
+        )));
         assert_eq!(
             method_totals(&snapshot),
             [(MAX_ATTRIBUTED_METHODS + extra) as u64, 0, 0],
@@ -2661,4 +2669,35 @@ async fn the_by_method_families_render_each_class_under_its_own_label() {
     assert!(!text.contains(
         "plurx_cluster_membership_operations_by_method_total{class=\"local_read\",method=\"list_libraries\"}"
     ));
+}
+
+/// A scope nobody claimed (made outside any request, as
+/// `spawn_in_http_store_scope` does when there is no request) is background
+/// work: its operations reach the background table when it is dropped,
+/// instead of no family at all.
+#[tokio::test]
+async fn an_unclaimed_scope_folds_into_the_background_table_when_dropped() {
+    const LABEL: &str = "background_test_unclaimed_scope";
+    let counted = |label: &str| {
+        background_store_operations_by_method()
+            .into_iter()
+            .find(|(method, _)| *method == label)
+            .map(|(_, counts)| counts)
+    };
+    let counts = super::super::HttpStoreOperationCounts::default();
+    super::super::scope_http_store_operations(counts.clone(), async {
+        time_store_operation(
+            &TEST_STORE_OPERATION_METRICS,
+            StoreOperationClass::AuthorityRead,
+            LABEL,
+            async { Ok::<_, StoreError>(()) },
+            |_| true,
+        )
+        .await
+        .expect("store");
+    })
+    .await;
+    assert_eq!(counted(LABEL), None, "still held: in no family yet");
+    drop(counts);
+    assert_eq!(counted(LABEL), Some([0, 1, 0]));
 }

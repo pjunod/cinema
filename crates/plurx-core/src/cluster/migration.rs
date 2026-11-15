@@ -7007,10 +7007,14 @@ pub mod status {
         async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error>;
     }
 
+    /// The serving fence's 2 Hz quorum read, counted like every other
+    /// replicated operation (`authority_read`, background, label
+    /// `quorum_watermark_sampler`). The counted call only times and delegates:
+    /// the sampler's period, timeout and error handling are its own.
     #[async_trait::async_trait]
-    impl QuorumWatermarkSource for Client {
+    impl QuorumWatermarkSource for crate::store::CountedClient {
         async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error> {
-            self.db_quorum_watermark().await
+            self.db_quorum_watermark("quorum_watermark_sampler").await
         }
     }
 
@@ -7329,7 +7333,7 @@ pub mod status {
                 }
             };
             let watermark_loop = run_quorum_watermark_loop(
-                client,
+                crate::store::CountedClient::outside_membership(client),
                 watermark_passive,
                 std::future::pending(),
                 node_stagger,
@@ -9000,6 +9004,43 @@ pub mod status {
             async fn wait_for_change(&mut self) -> bool {
                 self.receiver.changed().await.is_ok()
             }
+        }
+
+        /// The serving fence's sampler is counted: one `authority_read`,
+        /// outside a request, under `quorum_watermark_sampler`, and not as a
+        /// membership operation. The client points at no node, so the call
+        /// ends in an error or is dropped by the bound; both are counted.
+        #[tokio::test]
+        async fn the_quorum_watermark_sampler_is_counted_under_its_label() {
+            let counted = |table: Vec<(&'static str, [u64; 3])>| {
+                table
+                    .into_iter()
+                    .find(|(method, _)| *method == "quorum_watermark_sampler")
+                    .map_or(0, |(_, counts)| counts[1])
+            };
+            let before = counted(crate::store::background_store_operations_by_method());
+            let source = crate::store::CountedClient::outside_membership(
+                Client::remote(
+                    vec!["127.0.0.1:1".to_owned()],
+                    false,
+                    false,
+                    "unused".to_owned(),
+                    true,
+                    None,
+                )
+                .await
+                .expect("construct a remote client"),
+            );
+            let _ = tokio::time::timeout(Duration::from_millis(200), source.sample()).await;
+            assert!(
+                counted(crate::store::background_store_operations_by_method()) > before,
+                "the sampler's quorum read reaches the background family"
+            );
+            assert_eq!(
+                counted(crate::store::cluster_membership_operations_by_method()),
+                0,
+                "the sampler is not the membership manager"
+            );
         }
 
         #[tokio::test]

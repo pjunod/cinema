@@ -3258,19 +3258,24 @@ fn sharing_member_guard_with_freshness(
 /// identify the serving member; identities outside the committed roster refuse.
 /// This is advisory evidence only; admission must still embed the SQL guard.
 pub async fn sharing_session_principal_floor_ready(
-    client: &CountedClient,
+    client: &Client,
     local_raft_id: u64,
 ) -> Result<bool, MembershipError> {
-    sharing_member_floor_ready(client, local_raft_id, SharingMemberFloor::SessionPrincipal).await
+    member_floor_ready(
+        &CountedClient::membership(client.clone()),
+        local_raft_id,
+        SharingMemberFloor::SessionPrincipal,
+    )
+    .await
 }
 
 /// Quorum observation of the allocator-specific writer floor.
 pub async fn sharing_catalogue_item_identity_floor_ready(
-    client: &CountedClient,
+    client: &Client,
     local_raft_id: u64,
 ) -> Result<bool, MembershipError> {
-    sharing_member_floor_ready(
-        client,
+    member_floor_ready(
+        &CountedClient::membership(client.clone()),
         local_raft_id,
         SharingMemberFloor::CatalogueItemIdentity,
     )
@@ -3280,6 +3285,20 @@ pub async fn sharing_catalogue_item_identity_floor_ready(
 /// Quorum observation for a bounded required capability set. This does not
 /// advertise capabilities, install schemas, or override a saved Developer switch.
 pub async fn sharing_member_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    member_floor_ready(
+        &CountedClient::membership(client.clone()),
+        local_raft_id,
+        required,
+    )
+    .await
+}
+
+/// The three public observations above, on the manager's counted client.
+async fn member_floor_ready(
     client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
@@ -4491,7 +4510,7 @@ impl CacheAdminExclusionSlot for ReplicatedCacheAdminSlot<'_> {
         // refusal, so its rows are at least as new as the ones that refused.
         let through = self
             .client
-            .db_quorum_watermark("offer")
+            .db_quorum_watermark("membership_offer")
             .await?
             .committed_index;
         while self
@@ -4508,7 +4527,7 @@ impl CacheAdminExclusionSlot for ReplicatedCacheAdminSlot<'_> {
         let rows = self
             .client
             .query_map::<CacheAdminRefusalRow, _>(
-                "offer",
+                "membership_offer",
                 cache_admin_refusal_sql(),
                 params!(self.lease.node_id.as_str(), self.lease.claim.as_str()),
             )
@@ -10101,7 +10120,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<MembershipNodeRow, _>(
-                "status",
+                "membership_status",
                 "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, n.role, \
                         COALESCE(h.hostname, '') AS hostname, \
                         progress.apply_lag_entries, \
@@ -11749,7 +11768,12 @@ impl MembershipManager {
     /// the same guard in the Store admission write remain required separately.
     pub async fn sharing_session_principal_floor_ready(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
-        sharing_session_principal_floor_ready(&inner.client, inner.identity.raft_id).await
+        member_floor_ready(
+            &inner.client,
+            inner.identity.raft_id,
+            SharingMemberFloor::SessionPrincipal,
+        )
+        .await
     }
 
     /// Quorum-confirm the allocator-specific floor without advertising it.
@@ -11854,7 +11878,7 @@ impl MembershipManager {
         required: SharingMemberFloor,
     ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
-        sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required).await
+        member_floor_ready(&inner.client, inner.identity.raft_id, required).await
     }
 
     /// Observe the actual serving member and both Source writer capabilities.

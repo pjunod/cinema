@@ -14,7 +14,7 @@ fixtures = []
 # The workspace cluster harness enables the replicated backend, so feature
 # unification also runs these core unit tests during workspace checks. M2
 # enables the same backend on plurxd when the complete store becomes selectable.
-hiqlite-store = ["dep:hiqlite", "dep:openraft"]
+hiqlite-store = ["dep:hiqlite"]
 # Test-only operation accounting for deterministic three-voter read-cost gates.
 # The daemon does not enable this feature, so production requests pay no atomic
 # counter overhead.
@@ -40,10 +40,6 @@ dolby_vision = { workspace = true }
 async-trait = { workspace = true }
 bincode = { version = "2", features = ["serde"] }
 hiqlite = { workspace = true, optional = true }
-# Names the Raft metrics type the membership manager's counted client
-# forwards (`store::CountedClient::metrics_db`). Already in the tree via
-# hiqlite at this exact version, so this adds no compiled crate.
-openraft = { version = "0.9.25", optional = true }
 # Shared by pinned sharing TLS and the process-level Hiqlite provider. rustls panics instead of erroring when a process reaches TLS without
 # one, and `hiqlite::start_node` installs it only on the server side — which the
 # maintenance commands never reach. See `install_default_crypto_provider`.

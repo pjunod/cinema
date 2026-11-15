@@ -29,7 +29,7 @@ use hiqlite::{Client, Params, Row};
 use super::hiqlite::{time_counted_operation, StoreOperationClass};
 
 /// The database Raft metrics [`CountedClient::metrics_db`] forwards.
-pub type DbRaftMetrics = openraft::RaftMetrics<u64, hiqlite::Node>;
+pub type DbRaftMetrics = hiqlite::DbRaftMetrics;
 
 /// A hiqlite [`Client`] whose replicated SQL is counted by a static label.
 /// See the module documentation.
@@ -41,21 +41,21 @@ pub struct CountedClient {
 
 impl CountedClient {
     /// The membership manager's client: its operations are also counted in
-    /// `plurx_cluster_membership_operations_by_method_total`. Public so the
-    /// store contract tests can hand a fixture's raw client to the
-    /// manager's public quorum observations; wrapping counts, it never hides.
+    /// `plurx_cluster_membership_operations_by_method_total`.
     #[must_use]
-    pub fn membership(client: Client) -> Self {
+    pub(crate) fn membership(client: Client) -> Self {
         Self {
             client,
             membership: true,
         }
     }
 
-    /// The store's construction-time client, for a provisioning helper it
-    /// shares with the membership manager.
+    /// A counted client outside the membership manager: the store's
+    /// construction-time provisioning helper it shares with the manager, and
+    /// the cluster's quorum watermark sampler. Counted by class and label,
+    /// not as membership operations.
     #[must_use]
-    pub(crate) fn store(client: Client) -> Self {
+    pub(crate) fn outside_membership(client: Client) -> Self {
         Self {
             client,
             membership: false,
@@ -269,7 +269,7 @@ mod tests {
         ))
         .await;
         bounded(client.db_quorum_watermark("counted_client_test_watermark")).await;
-        let store = CountedClient::store(raw);
+        let store = CountedClient::outside_membership(raw);
         bounded(store.query_map::<Probe, _>(
             "counted_client_test_store_local",
             "SELECT 1",

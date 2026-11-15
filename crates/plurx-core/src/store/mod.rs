@@ -6351,7 +6351,7 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
 /// Keeping the scope here, at the Store boundary, prevents route handlers from
 /// having to guess how many physical local, authority, or write operations a
 /// high-level Store method performed.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -6364,6 +6364,72 @@ pub struct HttpStoreOperationCounts {
     store_nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The same operations split by the Store method that issued them.
     methods: std::sync::Arc<std::sync::Mutex<MethodOperationCounts>>,
+    /// Folds [`Self::methods`] into a process-wide by-method family once,
+    /// when the last clone of these counts is dropped. See
+    /// [`HttpStoreOperationCounts::fold_methods_into`].
+    flush: std::sync::Arc<MethodFlush>,
+}
+
+impl Default for HttpStoreOperationCounts {
+    fn default() -> Self {
+        let methods = std::sync::Arc::<std::sync::Mutex<MethodOperationCounts>>::default();
+        Self {
+            counts: std::sync::Arc::default(),
+            watch_reads: std::sync::Arc::default(),
+            index_status_calls: std::sync::Arc::default(),
+            cluster_index_availability_calls: std::sync::Arc::default(),
+            store_nanos: std::sync::Arc::default(),
+            flush: std::sync::Arc::new(MethodFlush {
+                methods: std::sync::Arc::clone(&methods),
+                sink: std::sync::Mutex::new(None),
+            }),
+            methods,
+        }
+    }
+}
+
+/// Where a scope's by-method counts go when its last holder is gone.
+type MethodSink = Box<dyn FnOnce(&[(&'static str, [u64; 3])]) + Send>;
+
+/// Folding at the last drop, not when the request's handler returns, is what
+/// makes the by-method families add up: an operation a detached task makes
+/// after the response, or one made by a request whose future was dropped
+/// (the client went away), is still folded, exactly once. A scope nobody
+/// gave a sink (one made outside any request, as
+/// [`spawn_in_http_store_scope`] does when there is no request) folds into
+/// the background table.
+struct MethodFlush {
+    methods: std::sync::Arc<std::sync::Mutex<MethodOperationCounts>>,
+    sink: std::sync::Mutex<Option<MethodSink>>,
+}
+
+impl Drop for MethodFlush {
+    fn drop(&mut self) {
+        let methods: Vec<(&'static str, [u64; 3])> = self
+            .methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_method
+            .iter()
+            .map(|(method, counts)| (*method, *counts))
+            .collect();
+        let sink = self
+            .sink
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if methods.is_empty() {
+            return;
+        }
+        match sink {
+            Some(sink) => sink(&methods),
+            #[cfg(feature = "hiqlite-store")]
+            None => hiqlite::fold_into_background(&methods),
+            // Without the replicated backend nothing is ever counted here.
+            #[cfg(not(feature = "hiqlite-store"))]
+            None => {}
+        }
+    }
 }
 
 /// The most distinct Store-method labels one request records. A request that
@@ -6385,20 +6451,35 @@ struct MethodOperationCounts {
 
 impl MethodOperationCounts {
     fn record(&mut self, method: &'static str, class_index: usize) {
-        self.record_capped(method, class_index, MAX_METHODS_PER_REQUEST);
+        // A request keeps its first MAX_METHODS_PER_REQUEST methods and the
+        // overflow label beside them.
+        self.record_capped(method, class_index, MAX_METHODS_PER_REQUEST + 1);
     }
 
-    /// [`Self::record`] with an explicit bound on distinct methods; past it
-    /// the operation is counted under [`METHOD_OVERFLOW_LABEL`], so the
-    /// counts always sum to the operations recorded.
+    /// Record under an exact bound: the map never holds more than `cap`
+    /// keys, the overflow label included. A new method is admitted while a
+    /// slot is left for [`METHOD_OVERFLOW_LABEL`]; past that it is counted
+    /// under the overflow label, so the counts always sum to the operations
+    /// recorded.
     fn record_capped(&mut self, method: &'static str, class_index: usize, cap: usize) {
-        let key = if self.by_method.contains_key(method) || self.by_method.len() < cap {
+        self.record_capped_n(method, class_index, 1, cap);
+    }
+
+    /// [`Self::record_capped`] for `count` operations at once.
+    fn record_capped_n(
+        &mut self,
+        method: &'static str,
+        class_index: usize,
+        count: u64,
+        cap: usize,
+    ) {
+        let key = if self.by_method.contains_key(method) || self.by_method.len() + 1 < cap {
             method
         } else {
             METHOD_OVERFLOW_LABEL
         };
         let cell = self.by_method.entry(key).or_default();
-        cell[class_index] = cell[class_index].saturating_add(1);
+        cell[class_index] = cell[class_index].saturating_add(count);
     }
 }
 
@@ -6475,6 +6556,21 @@ impl HttpStoreOperationCounts {
                 (delta != [0; 3]).then_some((method, delta))
             })
             .collect()
+    }
+
+    /// Send these counts, split by method, to `sink` once, when the last
+    /// clone of them is dropped — after the handler and after any task it
+    /// spawned in this scope have finished. Without a sink they fold into
+    /// the process-wide background table. Replaces any earlier sink.
+    pub fn fold_methods_into(
+        &self,
+        sink: impl FnOnce(&[(&'static str, [u64; 3])]) + Send + 'static,
+    ) {
+        *self
+            .flush
+            .sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(sink));
     }
 
     /// Summed wall time of every operation counted in [`Self::snapshot`].

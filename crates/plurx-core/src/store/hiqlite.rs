@@ -758,19 +758,21 @@ struct StoreOperationCell {
     buckets: [AtomicU64; STORE_OPERATION_BUCKETS.len()],
 }
 
-/// The most distinct method labels each process-wide attribution table
-/// (background, membership) holds. Labels are `&'static str` literals, so the
-/// set is bounded by the source (a few hundred today); the cap is the
-/// guarantee. Past it an operation is counted under
-/// [`super::METHOD_OVERFLOW_LABEL`], never dropped, so a table still sums to
-/// the operations it was given.
+/// The most keys each process-wide attribution table (background,
+/// membership) holds, its overflow label included. Labels are `&'static str`
+/// literals, so the set is bounded by the source (about 530 Store labels and
+/// about 100 membership labels today); the cap is the guarantee. Past it an
+/// operation is counted under [`super::METHOD_OVERFLOW_LABEL`], never
+/// dropped, so a table still sums to the operations it was given.
 const MAX_ATTRIBUTED_METHODS: usize = 1024;
 
 struct StoreOperationMetrics {
     cells: [StoreOperationCell; 9],
     /// Operations recorded outside any HTTP request scope, by the method
-    /// label that issued them. With the request-scoped split this accounts
-    /// for every counted operation exactly once.
+    /// label that issued them, plus those of a scope made outside any request
+    /// once its last holder is dropped. With the request-scoped split, once
+    /// every scope has been dropped, each counted operation is in exactly one
+    /// of the two.
     background: Mutex<super::MethodOperationCounts>,
     /// Operations the cluster membership manager issued through its
     /// [`super::CountedClient`], by the function that issued them, whatever
@@ -845,6 +847,20 @@ impl StoreOperationMetrics {
         }
     }
 
+    fn fold_background(&self, methods: &[(&'static str, [u64; 3])]) {
+        let mut table = self
+            .background
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (method, counts) in methods {
+            for (class, count) in counts.iter().enumerate() {
+                if *count > 0 {
+                    table.record_capped_n(method, class, *count, MAX_ATTRIBUTED_METHODS);
+                }
+            }
+        }
+    }
+
     fn background_snapshot(&self) -> Vec<(&'static str, [u64; 3])> {
         Self::method_table_snapshot(&self.background)
     }
@@ -894,7 +910,7 @@ impl StoreOperationMetrics {
         use std::fmt::Write;
 
         let mut out = String::from(
-            "# HELP plurx_store_operation_seconds Replicated Store operation latency by consistency class and outcome, including the cluster membership manager's operations.\n\
+            "# HELP plurx_store_operation_seconds Latency of the counted replicated operations (see plurx_store_operations_total) by consistency class and outcome.\n\
              # TYPE plurx_store_operation_seconds histogram\n",
         );
         for class in StoreOperationClass::ALL {
@@ -938,7 +954,7 @@ impl StoreOperationMetrics {
             }
         }
         out.push_str(
-            "# HELP plurx_store_operations_total Replicated Store operations by consistency class and outcome, including the cluster membership manager's operations. Each is also counted by method in exactly one of plurx_http_store_operations_by_method_total (or its dropped counter) and plurx_background_store_operations_by_method_total.\n\
+            "# HELP plurx_store_operations_total Replicated operations by consistency class and outcome: every Store operation (TimedClient) and every operation of the counted client (the cluster membership manager, the 2 Hz quorum watermark sampler, the Source dispatch guard provisioning). Not counted: start-up only work (Store schema installation and bootstrap, the voter start-up catch-up watermark) and Hiqlite's own Raft traffic. Once its request scope is no longer held, each counted operation is also counted by method in exactly one of plurx_http_store_operations_by_method_total (or its dropped counter) and plurx_background_store_operations_by_method_total.\n\
              # TYPE plurx_store_operations_total counter\n",
         );
         for class in StoreOperationClass::ALL {
@@ -955,7 +971,7 @@ impl StoreOperationMetrics {
         Self::render_method_family(
             &mut out,
             "plurx_background_store_operations_by_method_total",
-            "Replicated Store operations issued outside an HTTP request scope (background loops, timers, workers and the cluster membership manager's own tasks), by the method that issued them; a task spawned from a request without spawn_in_http_store_scope also lands here. Series exist only for methods that have run; past the method cap the rest count under method=\"other\".",
+            "Counted replicated operations issued outside an HTTP request scope (background loops, timers, workers, the cluster membership manager's own tasks, the quorum watermark sampler), by the method that issued them. A task spawned from a request without spawn_in_http_store_scope lands here, and so does a scope made outside any request, when its last holder finishes. Series exist only for methods that have run; past the method cap the rest count under method=\"other\".",
             &self.background_snapshot(),
         );
         Self::render_method_family(
@@ -1228,12 +1244,22 @@ async fn time_counted_operation_with<T, E>(
 
 /// Replicated operations issued outside any HTTP request scope, by the method
 /// label that issued them, sorted by label; each entry is `(method, [local,
-/// authority, write])`. With the request-scoped split
-/// ([`super::HttpStoreOperationCounts::method_snapshot`]) this accounts for
-/// every operation in `plurx_store_operations_total` exactly once.
+/// authority, write])`. With the request split, which a request folds into
+/// `plurx_http_store_operations_by_method_total` when its last holder is
+/// dropped, every counted operation in `plurx_store_operations_total` is in
+/// exactly one of the two; one in a scope still held (a request or a task it
+/// spawned that has not finished) is in neither yet. Operations that never
+/// reach a counted client are in none of them: see the
+/// `plurx_store_operations_total` HELP text.
 #[must_use]
 pub fn background_store_operations_by_method() -> Vec<(&'static str, [u64; 3])> {
     STORE_OPERATION_METRICS.background_snapshot()
+}
+
+/// Fold a request scope's by-method counts, which no route claimed, into
+/// the background table: the scope was made outside any HTTP request.
+pub(super) fn fold_into_background(methods: &[(&'static str, [u64; 3])]) {
+    STORE_OPERATION_METRICS.fold_background(methods);
 }
 
 /// The cluster membership manager's replicated operations by the function
@@ -2301,9 +2327,9 @@ impl HiqliteAuthStore {
             .map_err(database_error)?;
 
         Self::install_baseline_sharing_schema(&client).await?;
-        super::sharing_source_schema::provision_dispatch_guard(&super::CountedClient::store(
-            client.clone(),
-        ))
+        super::sharing_source_schema::provision_dispatch_guard(
+            &super::CountedClient::outside_membership(client.clone()),
+        )
         .await?;
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -2422,9 +2448,9 @@ impl HiqliteAuthStore {
 
     /// Open an already-bootstrapped cluster, refusing incompatible state.
     pub async fn open(client: Client, telemetry_path: &Path) -> Result<Self, StoreError> {
-        super::sharing_source_schema::provision_dispatch_guard(&super::CountedClient::store(
-            client.clone(),
-        ))
+        super::sharing_source_schema::provision_dispatch_guard(
+            &super::CountedClient::outside_membership(client.clone()),
+        )
         .await?;
         let store = Self::with_clock(
             client,
@@ -2465,9 +2491,9 @@ impl HiqliteAuthStore {
         telemetry_path: &Path,
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<Self, StoreError> {
-        super::sharing_source_schema::provision_dispatch_guard(&super::CountedClient::store(
-            client.clone(),
-        ))
+        super::sharing_source_schema::provision_dispatch_guard(
+            &super::CountedClient::outside_membership(client.clone()),
+        )
         .await?;
         let store = Self::with_clock(
             client,

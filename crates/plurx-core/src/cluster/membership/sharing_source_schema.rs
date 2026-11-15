@@ -157,7 +157,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
     let captured = if live {
         "[]".to_owned()
     } else {
-        let rows=inner.client.query_consistent_map::<PayloadRow,_>("install", "SELECT json_array(intent.node_id,intent.raft_id,intent.attempt_id,intent.master_fingerprint,intent.membership_generation) AS payload FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL ORDER BY intent.node_id LIMIT 257",params!()).await?;
+        let rows=inner.client.query_consistent_map::<PayloadRow,_>("membership_install", "SELECT json_array(intent.node_id,intent.raft_id,intent.attempt_id,intent.master_fingerprint,intent.membership_generation) AS payload FROM sharing_source_boot_intents intent JOIN cluster_nodes node ON node.node_id=intent.node_id AND node.raft_id=intent.raft_id WHERE node.removed_at IS NULL ORDER BY intent.node_id LIMIT 257",params!()).await?;
         if rows.is_empty() || rows.len() > 256 {
             return Ok(false);
         }
@@ -194,7 +194,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         inner.identity.raft_id
     );
     if !predicate(
-        "install",
+        "membership_install",
         &inner.client,
         format!("({authority}) AND ({})", predecessor),
         params!(roster.clone(), cutoff, now, captured.clone()),
@@ -229,7 +229,7 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         (format!("INSERT INTO sharing_source_schema_transaction_guard VALUES(1,CASE WHEN ({authority}) AND ({}) THEN 1 ELSE 0 END)",layout::installed_shape_guard()),params!(roster,cutoff,now,captured)),
 
     ]);
-    let attempt = transaction("install", &inner.client, statements).await;
+    let attempt = transaction("membership_install", &inner.client, statements).await;
     match attempt {
         Ok(()) => verify_layout(&inner.client).await,
         Err(error) => {
