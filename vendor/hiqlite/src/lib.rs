@@ -128,6 +128,14 @@ mod store;
 
 #[cfg(feature = "sqlite")]
 mod applied_mark;
+#[cfg(feature = "sqlite")]
+mod proposal_gate;
+#[cfg(feature = "sqlite")]
+pub use proposal_gate::ProposalHold;
+/// Plurx patch 30: the database Raft's own metrics, as
+/// `Client::wait_local_db_metrics` and `Client::metrics_db` return them.
+#[cfg(feature = "sqlite")]
+pub type RaftMetricsDb = openraft::RaftMetrics<NodeId, Node>;
 #[cfg(feature = "backup")]
 mod backup;
 #[cfg(feature = "dashboard")]

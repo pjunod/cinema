@@ -10376,3 +10376,85 @@ fn shutdown_handoff_reuses_the_one_handoff_and_writes_nothing() {
         }
     }
 }
+
+#[test]
+fn handoff_candidate_is_the_first_eligible_voter_matching_the_leaders_last_entry() {
+    use super::matched_survivor;
+
+    let matched = |pairs: &'static [(u64, u64)]| {
+        move |raft_id: u64| {
+            pairs
+                .iter()
+                .find(|(id, _)| *id == raft_id)
+                .map(|(_, index)| *index)
+        }
+    };
+    assert_eq!(
+        matched_survivor(&[2, 3], Some(2), Some(40), matched(&[(2, 39), (3, 39)])),
+        None,
+        "nobody is triggered while every survivor is behind"
+    );
+    assert_eq!(
+        matched_survivor(&[2, 3], Some(2), Some(40), matched(&[(2, 39), (3, 40)])),
+        Some(3),
+        "a different eligible voter that matched first is used"
+    );
+    assert_eq!(
+        matched_survivor(&[2, 3], Some(3), Some(40), matched(&[(2, 40), (3, 40)])),
+        Some(3),
+        "the preferred voter wins when it has matched too"
+    );
+    assert_eq!(
+        matched_survivor(&[2, 3], None, Some(40), matched(&[(2, 40), (3, 40)])),
+        Some(2),
+        "otherwise the first eligible voter in order"
+    );
+    assert_eq!(
+        matched_survivor(&[3], Some(2), Some(40), matched(&[(2, 40), (3, 39)])),
+        None,
+        "an ineligible voter is never chosen, even preferred and matched"
+    );
+    assert_eq!(
+        matched_survivor(&[2], Some(2), None, matched(&[(2, 40)])),
+        None,
+        "no last entry known, no candidate"
+    );
+}
+
+#[test]
+fn handoff_holds_proposals_until_a_matched_survivor_is_triggered() {
+    let source = include_str!("../membership.rs");
+    let body = method_body(source, "async fn handoff_leadership(");
+    let order = [
+        "inner.client.hold_local_db_proposals(hold_deadline)",
+        "matched_survivor(&eligible, preferred, metrics.last_log_index",
+        "trigger_election(candidate_api, &inner.secrets.api).await?;",
+        ".wait_local_db_metrics(hold_deadline, |metrics| {",
+        ".is_some_and(|leader| leader != departed)",
+        "drop(hold);",
+        "self.await_survivor_leader(",
+    ];
+    let mut previous = 0;
+    for step in order {
+        let at = body
+            .find(step)
+            .unwrap_or_else(|| panic!("the transfer is missing {step:?}"));
+        assert!(at >= previous, "{step:?} is out of order");
+        previous = at;
+    }
+    assert_eq!(
+        body.matches("trigger_election(").count(),
+        1,
+        "one trigger, no retry"
+    );
+    assert!(
+        !body.contains("tokio::time::sleep"),
+        "the waits are woken by metrics, never by polling"
+    );
+    assert!(
+        body.matches("deadline.min(tokio::time::Instant::now() + PROPOSAL_HOLD_WAIT)")
+            .count()
+            == 1,
+        "the hold's whole life is bounded once, inside the one deadline"
+    );
+}

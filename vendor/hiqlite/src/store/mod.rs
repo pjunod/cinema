@@ -166,6 +166,7 @@ pub(crate) async fn start_raft_db(
         log_statements: node_config.log_statements,
         is_raft_stopped,
         is_startup_finished,
+        proposals: Default::default(),
     };
     startup_owner.handoff();
     startup_owner.protect_db(&state);

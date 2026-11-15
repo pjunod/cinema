@@ -107,6 +107,50 @@ pub struct StateRaftDB {
     pub log_statements: bool,
     pub is_raft_stopped: Arc<AtomicBool>,
     pub is_startup_finished: Arc<AtomicBool>,
+    /// Plurx patch 30: the one gate every proposal on this Raft passes.
+    pub(crate) proposals: crate::proposal_gate::ProposalGate,
+}
+
+/// Plurx patch 30: the only places this node proposes to its database Raft.
+/// Each takes a shared proposal permit for the whole call, so a
+/// [`crate::ProposalHold`] stops this node's log from growing.
+#[cfg(feature = "sqlite")]
+impl StateRaftDB {
+    pub(crate) async fn client_write(
+        &self,
+        request: crate::store::state_machine::sqlite::state_machine::QueryWrite,
+    ) -> Result<
+        openraft::raft::ClientWriteResponse<TypeConfigSqlite>,
+        openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, crate::Node>>,
+    > {
+        let _permit = self.proposals.permit().await;
+        self.raft.client_write(request).await
+    }
+
+    pub(crate) async fn change_membership(
+        &self,
+        members: impl Into<openraft::ChangeMembers<NodeId, crate::Node>>,
+        retain: bool,
+    ) -> Result<
+        openraft::raft::ClientWriteResponse<TypeConfigSqlite>,
+        openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, crate::Node>>,
+    > {
+        let _permit = self.proposals.permit().await;
+        self.raft.change_membership(members, retain).await
+    }
+
+    pub(crate) async fn add_learner(
+        &self,
+        id: NodeId,
+        node: crate::Node,
+        blocking: bool,
+    ) -> Result<
+        openraft::raft::ClientWriteResponse<TypeConfigSqlite>,
+        openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, crate::Node>>,
+    > {
+        let _permit = self.proposals.permit().await;
+        self.raft.add_learner(id, node, blocking).await
+    }
 }
 
 #[cfg(feature = "cache")]
