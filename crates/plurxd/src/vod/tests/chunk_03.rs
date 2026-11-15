@@ -3577,6 +3577,192 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         drop(permit);
     }
 
+    const TRIAL_INCARNATION: &str = "6c2f9e1a-3b7d-4f5e-9a1c-2d8e4b6f0a17";
+
+    /// Give `old-session` (the predecessor's only reader) a fresh accepted
+    /// playhead at film zero, the trial claim's runway anchor.
+    #[cfg(unix)]
+    async fn viewer_at_film_start(fixture: &HandoffFixture) {
+        let mut sessions = fixture.serve.shared.sessions.lock().await;
+        let session = sessions.get_mut("old-session").expect("incumbent session");
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        demand.position_ms = 0;
+        demand.buffered_from_ms = Some(0);
+        demand.buffered_through_ms = 0;
+        session.last_control_snapshot = Some(demand);
+        session.control_observed_at = Some(Instant::now());
+    }
+
+    #[cfg(unix)]
+    async fn claim_for_trial(
+        fixture: &HandoffFixture,
+        reserve_ms: i64,
+    ) -> Option<IncumbentPermitClaim> {
+        let budget = fixture.successor_encoding.resources.cpu_threads.max(1);
+        fixture
+            .serve
+            .claim_incumbent_permit(
+                "old-session",
+                TRIAL_INCARNATION,
+                fixture.successor_encoding.resources,
+                1,
+                budget,
+                reserve_ms,
+            )
+            .await
+    }
+
+    #[cfg(unix)]
+    async fn predecessor_yields(fixture: &HandoffFixture) -> bool {
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        for _ in 0..40 {
+            if matches!(fixture.predecessor.slot.belief().await, Producer::Absent { .. }) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    /// The Air (Profile 5) defect: the viewer's own encoded incumbent held the
+    /// capacity its processed upgrade needed, and the trial was refused at
+    /// once. With a claim, the incumbent yields through the predecessor
+    /// handoff and the capacity is reserved for the trial alone — without the
+    /// trial ever registering a pool waiter other viewers would yield to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_processed_trial_claims_its_own_viewers_encoder_permit() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        viewer_at_film_start(&fixture).await;
+        let admissions = fixture.successor_encoding.admissions.clone();
+        let budget = fixture.successor_encoding.resources.cpu_threads.max(1);
+        assert!(
+            admissions
+                .try_admit_bundle(1, budget, &fixture.successor_encoding.resources,
+                    crate::admission::Priority::Live)
+                .is_none(),
+            "the incumbent holds the node's only encoder permit"
+        );
+        let claim = claim_for_trial(&fixture, 0).await.expect("its own viewer's incumbent");
+        assert!(fixture.predecessor.handoff_requested());
+        assert!(predecessor_yields(&fixture).await, "the incumbent gives its permit back");
+        let token = claim.claim().token().expect("capacity reserved for the trial");
+        assert_eq!(admissions.snapshot().live_waiting, 0, "the claim registers no pool waiter");
+        assert!(
+            admissions
+                .try_admit_bundle(1, budget, &fixture.successor_encoding.resources,
+                    crate::admission::Priority::Live)
+                .is_none(),
+            "another live start cannot take the trial's reservation"
+        );
+        let permit = admissions
+            .try_admit_bundle_claiming(1, budget, &fixture.successor_encoding.resources,
+                crate::admission::Priority::Live, Some(token))
+            .expect("the trial admits with its reservation");
+        claim.claim().mark_admitted();
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        assert!(
+            matches!(fixture.predecessor.slot.belief().await, Producer::Absent { .. }),
+            "a parked incumbent does not take the permit back while the claim stands"
+        );
+        drop(permit);
+        drop(claim);
+        assert!(!fixture.predecessor.handoff_requested(), "the claim's drop releases it");
+    }
+
+    /// The trial claim takes nothing it is not owed: not without runway that
+    /// covers a failed hand-back, and never a rendition another viewer reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_trial_claim_needs_runway_and_an_unshared_incumbent() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        viewer_at_film_start(&fixture).await;
+        // The fixture publishes entries 0..=3 from film zero: the runway is
+        // the published end on the plan's own boundaries.
+        let entry = fixture.predecessor.plan.entry(3).expect("fourth entry");
+        let published_ms = (entry.end_ticks() * 1_000
+            / u64::from(fixture.predecessor.timescale)) as i64;
+        assert!(
+            claim_for_trial(&fixture, published_ms + 100).await.is_none(),
+            "runway short of the reserve"
+        );
+        assert!(!fixture.predecessor.handoff_requested());
+        let covered = claim_for_trial(&fixture, published_ms - 100)
+            .await
+            .expect("runway covers the reserve");
+        drop(covered);
+        assert!(!fixture.predecessor.handoff_requested());
+        insert_control_session(&fixture.serve, "someone-else", Arc::clone(&fixture.predecessor),
+            Instant::now()).await;
+        fixture.serve.shared.sessions.lock().await.get_mut("someone-else")
+            .expect("second viewer").playback_id = "another-playback".into();
+        assert!(claim_for_trial(&fixture, 0).await.is_none(), "another viewer reads it");
+        assert!(!fixture.predecessor.handoff_requested());
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        assert!(matches!(fixture.predecessor.slot.belief().await, Producer::Running { .. }));
+        retire_predecessor(&fixture).await;
+    }
+
+    /// A trial that fails or is cancelled gives everything back: the request
+    /// lapses at once and the unused reservation returns to the pool. A claim
+    /// whose runway is spent while parked closes itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_or_spent_trial_claim_releases_its_incumbent() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        viewer_at_film_start(&fixture).await;
+        let admissions = fixture.successor_encoding.admissions.clone();
+        let claim = claim_for_trial(&fixture, 0).await.expect("claim");
+        assert!(predecessor_yields(&fixture).await);
+        assert_eq!(admissions.snapshot().reservations, 1);
+        drop(claim);
+        assert!(!fixture.predecessor.handoff_requested());
+        assert_eq!(admissions.snapshot().reservations, 0, "the unused reservation is returned");
+
+        // A seek past the published runway ends a claim on the next pass.
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        viewer_at_film_start(&fixture).await;
+        let claim = claim_for_trial(&fixture, 1).await.expect("claim");
+        fixture.serve.shared.sessions.lock().await.get_mut("old-session").expect("viewer")
+            .last_control_snapshot.as_mut().expect("demand").position_ms = 3_600_000;
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        assert!(claim.claim().is_closed(), "the spent claim tells the upgrade to give back");
+        assert!(!fixture.predecessor.handoff_requested());
+        retire_predecessor(&fixture).await;
+    }
+
+    /// Once its successor is staged under the same incarnation, the trial's
+    /// handoff is owned by the preparation slot: it outlives the claim's
+    /// owner, survives an unrelated settlement, and ends with the slot.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_staged_trial_keeps_its_incumbent_parked_until_the_slot_settles() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        viewer_at_film_start(&fixture).await;
+        let claim = claim_for_trial(&fixture, 0).await.expect("claim");
+        assert!(predecessor_yields(&fixture).await);
+        fixture.predecessor.release_handoff_unless(None);
+        assert!(fixture.predecessor.handoff_requested(), "an unstaged trial is not the slot's");
+        stage_successor(&fixture, TRIAL_INCARNATION).await;
+        claim.hand_to_staging();
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        assert!(fixture.predecessor.handoff_requested(), "staged: the slot keeps it parked");
+        let gate = fixture.serve.preparation_gate("old-session").await.expect("gate");
+        assert!(gate.begin_abort_preparation_for_owner(TRIAL_INCARNATION, 1).await);
+        assert!(!fixture.predecessor.handoff_requested(), "abort releases the staged trial");
+    }
+
     /// A successor that closes or fails stops polling for a handoff and gives
     /// back any reservation made for it.
     #[cfg(unix)]

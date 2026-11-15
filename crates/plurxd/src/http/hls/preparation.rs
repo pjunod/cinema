@@ -1066,8 +1066,12 @@ async fn reserve_preparation_before(
     });
     match tokio::time::timeout(PREPARATION_STORE_BUDGET, receive).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err(ReservationEnd::Refused(PreparationStageRefusal::ReservationTaskClosed)),
-        Err(_) => Err(ReservationEnd::Refused(PreparationStageRefusal::ReservationSettlementDeadline)),
+        Ok(Err(_)) => Err(ReservationEnd::Refused(
+            PreparationStageRefusal::ReservationTaskClosed,
+        )),
+        Err(_) => Err(ReservationEnd::Refused(
+            PreparationStageRefusal::ReservationSettlementDeadline,
+        )),
     }
 }
 
