@@ -303,7 +303,7 @@ impl Client {
         Ok(state.raft_db.applied_mark.handle())
     }
 
-    /// Plurx patch 29: stop this node's database Raft from starting an
+    /// Plurx patch 30: stop this node's database Raft from starting an
     /// election on its own timer, for the rest of this process. A stopping
     /// node calls it first so that it never campaigns again; it still votes,
     /// replicates and answers an explicit election trigger. Not persisted:
@@ -561,7 +561,7 @@ impl Client {
         }
     }
 
-    /// Plurx patch 30: stop new database proposals on this node until the
+    /// Plurx patch 31: stop new database proposals on this node until the
     /// returned hold drops. The hold waits for in-flight permits; new
     /// proposals wait rather than fail. A cancelled caller's entry may still
     /// be queued in the Raft core, so callers must not treat the hold as proof
@@ -579,7 +579,7 @@ impl Client {
         Ok(state.raft_db.proposals.hold_until(deadline).await)
     }
 
-    /// Plurx patch 30: wait, by `deadline`, for this node's own database Raft
+    /// Plurx patch 31: wait, by `deadline`, for this node's own database Raft
     /// metrics to satisfy `condition`, woken by each metrics change rather than
     /// by polling. Local clients only.
     #[cfg(feature = "sqlite")]
