@@ -1,6 +1,6 @@
 # Sharing authority through the cluster layer — A6 build plan
 
-**Status:** plan rev 3, after adversarial review and confirmation pass (Fable); sound to build · **Owner:** Claude Opus 5.5, session_01BCWLA21tCtxWeNBWRHWsWn ·
+**Status:** built (plan rev 5): M1, M2 and M3 built and adversarially reviewed (Fable); landing in progress · **Owner:** Claude Opus 5.5, session_01BCWLA21tCtxWeNBWRHWsWn ·
 **Implements:** the cluster layer audit (PR #1604) finding D4, action item A6 ·
 **Base:** stacked on #1598 (`claude/sharing-listener-unknown-not-disabled`), on top of `main @ 8785492be`
 
@@ -61,23 +61,82 @@ The cost on a production voter, 2026-11-14: one slow quorum confirmation ends li
 
 - A single-flight cached `sharing_member_floor_ready` **advisory bool**, per `SharingMemberFloor`, used only by the monitors and `authority()`.
 - It is invalidated on a change in the serving-loss generation or the local membership snapshot, and it is never older than `SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS` (5 s). The max age is the real bound, because readiness also depends on replicated heartbeat, capability and join rows that neither invalidator sees (`membership.rs:3157-3190`, `:3727-3736`).
+- Only a ready answer is kept for later callers. A not-ready answer serves only the callers already waiting on its read, so a floor blip ends with the next look rather than spending the monitors' outage grace. A failed read likewise answers only the callers already waiting on it and is never kept; a read runs on its own task with its own 1 s bound, so a caller that gives up does not cancel it for the callers behind it; while the serving fence is not ready the read is fresh and nothing is kept.
+- Its readers are the body monitors and the read-only admission points: `authority()` and `source_content_current` (catalogue, artwork and body start). A ready answer can admit for up to 5 s after a heartbeat, capability or join change; an error, a timeout or not-ready still refuses with the typed 503.
 - `observe_source_admission_members` and `observe_ingress_custody_members` keep their fresh reads, because their `write_guard_for` rejects observations older than 5 s (`:3306`). The "never a cached readiness permission" rule therefore still holds for permissions; the cache is advisory evidence only (`:3192-3194`, `:11621-11623`).
 
 ## M3 — change-driven re-observation
 
-- **Wake sources:** a revision change of the sharing grant, import, assignment and switch rows; an image-generation change; serving loss; or `sleep_until(earliest expiry)` for the time terms (lease, grant deadline, token idle). No fixed interval.
-- **Prerequisites:**
-  - extend the placeholder census to the sharing tables, whose SQL is built with `format!` (`placeholder_census.rs:3443-3452`);
-  - confirm the sharing tables are rowid tables updated through qualified statements;
-  - a vendored Hiqlite wait API on `AppliedMarkHandle`, which is used only through polled getters today. That is a new patch, upstreamable.
-- **Do not wake on `media_sessions`**, whose 10 s lease renewals would wake every monitor.
+Rev 5: rev 4 detailed from the code after M1 and M2 were built, then adversarially reviewed (Fable: sound after fixes; four must-fix and seven should-fix findings, all folded in below). Every sharing read is a linearizable `query_consistent_map` (`hiqlite_sharing.rs:84`). M3 changes when a monitor looks, not how: a look stays one classified linearizable read through M1's outage policy.
+
+**What looks today, and what it reads**
+
+| Monitor | Interval | Tables one look reads | Time terms |
+|---|---|---|---|
+| Source listener switch (`sharing.rs:766`) | 1 s | `settings` | none |
+| Source body (`shared_library.rs:779`) | 1 s | `settings`, `sharing_exports`, `sharing_identity`, `sharing_export_libraries`, `item_identity_watermark`, `libraries`, `items`, `files`; floor via M2 | none |
+| Receiver connection (`shared_receiver_playback.rs:1300`) | 1 s | authority: `tokens`, `users`, `settings`, `sharing_imports`, `sharing_viewers`, `sharing_assignments`, `sharing_identity`; binding and delivery: `sharing_relay_upstream`, `media_sessions`, `job_leases`, `media_session_requests`, `media_playback_pointers`, `sharing_delivery_grants` | session lease, delivery-grant deadline, token idle |
+| Receiver owner loops (`:1888`, `:2154`) | 10 s | renewal writes plus one full look | lease |
+
+The owner loops are the lease's heartbeat and keep their 10 s interval and full look; M3 does not touch them, and the acceptance line counts monitors only.
+
+**The wake primitive (vendored Hiqlite, an extension of patch 27, the applied mark).** Only the writer thread sees remote applies, so the primitive belongs there.
+- The pending mask widens from `AtomicU8` to `AtomicU16` (`applied_mark.rs:46`, `:74-94`, `:124`), and `APPLIED_MARK_MAX_TABLES` rises from 8 to 16. With 13 tables an 8-bit mask aliases slots 8–12 onto 0–4 in release. A test registers a slot at index ≥ 8 and proves it moves alone.
+- A registered table may be **delete-only**: the update hook's action (`writer.rs:289`) decides whether the row change bumps the slot. `tokens` registers delete-only, because every active device rewrites its token every 60 s (`auth.rs:76`, `store/hiqlite.rs:6170`); token idle expiry is a time term instead.
+- `AppliedMark` gains one `tokio::sync::Notify` and an **interest count per slot** for the watches alive (a count, so one watch dropping never clears a slot another still holds). `publish` bumps revisions first, then notifies only when a bumped slot has a nonzero interest count, so `media_sessions` renewals cost the writer thread one mask test. `begin_replacement` and `complete` always notify.
+- `AppliedMarkHandle::watch(slots) -> AppliedWatch` captures the slots' revisions and the generation. `AppliedWatch::changed()` creates its `Notified` before comparing (`notify_waiters` stores no permit), and returns once a slot or the generation moved. Dropping the watch decrements its slots' counts.
+
+**Exposed through `AppliedView`, not called from sharing.** `AppliedView` has three modes (`applied_view.rs:834-847`, `:868-870`). Only the replicated mode has a mark; `Standalone` (SQLite) and `RemoteAuthority` do not. `AppliedView::sharing_watch(tables)` returns either a mark watch or a 1 s interval, and also falls back to the 1 s interval while `generation` is odd (a failed replacement stays odd, `applied_mark.rs:173-185`). Markless stores therefore behave exactly as today.
+
+**Registration.** The tables monitors wait on join the registered set, giving 13 slots:
+
+| Registered set | Tables |
+|---|---|
+| Already registered | `settings`, `media_sessions` |
+| New | `sharing_exports`, `sharing_export_libraries`, `sharing_identity`, `item_identity_watermark`, `sharing_catalogue_revisions`, `libraries`, `files`, `tokens` (delete-only), `sharing_imports`, `sharing_viewers`, `sharing_assignments` |
+
+- `items` is **not** registered. The watermark moves only on `AFTER INSERT ON items` (`item_identity_schema.sql:13-15`), so it would not catch removals. `sharing_catalogue_revisions` is bumped on item delete, library move and kind change (`sharing_catalogue_schema.sql:17-27`). Those triggers are suppressed while `importing=1`; a look then fails closed, and the flip moves the watermark slot.
+- `files` has no such trigger and stays registered.
+- `settings` and `media_sessions` remain the only `STAMPED` views. The planning view's per-table metric (`applied_view.rs:1552`) iterates `STAMPED`, not `ALL`, so registering `files` adds no series. The comments that say production "registers exactly" the stamped set (`:79-81`, `:86-89`, `:98-100`) are corrected.
+
+**Per monitor.** Every monitor follows the same rule. It arms the watch **before** each look: before the admission look for the Source body (`shared_library.rs:765`), and the watch is moved into the monitor. It re-arms before every re-look. It re-looks at most once a second after a wake: next look = max(wake, last look + 1 s).
+- **Source listener:** waits on `settings` and serving loss.
+- **Source body:**
+  - Waits on `settings`, `sharing_exports`, `sharing_identity`, `sharing_export_libraries`, `item_identity_watermark`, `sharing_catalogue_revisions`, `libraries`, `files` and serving loss.
+  - The member floor (M2) is no longer re-observed on an idle stream. Damage to item identity moves the watched rows; a floor that lapses without a row change is caught at the next look. This is a deliberate change from M1, which ended an idle stream after a persistent not-ready floor.
+- **Receiver connection:**
+  - **Waits on:** `tokens` (deletes), `settings`, `sharing_imports`, `sharing_viewers`, `sharing_assignments`, `sharing_identity` and serving loss.
+  - **Wakes at:** the earlier of the lease and the original login's expiry, plus 1 ms, because the comparisons are strict `>`. The delivery-grant deadline needs no term of its own: it is `min(observed + 30 s, lease, login)` (`sharing_receiver_sessions.rs:66-79`) and is renewed with the lease.
+  - **Where the deadlines come from:** the lease is read from the owner's in-memory state at every wait (`delivery_deadline_ms`), so a renewal moves it; a deadline wake re-checks and looks only if the term has really lapsed. A value from the last look would go stale at each 10 s renewal.
+  - **New accessors:** the look returns the delivery deadline, which is read and discarded today (`:940-946`). An accessor exposes `login_expires_at_s` (`sharing_receiver_sessions.rs:48`).
+  - **Not watched:** `users`. The predicate uses it only for existence (`:667`), and deleting a user cascades to `tokens`, `sharing_viewers` and `sharing_assignments`, all of which are watched.
+  - **Also not watched:** the relay and delivery tables, which every 10 s renewal writes. A binding taken or ended elsewhere is seen by this owner's next renewal, which fails and retires through M1, and by the lease deadline. Nothing calls `revoke_receiver_delivery` outside retirement.
+- **Unknown spans** keep M1's 1 s re-look until a definite answer.
+
+**Invariant, confirmed.** While the serving fence is ready, revocation latency becomes local apply lag, and readiness bounds it in time:
+- Ready needs zero apply lag or an eligible serving proof (`serving_fence.rs:1359-1375`).
+- That proof is a quorum confirmation with `applied_index >= committed_index`, kept inside its own 1 s lease (`QUORUM_WATERMARK_LEASE`) and never restamped (`migration.rs:5593`, `:6250-6316`, `:6452-6466`).
+- So a ready node has applied a commit index that a quorum confirmed within the last second. Otherwise the fence drops and the monitors' serving-loss arm fires.
+- M3 adds no sharing-side timer.
+- The anchor precedes the sample: `started_nanos` is taken before `source.sample()` (`migration.rs:7076`, `:7083`), the sample is a fresh leader read index (`get_read_log_id`, `client/mgmt.rs:170`), and `publish_watermark` refuses a sample whose anchor is already past its lease.
+
+**Coverage proofs (prerequisites, each its own commit).**
+1. `applied_view_tables_never_escape_the_update_hook` (`placeholder_census.rs:3445`) moves from `APPLIED_VIEW_TABLES` to the full registered set. The unqualified deletes in `validation_reset_contract_state` (`store/hiqlite.rs:5871-5893`) gain `WHERE true`, as `:5835` already has.
+2. The census is textual and covers this binary only (`:3449-3451`), so a behavioural store-contract test backs it up. For each registered table, it runs one production write path and a bare `DELETE FROM t`, and asserts that exactly that slot and its cascade children move (or, for `tokens`, that only the delete moves it).
+3. Every library has a `sharing_catalogue_revisions` row: the delete trigger is an `UPDATE` (`sharing_catalogue_schema.sql:17-19`) and moves nothing without one. Rows come from the insert trigger (`:13-16`) and the import backfill (`hiqlite_import.rs:2675`). A contract test pins this invariant.
+4. Cascade children get a contract test that a cascaded delete moves the child's slot: `tokens`←`users` (`hiqlite.rs:339`), `sharing_viewers`←`users`, `sharing_assignments`←`sharing_imports`/`sharing_viewers`, and `sharing_export_libraries` (`sharing_schema.sql:34,62,66-68`).
+5. The interest counts: a `media_sessions` renewal with only sharing watches live does not notify.
+
+**Backstop: none.** The coverage proofs and the markless fallback are the defence; a periodic re-look would hide their failure. The receiver keeps the owner's 10 s look regardless.
+
+**Known harmless costs.** A rolled-back transaction still bumps its slots, which is a spurious wake. `note_row_change` compares table names per row; with 13 names this is replaced by a match on the hook's table pointer only if profiling shows it.
 
 ## Acceptance (from the audit)
 
-- `sharing_read` ≤ 2 per request, and 0 per idle stream-second after M3.
+- `sharing_read` ≤ 2 per request, and 0 per idle stream-second from the monitors after M3 (the receiver owner's 10 s look is the lease heartbeat and is excluded).
 - A 3 s leaderless window does not end a shared session (M1).
 - An affirmative grant revocation ends the stream within one applied change (M3), and at once on the next look before then.
 
 ## Landing
 
-M1, then M2, then M3, as separate PRs through the train. Each gets its own adversarial review of the code.
+M1 lands on `main` on its own: it is one complete fix for a live user failure. M2 and M3 then go through `effort/sharing-authority-a6` per [AGENTS.md](../../AGENTS.md) "Large efforts": M1 and M2 share `shared_library.rs` and `serving_fence.rs`, so the no-overlap exception does not apply. Each task gets its own adversarial review of the code and the effort development gate; the effort reaches `main` through the promotion gate and a qualification receipt.

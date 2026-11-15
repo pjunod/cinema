@@ -15,8 +15,9 @@
 //! `AppliedView` uses, against the node's applied mark (the handle the
 //! applied view holds; the manager's counted client hands out no raw one):
 //! load the stamp `s0` ([`RosterStamp`]); refuse to stamp if the image
-//! generation is odd, the membership is not committed, or a table has no
-//! slot in the mark; read; reload `s1`; keep the stamp only if `s0 == s1`.
+//! generation is odd or the membership is not committed; read; reload `s1`;
+//! keep the stamp only if `s0 == s1`. The stamp's revisions are the roster
+//! tables' own when the mark registers them, else the applied index.
 //! [`RosterDirectory`] keeps the stamped snapshot and answers from it only
 //! while the current stamp still equals `s0`. A miss is one local read. No
 //! timer, no TTL, no background task.
@@ -27,8 +28,11 @@
 
 use super::*;
 
-/// The tables the roster reads. Each has a slot in the applied mark
-/// ([`crate::store::APPLIED_VIEW_TABLES`]).
+/// The tables the roster reads. When each has a slot in the applied mark the
+/// stamp tracks them table by table; the production mark has no room for
+/// them yet (its sixteen slots hold the applied views and the sharing
+/// watches), so the stamp falls back to the applied index, which moves on
+/// every applied entry.
 pub const ROSTER_TABLES: [&str; 4] = [
     "cluster_nodes",
     "cluster_node_http",
@@ -330,19 +334,28 @@ struct DirectoryReads {
 #[derive(Clone)]
 struct RosterMark {
     handle: hiqlite::AppliedMarkHandle,
-    slots: [hiqlite::AppliedSlot; 4],
+    /// `None` when any roster table has no slot: the stamp then uses the
+    /// applied index — coarser (any applied entry ends a hit), never stale.
+    slots: Option<[hiqlite::AppliedSlot; 4]>,
 }
 
 impl RosterMark {
     fn of(handle: hiqlite::AppliedMarkHandle) -> Option<Self> {
-        let mut slots = Vec::with_capacity(ROSTER_TABLES.len());
-        for table in ROSTER_TABLES {
-            slots.push(handle.slot(table)?);
+        let slots = ROSTER_TABLES
+            .iter()
+            .map(|table| handle.slot(table))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|slots| slots.try_into().ok());
+        Some(Self { handle, slots })
+    }
+
+    /// The four revisions a stamp compares: one per roster table, or the
+    /// applied index in each place when the tables have no slots.
+    fn revisions(&self) -> [u64; 4] {
+        match self.slots {
+            Some(slots) => slots.map(|slot| self.handle.revision(slot)),
+            None => [self.handle.applied_index(); 4],
         }
-        Some(Self {
-            slots: slots.try_into().ok()?,
-            handle,
-        })
     }
 
     /// Whether the image and every roster table are still as `stamp` saw
@@ -351,11 +364,7 @@ impl RosterMark {
         let generation = self.handle.generation();
         generation.is_multiple_of(2)
             && generation == stamp.image_generation
-            && self
-                .slots
-                .iter()
-                .zip(stamp.revisions)
-                .all(|(slot, revision)| self.handle.revision(*slot) == revision)
+            && self.revisions() == stamp.revisions
     }
 }
 
@@ -453,10 +462,7 @@ fn roster_stamp(
     if !image_generation.is_multiple_of(2) {
         return None;
     }
-    let mut revisions = [0; 4];
-    for (revision, slot) in revisions.iter_mut().zip(mark.slots) {
-        *revision = mark.handle.revision(slot);
-    }
+    let revisions = mark.revisions();
     Some((
         RosterStamp {
             image_generation,

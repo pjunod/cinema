@@ -76,26 +76,75 @@ use super::HiqliteAuthStore;
 #[cfg(feature = "hiqlite-store")]
 use crate::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 
-/// Tables this node's applied mark counts, one revision each. Production
-/// registers exactly these (`production_hiqlite_defaults_with_read_pool`):
-/// the two stamped views below, then the four roster tables of the peer
-/// directory (`cluster::membership::directory::ROSTER_TABLES`). Six of the
-/// mark's eight slots; a seventh table needs the mark widened first.
-pub const APPLIED_VIEW_TABLES: &[&str] = &[
-    "settings",
-    "media_sessions",
-    "cluster_nodes",
-    "cluster_node_http",
-    "cluster_node_removals",
-    "cluster_node_progress",
+/// Tables the applied views stamp, one revision each. The mark registers
+/// these and [`SHARING_WATCH_TABLES`] (`production_hiqlite_defaults_with_read_pool`).
+pub const APPLIED_VIEW_TABLES: &[&str] = &["settings", "media_sessions"];
+
+/// Tables the sharing monitors wait on (A6 M3), registered after the
+/// stamped views. No applied view reads them; a change only wakes a watch.
+pub const SHARING_WATCH_TABLES: &[&str] = &[
+    "sharing_exports",
+    "sharing_export_libraries",
+    "sharing_identity",
+    "item_identity_watermark",
+    "sharing_catalogue_revisions",
+    "libraries",
+    "files",
+    "tokens",
+    "sharing_imports",
+    "sharing_viewers",
+    "sharing_assignments",
 ];
+
+/// Registered tables whose revision moves on a deleted row only: every
+/// active device rewrites its token each minute, and only a removed token
+/// ends a recipient's authority (its idle expiry is a time term).
+pub const APPLIED_MARK_DELETES_ONLY: &[&str] = &["tokens"];
+
+/// Every table the applied mark registers, in slot order.
+pub fn applied_mark_tables() -> impl Iterator<Item = &'static str> {
+    APPLIED_VIEW_TABLES
+        .iter()
+        .chain(SHARING_WATCH_TABLES)
+        .copied()
+}
+
+/// A sharing monitor's wait for its next look (A6 M3). Armed before the
+/// look it follows, so a change applied after arming always wakes it.
+pub enum SharingWatch {
+    /// The local replica's applied mark: wakes on a watched table's change or
+    /// an image replacement.
+    #[cfg(feature = "hiqlite-store")]
+    Applied(hiqlite::AppliedWatch),
+    /// No trusted mark (SQLite, a remote-authority process, an image being
+    /// replaced, a table the mark does not register): one look a second.
+    Interval,
+    /// Test fixtures: a change the test signals, standing in for the mark so
+    /// a monitor can be driven by a change rather than the interval.
+    #[cfg(feature = "fixtures")]
+    Notified(std::sync::Arc<tokio::sync::Notify>),
+}
+
+impl SharingWatch {
+    /// Returns once the next look is due.
+    pub async fn changed(&self) {
+        match self {
+            #[cfg(feature = "hiqlite-store")]
+            Self::Applied(watch) => watch.changed().await,
+            Self::Interval => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+            #[cfg(feature = "fixtures")]
+            Self::Notified(change) => change.notified().await,
+        }
+    }
+}
 
 /// One applied view, by the table it reads (and whose floor it keeps).
 ///
 /// `Files` is the planning view (D3b): it reads `files` with `settings`,
 /// `items` and the planning generation in one unstamped statement, and owns
-/// the files floor. It has no slot in the applied mark: nothing caches its
-/// answer, so no table revision is needed to say when one goes stale.
+/// the files floor. No answer of its is stamped: nothing caches it, so no
+/// table revision says when one goes stale. (`files` does have a slot, for
+/// the sharing monitors' wake; the view never reads it.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppliedTable {
     Settings,
@@ -106,8 +155,8 @@ pub enum AppliedTable {
 impl AppliedTable {
     pub const ALL: [Self; 3] = [Self::Settings, Self::MediaSessions, Self::Files];
     /// The views whose answers are stamped by a table revision of the
-    /// applied mark: the first two tables production registers
-    /// ([`APPLIED_VIEW_TABLES`]); the rest belong to the peer directory.
+    /// applied mark ([`APPLIED_VIEW_TABLES`]). The mark registers more
+    /// ([`SHARING_WATCH_TABLES`]); only these stamp an answer.
     pub const STAMPED: [Self; 2] = [Self::Settings, Self::MediaSessions];
 
     /// The replicated table behind this view.
@@ -1033,6 +1082,31 @@ impl AppliedView {
         }
     }
 
+    /// Arm a [`SharingWatch`] over `tables` (each from
+    /// [`SHARING_WATCH_TABLES`] or [`APPLIED_VIEW_TABLES`]).
+    #[must_use]
+    pub fn sharing_watch(&self, tables: &[&str]) -> SharingWatch {
+        match &self.mode {
+            Mode::Standalone | Mode::RemoteAuthority => SharingWatch::Interval,
+            #[cfg(feature = "hiqlite-store")]
+            Mode::Replicated(replicated) => {
+                let Some(slots) = tables
+                    .iter()
+                    .map(|table| replicated.mark.slot(table))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return SharingWatch::Interval;
+                };
+                let watch = replicated.mark.watch(&slots);
+                if watch.trusted() {
+                    SharingWatch::Applied(watch)
+                } else {
+                    SharingWatch::Interval
+                }
+            }
+        }
+    }
+
     /// One session-keyed route from Authority — a quorum read on a
     /// replicated node, the store itself on SQLite — for a caller replacing
     /// a per-row fact whose lease ended before the replica was proven to
@@ -1571,7 +1645,7 @@ impl AppliedViewMetrics {
             observation.applied_index = Some(mark.applied_index);
             observation.failed_replacements = mark.failed_replacements;
             observation.route_view_open = Some(replicated.answers_routes());
-            observation.revisions = AppliedTable::ALL
+            observation.revisions = AppliedTable::STAMPED
                 .into_iter()
                 .filter_map(|table| {
                     mark.tables

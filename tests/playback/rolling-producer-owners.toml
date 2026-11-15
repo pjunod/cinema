@@ -5922,7 +5922,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # released its custody, then removes its local witness. It owns no producer,
 # process or child, spawns nothing, and decides nothing about capacity: the
 # sweep does; the loop only ends the ledger task once there is nothing left.
-expected_occurrences = 2236
+# Change-driven sharing monitors (A6 M3): +2 net. The Source body and
+# receiver connection monitors drop their one-second `interval` for a wait on
+# the applied-mark watch, the serving fence and (receiver) the lease deadline,
+# paced by a one-second `sleep_until` floor after their last look; the
+# listener's fixed sleep becomes the same floor. Every timer runs on the
+# monitor's own task; no new task or timer owner.
+# +1 test-only timeout: the listener change-driven test bounds an hour with
+# no change, which must read nothing; expiry is the passing case.
+expected_occurrences = 2239
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7168,7 +7176,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Sharing outage policy (A6 M1): -1. The listener tests were rewritten
 # around UnknownSpan with one fewer SharingManager::status() read; none of
 # them launches a process.
-expected_occurrences = 934
+# +1 SharingManager::status() read in the listener change-driven test (A6 M3);
+# it reads listener state and launches nothing.
+expected_occurrences = 935
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7486,7 +7496,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Sharing outage policy (A6 M1): +1 closed.wait() in the receiver
 # connection monitor, racing its outage-grace wait against the same accepted
 # transport's closure the loop already waits on. No process is involved.
-expected_occurrences = 394
+# Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
+# connection monitor's one-second floor wait, beside its change wait. No
+# process is involved.
+expected_occurrences = 395
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

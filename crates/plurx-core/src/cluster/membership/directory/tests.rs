@@ -471,15 +471,10 @@ fn an_unclustered_process_has_no_peers_and_is_the_one_voter() {
 }
 
 #[test]
-fn every_roster_table_has_an_applied_mark_slot() {
-    for table in ROSTER_TABLES {
-        assert!(
-            crate::store::APPLIED_VIEW_TABLES.contains(&table),
-            "{table} has no applied-mark slot, so the directory never caches"
-        );
-    }
-    assert!(crate::store::APPLIED_VIEW_TABLES.len() <= hiqlite::APPLIED_MARK_MAX_TABLES);
-    // The roster read names exactly these tables.
+fn the_roster_read_names_exactly_its_tables() {
+    // The production mark registers no roster table yet (see ROSTER_TABLES),
+    // so its stamp is the applied index; it must still fit the mark.
+    assert!(crate::store::applied_mark_tables().count() <= hiqlite::APPLIED_MARK_MAX_TABLES);
     for table in ROSTER_TABLES {
         assert!(ROSTER_SQL.contains(&format!("{table} ")), "{table}");
     }

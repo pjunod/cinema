@@ -3450,8 +3450,9 @@ fn production() { let _ = "SELECT $1 FROM b"; }
 /// either would change rows without moving its revision, and an applied view
 /// would keep answering from a memo the replica no longer matches.
 ///
-/// It reads string literals, so SQL assembled with `format!` is invisible
-/// to it, and it covers this binary only: an entry an older binary wrote is
+/// It reads string literals (a `format!` template is one, so only an
+/// interpolated table name is invisible, and a DELETE may not interpolate
+/// one), and it covers this binary only: an entry an older binary wrote is
 /// applied as written (PLAYBACK-START-E1-BUILD.md §4.1).
 #[test]
 fn applied_view_tables_never_escape_the_update_hook() {
@@ -3464,11 +3465,12 @@ fn applied_view_tables_never_escape_the_update_hook() {
     assert_eq!(offenders, Vec::<String>::new());
 }
 
-/// The membership sources that write the peer directory's roster tables
-/// (`cluster::membership::directory`), read for the same two hazards as the
-/// store: an unqualified `DELETE` or a `WITHOUT ROWID` table would change the
-/// roster without moving its revision, and the directory would keep
-/// answering from a snapshot the replica no longer matches.
+/// The membership sources, read for the same two hazards as the store: the
+/// manager writes registered tables too (`settings`), and an unqualified
+/// `DELETE` or a `WITHOUT ROWID` table there would change rows without
+/// moving their revision. The store census never read these files. Once the
+/// mark registers the roster tables (`cluster::membership::directory`), this
+/// is also what keeps the directory's per-table stamp honest.
 const MEMBERSHIP_SOURCES: &[(&str, &str)] = &[
     (
         "../cluster/membership.rs",
@@ -3526,7 +3528,15 @@ fn update_hook_offenders<'a>(
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_ascii_lowercase();
-            for table in super::APPLIED_VIEW_TABLES {
+            // An interpolated table name would hide a registered table from
+            // the delete check below (A6 M3): every DELETE names its table.
+            if text.contains("delete from {") {
+                offenders.push(format!(
+                    "{name}:{}: a DELETE interpolates its table name",
+                    literal.line
+                ));
+            }
+            for table in super::applied_mark_tables() {
                 for statement in text.split(';') {
                     let statement = statement.trim();
                     let delete = format!("delete from {table}");
