@@ -10426,10 +10426,11 @@ fn handoff_holds_proposals_until_a_matched_survivor_is_triggered() {
     let source = include_str!("../membership.rs");
     let body = method_body(source, "async fn handoff_leadership(");
     let order = [
-        "inner.client.hold_local_db_proposals(hold_deadline)",
+        "if eligible.is_empty() {",
+        "hold_local_db_proposals(acquire_deadline)",
         "matched_survivor(&eligible, preferred, metrics.last_log_index",
-        "trigger_election(candidate_api, &inner.secrets.api).await?;",
-        ".wait_local_db_metrics(hold_deadline, |metrics| {",
+        ".map_err(|_| MembershipError::ElectionCandidateUnavailable)?;",
+        "within_hold(",
         ".is_some_and(|leader| leader != departed)",
         "drop(hold);",
         "self.await_survivor_leader(",
@@ -10444,17 +10445,50 @@ fn handoff_holds_proposals_until_a_matched_survivor_is_triggered() {
     }
     assert_eq!(
         body.matches("trigger_election(").count(),
-        1,
-        "one trigger, no retry"
+        3,
+        "one trigger on each of the three paths, never in a loop"
     );
+    assert!(!body.contains("loop {") && !body.contains("for ("));
     assert!(
         !body.contains("tokio::time::sleep"),
         "the waits are woken by metrics, never by polling"
     );
     assert!(
-        body.matches("deadline.min(tokio::time::Instant::now() + PROPOSAL_HOLD_WAIT)")
-            .count()
-            == 1,
-        "the hold's whole life is bounded once, inside the one deadline"
+        body.contains("deadline.min(hold_started + PROPOSAL_HOLD_WAIT)")
+            && body.contains("hold_deadline.min(hold_started + PROPOSAL_HOLD_ACQUIRE)"),
+        "the hold's whole life, and its acquisition share, end inside the one deadline"
     );
+    let leave = method_body(source, "async fn leave_voter_captured(");
+    assert!(
+        leave.contains(".handoff_leadership(inner.identity.raft_id, &status)")
+            && !leave.contains("trigger_election("),
+        "a leader's self-leave uses the same transfer"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_trigger_ends_at_the_hold_deadline() {
+    use super::within_hold;
+
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_millis(1_500);
+    let result = within_hold(deadline, std::future::pending()).await;
+    assert!(
+        matches!(result, Err(MembershipError::Internal(_))),
+        "an unanswered trigger fails the handoff"
+    );
+    assert_eq!(
+        started.elapsed(),
+        Duration::from_millis(1_500),
+        "and releases the hold exactly at its deadline"
+    );
+    assert!(within_hold(deadline, async { Ok(()) }).await.is_ok());
+    assert!(matches!(
+        within_hold(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            async { Err(MembershipError::ElectionCandidateUnavailable) }
+        )
+        .await,
+        Err(MembershipError::ElectionCandidateUnavailable)
+    ));
 }

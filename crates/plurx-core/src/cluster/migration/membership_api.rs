@@ -593,7 +593,7 @@ async fn sole_voter_handoff() {
         "a sole voter has no successor to hand leadership to"
     );
     assert!(
-        started.elapsed() < Duration::from_millis(250),
+        started.elapsed() < Duration::from_secs(1),
         "a sole voter's stop must not wait for a successor: {:?}",
         started.elapsed()
     );

@@ -135,13 +135,18 @@ const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
 /// The one bound on a stopping leader's handoff: the survivor wait plus the
 /// election trigger's own 1 s budget and one more 1 s survivor probe round.
 /// A stop never waits longer than this for leadership to move.
-/// How long a handing-off leader may hold its own proposals (Hiqlite patch
-/// 30): to take the hold, wait for a survivor to match its log, and then until
-/// it has stepped down. Writers on this node wait at most this long. A
-/// proposal that cannot finish in it means quorum trouble, and the handoff
-/// then proceeds without the hold.
-const PROPOSAL_HOLD_WAIT: Duration = Duration::from_secs(2);
 const SHUTDOWN_HANDOFF_WAIT: Duration = SURVIVOR_LEADER_WAIT.saturating_add(Duration::from_secs(2));
+/// How long a handing-off leader may hold off its own proposals (Hiqlite
+/// patch 30), counted from when it starts to take the hold: taking it, the
+/// wait for a survivor to match its log, the trigger and the wait to follow
+/// the new leader all end by then, so writers on this node wait at most this
+/// long. Inside the handoff's one deadline.
+const PROPOSAL_HOLD_WAIT: Duration = Duration::from_secs(2);
+/// The share of [`PROPOSAL_HOLD_WAIT`] spent taking the hold. A proposal that
+/// does not finish in it means quorum trouble; the handoff then proceeds
+/// without the hold, and a slow acquisition still leaves the rest for the
+/// match, the trigger and the step-down.
+const PROPOSAL_HOLD_ACQUIRE: Duration = Duration::from_millis(500);
 /// A committed self-removal must return to the HTTP layer promptly so the
 /// daemon can drain. The durable pending-removal row is already authoritative
 /// if this best-effort final tombstone write does not finish in time.
@@ -1221,6 +1226,30 @@ fn matched_survivor(
     preferred
         .filter(|raft_id| eligible.contains(raft_id) && caught_up(raft_id))
         .or_else(|| eligible.iter().copied().find(caught_up))
+}
+
+/// `raft_id`'s API address among the survivors.
+fn survivor_api(survivor_nodes: &[(u64, String)], raft_id: u64) -> Result<&str, MembershipError> {
+    survivor_nodes
+        .iter()
+        .find(|(id, _)| *id == raft_id)
+        .map(|(_, api)| api.as_str())
+        .ok_or(MembershipError::ElectionCandidateUnavailable)
+}
+
+/// Run `operation` while this node holds its proposals, ending it at the
+/// hold's deadline rather than letting it hold every write.
+async fn within_hold(
+    hold_deadline: tokio::time::Instant,
+    operation: impl Future<Output = Result<(), MembershipError>>,
+) -> Result<(), MembershipError> {
+    tokio::time::timeout_at(hold_deadline, operation)
+        .await
+        .unwrap_or_else(|_| {
+            Err(MembershipError::Internal(
+                "the election trigger did not answer while proposals were held".to_owned(),
+            ))
+        })
 }
 
 /// This leader's matched log index for `raft_id`, from its own replication
@@ -8590,14 +8619,28 @@ impl MembershipManager {
         let eligible = eligible.iter().map(|node| node.raft_id).collect::<Vec<_>>();
         let local_leader =
             departed == inner.identity.raft_id && metrics.current_leader == Some(departed);
-        // The hold's whole life — taking it, the match, the step-down — fits
-        // inside this, so writers here wait at most PROPOSAL_HOLD_WAIT.
-        let hold_deadline = deadline.min(tokio::time::Instant::now() + PROPOSAL_HOLD_WAIT);
-        let (candidate, hold) = if local_leader {
+        if !local_leader {
+            // Another node leads, or this node is not the one departing: no
+            // local log to hold or match. The original rule and trigger.
+            let candidate = preferred.ok_or(MembershipError::ElectionCandidateUnavailable)?;
+            let candidate_api = survivor_api(&survivor_nodes, candidate)?;
+            trigger_election(candidate_api, &inner.secrets.api).await?;
+        } else {
             if eligible.is_empty() {
+                // Nothing to wait for: answer at once, without a hold.
                 return Err(MembershipError::ElectionCandidateUnavailable);
             }
-            let hold = inner.client.hold_local_db_proposals(hold_deadline).await?;
+            // Everything done under the hold ends by `hold_deadline`, so
+            // writers on this node wait at most PROPOSAL_HOLD_WAIT; taking
+            // the hold gets its own share so a slow acquisition still leaves
+            // time for the rest.
+            let hold_started = tokio::time::Instant::now();
+            let hold_deadline = deadline.min(hold_started + PROPOSAL_HOLD_WAIT);
+            let acquire_deadline = hold_deadline.min(hold_started + PROPOSAL_HOLD_ACQUIRE);
+            let hold = inner
+                .client
+                .hold_local_db_proposals(acquire_deadline)
+                .await?;
             if hold.is_none() {
                 tracing::warn!(
                     target: "plurx::cluster",
@@ -8605,14 +8648,12 @@ impl MembershipManager {
                      handing off without the hold"
                 );
             }
-            let wait_until = if hold.is_some() {
-                hold_deadline
-            } else {
-                deadline
-            };
+            // The hold stops new proposals, but a cancelled caller's entry may
+            // still be queued in the Raft core; matching against the leader's
+            // own last log index in one metrics snapshot covers that.
             let caught_up = inner
                 .client
-                .wait_local_db_metrics(wait_until, |metrics| {
+                .wait_local_db_metrics(hold_deadline, |metrics| {
                     metrics.current_leader != Some(departed)
                         || matched_survivor(&eligible, preferred, metrics.last_log_index, |id| {
                             matched_index(metrics, id)
@@ -8620,11 +8661,9 @@ impl MembershipManager {
                         .is_some()
                 })
                 .await
-                .map_err(|_| {
-                    MembershipError::Internal(format!(
-                        "no eligible voter matched Raft voter {departed}'s last log entry"
-                    ))
-                })?;
+                // Eligible voters exist but none caught up in time: the same
+                // answer as having none, and the hold drops on return.
+                .map_err(|_| MembershipError::ElectionCandidateUnavailable)?;
             if caught_up.current_leader != Some(departed) {
                 return Err(MembershipError::Internal(format!(
                     "Raft voter {departed} lost leadership before choosing a successor"
@@ -8635,34 +8674,32 @@ impl MembershipManager {
                     matched_index(&caught_up, id)
                 })
                 .ok_or(MembershipError::ElectionCandidateUnavailable)?;
-            (candidate, hold)
-        } else {
-            (
-                preferred.ok_or(MembershipError::ElectionCandidateUnavailable)?,
-                None,
-            )
-        };
-        let candidate_api = survivor_nodes
-            .iter()
-            .find(|(raft_id, _)| *raft_id == candidate)
-            .map(|(_, api)| api.as_str())
-            .ok_or(MembershipError::ElectionCandidateUnavailable)?;
-        trigger_election(candidate_api, &inner.secrets.api).await?;
-        if let Some(hold) = hold {
-            // Keep the log still until this node follows the new leader: an
-            // append between the trigger and the vote request would put the
-            // candidate behind again, and a writer released before this node
-            // knows the winner gets a forward to nobody. Bounded by the hold's
-            // deadline; then waiting writers forward to the named leader.
-            let _ = inner
-                .client
-                .wait_local_db_metrics(hold_deadline, |metrics| {
-                    metrics
-                        .current_leader
-                        .is_some_and(|leader| leader != departed)
-                })
-                .await;
-            drop(hold);
+            let candidate_api = survivor_api(&survivor_nodes, candidate)?;
+            if let Some(hold) = hold {
+                // An unanswered trigger must not hold every write: bounded by
+                // the hold, and an error drops the hold on return.
+                within_hold(
+                    hold_deadline,
+                    trigger_election(candidate_api, &inner.secrets.api),
+                )
+                .await?;
+                // Keep the log still until this node follows the new leader:
+                // an append between the trigger and the vote request would put
+                // the candidate behind again, and a writer released before
+                // this node knows the winner gets a forward to nobody. Then
+                // waiting writers forward to the named leader.
+                let _ = inner
+                    .client
+                    .wait_local_db_metrics(hold_deadline, |metrics| {
+                        metrics
+                            .current_leader
+                            .is_some_and(|leader| leader != departed)
+                    })
+                    .await;
+                drop(hold);
+            } else {
+                trigger_election(candidate_api, &inner.secrets.api).await?;
+            }
         }
         self.await_survivor_leader(
             departed,
@@ -11486,29 +11523,11 @@ impl MembershipManager {
                     "cluster has no leadership successor".to_owned(),
                 ));
             }
-            let mut triggered = false;
-            for (_, candidate_api) in &survivor_nodes {
-                if trigger_election(candidate_api, &inner.secrets.api)
-                    .await
-                    .is_ok()
-                {
-                    triggered = true;
-                    break;
-                }
-            }
-            if !triggered {
-                return Err(MembershipError::Internal(
-                    "no surviving voter accepted the bounded leadership handoff".to_owned(),
-                ));
-            }
+            // The one gated transfer every leader handoff uses: hold this
+            // leader's log, trigger a survivor that has matched it, and confirm.
+            let status = self.status().await?;
             let new_leader = self
-                .await_survivor_leader(
-                    inner.identity.raft_id,
-                    &remaining,
-                    &survivor_nodes,
-                    &inner.secrets.api,
-                    tokio::time::Instant::now() + SURVIVOR_LEADER_WAIT,
-                )
+                .handoff_leadership(inner.identity.raft_id, &status)
                 .await?;
             commit_leader_api = survivor_nodes
                 .iter()
