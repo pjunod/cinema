@@ -59,6 +59,8 @@ it with the PRs queued with it and merges it (`hold` keeps a ready PR out,
 The bot's single comment on the PR says where it stands. When `MERGE_TRAIN` is
 unset or `off`, land your PR yourself as below.
 
+An off-mode merge goes through `scripts/land <pr> --head <sha>`, never the raw merge API: it refuses a draft or a moved head, merges with the description's `Regression-Test:` lines in the landing commit, and reads them back.
+
 ## Before you push: paperwork
 
 `make paperwork` (`scripts/paperwork`) checks, in about ten seconds, the

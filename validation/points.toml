@@ -1681,6 +1681,7 @@ paths = [
   "docs/ci/RIPWIRE.md",
   "docs/ci/RIPWIRE-PILOT.md",
   "scripts/history-audit",
+  "scripts/land",
   "scripts/scrub-infra-names",
   "scripts/scrub-infra-names.allow.toml",
   "tests/operations/test_infra_names.py",

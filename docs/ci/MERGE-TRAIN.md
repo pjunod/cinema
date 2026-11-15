@@ -20,6 +20,8 @@ Nothing changes: open your PR, take `WIP:` off the title when it is ready, the
 `Main promotion gate` passes (AGENTS.md "Large efforts" for the merge message).
 The train service writes nothing to your PR while it is off.
 
+Merge it with `scripts/land <pr> --head <sha>`, never the raw merge API: the script puts the description's `Regression-Test:` lines in the landing commit and checks them there.
+
 ## Train on — what you do instead
 
 1. **Open your PR.** If its title has no `WIP:`, the bot adds it and posts one

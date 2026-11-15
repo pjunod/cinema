@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Land a pull request on main with its Regression-Test lines in the landing commit.
+
+    scripts/land 1638 --head <full sha you reviewed>
+    scripts/land 1638 --head <sha> --dry-run     # every check, the message, no merge
+
+The landing path while MERGE_TRAIN is off (AGENTS.md "Landing on main");
+never the raw merge API, which lands the title alone. It refuses a `WIP:`
+title, a head other than --head, a `fix(`/`perf(` pull request with no
+`Regression-Test:` line and any line that does not resolve in the tree the
+merge will produce; then it merges, reads the landing commit back and prints
+its SHA. The forge and repository come from the `origin` remote, the token
+from $FORGEJO_TOKEN or --token-file. validation/landing.py is the
+implementation.
+"""
+
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from validation.landing import main_land  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main_land())
