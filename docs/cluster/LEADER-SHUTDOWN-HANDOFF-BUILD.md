@@ -34,7 +34,7 @@ Re-verify each at build time; line numbers are for `e228ab3ed`.
 | Signal | `plurxd/src/main.rs:5059` `shutdown_signal`, `:1910` `ShutdownWatch` | First SIGTERM/SIGINT resolves one future. The streams are consumed; a second signal does nothing. |
 | Drain | `main.rs:2608-2640`, the `shutdown` future in `boot` | Cancel `state.shutdown`, block media starts 10 s, drain telemetry, stop Live TV, then cancel the listener tokens. Listeners accept until this future completes. |
 | HTTP | `main.rs:4367`, `:4369` | 5 s connection drain, 3 s progress flush. |
-| Store | `main.rs:2028-2040` → `plurx-core/src/cluster/migration.rs:380` `SelectedStore::shutdown` → `vendor/hiqlite/src/client/mgmt.rs:817` | Bounded 30 s (`mgmt.rs:16`). Sleeps 9.5 s when not single-node, waits up to 5 s for a leader, then `raft.shutdown()`. No handoff: its own TODO defers one to OpenRaft 0.10. |
+| Store | `main.rs:2028-2040` → `SelectedStore::shutdown` → `shutdown_voter` → `vendor/hiqlite/src/client/mgmt.rs` `shutdown_retained_startup` | *Corrected at build.* The daemon keeps its staged-startup listeners (patch 23), so its stop takes `shutdown_retained_startup`: no 9.5 s sleep, no wait for a leader, no 30 s bound. Old leaders exited 0.92–0.94 s after SIGTERM. |
 | Grace | `deploy/docker-compose.yml:114` | `stop_grace_period` defaults to 65 m. |
 | Handoff | `plurx-core/src/cluster/membership.rs:8435` `handoff_leadership` | Private. Callers: `enter_maintenance` `:8225`, `exit_maintenance` `:8310`. Nothing in `crates/plurxd/src` calls it. |
 
@@ -83,17 +83,28 @@ One mechanism, one call site.
    - One log line, target `plurx::cluster`: outcome, successor, elapsed
      ms. Info for the first four outcomes, warn for the last three.
    It never returns an error: the caller always continues its drain.
-2. **Fork patch 30: `Client::disable_local_db_elections()`**, local-only
+2. **Fork patch 29: `Client::disable_local_db_elections()`**, local-only
    like patch 5, calling `raft.runtime_config().elect(false)`. Process
-   state, not persisted; the next start campaigns normally. This is what
-   makes a lost handoff cost one election, as a cold stop does today,
-   instead of two. Add the ledger row and bullet.
+   state, not persisted; the next start campaigns normally. A lost handoff
+   then costs one election, not two.
 3. **Call site:** the first await in `boot`'s `shutdown` future
    (`main.rs:2608`), after the `select!` and before
    `leave_shutdown.cancel()`. Clone `state.membership` before
    `http::router(state)` takes the state. Placing it first means the
    drain's own writes go to the successor instead of racing a leadership
-   change, and Hiqlite's 9.5 s sleep is spent as a follower.
+   change.
+4. **A real transfer inside `handoff_leadership`** (added at build; also
+   used by maintenance enter and exit). Fork patch 30 puts every database
+   Raft proposal behind one gate. The leader then:
+   (a) holds its proposals, so in-flight ones finish and new ones wait;
+   (b) waits on its metrics watch until an eligible voter's matched index
+   equals its last log index, preferring the voter the old rule picked;
+   (c) triggers that voter once;
+   (d) keeps the hold until it follows a named new leader;
+   (e) confirms with `await_survivor_leader`.
+   All phases share one `SURVIVOR_LEADER_WAIT` deadline. The hold lives
+   at most `PROPOSAL_HOLD_WAIT` (2 s); if it cannot be taken in that time,
+   the handoff proceeds ungated.
 
 No metric: no leader, election or handoff counter family exists in
 `crates/` to extend.
@@ -110,7 +121,7 @@ and nothing elsewhere. Bounded phases then total about 50 s against the
 | Single voter | `SoleVoter`, no wait | No successor exists; the outage is the documented one. |
 | No caught-up reachable voter | `NoCandidate` at once, drain continues | Waiting cannot produce one; elections stay disabled here. |
 | Leadership does not move | `TimedOut` at 10 s, drain continues | One bounded wait; the survivors then elect as today. |
-| Second signal during the wait | No effect, as everywhere in the drain today | The wait is bounded, and the unskippable 9.5 s sleep follows. An immediate exit would skip the WAL and writer drain. |
+| Second signal during the wait | No effect, as everywhere in the drain today | The wait is bounded. An immediate exit would skip the WAL and writer drain. |
 | Requests after a successful handoff | Served as any follower serves them | Writes forward to the successor; media starts are already blocked. |
 | Maintenance already entered | `NotLeader` | Maintenance handed off before its row committed. |
 | Restart preparation already ran | Usually `NotLeader`; if leadership moved here since, handed off | The verdict is a point-in-time proof. |
@@ -128,7 +139,7 @@ leader's sessions is still maintenance's job.
 
 Each test must be shown failing with its subject removed.
 
-**M1 — the core call and patch 30.**
+**M1 — the core call and patch 29** (planned as 30; the ledger is contiguous).
 - `plurx-core/src/cluster/membership/tests.rs::`
   `shutdown_handoff_without_a_replicated_store_returns_at_once`,
   `shutdown_handoff_wait_is_bounded` (paused clock, a pending attempt,
@@ -192,11 +203,10 @@ Then `cargo fmt --check`, clippy on the three crates with `-D warnings`,
 
 ## 6. Non-goals
 
-- **No change to Hiqlite's `shutdown_execute`**, its 9.5 s sleep or its
-  timeouts. C3 owns timing.
-- **No change to `handoff_leadership`, its candidate rule or its
-  callers.** A leader-side replication match would pick a better
-  candidate; that is a follow-up, after M2 gives a number.
+- **No change to Hiqlite's `shutdown_execute`** or its timeouts. C3 owns timing.
+- *Removed at build:* "no change to `handoff_leadership`". The ungated
+  trigger lost its vote race in 5 of 14 daemon stops and 10 of 10 harness
+  stops under write load, so the transfer (§3 step 4) is in scope.
 - **No membership or settings write, no maintenance row, no lease.**
 - **No flag, setting, retry loop, watchdog or second timer.** One bounded
   wait.
@@ -206,73 +216,27 @@ Then `cargo fmt --check`, clippy on the three crates with `-D warnings`,
 
 ## 7. Execution log
 
-| Date | Milestone | Agent-Model | Agent-Session | Result |
-|---|---|---|---|---|
-| 2026-11-15 | Design | claude-fable-5-2 | session_01BCWLA3JD1HCNMEid3AZrc3 | this document |
-| 2026-11-15 | M1 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Built as planned, except the patch is **29**, not 30: the ledger ends at 28 and its test requires contiguous rows. Four core tests and the vendor test pass; `make hiqlite-vendor-clippy` passes. Each test fails with its subject mutated (see "Mutations"). |
-| 2026-11-15 | M2 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Four cases built; `leader-shutdown` passed 5 of 5 runs on media1. Handoff 763–771 ms, term +1 and the triggered candidate won every time; survivors moved from old leader to successor within one 100 ms sample (no sample without a leader); successor and term held 10 s after the kill. Cold-stop baseline (leader killed, no handoff): survivors named a new leader after 7.50, 7.60 and 7.50 s. |
-| 2026-11-15 | M3 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Built as planned; `the_signal_path_…` passes. **The leader test is not reliable: the handoff lost the vote race in 5 of 14 runs.** In the 9 won runs both survivors named the triggered candidate 122–131 ms after SIGTERM, the old process exited 0.92–0.94 s after it, and the leader and term then held for 10 s. In each lost run the candidate was behind an append in flight from the old leader, so the old leader refused its vote and was deposed, as §2's second bullet warns. With its elections off the old leader never won back, but no leader existed for about one election. The 3 lost runs under a 40 s diagnostic bound: two recovered in 7.80 and 7.84 s, which matches the 7.5 s cold-stop baseline. In the third the handoff gave up (`failed`, 8127 ms), and there was still no leader when the old process exited 8.2 s after SIGTERM. The other 2 lost runs failed at the committed 3 s bound. M2's quieter harness never lost (0 of 5). No retry was added (§6); the root-cause follow-up is a transfer that does not trigger while the candidate is behind the leader's last log entry (OpenRaft 0.10's `transfer_leader`, or the leader-side replication match §6 defers). The follower test passed 1 of 1 runs. | |
-| 2026-11-15 | M4 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | Index row, `docs/OPERATIONS.md` reworded in place (418524 → 418519 bytes, ceiling lowered to match), audit C2 marked built in this PR. Paperwork and the adversarial review are left to the main session. |
+| Date | Milestone | Agent-Model | Result |
+|---|---|---|---|
+| 2026-11-15 | Design | claude-fable-5-2 | this document |
+| 2026-11-15 | M1–M4 | claude-opus-5-5 | As planned; patch 29 (not 30). |
+| 2026-11-15 | Transfer | claude-opus-5-5 | §3 step 4, patch 30. |
 
-### Source claims, as found
+Session `session_01BCWLA3JD1HCNMEid3AZrc3` throughout.
 
-- **§2 Store row — false for the daemon.** `SelectedStore::shutdown` calls
-  `shutdown_voter`, which takes Hiqlite's `shutdown_retained_startup`
-  whenever staged-startup listeners are retained (patch 23). That path has
-  no 9.5 s sleep, no wait for a leader and no 30 s bound. Every M3 run's old
-  process exited 0.92–0.94 s after SIGTERM. The design does not depend on
-  the sleep; "the 9.5 s sleep is spent as a follower" simply does not arise.
-- **The old leader grants the triggered candidate's vote** — true when the
-  candidate's log is not behind: 5 of 5 M2 runs. In M3 the daemon's
-  background writes race the trigger: see the M3 row. In both lost runs the
-  old leader's replication stream to the candidate met the higher vote
-  first, which is the "candidate one entry behind" case of §2: the old
-  leader refuses, is deposed, and, with its elections off, cannot win back.
-- **`runtime_config().elect(false)` stops this node campaigning** — true.
-  With the call removed, the stopping voter campaigned 8.8 s after the
-  leader died; with it, its term held for 10 s.
-- **A leader with both followers paused still reports itself leader** —
-  true in 5 of 5 runs.
-- **The harness uses production Raft timing** — true
-  (`production_hiqlite_defaults_with_read_pool`: 800 ms heartbeat,
-  2.4–4.0 s election timeout).
-- **`status()` is local reads only** — true for an embedded voter: local
-  metrics, `query_map` on the local state machine, `Read::Local` protocol
-  reads and the replication monitor's local metrics. The M1 source test
-  pins it.
-- **Fork patch counting** — `tests/operations/test_hiqlite_patch_ledger.py`
-  counts rows, bullets, the intro's number words and the removal paragraph;
-  updated for 29. Nothing else counts them.
-- **Telemetry drain and Live TV stop** — the telemetry drain owns a 2 s
-  bound; Live TV's worker waits are deadline-bounded.
-- **Tokio signals after the first** — the handler stays installed for the
-  process lifetime, so later signals are swallowed: a second signal does
-  nothing, as §4 decides. Read, not run.
-- **`-p plurx-core --lib shutdown_handoff`** — selects all four core tests,
-  but only with `--features hiqlite-store`; the membership module is behind
-  that feature.
-- **Cold-stop gap** — measured 7.5–7.6 s from loss to a named successor,
-  matching the 6.4–8.0 s source reading, not the audit's ~2.5 s.
-
-### Mutations (each test shown failing with its subject removed)
-
-| Test | Mutation | Failure |
+| Measured on media1 | Before (ungated trigger) | After (transfer) |
 |---|---|---|
-| `shutdown_handoff_without_a_replicated_store_returns_at_once` | 1 ms sleep before `NotReplicated` | elapsed not zero |
-| `shutdown_handoff_wait_is_bounded` | no `tokio::time::timeout` | outer 11 s guard fires |
-| `shutdown_handoff_reuses_the_one_handoff_and_writes_nothing` | no `disable_local_db_elections` call | "every replicated stopping node switches its own elections off" |
-| `a_sole_voter_shutdown_handoff_returns_at_once` | no `SoleVoter` check | `NoCandidate` |
-| `local_election_switch_has_no_remote_fallback` | `elect(true)` | missing `elect(false)` |
-| `run_leader_shutdown_handoff_case` | handoff returns `ElectionCandidateUnavailable` | "did not hand off: no_candidate" |
-| `run_follower_shutdown_noop_case` | no `NotLeader` check | "a follower's stop reported handed_off" |
-| `run_departing_voter_never_campaigns_case` | no `disable_local_db_elections` call | term 1 → 2 at 8.8 s |
-| `run_shutdown_without_successor_case` | no outer timeout, and an attempt whose trigger fails never ends | request timed out at 15 s |
-| `the_signal_path_hands_leadership_off_before_any_listener_stops` | handoff call removed from `main.rs` | "exactly one stop-time handoff call" |
-| `sigterm_on_the_leader_moves_leadership_before_its_raft_stops` | handoff call removed from `main.rs` (the old code) | old leader exited with both survivors still naming it at term 1 |
-| `sigterm_on_a_follower_changes_no_leader` | the follower triggers an election on itself before returning `NotLeader` | leadership changed 136 ms after SIGTERM |
+| Cold stop, leader killed (harness) | 7.50–7.60 s to a new leader, 3 runs | — |
+| Harness, quiet | won 5/5, 763–771 ms | won 1/1, 536 ms |
+| Harness, two writers through the handoff | won 0/10; 7.1–8.1 s without a leader; failed writes in 7 of 10 runs (127–151 each) | won 20/20; 532–785 ms; 0 failed; slowest write 72 ms; committed = acknowledged |
+| Daemon SIGTERM to the leader (3 s bound) | won 9/14; losses cost 7.8 s or more | won 20/20; successor named 123–138 ms after SIGTERM; old process exited 0.69–0.93 s after it |
+| Survivors' switch, old leader to successor | ≤ 101 ms when won | ≤ 102 ms |
 
-The two follower tests also pass on the old code, because a follower's stop
-never moved anything there. They guard the `NotLeader` branch. With only the
-`NotLeader` check removed, the M3 follower test still passes, because the
-first candidate is then the leader itself and triggering an election on a
-leader moves nothing.
+Findings: the old leader grants the vote only to a candidate that has
+matched its last entry, which, under writes, the ungated trigger often
+missed. `elect(false)` stops campaigning. A leader with both followers
+paused still reports itself leader. Heartbeats append nothing. Writers
+waiting on the hold are released once this node names the new leader;
+they get `ForwardToLeader` with that leader, and Hiqlite's leader-change
+retry resends them. A first build released at step-down; one forwarded
+write then failed on `ForwardToLeader(None)`.
