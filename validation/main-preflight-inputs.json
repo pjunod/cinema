@@ -3672,11 +3672,12 @@
       "reason": "Reads the listed repository files; invoked scripts are bound only when loaded/executed, not when their names occur in asserted text."
     },
     {
-      "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_preflight_runtime_is_job_local_bounded_and_precedes_receipts",
+      "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_preflight_runtime_is_the_image_pinned_python_and_precedes_receipts",
       "inputs": [
-        ".github/workflows/main-fast-lane.yml"
+        ".github/workflows/main-fast-lane.yml",
+        "Dockerfile"
       ],
-      "reason": "Checks the immutable workflow runtime download, ordering, checksum and exact owned-path cleanup."
+      "reason": "Checks that preflight downloads no runtime, the CI image stage's checksummed CPython 3.12.15, and receipt ordering."
     },
     {
       "id_prefix": "operations:test_contracts.OperationsContractCase.test_main_qualification_is_full_and_effort_prs_are_compile_only",

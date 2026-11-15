@@ -1223,7 +1223,7 @@ base digest is **not** the published CI image digest. No workflow with the
 **Publication receipt, 2026-09-30.** The retained smoke-tested artifact was
 published privately at the unique `p02-m5-d1a334853a45d31ec81c6d24f96529bd8752a07a`
 tag, manifest
-`sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855`.
+`sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d`.
 All nine OCI blobs were checksum-verified before publication. Its image-input
 fingerprint remains
 `aaa581bde3e453f15e3ee5942d36cb4fb40826e53fba75a5e0c33ef1a1281701`

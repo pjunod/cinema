@@ -196,6 +196,22 @@ pub fn register_broker(value: &str) -> io::Result<BrokerRegistration> {
 }
 
 pub(super) fn register_asset(file: &File, path: &Path) -> io::Result<DaemonFileRegistration> {
+    // Every child launch takes the registry lock, so the filesystem work that
+    // proves this descriptor is the named file happens before it.
+    let asset = held_asset(file, path)?;
+    let mut state = STATE
+        .lock()
+        .map_err(|_| io::Error::other("reader policy registry poisoned"))?;
+    register_asset_in(&mut state, asset)
+}
+/// Whether startup configured this process's reader roots. Diagnostic only:
+/// without them every launch runs unverified and nothing is refused.
+pub fn daemon_roots_configured() -> bool {
+    STATE.lock().is_ok_and(|state| state.roots.is_some())
+}
+/// The one hard failure of an otherwise advisory registration: a descriptor
+/// that is not the named file is refused whether or not roots exist.
+fn held_asset(file: &File, path: &Path) -> io::Result<Asset> {
     let canonical = path.canonicalize()?;
     let held = Arc::new(file.try_clone()?);
     let actual = identity(&held)?;
@@ -203,29 +219,28 @@ pub(super) fn register_asset(file: &File, path: &Path) -> io::Result<DaemonFileR
     if identity(&named)? != actual {
         return Err(io::Error::other("daemon asset and held descriptor differ"));
     }
-    let mut state = STATE
-        .lock()
-        .map_err(|_| io::Error::other("reader policy registry poisoned"))?;
-    let roots = state
-        .roots
-        .as_ref()
-        .ok_or_else(|| io::Error::other("reader roots are not configured"))?;
-    if !contained(&canonical, &roots.owned) {
+    Ok(Asset {
+        path: canonical,
+        file: held,
+        identity: actual,
+    })
+}
+fn register_asset_in(state: &mut State, asset: Asset) -> io::Result<DaemonFileRegistration> {
+    // An unconfigured registry verifies no launch (`roots_unconfigured` is
+    // never enforced), so it records no capability and the caller's work
+    // continues unverified. Failing here would make the advisory verifier a gate.
+    let Some(roots) = state.roots.as_ref() else {
+        return Ok(DaemonFileRegistration { id: None });
+    };
+    if !contained(&asset.path, &roots.owned) {
         return Err(io::Error::other("daemon asset is outside qualified roots"));
     }
     if state.assets.len() >= MAX_CAPABILITIES {
         return Err(io::Error::other("daemon asset registry full"));
     }
-    let id = next_id(&mut state)?;
-    state.assets.insert(
-        id,
-        Asset {
-            path: canonical,
-            file: held,
-            identity: actual,
-        },
-    );
-    Ok(DaemonFileRegistration { id })
+    let id = next_id(state)?;
+    state.assets.insert(id, asset);
+    Ok(DaemonFileRegistration { id: Some(id) })
 }
 pub(super) fn unregister_asset(id: u64) {
     STATE
@@ -1351,6 +1366,30 @@ mod tests {
                 .check,
             "unregistered_broker_url"
         );
+    }
+    #[test]
+    fn absent_roots_record_no_daemon_file_and_do_not_fail_its_owner() {
+        let fixture = Fixture::new();
+        let path = fixture.data.join("evidence.log");
+        let file = File::create(&path).expect("daemon file");
+        let mut absent = State::default();
+        let held = || held_asset(&file, &path).expect("the descriptor is the named file");
+        let unrecorded = register_asset_in(&mut absent, held())
+            .expect("an unconfigured registry leaves the work unverified, not failed");
+        assert!(unrecorded.id.is_none() && absent.assets.is_empty());
+        let other = File::open(fixture.tools.join("ffmpeg")).expect("another file");
+        assert!(
+            held_asset(&other, &path).is_err(),
+            "a descriptor that is not the named file is refused before any registry"
+        );
+        let mut configured = fixture.state;
+        let recorded = register_asset_in(&mut configured, held()).expect("owned file");
+        assert!(recorded.id.is_some() && asset_matches(&configured, &file));
+        std::mem::forget(recorded); // its identity belongs to this local state
+        let outside = fixture.media.join("movie.mkv");
+        let media = File::create(&outside).expect("media file");
+        let outside = held_asset(&media, &outside).expect("media identity");
+        assert!(register_asset_in(&mut configured, outside).is_err());
     }
     #[test]
     fn absent_roots_are_conservative_without_a_debug_assertion() {

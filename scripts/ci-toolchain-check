@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# The general lane's preflight jobs run in the plurx-ci image. A digest that
+# predates the 3.12 interpreter or the Node/Docker/autotools/D-Bus tooling
+# would otherwise run the suites, skip every test that needs a missing tool,
+# and report green. Fail first, and say which part of the image is wrong.
+set -u
+status=0
+version="$(python3 --version 2>&1)"
+if [ "$version" != "Python 3.12.15" ]; then
+  echo "::error::plurx-ci image toolchain: python3 is '$version', expected 'Python 3.12.15'; the pinned digest is not the current ci stage." >&2
+  status=1
+fi
+# curl >= 8.4.0: scripts/provision-hiqlite-upstream refuses older ones, and
+# bookworm ships 7.88.
+curl_version="$(curl -q --version 2>&1 | sed -n 1p)"
+if ! printf '%s\n' "$curl_version" | grep -Eq '^curl (8\.([4-9]|[1-9][0-9])|[9-9]|[1-9][0-9])\.'; then
+  echo "::error::plurx-ci image toolchain: curl is '$curl_version', expected >= 8.4.0; the pinned digest is not the current ci stage." >&2
+  status=1
+fi
+for tool in docker npm autoconf aclocal dbus-run-session; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "::error::plurx-ci image toolchain: '$tool' is not on PATH; the pinned digest is not the current ci stage." >&2
+    status=1
+  fi
+done
+exit "$status"

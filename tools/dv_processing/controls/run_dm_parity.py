@@ -19,6 +19,7 @@ original PQ acceptance while allowing small light errors near zero that PQ great
 not proof that all such discrepancies are float32 noise. Both outputs must be finite in [0,1]."""
 import json, os, subprocess, sys
 import numpy as np
+from cm4_reference_controls import MS_REFERENCE_CASES, spatial_texture
 CTL = sys.argv[1]; WORK = sys.argv[2]; SRC = sys.argv[3]  # control binary, scratch dir, real 4K frames (src.yuv)
 ONLY, SEEN = set(sys.argv[4:]), set()
 os.makedirs(WORK, exist_ok=True)
@@ -51,7 +52,7 @@ def precise_cm4_channel_ok(g, c, linear_g, linear_c, pixel_peak):
     return valid & ((abs(g - c) < 1.5e-6)
                     | (abs(linear_g - linear_c) <= 4 * (2.0 ** -23) * pixel_peak))
 
-def run(name, params, rgb, w, h, synthetic=False):
+def run(name, params, rgb, w, h, synthetic=False, expected_weight=None, reference_samples=None):
     SEEN.add(name)
     if ONLY and name not in ONLY: return True
     rgba = np.concatenate([rgb.reshape(h, w, 3), np.ones((h, w, 1))], -1).astype(np.float32)
@@ -61,10 +62,25 @@ def run(name, params, rgb, w, h, synthetic=False):
         if os.path.exists(f): os.remove(f)
     r = subprocess.run([CTL, pf, inf, str(w), str(h), go, co], capture_output=True, text=True)
     if r.returncode: print(name, 'FAILED', r.stderr.strip()); return False
+    if expected_weight is not None:
+        try:
+            weight = json.loads(r.stdout)['weight']
+        except (ValueError, KeyError, TypeError):
+            print(name, 'FAILED: missing spatial-weight status'); return False
+        if not np.isfinite(weight) or abs(weight - expected_weight) > 1e-6:
+            print(name, 'FAILED: L8 spatial weight', weight, 'expected', expected_weight); return False
+
     g = np.fromfile(go, np.float32).reshape(-1, 4)[:, :3].astype(float); c = np.fromfile(co, np.float32).reshape(-1, 4)[:, :3].astype(float)
     if not (np.isfinite(g).all() and np.isfinite(c).all()
             and ((g >= 0) & (g <= 1)).all() and ((c >= 0) & (c <= 1)).all()):
         print(name, 'FAILED: non-finite or out-of-domain PQ output'); return False
+
+    if reference_samples is not None:
+        indexes = np.array([y * w + x for x, y, _ in reference_samples])
+        reference = np.array([rgb for _, _, rgb in reference_samples])
+        golden_error = max(de(g[indexes], reference).max(), de(c[indexes], reference).max())
+        if golden_error >= 0.01:
+            print(name, 'FAILED: licensed spatial reference mismatch, max dE', golden_error); return False
     d = np.abs(g - c).max(); e = de(g, c)
     print('%-28s %s  max|GPU-CPU| %.2e PQ  dE mean %.4f max %.4f' % (name, r.stdout.strip(), d, e.mean(), e.max()))
     if synthetic:
@@ -118,6 +134,13 @@ l8 48 25 1900 2000 2200 1900 2300 2048 1800 1900 120 128 140 128 128 110 140 128
 for tgt in ("400 0.005 1 4000", "1000 0 1 4000", "2000 0 0 4000", "100 0.005 2 4000"):
     ok &= run('cm4_syn_' + tgt.split()[0] + '_p' + tgt.split()[2], syn4 + 'target ' + tgt + '\n', syn, W, H, True)
     ok &= run('cm4_synreal_' + tgt.split()[0] + '_p' + tgt.split()[2], syn4 + 'target ' + tgt + '\n', frames[1], W, H)
+# L8 MS is a spatial parameter: flat tiles cannot detect a missing decode or
+# wrong interpolation domain. Check real parser status and independent oracle
+# samples, in addition to CPU/GPU parity, on a periodic sinusoid/step texture.
+ms_image = spatial_texture(W, H)
+for case in MS_REFERENCE_CASES:
+    ok &= run(case['name'], case['params'], ms_image, W, H,
+              expected_weight=case['weight'], reference_samples=case['samples'])
 # CM4 L5 active areas: asymmetric bars over real pixels (bar content takes the pointwise mapping),
 # the synthetic lattice, a one-row and a one-column active picture. These select the boundary-aware
 # shaders; the full-frame cases above keep the original literals.

@@ -491,6 +491,7 @@ mod tests {
             },
         };
         DecisionResponse {
+            enhancement: None,
             measured_candidate_outputs: None,
             display_aware_auto_protocol: Some("route-v1".into()),
             quality_candidate_id: Some(plurx_core::playback::candidate::CandidateId([4; 16])),

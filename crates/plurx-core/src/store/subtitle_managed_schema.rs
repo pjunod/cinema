@@ -908,9 +908,16 @@ mod tests {
             (rows(&conn).expect("managed shape"), version)
         };
         let before = snapshot();
-        assert_eq!(before.1, PUBLISH_MIGRATION_VERSION);
+        // A fresh store opens at the newest ordinal, which carries v6 from
+        // its publication (v128) onward.
+        assert_eq!(before.1, super::super::sqlite::SQLITE_SCHEMA_VERSION);
+        assert!(before.1 >= PUBLISH_MIGRATION_VERSION);
         drop(SqliteStore::open(&path).expect("restart"));
-        assert_eq!(snapshot(), before, "a restart is a no-op at v128/v6");
+        assert_eq!(
+            snapshot(),
+            before,
+            "a restart is a no-op at the current ordinal/v6"
+        );
     }
 
     #[test]
