@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "63eb42062d9114964b158cf69bdce6d650c49e359f857b61895546a1b7331e7f"
+        "sha256": "de93793ed5667c9fd578a5194472da3f57b0a89ba4af0bb9c41260d348d5a2fe"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "63eb42062d9114964b158cf69bdce6d650c49e359f857b61895546a1b7331e7f"
+        "sha256": "de93793ed5667c9fd578a5194472da3f57b0a89ba4af0bb9c41260d348d5a2fe"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "63eb42062d9114964b158cf69bdce6d650c49e359f857b61895546a1b7331e7f"
+        "sha256": "de93793ed5667c9fd578a5194472da3f57b0a89ba4af0bb9c41260d348d5a2fe"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -255,13 +255,13 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "68c6579c62f2ce47f01b9fabf7270c33ed061dfafb10c2c15e5afd769b80c752"
+        "sha256": "db1ad2b4dfeb79fbd5984832518cc47e880a8ac1240ec51f5e1712121bcc0cb4"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "68c6579c62f2ce47f01b9fabf7270c33ed061dfafb10c2c15e5afd769b80c752"
+        "sha256": "db1ad2b4dfeb79fbd5984832518cc47e880a8ac1240ec51f5e1712121bcc0cb4"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
@@ -345,7 +345,7 @@
         "table": "recovery dependency outside model: custody activation and cleanup",
         "source": "crates/plurxd/src/source_custody.rs",
         "anchor": "pub(crate) async fn activate_background_with_journal(",
-        "sha256": "c20cd4961bbef84d7d67b889bfbf0912f30c2b613864baf84c8d5d1a674b42fb"
+        "sha256": "992c47217a0905d632e406e1b6f831bc4e0d9c3bdd3287da33d9b4fb10c328fc"
       },
       {
         "table": "recovery dependency outside model: exact-Store verified boot replay",
