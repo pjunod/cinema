@@ -189,19 +189,19 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "3c8bef20764367616c41b89f83b56fb78c41f93f8bc69c7e870b1df83e481bc2"
+        "sha256": "f96afec9f7ff35822bb14f848ca6a90df8453eb528a43d7df3e94e32cf7b4b8f"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "3c8bef20764367616c41b89f83b56fb78c41f93f8bc69c7e870b1df83e481bc2"
+        "sha256": "f96afec9f7ff35822bb14f848ca6a90df8453eb528a43d7df3e94e32cf7b4b8f"
       },
       {
         "table": "33 local raft metrics authority",
         "source": "vendor/hiqlite/src/client/mgmt.rs",
         "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
-        "sha256": "0e4be210532275ed04b80f2c78bed62b9b4a8352e711a0d572937541dba82456"
+        "sha256": "6f607984124abac636a48b9bbebb880a762f69124827743aea210812f7208aaa"
       },
       {
         "table": "34 scanner page capacity",
