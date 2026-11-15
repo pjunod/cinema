@@ -1699,6 +1699,7 @@ paths = [
   "scripts/split-identity",
   "scripts/validate",
   "tests/client-fixes.toml",
+  "tests/client-fixes.d/**",
   "tests/validation/**",
   "validation/**",
 ]

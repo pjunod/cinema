@@ -127,6 +127,9 @@ class ClientFixEntry:
     test: str
     test_anchor: str
     supplements: str | None = None
+    # The fragment that holds the row, relative to the ledger's directory;
+    # None for a row in the ledger file itself.
+    origin: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -395,8 +398,42 @@ def load_coverage(path: Path = DEFAULT_COVERAGE) -> tuple[CoverageEntry, ...]:
     )
 
 
+def client_fix_fragments(path: Path) -> tuple[Path, ...]:
+    """The per-change files beside the client fix ledger, in name order.
+
+    `tests/client-fixes.toml` holds the rows recorded before 2026-11-15 and the
+    ledger's `version` and `enforce_after`. A new row is a file of its own
+    under `tests/client-fixes.d/`, so two changes that each record a fix write
+    two paths instead of the same end of one file.
+    """
+
+    directory = path.with_suffix(".d")
+    return tuple(sorted(directory.glob("*.toml"))) if directory.is_dir() else ()
+
+
+def _client_fix_rows(path: Path) -> list[tuple[str, object]]:
+    """`(where, row)` for every `[[fixes]]` table in one fragment."""
+
+    try:
+        with path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise HistoryError(f"cannot read {path}: {exc}") from exc
+    name = f"{path.parent.name}/{path.name}"
+    rows = raw.get("fixes")
+    if set(raw) != {"fixes"} or not isinstance(rows, list) or not rows:
+        raise HistoryError(f"{name} must contain only one or more [[fixes]] tables")
+    return [(f"{name} fixes[{index}]", item) for index, item in enumerate(rows)]
+
+
 def load_client_fixes(path: Path) -> ClientFixLedger:
+    fragments = client_fix_fragments(path)
     if not path.exists():
+        if fragments:
+            raise HistoryError(
+                f"{path.with_suffix('.d').name}/ has fragments but {path.name}, which "
+                "declares the ledger version and enforce_after, is missing"
+            )
         return ClientFixLedger(enforce_after=None, fixes=())
     try:
         with path.open("rb") as handle:
@@ -413,8 +450,10 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
         raise HistoryError("client fix enforce_after must be a Git SHA prefix")
 
     entries: list[ClientFixEntry] = []
-    for index, item in enumerate(raw.get("fixes", [])):
-        where = f"fixes[{index}]"
+    rows = [(f"fixes[{index}]", item) for index, item in enumerate(raw.get("fixes", []))]
+    for fragment in fragments:
+        rows.extend(_client_fix_rows(fragment))
+    for where, item in rows:
         if not isinstance(item, dict):
             raise HistoryError(f"{where} must be a table")
         required = {
@@ -444,12 +483,19 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
                 test=str(item["test"]),
                 test_anchor=str(item["test_anchor"]),
                 supplements=supplements,
+                origin=where.split(" ", 1)[0] if " " in where else None,
             )
         )
     # A supplementary row adds live obligations to exactly one primary; it
     # does not own a second copy of that primary's corrective commit.
-    for index, entry in enumerate(entries):
-        where = f"fixes[{index}]"
+    seen: dict[str, str] = {}
+    for (where, _), entry in zip(rows, entries):
+        # A fragment is added without reading the ledger, so a reused id is a
+        # mistake to report here rather than a duplicate to carry.
+        if where.startswith(path.with_suffix(".d").name + "/") and entry.id in seen:
+            raise HistoryError(f"{where} reuses fix id {entry.id!r} from {seen[entry.id]}")
+        seen.setdefault(entry.id, where)
+    for (where, _), entry in zip(rows, entries):
         if entry.supplements is None:
             if not entry.commits:
                 raise HistoryError(f"{where} primary fix has no commits")
@@ -996,6 +1042,14 @@ def audit_history(
     errors = _Errors()
     coverage_file = _relative(root, coverage_path)
     client_fixes_file = _relative(root, client_fixes_path or root / "tests" / "client-fixes.toml")
+    client_fixes_files = (
+        client_fixes_file,
+        *sorted({
+            str(Path(client_fixes_file).parent / entry.origin)
+            for entry in client_fixes.fixes
+            if entry.origin is not None
+        }),
+    )
     ledger_file = _relative(root, merge_ledger_path or root / "validation" / "merge-errata.toml")
     post_boundary: frozenset[str] = frozenset()
     boundary: str | None = None
@@ -1119,8 +1173,13 @@ def audit_history(
     anchor_ids: set[str] = set()
     anchor_prefixes: set[str] = set()
     for index, entry in enumerate(client_fixes.fixes):
-        with errors.about(named_by(entry.commits), (client_fixes_file, entry.source, entry.test)):
-            where = f"fixes[{index}]"
+        row_file = (
+            client_fixes_file
+            if entry.origin is None
+            else str(Path(client_fixes_file).parent / entry.origin)
+        )
+        with errors.about(named_by(entry.commits), (row_file, entry.source, entry.test)):
+            where = f"fixes[{index}]" if entry.origin is None else f"{entry.origin} {entry.id}"
             if not entry.id or entry.id in anchor_ids:
                 errors.append(f"{where} has a missing or duplicate id {entry.id!r}")
             anchor_ids.add(entry.id)
@@ -1182,7 +1241,7 @@ def audit_history(
                 errors.add(
                     f"corrective client commit {issue.sha[:8]} needs a "
                     f"tests/client-fixes.toml anchor row: {issue.subject}",
-                    (issue.sha,), (client_fixes_file,),
+                    (issue.sha,), client_fixes_files,
                 )
             if not is_corrective(issue.subject, issue.sha, post_boundary):
                 # Here only because a `tests/client-fixes.toml` row names it.
@@ -1218,7 +1277,7 @@ def audit_history(
                 errors.add(
                     f"corrective client commit {issue.sha[:8]} needs a "
                     f"tests/client-fixes.toml anchor row: {issue.subject}",
-                    (issue.sha,), (client_fixes_file,),
+                    (issue.sha,), client_fixes_files,
                 )
             continue
         runtime_mapping_required = issue.sha in explicit_commits and any(
@@ -1229,7 +1288,7 @@ def audit_history(
                 errors.add(
                     f"corrective runtime commit {issue.sha[:8]} needs an explicit "
                     f"regressions.d mapping or client-fix anchor: {issue.subject}",
-                    (issue.sha,), (coverage_file, client_fixes_file),
+                    (issue.sha,), (coverage_file, *client_fixes_files),
                 )
             continue
         if issue.point_ids and issue.direct_test_evidence:
@@ -1238,7 +1297,7 @@ def audit_history(
             missing = "functionality point" if not issue.point_ids else "regression evidence"
             errors.add(
                 f"corrective commit {issue.sha[:8]} has no {missing}: {issue.subject}",
-                (issue.sha,), (coverage_file, client_fixes_file),
+                (issue.sha,), (coverage_file, *client_fixes_files),
             )
 
     failing, inherited = tuple(errors), ()
