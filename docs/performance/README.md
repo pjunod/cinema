@@ -29,3 +29,4 @@ Two rounds of performance work, each with its plan, review, and response.
 | [PERF2-REVIEW-RESPONSE.md](PERF2-REVIEW-RESPONSE.md) | All eight findings accepted. | done |
 | [PERF2-IMPLEMENTATION-HANDOFF.md](PERF2-IMPLEMENTATION-HANDOFF.md) | How to build round two without breaking it. | open |
 | [CODE-QUALITY-PERFORMANCE-REVIEW.md](CODE-QUALITY-PERFORMANCE-REVIEW.md) | A strong data plane with lifecycle gaps. | done |
+| [DV-PERSISTENT-HELPER.md](DV-PERSISTENT-HELPER.md) | One DV helper per rendition's contiguous play: lifecycle, carried soundtrack, measurements. | built |

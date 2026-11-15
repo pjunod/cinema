@@ -106,10 +106,11 @@ requirement.
 
 ## 7. Pipeline performance beyond this PR
 
-- **Persistent per-playback helper:** each window is a fresh helper and
-  encoder process, with a keyframe seek and preroll decode (34 of 82
-  decoded frames on a 2 s P8 window). Keeping one helper per playback
-  removes the preroll and the process/Vulkan start-up.
+- **Persistent per-playback helper:** built, phase 1 (one helper per
+  rendition's contiguous play, a fresh encoder per window); see
+  [DV-PERSISTENT-HELPER.md](../performance/DV-PERSISTENT-HELPER.md). Not built:
+  a persistent encoder (phase 2), and handing the processed trial's helper
+  to the rendition.
 - **Zero-copy encode:** frames still leave the GPU as 25 MB of YCbCr per 4K
   frame and are uploaded again for VA-API. Exporting the Vulkan image as a
   dmabuf straight into the VA-API encoder (or Vulkan Video encode) removes
