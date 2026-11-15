@@ -156,7 +156,9 @@ const EXEMPT: &[(&str, &str)] = &[
 ];
 
 /// Reach-arounds per production file and class, pinned exactly. The first
-/// census run (`dd76bb88e`) is the baseline: 710 sites in 71 files.
+/// census run (`dd76bb88e`) is the baseline: 710 sites in 71 files. Slice 1
+/// moved the Live TV, media-pool, shared-cache and relay rosters onto the
+/// facade: 660 in 70.
 #[rustfmt::skip]
 const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("background_jobs.rs", "role", 6),
@@ -243,12 +245,11 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("http/internal_media_sessions.rs", "membership", 2),
     ("http/internal_media_sessions.rs", "serving", 6),
     ("http/internal_media_sessions.rs", "type", 4),
-    ("http/live_tv.rs", "membership", 17),
+    ("http/live_tv.rs", "membership", 8),
     ("http/live_tv.rs", "serving", 7),
     ("http/live_tv.rs", "type", 1),
     ("http/live_tv.rs", "transport", 1),
-    ("http/live_tv.rs", "role", 9),
-    ("http/live_tv.rs", "roster", 7),
+    ("http/live_tv.rs", "role", 7),
     ("http/mod.rs", "membership", 5),
     ("http/mod.rs", "replication", 1),
     ("http/mod.rs", "serving", 6),
@@ -292,25 +293,20 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("main.rs", "serving", 7),
     ("main.rs", "type", 5),
     ("main.rs", "hiqlite", 2),
-    ("media_pool.rs", "membership", 12),
+    ("media_pool.rs", "membership", 1),
     ("media_pool.rs", "serving", 3),
     ("media_pool.rs", "type", 3),
     ("media_pool.rs", "transport", 1),
-    ("media_pool.rs", "role", 5),
-    ("media_pool.rs", "roster", 7),
-    ("media_sessions.rs", "membership", 3),
-    ("media_sessions.rs", "type", 3),
+    ("media_pool.rs", "role", 1),
+    ("media_sessions.rs", "membership", 2),
+    ("media_sessions.rs", "type", 2),
     ("media_sessions.rs", "transport", 1),
-    ("media_sessions.rs", "roster", 1),
     ("offline.rs", "serving", 1),
     ("offline.rs", "type", 2),
     ("offline.rs", "role", 1),
     ("settings_changes.rs", "type", 1),
-    ("shared_cache.rs", "membership", 3),
-    ("shared_cache.rs", "type", 3),
+    ("shared_cache.rs", "type", 2),
     ("shared_cache.rs", "transport", 1),
-    ("shared_cache.rs", "role", 1),
-    ("shared_cache.rs", "roster", 2),
     ("sharing_connection_custody.rs", "membership", 2),
     ("state.rs", "membership", 4),
     ("state.rs", "type", 8),
@@ -342,7 +338,7 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 710;
+const CEILING: usize = 660;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| {

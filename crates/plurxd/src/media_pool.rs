@@ -12,12 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeer, MembershipError, MembershipManager};
+use plurx_core::cluster::membership::{ActivityPeer, MembershipManager};
 use plurx_core::domain::MediaFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
+use crate::cluster::{Admission, Purpose};
 use crate::http::peer_transport::{deadline_after, PeerAuthMode, PeerTransport};
 use crate::state::AppState;
 
@@ -990,6 +991,7 @@ struct RootProbeRegistry {
 #[derive(Clone)]
 pub(crate) struct MediaPool {
     membership: MembershipManager,
+    directory: crate::cluster::Directory,
     transport: PeerTransport,
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
@@ -1076,10 +1078,14 @@ impl MediaPool {
             },
         );
     }
-    pub(crate) fn new(membership: MembershipManager) -> Arc<Self> {
+    pub(crate) fn new(
+        membership: MembershipManager,
+        directory: crate::cluster::Directory,
+    ) -> Arc<Self> {
         Arc::new(Self {
             transport: PeerTransport::new(membership.clone()),
             membership,
+            directory,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
@@ -1087,6 +1093,16 @@ impl MediaPool {
             #[cfg(test)]
             injected_peer_answers: Default::default(),
         })
+    }
+
+    /// Ready media targets, learners included (was `media_peers`).
+    async fn media_workers(&self) -> Result<Vec<ActivityPeer>, crate::cluster::ClusterError> {
+        Ok(self
+            .directory
+            .peers(Purpose::MediaWorkers)
+            .await?
+            .all()
+            .to_vec())
     }
 
     pub(crate) async fn poll_loop(self: Arc<Self>) {
@@ -1115,11 +1131,8 @@ impl MediaPool {
     }
 
     async fn refresh_root_readability(&self, store: &dyn plurx_core::store::Store) {
-        let peers = match tokio::time::timeout(
-            ROOT_PROBE_COLLECTION_DEADLINE,
-            self.membership.media_peers(),
-        )
-        .await
+        let peers = match tokio::time::timeout(ROOT_PROBE_COLLECTION_DEADLINE, self.media_workers())
+            .await
         {
             Ok(Ok(peers)) => peers,
             Ok(Err(error)) => {
@@ -1379,10 +1392,9 @@ impl MediaPool {
             })
     }
 
-    async fn poll_once(&self) -> Result<(), MembershipError> {
+    async fn poll_once(&self) -> Result<(), crate::cluster::ClusterError> {
         let peers = self
-            .membership
-            .media_peers()
+            .media_workers()
             .await?
             .into_iter()
             .filter(|peer| peer.reachable && peer.http_base.is_some())
@@ -1433,11 +1445,12 @@ impl MediaPool {
         if !self.remote_placement_ready(state, None).await {
             return state.node_id.clone();
         }
-        let voters = match self.membership.activity_peers().await {
+        let voters = match self.directory.peers(Purpose::Voters).await {
             Ok(peers) => peers
-                .into_iter()
+                .all()
+                .iter()
                 .filter(|p| p.reachable)
-                .map(|p| p.node_id)
+                .map(|p| p.node_id.clone())
                 .collect::<BTreeSet<_>>(),
             Err(_) => return state.node_id.clone(),
         };
@@ -1543,25 +1556,17 @@ impl MediaPool {
         }
         self.expire().await;
         let deadline = deadline_after(SNAPSHOT_DEADLINE);
-        let directory = tokio::time::timeout_at(deadline, async {
-            tokio::join!(
-                self.membership.activity_peers(),
-                self.membership.activity_voter_count(),
-                self.membership.local_node_is_committed_voter()
-            )
-        })
-        .await;
-        let Ok((Ok(peers), Ok(voter_count), Ok(local_is_voter))) = directory else {
+        let directory =
+            tokio::time::timeout_at(deadline, self.directory.peers(Purpose::Voters)).await;
+        let Ok(Ok(peers)) = directory else {
             return false;
         };
-        if voter_count <= 1 {
+        if peers.voter_count() <= 1 {
             return false;
         }
         let snapshots = self.snapshots.read().await;
         remote_directory_ready(
             &peers,
-            voter_count,
-            local_is_voter,
             std::ops::Deref::deref(&snapshots),
             tokio::time::Instant::now(),
         )
@@ -1653,8 +1658,7 @@ impl MediaPool {
             {
                 return answers;
             }
-            let peers = match tokio::time::timeout_at(deadline, self.membership.media_peers()).await
-            {
+            let peers = match tokio::time::timeout_at(deadline, self.media_workers()).await {
                 Ok(Ok(peers)) => peers,
                 _ => return vec![QualityCatalogResult::unavailable(CatalogCause::Transport)],
             };
@@ -1876,7 +1880,7 @@ impl MediaPool {
             Ok((offer, snapshot)) => (vec![offer], Some(snapshot)),
             Err(_) => (Vec::new(), None),
         };
-        let peers = tokio::time::timeout_at(deadline, self.membership.media_peers())
+        let peers = tokio::time::timeout_at(deadline, self.media_workers())
             .await
             .ok()
             .and_then(Result::ok)
@@ -1967,14 +1971,12 @@ fn select_live_tv_worker(
 }
 
 fn remote_directory_ready(
-    peers: &[ActivityPeer],
-    voter_count: usize,
-    local_is_voter: bool,
+    peers: &crate::cluster::Peers,
     snapshots: &BTreeMap<String, CachedSnapshot>,
     now: tokio::time::Instant,
 ) -> bool {
-    voter_count == peers.len().saturating_add(usize::from(local_is_voter))
-        && peers.iter().all(|peer| {
+    peers.complete().unwrap_or(false)
+        && peers.all().iter().all(|peer| {
             peer.reachable
                 && peer.http_base.is_some()
                 && snapshots.get(&peer.node_id).is_some_and(|cached| {
@@ -2137,7 +2139,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         // Older owners must not dispatch their removed relay endpoint here.
         live_tv_processing: false,
         live_tv_resource_processing: state.serving.is_ready()
-            && !state.membership.local_maintenance_active(),
+            && state.cluster.role().admission != Admission::Maintenance,
     }
 }
 
@@ -2178,7 +2180,7 @@ pub(crate) async fn local_quality_catalog(
     if let Err(error) = request.validate() {
         return QualityCatalogResult::unavailable(CatalogCause::RequestInvalid(error));
     }
-    if state.membership.local_maintenance_active() {
+    if state.cluster.role().admission == Admission::Maintenance {
         return QualityCatalogResult::unavailable(CatalogCause::Maintenance);
     }
     let progress = std::sync::Mutex::new(Vec::new());
@@ -2389,7 +2391,7 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
             ..base()
         };
     }
-    if state.membership.local_maintenance_active() {
+    if state.cluster.role().admission == Admission::Maintenance {
         return MediaOffer {
             refusal_code: Some("node_maintenance".to_owned()),
             ..base()
@@ -2806,7 +2808,10 @@ mod tests {
 
     #[tokio::test]
     async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(
+            MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
         assert!(!pool.retained_output_receiver("worker").await);
         let legacy = snapshot("worker", &["h264"], 1080);
         let mut wire = serde_json::to_value(&legacy).expect("snapshot");
@@ -3230,12 +3235,20 @@ mod tests {
             .expect("remote_rollout_ready never closes at fn indent")
             .0;
         assert!(
-            body.contains("local_node_is_committed_voter()"),
-            "the rollout gate must read the local committed role, not assume it",
+            body.contains("self.directory.peers(Purpose::Voters)"),
+            "the rollout gate must read the voters and the local committed role \
+             from one directory snapshot, not assume the role",
         );
+        let ready = include_str!("media_pool.rs")
+            .split_once("fn remote_directory_ready(")
+            .expect("remote_directory_ready was renamed")
+            .1
+            .split_once("\n}\n")
+            .expect("remote_directory_ready never closes")
+            .0;
         assert!(
-            body.contains("local_is_voter,"),
-            "the local role must reach remote_directory_ready",
+            ready.contains("peers.complete()"),
+            "the visible-voter count must depend on the local role (Peers::complete)",
         );
         assert!(
             !body.contains("peers.len().saturating_add(1)"),
@@ -3259,8 +3272,15 @@ mod tests {
                 expires_at: now + Duration::from_secs(1),
             },
         )]);
-        assert!(remote_directory_ready(&peers, 2, true, &snapshots, now));
-        assert!(!remote_directory_ready(&peers, 3, true, &snapshots, now));
+        let directory = |voter_count, local_is_voter| {
+            crate::cluster::Peers::for_test(peers.clone(), voter_count, Some(local_is_voter))
+        };
+        assert!(remote_directory_ready(&directory(2, true), &snapshots, now));
+        assert!(!remote_directory_ready(
+            &directory(3, true),
+            &snapshots,
+            now
+        ));
 
         // The same directory read from a LEARNER. `activity_peers` never
         // returns the local node and never returns a learner, so every voter a
@@ -3269,16 +3289,32 @@ mod tests {
         // it was unsatisfiable for any roster size. A learner that can see the
         // one voter passes the arithmetic (`remote_rollout_ready` separately
         // refuses a single-voter cluster); one that is missing a voter fails.
-        assert!(remote_directory_ready(&peers, 1, false, &snapshots, now));
-        assert!(!remote_directory_ready(&peers, 2, false, &snapshots, now));
+        assert!(remote_directory_ready(
+            &directory(1, false),
+            &snapshots,
+            now
+        ));
+        assert!(!remote_directory_ready(
+            &directory(2, false),
+            &snapshots,
+            now
+        ));
 
         snapshots
             .get_mut("peer-a")
             .expect("peer snapshot")
             .snapshot
             .protocol_version = PROTOCOL_VERSION - 1;
-        assert!(!remote_directory_ready(&peers, 2, true, &snapshots, now));
-        assert!(!remote_directory_ready(&peers, 1, false, &snapshots, now));
+        assert!(!remote_directory_ready(
+            &directory(2, true),
+            &snapshots,
+            now
+        ));
+        assert!(!remote_directory_ready(
+            &directory(1, false),
+            &snapshots,
+            now
+        ));
     }
 
     #[test]
@@ -3418,7 +3454,10 @@ mod tests {
 
     #[tokio::test]
     async fn deadline_fencing_retains_children_and_rejects_delayed_success() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(
+            MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
         let running_root = PathBuf::from("/media/running");
         let running_child = tokio::process::Command::new("sh")
             .arg("-c")
@@ -3568,7 +3607,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn snapshots_expire_after_fifteen_seconds() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(
+            MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
         pool.snapshots.write().await.insert(
             "peer".to_owned(),
             CachedSnapshot {
@@ -3605,7 +3647,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn receipt_cannot_restart_an_old_snapshots_full_ttl() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(
+            MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
         let mut old = snapshot("peer", &["h264"], 1080);
         old.observed_at_unix_ms = unix_ms() - 10_000;
         let cached = accepted_snapshot(old, "peer").expect("ten-second-old snapshot remains fresh");
@@ -3621,7 +3666,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn root_readability_is_specific_and_age_bounded() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(
+            MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
         let observed_at = tokio::time::Instant::now();
         pool.root_readability.write().await.extend([
             (
@@ -3673,7 +3721,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_node_poll_performs_no_peer_http_work() {
-        let pool = MediaPool::new(MembershipManager::unavailable());
+        let pool = MediaPool::new(
+            MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
+        );
         pool.poll_once().await.expect("empty membership is a no-op");
         assert!(pool.snapshots.read().await.is_empty());
     }

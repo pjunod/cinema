@@ -1289,6 +1289,7 @@ impl AppState {
             &cluster_id,
             node_id.clone(),
             membership.clone(),
+            cluster.directory(),
             Arc::clone(&store),
         );
         let transcode = Arc::new(
@@ -1378,9 +1379,10 @@ impl AppState {
             node_id.clone(),
             serving.clone(),
         );
-        let media_pool = crate::media_pool::MediaPool::new(membership.clone());
-        let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_applied_view(
+        let media_pool = crate::media_pool::MediaPool::new(membership.clone(), cluster.directory());
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(
             membership.clone(),
+            cluster.directory(),
             Arc::clone(&store),
             Arc::new(applied.clone()),
         );

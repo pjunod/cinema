@@ -2593,7 +2593,9 @@ fn valid_resource_name(value: &str) -> bool {
 
 #[derive(Clone)]
 pub(crate) struct MediaSessionCoordinator {
-    membership: MembershipManager,
+    /// The process's peer directory: `peer_base` resolves one owner per
+    /// relayed segment, from the cached roster rather than a read each time.
+    directory: crate::cluster::Directory,
     transport: PeerTransport,
     store: Arc<dyn Store>,
     routes: Arc<tokio::sync::Mutex<HashMap<String, CachedRoute>>>,
@@ -2775,16 +2777,30 @@ impl MediaSessionCoordinator {
         Self::with_applied_view(membership, store, Arc::new(applied))
     }
 
-    /// The coordinator over this node's store and applied view (`AppState`'s
-    /// `applied`, which reads the same store's replica).
+    /// A coordinator over its own peer directory, for a test that wires one
+    /// membership by hand.
+    #[cfg(test)]
     pub(crate) fn with_applied_view(
         membership: MembershipManager,
         store: Arc<dyn Store>,
         applied: Arc<dyn RouteView>,
     ) -> Arc<Self> {
+        let directory = crate::cluster::Directory::new(membership.clone());
+        Self::with_directory(membership, directory, store, applied)
+    }
+
+    /// The coordinator over this node's store and applied view (`AppState`'s
+    /// `applied`, which reads the same store's replica), sharing the
+    /// process's peer directory.
+    pub(crate) fn with_directory(
+        membership: MembershipManager,
+        directory: crate::cluster::Directory,
+        store: Arc<dyn Store>,
+        applied: Arc<dyn RouteView>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport: PeerTransport::new(membership),
+            directory,
             store,
             routes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             release_fences: Arc::new(
@@ -3912,14 +3928,16 @@ impl MediaSessionCoordinator {
         node_id: &str,
         deadline: tokio::time::Instant,
     ) -> Result<String, PeerTransportError> {
-        tokio::time::timeout_at(deadline, self.membership.media_peers())
-            .await
-            .map_err(|_| PeerTransportError::TimedOut)?
-            .map_err(|_| PeerTransportError::Unreachable)?
-            .into_iter()
-            .find(|peer| peer.node_id == node_id && peer.reachable)
-            .and_then(|peer| peer.http_base)
-            .ok_or(PeerTransportError::Unreachable)
+        tokio::time::timeout_at(
+            deadline,
+            self.directory.peers(crate::cluster::Purpose::MediaWorkers),
+        )
+        .await
+        .map_err(|_| PeerTransportError::TimedOut)?
+        .map_err(|_| PeerTransportError::Unreachable)?
+        .find(node_id)
+        .map(|(_, base)| base)
+        .ok_or(PeerTransportError::Unreachable)
     }
 
     /// Shared receiver bytes retain the existing authenticated streaming driver.

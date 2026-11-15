@@ -144,14 +144,10 @@ pub(crate) async fn owner_guide(
         return cached.clipped(&window);
     }
     if state.membership.is_replicated() {
-        if let Ok(peers) = state.membership.activity_peers().await {
-            for peer in peers
-                .into_iter()
-                .filter(|p| p.reachable && p.node_id != state.node_id)
-                .take(3)
-            {
+        if let Ok(peers) = voters(state).await {
+            for node_id in guide_relay_candidates(&peers) {
                 let mut candidate = config.clone();
-                candidate.owner_node_id = peer.node_id;
+                candidate.owner_node_id = node_id;
                 if let Ok(guide) = relay_guide(state, &candidate).await {
                     if guide.freshness != crate::live_tv::guide::GuideFreshness::Unavailable {
                         state
@@ -189,15 +185,9 @@ async fn relay_guide(state: &AppState, config: &LiveTvConfig) -> Result<LiveTvGu
     if !state.membership.is_replicated() {
         return Err("the selected owner is not this single-node server".to_owned());
     }
-    let peer = state
-        .membership
-        .activity_peers()
+    let peer = voter(state, &config.owner_node_id)
         .await
         .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|peer| peer.node_id == config.owner_node_id)
-        .filter(|peer| peer.reachable)
-        .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
         .ok_or_else(|| "the session server is not a reachable committed voter".to_owned())?;
     let body = serde_json::to_vec(&SnapshotRequest {
         generation: config.generation,
@@ -789,17 +779,10 @@ async fn select_start_worker(
     }
     let mut candidates = vec![state.node_id.clone()];
     if state.membership.is_replicated() {
-        let mut peers = state
-            .membership
-            .activity_peers()
+        let peers = voters(state)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-            .into_iter()
-            .filter(|p| p.reachable && p.http_base.is_some() && p.node_id != state.node_id)
-            .map(|p| p.node_id)
-            .collect::<Vec<_>>();
-        peers.sort();
-        candidates.extend(peers);
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        candidates.extend(worker_candidates(&peers));
     }
     let preferred = state.media_pool.live_tv_worker(state).await;
     candidates.sort_by_key(|node| node != &preferred);
@@ -1089,7 +1072,7 @@ pub(crate) async fn readiness_for_config(
         },
     });
     let mut nodes = vec![state.node_id.clone()];
-    if let Ok(peers) = state.membership.activity_peers().await {
+    if let Ok(peers) = voters(state).await {
         nodes.extend(peers.into_iter().map(|peer| peer.node_id));
     }
     nodes.sort();
@@ -1847,9 +1830,7 @@ async fn resolve_owner_peer(
     state: &AppState,
     expected: &str,
 ) -> Result<(String, String), ApiError> {
-    state
-        .membership
-        .activity_peers()
+    voter(state, expected)
         .await
         .map_err(|error| {
             api_error_from(
@@ -1857,9 +1838,6 @@ async fn resolve_owner_peer(
                 Decided::Ingress,
             )
         })?
-        .into_iter()
-        .find(|peer| peer.node_id == expected && peer.reachable)
-        .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
         .ok_or_else(|| {
             api_error_from(
                 LiveTvError::OwnerUnavailable(
@@ -1949,13 +1927,8 @@ async fn owner_snapshot(
     let mut candidate = config.clone();
     let mut nodes = vec![state.node_id.clone()];
     if state.membership.is_replicated() {
-        if let Ok(peers) = state.membership.activity_peers().await {
-            nodes.extend(
-                peers
-                    .into_iter()
-                    .filter(|p| p.reachable && p.http_base.is_some() && p.node_id != state.node_id)
-                    .map(|p| p.node_id),
-            );
+        if let Ok(peers) = voters(state).await {
+            nodes.extend(snapshot_candidates(&peers));
         }
     }
     let mut last = LiveTvError::OwnerUnavailable("no eligible tuner worker".into());
@@ -1990,13 +1963,10 @@ async fn owner_snapshot_within(
         ));
     }
     if config.owner_node_id == state.node_id {
-        if state.membership.is_replicated()
-            && !state
-                .membership
-                .local_node_is_committed_voter()
-                .await
-                .unwrap_or(false)
-        {
+        if !matches!(
+            state.cluster.role().standing,
+            crate::cluster::Standing::Standalone | crate::cluster::Standing::Voter
+        ) {
             return Err(LiveTvError::OwnerUnavailable(
                 "the selected owner is not a committed voter".to_owned(),
             ));
@@ -2013,15 +1983,9 @@ async fn owner_snapshot_within(
             "the selected owner is not this single-node server".to_owned(),
         ));
     }
-    let peer = state
-        .membership
-        .activity_peers()
+    let peer = voter(state, &config.owner_node_id)
         .await
         .map_err(|error| LiveTvError::OwnerUnavailable(error.to_string()))?
-        .into_iter()
-        .find(|peer| peer.node_id == config.owner_node_id)
-        .filter(|peer| peer.reachable)
-        .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
         .ok_or_else(|| {
             LiveTvError::OwnerUnavailable(
                 "the selected session server is not a reachable committed voter".to_owned(),
@@ -2219,8 +2183,151 @@ fn sanitize_public_error(message: &str) -> String {
     }
 }
 
+/// The other committed voters, reachable or not — every Live TV roster
+/// starts here (cluster facade, `Purpose::Voters`).
+async fn voters(
+    state: &AppState,
+) -> Result<Vec<plurx_core::cluster::membership::ActivityPeer>, crate::cluster::ClusterError> {
+    Ok(state
+        .cluster
+        .peers(crate::cluster::Purpose::Voters)
+        .await?
+        .all()
+        .to_vec())
+}
+
+/// One voter by node id, only if it is reachable and has an HTTP base:
+/// `(node_id, base)`. The three owner lookups share this one rule and keep
+/// their own error strings.
+async fn voter(
+    state: &AppState,
+    node_id: &str,
+) -> Result<Option<(String, String)>, crate::cluster::ClusterError> {
+    Ok(state
+        .cluster
+        .peers(crate::cluster::Purpose::Voters)
+        .await?
+        .find(node_id))
+}
+
+/// Up to three voters to ask for a relayed guide, in Raft order: reachable.
+/// (The directory never names this node, so no self filter is needed.)
+fn guide_relay_candidates(peers: &[plurx_core::cluster::membership::ActivityPeer]) -> Vec<String> {
+    peers
+        .iter()
+        .filter(|peer| peer.reachable)
+        .take(3)
+        .map(|peer| peer.node_id.clone())
+        .collect()
+}
+
+/// Channel-worker candidates after this node: reachable with an HTTP base,
+/// by node id.
+fn worker_candidates(peers: &[plurx_core::cluster::membership::ActivityPeer]) -> Vec<String> {
+    let mut nodes = peers
+        .iter()
+        .filter(|peer| peer.reachable && peer.http_base.is_some())
+        .map(|peer| peer.node_id.clone())
+        .collect::<Vec<_>>();
+    nodes.sort();
+    nodes
+}
+
+/// Tuner-snapshot candidates after this node: reachable with an HTTP base,
+/// in Raft order.
+fn snapshot_candidates(peers: &[plurx_core::cluster::membership::ActivityPeer]) -> Vec<String> {
+    peers
+        .iter()
+        .filter(|peer| peer.reachable && peer.http_base.is_some())
+        .map(|peer| peer.node_id.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use plurx_core::cluster::membership::ActivityPeer;
+
+    /// A fixed voter roster in Raft order, as the directory returns it:
+    /// every state a Live TV filter distinguishes.
+    fn roster() -> Vec<ActivityPeer> {
+        let peer = |node: &str, raft_id, reachable, base: bool| ActivityPeer {
+            node_id: node.to_owned(),
+            raft_id,
+            http_base: base.then(|| format!("http://{node}.invalid")),
+            reachable,
+        };
+        vec![
+            peer("node-d", 2, true, true),
+            peer("node-c", 3, true, false), // a voter with no HTTP row
+            peer("node-b", 4, false, true), // unreachable
+            peer("node-e", 5, true, true),
+            peer("node-a", 6, true, true),
+        ]
+    }
+
+    /// Each Live TV roster site, pinned for the fixed roster, against the
+    /// inline filter it replaced (copied from `dd76bb88e`).
+    #[test]
+    fn each_live_tv_roster_site_keeps_its_candidates() {
+        let peers = roster();
+        let local = "node-local";
+        // owner_guide (was :147): reachable, not self, take 3.
+        let old = peers
+            .clone()
+            .into_iter()
+            .filter(|p| p.reachable && p.node_id != local)
+            .take(3)
+            .map(|p| p.node_id)
+            .collect::<Vec<_>>();
+        assert_eq!(super::guide_relay_candidates(&peers), old);
+        assert_eq!(old, ["node-d", "node-c", "node-e"]);
+        // worker selection (was :794): reachable, has base, not self, by id.
+        let mut old = peers
+            .clone()
+            .into_iter()
+            .filter(|p| p.reachable && p.http_base.is_some() && p.node_id != local)
+            .map(|p| p.node_id)
+            .collect::<Vec<_>>();
+        old.sort();
+        assert_eq!(super::worker_candidates(&peers), old);
+        assert_eq!(old, ["node-a", "node-d", "node-e"]);
+        // owner_snapshot (was :1952): reachable, has base, not self, Raft order.
+        let old = peers
+            .clone()
+            .into_iter()
+            .filter(|p| p.reachable && p.http_base.is_some() && p.node_id != local)
+            .map(|p| p.node_id)
+            .collect::<Vec<_>>();
+        assert_eq!(super::snapshot_candidates(&peers), old);
+        assert_eq!(old, ["node-d", "node-e", "node-a"]);
+    }
+
+    /// The three owner lookups (was :194, :1852, :2018) were one rule:
+    /// the voter by id, reachable, with a base.
+    #[test]
+    fn the_owner_lookups_are_one_rule() {
+        let peers = roster();
+        for node in ["node-a", "node-b", "node-c", "node-d", "missing"] {
+            let was_194_2018 = peers
+                .clone()
+                .into_iter()
+                .find(|peer| peer.node_id == node)
+                .filter(|peer| peer.reachable)
+                .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)));
+            let was_1852 = peers
+                .clone()
+                .into_iter()
+                .find(|peer| peer.node_id == node && peer.reachable)
+                .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)));
+            assert_eq!(was_194_2018, was_1852, "{node}");
+            assert_eq!(
+                crate::cluster::Peers::for_test(peers.clone(), 6, Some(true)).find(node),
+                was_194_2018,
+                "{node}"
+            );
+        }
+    }
+
     #[test]
     fn the_master_lists_only_the_caption_services_the_owner_advertised() {
         let both = super::caption_renditions(Some("CC1,SERVICE1"));

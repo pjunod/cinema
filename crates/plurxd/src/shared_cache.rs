@@ -70,7 +70,7 @@ pub(crate) struct SharedCacheCoordinator {
     #[cfg(test)]
     publication_commit_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     node_id: String,
-    membership: MembershipManager,
+    directory: crate::cluster::Directory,
     transport: PeerTransport,
     store: Arc<dyn Store>,
 }
@@ -241,6 +241,7 @@ impl SharedCacheCoordinator {
         cluster_id: &str,
         node_id: String,
         membership: MembershipManager,
+        directory: crate::cluster::Directory,
         store: Arc<dyn Store>,
     ) -> Arc<Self> {
         let config =
@@ -268,8 +269,8 @@ impl SharedCacheCoordinator {
             #[cfg(test)]
             publication_commit_pause: Arc::new(std::sync::Mutex::new(None)),
             node_id,
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport: PeerTransport::new(membership),
+            directory,
             store,
         })
     }
@@ -537,31 +538,25 @@ impl SharedCacheCoordinator {
             .as_ref()
             .ok_or_else(|| "shared cache is not configured".to_owned())?;
         let (path, identity, canaries) = prepare_canary_directory(&config.configured_root).await?;
-        let voter_count = self
-            .membership
-            .activity_voter_count()
+        // One directory snapshot answers the other VOTERS (this node
+        // excluded), whether this node is one, and how many there are, so a
+        // membership change cannot fall between three reads. `complete()`
+        // counts this node only when it votes: adding the 1 unconditionally
+        // made this `n != n + 1` on a learner, so the canary refused before it
+        // ran and the shared cache root was never published there.
+        let directory = self
+            .directory
+            .peers(crate::cluster::Purpose::Voters)
             .await
             .map_err(|error| error.to_string())?;
-        let peers = self
-            .membership
-            .activity_peers()
-            .await
+        let voter_count = directory.voter_count();
+        let local_is_voter = directory
+            .local_is_voter()
             .map_err(|error| error.to_string())?;
-        // `activity_peers` returns the other VOTERS: it excludes this node and
-        // filters to voters. The voters this node can see therefore number
-        // `peers.len()` plus itself only when it is one. Adding the 1
-        // unconditionally made this `n != n + 1` on a learner, so the canary
-        // refused before it ran and the shared cache root was never published
-        // there — the same arithmetic that made `remote_rollout_ready`
-        // unsatisfiable on a learner.
-        let local_is_voter = self
-            .membership
-            .local_node_is_committed_voter()
-            .await
-            .map_err(|error| error.to_string())?;
-        if peers.len().saturating_add(usize::from(local_is_voter)) != voter_count {
+        if !directory.complete().map_err(|error| error.to_string())? {
             return Err("the complete voter directory is not available".to_owned());
         }
+        let peers = directory.all();
         // No peer to probe is the honest condition for the local-only canary.
         // Testing `voter_count == 1` said the same thing only for a voter.
         if peers.is_empty() {
@@ -1616,12 +1611,12 @@ mod tests {
             .expect("verify_once_inner never closes at fn indent")
             .0;
         assert!(
-            body.contains("local_node_is_committed_voter()"),
+            body.contains(".local_is_voter()"),
             "the canary must read the local committed role, not assume it",
         );
         assert!(
-            body.contains("saturating_add(usize::from(local_is_voter))"),
-            "the visible-voter count must depend on the local role",
+            body.contains(".complete()"),
+            "the visible-voter count must depend on the local role (Peers::complete)",
         );
         assert!(
             body.contains("if peers.is_empty()"),
@@ -1645,6 +1640,7 @@ mod tests {
             "test-cluster",
             node_id.to_owned(),
             MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
             store,
         )
     }
