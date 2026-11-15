@@ -3173,6 +3173,44 @@ mod loop_pacing_tests {
         assert!(!lifetime.is_cancelled());
         assert_eq!(manager.status().listener, "listening");
     }
+    /// A6 M3: with a change-driven watch the listener reads the switch only
+    /// when its table changes, never on a clock; the change's look then acts
+    /// on the answer at once.
+    #[tokio::test(start_paused = true)]
+    async fn serving_listener_reads_the_switch_only_on_a_change() {
+        let manager = running_listener_fixture(47);
+        let lifetime = manager.begin_lifetime();
+        let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
+        let (_fence, serving) = ready_fence();
+        let change = Arc::new(tokio::sync::Notify::new());
+        let armed = Arc::clone(&change);
+        let mut wake = ListenerWake::new(
+            serving,
+            Box::new(move || plurx_core::store::SharingWatch::Notified(Arc::clone(&armed))),
+        );
+        wake.watch = plurx_core::store::SharingWatch::Notified(Arc::clone(&change));
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let look = move || -> SwitchRead {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(std::future::ready(Ok(false)))
+        };
+        let mut span = UnknownSpan::default();
+        let next = manager.next_look(look, &mut span, &mut wake, &lifetime, &stop, &shutdown);
+        tokio::pin!(next);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3_600), next.as_mut())
+                .await
+                .is_err(),
+            "an hour without a change reads nothing"
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        change.notify_one();
+        assert!(!next.await, "the change's look sees the disable and closes");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(manager.status().listener, "disabled");
+        assert!(stop.is_cancelled());
+    }
     #[test]
     fn only_a_revoking_term_revokes_and_the_member_floor_never_does() {
         assert_eq!(

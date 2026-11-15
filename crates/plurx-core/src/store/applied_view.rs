@@ -119,6 +119,10 @@ pub enum SharingWatch {
     /// No trusted mark (SQLite, a remote-authority process, an image being
     /// replaced, a table the mark does not register): one look a second.
     Interval,
+    /// Test fixtures: a change the test signals, standing in for the mark so
+    /// a monitor can be driven by a change rather than the interval.
+    #[cfg(feature = "fixtures")]
+    Notified(std::sync::Arc<tokio::sync::Notify>),
 }
 
 impl SharingWatch {
@@ -128,6 +132,8 @@ impl SharingWatch {
             #[cfg(feature = "hiqlite-store")]
             Self::Applied(watch) => watch.changed().await,
             Self::Interval => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+            #[cfg(feature = "fixtures")]
+            Self::Notified(change) => change.notified().await,
         }
     }
 }
