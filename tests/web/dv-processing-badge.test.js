@@ -157,7 +157,7 @@ test('the Enhancement info row lists each details[].text on its own neutral line
   assert.match(statsSource,/enhancement_note:enhancement\?enhancement\.note:null/,'telemetry carries the lines');
   const css=fs.readFileSync(path.join(root,'app.css'),'utf8');
   assert.match(css,/\.pi-row small\[data-stats-note="enhancement"\]\{white-space:pre-line\}/);
-  assert.match(css,/\.vbadge\.enh\{[^}]*var\(--enhance\)/);
+  assert.match(css,/\.vbadge\.enh,\.vbadge\.tonemap\{[^}]*var\(--enhance\)/);
 });
 test('every session attach replaces the enhancement; prepared swaps adopt the successor own, never the predecessor one',()=>{
   const directed=fs.readFileSync(path.join(root,'player/directed-change.js'),'utf8');
@@ -329,4 +329,55 @@ test('a deferred upgrade refusal explains only current inactive rows and clears 
   const active=context.enhancementWithProcessingSkip(p.enhancement,{generation,reason:'old refusal'},generation);
   assert.deepEqual([...active.active],['FEL','RPU','DYN']);
   assert.equal(active.details[0].text,processedEnhancement.details[0].text);
+});
+
+test('Tone mapping pill follows current server telemetry and confirmed display mapping',()=>{
+  const context=enhancementSetup(undefined),p=context.PLAYER;
+  assert.match(context.playerFactBadges(),/>Tone mapping<\/span>/,'current HDR-to-HDR target mapping');
+  p.effectiveProcessing=null;
+  p.sessionId='active';
+  p.health={id:'active',tone_map_peak_nits:1000,tone_map_peak_source:'cll'};
+  assert.match(context.playerFactBadges(),/aria-label="Cinema is tone mapping this playback"/);
+  for(const source of ['cll','mdcv','default']){
+    p.health.tone_map_peak_source=source;
+    assert.equal(context.playerToneMapping(p),true);
+  }
+  for(const health of [null,{id:'retired',tone_map_peak_nits:1000,tone_map_peak_source:'cll'},
+    {id:'active',tone_map_peak_nits:0,tone_map_peak_source:'cll'},
+    {id:'active',tone_map_peak_nits:'1000',tone_map_peak_source:'cll'},
+    {id:'active',tone_map_peak_nits:1000,tone_map_peak_source:'unknown'}]){
+    p.health=health;
+    assert.doesNotMatch(context.playerFactBadges(),/>Tone mapping<\/span>/);
+  }
+  p.deliveredRange='sdr';
+  assert.equal(context.playerToneMapping(p),false,'HDR source and SDR delivery alone do not award the pill');
+  p.deliveredRange='hdr10';p.effectiveProcessing=report();
+  p.controlReporter.bootstrap.generation='22222222-2222-4222-8222-222222222222';
+  assert.equal(context.playerToneMapping(p),false,'stale processing report');
+  p.controlReporter.bootstrap.generation=generation;
+  p.effectiveProcessing.applied_operations=['RpuColorConversion'];
+  assert.equal(context.playerToneMapping(p),false,'reshaping alone is not target mapping');
+});
+
+test('closed playback info still samples attached session facts and repaints the tone-mapping pill',async()=>{
+  const context=enhancementSetup(undefined),p=context.PLAYER;
+  let requests=0,repaints=0;
+  Object.assign(p,{sessionId:'active',effectiveProcessing:null});
+  Object.assign(context,{
+    playbackOwnsAttachedMedia:()=>true,observeDiagnosticPlayback:()=>{},
+    document:{getElementById:()=>null},playbackWaitSurfaceLive:()=>false,
+    playbackFileContextForPlayer:()=>({source_ref:{kind:'local'}}),
+    api:async()=>{requests++;return {id:'active',tone_map_peak_nits:1000,tone_map_peak_source:'mdcv'};},
+    performance:{now:()=>1},updateStats:()=>{},renderPlayerInfo:()=>{repaints++;},
+  });
+  const stats=fs.readFileSync(path.join(root,'player/stats.js'),'utf8');
+  vm.runInContext(stats.slice(stats.indexOf('function statsStreamFormat('),stats.indexOf('function statsToneMapPeak(')),context);
+  vm.runInContext(stats.slice(stats.indexOf('async function pollSessionHealth('),stats.indexOf('setInterval(()=>{ pollSessionHealth()')),context);
+  await context.pollSessionHealth();
+  assert.equal(requests,1);assert.equal(repaints,1);
+  assert.equal(context.playerToneMapping(p),true);
+  await context.pollSessionHealth();assert.equal(requests,1,'no extra background polling once facts are known');
+  p.sessionId='successor';
+  assert.equal(context.playerToneMapping(p),false,'retired session cannot award successor pill');
+  await context.pollSessionHealth();assert.equal(requests,2,'successor needs its own facts');
 });

@@ -258,11 +258,14 @@ impl DescriptorManifest {
 /// Identity and path must still agree at launch; replacing an asset does not
 /// bless the replacement, and dropping its guard revokes the registration.
 pub struct DaemonFileRegistration {
-    pub(super) id: u64,
+    /// `None` while the process registry has no roots: nothing was recorded.
+    pub(super) id: Option<u64>,
 }
 impl Drop for DaemonFileRegistration {
     fn drop(&mut self) {
-        super::policy::unregister_asset(self.id);
+        if let Some(id) = self.id {
+            super::policy::unregister_asset(id);
+        }
     }
 }
 

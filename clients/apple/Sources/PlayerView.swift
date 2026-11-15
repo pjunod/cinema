@@ -81,6 +81,7 @@ struct PlayerMetadataBadge: Equatable, Identifiable {
         /// One server-computed Dolby Vision enhancement (FEL, RPU, DYN):
         /// a text-only pill, so several can sit side by side.
         case enhancement
+        case toneMapping
         case audio
     }
 
@@ -121,7 +122,7 @@ struct PlayerMetadataBadge: Equatable, Identifiable {
         switch kind {
         case .resolution: return "tv.fill"
         case .dynamicRange: return "sparkles"
-        case .enhancement: return "plus.circle"
+        case .enhancement, .toneMapping: return "plus.circle"
         case .audio: return "waveform"
         }
     }
@@ -248,7 +249,7 @@ private struct PlayerMetadataBadgeIcon: Shape {
             path.addRect(CGRect(x: 11, y: 2, width: 2, height: 20))
             path.addRect(CGRect(x: 15, y: 6, width: 2, height: 12))
             path.addRect(CGRect(x: 19, y: 10, width: 2, height: 4))
-        case .enhancement:
+        case .enhancement, .toneMapping:
             // Text-only pill: `PlayerMetadataBadgeView` draws no icon for it.
             break
         }
@@ -282,7 +283,7 @@ private struct PlayerMetadataBadgeView: View {
     var body: some View {
         HStack(spacing: PlayerMetadataBadgeMetrics.contentSpacing) {
             HStack(spacing: PlayerMetadataBadgeMetrics.contentSpacing) {
-                if badge.kind != .enhancement {
+                if badge.kind != .enhancement && badge.kind != .toneMapping {
                     PlayerMetadataBadgeIcon(kind: badge.kind)
                         .fill(badge.tone.color, style: FillStyle(eoFill: true))
                         .frame(
@@ -2004,6 +2005,7 @@ struct PlayerView: View {
         // Eligibility is asked here, at render time, rather than cached at
         // launch: an Apple TV whose Dolby Vision output is turned off in
         // Settings changes this answer while the app is running.
+        let status = controller.sessionStatus.flatMap { $0.id == controller.currentSessionId ? $0 : nil }
         let badges = Self.playbackBadges(
             source: controller.decision?.source,
             audio: audio,
@@ -2012,7 +2014,9 @@ struct PlayerView: View {
             deliveredDolbyVisionProfile: controller.deliveredDolbyVisionProfile,
             effectiveProcessing: controller.effectiveProcessing,
             activeGeneration: controller.effectiveProcessingGeneration,
-            enhancement: controller.playbackEnhancement
+            enhancement: controller.playbackEnhancement,
+            toneMapPeakNits: status?.toneMapPeakNits,
+            toneMapPeakSource: status?.toneMapPeakSource
         )
         return HStack(spacing: PlayerMetadataBadgeMetrics.rowSpacing) {
             ForEach(badges) { badge in
@@ -2043,7 +2047,9 @@ struct PlayerView: View {
         deliveredDolbyVisionProfile: Int? = nil,
         effectiveProcessing: EffectiveProcessingReport? = nil,
         activeGeneration: String? = nil,
-        enhancement: PlaybackEnhancement? = nil
+        enhancement: PlaybackEnhancement? = nil,
+        toneMapPeakNits: Int? = nil,
+        toneMapPeakSource: String? = nil
     ) -> [PlayerMetadataBadge] {
         var badges: [PlayerMetadataBadge] = []
         if let label = playbackResolutionLabel(width: source?.width, height: source?.height) {
@@ -2071,6 +2077,12 @@ struct PlayerView: View {
             activeGeneration: activeGeneration,
             delivered: delivered
         )
+        if toneMappingActive(peakNits: toneMapPeakNits, peakSource: toneMapPeakSource,
+                             effectiveProcessing: effectiveProcessing,
+                             activeGeneration: activeGeneration, delivered: delivered) {
+            badges.append(PlayerMetadataBadge(kind: .toneMapping, tone: .enhancement,
+                mark: "Tone mapping", accessibilityLabel: "Cinema tone mapping active"))
+        }
         if let audio, let sound = soundLabel(audio) {
             badges.append(PlayerMetadataBadge(
                 kind: .audio,
@@ -2080,6 +2092,21 @@ struct PlayerView: View {
             ))
         }
         return badges
+    }
+
+    /// Peak metadata belongs to the active session; generation-validated reports
+    /// also identify mapping on the enhanced Dolby Vision processing routes.
+    static func toneMappingActive(
+        peakNits: Int?, peakSource: String?,
+        effectiveProcessing: EffectiveProcessingReport?, activeGeneration: String?, delivered: String?
+    ) -> Bool {
+        if let peakNits, peakNits > 0,
+           ["cll", "mdcv", "default"].contains(peakSource?.lowercased() ?? "") { return true }
+        guard let report = effectiveProcessing,
+              report.matches(generation: activeGeneration, delivered: delivered) else { return false }
+        return report.appliedOperations.contains {
+            $0 == "TargetMapping" || $0.hasPrefix("DisplayTargetMapping:")
+        }
     }
 
     /// One teal pill per *active* enhancement, labelled exactly `FEL`, `RPU`,

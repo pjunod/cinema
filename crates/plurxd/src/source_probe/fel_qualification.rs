@@ -1291,6 +1291,10 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        // The command's prepared hook pins a duplicate of the output writer
+        // until the command is dropped, exactly as render_owned releases its
+        // helper command. Reading to the end needs every parent writer closed.
+        drop(command);
         drop(write);
         let mut bytes = Vec::new();
         read.read_to_end(&mut bytes).expect("settled NUT output");

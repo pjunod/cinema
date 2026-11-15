@@ -341,6 +341,10 @@ render = function()
         draw_rect(a, 0, n*4, W, 4, '000000', math.floor(65+n*190/24))
         draw_rect(a, 0, H-(n+1)*6, W, 6, '000000', math.floor(40+n*215/24))
     end
+    if cinema().tone_mapping == true then
+        draw_rect(a, 24, 58, 132, 26, '303030', 25)
+        text(a, 90, 71, 'Tone mapping', 15, 'FFFFFF', 5)
+    end
     local movie_title = title()
     -- Clip long or hostile file titles to the title region (ASS escapes above).
     a:new_event(); a:append(string.format('{\\an7\\pos(24,22)\\fnDejaVu Sans\\fs20\\bord0\\shad0\\clip(24,0,%g,65)}', W-235)); a:append(escape(movie_title))

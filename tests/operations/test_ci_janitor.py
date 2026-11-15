@@ -128,6 +128,10 @@ exit 0
 """
 
 
+# The unprivileged identity a root-run suite drops to (`nobody` on Linux).
+NOBODY = 65534
+
+
 class JanitorContractCase(unittest.TestCase):
     def setUp(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
@@ -223,12 +227,13 @@ class JanitorContractCase(unittest.TestCase):
         self.environment["FIXTURE_CONFIG2"] = str(config)
         return cache
 
-    def run_janitor(self, *arguments):
+    def run_janitor(self, *arguments, preexec_fn=None):
         return subprocess.run(
             [str(SCRIPT), *arguments],
             env=self.environment,
             capture_output=True,
             text=True,
+            preexec_fn=preexec_fn,
         )
 
     def systemctl_calls(self):
@@ -855,14 +860,26 @@ class JanitorContractCase(unittest.TestCase):
         recover it either: nothing here ever starts a runner it did not itself
         stop.
         """
-        if os.geteuid() == 0:
-            self.skipTest("root deletes anything; the mode below proves nothing")
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
         undeletable = self.cache / "cache/0a"
+        unprivileged = None
+        if os.geteuid() == 0:
+            # Root deletes through any mode (CI containers run the suite as
+            # root), so the janitor runs as an unprivileged owner of the
+            # fixture instead: the 0500 directory below is then as
+            # undeletable as it is for a runner's own user.
+            fixture = Path(self._directory.name)
+            for path in [fixture, *fixture.rglob("*")]:
+                os.lchown(path, NOBODY, NOBODY)
+
+            def unprivileged():
+                os.setgroups([])
+                os.setgid(NOBODY)
+                os.setuid(NOBODY)
         undeletable.chmod(0o500)
         self.addCleanup(undeletable.chmod, 0o700)
 
-        result = self.run_janitor()
+        result = self.run_janitor(preexec_fn=unprivileged)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("could not fully delete", result.stdout)
