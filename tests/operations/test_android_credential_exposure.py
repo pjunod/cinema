@@ -500,6 +500,9 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
             PLURX_ANDROID_KEYSTORE="plurx-upload.jks",
             PLURX_ANDROID_OLD_KEYSTORE="old-debug.jks",
             PLURX_ANDROID_LINEAGE="lineage.bin",
+            # The recipe numbers the build from the repository's history; a
+            # fixed number keeps these cases independent of the checkout depth.
+            PLURX_BUILD_NUMBER="4242",
         )
         # PUBLISHING.md's `keytool` line leaves the keystore in the cwd under
         # this bare name; that is the case Docker mistakes for a volume name.
@@ -564,6 +567,10 @@ class AndroidReleaseMakeTargetCase(unittest.TestCase):
         result = self._make("android-release")
         self.assertEqual(result.returncode, 0, result.stdout)
         words = self.docker_log.read_text(encoding="utf-8").splitlines()
+        # The tree carries no store build number; the recipe hands Gradle one.
+        self.assertTrue(
+            any("-PplurxBuildNumber=4242 :app:assembleRelease" in word for word in words), words
+        )
         mounts = [
             words[index + 1]
             for index, word in enumerate(words[:-1])

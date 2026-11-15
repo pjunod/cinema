@@ -1925,6 +1925,11 @@ desktop-macos-check: desktop-macos-build desktop-macos-test ## Build the arm64 t
 
 ## ---- apple clients -----------------------------------------------------
 
+# The store build number is the count of commits in the commit being built
+# (validation/mobile_build.py); nothing in the tree claims one. android-release
+# passes it to Gradle; PLURX_BUILD_NUMBER overrides it for a deliberate sideload.
+PLURX_SOURCE_ROOT := $(patsubst %/,%,$(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
+
 .PHONY: mobile-build-number
 mobile-build-number: ## Print the store build number of HEAD (assigned at release; nothing in the tree claims one)
 	@python3 -m validation.mobile_build number
@@ -2088,7 +2093,8 @@ android-release: android-image ## Build the lineage-signed Android release APK (
 	@test -f "$${PLURX_ANDROID_KEYSTORE}" || { echo "PLURX_ANDROID_KEYSTORE=$${PLURX_ANDROID_KEYSTORE} is not a file"; exit 1; }
 	@test -f "$${PLURX_ANDROID_OLD_KEYSTORE:-}" || { echo "set PLURX_ANDROID_OLD_KEYSTORE to the audited original signer"; exit 1; }
 	@test -f "$${PLURX_ANDROID_LINEAGE:-}" || { echo "set PLURX_ANDROID_LINEAGE to the signed debug-to-release lineage"; exit 1; }
-	build="$$(python3 -m validation.mobile_build number)" && \
+	build="$${PLURX_BUILD_NUMBER:-$$(PYTHONPATH="$(PLURX_SOURCE_ROOT)" python3 -m validation.mobile_build number --repo "$(PLURX_SOURCE_ROOT)")}" && \
+	test -n "$$build" && \
 	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
 	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
 	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \

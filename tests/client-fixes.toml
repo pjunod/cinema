@@ -919,7 +919,7 @@ commits = ["ac51adb13"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+test_anchor = "test_a_client_change_obligates_no_edit_to_either_manifest"
 
 [[fixes]]
 id = "apple.home-hero-foreground-clipping"
@@ -1305,7 +1305,7 @@ commits = ["05f930be"]
 # concurrent Apple changes conflict. The pointer below is what replaced it, and
 # the test is red the moment a `Build <n> …` sentence returns to that blockquote.
 source = "clients/apple/README.md"
-source_anchor = "Per-build release notes live in"
+source_anchor = "Per-change release notes live in"
 test = "tests/operations/test_apple_build_claims.py"
 test_anchor = "test_the_shared_status_blockquotes_carry_no_per_build_narrative"
 
@@ -1319,7 +1319,7 @@ commits = ["c52c38b7"]
 source = "docs/apple-builds/history-through-build-78.md"
 source_anchor = "build `49`"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "apple.offline-download-location"
@@ -1447,7 +1447,7 @@ commits = ["e2e59a0c"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "apple.delivery-watchdog-healthy-buffer"
@@ -1461,9 +1461,9 @@ test_anchor = "testDeliveryStarvationNeverFiresOnAHealthyBufferedPlayer"
 id = "apple.build-65-release-claims"
 commits = ["9989092"]
 source = "docs/clients/APPLE-CLIENT-PARITY.md"
-source_anchor = ", Apple build"
+source_anchor = "> Status ("
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "apple.build-67-release-claims"
@@ -1471,7 +1471,7 @@ commits = ["08752be"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "android.bound-stall-downgrade"
@@ -1581,7 +1581,7 @@ test_anchor = "resetForUserActionResetsBudgetAndAdvancesSequence"
 id = "android.merge-resolution-fix"
 commits = ["4c9d964"]
 source = "clients/android/README.md"
-source_anchor = "**, build `"
+source_anchor = "> Status: **v"
 test = "tests/validation/test_history.py"
 test_anchor = "test_client_anchor_survives_a_non_corrective_squash_title"
 
@@ -1757,7 +1757,7 @@ commits = ["203cf7cf"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "apple.build-102-m5b-release-claim"
@@ -1765,7 +1765,7 @@ commits = ["d651deed"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "apple.build-103-m5b-release-claim"
@@ -1773,7 +1773,7 @@ commits = ["fae1edbc"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "clients.marker-provenance-auto-skip"
@@ -2112,7 +2112,7 @@ commits = ["fdbed69e"]
 source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
+test_anchor = "test_a_client_change_obligates_no_edit_to_either_manifest"
 
 [[fixes]]
 # The Live TV client changes require fresh store build counters for both mobile
@@ -2122,7 +2122,7 @@ commits = ["b2834adb"]
 source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_each_changed_app_requires_only_its_own_build_counter"
+test_anchor = "test_the_development_build_is_the_only_number_the_tree_may_carry"
 
 [[fixes]]
 # tvOS 26 rendered default tinted actions as empty red capsules, stretched
@@ -2198,7 +2198,7 @@ commits = ["bc4a6208"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+test_anchor = "test_a_client_change_obligates_no_edit_to_either_manifest"
 
 [[fixes]]
 # The first navigation correction routes every directional press through one
@@ -2878,7 +2878,7 @@ commits = ["0f68b0a1"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_apple_build_claims.py"
-test_anchor = "def test_a_generated_next_build_satisfies_the_document_claim_sweep"
+test_anchor = "def test_a_status_line_that_quotes_a_build_number_is_rejected"
 
 [[fixes]]
 # The first Android compile this branch has ever had found exactly one error,
@@ -2992,7 +2992,7 @@ commits = ["b914464b"]
 source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
+test_anchor = "def test_a_client_change_obligates_no_edit_to_either_manifest"
 
 [[fixes]]
 # The review correction spans web and Apple. This retained regression covers
@@ -3034,7 +3034,7 @@ commits = ["537e22e6"]
 source = "clients/android/README.md"
 source_anchor = "> Status: **v"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "def test_repository_build_claims_match_release_inputs"
+test_anchor = "def test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "clients.calm-library-download-check"
@@ -3050,7 +3050,7 @@ commits = ["6d7a34db"]
 source = "clients/android/README.md"
 source_anchor = "> Status: **v"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "def test_repository_build_claims_match_release_inputs"
+test_anchor = "def test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "apple.unknown-stall-preserves-delivery"
@@ -3201,7 +3201,7 @@ commits = ["3d0599779"]
 source = "clients/android/README.md"
 source_anchor = "Status: **v"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "def test_repository_build_claims_match_release_inputs(self) -> None:"
+test_anchor = "def test_repository_documents_claim_no_store_build_number(self) -> None:"
 [[fixes]]
 # The server's transport requirement is durable playback recipe identity on
 # Android, not a one-shot URL choice. This table regression exercises direct,
@@ -6568,7 +6568,7 @@ commits = ["8148ffea9fcded4fef5f605a36fc8ae63e8f25b1"]
 source = "clients/android/README.md"
 source_anchor = "> Status: **v"
 test = "tests/operations/test_mobile_build_claims.py"
-test_anchor = "test_repository_build_claims_match_release_inputs"
+test_anchor = "test_repository_documents_claim_no_store_build_number"
 
 [[fixes]]
 id = "apple.playback-buffer-limit-hold-wording"
@@ -7668,7 +7668,7 @@ commits = ["e9d9e510dcfd7bc3c45188c77803dd5872767976"]
 source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
+test_anchor = "def test_a_client_change_obligates_no_edit_to_either_manifest"
 
 [[fixes]]
 id = "android.transport-options-keep-shared-focus-order"
@@ -7875,7 +7875,7 @@ commits = ["740d6ac4bed63b0e5c0d5986a4e4eb87463ec983"]
 source = "clients/apple/project.yml"
 source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+test_anchor = "test_a_client_change_obligates_no_edit_to_either_manifest"
 
 [[fixes]]
 id = "android.hdr-qualification-release-counter"
@@ -7884,7 +7884,7 @@ supplements = "mobile.hdr-qualification-release-counters"
 source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
-test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
+test_anchor = "test_a_client_change_obligates_no_edit_to_either_manifest"
 
 [[fixes]]
 id = "apple.tv-guide-lazy-row-focus-destination"

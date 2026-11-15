@@ -77,7 +77,10 @@ BUILD_SPECS = {
     # fast-rust-gate/paperwork-fix targets and offload web-test registration.
     # Recipe changes still require review; project-counter normalization below
     # does not authorize different recipe bytes or transfer native passes.
-    'Makefile': '297cf73d69babf7880ffad1359cd5d71b07f1ec223aaf9e501fe758b03636758',
+    # 2026-11-15: apple-build-bump is replaced by mobile-build-number, and
+    # android-release passes the release-assigned build number to Gradle
+    # (validation/mobile_build.py). No native test recipe changes.
+    'Makefile': 'a08e6ee88c436a1d5dfcf871d4ed0b9d7c4a5ab016ce203c21b86f553ea80200',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag
@@ -115,8 +118,8 @@ def producer(commit, current):
     # native origin evidence; producer output must still be an original pass.
 
 
-# The reviewed input closure is unchanged by the generated positive integer
-# build counter. Actual input fingerprints and case compatibility still use
+# The reviewed input closure is unchanged by the positive integer build
+# number (the development build in the tree, a stamped one at release). Actual input fingerprints and case compatibility still use
 # complete Git blobs, so this does not transfer passes between build numbers.
 APPLE_PROJECT_SHAPE = "d5eda692d7c4691cc20926ec85c87ec65cbc60122c6b638853d6cbd57b645c5b"
 APPLE_BUILD_COUNTER = re.compile(rb'(?m)^(    CURRENT_PROJECT_VERSION: ")[1-9][0-9]*(")$')
