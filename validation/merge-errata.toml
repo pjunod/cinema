@@ -750,3 +750,27 @@ reason = """Landing commit of #1595 (keep prepared Dolby Vision handoffs on the 
 [[errata]]
 commit = "b9201c6a4ac343a63906593fc5cdaf36a4e0bb20"
 reason = """Landing commit of #1608 (share one pooled client across signed peer requests), merged 2026-11-15 13:24 UTC through the API while merge train 13 was stalled, without Regression-Test lines in its message. Its pull request body names 2 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "59e408f7fe504ab4afd66b445df33d13f9527645"
+reason = """Landing commit of #1607 (fix(ci): run every general lane job in the pinned CI image), merged 2026-11-15 12:44 UTC by the merge train without Regression-Test lines in its message. Its pull request body names 10 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "5af8234361ab7bbdd9f56fa35c711a013ec4a01e"
+reason = """Landing commit of #1613 (fix(shared-cache): an unreachable voter no longer revokes the shared cache), merged 2026-11-15 12:42 UTC by the merge train without Regression-Test lines in its message. Its pull request body names 3 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "ad6c43e1e1de64e80da1e7d954aa00ba69fce4a0"
+reason = """Landing commit of #1638 (fix(playback): keep daemon-file registration advisory without reader roots; unhang the FEL), merged 2026-11-15 12:41 UTC by the merge train without Regression-Test lines in its message. Its pull request body names 5 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "b490b2081d2a8b60f8050817e8cc42ed9873715c"
+reason = """Landing commit of #1588 (fix(reader): repair desktop and mobile ebook playback), merged 2026-11-15 12:42 UTC by the merge train without Regression-Test lines in its message. Its pull request body names 4 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "c288edd191255e54fcc8e72ef7971e73478f72bf"
+reason = """Landing commit of #1591 (fix(hdr): honor CM4 source hue labels and L8 spatial trims), merged 2026-11-15 12:42 UTC by the merge train without Regression-Test lines in its message. Its pull request body names 3 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
+
+[[errata]]
+commit = "f999f225cddcbb32cd9b59d37d0757fc46f6501e"
+reason = """Landing commit of #1621 (fix(dv): declare film demand for processed upgrade successors), merged 2026-11-15 12:42 UTC by the merge train without Regression-Test lines in its message. Its pull request body names 2 Regression-Test lines for the corrective commits it brings in. A landing commit cannot be amended, so this row records the omission; it changes no implementation, audit boundary or future field checks and claims no test execution."""
