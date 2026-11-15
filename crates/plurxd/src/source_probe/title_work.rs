@@ -490,7 +490,11 @@ impl TitleTask {
 /// FEL verdicts measure the renderer, so its key is read only to form the FEL
 /// identity; title demand itself is keyed by the scanner alone.
 async fn fel_backend(state: &AppState, tools: &ToolSet) -> Option<String> {
-    state.transcode.fel_identity(&tools.backend_digest()).await.ok()
+    state
+        .transcode
+        .fel_identity(&tools.backend_digest())
+        .await
+        .ok()
 }
 
 async fn eligible_file(
