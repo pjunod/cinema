@@ -1,0 +1,3 @@
+# Library worker driver; async Store refinement proof parked
+
+[parked proof ledger](../docs/cluster/ASYNC-STORE-REFINEMENT-STATUS.md). Owner Claude (claude-opus-5-5, session 01BCWL9x). Library workers now run through one shared driver, so ready work beats pressure ticks while queue and domain loss keep priority; carved from PR #1263 without its proof machinery. The exhaustive refinement proof is parked: its state space did not close in an offline census (about 5M products per context and still growing), far beyond what paged sessions can qualify. The proof work is preserved under tag `archive/async-store-refinement-2026-11-02` and a bundle on #1263; restarting needs a reduced model first.

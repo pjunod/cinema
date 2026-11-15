@@ -1,0 +1,3 @@
+# Display-targeted HDR10-E
+
+[A–F ledger](../docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner direct GPT/root; #1216 and batched#1269 merged into the effort, latest3cc264068; main unchanged. Compile-only gate5889 all8 PASS, Rust382/C384/trim393 compile passes; earlier behavior/media/client evidence retains source attribution. Final integrated adoption, completed-candidate review and qualification remain. Root delivery decision covers HDR/SDR with E explicitly unfinished and truthful L1-only reporting; no full A–F completion. Promotion-test policy awaits user reconciliation; physical acceptance and the excluded full-app FEL EOF lane remain separate.

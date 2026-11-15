@@ -1,0 +1,3 @@
+# CM4 active-area fidelity
+
+[processing ledger](../docs/streaming/DV_HDR_PROCESSING_STATUS.md). Owner Claude (claude-opus-5-5, session 01BCWLA2), taken over from Codex. PR #1481 constrains CM4 spatial filtering to the RPU L5 active picture; bars keep their content under the pointwise mapping (revised after adversarial review). Current main merged in. C/native compilation and three crop-domain CPU controls passed; unaffected routes keep their original shader literals. GPU parity and full picture/display/performance acceptance stay open.

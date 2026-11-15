@@ -1,0 +1,3 @@
+# Safari resume
+
+[reviewed fix and 108 passing tests](../docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.

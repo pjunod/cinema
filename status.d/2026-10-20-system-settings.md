@@ -1,0 +1,3 @@
+# System settings
+
+[approved layout and comparison ledger](../docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.

@@ -1,0 +1,3 @@
+# Enhanced playback preparation and web recovery
+
+[incident and acceptance ledger](../docs/streaming/HDR10E-PREPARATION-AND-WEB-RECOVERY.md). Owner Codex; branch `codex/m6-hdr10e-preparation`. Bounded owned-source read-ahead and cache inventory overlap retain all checks. Balanced 32-window controls pass: reader waits average 1.60 s, maximum 1.76 s for two-second media. Partial rewatch resume passes. Current-main integration, compiler/CLI gates and live acceptance remain open; its schema upgrade prevents old-image rollback after activation. Merged as [PR #1374](http://forge.lan:3000/noirr/plurx/pulls/1374) and deployed 2026-11-07 to media1, lab4 and lab6 (builds `4ddbf1229` and `edf6d08fa`, both contain it), so old-image rollback no longer applies on those nodes.

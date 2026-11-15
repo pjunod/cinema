@@ -1,0 +1,3 @@
+# CM29 analytic gamut reconstruction
+
+[current rendering ledger](../docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner Codex chat 01a17554. Standard IPT D65, the published colorfulness equation, analytic gamut interpolation and separate stock SDR/output blacks replace fitted gains; method v5 invalidates older targeted renditions. Selected-frame comparisons improve across all four titles, including Smile’s dark band. Adversarial review approved; native parity passed. [PR #1289](http://forge.lan:3000/noirr/plurx/pulls/1289) records final fast-lane qualification and landing. Private raw evidence is retained. No deployment: Paul deploys.

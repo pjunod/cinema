@@ -1,0 +1,3 @@
+# Operation progress
+
+[live ledger](../docs/cluster/OPERATION-PROGRESS-STATUS.md); wait map/model/checker built and qualified; Fable approved; live promotion and landing are in PR #1249. Owner: Codex coordinator.

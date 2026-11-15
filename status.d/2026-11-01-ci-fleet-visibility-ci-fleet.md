@@ -1,0 +1,3 @@
+# CI fleet visibility (ci-fleet)
+
+[repository, plan and usage](http://forge.lan:3000/noirr/ci-fleet) (moved out of plurx into its own repository after merging here). Owner Claude (claude-opus-5-5, session 01BCWL9y); [PR #1344](http://forge.lan:3000/noirr/plurx/pulls/1344). The forge records no placement and shows a job whose labels no runner carries as waiting forever: four Apple jobs asked for `xcode-27.1` after macb re-registered as `xcode-27.2`, and `general · ffmpeg-6` had 0 of 3 runners online. ci-fleet classifies every waiting job, shows pools, drift, placement (from line 1 of each job log) and per-host usage, and routes Drain/Start VM through the runner watchdog and Apple standby. Not deployed: Paul installs the collector on lab3 and the agents.

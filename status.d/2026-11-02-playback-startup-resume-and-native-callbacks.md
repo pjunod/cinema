@@ -1,0 +1,3 @@
+# Playback startup, Resume and native callbacks
+
+Owner Codex/root; [delivery ledger](../docs/streaming/PLAYBACK-STARTUP-IMPLEMENTATION-STATUS.md). Astra closed all seven source findings; narrow test-phase corrections are recorded in the delivery ledger. All 86 focused Rust cases pass with successful cases retained and failures retried only. C controls, Apple (1) and Android (10) tests pass on matching inputs. Pinned compiler checks pass. [PR #1366](http://forge.lan:3000/noirr/plurx/pulls/1366) records the live main-lane checks and landing. Deployed 2026-11-07 to media1, lab4 and lab6 (media1 and lab6 on build `4ddbf1229`, lab4 on `edf6d08fa`; #1366 is in both); runtime cold-start acceptance is not yet measured.

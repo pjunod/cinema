@@ -1,0 +1,3 @@
+# Display-targeted DV creative trims (Phase E finish)
+
+[build plan, phase 2](../docs/streaming/DISPLAY-TARGETED-DV-BUILD.md#phase-2-closed-form-dolby-display-management-l1-l3-l2-l8). PR #1276 serves the CM v4 L8 and CM v2.9 L2 trims (L2 interpolated linearly in target PQ, measured on the reference), accepted by pixel comparison on eight real titles: CM v4 mean ΔE_ITP ≤ 0.011, CM v2.9 0.14–0.46 (untrimmed was 4.9–14). Playback reports `creative_trims_applied` per session; Apple 275, Android 181. Owner Claude; merged as 072d0f65 after two review rounds and one green fast lane. Not deployed: Paul deploys #1275 and #1276 together, then a GPT physical-display check.

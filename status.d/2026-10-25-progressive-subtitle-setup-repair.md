@@ -1,0 +1,3 @@
+# Progressive subtitle setup repair
+
+[live status](../docs/features/SUBTITLE-SETUP-REPAIR-STATUS.md). Owner Codex /root; [#1283](http://forge.lan:3000/noirr/plurx/pulls/1283) batches `codex/subtitle-setup-repair` to `main`. Install response and setup UX fixes are built locally; FIFO model-test admission is built locally. Adversarial review found no actionable issues; qualification and landing are tracked on the PR.

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Print the efforts in flight, newest first, from status.d/.
+
+    scripts/status            # one line per effort: date, title, file
+    scripts/status --full     # each effort's text
+    scripts/status -n 10      # only the ten newest
+
+STATUS.md used to hold these as one list that every pull request prepended
+to; each effort is now its own file (status.d/README.md).
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from validation.status_entries import DIRECTORY, entry_paths, title  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--full", action="store_true", help="print each effort's text")
+    parser.add_argument("-n", type=int, default=0, help="only the N newest efforts")
+    args = parser.parse_args(argv)
+    paths = list(reversed(entry_paths(ROOT)))
+    if args.n > 0:
+        paths = paths[: args.n]
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        if args.full:
+            print(f"## {path.name[:10]} · {title(text)}  ({DIRECTORY}/{path.name})")
+            print(text.split("\n", 1)[1].strip() if "\n" in text else "")
+            print()
+        else:
+            print(f"{path.name[:10]}  {title(text)}  ({DIRECTORY}/{path.name})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -55,6 +55,23 @@ STATUS_PAGES = (
     "docs/streaming/STATUS-HISTORY.md",
 )
 
+
+
+def status_pages() -> tuple[str, ...]:
+    """The fixed pages plus every effort file under status.d/.
+
+    The efforts moved out of STATUS.md into one file each
+    (validation/status_entries.py); the guard reads them where they now are.
+    """
+
+    entries = sorted(
+        f"status.d/{path.name}"
+        for path in (ROOT / "status.d").glob("*.md")
+        if path.name != "README.md"
+    )
+    return (*STATUS_PAGES, *entries)
+
+
 # Phrases that assert a pull request has not landed. Kept narrow on purpose,
 # twice over. A milestone may honestly still be "building" while every pull
 # request that built it so far is merged, so only claims about the *pull
@@ -168,7 +185,7 @@ class StatusPullRequestClaimCase(unittest.TestCase):
         )
 
         stale: list[str] = []
-        for page in STATUS_PAGES:
+        for page in status_pages():
             path = ROOT / page
             if not path.exists():
                 continue
