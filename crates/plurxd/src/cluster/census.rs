@@ -10,12 +10,26 @@
 //!   alike;
 //! - a path naming one of [`TYPES`], or any other path starting `hiqlite::`;
 //! - a call to `PeerTransport::new`;
-//! - a call, by name, to one of the membership manager's role ([`ROLE`]) or
-//!   roster ([`ROSTER`]) methods.
+//! - the same three names taken out by a pattern
+//!   (`let AppState { membership, .. } = state;`) or moved by a shorthand
+//!   field (`Foo { serving }`);
+//! - a path naming one of [`TYPES`], or any other path starting `hiqlite::`;
+//! - a call to `PeerTransport::new`;
+//! - a call, by name, to a membership manager method: its role ([`ROLE`]) and
+//!   roster ([`ROSTER`]) answers, and every other public method of
+//!   `MembershipManager` (`manager`), read from plurx-core's source less the
+//!   names other types share ([`NOT_CLUSTER`]). A handle under another field
+//!   name is still counted by what is called on it.
 //!
 //! Macro bodies are not Rust syntax to `syn`, so their tokens are scanned for
 //! the same spellings (`tokio::join!(self.membership.activity_peers(), ..)`
-//! counts).
+//! counts). An item, statement or block under `#[cfg(test)]` or
+//! `#[cfg(all(test, ..))]` is skipped; `any(test, ..)` is counted.
+//!
+//! What it cannot see: a type renamed on import (`use … as`), a call through
+//! a generic or trait-object receiver whose method name is not the
+//! manager's, and code outside this crate's `src/` — plurx-core,
+//! plurx-cluster-check, `tests/` and `benches/` are not read.
 //!
 //! [`REACH_AROUNDS`] pins every file's count exactly: a file that gains a site
 //! fails, a file that loses one fails until its entry is lowered, and a file
@@ -57,10 +71,13 @@ enum Class {
     Role,
     /// A roster method of [`ROSTER`].
     Roster,
+    /// Any other public `MembershipManager` method, by name (derived from
+    /// plurx-core's source, less [`NOT_CLUSTER`]).
+    Manager,
 }
 
 impl Class {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Membership,
         Self::Replication,
         Self::Serving,
@@ -69,6 +86,7 @@ impl Class {
         Self::Transport,
         Self::Role,
         Self::Roster,
+        Self::Manager,
     ];
 
     const fn label(self) -> &'static str {
@@ -81,6 +99,7 @@ impl Class {
             Self::Transport => "transport",
             Self::Role => "role",
             Self::Roster => "roster",
+            Self::Manager => "manager",
         }
     }
 
@@ -98,6 +117,8 @@ impl Class {
             Some(Self::Role)
         } else if ROSTER.contains(&name) {
             Some(Self::Roster)
+        } else if manager_methods().iter().any(|method| method == name) {
+            Some(Self::Manager)
         } else {
             None
         }
@@ -140,11 +161,97 @@ const ROSTER: &[&str] = &[
     "cache_admin_revocation_peers",
 ];
 
-/// Files that own the raw parts, relative to `src/`. A trailing `/` names a
-/// directory.
+/// Public `MembershipManager` methods the census does not count, each with
+/// why: the name is every other type's too, so a by-name count would count
+/// those. Everything else public on the manager is a cluster question.
+const NOT_CLUSTER: &[(&str, &str)] = &[
+    ("status", "every HTTP response and process has a `status()`"),
+    ("finalize", "every digest and hasher has a `finalize()`"),
+    (
+        "metrics_handle",
+        "every subsystem hands out a `metrics_handle()`",
+    ),
+    (
+        "unavailable",
+        "a constructor; the type path is counted as `type`",
+    ),
+    (
+        "replicated",
+        "a constructor; the type path is counted as `type`",
+    ),
+];
+
+/// The public methods of `MembershipManager`, from plurx-core's source:
+/// every `pub fn` of an inherent `impl MembershipManager` in
+/// `cluster/membership.rs` and its production children, less
+/// [`NOT_CLUSTER`].
+fn manager_methods() -> &'static [String] {
+    static METHODS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    METHODS.get_or_init(|| {
+        let mut methods = manager_pub_fns()
+            .into_iter()
+            .filter(|name| !NOT_CLUSTER.iter().any(|(skip, _)| skip == name))
+            .collect::<Vec<_>>();
+        methods.sort();
+        methods.dedup();
+        methods
+    })
+}
+
+fn manager_pub_fns() -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plurx-core/src/cluster");
+    let mut files = vec![root.join("membership.rs")];
+    for entry in std::fs::read_dir(root.join("membership")).expect("membership children") {
+        let path = entry.expect("a membership child").path();
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        if path.extension().is_some_and(|ext| ext == "rs")
+            && stem != "tests"
+            && !stem.ends_with("_tests")
+        {
+            files.push(path);
+        }
+    }
+    let mut names = Vec::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file).expect("read a membership source");
+        let syntax = syn::parse_file(&source).expect("a membership source parses");
+        for item in syntax.items {
+            let syn::Item::Impl(block) = item else {
+                continue;
+            };
+            let syn::Type::Path(ty) = block.self_ty.as_ref() else {
+                continue;
+            };
+            if block.trait_.is_some()
+                || is_cfg_test(&block.attrs)
+                || !ty
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "MembershipManager")
+            {
+                continue;
+            }
+            for item in block.items {
+                if let syn::ImplItem::Fn(function) = item {
+                    if matches!(function.vis, syn::Visibility::Public(_))
+                        && !is_cfg_test(&function.attrs)
+                    {
+                        names.push(function.sig.ident.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Files that own the raw parts, relative to `src/`.
 const EXEMPT: &[(&str, &str)] = &[
     ("cluster.rs", "the facade itself"),
-    ("cluster/", "the facade's own children"),
     (
         "serving_fence.rs",
         "the serving fence is a wrapped mechanism the facade exposes",
@@ -155,10 +262,9 @@ const EXEMPT: &[(&str, &str)] = &[
     ),
 ];
 
-/// Reach-arounds per production file and class, pinned exactly. The first
-/// census run (`dd76bb88e`) is the baseline: 710 sites in 71 files. Slice 1
-/// moved the Live TV, media-pool, shared-cache and relay rosters onto the
-/// facade: 660 in 70.
+/// Reach-arounds per production file and class, pinned exactly. How the
+/// numbers moved, slice by slice, is recorded in
+/// `docs/cluster/CLUSTER-FACADE-BUILD.md` §10.
 #[rustfmt::skip]
 const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("background_jobs.rs", "role", 6),
@@ -169,22 +275,25 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("backup.rs", "hiqlite", 4),
     ("cache_preparation.rs", "membership", 2),
     ("cache_preparation.rs", "roster", 2),
-    ("clock_offset.rs", "membership", 26),
+    ("clock_offset.rs", "membership", 27),
     ("clock_offset.rs", "type", 7),
     ("clock_offset.rs", "transport", 1),
     ("clock_offset.rs", "role", 2),
     ("clock_offset.rs", "roster", 3),
-    ("copy_index_v3.rs", "membership", 1),
+    ("clock_offset.rs", "manager", 14),
+    ("copy_index_v3.rs", "membership", 2),
     ("copy_index_v3.rs", "type", 4),
     ("copy_index_v3.rs", "transport", 1),
     ("copy_index_v3.rs", "roster", 1),
     ("desktop_control.rs", "membership", 4),
     ("desktop_control.rs", "replication", 4),
     ("desktop_control.rs", "serving", 12),
+    ("desktop_control.rs", "manager", 1),
     ("diagnostics.rs", "membership", 3),
     ("diagnostics.rs", "serving", 1),
     ("diagnostics.rs", "transport", 1),
     ("diagnostics.rs", "roster", 1),
+    ("diagnostics.rs", "manager", 1),
     ("dv_runtime.rs", "membership", 1),
     ("fragment_index_cluster.rs", "type", 4),
     ("fragment_index_cluster.rs", "transport", 1),
@@ -193,21 +302,25 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("http/activity_starts.rs", "transport", 1),
     ("http/activity_starts.rs", "role", 1),
     ("http/activity_starts.rs", "roster", 1),
+    ("http/activity_starts.rs", "manager", 1),
     ("http/background_jobs.rs", "role", 1),
     ("http/cluster.rs", "membership", 22),
     ("http/cluster.rs", "serving", 7),
     ("http/cluster.rs", "role", 2),
     ("http/cluster.rs", "roster", 1),
-    ("http/cluster_operations.rs", "membership", 56),
+    ("http/cluster.rs", "manager", 14),
+    ("http/cluster_operations.rs", "membership", 58),
     ("http/cluster_operations.rs", "replication", 5),
-    ("http/cluster_operations.rs", "serving", 23),
+    ("http/cluster_operations.rs", "serving", 24),
     ("http/cluster_operations.rs", "type", 11),
     ("http/cluster_operations.rs", "transport", 2),
     ("http/cluster_operations.rs", "role", 2),
     ("http/cluster_operations.rs", "roster", 2),
+    ("http/cluster_operations.rs", "manager", 5),
     ("http/developer.rs", "membership", 14),
     ("http/developer.rs", "role", 4),
     ("http/developer.rs", "roster", 2),
+    ("http/developer.rs", "manager", 4),
     ("http/dvr.rs", "membership", 1),
     ("http/dvr.rs", "role", 1),
     ("http/hls/control.rs", "serving", 6),
@@ -216,99 +329,123 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("http/hls/fence.rs", "type", 1),
     ("http/hls/preparation.rs", "serving", 5),
     ("http/hls/relay.rs", "membership", 1),
+    ("http/hls/relay.rs", "manager", 1),
     ("http/hls/response.rs", "serving", 1),
     ("http/images.rs", "membership", 14),
     ("http/images.rs", "type", 3),
     ("http/images.rs", "role", 5),
     ("http/images.rs", "roster", 5),
+    ("http/images.rs", "manager", 6),
     ("http/images_worker.rs", "membership", 2),
     ("http/images_worker.rs", "role", 1),
     ("http/images_worker.rs", "roster", 1),
-    ("http/internal_activity.rs", "membership", 4),
+    ("http/images_worker.rs", "manager", 1),
+    ("http/internal_activity.rs", "membership", 5),
     ("http/internal_activity.rs", "serving", 1),
     ("http/internal_activity.rs", "type", 2),
     ("http/internal_activity.rs", "transport", 1),
     ("http/internal_activity.rs", "role", 1),
     ("http/internal_activity.rs", "roster", 2),
+    ("http/internal_activity.rs", "manager", 1),
     ("http/internal_auth_revocation.rs", "membership", 16),
     ("http/internal_auth_revocation.rs", "type", 4),
     ("http/internal_auth_revocation.rs", "transport", 1),
     ("http/internal_auth_revocation.rs", "role", 3),
     ("http/internal_auth_revocation.rs", "roster", 1),
-    ("http/internal_clock.rs", "membership", 6),
-    ("http/internal_clock.rs", "type", 7),
-    ("http/internal_clock.rs", "hiqlite", 11),
-    ("http/internal_clock.rs", "roster", 2),
+    ("http/internal_auth_revocation.rs", "manager", 9),
+    ("http/internal_clock.rs", "membership", 2),
+    ("http/internal_clock.rs", "type", 2),
+    ("http/internal_clock.rs", "manager", 4),
     ("http/internal_live_tv.rs", "membership", 3),
     ("http/internal_live_tv.rs", "serving", 7),
+    ("http/internal_live_tv.rs", "manager", 3),
     ("http/internal_media.rs", "membership", 2),
+    ("http/internal_media.rs", "manager", 2),
     ("http/internal_media_sessions.rs", "membership", 2),
     ("http/internal_media_sessions.rs", "serving", 6),
     ("http/internal_media_sessions.rs", "type", 4),
+    ("http/internal_media_sessions.rs", "manager", 2),
     ("http/live_tv.rs", "membership", 1),
     ("http/live_tv.rs", "serving", 7),
     ("http/live_tv.rs", "type", 1),
     ("http/live_tv.rs", "transport", 1),
+    ("http/live_tv.rs", "manager", 1),
     ("http/mod.rs", "membership", 5),
     ("http/mod.rs", "replication", 1),
     ("http/mod.rs", "serving", 6),
     ("http/mod.rs", "type", 1),
     ("http/mod.rs", "role", 4),
+    ("http/mod.rs", "manager", 1),
     ("http/remote.rs", "membership", 7),
     ("http/remote.rs", "transport", 2),
     ("http/remote.rs", "role", 1),
     ("http/remote.rs", "roster", 2),
+    ("http/remote.rs", "manager", 2),
     ("http/remote/invitations/snapshots.rs", "membership", 2),
     ("http/remote/invitations/snapshots.rs", "transport", 1),
     ("http/remote/invitations/snapshots.rs", "roster", 1),
     ("http/shared_library.rs", "membership", 4),
     ("http/shared_library.rs", "role", 2),
+    ("http/shared_library.rs", "manager", 2),
     ("http/shared_receiver_forwarding.rs", "membership", 2),
-    ("http/shared_receiver_ingress_custody.rs", "membership", 3),
-    ("http/shared_receiver_ingress_custody.rs", "role", 2),
+    ("http/shared_receiver_forwarding.rs", "manager", 2),
+    ("http/shared_receiver_ingress_custody.rs", "membership", 2),
+    ("http/shared_receiver_ingress_custody.rs", "role", 1),
+    ("http/shared_receiver_ingress_custody.rs", "manager", 1),
     ("http/shared_source_forwarding.rs", "membership", 3),
     ("http/shared_source_forwarding.rs", "roster", 1),
+    ("http/shared_source_forwarding.rs", "manager", 2),
     ("http/shared_source_ingress.rs", "membership", 4),
     ("http/shared_source_ingress.rs", "serving", 1),
+    ("http/shared_source_ingress.rs", "manager", 4),
     ("http/shared_source_playback.rs", "membership", 3),
-    ("http/stream.rs", "serving", 1),
+    ("http/shared_source_playback.rs", "manager", 3),
+    ("http/stream.rs", "serving", 2),
     ("http/system.rs", "membership", 8),
-    ("http/system.rs", "replication", 2),
+    ("http/system.rs", "replication", 3),
     ("http/system.rs", "type", 2),
     ("http/system.rs", "hiqlite", 3),
     ("http/system.rs", "role", 3),
     ("http/system.rs", "roster", 1),
+    ("http/system.rs", "manager", 3),
     ("http/transcode_copies.rs", "membership", 2),
     ("http/transcode_copies.rs", "transport", 1),
     ("http/transcode_copies.rs", "role", 1),
     ("http/transcode_copies.rs", "roster", 1),
     ("job_lease.rs", "role", 1),
     ("library_search.rs", "role", 3),
-    ("live_tv.rs", "serving", 12),
+    ("live_tv.rs", "serving", 13),
     ("live_tv/dvr.rs", "serving", 12),
     ("live_tv/resource.rs", "serving", 3),
-    ("main.rs", "membership", 15),
-    ("main.rs", "replication", 1),
+    ("main.rs", "membership", 18),
+    ("main.rs", "replication", 4),
     ("main.rs", "serving", 7),
     ("main.rs", "type", 5),
     ("main.rs", "hiqlite", 2),
+    ("main.rs", "manager", 7),
     ("media_pool.rs", "serving", 3),
-    ("media_pool.rs", "type", 3),
+    ("media_pool.rs", "type", 2),
     ("media_pool.rs", "transport", 1),
     ("media_sessions.rs", "membership", 2),
     ("media_sessions.rs", "type", 2),
     ("media_sessions.rs", "transport", 1),
-    ("offline.rs", "serving", 1),
+    ("media_sessions.rs", "manager", 2),
+    ("offline.rs", "serving", 2),
     ("offline.rs", "type", 2),
     ("offline.rs", "role", 1),
+    ("pgs_overlay.rs", "manager", 1),
     ("settings_changes.rs", "type", 1),
     ("shared_cache.rs", "type", 2),
     ("shared_cache.rs", "transport", 1),
     ("sharing_connection_custody.rs", "membership", 2),
-    ("state.rs", "membership", 4),
+    ("sharing_connection_custody.rs", "manager", 2),
+    ("state.rs", "membership", 6),
+    ("state.rs", "replication", 2),
+    ("state.rs", "serving", 1),
     ("state.rs", "type", 8),
     ("state.rs", "hiqlite", 1),
     ("state.rs", "role", 10),
+    ("state.rs", "manager", 2),
     ("subtitle_models/mod.rs", "membership", 2),
     ("subtitle_models/mod.rs", "serving", 1),
     ("subtitle_models/mod.rs", "role", 1),
@@ -320,14 +457,18 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("subtitle_source.rs", "transport", 1),
     ("subtitle_source.rs", "roster", 1),
     ("subtitle_work.rs", "role", 1),
+    ("subtitles.rs", "manager", 2),
     ("trakt.rs", "role", 1),
     ("transcode.rs", "type", 1),
     ("transcode/manager/construct.rs", "type", 1),
     ("transcode/manager/control.rs", "type", 5),
     ("transcode/source_actor.rs", "membership", 6),
     ("transcode/source_actor.rs", "type", 1),
+    ("transcode/source_actor.rs", "manager", 5),
     ("transcode/source_actor/growing.rs", "membership", 2),
+    ("transcode/source_actor/growing.rs", "manager", 2),
     ("transcode/source_direct.rs", "membership", 3),
+    ("transcode/source_direct.rs", "manager", 2),
     ("vod/serve/construct.rs", "type", 3),
     ("vodserve.rs", "type", 1),
     ("waitpool.rs", "serving", 4),
@@ -335,25 +476,81 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 646;
+const CEILING: usize = 755;
 
 fn exempt(rel: &str) -> bool {
-    EXEMPT.iter().any(|(path, _)| {
-        if path.ends_with('/') {
-            rel.starts_with(path)
-        } else {
-            rel == *path
-        }
-    })
+    EXEMPT.iter().any(|(path, _)| rel == *path)
+}
+
+/// Whether a `cfg` predicate holds only under test: `test`, or an `all(..)`
+/// with `test` among its terms. `any(test, ..)` and `not(..)` also compile
+/// outside tests, so they are counted.
+fn cfg_is_test(meta: &syn::Meta) -> bool {
+    match meta {
+        syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::List(list) if list.path.is_ident("all") => list
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .is_ok_and(|terms| terms.iter().any(cfg_is_test)),
+        _ => false,
+    }
 }
 
 fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attribute| {
         attribute.path().is_ident("cfg")
             && attribute
-                .parse_args::<syn::Path>()
-                .is_ok_and(|path| path.is_ident("test"))
+                .parse_args::<syn::Meta>()
+                .is_ok_and(|meta| cfg_is_test(&meta))
     })
+}
+
+/// The outer attributes of an expression, for `#[cfg(test)]` on a statement
+/// or block.
+fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
+    match expr {
+        syn::Expr::Array(e) => &e.attrs,
+        syn::Expr::Assign(e) => &e.attrs,
+        syn::Expr::Async(e) => &e.attrs,
+        syn::Expr::Await(e) => &e.attrs,
+        syn::Expr::Binary(e) => &e.attrs,
+        syn::Expr::Block(e) => &e.attrs,
+        syn::Expr::Break(e) => &e.attrs,
+        syn::Expr::Call(e) => &e.attrs,
+        syn::Expr::Cast(e) => &e.attrs,
+        syn::Expr::Closure(e) => &e.attrs,
+        syn::Expr::Const(e) => &e.attrs,
+        syn::Expr::Continue(e) => &e.attrs,
+        syn::Expr::Field(e) => &e.attrs,
+        syn::Expr::ForLoop(e) => &e.attrs,
+        syn::Expr::Group(e) => &e.attrs,
+        syn::Expr::If(e) => &e.attrs,
+        syn::Expr::Index(e) => &e.attrs,
+        syn::Expr::Infer(e) => &e.attrs,
+        syn::Expr::Let(e) => &e.attrs,
+        syn::Expr::Lit(e) => &e.attrs,
+        syn::Expr::Loop(e) => &e.attrs,
+        syn::Expr::Macro(e) => &e.attrs,
+        syn::Expr::Match(e) => &e.attrs,
+        syn::Expr::MethodCall(e) => &e.attrs,
+        syn::Expr::Paren(e) => &e.attrs,
+        syn::Expr::Path(e) => &e.attrs,
+        syn::Expr::Range(e) => &e.attrs,
+        syn::Expr::RawAddr(e) => &e.attrs,
+        syn::Expr::Reference(e) => &e.attrs,
+        syn::Expr::Repeat(e) => &e.attrs,
+        syn::Expr::Return(e) => &e.attrs,
+        syn::Expr::Struct(e) => &e.attrs,
+        syn::Expr::Try(e) => &e.attrs,
+        syn::Expr::TryBlock(e) => &e.attrs,
+        syn::Expr::Tuple(e) => &e.attrs,
+        syn::Expr::Unary(e) => &e.attrs,
+        syn::Expr::Unsafe(e) => &e.attrs,
+        syn::Expr::While(e) => &e.attrs,
+        syn::Expr::Yield(e) => &e.attrs,
+        _ => &[],
+    }
 }
 
 #[derive(Default)]
@@ -416,7 +613,10 @@ impl Counter {
             match &tokens[at] {
                 TokenTree::Group(group) => self.scan_tokens(group.stream()),
                 TokenTree::Punct(punct) if punct.as_char() == '.' => {
-                    if let Some(TokenTree::Ident(name)) = tokens.get(at + 1) {
+                    // `..serving` is a range or a struct update, not a field.
+                    let rest = at > 0
+                        && matches!(&tokens[at - 1], TokenTree::Punct(prior) if prior.as_char() == '.');
+                    if let (false, Some(TokenTree::Ident(name))) = (rest, tokens.get(at + 1)) {
                         let name = name.to_string();
                         let called = matches!(
                             tokens.get(at + 2),
@@ -531,8 +731,46 @@ impl<'ast> Visit<'ast> for Counter {
     }
 
     fn visit_field_value(&mut self, field: &'ast syn::FieldValue) {
-        if !is_cfg_test(&field.attrs) {
-            syn::visit::visit_field_value(self, field);
+        if is_cfg_test(&field.attrs) {
+            return;
+        }
+        // `Foo { membership }`: the shorthand moves the handle by name.
+        if let (None, syn::Member::Named(name)) = (&field.colon_token, &field.member) {
+            if let Some(class) = Class::field(&name.to_string()) {
+                self.add(class);
+            }
+        }
+        syn::visit::visit_field_value(self, field);
+    }
+
+    /// `let AppState { membership, .. } = state;` takes the handle out by
+    /// name, and whatever is then called on it would count nothing.
+    fn visit_field_pat(&mut self, field: &'ast syn::FieldPat) {
+        if is_cfg_test(&field.attrs) {
+            return;
+        }
+        if let syn::Member::Named(name) = &field.member {
+            if let Some(class) = Class::field(&name.to_string()) {
+                self.add(class);
+            }
+        }
+        syn::visit::visit_field_pat(self, field);
+    }
+
+    fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+        let skip = match stmt {
+            syn::Stmt::Expr(expr, _) => is_cfg_test(expr_attrs(expr)),
+            syn::Stmt::Macro(mac) => is_cfg_test(&mac.attrs),
+            _ => false,
+        };
+        if !skip {
+            syn::visit::visit_stmt(self, stmt);
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+        if !is_cfg_test(expr_attrs(expr)) {
+            syn::visit::visit_expr(self, expr);
         }
     }
 
@@ -706,7 +944,7 @@ fn every_exemption_names_a_real_path_and_a_reason() {
     for (path, reason) in EXEMPT {
         assert!(!reason.is_empty(), "{path}: an exemption states its reason");
         assert!(
-            root.join(path.trim_end_matches('/')).exists(),
+            root.join(path).is_file(),
             "{path}: an exemption names a path that exists"
         );
     }
@@ -754,6 +992,27 @@ fn a_new_reach_around_fails_naming_its_file_and_class() {
             &[Class::Type],
         ),
         ("a hiqlite path", "fn f() -> hiqlite::Error { todo!() }", &[Class::Hiqlite]),
+        (
+            "a destructured handle",
+            "async fn f(state: &AppState) { let AppState { membership, .. } = state; \
+             let _ = membership.issue_token(d).await; }",
+            &[Class::Membership, Class::Manager],
+        ),
+        (
+            "a shorthand field",
+            "fn f(serving: Fence) -> S { S { serving } }",
+            &[Class::Serving],
+        ),
+        (
+            "a manager method on a renamed field",
+            "async fn f(&self) { let _ = self.cluster_handle.promote_learner(id).await; }",
+            &[Class::Manager],
+        ),
+        (
+            "a test-and-something cfg is still production when any",
+            "#[cfg(any(test, unix))] fn f(s: &S) { let _ = s.replication; }",
+            &[Class::Replication],
+        ),
     ];
     let real = pinned();
     for (name, source, classes) in cases {
@@ -795,4 +1054,54 @@ fn test_only_items_are_not_counted() {
     assert_eq!(counted.get(&Class::Membership), None);
     assert_eq!(counted.get(&Class::Serving), None);
     assert_eq!(counted.get(&Class::Roster), None);
+}
+
+#[test]
+fn test_only_conjunctions_statements_and_blocks_are_not_counted() {
+    let source = "#[cfg(all(test, unix))] fn f(s: &S) { let _ = s.membership; }\n\
+                  fn g(s: &S) {\n\
+                      #[cfg(test)]\n\
+                      s.serving.reset();\n\
+                      #[cfg(test)]\n\
+                      { let _ = s.membership.media_peers(); }\n\
+                      #[cfg(test)]\n\
+                      tracing::debug!(\"{:?}\", s.replication);\n\
+                  }";
+    assert_eq!(census_of(source), BTreeMap::new());
+}
+
+#[test]
+fn a_struct_update_in_a_macro_is_not_a_field() {
+    let counted = census_of("fn f() -> Vec<S> { vec![S { a: 1, ..serving }] }");
+    assert_eq!(counted.get(&Class::Serving), None);
+    let counted = census_of("fn f() -> Vec<S> { vec![s.serving] }");
+    assert_eq!(counted.get(&Class::Serving), Some(&1));
+}
+
+/// The manager's public surface is read from plurx-core, so a new method is
+/// counted the day it lands; the hand lists name only real methods.
+#[test]
+fn every_named_method_is_a_real_manager_method() {
+    let all = manager_pub_fns();
+    assert!(
+        all.len() > 50,
+        "the manager's methods were not found: {all:?}"
+    );
+    for name in ROLE.iter().chain(ROSTER) {
+        assert!(
+            all.iter().any(|method| method == name),
+            "{name} is not a manager method"
+        );
+    }
+    for (name, reason) in NOT_CLUSTER {
+        assert!(!reason.is_empty(), "{name}: a skip states its reason");
+        assert!(
+            all.iter().any(|method| method == name),
+            "{name} is not a manager method"
+        );
+    }
+    assert!(manager_methods()
+        .iter()
+        .any(|method| method == "promote_learner"));
+    assert!(!manager_methods().iter().any(|method| method == "status"));
 }
