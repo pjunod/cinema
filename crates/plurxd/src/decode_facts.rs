@@ -537,8 +537,6 @@ enum ProbeLaunchMode {
     #[cfg(all(test, target_os = "linux"))]
     ProductionSupervisorDelay,
     #[cfg(all(test, target_os = "linux"))]
-    ProductionCompletionWorkerHeld,
-    #[cfg(all(test, target_os = "linux"))]
     ProductionSupervisorReceiveFailure,
     #[cfg(all(test, target_os = "linux"))]
     ProductionBootstrapInterrupted,
@@ -591,7 +589,6 @@ impl ProbeLaunchMode {
             | Self::ProductionPidfdOpenFailure
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
-            | Self::ProductionCompletionWorkerHeld
             | Self::ProductionSupervisorReceiveFailure
             | Self::ProductionBootstrapInterrupted
             | Self::ProductionBootstrapInterruptedUntilDeadline(_)
@@ -2405,21 +2402,6 @@ fn supervise_linux_probe_execs(
         LinuxNotificationInterruptionHooks::default(),
     )?;
 
-    #[cfg(test)]
-    if launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
-        COMPLETION_WORKER_STARTED.store(true, Ordering::Release);
-        let released = COMPLETION_WORKER_RELEASE
-            .0
-            .lock()
-            .expect("completion worker gate");
-        let (released, _) = COMPLETION_WORKER_RELEASE
-            .1
-            .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
-            .expect("completion worker release");
-        if !*released {
-            return Err(std::io::Error::other("completion test worker timed out"));
-        }
-    }
     while !stop.load(Ordering::Acquire) {
         let mut descriptor = libc::pollfd {
             fd: listener.as_raw_fd(),
@@ -2745,16 +2727,6 @@ static STEADY_RESPONSE_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
 static STEADY_RESPONSE_STOP_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(all(test, target_os = "linux"))]
-static COMPLETION_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
-#[cfg(all(test, target_os = "linux"))]
-static COMPLETION_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
-#[cfg(all(test, target_os = "linux"))]
-static COMPLETION_WORKER_RELEASE: std::sync::LazyLock<(
-    std::sync::Mutex<bool>,
-    std::sync::Condvar,
-)> = std::sync::LazyLock::new(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()));
-
 /// The detached reap of the steady-response deadline proof waits for one
 /// permit here, so the test can observe it still holding version ownership
 /// for as long as it likes — the slow reap it stands for is unbounded — and
@@ -2769,7 +2741,6 @@ static STEADY_RESPONSE_STOP_EXITS: std::sync::atomic::AtomicUsize =
 #[cfg(unix)]
 struct ProbeExecutionSupervisor {
     descriptors: Option<Arc<crate::producer_spawn::DescriptorManifest>>,
-    retirement: Option<crate::background_jobs::RawRetirement>,
     #[cfg(target_os = "linux")]
     linux: Option<LinuxProbeExecSupervisor>,
 }
@@ -2779,7 +2750,6 @@ impl ProbeExecutionSupervisor {
     fn none() -> Self {
         Self {
             descriptors: None,
-            retirement: None,
             #[cfg(target_os = "linux")]
             linux: None,
         }
@@ -2789,7 +2759,6 @@ impl ProbeExecutionSupervisor {
     fn linux(supervisor: LinuxProbeExecSupervisor) -> Self {
         Self {
             descriptors: None,
-            retirement: None,
             linux: Some(supervisor),
         }
     }
@@ -2799,16 +2768,6 @@ impl ProbeExecutionSupervisor {
         if let Some(supervisor) = self.linux.as_mut() {
             supervisor.parent_after_spawn();
         }
-    }
-
-    // Only call after the child/namespace exit route has reaped. A supervisor
-    // Drop or an exec error cannot assert that physical reader completion.
-    fn finish_joined(&mut self) -> Result<(), DecodeFactError> {
-        self.finish()?;
-        if let Some(retirement) = self.retirement.take() {
-            retirement.joined();
-        }
-        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), DecodeFactError> {
@@ -2857,11 +2816,8 @@ async fn spawn_configured_probe(
         // `configure_probe_execution` already registered the priority ahead
         // of its own exec-from-`pre_exec`; the launcher's second registration
         // lands after that closure and never runs.
-        let launch = |command: &mut tokio::process::Command| match &supervisor.retirement {
-            Some(retirement) => {
-                retirement.spawn(|| crate::process_control::spawn_job_owned(command, work))
-            }
-            None => crate::process_control::spawn_job_owned(command, work),
+        let launch = |command: &mut tokio::process::Command| {
+            crate::process_control::spawn_job_owned(command, work)
         };
         let spawned = match supervisor.descriptors.as_ref() {
             Some(descriptors) => {
@@ -3018,45 +2974,6 @@ impl LinuxExecveArguments {
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn configure_probe_execution(
-    command: &mut tokio::process::Command,
-    launch_mode: ProbeLaunchMode,
-    launch_deadline: std::time::Instant,
-    executable_fd: std::os::fd::RawFd,
-    source_fd: Option<std::os::fd::RawFd>,
-    arg0: &Path,
-    arguments: &[OsString],
-    class: crate::process_control::ChildClass,
-    stdio: crate::producer_spawn::StdioFacts,
-) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
-    #[cfg(target_os = "linux")]
-    let retirement = if source_fd.is_some() && launch_mode.is_production() {
-        crate::background_jobs::source_budget()
-            .map(|budget| budget.raw_retirement())
-            .transpose()
-            .map_err(DecodeFactError::SourceService)?
-            .flatten()
-    } else {
-        None
-    };
-    #[cfg(not(target_os = "linux"))]
-    let retirement = None;
-    let mut supervisor = configure_probe_execution_untracked(
-        command,
-        launch_mode,
-        launch_deadline,
-        executable_fd,
-        source_fd,
-        arg0,
-        arguments,
-        class,
-        stdio,
-    )?;
-    supervisor.retirement = retirement;
-    Ok(supervisor)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn configure_probe_execution_untracked(
     command: &mut tokio::process::Command,
     launch_mode: ProbeLaunchMode,
     launch_deadline: std::time::Instant,
@@ -3225,17 +3142,9 @@ async fn terminate_probe_session(
     // This potentially unbounded reap runs only inside an owned task. The
     // caller-facing deadline detaches that task while it retains every source
     // and admission guard needed for safe cleanup.
-    #[cfg(all(test, target_os = "linux"))]
-    if _launch_mode == ProbeLaunchMode::ProductionCompletionWorkerHeld {
-        COMPLETION_CLEANUP_STARTED.store(true, Ordering::Release);
-    }
     session.kill_once();
-    if wait_for_probe_reap(child, _launch_mode).await.is_ok() {
-        let _ = supervisor.finish_joined();
-    } else {
-        // An attempted wait is not a physical exit proof.
-        let _ = supervisor.finish();
-    }
+    let _ = wait_for_probe_reap(child, _launch_mode).await;
+    let _ = supervisor.finish();
 }
 
 #[cfg(unix)]
@@ -4038,11 +3947,7 @@ async fn probe_version_with_deadline_on(
                 return Err(DecodeFactError::Deadline);
             }
         };
-        let supervisor_result = if status.is_ok() && exit_error.is_none() {
-            supervisor.finish_joined()
-        } else {
-            supervisor.finish()
-        };
+        let supervisor_result = supervisor.finish();
         if let Some(error) = exit_error {
             return Err(error);
         }
@@ -4442,13 +4347,6 @@ impl DecodeFactCache {
         budget: Duration,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<(CollectedProbe, DecodeFactLookupResult), DecodeFactError> {
-        // Capture every held source Arc before identity/blocking/collector
-        // work can detach. The live owner holds the final original capability.
-        if let Some(owner) = &source.source_background {
-            owner
-                .register_source_file(Arc::clone(&source.handle))
-                .map_err(DecodeFactError::SourceService)?;
-        }
         let started = std::time::Instant::now();
         #[cfg(target_os = "linux")]
         let inherited_control = plurx_core::process::bounded::source_pause_controller();
@@ -5408,11 +5306,7 @@ async fn collect_refinement_output(
             return Err(DecodeFactError::Deadline);
         }
     };
-    let supervisor_result = if status.is_ok() && exit_error.is_none() {
-        supervisor.finish_joined()
-    } else {
-        supervisor.finish()
-    };
+    let supervisor_result = supervisor.finish();
     if let Some(error) = exit_error {
         return Err(error);
     }
@@ -5768,11 +5662,7 @@ async fn collect_platform(
             return Err(DecodeFactError::Deadline);
         }
     };
-    let supervisor_result = if status.is_ok() && exit_error.is_none() {
-        supervisor.finish_joined()
-    } else {
-        supervisor.finish()
-    };
+    let supervisor_result = supervisor.finish();
     if let Some(error) = exit_error {
         return Err(error);
     }

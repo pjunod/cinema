@@ -72,7 +72,6 @@ pub(super) async fn input(
     let allocator = Arc::new(UnlimitedBudget(AtomicU64::new(0)));
     let state = Arc::new(InputState {
         source: std::sync::Mutex::new(Some(source)),
-        _background_holder: None,
         custody: std::sync::Mutex::new(None),
         observer: None,
         purpose_budget: None,
@@ -151,7 +150,6 @@ async fn companion_read_window_tracks_selected_purpose_at_physical_read() {
     });
     let state = Arc::new(InputState {
         source: std::sync::Mutex::new(Some(source)),
-        _background_holder: None,
         custody: std::sync::Mutex::new(None),
         observer: None,
         purpose_budget: Some(budget.clone()),

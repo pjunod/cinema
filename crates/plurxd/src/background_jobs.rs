@@ -35,7 +35,7 @@ pub(crate) mod analysis_reconcile;
 #[path = "background_jobs/source.rs"]
 mod source;
 pub(crate) use source::{
-    budgeted, source_budget, RawRetirement, SourceHolder, SourcePacingClock, SourceReadBudget,
+    budgeted, source_budget, SourcePacingClock, SourceReadBudget,
 };
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
@@ -266,14 +266,11 @@ struct Inner {
     lost: CancellationToken,
     /// Historical acknowledged completion only; never artifact authority.
     copy_output_completed: AtomicBool,
-    /// Retained independently of the renewable/retired job token. Only an
-    /// explicit finish after physical join may settle this source custody.
+    /// Retained independently of the renewable/retired job token. `finish`
+    /// releases it; otherwise the store sweep does once its authority lapses.
     source_custody:
         Option<plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken>,
     source_budget: Arc<SourceReadBudget>,
-    /// Opened only by `finish` after retirement; authorizes the live
-    /// completion ledger. Drop never opens it.
-    settle: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -603,16 +600,13 @@ impl ActiveBackgroundJob {
             }
         }
         let lost = CancellationToken::new();
-        let settle = CancellationToken::new();
-        let source_budget = match &source_custody {
-            Some(receipt) => SourceReadBudget::with_completion(
-                Arc::clone(&store),
-                receipt,
-                lost.clone(),
-                settle.clone(),
-            ),
-            None => SourceReadBudget::new(Arc::clone(&store), owner, lost.clone()),
-        };
+        let source_budget = SourceReadBudget::new(
+            Arc::clone(&store),
+            source_custody
+                .as_ref()
+                .map_or(owner, |receipt| receipt.owner.clone()),
+            lost.clone(),
+        );
         let (deadline, _) = watch::channel(deadline);
         let fence = JobFence(Arc::new(Inner {
             kind,
@@ -628,7 +622,6 @@ impl ActiveBackgroundJob {
             copy_output_completed: AtomicBool::new(false),
             source_custody,
             source_budget,
-            settle,
         }));
         let stop = CancellationToken::new();
         let heartbeat_stop = stop.clone();
@@ -699,16 +692,10 @@ impl ActiveBackgroundJob {
             tracing::warn!(%error, "background retirement remains ambiguous");
         }
         if let Some(custody) = self.fence.0.source_custody.clone() {
-            // `lost` is cancelled above, so enrollment is closed. An enrolled
-            // producer's File clones, InputState holders and declared raw
-            // children may outlive this call (a planning error can return while
-            // a blocking read still runs); only the ledger may publish the
-            // joined proof, after they physically retire.
-            if self.fence.0.source_budget.completion_owns_settlement() {
-                self.fence.0.settle.cancel();
-            } else {
-                settle_joined_source_custody(&self.fence.0.store, custody).await;
-            }
+            // Finish releases directly. A read that outlives this call (a
+            // planning error can return while a blocking read still runs)
+            // costs one extra concurrent reader, never correctness.
+            settle_joined_source_custody(&self.fence.0.store, custody).await;
         }
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
@@ -718,9 +705,9 @@ impl Drop for ActiveBackgroundJob {
     fn drop(&mut self) {
         self.fence.0.lost.cancel();
         self.stop.cancel();
-        // Do not release a durable reservation here: a dropped caller is not
-        // proof that its child exited. Physical custody survives expiry until
-        // explicit join+finish. Dropping JoinHandle does not abort writes.
+        // A dropped job does not release its source custody here; the store
+        // sweep releases it once its authority lapses. Dropping JoinHandle
+        // does not abort writes.
     }
 }
 
