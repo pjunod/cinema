@@ -2,7 +2,7 @@
 
 **Status:** open — build contract for audit items **B1** and **B2** of
 [CLUSTER-LAYER-AUDIT-2026-11-14.md](CLUSTER-LAYER-AUDIT-2026-11-14.md) §7.
-Slice 1 is being built; slices 2–7 follow the open PRs named in §8.
+Slice 1 is built (§10.1); slices 2–7 follow the open PRs named in §8.
 **Verified against:** `main @ dd76bb88e`, from source only — nothing was
 compiled or run. Every `file:line` below is **re-verify at build time**.
 **Author:** Claude (Fable 5.2), session `01BCWLA3JD1HCNMEid3AZrc3`.
@@ -339,3 +339,60 @@ private, and the census is a ban with an empty table.
 | Date | Milestone | Agent-Model | Agent-Session | Result |
 |---|---|---|---|---|
 | 2026-11-15 | Design | claude-fable-5-2 | session_01BCWLA3JD1HCNMEid3AZrc3 | this document |
+| 2026-11-15 | M1–M5 | claude-opus-5-5 | session_01BCWLA3JD1HCNMEid3AZrc3 | slice 1 built; compiled and tested on media1; deviations below |
+
+### 10.1 Slice 1 as built
+
+**Census (M1).** The first `syn` run at `dd76bb88e` counted **710** sites in
+71 files. The six classes of §4.1 sum to exactly the estimated 580
+(`.membership` 302 in 44 files, `.serving` 131 in 24, `.replication` 13 in
+5, type names 94 in 28, other `hiqlite::` 21 in 5, `PeerTransport::new` 19
+in 17); the role and roster method classes of §2 add 78 (30 files) and 52
+(27 files). After M4 `CEILING` is **660** (−50): `ltv.rs` roster 7→0,
+membership 17→8, role 9→7; `media_pool.rs` roster 7→0, membership 12→1,
+role 5→1; `shared_cache.rs` roster 2→0, membership 3→0, role 1→0, type
+3→2; `media_sessions.rs` roster 1→0, membership 3→2, type 3→2.
+
+**Deviations, each the smallest change that fits.**
+
+- The cache lives in plurx-core, `directory.rs`'s `PeerDirectory`, and
+  plurxd's `cluster::Directory` wraps it. The invalidation test needs a real
+  replicated node, and the in-process fixtures that build one are in
+  plurx-core. `mem.rs` still gains one line.
+- `Cluster` holds the fence, the manager and the directory; no
+  `replication` field and no `Purpose::Operations` yet, because nothing in
+  slice 1 reads them (dead code fails Clippy). `RosterSnapshot::operations`
+  exists and is tested against `operations_peers`.
+- `Admission` ranks `Maintenance` above `Fenced`, so
+  `admission == Maintenance` is exactly `local_maintenance_active()`; the
+  three media-pool maintenance checks moved to it.
+- `state.rs` and `main.rs` are counted and pinned, not exempt: a whole-file
+  exemption would hide every non-wiring use in a 13,700-line file. Slice 7
+  can exempt the constructors item by item.
+- M3's test runs on one real voter that admits one real learner, not three
+  voters, and the learner's admission is the Raft membership change in
+  place of a promotion (both move only the membership log; a promotion
+  needs the whole promotion protocol). Reachability is wall-clock
+  (`SystemTime`), not tokio time, so the 31 s step is an explicit `now`
+  on the same snapshot instead of a paused clock. The removal fence is
+  written as the coordinator writes it (attempt, intent, fence in one
+  transaction); a bare insert is refused by its trigger.
+- Subsystems that keep a manager clone (`MediaPool`, `SharedCacheCoordinator`,
+  `MediaSessionCoordinator`) take a `Directory` handle at construction, so
+  the process has one cache; test constructors build their own.
+  `SharedCacheCoordinator` and `MediaSessionCoordinator` no longer keep the
+  manager, only the transport made from it.
+- The Live TV sites are two helpers (`voters`, `voter(node_id)`) and three
+  pure selectors, each pinned against a copy of the inline filter it
+  replaced; `ltv.rs:1852` swaps only the read behind F3's memory.
+- Size: about 3,000 changed lines without the baseline table, against
+  §6's 1,400; about 1,500 of them are tests (the old-producer copies, the
+  replicated invalidation fixture, the census and its controls). The
+  caller migration itself is about 500.
+
+**Plan claims found false at build time.** M4's "delete what they
+replaced": the producers `activity_peers`, `media_peers` and
+`activity_voter_count` keep callers outside slice 1 and stay; what M4
+deletes is the callers' own filters and the hand-built predicate. The
+audit's `shared_cache.rs:395-421` is `:540-562` at `dd76bb88e` (this
+document had it right). Every other `file:line` in §2–§4 held.

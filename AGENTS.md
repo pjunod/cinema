@@ -182,6 +182,19 @@ shape for an agent here — use the source-only loop in
   ([docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md](docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md));
   `scripts/voter-isolation-check` shows whether a voter is isolated.
 
+## Cluster questions go through `state.cluster`
+
+Feature code asks the cluster through the facade in
+`crates/plurxd/src/cluster.rs` — may this node serve, what is its role, which
+peers can help — not through `state.membership`, `state.replication`,
+`state.serving`, a cloned `MembershipManager`, raw Raft metrics, `hiqlite::`
+or a new `PeerTransport::new`. `cluster::census` pins each production file's
+remaining reach-arounds by class and fails a new one; a change that removes
+one lowers its pin and `CEILING` in the same commit, and
+`tests/operations/test_cluster_facade_ratchet.py` refuses a `CEILING` above
+the merge base's. The plan and the slice order are in
+[CLUSTER-FACADE-BUILD.md](docs/cluster/CLUSTER-FACADE-BUILD.md).
+
 ## Large efforts
 
 - Integrate a multi-task project on one temporary `effort/<project>` branch.
