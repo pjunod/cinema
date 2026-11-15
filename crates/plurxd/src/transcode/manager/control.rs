@@ -1218,6 +1218,31 @@ impl TranscodeManager {
         Some(Arc::new(control) as Arc<dyn crate::playback_control::PreparationGate>)
     }
 
+    /// [`crate::vodserve::VodServe::claim_incumbent_permit`] under this node's
+    /// current pool limits. The claim's reserve composes existing contracts:
+    /// a trial's own budget plus the admission queue wait.
+    pub(crate) async fn claim_incumbent_permit(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        wanted: crate::admission::TranscodeResourceEstimate,
+    ) -> Option<crate::vodserve::IncumbentPermitClaim> {
+        let reserve = crate::transcode::PROCESSED_UPGRADE_TRIAL_BUDGET + crate::admission::QUEUE_WAIT;
+        let reserve_ms = i64::try_from(reserve.as_millis()).unwrap_or(i64::MAX);
+        let hardware_limit = self.max_hw_sessions().await;
+        let software_budget = self.software_budget().await;
+        self.vod
+            .claim_incumbent_permit(
+                session_id,
+                incarnation,
+                wanted,
+                hardware_limit,
+                software_budget,
+                reserve_ms,
+            )
+            .await
+    }
+
     /// Where the viewer of `session_id` is now on the source timeline: its
     /// latest accepted control demand advanced by that observation's age,
     /// the playhead estimate the producers read
