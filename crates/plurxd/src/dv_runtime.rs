@@ -1052,6 +1052,7 @@ impl RuntimeRecipe {
         registration_hook: Option<RegistrationHook>,
         source_input: crate::source_input::SourceInput,
         absolute_deadline: Option<tokio::time::Instant>,
+        source_open: Option<std::time::Duration>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1076,6 +1077,7 @@ impl RuntimeRecipe {
                 absolute_deadline,
                 self.display_target,
                 Arc::clone(&source_input),
+                source_open,
             )
             .await;
         // Early validation/spawn failures and every terminal graph result use
@@ -1134,6 +1136,7 @@ impl RuntimeRecipe {
                 absolute_deadline,
                 display_target,
                 Arc::clone(&source_input),
+                None,
             )
             .await;
         source_input
@@ -1159,6 +1162,7 @@ impl RuntimeRecipe {
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
         source_input: Arc<crate::dv_segment::SourceInputLease>,
+        source_open: Option<std::time::Duration>,
     ) -> Result<
         WindowOutcome<(
             VerifiedWindow,
@@ -1184,6 +1188,7 @@ impl RuntimeRecipe {
             None => None,
         };
         let cancellation = cancel.clone();
+        let stages = crate::dv_segment::WindowStageClock::start();
         let result: Result<_, String> = async {
             let mut stage_started = std::time::Instant::now();
             use plurx_core::transcode::dv_processing::{
@@ -1251,6 +1256,7 @@ impl RuntimeRecipe {
                 "processed window encoder recipe");
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
             let deadline = absolute_deadline.map_or(deadline, |absolute| deadline.min(absolute));
+            stages.deadline(deadline);
             let mut renderer_env = self.tools.renderer_env.clone();
             renderer_env.extend([
                 (
@@ -1296,11 +1302,13 @@ impl RuntimeRecipe {
                 },
                 renderer_deadline: deadline,
                 window: Some(window),
+                stages: Arc::clone(&stages),
             };
             let private = match run_private_window(request, registration_hook).await? {
                 WindowOutcome::Completed(private) => private,
                 WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
             };
+            stages.mark(crate::dv_segment::WindowStage::Captured);
             trace_window_stage(entry.index, "render_and_encode", &mut stage_started);
             // Both children are reaped. Start an optional inventory while all
             // existing private-window checks run; none of these bytes can be
@@ -1498,9 +1506,22 @@ impl RuntimeRecipe {
                 verification,
             );
             trace_window_stage(entry.index, "inventory_join", &mut stage_started);
+            if matches!(verified, Ok(WindowOutcome::Completed(_))) {
+                stages.mark(crate::dv_segment::WindowStage::Verified);
+            }
             verified
         }
         .await;
+        // One INFO line per window, on every outcome: where its time went.
+        let (outcome, cause) = match &result {
+            _ if cancellation.is_cancelled() => ("cancelled", None),
+            Ok(WindowOutcome::Completed(_)) => ("completed", None),
+            Ok(WindowOutcome::Cancelled) => ("cancelled", None),
+            Err(cause) => ("failed", Some(cause.as_str())),
+        };
+        stages
+            .report(source_open)
+            .log(entry.index, self.mode, outcome, cause);
         // Return observations to the owner. Only its current generation or
         // admitted preparation can make a backend failure episode-wide.
         if cancellation.is_cancelled() {
@@ -1525,6 +1546,7 @@ async fn run_private_window(
     let _cancel_on_drop = cancel.clone().drop_guard();
     request.request.cancel = cancel.clone();
     let deadline = request.renderer_deadline;
+    let stages = Arc::clone(&request.stages);
     let display_target = request.display_target;
     let master_metadata = request.master_metadata;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
@@ -1540,7 +1562,7 @@ async fn run_private_window(
         if let Some(registered) = registration_hook {
             registered(&registration);
         }
-        match capture_private_output(
+        let captured = capture_private_output(
             &slot,
             &registration,
             writers,
@@ -1549,9 +1571,12 @@ async fn run_private_window(
             helper,
             &cancel,
             deadline,
+            &stages,
         )
-        .await?
-        {
+        .await;
+        // Both children are reaped here, so the helper's rows are final.
+        stages.helper_reported(evidence.helper_stages());
+        match captured? {
             WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
                 encoded,
                 evidence,
@@ -1579,6 +1604,7 @@ async fn capture_private_output(
     helper: crate::dv_segment::HelperCompletion,
     cancel: &tokio_util::sync::CancellationToken,
     deadline: tokio::time::Instant,
+    stages: &crate::dv_segment::WindowStageClock,
 ) -> Result<WindowOutcome<Vec<u8>>, String> {
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -1615,7 +1641,9 @@ async fn capture_private_output(
                 Ok(text)
             };
             let completed_helper = async {
-                match helper.wait().await {
+                let outcome = helper.wait().await;
+                stages.mark(crate::dv_segment::WindowStage::HelperExited);
+                match outcome {
                     crate::dv_segment::HelperOutcome::Completed => Ok(()),
                     crate::dv_segment::HelperOutcome::Cancelled => {
                         Err("DV helper cancelled".into())
@@ -1630,6 +1658,7 @@ async fn capture_private_output(
                         .await
                         .map_err(|e| e.to_string())?
                     {
+                        stages.mark(crate::dv_segment::WindowStage::EncoderExited);
                         return Ok(status);
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2627,6 +2656,25 @@ mod private_window_outcome_tests {
         timeout: bool,
         caller_cancel: bool,
     ) -> Result<super::WindowOutcome<Vec<u8>>, String> {
+        capture_timed_graph(
+            &crate::dv_segment::WindowStageClock::start(),
+            encoder_fails,
+            helper_fails,
+            externally_retire,
+            timeout,
+            caller_cancel,
+        )
+        .await
+    }
+
+    async fn capture_timed_graph(
+        stages: &crate::dv_segment::WindowStageClock,
+        encoder_fails: bool,
+        helper_fails: bool,
+        externally_retire: bool,
+        timeout: bool,
+        caller_cancel: bool,
+    ) -> Result<super::WindowOutcome<Vec<u8>>, String> {
         use std::process::Stdio;
         use tokio_util::sync::CancellationToken;
         let slot = std::sync::Arc::new(crate::prodrun::ProducerSlot::new());
@@ -2710,6 +2758,7 @@ mod private_window_outcome_tests {
             completion,
             &cancel,
             deadline,
+            stages,
         )
         .await;
         if let Some(close) = close {
@@ -2748,6 +2797,36 @@ mod private_window_outcome_tests {
             .await
             .expect_err("failed encoder graph");
         assert!(error.starts_with("DV encoder failed:"), "{error}");
+    }
+
+    /// The capture marks helper and encoder exit on the window's clock as it
+    /// observes them, and a window stopped at its deadline marks neither, so
+    /// its timing line shows which child was still running.
+    #[tokio::test]
+    async fn capture_marks_helper_and_encoder_exit_on_the_window_clock() {
+        use crate::dv_segment::{WindowStage, WindowStageClock};
+        let stages = WindowStageClock::start();
+        let error = capture_timed_graph(&stages, true, false, false, false, false)
+            .await
+            .expect_err("failed encoder graph");
+        assert!(error.starts_with("DV encoder failed:"), "{error}");
+        assert!(stages.at(WindowStage::EncoderExited).is_some());
+        assert!(stages.at(WindowStage::HelperExited).is_some());
+        assert!(stages.report(None).encoder_tail.is_some());
+
+        let stages = WindowStageClock::start();
+        capture_timed_graph(&stages, false, true, false, false, false)
+            .await
+            .expect_err("failed helper graph");
+        assert!(stages.at(WindowStage::HelperExited).is_some());
+
+        let stages = WindowStageClock::start();
+        let error = capture_timed_graph(&stages, false, false, false, true, false)
+            .await
+            .expect_err("bounded graph");
+        assert_eq!(error, "DV private window deadline expired");
+        assert_eq!(stages.at(WindowStage::HelperExited), None);
+        assert_eq!(stages.at(WindowStage::EncoderExited), None);
     }
 
     #[tokio::test]

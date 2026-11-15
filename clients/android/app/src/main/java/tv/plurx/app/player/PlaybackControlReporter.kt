@@ -717,6 +717,8 @@ data class ControlAction(
      * and the commit boundary is expressed in film time.
      */
     @SerialName("media_origin_ms") val mediaOriginMs: Long? = null,
+    /** The successor's own reporting endpoint; older servers may omit it. */
+    val control: ControlBootstrap? = null,
     /** `prepare` only: what the successor will deliver, not what was asked. */
     @SerialName("effective_selection") val effectiveSelection: EffectiveSelection? = null,
     /**
