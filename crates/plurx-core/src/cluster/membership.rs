@@ -1178,6 +1178,9 @@ pub enum ShutdownHandoff {
     TimedOut,
     /// Reading status, triggering the election or confirming it failed.
     Failed,
+    /// This node's Raft core had already stopped (a fatal storage error),
+    /// so nothing could move; its last metrics may still name it leader.
+    CoreStopped,
 }
 
 impl ShutdownHandoff {
@@ -1192,6 +1195,7 @@ impl ShutdownHandoff {
             Self::NoCandidate => "no_candidate",
             Self::TimedOut => "timed_out",
             Self::Failed => "failed",
+            Self::CoreStopped => "core_stopped",
         }
     }
 
@@ -1205,10 +1209,13 @@ impl ShutdownHandoff {
     }
 
     /// Whether the stop left leadership where it should be. Only the last
-    /// three outcomes mean the survivors elect on their own timers.
+    /// four outcomes mean the survivors elect on their own timers.
     #[must_use]
     pub const fn settled(self) -> bool {
-        !matches!(self, Self::NoCandidate | Self::TimedOut | Self::Failed)
+        !matches!(
+            self,
+            Self::NoCandidate | Self::TimedOut | Self::Failed | Self::CoreStopped
+        )
     }
 }
 
@@ -8764,6 +8771,12 @@ impl MembershipManager {
             Ok(metrics) => metrics,
             Err(error) => return (ShutdownHandoff::Failed, Some(error.into())),
         };
+        // A dead core's last metrics can still name this node leader, and no
+        // handoff can run through it: return at once instead of spending the
+        // bound on a core that will never answer.
+        if metrics.running_state.is_err() {
+            return (ShutdownHandoff::CoreStopped, None);
+        }
         if metrics.current_leader != Some(inner.identity.raft_id) {
             return (ShutdownHandoff::NotLeader, None);
         }

@@ -678,6 +678,32 @@ async fn dead_raft_core() {
         .await
         .expect("every observer sees the same terminal state");
     assert_eq!(again, error);
+
+    // The dead core's last metrics still name this node leader; the stop's
+    // handoff must see the dead core first and return at once.
+    let last = selected
+        .local_client()
+        .expect("local voter client")
+        .metrics_db()
+        .await
+        .expect("a dead core's last metrics");
+    assert!(last.running_state.is_err(), "the core is dead");
+    assert_eq!(
+        last.current_leader,
+        Some(last.id),
+        "and still names itself leader"
+    );
+    let started = Instant::now();
+    assert_eq!(
+        selected.membership_manager().handoff_for_shutdown().await,
+        crate::cluster::membership::ShutdownHandoff::CoreStopped,
+        "a dead core cannot hand leadership off"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "a dead core's stop must not wait: {:?}",
+        started.elapsed()
+    );
     std::fs::remove_file(&snapshots).expect("unblock the snapshots path");
     std::fs::rename(&parked, &snapshots).expect("restore the snapshots directory");
     let _ = tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await;
