@@ -329,16 +329,36 @@ Update: `sharing_source_bound_invocation_projects_the_complete_start_response`
 (`tests.rs:996`) if its fixture is HDR.
 Risk: see §5 Q1 — confirm on one Apple TV before and after.
 
-**T2.3 — Remove the dead client guards and the stale copy.**
-Files: the five client lines in §1.4, the message at
-`web/core/shared-decision.js:23,90-92`, docs
-(`IMPLEMENTATION.md:6304-6317`, `OPERATIONS.md:179-180`,
-`SHARED-LIBRARIES-STATUS.md:22`, `HANDOFF.md:231`).
-Tests: update `clients/apple/Tests/SharedDecisionClientTests.swift` (case 4,
-`:308`), `SharedPlaybackControlTests.swift:307`,
-`SharedDecisionClientTest.kt:286`. Client edits are code, so they need the
-build bumps and go out through TestFlight / Play internal; nothing in M1–M2
-waits on them.
+**T2.3 — Shared clients ask for Dolby Vision as local does; remove the stale copy.**
+*(Corrected 2026-11-15: the guards are not dead — §6.1.)* The planner clamps
+the derived plan down to the ask, and no shared client sends
+`preserve_dolby_vision: true`, so without this task no device gets Dolby
+Vision over sharing.
+Files: Apple `SharedPlaybackModels.swift` (`SharedPlaybackPlan.make` sends
+`preserveDolbyVision` for a copy from the decision's verdict, the rule of
+`PlayerController.shouldPreserveDolbyVision`; the init guard goes),
+`SharedDecisionClient.swift` and `SharedPlaybackControl.swift` (guards go);
+Android `SharedPlaybackSession.kt` (`sharedPlaybackPlan` sends
+`preserve_dolby_vision` for a copy from `delivery.preserve_dolby_vision ?:
+preserve_dolby_vision`, as `PlayerScreen` / `hlsSessionRequest` do),
+`SharedDecisionClient.kt`, `SharedPlaybackModels.kt` (guards go); web
+`core/shared-decision.js` (guard and `dolbyVisionUnsupported` go; the
+refusal message for an older or Profile 5 Source stays, reworded) and
+`player/decode-tiers.js` (`choosePlayRoute`'s Dolby Vision refusal goes;
+the copy open already sends local's ask). There is no convert field on any
+client: the server's conversion follows the preservation
+(`review.convert_dolby_vision &= review.preserve_dolby_vision`). Docs:
+`IMPLEMENTATION.md` §"Dolby Vision follows the local plan",
+`OPERATIONS.md`, `SHARED-LIBRARIES-STATUS.md`, `HANDOFF.md`.
+Tests: `SharedDecisionClientTests.swift`
+(`testInitialStartSendsTheDolbyVisionPreservationAsk`, case 4 removed),
+`SharedPlaybackControlTests.swift`
+(`testSharedBurnAndHDRPlanUseSourceOwnedStartFields` asserts the ask),
+`SharedDecisionClientTest.kt`
+(`dolbyVisionCapableSharedStartAsksToPreserveExactlyAsLocalDoes`),
+`tests/web/shared-decision.test.js`, `tests/web/file-context.test.js`.
+Client edits are code: Apple build and Android `versionCode` bumped; they go
+out through TestFlight / Play internal.
 
 ### M3 — Profile 5 encodes: the Source owns the pixel proof
 
