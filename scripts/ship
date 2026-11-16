@@ -183,7 +183,9 @@ if [ $((DO_APPLE + DO_ANDROID)) -gt 0 ]; then
       note "uncommitted changes are not shipped: the build is of $(git -C "$ROOT" rev-parse --short HEAD)"
     fi
     STAMP_ARGS=(checkout --repo "$ROOT" --commit HEAD --fetch)
-    [ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store)
+    # A TestFlight upload is a store upload: main only, and above the last
+    # build the forge records for iOS and tvOS.
+    [ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store ios tvos)
     MOBILE_REPO="$(PYTHONPATH="$ROOT" python3 -m validation.mobile_build "${STAMP_ARGS[@]}")" \
       || die "could not prepare a stamped release checkout (see above)"
     note "release checkout: $MOBILE_REPO"
@@ -203,6 +205,14 @@ if [ $((DO_APPLE + DO_ANDROID)) -gt 0 ]; then
   note "controller inventory: $ANSIBLE_INVENTORY"
   note "targets: $MOBILE_TAGS"
   run "${MOBILE_ARGS[@]}"
+  if [ "$DRY" -eq 0 ] && [ "$DO_APPLE" -eq 1 ] \
+      && ! { [ -n "$MOBILE_VARS_FILE" ] && grep -Eq '^plurx_apple_upload:[[:space:]]*false' "$MOBILE_VARS_FILE"; }; then
+    # The upload succeeded: move the forge's publication refs, so the next
+    # release, from any host, starts above this build.
+    PYTHONPATH="$ROOT" python3 -m validation.mobile_build record "$MOBILE_REPO" --repo "$ROOT" --platforms ios tvos >/dev/null \
+      || die "uploaded, but the publication was not recorded in the forge (see above)"
+    note "recorded the TestFlight build in the forge"
+  fi
 fi
 
 # --- the status probe ------------------------------------------------------

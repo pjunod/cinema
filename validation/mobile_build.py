@@ -34,10 +34,17 @@ working tree in a container, passes the same number as `-PplurxBuildNumber`.
 A path that builds anything else builds development build 1, and every
 upload and install step refuses that (`require_stamped`).
 
-The release job also keeps a ledger of what it published, per platform
-(`record_published`), and refuses a number at or below the last one
-(`require_above_published`): a rewritten `main` would otherwise be uploaded
-under a number the store already holds.
+Every store upload records itself in the forge (`record_published`): the ref
+`refs/cinema-published/<platform>` is moved to the `main` commit that was
+published. `require_above_published` reads those refs before any build and
+refuses a number at or below the one they hold, so a rewritten `main` cannot
+be uploaded under a number the store already has, and the floor survives a
+new controller or a wiped state directory. The controller's own ledger file
+is kept as a second, local record of the stamp commit and the time.
+
+A stamp commit says what it may be used for (`Build-Scope: store` or
+`devices`); only a commit on `main` gets the store scope, and the Ansible
+upload task requires it.
 """
 
 from __future__ import annotations
@@ -67,6 +74,8 @@ GOOGLE_PLAY_CEILING = 2_100_000_000
 MAIN = "origin/main"
 PIN = "pinned-source.git"
 LEDGER = "cinema-published-builds.jsonl"
+PUBLISHED_REFS = "refs/cinema-published"
+SCOPE_TRAILER = "Build-Scope"
 # Which hand-claimed floor each release platform inherits.
 PLATFORM_FLOOR = {"ios": "apple", "tvos": "apple", "android": "android"}
 
@@ -215,7 +224,7 @@ def stamp_manifests(android: str, apple: str, build: int) -> tuple[str, str]:
     return put(_ANDROID_LINE, android, ANDROID), put(_APPLE_LINE, apple, APPLE)
 
 
-def stamp_commit(repo: Path, commit: str, build: int) -> str:
+def stamp_commit(repo: Path, commit: str, build: int, scope: str = "devices") -> str:
     """A child of `commit` in `repo` whose manifests carry `build`.
 
     Written with plumbing, so `repo` may be bare and no checkout is touched.
@@ -242,12 +251,15 @@ def stamp_commit(repo: Path, commit: str, build: int) -> str:
         repo, "commit-tree", tree, "-p", commit, "-m",
         f"release stamp: build {build} of {commit}\n\n"
         "Written by validation/mobile_build.py for the signing controller.\n"
-        "Never pushed: the build number is assigned at release, not in the tree.",
+        "Never pushed: the build number is assigned at release, not in the tree.\n\n"
+        f"{SCOPE_TRAILER}: {scope}",
         env={**_STAMP_IDENTITY, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when},
     )
 
 
-def release_source(source: Path, state: Path, commit: str, build: int) -> tuple[Path, str]:
+def release_source(
+    source: Path, state: Path, commit: str, build: int, scope: str = "devices"
+) -> tuple[Path, str]:
     """A bare repository whose `main` is `commit` stamped as `build`.
 
     The one place a build tree comes from. The controller fetches
@@ -276,12 +288,24 @@ def release_source(source: Path, state: Path, commit: str, build: int) -> tuple[
         _git(pin, "update-ref", "-d", ref)
     _git(pin, "worktree", "prune")
     _git(pin, "config", "remote.origin.url", str(pin))
-    stamped = stamp_commit(pin, commit, build)
+    if scope == "store":
+        require_main(source, commit)
+    stamped = stamp_commit(pin, commit, build, scope)
     _git(pin, "update-ref", "refs/heads/main", stamped)
     return pin, stamped
 
 
-def release_checkout(source: Path, state: Path, commit: str) -> tuple[Path, int, str]:
+def build_scope(root: Path) -> str:
+    """What a stamped checkout may be used for: `store`, `devices`, or `` if unstamped."""
+
+    message = _git(root, "log", "-1", "--format=%B", check=False)
+    found = re.search(rf"(?m)^{SCOPE_TRAILER}: (store|devices)$", message)
+    return found.group(1) if found else ""
+
+
+def release_checkout(
+    source: Path, state: Path, commit: str, scope: str = "devices"
+) -> tuple[Path, int, str]:
     """A checkout of `commit` stamped with its build number, for a local build.
 
     Returns the checkout, the number and the stamp commit. The directory is
@@ -291,7 +315,7 @@ def release_checkout(source: Path, state: Path, commit: str) -> tuple[Path, int,
 
     commit = _git(source, "rev-parse", "--verify", f"{commit}^{{commit}}")
     build = build_number(source, commit)
-    pin, stamped = release_source(source, state, commit, build)
+    pin, stamped = release_source(source, state, commit, build, scope)
     checkout = state / "checkouts" / f"plurx-{stamped[:12]}"
     if not (checkout / ".git").exists():
         checkout.parent.mkdir(parents=True, exist_ok=True)
@@ -307,7 +331,7 @@ def release_checkout(source: Path, state: Path, commit: str) -> tuple[Path, int,
 
 
 def published(state: Path) -> dict[str, dict]:
-    """The highest build this controller published, per platform."""
+    """The highest build this controller's own ledger file records, per platform."""
 
     ledger = state / LEDGER
     latest: dict[str, dict] = {}
@@ -326,37 +350,79 @@ def published(state: Path) -> dict[str, dict]:
     return latest
 
 
-def require_above_published(state: Path, platforms: list[str], build: int) -> None:
-    """Refuse a number at or below the last one published for a platform.
+def forge_published(source: Path) -> dict[str, tuple[int, str]]:
+    """`(build, commit)` per platform, from the forge's publication refs.
 
-    The commit count only rises while `main` is never rewritten. This is the
-    record that holds when it is: a store rejects a number it has seen only
-    after the whole build and upload, and Play accepts a lower one silently
-    into a track nobody is offered.
+    The record every host shares: `refs/cinema-published/<platform>` on
+    `origin` names the commit last published for that platform, and its build
+    number is that commit's commit count. An unreachable forge is an error,
+    not an empty answer: publishing without the floor is what this prevents.
     """
 
-    latest = published(state)
+    _git(source, "fetch", "--quiet", "--prune", "origin",
+         f"+{PUBLISHED_REFS}/*:{PUBLISHED_REFS}/*")
+    found: dict[str, tuple[int, str]] = {}
+    listing = _git(source, "for-each-ref", "--format=%(refname) %(objectname)", PUBLISHED_REFS)
+    for line in listing.splitlines():
+        ref, commit = line.split()
+        found[ref.rsplit("/", 1)[1]] = (int(_git(source, "rev-list", "--count", commit)), commit)
+    return found
+
+
+def require_above_published(
+    source: Path, platforms: list[str], build: int, state: Path | None = None
+) -> None:
+    """Refuse a number at or below the last one published for a platform.
+
+    The commit count only rises while `main` is never rewritten. The forge's
+    publication refs are the record that holds when it is, on any host; the
+    hand-claimed floor covers the time before the first ref, and this
+    controller's ledger file, when it has one, is checked as well.
+    """
+
+    forge = forge_published(source)
+    local = published(state) if state is not None else {}
     for platform in platforms:
         floor = LAST_CLAIMED[PLATFORM_FLOOR[platform]]
-        source = "the last hand-claimed build"
-        if platform in latest:
-            floor, source = int(latest[platform]["build"]), (
-                f"published from {str(latest[platform].get('source_commit', '?'))[:12]} "
-                f"at {latest[platform].get('at', '?')}"
-            )
+        where = "the last hand-claimed build"
+        if platform in forge and forge[platform][0] > floor:
+            floor, where = forge[platform][0], f"published from {forge[platform][1][:12]}, per the forge"
+        if platform in local and int(local[platform]["build"]) > floor:
+            floor = int(local[platform]["build"])
+            where = (f"published from {str(local[platform].get('source_commit', '?'))[:12]} "
+                     f"at {local[platform].get('at', '?')}, per this controller's ledger")
         if build <= floor:
             raise MobileBuildError(
-                f"build {build} is not above {platform} build {floor} ({source}); "
+                f"build {build} is not above {platform} build {floor} ({where}); "
                 "the same or a lower number cannot be published again. If main was "
                 "rewritten, land a commit that raises its commit count past that build"
             )
 
 
 def record_published(
-    state: Path, platforms: list[str], build: int, source_commit: str, stamp_commit: str
+    source: Path, platforms: list[str], build: int, source_commit: str, stamp_commit: str,
+    state: Path | None = None,
 ) -> None:
-    """Append what was just published: number, source commit and stamp commit."""
+    """Record a publication in the forge, and in this controller's ledger file.
 
+    Moves `refs/cinema-published/<platform>` on `origin` to the source commit.
+    A failure here is raised: the build is already in the store, and the next
+    release must not start from a floor that does not know it.
+    """
+
+    refspecs = [f"{source_commit}:{PUBLISHED_REFS}/{platform}" for platform in platforms]
+    try:
+        _git(source, "push", "--quiet", "--force", "origin", *refspecs)
+    except MobileBuildError as exc:
+        raise MobileBuildError(
+            f"build {build} of {source_commit[:12]} was published for {', '.join(platforms)} but "
+            f"could not be recorded in the forge ({exc}). Record it by hand before the next "
+            f"release: git push --force origin {' '.join(refspecs)}"
+        ) from exc
+    for platform in platforms:
+        _git(source, "update-ref", f"{PUBLISHED_REFS}/{platform}", source_commit)
+    if state is None:
+        return
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with (state / LEDGER).open("a", encoding="utf-8") as ledger:
@@ -388,8 +454,16 @@ def main(argv: list[str] | None = None) -> int:
     checkout.add_argument("--state", type=Path, default=None)
     checkout.add_argument("--fetch", action="store_true", help="fetch origin/main first")
     checkout.add_argument(
-        "--store", action="store_true", help="refuse a commit that is not on main"
+        "--store", nargs="+", metavar="PLATFORM", choices=sorted(PLATFORM_FLOOR), default=None,
+        help="the checkout is for a store upload of these platforms: refuse a commit that is "
+             "not on main or whose number is not above the last one published",
     )
+    record = commands.add_parser(
+        "record", help="record a finished store upload of a stamped checkout in the forge"
+    )
+    record.add_argument("root", type=Path, help="the stamped checkout that was uploaded")
+    record.add_argument("--repo", type=Path, default=REPO_ROOT)
+    record.add_argument("--platforms", nargs="+", required=True, choices=sorted(PLATFORM_FLOOR))
     source = commands.add_parser(
         "release-source",
         help="print the path of the pinned repository whose main is origin/main, stamped",
@@ -404,6 +478,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "number":
             print(build_number(args.repo, args.commit))
+        elif args.command == "record":
+            if build_scope(args.root) != "store":
+                raise MobileBuildError(f"{args.root} is not a store-scope release checkout")
+            build = require_stamped(args.root)["android"]
+            stamp = _git(args.root, "rev-parse", "HEAD")
+            record_published(args.repo, args.platforms, build, _git(args.root, "rev-parse", "HEAD^"), stamp)
+            print(build)
         elif args.command == "require-stamped":
             builds = require_stamped(args.root)
             print(builds["android"])
@@ -414,12 +495,19 @@ def main(argv: list[str] | None = None) -> int:
                      "+refs/heads/main:refs/remotes/origin/main")
             if args.command == "release-source":
                 commit = _git(args.repo, "rev-parse", MAIN)
-                pin, _ = release_source(args.repo, state, commit, build_number(args.repo, commit))
+                pin, _ = release_source(
+                    args.repo, state, commit, build_number(args.repo, commit), "store"
+                )
                 print(pin)
             else:
                 if args.store:
                     require_main(args.repo, args.commit)
-                path, _, _ = release_checkout(args.repo, state, args.commit)
+                    require_above_published(
+                        args.repo, args.store, build_number(args.repo, args.commit)
+                    )
+                path, _, _ = release_checkout(
+                    args.repo, state, args.commit, "store" if args.store else "devices"
+                )
                 print(path)
     except (MobileBuildError, OSError, subprocess.CalledProcessError) as exc:
         print(f"mobile build: {exc}", file=sys.stderr)

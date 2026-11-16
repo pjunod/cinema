@@ -100,8 +100,8 @@ def release(base: str, head: str) -> None:
             # tree comes from.
             mobile_build.require_main(source, current)
             build = mobile_build.build_number(source, current)
-            mobile_build.require_above_published(state, platforms, build)
-            pin, stamped = mobile_build.release_source(source, state, current, build)
+            mobile_build.require_above_published(source, platforms, build, state)
+            pin, stamped = mobile_build.release_source(source, state, current, build, "store")
         except mobile_build.MobileBuildError as exc:
             raise ValueError(str(exc)) from exc
         print(f"Publishing Cinema {current} as build {build} (stamp commit {stamped}): "
@@ -129,8 +129,12 @@ def release(base: str, head: str) -> None:
         # Enforce app, track and real uploads after any local signing overrides.
         command.extend(("-e", json.dumps(variables)))
         subprocess.run(command, cwd=ansible.parent, check=True)
-        mobile_build.record_published(state, platforms, build, current, stamped)
-        print(f"Recorded build {build} of {current} in {state / mobile_build.LEDGER}", flush=True)
+        try:
+            mobile_build.record_published(source, platforms, build, current, stamped, state)
+        except mobile_build.MobileBuildError as exc:
+            raise ValueError(str(exc)) from exc
+        print(f"Recorded build {build} of {current} in the forge "
+              f"({mobile_build.PUBLISHED_REFS}/) and in {state / mobile_build.LEDGER}", flush=True)
 
 
 def main() -> int:

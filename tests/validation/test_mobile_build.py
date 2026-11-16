@@ -15,7 +15,9 @@ from validation.mobile_build import (
     APPLE,
     MobileBuildError,
     build_number,
+    build_scope,
     declared_builds,
+    forge_published,
     on_main,
     published,
     record_published,
@@ -212,32 +214,81 @@ class MobileBuildCase(unittest.TestCase):
         self.assertNotEqual(newer, checkout)
         self.assertGreater(newer_build, build)
 
-    def test_the_publication_ledger_is_a_high_water_mark_per_platform(self):
-        state = self.root.parent / "state"
+    def origin(self) -> None:
+        """The repository is its own `origin`, as a forge both hosts can reach."""
+        git(self.root, "remote", "add", "origin", str(self.root))
+
+    def test_the_forge_records_every_publication_and_is_the_floor_on_any_host(self):
+        self.origin()
+        first = self.commit("first release")
         with patch.dict(mobile_build.LAST_CLAIMED, {"apple": 301, "android": 207}):
             # Nothing recorded yet: the floor is the last hand-claimed build.
-            require_above_published(state, ["android"], 208)
+            require_above_published(self.root, ["android"], 208)
             with self.assertRaisesRegex(MobileBuildError, "not above android build 207"):
-                require_above_published(state, ["android"], 207)
+                require_above_published(self.root, ["android"], 207)
             with self.assertRaisesRegex(MobileBuildError, "not above ios build 301"):
-                require_above_published(state, ["ios", "android"], 250)
-        record_published(state, ["ios", "tvos"], 500, "a" * 40, "b" * 40)
-        record_published(state, ["android"], 480, "c" * 40, "d" * 40)
-        record_published(state, ["android"], 470, "e" * 40, "f" * 40)
-        latest = published(state)
-        self.assertEqual({key: row["build"] for key, row in latest.items()},
-                         {"ios": 500, "tvos": 500, "android": 480})
+                require_above_published(self.root, ["ios", "android"], 250)
+        number = build_number(self.root, first)
+        record_published(self.root, ["ios", "tvos"], number, first, "b" * 40)
         self.assertEqual(
-            (latest["ios"]["source_commit"], latest["ios"]["stamp_commit"]), ("a" * 40, "b" * 40)
+            git(self.root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/cinema-published"),
+            f"refs/cinema-published/ios {first}\nrefs/cinema-published/tvos {first}",
         )
-        require_above_published(state, ["android"], 481)
-        for platforms, build in ((["android"], 480), (["android"], 479), (["tvos", "android"], 500)):
-            with self.subTest(platforms=platforms, build=build):
-                with self.assertRaisesRegex(MobileBuildError, "cannot be published again"):
-                    require_above_published(state, platforms, build)
+        self.assertEqual(forge_published(self.root), {"ios": (number, first), "tvos": (number, first)})
+        # Another host: a fresh clone with no state directory at all still
+        # refuses the same number, and a rewritten main with fewer commits.
+        clone = self.root.parent / "second-host"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(self.root), str(clone)], check=True)
+        for build in (number, number - 1):
+            with self.subTest(build=build):
+                with self.assertRaisesRegex(MobileBuildError, "per the forge"):
+                    require_above_published(clone, ["ios"], build)
+        require_above_published(clone, ["ios"], number + 1)
+        require_above_published(clone, ["android"], number)  # nothing published there yet
+        # The next release moves the refs forward.
+        second = self.commit("second release")
+        record_published(self.root, ["ios", "tvos", "android"], number + 1, second, "c" * 40)
+        self.assertEqual(forge_published(clone)["android"], (number + 1, second))
+
+    def test_a_publication_that_cannot_be_recorded_is_an_error_with_the_command(self):
+        git(self.root, "remote", "add", "origin", str(self.root.parent / "no-such-forge"))
+        with self.assertRaisesRegex(MobileBuildError, "could not be recorded in the forge"):
+            record_published(self.root, ["android"], 5, self.base, "b" * 40)
+        with self.assertRaises(MobileBuildError):
+            require_above_published(self.root, ["android"], 999)
+
+    def test_the_controller_ledger_is_a_second_floor_and_names_both_commits(self):
+        self.origin()
+        state = self.root.parent / "state"
+        record_published(self.root, ["android"], 480, self.base, "d" * 40, state)
+        latest = published(state)
+        self.assertEqual(
+            (latest["android"]["build"], latest["android"]["source_commit"], latest["android"]["stamp_commit"]),
+            (480, self.base, "d" * 40),
+        )
+        with self.assertRaisesRegex(MobileBuildError, "per this controller's ledger"):
+            require_above_published(self.root, ["android"], 480, state)
+        require_above_published(self.root, ["android"], 481, state)
         (state / mobile_build.LEDGER).write_text("not json\n")
         with self.assertRaisesRegex(MobileBuildError, "not a publication record"):
             published(state)
+
+    def test_only_a_main_commit_gets_a_store_scope_stamp(self):
+        state = self.root.parent / "state"
+        self.commit("a second commit, so the number is not the development build")
+        checkout, _, _ = release_checkout(self.root, state, "HEAD", "store")
+        self.assertEqual(build_scope(checkout), "store")
+        devices, _, _ = release_checkout(self.root, state, "HEAD")
+        self.assertEqual(build_scope(devices), "devices")
+        self.assertNotEqual(checkout, devices, "the scope is part of the stamp")
+        self.assertEqual(build_scope(self.root), "", "an unstamped checkout has no scope")
+        git(self.root, "checkout", "-q", "-b", "feature")
+        self.write("clients/android/app/src/main/F.kt", "val f = 1\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "feature")
+        with self.assertRaisesRegex(MobileBuildError, "is not on origin/main"):
+            release_checkout(self.root, state, "feature", "store")
+        self.assertEqual(build_scope(release_checkout(self.root, state, "feature")[0]), "devices")
 
     def pin(self) -> Path:
         pin = self.root.parent / "pin.git"

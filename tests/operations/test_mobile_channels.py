@@ -261,6 +261,13 @@ class MobileChannelsCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not above android build"):
             release(self.base, head)
         self.assertFalse((self.root / "command.json").exists())
+        # The floor is the forge's, not this host's: with the state directory
+        # gone (a new controller), the same commit is still refused.
+        import shutil
+        shutil.rmtree(self.root / "state")
+        with self.assertRaisesRegex(ValueError, "per the forge"):
+            release(self.base, head)
+        self.assertEqual(self.run_git("rev-parse", "refs/cinema-published/android"), head)
         # Apple has published nothing yet, so the same commit may still go.
         apple = self.change("apple", 1)
         release(head, apple)
@@ -365,10 +372,13 @@ class EveryBuildPathStampsCase(unittest.TestCase):
         ship = self.read("scripts/ship")
         self.assertIn('python3 -m validation.mobile_build "${STAMP_ARGS[@]}"', ship)
         self.assertIn('STAMP_ARGS=(checkout --repo "$ROOT" --commit HEAD --fetch)', ship)
+        # ...and records the upload in the forge, where every host reads the floor.
+        self.assertIn('mobile_build record "$MOBILE_REPO" --repo "$ROOT" --platforms ios tvos', ship)
+        self.assertLess(ship.index('run "${MOBILE_ARGS[@]}"'), ship.index("mobile_build record"))
         self.assertIn('-e "plurx_repo=$MOBILE_REPO"', ship)
         self.assertNotIn('plurx_repo=$ROOT"', ship)
         # A TestFlight upload is a store upload: main only.
-        self.assertIn('[ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store)', ship)
+        self.assertIn('[ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store ios tvos)', ship)
 
     def test_ship_physical_builds_only_the_stamped_checkout(self) -> None:
         script = self.read("scripts/ship-physical")
