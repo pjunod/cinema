@@ -769,6 +769,7 @@ pub(crate) async fn worker_pass(
             after,
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         })
         .await?;
     *state

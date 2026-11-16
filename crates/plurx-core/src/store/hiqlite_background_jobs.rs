@@ -330,4 +330,20 @@ impl QueueSql for HiqliteAuthStore {
             Ok(rows.into_iter().map(|row| row.0).collect())
         }
     }
+
+    async fn local_replica_sql(
+        &self,
+        sql: String,
+        request: String,
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        if !self.client().has_local_replica() {
+            return Ok(None);
+        }
+        let method = super::background_jobs::queue_label();
+        let rows = self
+            .client()
+            .query_map::<JsonRow, _>(method, sql, params!(request))
+            .await?;
+        Ok(Some(rows.into_iter().map(|row| row.0).collect()))
+    }
 }
