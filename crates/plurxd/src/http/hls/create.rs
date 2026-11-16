@@ -6465,6 +6465,9 @@ pub(crate) struct PreparedSourcePlayback {
     processed_upgrade_offered: bool,
     processed_upgrade_ask: crate::transcode::ProcessedUpgradeAsk,
     decision: super::super::stream::DecisionResponse,
+    /// The receiver affirmed Dolby Vision relay, and with it that its Start
+    /// decoder relays the enhancement rows.
+    relays_enhancement: bool,
 }
 #[allow(dead_code)]
 impl PreparedSourcePlayback {
@@ -6488,6 +6491,11 @@ impl PreparedSourcePlayback {
     }
     pub(crate) fn plan_notes(&self) -> &[String] {
         &self.resolved.plan_notes
+    }
+    /// The receiver affirmed Dolby Vision relay: the Start carries the
+    /// enhancement rows.
+    pub(crate) fn relay_enhancement(&mut self) {
+        self.relays_enhancement = true;
     }
     /// A note the Source's own start policy adds to what this plan says.
     pub(crate) fn add_plan_note(&mut self, note: &str) {
@@ -6616,24 +6624,41 @@ impl PreparedSourcePlayback {
             .capability_height_ceiling_for_request(Some(&self.file), self.resolved.request.hdr10)
             .await;
         let quality_negotiated = self.resolved.request.candidate_context.is_some();
-        let playlist_url = if self.resolved.native_subtitles {
-            let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
-            match self.resolved.native_subtitle {
-                Some(index) => format!("{master}?subtitle={index}"),
-                None => master,
-            }
-        } else {
-            info.playlist_url.clone()
-        };
+        let (delivered_dynamic_range, delivered_dolby_vision_profile) =
+            session_delivered_processing_shape(
+                Some(&self.file),
+                &info.kind,
+                info.grade,
+                info.processed_dv_profile,
+            );
+        let playlist_url = source_start_playlist_url(
+            &info.session_id,
+            &info.playlist_url,
+            self.resolved.native_subtitles,
+            self.resolved.native_subtitle,
+            delivered_dynamic_range,
+        );
         Ok(StartResponse {
             processed_upgrade: self.processed_upgrade_offered.then(|| "offered".to_owned()),
-            // The FEL / RPU / DYN rows are a local response field that
-            // `StartResponse` never deserializes, so the receiver's closed
-            // Start decoder cannot relay them: a Source Start carrying them
-            // for a Dolby Vision source is refused by every receiver as a
-            // protocol violation. The delivered range and profile above are
-            // what a shared Start carries.
-            enhancement: None,
+            // The FEL / RPU / DYN rows local playback shows. A receiver that
+            // affirmed Dolby Vision relay decodes and relays them; an older
+            // one round-trips the Start through a `StartResponse` that never
+            // deserializes them and would refuse it, so it gets none.
+            enhancement: self
+                .relays_enhancement
+                .then(|| {
+                    session_enhancement(
+                        Some(&self.file),
+                        &info.kind,
+                        info.grade,
+                        info.processed_dv_profile,
+                        info.processed_fel,
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .flatten(),
             effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,
@@ -6670,21 +6695,8 @@ impl PreparedSourcePlayback {
             vod: info.vod,
             ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
             prior_kbps: None,
-            delivered_dynamic_range: session_delivered_processing_shape(
-                Some(&self.file),
-                &info.kind,
-                info.grade,
-                info.processed_dv_profile,
-            )
-            .0
-            .map(str::to_owned),
-            delivered_dolby_vision_profile: session_delivered_processing_shape(
-                Some(&self.file),
-                &info.kind,
-                info.grade,
-                info.processed_dv_profile,
-            )
-            .1,
+            delivered_dynamic_range: delivered_dynamic_range.map(str::to_owned),
+            delivered_dolby_vision_profile,
             control: Some(control),
             plan_notes: self.resolved.plan_notes.clone(),
         })
@@ -6705,6 +6717,34 @@ impl PreparedSourcePlayback {
             && binding.playback_id() == self.resolved.request.playback_id
             && Some(binding.request_id()) == self.resolved.request.request_id.as_deref()
             && self.source_invocation_fingerprint.as_deref() == Some(binding.request_fingerprint())
+    }
+}
+
+/// The URL a shared Start opens on. Native subtitles need the master for
+/// their media group; an HDR or Dolby Vision session needs it for
+/// `VIDEO-RANGE` and `SUPPLEMENTAL-CODECS`, which a bare media playlist cannot
+/// say (a Profile 8.1 copy is `hvc1`, so without the master nothing tells the
+/// player it is Dolby Vision). Local Apple playback always asks for native
+/// subtitles and so always opens on the master; a shared client asks only
+/// when a subtitle is selected, so the Source decides here, from what the
+/// session delivers. Without prepared tracks the master admits none.
+pub(crate) fn source_start_playlist_url(
+    session_id: &str,
+    index_url: &str,
+    native_subtitles: bool,
+    native_subtitle: Option<i64>,
+    delivered_dynamic_range: Option<&str>,
+) -> String {
+    let master = format!("/api/v1/hls/{session_id}/master.m3u8");
+    if native_subtitles {
+        return match native_subtitle {
+            Some(index) => format!("{master}?subtitle={index}"),
+            None => master,
+        };
+    }
+    match delivered_dynamic_range {
+        Some("hdr10" | "hlg" | "dolby_vision") => master,
+        _ => index_url.to_owned(),
     }
 }
 
@@ -6978,6 +7018,7 @@ pub(crate) async fn prepare_source_playback<
         file,
         resolved,
         decision,
+        relays_enhancement: false,
     })
 }
 
@@ -7225,6 +7266,40 @@ mod source_presentation_origin_tests {
     }
 }
 
+#[cfg(test)]
+mod source_start_playlist_tests {
+    use super::source_start_playlist_url;
+    const SESSION: &str = "7d4f3c7e-6f5b-4a39-9a43-0f4f1d3f3a11";
+    #[test]
+    fn source_start_response_opens_hdr_and_dolby_vision_sessions_on_the_master() {
+        let index = format!("/api/v1/hls/{SESSION}/index.m3u8");
+        let master = format!("/api/v1/hls/{SESSION}/master.m3u8");
+        for range in ["hdr10", "hlg", "dolby_vision"] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, false, None, Some(range)),
+                master,
+                "{range} without a subtitle opens on the master"
+            );
+        }
+        for range in [Some("sdr"), None] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, false, None, range),
+                index,
+                "{range:?} keeps the media playlist"
+            );
+        }
+        for range in [Some("sdr"), Some("hdr10"), Some("dolby_vision")] {
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, true, Some(2), range),
+                format!("{master}?subtitle=2")
+            );
+            assert_eq!(
+                source_start_playlist_url(SESSION, &index, true, None, range),
+                master
+            );
+        }
+    }
+}
 #[cfg(test)]
 mod source_copy_head_tests {
     use super::*;
