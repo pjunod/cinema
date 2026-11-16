@@ -428,6 +428,18 @@ opened yet. Tests run on the pinned gate image (FFmpeg 6.1, no `dovi_rpu`).
 | T1.6 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `a7602fc27` (+ ledger `468e9e90d`); 4 e2e fixtures pass |
 | T2.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `5c4542676`; 3 new tests pass, fail on mutated old behaviour |
 
+| Review | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `9ee8d7dcb`..`ad9364440` (findings 1–11); each new test fails on the old behaviour |
+
+Review fixes (2026-11-16): T2.1 no longer adds a relay token — Dolby Vision
+is withheld in the effective recipe itself (`normalize_wire`), so an older
+owner reads an ordinary recipe and a non-DV recipe is byte-identical; the
+shared decision withholds the same way; a non-P5 DV copy head needs a known
+base; a Source Start never renders a processed first window. The DV strip
+fixtures ran with jellyfin-ffmpeg 8.1 (`dovi_rpu`) on m6: strip, conversion,
+unaffirmed and the cold strip index pass there. Under FFmpeg 8.1 a Profile
+8.1 preserve copy's init carried no `dvvC` and the base encode did not start;
+both pass on the gate's FFmpeg 6.1 and are open questions for M2.
+
 ### 6.1 Corrections found while building
 
 - **The ask clamps the plan down (§1, §1.4).** `review_client_plan_inner`
