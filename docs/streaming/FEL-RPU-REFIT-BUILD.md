@@ -16,21 +16,63 @@ a decoder or client protocol signal, stop and flag it: F+ changes RPU bytes
 on the server. Developer controls and playback-info presentation are part of
 §4 and §6, without changing how clients decode or identify their platform.
 
-The candidate merges main `59022fd2a` into the reviewed F+ integration
-(`846225459`, then main `6b891f63a` at `0d501cae6`). Worker protocol 11 combines
-strict catalog provenance with the F+ digest. Main took SQLite v133 for scoped
-application login, so the F+ curve extension is v134; the fixture rewind removes
-the empty F+ tail before main's delegation rewind. Rollout requires a compatible
-worker cohort and the rebuilt processing bundle. No deployment is implied.
+The candidate merges main `59022fd2a` and then `40cc6460d` into the reviewed F+
+integration (`846225459`, then main `6b891f63a` at `0d501cae6`). Main took
+SQLite v133 for scoped application login, so the F+ curve extension is v134;
+the fixture rewind removes the empty F+ tail before main's delegation rewind.
+Worker protocol 11: the strict media-worker `SessionRequest` envelope carries
+the server-selected F+ curve digest beside protocol 10's catalog provenance.
+Workers on different protocols form separate placement cohorts, so rollout
+follows the cohort/drain sequence in [OPERATIONS.md](../OPERATIONS.md#rolling-upgrades)
+with a rebuilt processing bundle; clients send no new platform signal. No
+deployment is implied.
 
-On the merged tree, production and test-target Clippy (`-D warnings`) and
-rustfmt pass, as do the focused store cases the renumber touches (307 library
-cases, 39 store-contract cases). Earlier focused core/store/daemon results whose
-inputs did not change are retained. Real video and controlled AAC publication
-each read back 310 whole and 139 seek RPUs against source clocks and stored
-curves; AAC also yielded 602 whole and 272 seek audio samples. Disk conversion
-passed on the contiguous zero-origin FEL window; the existing nonzero-origin
-refusal remains explicit (§3.6).
+A SQLite database written by a pre-merge F+ candidate, where v133 was the F+
+curve extension, does not open on this build: the v134 step is a no-op on the
+existing F+ tables, then `open` refuses at `delegation::verify_sqlite`
+("playback delegation schema missing"). This is read from the code, not run.
+Such a database must be recreated; none is known to exist. No candidate build
+was deployed, the F+ work area on the learner build node holds no SQLite
+database outside build targets, and that node's running plurxd is an unrelated
+image. The M3 could not be checked (asleep); its F+ use was render diagnostics,
+not a plurxd store.
+
+Results, each stamped with the commit it ran on (learner build node, capped
+scope, Rust 1.97.1):
+
+- `bfda558e9` (main `40cc6460d` merged): production and test-target Clippy
+  (`-D warnings`) and rustfmt pass. plurx-core `segplan::packet_clock`,
+  `segplan::refit_proof` and `fmp4::`: 120 pass. plurxd `source_probe::dv_refit`,
+  `source_probe::refit_work` and `fragindex::refit_acceptance_tests`: 28 pass.
+  Real-video copy publication read back 310 whole and 139 seek RPUs against
+  source clocks and stored curves. Controlled AAC (zero-origin FEL plus stereo
+  PCM) did the same, plus 602 whole and 272 seek AAC samples.
+  Real zero-origin FEL disk authoring with frame-by-frame readback passed
+  (`dv_disk::tests::real_fel_fit_is_written_and_read_back`). The helper is the
+  retained native build of source 4989. The merged tree's `tools/dv_processing`
+  differs from that source only in display-management and CM29 code, which
+  `--refit-stats` does not reach (`refit_mode.h` hands decoded pairs to
+  `refit_pairs`, not the renderer).
+- `241491459` (main `59022fd2a` merged, plus reconcile fixes): the plurx-core
+  store library cases the v134 renumber touches, 307 pass (run before that
+  commit's census-label line; its 9-case module was re-run after). Store-contract
+  `dv_refit_jobs`, `delegation`, `historical`, `dv_title_jobs` and
+  `contract_inventory_matches_every_store_method`: 39 pass. plurxd
+  `source_probe::`, `source_custody::` and `copy_analysis::`: 121 pass and 3
+  fail. The same 3 fail identically, at the same assertions, on main `59022fd2a`
+  and on `bfda558e9`, so none comes from F+:
+  `copy_analysis::gap_fill_tests::an_analysis_filled_head_and_gap_merge_into_the_whole_title_analysis_observation`
+  (`copy_sync_unverified`, the known main failure in the 2026-11-15 CI triage),
+  and `source_custody::recovery::reader::tests::mediated_reader_crash_recovers_same_kernel_on_native_mac_and_linux`
+  and `…::brokered_cache_parts_keep_reader_recovery_but_raw_fallbacks_remain_fenced`
+  ("host physical-stop proof does not match the audited reader census"). Those
+  two read the fixed host path `/run/plurx-physical-stop/legacy-dv-title-v1.json`,
+  which exists on the build node because it is a deployed node; they cannot
+  pass there.
+- `846225459` and earlier F+ candidates: the retained focused core, store and
+  daemon cases, helper digest/resume/thread/refusal results and the native
+  48-patch mapping control, each recorded with its own source in the PR
+  history. Disk conversion's nonzero-origin refusal remains explicit (§3.6).
 
 The earlier native 48-patch control showed improved mapping, not the full M6
 equivalence criterion. A reviewed six-point Q23 constant-composition diagnostic
