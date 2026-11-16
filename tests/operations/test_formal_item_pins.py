@@ -1,0 +1,370 @@
+"""Item pins: a mapped source row pins the item its anchor selects, not the file."""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[2]
+LOADER = importlib.machinery.SourceFileLoader("check_formal_item_pins", str(ROOT / "scripts/check-formal"))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
+assert SPEC is not None and SPEC.loader is not None
+formal = importlib.util.module_from_spec(SPEC)
+LOADER.exec_module(formal)
+
+
+# The shape of the vendored SQLite writer: one long function whose match arms
+# each answer a different request, with the model mapped to one arm.
+WRITER = '''\
+use std::sync::Arc;
+
+/// Applies requests one at a time.
+pub fn spawn_writer(rx: Receiver<Query>) {
+    loop {
+        match rx.recv() {
+            Query::Execute(q) => {
+                let note = "} not a brace, // not a comment";
+                q.tx.send(run(q.sql)).expect("oneshot tx to never be dropped");
+            }
+            Query::Transaction(req) => {
+                let rows = apply(req.queries); // serial: one transaction at a time
+                req.tx.send(rows).expect("oneshot tx to never be dropped");
+            }
+        }
+    }
+}
+
+const STORE_TIMEOUT: Duration = Duration::from_secs(3);
+
+impl<'a> Drop for Lease<'a> {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+'''
+ARM = "Query::Transaction(req) => {"
+SOURCE = "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs"
+
+
+def row(text: str, anchor: str, scope: str | None = None, source: str = SOURCE) -> dict[str, str]:
+    return {"table": "27 vendor serial SQLite transaction", "source": source, "anchor": anchor,
+            **formal.item_pin(source, text, anchor, scope)}
+
+
+def check(text: str, pinned: dict[str, str], source: str = SOURCE) -> list[str]:
+    return formal.check_item_pin("authority", source, text, pinned, pinned["table"])
+
+
+class RustItemPinTests(unittest.TestCase):
+    def test_an_edit_outside_the_anchored_item_is_not_drift(self) -> None:
+        pinned = row(WRITER, ARM)
+        self.assertEqual(pinned["scope"], "block")
+        self.assertEqual(pinned["item"], "fn spawn_writer > block")
+        # Tonight's case in miniature: reply handling changes in another arm,
+        # a function is added above, and an unrelated constant changes.
+        edited = WRITER.replace(
+            'q.tx.send(run(q.sql)).expect("oneshot tx to never be dropped");',
+            "send_reply(q.tx, run(q.sql), WriterReply::Execute);",
+        ).replace("from_secs(3)", "from_secs(5)").replace(
+            "/// Applies requests", "fn send_reply<T>(tx: Sender<T>, value: T, kind: WriterReply) {}\n\n/// Applies requests"
+        )
+        self.assertNotEqual(edited, WRITER)
+        self.assertEqual(check(edited, pinned), [])
+
+    def test_an_edit_inside_the_anchored_item_requires_review_and_names_it(self) -> None:
+        pinned = row(WRITER, ARM)
+        edited = WRITER.replace(
+            'req.tx.send(rows).expect("oneshot tx to never be dropped");',
+            "send_reply(req.tx, rows, WriterReply::Transaction);",
+        )
+        problems = check(edited, pinned)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("authority source drift requires review", problems[0])
+        self.assertIn(f"{SOURCE} :: fn spawn_writer > block", problems[0])
+        self.assertIn("27 vendor serial SQLite transaction", problems[0])
+
+    def test_an_item_scope_pin_covers_the_whole_function(self) -> None:
+        pinned = row(WRITER, ARM, "item")
+        self.assertEqual(pinned["item"], "fn spawn_writer")
+        edited = WRITER.replace("run(q.sql)", "run_checked(q.sql)")
+        self.assertIn(f"{SOURCE} :: fn spawn_writer (", check(edited, pinned)[0])
+        self.assertEqual(check(WRITER.replace("from_secs(3)", "from_secs(5)"), pinned), [])
+
+    def test_a_renamed_or_deleted_anchor_fails(self) -> None:
+        pinned = row(WRITER, ARM)
+        renamed_arm = WRITER.replace(ARM, "Query::Txn(req) => {")
+        self.assertIn("anchor must occur exactly once", check(renamed_arm, pinned)[0])
+        deleted = WRITER[:WRITER.index("            Query::Transaction")] + WRITER[WRITER.index("        }\n    }\n}"):]
+        self.assertIn("anchor must occur exactly once", check(deleted, pinned)[0])
+        duplicated = WRITER.replace("    }\n}\n\nconst", "    }\n}\n\nfn other() { match x { Query::Transaction(req) => {} } }\n\nconst")
+        self.assertIn("anchor must occur exactly once", check(duplicated, pinned)[0])
+        # The anchor survives but the item that holds it has another name.
+        renamed_item = WRITER.replace("pub fn spawn_writer(", "pub fn spawn_db_writer(")
+        problem = check(renamed_item, pinned)[0]
+        self.assertIn("renamed or moved", problem)
+        self.assertIn("fn spawn_writer > block is now fn spawn_db_writer > block", problem)
+        # A header anchor names the item itself, so a rename removes the anchor.
+        header = row(WRITER, "const STORE_TIMEOUT: Duration = Duration::from_secs(3);")
+        self.assertEqual(header["item"], "const STORE_TIMEOUT")
+        self.assertIn("anchor must occur exactly once", check(WRITER.replace("STORE_TIMEOUT", "WRITE_TIMEOUT"), header)[0])
+
+    def test_an_anchor_that_selects_no_item_never_passes(self) -> None:
+        with self.assertRaisesRegex(formal.AnchorError, "not inside a named item"):
+            formal.item_pin(SOURCE, WRITER, "use std::sync::Arc;")
+        with self.assertRaisesRegex(formal.AnchorError, "no item extractor"):
+            formal.item_pin("notes/plan.txt", "an anchor\n", "an anchor")
+        with self.assertRaisesRegex(formal.AnchorError, "opening brace"):
+            formal.item_pin(SOURCE, WRITER, "let rows = apply(req.queries);", "block")
+        with self.assertRaisesRegex(formal.AnchorError, "unknown pin scope"):
+            formal.item_pin(SOURCE, WRITER, ARM, "file")
+        pinned = row(WRITER, ARM)
+        moved_out = WRITER.replace("            " + ARM, "            /* " + ARM + " */\n            Query::Renamed(req) => {")
+        self.assertIn("does not select a pinnable item", check(moved_out, pinned)[0])
+        self.assertIn("needs a reviewed scope and item", check(WRITER, {**pinned, "scope": None})[0])
+        self.assertIn("item hash is not reviewed", check(WRITER, {**pinned, "item_sha256": "unreviewed"})[0])
+        self.assertIn("retired whole-file pin", check(WRITER, {**pinned, "sha256": "a" * 64})[0])
+        broken = WRITER.replace("    loop {", "    loop {{")
+        self.assertIn("does not select a pinnable item", check(broken, pinned)[0])
+
+    def test_layout_is_not_drift_but_literals_and_comment_boundaries_are(self) -> None:
+        pinned = row(WRITER, ARM)
+        reflowed = WRITER.replace(
+            "                let rows = apply(req.queries); // serial",
+            "                let rows =\n                    apply(req.queries);   // serial",
+        )
+        self.assertNotEqual(reflowed, WRITER)
+        self.assertEqual(check(reflowed, pinned), [])
+        literal = WRITER.replace('"oneshot tx to never be dropped");\n            }\n        }', '"oneshot  tx to never be dropped");\n            }\n        }')
+        self.assertNotEqual(literal, WRITER)
+        self.assertIn("drift requires review", check(literal, pinned)[0])
+        # Joining a line onto a comment removes code; it must not hash the same.
+        hidden = WRITER.replace("one transaction at a time\n                req.tx", "one transaction at a time req.tx")
+        self.assertIn("drift requires review", check(hidden, pinned)[0])
+
+    def test_default_scope_takes_a_region_only_where_one_is_self_contained(self) -> None:
+        source = '''\
+impl Worker {
+    async fn run(&self) {
+        let heartbeat = tokio::spawn(async move {
+            tick().await;
+        });
+        for attempt in 0..4 {
+            retry(attempt);
+        }
+        if queue_loss.is_ready() {
+            return;
+        }
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let reply = Reply::Released {
+            ok: true,
+        };
+        let results = match transaction {
+            Ok(rows) => rows,
+        };
+    }
+}
+'''
+        expect = {
+            "let heartbeat = tokio::spawn(async move {": "block",
+            "for attempt in 0..4 {": "block",
+            "let results = match transaction {": "block",
+            "if queue_loss.is_ready() {": "item",
+            "let Some(token) = self.token.take() else {": "item",
+            "let reply = Reply::Released {": "item",
+            "async fn run(&self) {": "item",
+            "impl Worker {": "item",
+        }
+        for anchor, scope in expect.items():
+            pin = formal.item_pin("src/worker.rs", source, anchor)
+            self.assertEqual(pin["scope"], scope, anchor)
+            self.assertTrue(pin["item"].startswith("impl Worker"), anchor)
+        self.assertEqual(formal.item_pin("src/worker.rs", source, "impl Worker {")["item"], "impl Worker")
+        self.assertEqual(formal.item_pin("src/worker.rs", source, "retry(attempt);")["item"], "impl Worker > fn run")
+
+    def test_item_keywords_inside_types_and_literals_do_not_start_items(self) -> None:
+        source = r'''
+#[derive(Debug)]
+pub(crate) struct Holder<'a, const N: usize> {
+    name: &'static str,
+    raw: *const u8,
+    brace: char,
+}
+
+/* outer /* nested */ fn ghost() { */
+pub(in crate::store) async fn fenced_call<'call, T>(
+    reader: impl Read + 'call,
+    quote: char,
+) -> impl Future<Output = T> + 'call
+where
+    T: Send,
+{
+    let open = '{';
+    let escaped = '\'';
+    let sql = r#"SELECT "fn fake() {" FROM t; }"#;
+    let label = b"}";
+    marker(open, escaped, sql, label)
+}
+
+const BIND_SQL: &str = r#"
+UPDATE jobs SET state = 'bound' WHERE id = $1;
+"#;
+
+pub const fn limit() -> usize { 4 }
+'''
+        cases = {
+            "raw: *const u8,": "struct Holder",
+            "name: &'static str,": "struct Holder",
+            "#[derive(Debug)]": "struct Holder",
+            "reader: impl Read + 'call,": "fn fenced_call",
+            "marker(open, escaped, sql, label)": "fn fenced_call",
+            "T: Send,": "fn fenced_call",
+            "UPDATE jobs SET state = 'bound' WHERE id = $1;": "const BIND_SQL",
+            "pub const fn limit() -> usize { 4 }": "fn limit",
+        }
+        for anchor, item in cases.items():
+            self.assertEqual(formal.item_pin("src/store.rs", source, anchor)["item"], item, anchor)
+        # A comment belongs to the item it introduces; it never starts one.
+        self.assertEqual(formal.item_pin("src/store.rs", source, "fn ghost()")["item"], "fn fenced_call")
+        with self.assertRaisesRegex(formal.AnchorError, "not inside a named item"):
+            formal.item_pin("src/store.rs", source + "// fn trailing() {}\n", "fn trailing()")
+
+    def test_a_conformance_test_is_pinned_by_its_function(self) -> None:
+        source = "mod tests {\n    #[tokio::test]\n    async fn worker_schedule() { step(); }\n    fn helper() {}\n}\n"
+        label, canonical = formal.rust_function(source, "worker_schedule")
+        self.assertEqual(label, "mod tests > fn worker_schedule")
+        self.assertIn("#[tokio::test]", canonical)
+        self.assertEqual(canonical, formal.rust_function(source.replace("fn helper() {}", "fn helper() { more(); }"), "worker_schedule")[1])
+        self.assertNotEqual(canonical, formal.rust_function(source.replace("step();", "step(); step();"), "worker_schedule")[1])
+        with self.assertRaisesRegex(formal.AnchorError, "exactly one fn"):
+            formal.rust_function(source, "absent")
+        with self.assertRaisesRegex(formal.AnchorError, "exactly one fn"):
+            formal.rust_function(source + "fn helper() {}\n", "helper")
+
+
+class OtherLanguageItemPinTests(unittest.TestCase):
+    def test_sql_pins_one_statement_and_a_trigger_runs_to_its_own_end(self) -> None:
+        source = '''\
+-- Queue schema.
+CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, note TEXT DEFAULT 'a;b');
+
+CREATE TRIGGER IF NOT EXISTS job_completed AFTER UPDATE ON jobs
+WHEN CASE WHEN NEW.state = 'done' THEN 1 ELSE 0 END = 1
+BEGIN
+    UPDATE waiters SET state = CASE WHEN NEW.ok THEN 'succeeded' ELSE 'failed' END WHERE job_id = NEW.id;
+    DELETE FROM leases WHERE job_id = NEW.id;
+END;
+
+CREATE VIEW IF NOT EXISTS required AS
+SELECT id, 'provider:tmdb' FROM jobs WHERE kind IN ('library_scan','metadata_refresh');
+'''
+        path = "crates/plurx-core/src/store/jobs.sql"
+        trigger = row(source, "DELETE FROM leases WHERE job_id = NEW.id;", source=path)
+        self.assertEqual(trigger["item"], "trigger job_completed")
+        view = row(source, "SELECT id, 'provider:tmdb' FROM jobs", source=path)
+        self.assertEqual(view["item"], "view required")
+        self.assertEqual(row(source, "note TEXT DEFAULT 'a;b'", source=path)["item"], "table jobs")
+        outside = source.replace("note TEXT", "detail TEXT").replace("'library_scan',", "'library_scan', 'dv_title_scan',")
+        self.assertEqual(check(outside, trigger, path), [])
+        self.assertIn(f"{path} :: view required", check(outside, view, path)[0])
+        inside = source.replace("ELSE 'failed' END", "ELSE 'cancelled' END")
+        self.assertIn(f"{path} :: trigger job_completed", check(inside, trigger, path)[0])
+        self.assertEqual(check(inside, view, path), [])
+        renamed = source.replace("TRIGGER IF NOT EXISTS job_completed", "TRIGGER IF NOT EXISTS job_settled")
+        self.assertIn("renamed or moved", check(renamed, trigger, path)[0])
+
+    def test_lockfile_pins_the_package_and_manifest_pins_the_key(self) -> None:
+        lock = '''\
+version = 4
+
+[[package]]
+name = "tokio"
+version = "1.53.1"
+checksum = "aaaa"
+dependencies = [
+ "mio",
+]
+
+[[package]]
+name = "wasmtime"
+version = "49.0.2"
+checksum = "bbbb"
+'''
+        anchor = 'name = "tokio"\nversion = "1.53.1"'
+        pinned = row(lock, anchor, source="Cargo.lock")
+        self.assertEqual(pinned["item"], "[[package]] tokio 1.53.1")
+        self.assertEqual(check(lock.replace("49.0.2", "50.0.0").replace("bbbb", "cccc"), pinned, "Cargo.lock"), [])
+        self.assertIn("Cargo.lock :: [[package]] tokio 1.53.1", check(lock.replace("aaaa", "dddd"), pinned, "Cargo.lock")[0])
+        self.assertIn("exactly once", check(lock.replace("1.53.1", "1.54.0"), pinned, "Cargo.lock")[0])
+        manifest = '[workspace.dependencies]\nhiqlite = { version = "=0.14.0", features = [\n    "sqlite",\n] }\ntokio = "1"\n'
+        key = row(manifest, 'hiqlite = { version = "=0.14.0"', source="Cargo.toml")
+        self.assertEqual(key["item"], "[workspace.dependencies] > hiqlite")
+        self.assertEqual(check(manifest.replace('tokio = "1"', 'tokio = "1.53"'), key, "Cargo.toml"), [])
+        self.assertIn("drift requires review", check(manifest.replace('"sqlite"', '"sqlite", "cache"'), key, "Cargo.toml")[0])
+
+    def test_python_pins_the_function(self) -> None:
+        source = "#!/usr/bin/env python3\nimport os\n\n\ndef validated_challenge(data_dir, node):\n    return node\n\n\ndef other():\n    return 1\n"
+        path = "scripts/source-custody-recovery"
+        pinned = row(source, "def validated_challenge(data_dir, node):", source=path)
+        self.assertEqual(pinned["item"], "def validated_challenge")
+        self.assertEqual(check(source.replace("return 1", "return 2"), pinned, path), [])
+        self.assertIn(f"{path} :: def validated_challenge", check(source.replace("return node", "return node.strip()"), pinned, path)[0])
+        with self.assertRaisesRegex(formal.AnchorError, "Python function or class"):
+            formal.item_pin(path, source, "import os")
+
+
+class ItemPinMappingTests(unittest.TestCase):
+    def test_a_whole_file_mapping_is_refused(self) -> None:
+        mapping = {"source_mapping": {"status": "reviewed", "tables": [
+            {"table": "t", "source": "src.rs", "anchor": "a", "sha256": "a" * 64},
+        ]}}
+        drift, _ = formal.mapping_inputs(mapping, "operation-progress")
+        self.assertTrue(any("whole-file pins are retired" in item for item in drift))
+
+    def test_item_pins_reports_stale_pins_and_writes_only_on_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mapping_path = root / "verification/operation-progress/mapping.json"
+            mapping_path.parent.mkdir(parents=True)
+            (root / SOURCE).parent.mkdir(parents=True)
+            (root / SOURCE).write_text(WRITER, encoding="utf-8")
+            mapping_path.write_text(json.dumps({"source_mapping": {"status": "reviewed", "tables": [
+                {"table": "27 vendor serial SQLite transaction", "source": SOURCE, "anchor": ARM, "sha256": "a" * 64},
+            ]}}), encoding="utf-8")
+
+            def run(write: bool) -> tuple[int, dict[str, object]]:
+                output = io.StringIO()
+                with mock.patch.object(formal, "ROOT", root), contextlib.redirect_stdout(output):
+                    code = formal.item_pins("operation-progress", write)
+                return code, json.loads(output.getvalue())
+
+            code, report = run(False)
+            self.assertEqual((code, report["written"]), (1, False))
+            self.assertIn("sha256", json.loads(mapping_path.read_text())["source_mapping"]["tables"][0])
+            code, report = run(True)
+            self.assertEqual((code, report["written"]), (0, True))
+            written = json.loads(mapping_path.read_text())["source_mapping"]
+            self.assertEqual(written["pin_scheme"], formal.PIN_SCHEME)
+            self.assertEqual(written["tables"][0], row(WRITER, ARM))
+            self.assertEqual(run(False), (0, {"package": "operation-progress", "changes": [], "failures": [], "written": False}))
+            (root / SOURCE).write_text(WRITER.replace("apply(req.queries)", "apply_all(req.queries)"), encoding="utf-8")
+            code, report = run(False)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["changes"][0]["row"], "27 vendor serial SQLite transaction")
+            (root / SOURCE).write_text(WRITER.replace(ARM, "Query::Txn(req) => {"), encoding="utf-8")
+            code, report = run(True)
+            self.assertEqual((code, report["written"]), (2, False))
+            self.assertIn("exactly once", report["failures"][0])
+
+
+if __name__ == "__main__":
+    unittest.main()

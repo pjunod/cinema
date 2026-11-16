@@ -104,7 +104,7 @@ Spec == Next
                             "file": source_file,
                             "symbol": "worker_schedule",
                             "anchor": "// source pin",
-                            "sha256": file_hash(source_file),
+                            **formal.item_pin(source_file, source, "// source pin"),
                         },
                         "held_across_await": [],
                         "completed_by": "worker task",
@@ -116,7 +116,10 @@ Spec == Next
                 "status": "reviewed",
                 "model_file": model_file,
                 "model_sha256": file_hash(model_file),
-                "tests": [{"id": test_id, "file": source_file, "name": "worker_schedule"}],
+                "tests": [{
+                    "id": test_id, "file": source_file, "name": "worker_schedule",
+                    "item_sha256": formal.text_sha256(formal.rust_function(source, "worker_schedule")[1]),
+                }],
                 "actions": rows,
             }
             correspondence_path = "verification/worker-refinement/correspondence.json"
@@ -184,21 +187,41 @@ Spec == Next
                 (root / extra_test).parent.mkdir(parents=True, exist_ok=True)
                 (root / extra_test).write_text("fn extra_schedule() {}\n", encoding="utf-8")
                 candidate = copy.deepcopy(correspondence)
-                candidate["tests"] = [{"id": extra_test + "::tests::extra_schedule", "file": extra_test, "name": "extra_schedule"}]
+                candidate["tests"] = [{
+                    "id": extra_test + "::tests::extra_schedule", "file": extra_test, "name": "extra_schedule",
+                    "item_sha256": None,
+                }]
                 candidate["actions"] = [dict(row, schedules=[candidate["tests"][0]["id"]]) for row in rows]
                 drift = validate(candidate)
-                self.assertTrue(any("lack reviewed source hash pins" in item for item in drift))
+                self.assertTrue(any("lacks a reviewed item pin" in item for item in drift))
+
+                candidate = copy.deepcopy(correspondence)
+                candidate["actions"][0]["source"]["symbol"] = "Worker::another_function"
+                drift = validate(candidate)
+                self.assertTrue(any("symbol does not hold its anchor" in item for item in drift))
 
                 candidate = copy.deepcopy(correspondence)
                 candidate["actions"][0]["schedules"] = "unchecked"
                 drift = validate(candidate)
                 self.assertTrue(any("unchecked correspondence needs an explicit gap" in item for item in drift))
 
+                # An edit outside the pinned function is not drift; one inside it is,
+                # for the action rows and for the conformance test alike.
                 candidate = copy.deepcopy(correspondence)
-                candidate["actions"] = rows
-                (root / source_file).write_text(source + "// drift\n", encoding="utf-8")
+                (root / source_file).write_text(source + "fn unrelated() {}\n", encoding="utf-8")
+                self.assertEqual(validate(candidate), [])
+                (root / source_file).write_text(source.replace("{}", "{ step(); }"), encoding="utf-8")
                 drift = validate(candidate)
-                self.assertTrue(any("source drift requires review" in item for item in drift))
+                self.assertTrue(any(
+                    f"worker source drift requires review: {source_file} :: fn worker_schedule" in item for item in drift
+                ))
+                self.assertTrue(any(
+                    f"conformance test drift requires review: {source_file} :: fn worker_schedule" in item for item in drift
+                ))
+                (root / source_file).write_text(source.replace("fn worker_schedule", "fn renamed_schedule"), encoding="utf-8")
+                drift = validate(candidate)
+                self.assertTrue(any("renamed or moved" in item for item in drift))
+                self.assertTrue(any("conformance test function is absent or ambiguous" in item for item in drift))
 
 
 if __name__ == "__main__":
