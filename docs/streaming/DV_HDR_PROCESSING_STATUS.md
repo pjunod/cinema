@@ -2,7 +2,7 @@
 
 **Status:** built for supported bounded routes and merged to `main`; full-suite
 qualification, broader reference and hardware acceptance open ·
-**Updated:** 2026-11-09 (America/New_York) · **Integration:** merged to `main` as `c96142ac` (#968)
+**Updated:** 2026-11-15 (America/New_York) · **Integration:** merged to `main` as `c96142ac` (#968)
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -23,6 +23,20 @@ subtitles), never PQ black. No-L5 and full-frame L5 keep the original shader
 literals byte for byte (`dv_dm_active_partial`). Three crop-domain CPU
 controls and L5 GPU parity cases cover it. Whole-frame qualification and
 display/performance acceptance remain open.
+
+**Base master black (2026-11-15):** the base reconstruction (P5, P8, and P7
+rendered without its EL) kept the stream's colour description on its source,
+so libplacebo tone-mapped a pass meant to be an identity: under
+`PL_HDR_METADATA_NONE` it reads source black as 0 and compensates to the
+destination's 0.005 nits. Black became code 988 and every channel below a
+pixel's largest rose with it: three P8 masters were 12.5-14.9 dE ITP off the
+corpus master. Both renderers now set one description on both sides
+(`dv_master_frames`, the player's): master within 0.037 dE and 2 codes,
+mapped within 0.049 of the licensed reference; P7 FEL and HDR10-E bytes
+unchanged. A real P5 and a real base-only P7 frame lose the 988 floor; neither
+has a reference master. `controls/test_base_master_black.c` covers the three
+families and runs on lavapipe in every image build. Served base masters carry
+the lift until deployed.
 
 **CM v2.9 active area (2026-11-12):** L5 now bounds the CM v2.9 detail
 filter too. It had blended bars into two boundary rows: on four native frames,
@@ -76,22 +90,17 @@ boundary-row losses of the earlier renderers are gone against the L5-aware
 reference; 239 and 47 interior pixels remain worse than P8, by at most
 0.0156 ΔE ITP, as for B and C. Its interior differs from the qualified C
 capture at 3-4 pixels by one code. Two frames are not whole-title, HDR10-E
-or performance acceptance. One frame is not whole-title or performance acceptance.
+or performance acceptance.
 
-The preceding source-budget correction merged in PR #1477 at `49c4ec103` after
-all applicable current-head fast-lane jobs passed. Its bitrate, level and
-qualification fixes do not close picture, display or performance acceptance.
+The source-budget correction (PR #1477, `49c4ec103`) fixed bitrate, level and
+qualification; it does not close picture, display or performance acceptance.
 
-The reviewed proposal landed in documentation PR #919, the comparator in
-PR #920, and the initial backend controls in PR #924. PR #928 merged at
-`a1e56700d3940363dc06c16afcc4f919d63eac97`; run 4517 passed scope, Python
-(1,203 tests), Rust, web, Apple and Android. PR #930 merged the separate
-[timeline follow-up](DV_HDR_TIMELINE_CONTROLS.md) at
-`03fa9d2d104122d40d168260e96647fd14884104`; run 4519 passed all six non-Windows
-jobs on exact head `9d33aee3caf0c0c442eb248c43cef39b5e1aee0c`. Windows and
-both blocked aggregates were cancelled under the user's explicit Windows
-waiver; they are not Windows success evidence. PR #928 retained all 14 named
-regression trailers. These are integration checks, not product qualification.
+The proposal landed in PR #919, the comparator in #920 and the initial backend
+controls in #924. PR #928 merged at `a1e56700d394` (run 4517, all 14 regression
+trailers kept) and the [timeline follow-up](DV_HDR_TIMELINE_CONTROLS.md) #930
+at `03fa9d2d1041` (run 4519, six non-Windows jobs; Windows waived by the
+user, not Windows success evidence). These are integration checks,
+not product qualification.
 
 Sol 6.1 sessions provide renderer, CPU/authoring and offline measurement work,
 with independent adversarial review. Settings and generation-bound client
@@ -99,11 +108,7 @@ presentation are implemented; normal serving integration and the installed Linux
 helper bundle have bounded local serving evidence in §22. The effort merged to
 `main` without a qualification receipt; §23 records which suites have and have
 not passed on the merged tree. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
-initially introduced only additive core types, validation and pure/test-only
-selection; code review approved that bounded Rust diff. On its effort base `03fa9d2`,
-25 focused tests, six compatibility regressions, core all-target checking and
-warnings-denied Clippy passed with Rust 1.97.1. PR #933 merged at `0925e26db6336e9f17442635eee8e361de90745f`.
-Its existing exact-head run 4524 completed successfully before the cancellation request.
+merged as PR #933 (`0925e26db633`).
 The first task must retain reproducible commands, source pins, actual frame
 artifacts and negative controls. Numerical agreement is evidence for the named
 operation, not full Dolby Vision conformance or an improvement on a movie.
