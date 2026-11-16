@@ -462,7 +462,7 @@ class Migration:
             # The count in words and the removal paragraph's row lists restate
             # what is derived now; put those lines back as the branch found
             # them. Every other edit the branch made stays and is merged.
-            derived = re.compile(r"Plurx carries \S+ |retire the \S+ generic bugs|retire the \S+ Plurx policies|\(rows? \d")
+            derived = re.compile(r"Plurx carries \S+ |retire the \S+ generic bugs|retire the \S+ Plurx policies|\(rows? \d+(?:, \d+)+")
             base_derived = [line for line in base.split("\n") if derived.search(line)]
             indexes = [i for i, line in enumerate(kept) if derived.search(line)]
             if len(indexes) == len(base_derived):
