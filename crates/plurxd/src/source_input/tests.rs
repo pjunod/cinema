@@ -63,6 +63,14 @@ pub(super) async fn input(
     window: usize,
     read_gate: Option<Arc<ReadGate>>,
 ) -> (SourceInput, std::fs::File, Arc<UnlimitedBudget>) {
+    input_with_observer(bytes, window, read_gate, None).await
+}
+async fn input_with_observer(
+    bytes: &[u8],
+    window: usize,
+    read_gate: Option<Arc<ReadGate>>,
+    observer: Option<SourceObserver>,
+) -> (SourceInput, std::fs::File, Arc<UnlimitedBudget>) {
     use std::io::Write;
     let mut file = tempfile::tempfile().expect("source file");
     file.write_all(bytes).expect("source bytes");
@@ -74,7 +82,7 @@ pub(super) async fn input(
         source: std::sync::Mutex::new(Some(source)),
         _background_holder: None,
         custody: std::sync::Mutex::new(None),
-        observer: None,
+        observer,
         purpose_budget: None,
         background_budget: Some(allocator.clone()),
         pause: plurx_core::process::bounded::source_pause_controller(),
@@ -643,4 +651,60 @@ async fn broker_verification_is_revoked_on_join_cleanup_and_drop() {
         !is_registered_broker(&url),
         "Drop cannot leave a verifying bearer behind"
     );
+}
+
+#[tokio::test]
+async fn source_input_close_revokes_publication_before_joining_physical_source() {
+    let owners = crate::source_generation::SourceRenditionOwners::default();
+    let (observer, mut owner) = SourceObserver::policy_fixture();
+    let (mut input, _file, _budget) =
+        input_with_observer(b"source", SOURCE_HTTP_CHUNK, None, Some(observer)).await;
+    input
+        .publish_source_observer(&owners, 12)
+        .await
+        .expect("publish live input");
+    let state = Arc::clone(&input.state);
+    let read = Arc::clone(&state.read_slot)
+        .acquire_owned()
+        .await
+        .expect("hold physical reader");
+    let close = tokio::spawn(input.close_and_wait());
+    owner.cleanup_pending().await;
+    assert!(owners.source_observer(12).is_none());
+    assert!(state.source.lock().expect("physical source").is_some());
+    assert!(
+        !close.is_finished(),
+        "physical source still waits for reader join"
+    );
+    owners
+        .declare_source_telemetry()
+        .await
+        .expect("retired observer stays pending");
+    drop(read);
+    close
+        .await
+        .expect("close task")
+        .expect("joined source input");
+    assert!(state.source.lock().expect("physical source").is_none());
+}
+
+#[tokio::test]
+async fn source_input_drop_and_cleanup_revoke_their_publication() {
+    let owners = crate::source_generation::SourceRenditionOwners::default();
+    for cleanup in [false, true] {
+        let (observer, _owner) = SourceObserver::policy_fixture();
+        let (mut input, _file, _budget) =
+            input_with_observer(b"source", SOURCE_HTTP_CHUNK, None, Some(observer)).await;
+        input
+            .publish_source_observer(&owners, 13)
+            .await
+            .expect("publish live input");
+        assert!(owners.source_observer(13).is_some());
+        if cleanup {
+            input.cleanup_pending();
+        } else {
+            drop(input);
+        }
+        assert!(owners.source_observer(13).is_none());
+    }
 }
