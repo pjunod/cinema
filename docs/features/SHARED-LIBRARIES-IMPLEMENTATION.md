@@ -6305,6 +6305,8 @@ release its admission while extraction or font work was still running.
    `docs/streaming/SHARED-LIBRARY-DV-HDR-PLAN.md`). Only a Profile 5 encode
    is refused (`sharing_start_dolby_vision_unsupported`) until its RPU proof
    is Source-owned. A receiver that does not affirm DV relay gets the base.
+   Shared clients ask to preserve exactly as their local playback asks, and
+   an HDR or Dolby Vision session opens on the master.
 5. **Retain regression definitions, defer execution.** Cover text and bitmap
    burn selection, bounded extraction/settlement, HDR grade binding, and DV
    refusal. Compile test targets now; execute required regressions only after

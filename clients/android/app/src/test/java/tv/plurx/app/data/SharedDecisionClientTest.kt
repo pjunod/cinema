@@ -283,10 +283,37 @@ class SharedDecisionClientTest {
         login(); val context = context(); var calls = 0
         val client = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { calls++; response(it.request(), "{}") }.build())
         val base = CreateSessionReq(playback_id = "shared", request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps = caps())
-        for (request in listOf(base.copy(previous_session_id = ""), base.copy(control_sequence = 0), base.copy(reopen_reason = ReopenReason.Stall), base.copy(preserve_dolby_vision = true), base.copy(request_id = base.request_id!!.uppercase()))) {
+        for (request in listOf(base.copy(previous_session_id = ""), base.copy(control_sequence = 0), base.copy(reopen_reason = ReopenReason.Stall), base.copy(request_id = base.request_id!!.uppercase()))) {
             assertTrue(runCatching { client.start(context, request) }.isFailure)
         }
         assertEquals(0, calls)
+    }
+    @Test fun dolbyVisionCapableSharedStartAsksToPreserveExactlyAsLocalDoes(): Unit = runBlocking {
+        login(); val context = context()
+        fun decide(change: (JsonObject) -> JsonObject = { it }) = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor {
+            response(it.request(), wire("0", change))
+        }.build())
+        val subject = SharedPlaybackSubject(context, "Shared", 0, 1)
+        val preserved = decide().decisionForTest(context, caps(), emptyMap())
+        val plan = sharedPlaybackPlan(subject, preserved, SharedSelection(PlaybackQuality.Original), "shared", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", false)
+        assertEquals(true, plan.request.copy); assertEquals(true, plan.request.preserve_dolby_vision)
+        // The Start carries the ask to B and on to the Source.
+        var sent: JsonObject? = null
+        val client = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor {
+            val buffer = Buffer(); it.request().body!!.writeTo(buffer); sent = Json.parseToJsonElement(buffer.readUtf8()).jsonObject
+            response(it.request(), "{}", 503)
+        }.build())
+        runCatching { client.start(context, plan.request) }
+        assertEquals(JsonPrimitive(true), sent!!.getValue("preserve_dolby_vision"))
+        // A decision that does not preserve, a transcode and a burn ask nothing, as Local.
+        val stripped = decide { JsonObject(it + ("delivery" to JsonObject(it.getValue("delivery").jsonObject + ("preserve_dolby_vision" to JsonPrimitive(false))))) }
+            .decisionForTest(context, caps(), emptyMap())
+        assertNull(sharedPlaybackPlan(subject, stripped, SharedSelection(PlaybackQuality.Original), "shared", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", false).request.preserve_dolby_vision)
+        val encoded = decide { JsonObject(it + ("method" to JsonPrimitive("transcode")) + ("delivery" to JsonObject(it.getValue("delivery").jsonObject + ("mode" to JsonPrimitive("transcode"))))) }
+            .decisionForTest(context, caps(), emptyMap())
+        assertNull(sharedPlaybackPlan(subject, encoded, SharedSelection(PlaybackQuality.Auto), "shared", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", false).request.preserve_dolby_vision)
+        val burned = sharedPlaybackPlan(subject, preserved, SharedSelection(PlaybackQuality.Original, subtitle = 4, burn = true), "shared", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", false)
+        assertEquals(4, burned.request.subtitle_burn); assertNull(burned.request.preserve_dolby_vision)
     }
 
 }
