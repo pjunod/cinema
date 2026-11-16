@@ -1,13 +1,14 @@
 # Vendored Hiqlite WAL 0.14.0
 
 This directory is the crates.io `hiqlite-wal` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries six patches for replicated SQLite: three
-restart-recovery repairs and three Plurx policies:
+Apache-2.0. Plurx carries seven patches for replicated SQLite: three
+restart-recovery repairs, one writer reply repair and three Plurx policies:
 
-**Owner:** Paul Junod (repository owner). Rows 1-3 are generic bugs; rows 4-6
+**Owner:** Paul Junod (repository owner). Rows 1-3 and 7 are generic bugs; rows 4-6
 are Plurx policies.
-As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
-`pending M6` rows still need upstream coordination and a real public URL.
+As of 2026-11-15, row 2 has an accepted upstream mechanism; the three
+`pending M6` rows (1, 3 and 7) still need upstream coordination and a real
+public URL.
 
 | # | Patch | Kind | Upstream | Drop condition |
 |---:|---|---|---|---|
@@ -17,6 +18,7 @@ As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
 | 4 | K-06 staged WAL construction (`start_staged`, `PartialStartupWriter`) | plurx policy | — | Never; Plurx's cancellable clock-observation start requires a failed constructor to drain its writer, not abandon it. |
 | 5 | Bounded writer-owned WAL runtime status | plurx policy | — | Never; Plurx owns this observational runtime status and its writer lifecycle attribution. |
 | 6 | Read-only stopped-node WAL inspection | plurx policy | — | Never; Plurx requires stopped-node boundary diagnostics without returning application payloads or reopening a writer. |
+| 7 | Keep the WAL writer alive when a vote or shutdown reply's receiver is gone | generic bug | pending M6 | Upstream release delivers the vote and shutdown replies without panicking when the caller has dropped its receiver. |
 
 - Missing `last_purged_log_id` metadata is reconstructed whenever the first
   retained WAL entry is above the initial log range. Snapshot installation can
@@ -82,6 +84,21 @@ As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
   The `plurx-cluster-check inspect-wal` caller adds immutable SQLite
   snapshot/applied boundaries and file hashes to its versioned artifact.
   Files: `src/inspection.rs`, `src/lib.rs`.
+- **Row 7 — Abandoned vote and shutdown replies:** `Action::Vote` replied
+  with `ack.send(res).unwrap()` and the shutdown acknowledgement with
+  `.expect(..)`, while `Append` and `Remove` already tolerated a closed
+  receiver. A `save_vote` cancelled with its Raft core dropped the receiver,
+  the reply panicked the WAL writer, and its lock file stayed behind. Both
+  replies now log a `warn` and carry on: the vote is already written and the
+  WAL already flushed when they are sent. This is the WAL half of Hiqlite
+  row 29. `dropped_vote_reply_keeps_the_vote_and_the_writer` abandons a vote
+  on the real writer, then proves the vote, an acknowledged shutdown, the
+  released lock and a reopen;
+  `dropped_shutdown_reply_still_releases_the_wal` shows the orderly stop
+  with the acknowledgement abandoned (the acknowledgement is the writer's
+  last act, so that the send no longer panics is in the source, not in that
+  run).
+  Files: `src/writer.rs`.
 
 **M1 ledger continuation, 2026-10-08:** rows 5 and 6 own the status and
 inspection surfaces and their existing plumbing previously disclosed as
@@ -113,7 +130,7 @@ their own exact disposition. Row 3 stays `pending M6`; no new upstream
 reproduction, full equivalence, upgrade or patch removal is claimed.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 2 and 3: the `generic bug` kind) have
+upstream release can retire (rows 1, 2, 3 and 7: the `generic bug` kind) have
 met their drop conditions in a release Plurx has upgraded to. Second, the
 `plurx policy` rows (rows 4, 5 and 6) no longer need a patch: their drop
 conditions are `Never` by design, so a row leaves only when upstream offers

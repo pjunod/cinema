@@ -18,6 +18,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A Raft apply that is cancelled or torn down mid-write (the Raft core
+  stopping, the runtime shutting down) no longer takes the node's store
+  writers down with it. The vendored Hiqlite SQLite writer and WAL writer
+  panicked when they replied to a request nobody was waiting for any more;
+  every later write on that node then failed until the process restarted, and
+  the next start rebuilt the database from a stale lock file. No caller
+  timeout was involved. The write itself is unchanged: it has committed or
+  rolled back before the reply. An abandoned reply is logged with its request,
+  applied index and any error, and counted in
+  `plurx_hiqlite_writer_abandoned_replies_total` (Hiqlite patch 32, WAL patch 7).
 - An idle cluster no longer pays a settings quorum read per background-loop tick to learn that
   nothing changed. The offline source probe loop and the media-session lease loop check this node's own
   replica (and, for leases, its own registry) before their authoritative read; the playback cache
