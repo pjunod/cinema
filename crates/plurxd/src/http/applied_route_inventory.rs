@@ -516,7 +516,8 @@ fn every_route_cache_entry_point_has_a_pinned_caller() {
             "dyn RouteView",
             1,
         ),
-        ("media_sessions.rs", "with_applied_view", "dyn RouteView", 1),
+        // The production constructor; the test-only `with_applied_view` is masked.
+        ("media_sessions.rs", "with_directory", "dyn RouteView", 1),
     ]);
     assert!(
         found == expected,

@@ -70,7 +70,7 @@ pub(crate) struct SharedCacheCoordinator {
     #[cfg(test)]
     publication_commit_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     node_id: String,
-    membership: MembershipManager,
+    directory: crate::cluster::Directory,
     transport: PeerTransport,
     store: Arc<dyn Store>,
 }
@@ -241,6 +241,7 @@ impl SharedCacheCoordinator {
         cluster_id: &str,
         node_id: String,
         membership: MembershipManager,
+        directory: crate::cluster::Directory,
         store: Arc<dyn Store>,
     ) -> Arc<Self> {
         let config =
@@ -268,8 +269,8 @@ impl SharedCacheCoordinator {
             #[cfg(test)]
             publication_commit_pause: Arc::new(std::sync::Mutex::new(None)),
             node_id,
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport: PeerTransport::new(membership),
+            directory,
             store,
         })
     }
@@ -537,31 +538,19 @@ impl SharedCacheCoordinator {
             .as_ref()
             .ok_or_else(|| "shared cache is not configured".to_owned())?;
         let (path, identity, canaries) = prepare_canary_directory(&config.configured_root).await?;
-        let voter_count = self
-            .membership
-            .activity_voter_count()
+        // One directory snapshot answers the other VOTERS (this node
+        // excluded), whether this node is one, and how many there are, so a
+        // membership change cannot fall between three reads. `complete()`
+        // counts this node only when it votes: adding the 1 unconditionally
+        // made this `n != n + 1` on a learner, so the canary refused before it
+        // ran and the shared cache root was never published there.
+        let directory = self
+            .directory
+            .voters()
             .await
             .map_err(|error| error.to_string())?;
-        let peers = self
-            .membership
-            .activity_peers()
-            .await
-            .map_err(|error| error.to_string())?;
-        // `activity_peers` returns the other VOTERS: it excludes this node and
-        // filters to voters. The voters this node can see therefore number
-        // `peers.len()` plus itself only when it is one. Adding the 1
-        // unconditionally made this `n != n + 1` on a learner, so the canary
-        // refused before it ran and the shared cache root was never published
-        // there — the same arithmetic that made `remote_rollout_ready`
-        // unsatisfiable on a learner.
-        let local_is_voter = self
-            .membership
-            .local_node_is_committed_voter()
-            .await
-            .map_err(|error| error.to_string())?;
-        if peers.len().saturating_add(usize::from(local_is_voter)) != voter_count {
-            return Err("the complete voter directory is not available".to_owned());
-        }
+        let (voter_count, local_is_voter) = canary_voter_facts(&directory)?;
+        let peers = directory.peers().all();
         // No peer to probe is the honest condition for the local-only canary.
         // Testing `voter_count == 1` said the same thing only for a voter.
         if peers.is_empty() {
@@ -1601,8 +1590,50 @@ fn unix_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+/// The canary's voter facts — how many voters, whether this node is one —
+/// or why it must not run: an unclustered process, or a voter it cannot see.
+fn canary_voter_facts(voters: &crate::cluster::Voters) -> Result<(usize, bool), String> {
+    let local_is_voter = voters.local_is_voter().map_err(|error| error.to_string())?;
+    if !voters.complete().map_err(|error| error.to_string())? {
+        return Err("the complete voter directory is not available".to_owned());
+    }
+    Ok((voters.voter_count(), local_is_voter))
+}
+
 #[cfg(test)]
 mod tests {
+    /// The canary's completeness as behaviour: a learner counts no self, a
+    /// voter counts itself, an invisible voter refuses, and an unclustered
+    /// process has no membership to check.
+    #[test]
+    fn the_canary_runs_only_with_every_voter_visible() {
+        let peer = |node: &str| plurx_core::cluster::membership::ActivityPeer {
+            node_id: node.to_owned(),
+            raft_id: 2,
+            http_base: Some(format!("http://{node}.invalid")),
+            reachable: true,
+        };
+        let facts = |peers: &[&str], count, local| {
+            super::canary_voter_facts(&crate::cluster::Voters::for_test(
+                peers.iter().map(|node| peer(node)).collect(),
+                count,
+                local,
+            ))
+        };
+        assert_eq!(facts(&["peer-a"], 2, Some(true)), Ok((2, true)));
+        assert_eq!(facts(&["peer-a", "peer-b"], 2, Some(false)), Ok((2, false)));
+        assert_eq!(facts(&[], 1, Some(true)), Ok((1, true)));
+        assert_eq!(
+            facts(&["peer-a"], 3, Some(true)),
+            Err("the complete voter directory is not available".to_owned())
+        );
+        assert_eq!(
+            facts(&["peer-a"], 2, Some(false)),
+            Err("the complete voter directory is not available".to_owned())
+        );
+        assert!(facts(&[], 1, None).is_err(), "unclustered");
+    }
+
     // Same defect, same shape, different file: the canary refused to run at all
     // on a learner because it counted this node into the voter directory. Pin
     // the call site — a helper test would not have caught the original.
@@ -1616,12 +1647,8 @@ mod tests {
             .expect("verify_once_inner never closes at fn indent")
             .0;
         assert!(
-            body.contains("local_node_is_committed_voter()"),
-            "the canary must read the local committed role, not assume it",
-        );
-        assert!(
-            body.contains("saturating_add(usize::from(local_is_voter))"),
-            "the visible-voter count must depend on the local role",
+            body.contains("canary_voter_facts(&directory)"),
+            "the canary must take the voter facts from one directory snapshot",
         );
         assert!(
             body.contains("if peers.is_empty()"),
@@ -1645,6 +1672,7 @@ mod tests {
             "test-cluster",
             node_id.to_owned(),
             MembershipManager::unavailable(),
+            crate::cluster::Directory::new(MembershipManager::unavailable()),
             store,
         )
     }

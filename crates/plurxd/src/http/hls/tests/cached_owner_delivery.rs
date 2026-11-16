@@ -63,7 +63,7 @@ mod cached_owner_delivery_tests {
         add_http_text_subtitle(&mut owner, &session).await;
         owner.mark_started().await;
         owner.state.node_id = selected.identity.node_id.clone();
-        owner.state.membership = leader.clone();
+        owner.state.replace_membership(leader.clone());
         owner.state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
             leader.clone(),
             Arc::clone(&owner.store),
@@ -181,7 +181,7 @@ mod cached_owner_delivery_tests {
         .await;
         let mut ingress = ingress_fixture.state.clone();
         ingress.node_id = learner_id;
-        ingress.membership = learner;
+        ingress.replace_membership(learner);
         ingress.store = Arc::clone(&owner.store);
         ingress.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
             ingress.membership.clone(),

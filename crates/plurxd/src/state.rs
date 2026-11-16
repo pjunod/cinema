@@ -809,6 +809,9 @@ pub struct AppState {
     pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// The cluster facade (`crate::cluster`): authority, role and peers.
+    /// Feature code asks it; the three raw handles above stay until slice 7.
+    pub(crate) cluster: crate::cluster::Cluster,
     /// Shared complete observation owner. Pending startup hands this exact
     /// handle to normal HTTP; a second loop cannot claim its receiver.
     pub(crate) clock_observer: crate::clock_offset::ClockObserver,
@@ -1204,6 +1207,11 @@ impl AppState {
         let copy_observation_dir = (!data_dir.as_os_str().is_empty())
             .then(|| data_dir.join("copy-ranges").join("observations"));
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
+        let cluster = crate::cluster::Cluster::new(
+            serving.clone(),
+            membership.clone(),
+            applied.applied_mark(),
+        );
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -1286,6 +1294,7 @@ impl AppState {
             &cluster_id,
             node_id.clone(),
             membership.clone(),
+            cluster.directory(),
             Arc::clone(&store),
         );
         let transcode = Arc::new(
@@ -1375,9 +1384,10 @@ impl AppState {
             node_id.clone(),
             serving.clone(),
         );
-        let media_pool = crate::media_pool::MediaPool::new(membership.clone());
-        let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_applied_view(
+        let media_pool = crate::media_pool::MediaPool::new(membership.clone(), cluster.directory());
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::with_directory(
             membership.clone(),
+            cluster.directory(),
             Arc::clone(&store),
             Arc::new(applied.clone()),
         );
@@ -1420,6 +1430,7 @@ impl AppState {
             copy_observation_dir,
             node_hostname: membership.local_hostname(),
             membership,
+            cluster,
             media_pool,
             media_sessions,
             settings_changes,
@@ -1471,6 +1482,21 @@ impl AppState {
             hls_route_hooks: crate::http::hls::unfilled_hls_route_hooks(),
             started_at: Instant::now(),
         }
+    }
+
+    /// Point this state at another membership manager, and the cluster
+    /// facade with it, so a fixture can never leave the two disagreeing.
+    #[cfg(test)]
+    pub(crate) fn replace_membership(
+        &mut self,
+        membership: plurx_core::cluster::membership::MembershipManager,
+    ) {
+        self.cluster = crate::cluster::Cluster::new(
+            self.serving.clone(),
+            membership.clone(),
+            self.applied.applied_mark(),
+        );
+        self.membership = membership;
     }
 
     /// Refresh all Store-backed Prometheus gauges as one complete sample.
