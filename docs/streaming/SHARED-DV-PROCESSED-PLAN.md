@@ -1,10 +1,10 @@
 # Shared processed Dolby Vision / FEL re-encode — design note (T4.1)
 
-**Status:** design, ready for Paul's two calls (§6) · **Effort:** `effort/shared-dv-hdr`, M4 ·
+**Status:** implementation in progress; qualification and deployment outstanding · **Effort:** `effort/shared-dv-hdr`, M4 ·
 **Written:** 2026-11-15 · **Read against:** `wt-dvhdr-m2` @ `468e9e90d` (M1 code);
-`origin/main` @ `29b35e713`. Read, not compiled, nothing run.
-Destination in the repo: `docs/streaming/SHARED-DV-PROCESSED-PLAN.md` plus its row in
-`docs/streaming/README.md` (T4.1 of `SHARED-LIBRARY-DV-HDR-PLAN.md`).
+`origin/main` @ `29b35e713` for the original design. The continuation
+execution state is recorded in §7; compile attempts are not test qualification.
+Companion to [the shared DV/HDR plan](SHARED-LIBRARY-DV-HDR-PLAN.md), M4.
 
 Paths are relative to `crates/plurxd/src/` unless they start with `crates/` or `docs/`.
 Line numbers are from that worktree as it stood, which had uncommitted M2 edits
@@ -215,6 +215,12 @@ retires that Source session through the existing admin stop
 (`transcode/manager/control.rs:1058`); B then sees an ordinary Source End. On B, the
 session row names the Source as the place the work runs. A declined upgrade reports
 its reason on B through a relayable field, not `enhancement` (F12).
+The B Activity projection uses the exact retained receiver processed successor,
+including an assigned successor before publication. Its Source label comes from
+the current matching import or falls back to the Source server ID; its title is
+an honest shared-item ID fallback because Activity does not fetch the remote
+catalogue on every poll. Stop retires only that B owner and waits for confirmed
+Source End. Peer snapshots carry these rows for another B cluster member.
 Tests: `http/tests.rs::activity_lists_a_source_processed_upgrade_with_its_grant_and_stop`,
 `transcode/tests/source_actor.rs::admin_stop_of_a_source_processed_session_settles_and_ends_the_start`.
 Must land before any deploy of T4.2 (hardware-attribution rule).
@@ -253,31 +259,34 @@ processing only through T4.2. Test:
 `transcode/tests/source_actor.rs::source_compatible_base_encode_never_renders_a_processed_window_in_the_start`.
 T1.1's risk note covers `encoder_and_grade_preferring` only.
 
-## 6. Open — Paul's calls and unknowns
+## 6. Decisions and remaining acceptance
 
-1. **Paul:** shared viewers compete for the Source's one processed preparation slot
+1. **Resolved by the 2026-11-16 handoff:** shared viewers compete for the Source's one processed preparation slot
    and its GPU on equal terms with local viewers (F6). Default taken: equal, first
    come, the Source's own `DV_HDR_PROCESSING` / `DV_FEL_REENCODE` settings decide and
-   B's do not. Say so if the Source's local viewers should come first.
-2. **Paul:** B's existing "prepared quality handoff" setting
+   B's do not.
+2. **Resolved by the 2026-11-16 handoff:** B's existing "prepared quality handoff" setting
    (`shared_receiver_control.rs:326-333`) also turns the upgrade off on B, since it is
    the same successor. Default taken: yes, one switch for one mechanism.
-3. Unknown: the Source Activity row (T4.4).
-4. Unknown: whether the renderer children die when the trial future is dropped; T4.3
-   does not rely on it.
+3. Source Activity is projected from the actual Source owner before hardware
+   work and retained through rendition retirement. Signed Stop follows that
+   exact owner, including learners; implementation checks are pending.
+4. The Source operation is retained when a Start waiter leaves. Cancellation
+   and the existing trial deadline join its real child/readers before settlement;
+   the authored regressions have not been executed yet.
 5. Unknown: the right start lead (T4.2 risk 1).
 
 ## 7. Execution log
 
 | Task | Agent-Model | Agent-Session | PR | State |
 |---|---|---|---|---|
-| T4.1 design note | claude-fable-5-2 (sub-agent) | 01BCWLA21tCtxWeNBWRHWsWn | — | written 2026-11-15; not yet in the repo; awaiting §6 calls |
-| M1 correction (§5) | | | | open — flag to the M1 owner |
-| T4.2 | | | | |
-| T4.3 | | | | |
+| T4.1 design note | claude-fable-5-2 (sub-agent) | 01BCWLA21tCtxWeNBWRHWsWn | — | written 2026-11-15; restored in `94f9568b5`; §6 defaults accepted in the handoff |
+| M1 correction (§5) | prior M1 owner | prior handoff | — | built in `5076a9681`; retained in this stack |
+| T4.2 | Codex + delegated GPT models | 2026-11-16 continuation | pending | implemented in `6b06553f4` and working tree; compile corrections in progress; no test qualification |
+| T4.3 | Codex + delegated GPT models | 2026-11-16 continuation | pending | Source operation/receipt and deadline cancellation implemented; real child/reader/semaphore regressions authored, unrun |
 | T4.4 | GPT (Activity task) | shared M4 task | — | implementation in worktree; adversarial review and fast lane pending |
-| T4.5 | | | | |
-| T4.6 | | | | |
+| T4.5 | Codex + delegated GPT models | 2026-11-16 continuation | pending | Source-scoped private root attachment/reuse implemented; cross-grant/viewer acceptance remains |
+| T4.6 | Codex + delegated GPT models | 2026-11-16 continuation | pending | not started; physical switch, frame/audio and real-title evidence outstanding |
 
 ## 8. T4.4 Activity and Stop implementation note
 

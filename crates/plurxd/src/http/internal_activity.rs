@@ -58,6 +58,8 @@ pub struct ActivitySnapshot {
     #[serde(default)]
     pub source_processed: Vec<SourceProcessedRow>,
     #[serde(default)]
+    pub receiver_processed: Vec<ReceiverProcessedRow>,
+    #[serde(default)]
     pub analysis: Vec<crate::state::AnalysisProgress>,
     #[serde(default)]
     pub(crate) live_tv: Vec<crate::live_tv::LiveTvActivity>,
@@ -81,6 +83,58 @@ pub struct SourceProcessedRow {
     pub item_id: i64,
     pub started_unix: i64,
     pub reason: String,
+}
+
+/// B's retained processed successor. Source server is the work location;
+/// receiver_node_id is where the exact B retirement owner lives.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReceiverProcessedRow {
+    pub stop_id: String,
+    pub receiver_node_id: String,
+    pub source_server_id: String,
+    pub source_name: String,
+    pub title: String,
+    pub viewer: String,
+    pub reason: String,
+}
+
+fn valid_receiver_stop_id(id: &str) -> bool {
+    id.strip_prefix("receiver-s-").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+pub(super) async fn local_receiver_processed(state: &AppState) -> Vec<ReceiverProcessedRow> {
+    let activities = state.sharing.receiver_starts.processed_activities();
+    if activities.is_empty() {
+        return Vec::new();
+    }
+    let imports = state.store.sharing_imports().await.unwrap_or_default();
+    activities
+        .into_iter()
+        .filter(|row| valid_receiver_stop_id(&row.stop_id))
+        .map(|row| {
+            let source_name = imports
+                .iter()
+                .find(|import| {
+                    import.id == row.import_id
+                        && import.source_server_id == row.source_server_id
+                        && import.catalogue_epoch == row.catalogue_epoch
+                        && import.state == "active"
+                })
+                .map(|import| bounded_text(import.source_name.clone(), MAX_USER_BYTES))
+                .unwrap_or_else(|| row.source_server_id.to_string());
+            ReceiverProcessedRow {
+                stop_id: row.stop_id,
+                receiver_node_id: state.node_id.clone(),
+                source_server_id: row.source_server_id.to_string(),
+                source_name,
+                title: bounded_text(format!("Shared item {}", row.item_id), MAX_TITLE_BYTES),
+                viewer: format!("User #{}", row.viewer_id),
+                reason: "Processed Dolby Vision upgrade runs on Source".to_owned(),
+            }
+        })
+        .collect()
 }
 
 fn valid_source_stop_id(id: &str) -> bool {
@@ -492,12 +546,12 @@ impl PeerActivityClient {
     /// Route one admin Stop only to the committed member named by a fresh
     /// Activity row. Membership supplies the address; the signed body binds
     /// both that node and the exact opaque Source operation id.
-    pub async fn stop_source_processed_on(
+    pub async fn stop_processed_on(
         &self,
         owner_node_id: &str,
         stop_id: &str,
     ) -> Result<StatusCode, PeerTransportError> {
-        if !valid_source_stop_id(stop_id) {
+        if !valid_source_stop_id(stop_id) && !valid_receiver_stop_id(stop_id) {
             return Err(PeerTransportError::InvalidResponse);
         }
         let peer = self
@@ -522,7 +576,11 @@ impl PeerActivityClient {
                 reqwest::Method::POST,
                 SOURCE_STOP_PATH,
                 body,
-                deadline_after(SOURCE_STOP_TIMEOUT),
+                deadline_after(if valid_receiver_stop_id(stop_id) {
+                    Duration::from_secs(40)
+                } else {
+                    SOURCE_STOP_TIMEOUT
+                }),
                 1_024,
                 PeerAuthMode::ExactRequestAndMemberResponse,
             )
@@ -699,6 +757,9 @@ pub async fn stop_source_processed(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, StatusCode> {
+    if body.len() > 256 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
     let auth =
         super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
@@ -711,14 +772,25 @@ pub async fn stop_source_processed(
     }
     let request: SourceStopRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if request.node_id != state.node_id || !valid_source_stop_id(&request.stop_id) {
+    if request.node_id != state.node_id
+        || (!valid_source_stop_id(&request.stop_id) && !valid_receiver_stop_id(&request.stop_id))
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let status = match state
-        .transcode
-        .stop_source_processed_session(&request.stop_id)
-        .await
-    {
+    let stopped = if valid_receiver_stop_id(&request.stop_id) {
+        state
+            .sharing
+            .receiver_starts
+            .stop_processed_activity(std::sync::Arc::new(state.clone()), &request.stop_id)
+            .await
+    } else {
+        state
+            .transcode
+            .stop_source_processed_session(&request.stop_id)
+            .await
+            .map_err(|_| ())
+    };
+    let status = match stopped {
         Ok(true) => StatusCode::NO_CONTENT,
         Ok(false) => StatusCode::NOT_FOUND,
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -781,6 +853,7 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
             .is_none_or(|workers| workers.bounded(expected_node_id))
         && snapshot.deliveries.len() <= MAX_DELIVERIES
         && snapshot.source_processed.len() <= MAX_SOURCE_PROCESSED
+        && snapshot.receiver_processed.len() <= MAX_SOURCE_PROCESSED
         && snapshot.analysis.len() <= MAX_ANALYSIS_PROGRESS
         && snapshot.live_tv.len() <= 4
         && snapshot.dvr.as_ref().is_none_or(|dvr| {
@@ -839,6 +912,15 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
                 && row.title.len() <= MAX_TITLE_BYTES
                 && row.viewer.len() <= MAX_USER_BYTES
                 && row.grant.len() <= 64
+                && row.reason.len() <= 256
+        })
+        && snapshot.receiver_processed.iter().all(|row| {
+            row.receiver_node_id == snapshot.node_id
+                && valid_receiver_stop_id(&row.stop_id)
+                && row.source_server_id.len() == 36
+                && row.source_name.len() <= MAX_USER_BYTES
+                && row.title.len() <= MAX_TITLE_BYTES
+                && row.viewer.len() <= MAX_USER_BYTES
                 && row.reason.len() <= 256
         })
         && snapshot.analysis.iter().all(|progress| {
@@ -1011,6 +1093,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
     }
     let mut snapshot = bounded_snapshot(state.node_id.clone(), deliveries, analysis);
     attach_source_processed(&mut snapshot, local_source_processed(state).await);
+    attach_receiver_processed(&mut snapshot, local_receiver_processed(state).await);
     snapshot.workers = Some(Box::new(local_workers(state).await));
     snapshot.live_tv = state.live_tv.activities().into_iter().take(4).collect();
     attach_dvr_snapshot(&mut snapshot, state.live_tv.capture_observation_snapshot());
@@ -1104,6 +1187,7 @@ fn bounded_snapshot(
         node_id,
         deliveries: Vec::new(),
         source_processed: Vec::new(),
+        receiver_processed: Vec::new(),
         analysis: Vec::new(),
         live_tv: Vec::new(),
         dvr: None,
@@ -1162,7 +1246,7 @@ fn bounded_snapshot(
 fn attach_source_processed(snapshot: &mut ActivitySnapshot, rows: Vec<SourceProcessedRow>) {
     let mut bytes = serde_json::to_vec(snapshot).map_or(MAX_RESPONSE_BYTES, |wire| wire.len());
     let limit = bytes
-        .saturating_add(SOURCE_RESPONSE_RESERVE_BYTES)
+        .saturating_add(SOURCE_RESPONSE_RESERVE_BYTES / 2)
         .min(MAX_RESPONSE_BYTES);
     for row in rows.into_iter().take(MAX_SOURCE_PROCESSED) {
         let Ok(wire) = serde_json::to_vec(&row) else {
@@ -1174,6 +1258,24 @@ fn attach_source_processed(snapshot: &mut ActivitySnapshot, rows: Vec<SourceProc
         }
         bytes += added;
         snapshot.source_processed.push(row);
+    }
+}
+
+fn attach_receiver_processed(snapshot: &mut ActivitySnapshot, rows: Vec<ReceiverProcessedRow>) {
+    let mut bytes = serde_json::to_vec(snapshot).map_or(MAX_RESPONSE_BYTES, |wire| wire.len());
+    let limit = bytes
+        .saturating_add(SOURCE_RESPONSE_RESERVE_BYTES / 2)
+        .min(MAX_RESPONSE_BYTES);
+    for row in rows.into_iter().take(MAX_SOURCE_PROCESSED) {
+        let Ok(wire) = serde_json::to_vec(&row) else {
+            continue;
+        };
+        let added = wire.len() + usize::from(!snapshot.receiver_processed.is_empty());
+        if bytes.saturating_add(added) > limit {
+            break;
+        }
+        bytes += added;
+        snapshot.receiver_processed.push(row);
     }
 }
 
@@ -1352,6 +1454,31 @@ mod tests {
         assert!(!snapshot_is_bounded(&snapshot, "source-node"));
     }
 
+    #[test]
+    fn receiver_processed_snapshot_binds_retirement_owner_and_opaque_id() {
+        let row = ReceiverProcessedRow {
+            stop_id: format!("receiver-s-{}", "a".repeat(64)),
+            receiver_node_id: "receiver-node".into(),
+            source_server_id: uuid::Uuid::new_v4().to_string(),
+            source_name: "Source".into(),
+            title: "Shared item 100".into(),
+            viewer: "User #7".into(),
+            reason: "Processed Dolby Vision upgrade runs on Source".into(),
+        };
+        let mut snapshot = bounded_snapshot("receiver-node".into(), Vec::new(), Vec::new());
+        attach_receiver_processed(&mut snapshot, vec![row.clone()]);
+        let wire = serde_json::to_vec(&snapshot).expect("bounded receiver snapshot");
+        assert!(matches!(
+            decode_snapshot(&wire, "receiver-node"),
+            PeerActivityOutcome::Answered(_)
+        ));
+        snapshot.receiver_processed[0].receiver_node_id = "other-node".into();
+        assert!(!snapshot_is_bounded(&snapshot, "receiver-node"));
+        snapshot.receiver_processed[0] = row;
+        snapshot.receiver_processed[0].stop_id = "receiver-secret".into();
+        assert!(!snapshot_is_bounded(&snapshot, "receiver-node"));
+    }
+
     #[tokio::test]
     async fn source_processed_stop_rejects_household_bearer() {
         let (_, state) = crate::http::tests::test_app_with_state();
@@ -1422,6 +1549,7 @@ mod tests {
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             source_processed: Vec::new(),
+            receiver_processed: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
             dvr: None,
@@ -1438,6 +1566,7 @@ mod tests {
             node_id: "node".into(),
             deliveries: vec![],
             source_processed: vec![],
+            receiver_processed: vec![],
             analysis: vec![row.clone()],
             live_tv: vec![],
             dvr: None,
@@ -1468,6 +1597,7 @@ mod tests {
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             source_processed: Vec::new(),
+            receiver_processed: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
             dvr: Some(crate::live_tv::dvr::DvrObservationSnapshot {
@@ -1784,6 +1914,7 @@ mod tests {
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             source_processed: Vec::new(),
+            receiver_processed: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
             dvr: None,

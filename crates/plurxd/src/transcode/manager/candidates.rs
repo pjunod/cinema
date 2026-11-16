@@ -106,7 +106,7 @@ impl TranscodeManager {
         )
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     pub(crate) fn processed_enhancement_envelope_with_source_rate(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         request: &SessionRequest,
@@ -310,17 +310,6 @@ impl TranscodeManager {
     /// original service-reviewed conversion scope can restore its P81 intent;
     /// source tags, client preferences and a serialized description cannot.
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn processed_qualification_destination(
-        request: &SessionRequest,
-    ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
-        let ask = request
-            .candidate_context
-            .as_deref()
-            .map(ProcessedUpgradeAsk::from_candidate);
-        Self::processed_qualification_destination_with_ask(request, ask.as_ref())
-    }
-
-    #[cfg(any(target_os = "linux", test))]
     pub(super) fn processed_qualification_destination_with_ask(
         request: &SessionRequest,
         ask: Option<&ProcessedUpgradeAsk>,
@@ -355,7 +344,7 @@ impl TranscodeManager {
     /// Pure qualification-input seam shared with ingress regressions. Its
     /// caller must still validate current planning authority and acquire the
     /// admitted local producer; this grants no prepared lease or executable.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     pub(crate) fn processed_qualification_input(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         request: &SessionRequest,

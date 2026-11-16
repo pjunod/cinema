@@ -32,13 +32,14 @@ impl VodServe {
             {
                 return None;
             }
-            Self::capture_session_processed_root(
+            Self::capture_session_processed_root_scoped(
                 session,
                 id,
                 request,
                 supersession_user,
                 scope,
                 deadline,
+                false,
             )
         })
     }
@@ -108,9 +109,30 @@ impl VodServe {
         scope: [u8; 32],
         deadline: Instant,
     ) -> Option<PreparedRootAdmission> {
+        Self::capture_session_processed_root_scoped(
+            session,
+            id,
+            request,
+            supersession_user,
+            scope,
+            deadline,
+            true,
+        )
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn capture_session_processed_root_scoped(
+        session: &Session,
+        id: &str,
+        request: &SessionRequest,
+        supersession_user: &str,
+        scope: [u8; 32],
+        deadline: Instant,
+        same_playback: bool,
+    ) -> Option<PreparedRootAdmission> {
         if !session.renewable()
             || session.supersession_user != supersession_user
-            || session.playback_id != request.playback_id
+            || same_playback && session.playback_id != request.playback_id
             || session.file.id != request.file_id
             || session.processed_reuse_scope != Some(scope)
             || Instant::now() >= deadline

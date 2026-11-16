@@ -67,6 +67,9 @@ pub(super) struct HandoffState {
     processed_offer: bool,
     /// Dispatch is one-shot even if Source refuses or the viewer aborts.
     processed_spent: bool,
+    /// B's bounded explanation for a declined optional upgrade, retained for
+    /// accepted control responses on this predecessor generation only.
+    processed_skip: Option<String>,
     /// The latest `dual_player_preparation` the client declared.
     dual_player: bool,
     /// The one prepared successor slot.
@@ -83,21 +86,38 @@ pub(super) struct SuccessorDispatch {
     processed_upgrade: bool,
 }
 
-#[cfg(test)]
-impl PartialEq<String> for SuccessorDispatch {
-    fn eq(&self, other: &String) -> bool {
-        self.digest.as_str() == other.as_str()
-    }
-}
-
 struct SuccessorSlot {
     successor: Arc<ReceiverStartInner>,
+    processed_upgrade: bool,
     digest: String,
     deadline_ms: i64,
     /// Minted by the first exchange that offers this successor and reused by
     /// every later offer, so an acknowledgement names this exact staging.
     action_id: Option<String>,
     committed: bool,
+}
+
+impl SuccessorSlot {
+    fn processed_failure_reason(&self) -> Option<&'static str> {
+        if !self.processed_upgrade || self.committed {
+            return None;
+        }
+        let owned = self
+            .successor
+            .state
+            .lock()
+            .expect("receiver successor owner");
+        let error = owned.start.as_ref()?.as_ref().err()?;
+        Some(match error {
+            ReceiverStartError::Deadline | ReceiverStartError::NotYet(_) => {
+                "Optional processed upgrade did not complete in time."
+            }
+            ReceiverStartError::DolbyVisionUnsupported | ReceiverStartError::Unsupported => {
+                "Source declined the optional processed upgrade."
+            }
+            _ => "Optional processed upgrade could not be completed.",
+        })
+    }
 }
 
 struct AckReply {
@@ -492,6 +512,43 @@ impl ReceiverStartRegistry {
 }
 
 impl ReceiverStartActor {
+    fn record_processed_skip(&self, reason: &'static str) {
+        let mut owned = self.0.state.lock().expect("receiver owner");
+        owned
+            .handoff
+            .processed_skip
+            .get_or_insert_with(|| reason.to_owned());
+    }
+
+    /// A skip belongs to the published B generation, never the Source tuple
+    /// or a later successor. The public decorator validates this same bound.
+    pub(super) fn processed_upgrade_skip(
+        &self,
+        generation: &str,
+    ) -> Option<crate::http::hls::processed_upgrade::ProcessingSkip> {
+        let mut owned = self.0.state.lock().expect("receiver owner");
+        let current = matches!(owned.start.as_ref(), Some(Ok(ReceiverPublished::Hls(start)))
+            if start.control.as_ref().is_some_and(|control| control.generation == generation));
+        if !current || owned.retirement_started {
+            return None;
+        }
+        if let Some(reason) = owned
+            .handoff
+            .slot
+            .as_ref()
+            .and_then(SuccessorSlot::processed_failure_reason)
+        {
+            owned
+                .handoff
+                .processed_skip
+                .get_or_insert_with(|| reason.to_owned());
+        }
+        Some(crate::http::hls::processed_upgrade::ProcessingSkip {
+            generation: generation.to_owned(),
+            reason: owned.handoff.processed_skip.clone()?,
+        })
+    }
+
     /// Record the ask of one Source-accepted exchange and decide whether it
     /// dispatches a successor. Returns the digest to stage.
     ///
@@ -524,6 +581,15 @@ impl ReceiverStartActor {
                 if let Some(capabilities) = request.capabilities.as_ref() {
                     handoff.dual_player = capabilities.dual_player_preparation;
                 }
+                if let Some(reason) = handoff
+                    .slot
+                    .as_ref()
+                    .and_then(SuccessorSlot::processed_failure_reason)
+                {
+                    handoff
+                        .processed_skip
+                        .get_or_insert_with(|| reason.to_owned());
+                }
                 if handoff
                     .slot
                     .as_ref()
@@ -543,6 +609,7 @@ impl ReceiverStartActor {
                 {
                     // A viewer-directed change outranks the offered upgrade.
                     handoff.processed_spent = true;
+                    handoff.processed_skip = None;
                 }
                 let withdrawn = if handoff
                     .slot
@@ -653,6 +720,11 @@ impl ReceiverStartActor {
             Uuid::new_v4(),
             processed_upgrade,
         ) else {
+            if processed_upgrade {
+                self.record_processed_skip(
+                    "Receiver could not stage the optional processed upgrade.",
+                );
+            }
             return;
         };
         let deadline_ms = clock_ms().saturating_add(SUCCESSOR_DEADLINE_MS);
@@ -663,9 +735,14 @@ impl ReceiverStartActor {
             &digest,
             deadline_ms,
         ) else {
+            if processed_upgrade {
+                self.record_processed_skip(
+                    "Receiver could not stage the optional processed upgrade.",
+                );
+            }
             return;
         };
-        if !self.install_successor(&successor, digest, deadline_ms) {
+        if !self.install_successor(&successor, digest, deadline_ms, processed_upgrade) {
             successor.begin_retirement(state.clone(), ReceiverRetirementReason::Replaced);
         }
     }
@@ -678,6 +755,7 @@ impl ReceiverStartActor {
         successor: &ReceiverStartActor,
         digest: String,
         deadline_ms: i64,
+        processed_upgrade: bool,
     ) -> bool {
         let mut owned = self.0.state.lock().expect("receiver owner");
         if owned.retirement_started || owned.handoff.slot.is_some() {
@@ -685,6 +763,7 @@ impl ReceiverStartActor {
         }
         owned.handoff.slot = Some(SuccessorSlot {
             successor: Arc::clone(&successor.0),
+            processed_upgrade,
             digest,
             deadline_ms,
             action_id: None,

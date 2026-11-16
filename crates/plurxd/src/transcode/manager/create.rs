@@ -2377,12 +2377,14 @@ impl TranscodeManager {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // the exact accepted trial and its Source custody
     pub(in crate::transcode) async fn prepare_source_processed_upgrade(
         &self,
         request: &SessionRequest,
         ask: &ProcessedUpgradeAsk,
         evidence: &crate::transcode::source_preparation::SourceHeldProbeEvidence,
         proof: &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+        authority: Arc<crate::transcode::source_actor::SourceProducerAuthority>,
         producer: Arc<crate::prodrun::ProducerSlot>,
         cancel: tokio_util::sync::CancellationToken,
         deadline: tokio::time::Instant,
@@ -2402,7 +2404,7 @@ impl TranscodeManager {
                 &recovery,
                 request.hdr10,
                 ask,
-                Some((evidence, proof, producer, cancel.clone())),
+                Some((evidence, proof, producer, cancel.clone(), authority)),
                 Some(deadline),
             )
             .await?
@@ -2413,6 +2415,7 @@ impl TranscodeManager {
         Ok(trial)
     }
 
+    #[allow(clippy::too_many_arguments)] // the exact accepted trial and its Source custody
     async fn prepare_processed_upgrade_with_source(
         &self,
         session_id: &str,
@@ -2425,6 +2428,7 @@ impl TranscodeManager {
             &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
             Arc<crate::prodrun::ProducerSlot>,
             tokio_util::sync::CancellationToken,
+            Arc<crate::transcode::source_actor::SourceProducerAuthority>,
         )>,
         source_deadline: Option<tokio::time::Instant>,
     ) -> Result<Option<ProcessedUpgradeTrial>, String> {
@@ -2551,19 +2555,23 @@ impl TranscodeManager {
                 context.profile = None;
                 context.planning_snapshot = Some(Arc::new(planning.clone()));
             }
-            let processed_work = source.as_ref().map(|(_, _, producer, cancel)| {
-                let mut ask = original.clone();
-                ask.display_target = display_target;
-                ask.display_target_note = display_target_note.clone();
-                SourceProcessedWork {
-                    ask,
-                    producer: Arc::clone(producer),
-                    cancel: cancel.clone(),
-                }
-            });
+            let processed_work = source
+                .as_ref()
+                .map(|(_, proof, producer, cancel, authority)| {
+                    let mut ask = original.clone();
+                    ask.display_target = display_target;
+                    ask.display_target_note = display_target_note.clone();
+                    SourceProcessedWork {
+                        ask,
+                        authority: Arc::clone(authority),
+                        assignment: proof.assignment().clone(),
+                        producer: Arc::clone(producer),
+                        cancel: cancel.clone(),
+                    }
+                });
             let source_evidence = source
                 .as_ref()
-                .map(|(evidence, proof, _, _)| (*evidence, *proof));
+                .map(|(evidence, proof, _, _, _)| (*evidence, *proof));
             let reuse_scope = original
                 .catalog_query
                 .as_ref()
@@ -3965,6 +3973,13 @@ impl TranscodeManager {
                     // Clone the held descriptor; never reacquire path authority.
                     if processed_work.is_some_and(|work| work.cancel.is_cancelled()) {
                         return Err("Source processed preparation cancelled".to_owned());
+                    }
+                    if let Some(work) = processed_work {
+                        work.authority.current_preparation(&work.assignment).await
+                            .map_err(|_| "Source preparation authority changed before processed launch".to_owned())?;
+                        if work.cancel.is_cancelled() {
+                            return Err("Source processed preparation cancelled".to_owned());
+                        }
                     }
                     let source_open_started = tokio::time::Instant::now();
                     let input=crate::source_input::SourceInput::open_current_held(

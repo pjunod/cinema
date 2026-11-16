@@ -658,6 +658,8 @@ impl ProcessedUpgradeAsk {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct SourceProcessedWork {
     pub(crate) ask: ProcessedUpgradeAsk,
+    pub(crate) authority: Arc<source_actor::SourceProducerAuthority>,
+    pub(crate) assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
     pub(crate) producer: Arc<crate::prodrun::ProducerSlot>,
     pub(crate) cancel: tokio_util::sync::CancellationToken,
 }

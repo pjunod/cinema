@@ -263,6 +263,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     return source?{...de,title:source.title||de.title,user:source.viewer||de.user,source_processed:source}:de;
   });
   const sourcePending=sourceRows.filter(row=>!watching.some(de=>de.source_processed?.stop_id===row.stop_id));
+  const receiverProcessed=Array.isArray(d.receiver_processed)?d.receiver_processed:[];
   paintActivity(detailActivitySummary(d,watching,recording));
   const missing=activityNodeFailures(d);
   const nodeNames=d.node_hostnames||{};
@@ -330,6 +331,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
     ${activityWatchingHtml(watching,d.live_tv,nodeNames,sessionsById,open,d.retained_output_node)}
     ${activitySourceProcessedHtml(sourcePending,nodeNames)}
+    ${activityReceiverProcessedHtml(receiverProcessed,nodeNames)}
     ${activitySourceRecoveryHtml(d)}
     ${activityTabsHtml()}
     <section id="activity-status" ${ME?.is_admin?'role="tabpanel" aria-labelledby="activity-tab-status"':'aria-label="Activity status"'}${ACTIVITY_VIEW.tab!=="status"?" hidden":""}>

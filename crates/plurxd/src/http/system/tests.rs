@@ -318,6 +318,7 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
                         delivered_bps: None,
                     }],
                     source_processed: Vec::new(),
+                    receiver_processed: Vec::new(),
                     analysis: Vec::new(),
                     live_tv: vec![crate::live_tv::LiveTvActivity {
                         channel_number: "7.1".into(),
@@ -416,6 +417,55 @@ fn source_processed_stop_selects_only_the_answered_owner() {
     let missing =
         PeerActivityRead::Peers(vec![("source-node".into(), PeerActivityOutcome::TimedOut)].into());
     assert!(source_processed_owner(&missing, &id).is_err());
+}
+
+#[test]
+fn receiver_processed_stop_selects_only_the_answered_b_owner() {
+    let id = format!("receiver-s-{}", "a".repeat(64));
+    let snapshot: crate::http::internal_activity::ActivitySnapshot =
+        serde_json::from_value(serde_json::json!({
+            "node_id": "receiver-node", "deliveries": [],
+            "receiver_processed": [{
+                "stop_id": id, "receiver_node_id": "receiver-node",
+                "source_server_id": uuid::Uuid::new_v4().to_string(),
+                "source_name": "Source", "title": "Shared item 100",
+                "viewer": "User #7", "reason": "Processed Dolby Vision upgrade runs on Source"
+            }]
+        }))
+        .expect("B activity snapshot");
+    let peers = PeerActivityRead::Peers(
+        vec![(
+            "receiver-node".into(),
+            PeerActivityOutcome::Answered(snapshot.clone()),
+        )]
+        .into(),
+    );
+    assert_eq!(
+        receiver_processed_owner(&peers, &id),
+        Ok(Some("receiver-node"))
+    );
+    assert_eq!(
+        receiver_processed_owner(&peers, "receiver-s-other"),
+        Ok(None)
+    );
+    let duplicate = PeerActivityRead::Peers(
+        vec![
+            (
+                "receiver-node".into(),
+                PeerActivityOutcome::Answered(snapshot.clone()),
+            ),
+            (
+                "another-node".into(),
+                PeerActivityOutcome::Answered(snapshot),
+            ),
+        ]
+        .into(),
+    );
+    assert!(receiver_processed_owner(&duplicate, &id).is_err());
+    let missing = PeerActivityRead::Peers(
+        vec![("receiver-node".into(), PeerActivityOutcome::TimedOut)].into(),
+    );
+    assert!(receiver_processed_owner(&missing, &id).is_err());
 }
 
 #[test]

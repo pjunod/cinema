@@ -711,6 +711,10 @@ function activitySourceProcessedHtml(rows,names){
   if(!rows.length)return '';
   return `<h2 class="section">Source processing</h2>${rows.map(row=>`<div class="card"><b>${esc(row.title||'Shared title')}</b><div class="muted">Processed Dolby Vision upgrade · ${esc(row.reason||'Source preparation')}</div><dl class="specs"><dt>Viewer</dt><dd>${esc(row.viewer)}</dd><dt>Grant</dt><dd>${esc(row.grant)}</dd><dt>Source node</dt><dd>${activityNodeCell(names,row.node_id)}</dd><dt>Started</dt><dd>${fmtAgo(row.started_unix)}</dd></dl>${ME?.is_admin?`<button class="ghost sm" onclick='stopSession(${esc(JSON.stringify(row.stop_id))})'>Stop</button>`:''}</div>`).join('')}`;
 }
+function activityReceiverProcessedHtml(rows,names){
+  if(!rows.length)return '';
+  return `<h2 class="section">Shared processing</h2>${rows.map(row=>`<div class="card"><b>${esc(row.title)}</b><div class="muted">${esc(row.reason)}</div><dl class="specs"><dt>Viewer</dt><dd>${esc(row.viewer)}</dd><dt>Source</dt><dd>${esc(row.source_name)} (${esc(row.source_server_id)})</dd><dt>Receiver node</dt><dd>${activityNodeCell(names,row.receiver_node_id)}</dd></dl>${ME?.is_admin?`<button class="ghost sm" onclick='stopSession(${esc(JSON.stringify(row.stop_id))})'>Stop</button>`:''}</div>`).join('')}`;
+}
 function activityWatchingHtml(deliveries,live,names,sessions,opened,localNode){
   const entries=deliveries.map(de=>({key:`delivery:${de.session_id||de.request_id||[de.node_id,de.item_id,de.started_unix].join(':')}`,title:de.title||'Untitled stream',subtitle:de.user||'Viewer unavailable',de}));
   for(const [index,row] of (live||[]).entries())entries.push({key:`live:${row.session_id||row.id||[row.owner_node_id,row.user,row.channel_number,index].join(':')}`,title:row.programme_title||row.channel_name||'Live television',subtitle:[row.user,row.channel_name].filter(Boolean).join(' · '),live:row});

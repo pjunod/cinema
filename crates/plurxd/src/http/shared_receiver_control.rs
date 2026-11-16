@@ -718,7 +718,7 @@ pub(super) async fn receiver_control(
     // A settled commit travels with the answer's writer and supersedes the
     // predecessor only once that writer is released.
     let mut committed = None;
-    let response = match answer {
+    let mut response = match answer {
         SharedControlAnswer::Accepted(mut response) => {
             if finish_accepted(
                 &actor,
@@ -780,6 +780,19 @@ pub(super) async fn receiver_control(
             None,
         ),
     };
+    if response.status() == StatusCode::OK {
+        // The public control decorator validates this bounded owner header
+        // against the body generation before adding processing_skip.
+        if let Some(report) = actor.processed_upgrade_skip(&tuple.incarnation.to_string()) {
+            if let Some(bytes) = report.owner_header() {
+                if let Ok(header) = axum::http::HeaderValue::from_str(&bytes) {
+                    response
+                        .headers_mut()
+                        .insert("x-plurx-processing-skip", header);
+                }
+            }
+        }
+    }
     with_writer(response, CommitAnswerWriter::custody(guard, committed))
 }
 

@@ -1652,6 +1652,7 @@ impl TranscodeManager {
                             &ask,
                             &evidence,
                             &current,
+                            Arc::clone(&trial_owner.gate),
                             producer,
                             cancel,
                             tokio::time::Instant::from_std(deadline),
@@ -2118,6 +2119,9 @@ impl TranscodeManager {
             work.cancel();
             preparations.processed = Some(work.settle().await);
         }
+        // A trial completed just before retirement can still have an unattached
+        // root. Its held source and admission close before the SQL owner does.
+        drop(processed_root.take());
         // These operations' settle methods join the detached reader/child,
         // including work which outlived the startup deadline.
         drop(preparation_custody);

@@ -927,6 +927,7 @@ async fn sharing_source_http_dolby_vision_unaffirmed_receiver_gets_the_hdr10_bas
     ))
     .await;
 }
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_receiver() {
     use super::receiver_presentation::{
@@ -976,11 +977,8 @@ async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_rec
     let ordinary_bytes = axum::body::to_bytes(ordinary.into_body(), 4 * 1024 * 1024)
         .await
         .expect("ordinary Start body");
-    let ordinary = super::super::decode_source_start_response(
-        &ordinary_bytes,
-        &fixture.reference,
-    )
-    .expect("ordinary Start DTO");
+    let ordinary = super::super::decode_source_start_response(&ordinary_bytes, &fixture.reference)
+        .expect("ordinary Start DTO");
     assert_eq!(ordinary.response().processed_upgrade, None);
     assert_eq!(
         ordinary.response().delivered_dynamic_range.as_deref(),

@@ -447,6 +447,15 @@ pub(crate) struct SourceProcessedOperation {
 impl SourceProcessedOperation {
     pub(crate) fn cancel(&self) {
         self.cancel.cancel();
+        // An abandoned waiter may not have consumed a completed root. Retire
+        // its held source/permit now rather than after the Source SQL release.
+        let unclaimed = self
+            .state
+            .result
+            .lock()
+            .expect("Source processed result")
+            .take();
+        drop(unclaimed);
     }
     pub(crate) async fn settle(&self) -> SourceProcessedSettlement {
         loop {
@@ -508,7 +517,15 @@ where
                 Err("Source processed preparation deadline".to_owned())
             }
         };
-        *owned.result.lock().expect("Source processed result") = Some(result);
+        {
+            let mut published = owned.result.lock().expect("Source processed result");
+            *published = Some(if token.is_cancelled() {
+                drop(result);
+                Err("Source processed preparation cancelled".to_owned())
+            } else {
+                result
+            });
+        }
         owned.settled.store(true, Ordering::Release);
         owned.changed.notify_waiters();
     });

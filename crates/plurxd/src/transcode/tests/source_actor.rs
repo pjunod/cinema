@@ -206,6 +206,7 @@ async fn source_processed_settlement_of_another_assignment_is_a_mismatch() {
     .await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_processed_trial_past_its_deadline_releases_the_preparation_slot() {
     Box::pin(source_copy_preadmission_fixture_with_hdr10(
@@ -873,7 +874,9 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
             .expect("second assigned owner");
         if mode == SOURCE_FIXTURE_PROCESSED_SETTLEMENT {
             source_processed_assignment_settlement(&assignment, &second_assignment).await;
-        } else if mode == SOURCE_FIXTURE_PROCESSED_DEADLINE {
+        }
+        #[cfg(target_os = "linux")]
+        if mode == SOURCE_FIXTURE_PROCESSED_DEADLINE {
             source_processed_deadline_settlement(
                 &assignment,
                 &second_assignment,
@@ -3780,6 +3783,7 @@ async fn source_processed_assignment_settlement(
     );
 }
 
+#[cfg(target_os = "linux")]
 async fn source_processed_deadline_settlement(
     assignment: &SourceDispatchAssignment,
     another: &SourceDispatchAssignment,
@@ -3849,7 +3853,9 @@ async fn source_processed_deadline_settlement(
         "deadline receipt waits for the retained reader"
     );
     assert!(
-        Arc::clone(&slot_for_assertions).try_acquire_owned().is_err(),
+        Arc::clone(&slot_for_assertions)
+            .try_acquire_owned()
+            .is_err(),
         "the actual preparation slot remains held while the reader is retained"
     );
     reader_release_tx.send(()).expect("release actual reader");
@@ -3859,10 +3865,7 @@ async fn source_processed_deadline_settlement(
     assert!(receipt.matches(assignment));
     assert!(!receipt.matches(another));
     assert!(operation.outcome().await.is_err());
-    let _permit = tokio::time::timeout(
-        Duration::from_secs(1),
-        slot_for_assertions.acquire_owned(),
-    )
+    let _permit = tokio::time::timeout(Duration::from_secs(1), slot_for_assertions.acquire_owned())
         .await
         .expect("preparation slot released after physical settlement")
         .expect("preparation semaphore remains open");
