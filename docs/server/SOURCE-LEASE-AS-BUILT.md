@@ -1,6 +1,6 @@
 # Source leases and node capacity — as built
 
-**Status:** built; review fixes committed, [PR #1728](http://192.168.4.7:3000/noirr/plurx/pulls/1728) in final qualification · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Written:** 2026-11-15
+**Status:** built; review fixes committed, [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) in final qualification · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Written:** 2026-11-15
 
 
 Built on `claude/source-lease-steps-2-4` (stacked on PR #1597) by Claude Opus
@@ -225,7 +225,7 @@ qualification. No deployment is part of this change.
 ## Local qualification and landing record
 
 Owner: GPT-6 Codex, session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`.
-[PR #1728](http://192.168.4.7:3000/noirr/plurx/pulls/1728) carries current CI
+[PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) carries current CI
 and merge-train state; no deployment is part of this change.
 
 The store module run passed 767 cases; its four fixture failures passed

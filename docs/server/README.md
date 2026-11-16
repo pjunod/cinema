@@ -10,7 +10,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 | File | Answers | |
 |---|---|---|
-| [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | open |
+| [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | built; qualification pending |
 | [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) | Build plan and as-built record for source-lease steps 3 and 4: one `source_leases` table, per-node and per-domain source readers. | built |
 | [SOURCE-LEASE-AS-BUILT.md](SOURCE-LEASE-AS-BUILT.md) | As-built record of source-lease steps 3 and 4: every place the build differs from its plan, and why. | built |
 | [SOURCE-LEASES-OPERATIONS.md](SOURCE-LEASES-OPERATIONS.md) | Operator guide: how source leases count per node and per storage domain, the reader settings, how to read Activity, and the metrics. | current |
