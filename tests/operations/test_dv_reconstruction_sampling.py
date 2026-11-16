@@ -163,6 +163,12 @@ class DvReconstructionSamplingTests(unittest.TestCase):
         self.assertIn("av_mastering_display_metadata_create_side_data(frame)", control)
         self.assertIn("if (actual != 0) {", control)
         self.assertIn("fabs(actual - expected[ch]) > 2", control)
+        # The control is built with the others and run by a named test.
+        self.assertIn('"$source_dir/test_base_master_black.c"',
+                      (TOOLS / "controls/build_target_controls.sh").read_text())
+        runner = (TOOLS / "controls/test_base_master_black.py").read_text()
+        self.assertIn("raise RuntimeError(", runner)
+        self.assertNotIn("skip", runner.replace("never a skip", ""))
 
     def test_targeted_refusals_name_their_cause(self):
         target = (TOOLS / "display_target.h").read_text()

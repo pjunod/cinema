@@ -12,8 +12,7 @@
 // nits) and pulled every channel below a pixel's largest toward it.
 //
 // Needs a Vulkan device (a software one is enough); no decoder, no VA-API.
-// Build as test_base_host_copy.c: the helper's own flags plus
-// -Wno-unused-function, against the dependency prefix.
+// build_target_controls.sh builds it; test_base_master_black.py runs it.
 #include "../fel_renderer.h"
 #include "../base_dv_renderer.h"
 #include <libavutil/mastering_display_metadata.h>
