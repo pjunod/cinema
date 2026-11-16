@@ -190,6 +190,16 @@ def merge_candidate_tree(root: Path, base: str, head: str) -> str | None:
     return tree if re.fullmatch(r"[0-9a-f]{40,64}", tree) else None
 
 
+def landing_lines(fields: tuple[str, ...]) -> tuple[str, ...]:
+    """The field values as the lines a landing commit's message carries.
+
+    One spelling for `--landing-lines` and for `scripts/land`
+    (`validation/landing.py`), which merges with exactly these lines.
+    """
+
+    return tuple(f"{REGRESSION_TRAILER}: {value}" for value in fields)
+
+
 def corrective_subjects(root: Path, base: str, head: str) -> tuple[str, ...]:
     log = _git(root, "log", "--no-merges", "--format=%s", f"{base}..{head}", "--")
     return tuple(
@@ -312,8 +322,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 1
     if args.landing_lines:
-        for value in fields:
-            print(f"{REGRESSION_TRAILER}: {value}")
+        for line in landing_lines(fields):
+            print(line)
         return 0
     if not fields:
         print(f"no {REGRESSION_TRAILER}: field, and nothing corrective that needs one")
