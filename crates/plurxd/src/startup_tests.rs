@@ -5100,7 +5100,7 @@ fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
     let arm = &future[fatal..];
     assert!(arm.contains("tracing::error!("), "one error line names it");
     assert!(arm.contains("raft_core_fatal_drain.set(error)"));
-    assert_eq!(source.matches("raft_core_failure()").count(), 1);
+    assert_eq!(source.matches("state.cluster.core_failure()").count(), 1);
     assert!(
         source.contains("exit_after_drain(raft_core_fatal.get())"),
         "the drained boot ends with the recorded verdict"
