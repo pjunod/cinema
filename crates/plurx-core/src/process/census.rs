@@ -634,7 +634,8 @@ fn every_production_descriptor_install_uses_the_single_builder() {
                 ));
             }
         }
-        let audited_file_size_hook = file == file_size_policy && is_audited_file_size_hook(&compact);
+        let audited_file_size_hook =
+            file == file_size_policy && is_audited_file_size_hook(&compact);
         file_size_policy_seen |= audited_file_size_hook;
         if compact.contains(".pre_exec(")
             && file != builder
