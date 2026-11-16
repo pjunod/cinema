@@ -3356,16 +3356,20 @@ separate placement cohorts. Build skew alone does not prevent placement.
    last old node: new-protocol workers cannot accept old placement.
 
 Strict media-pool envelope changes require a protocol bump and dated note
-here (`make paperwork` checks). Newest first:
+here (`make paperwork` checks this). Newest first:
 
-- 2026-11-13: protocol 11 — F+ curve digest on `SessionRequest`; cohort/drain as above.
+- 2026-11-13: protocol 11 — a server-selected F+ curve digest on the strict
+  `SessionRequest` media-worker envelope, combined with protocol 10 catalog
+  provenance. Use the cohort/drain procedure above; clients send no new
+  platform signal. Detail:
+  [FEL-RPU-REFIT-BUILD.md](streaming/FEL-RPU-REFIT-BUILD.md).
 
 - 2026-11-13: protocol 10 — retain validated source, track and full-capability
   catalog-query provenance in `CandidateCatalogContext` so processed commits
-  keep Copy discovery after Encode normalization; it grants no execution
-  authority. Cohort/drain as above. Old processed rows lacking provenance
-  cannot commit; retain or reopen ordinary playback.
-
+  preserve Copy discovery after Encode normalization. This descriptive query
+  grants no execution authority. Follow the cohort/drain sequence above.
+  Old processed rows without provenance cannot commit; retain or reopen
+  ordinary playback instead.
 - 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
   `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
 
@@ -3442,14 +3446,9 @@ native-subtitle work: a physical Apple TV rejecting a copied Dolby Vision
 master with CoreMedia `-12927`
 ([docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
 
-Its sibling, `PLURX_HLS_CLOSED_CAPTIONS_NONE`, was retired in favour of
-shipping `CLOSED-CAPTIONS=NONE` on every variant unconditionally. None of
-these variants carries a caption track, so saying so is correct authoring
-rather than an experiment — and an unset rung is not evidence about anything.
-A variant that stays silent lets AVFoundation and ExoPlayer both synthesise a
-phantom CEA-608 option into the text group, which shifts every rendition
-ordinal beneath it: a client asking for the first subtitle rendition by
-position gets the second.
+Its sibling, `PLURX_HLS_CLOSED_CAPTIONS_NONE`, was retired:
+`CLOSED-CAPTIONS=NONE` now ships on every variant. Why is in
+[APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4.
 
 | Var | What it adds | Why it might matter |
 |---|---|---|
@@ -5207,6 +5206,7 @@ Sharing lists the local listener, certificate, saved addresses and setup status.
 A listening socket cannot prove another Cinema can connect. Missing addresses
 and failed reads are distinct; the Developer switch stays available.
 
+
 Create invitation reads this Cinema's saved addresses. If absent, choose
 **Advanced addresses** (or **Configure this Cinema’s addresses** on older
 servers), then **Return to invitation**; your
@@ -5984,6 +5984,7 @@ Exit counter
 "The number looks fine" is not a threshold. The figure that mattered was on
 the fleet from the day of the deploy; what was missing was a series and
 somebody expecting a value.
+
 
 ### Reading the index queue's verdict
 
