@@ -1,6 +1,6 @@
 # Cluster facade slice 2 — media rosters and Live TV authority
 
-**Status:** open — source implemented and independently reviewed; local outcomes below, current-base effort qualification and landing pending.
+**Status:** open — slice 2 implemented and independently reviewed; main promotion waits for the remaining facade effort. Track effort qualification in the task PR checks.
 **Owner:** Codex. **Prepared:** 2026-11-16.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md) and
@@ -101,7 +101,7 @@ migration separately from the media/Live TV scope.
 
 ## Implementation ledger
 
-2026-11-16, Codex: the first source pass compiles with pinned Rust 1.97.1
+2026-11-16, Codex: the current effort candidate compiles with pinned Rust 1.97.1
 (`cargo check --locked -p plurxd --all-targets`, 130 seconds). It routes the
 four media rosters through clones of the existing shared directory, routes
 14 HTTP serving accesses through the facade, and moves three authority
@@ -122,11 +122,11 @@ whole-file digests change for constructor plumbing and subscriptions. This
 repinning is source correspondence maintenance, not new model qualification.
 The one independent whole-diff review by Codex subagent
 `/root/slice2_review` found no actionable issues. The post-review focused
-batch ran 99 tests: 98 passed; only the confirmed pre-existing system-metric
+batch on the independent effort base ran 98 tests: 97 passed; only the confirmed pre-existing system-metric
 census mismatch failed (actual 746, pinned 744). This includes media roster
 policy, copy-index holderless/unavailable outcomes, subtitle range failure
 and cancellation, Live TV HTTP and grace behavior, restart-drain behavior,
-local fragment hydration and C7's startup regression. No failing behavioral
+local fragment hydration. C7 is excluded from this candidate. No failing behavioral
 test was retried or hidden.
 
 `cargo fmt --all --check`, catalog lint, 104 served-script syntax checks and
@@ -135,7 +135,7 @@ Clippy with `-D warnings` remains red on the existing baseline warnings:
 `claim_skipped`, trial-admission fields/methods and the unused playback
 qualification subscription. The same warnings were present in the baseline
 compiler check; this slice does not silence them. No green Clippy result or
-fleet acceptance is claimed. Source is not yet published or deployed.
+fleet acceptance is claimed. No deployment was performed.
 
 ## Integration base
 
@@ -147,6 +147,21 @@ remain outside the changed hunks. The original contract listed only #1629
 as slice 2's prerequisite. Independent effort qualification therefore does
 not wait for an unrelated hotfix train or indirectly land #1646.
 
-The 130-second check and 98-test pass above describe the preliminary C7
-candidate. Exact current-base compiler and focused-test results follow when
-complete; no old-base result is presented as current-tree qualification.
+Exact-base results at source candidate `7c8debc61`: all-target compilation
+passed in 130 seconds; the focused batch passed 97 tests with only the
+inherited census failure (actual 746 versus pinned 744); Clippy reports only
+the same inherited unused items. All three formal mappings report no source
+drift. Documentation-only result updates preserve the reviewed Rust patch.
+The earlier C7 candidate's separate startup result is not qualification for
+this independent effort tree.
+
+Focused current-base command (one batch after the base transplant):
+
+```sh
+cargo test --locked -p plurxd --bin plurxd -- \
+  cluster::tests:: cluster::census:: copy_index_v3::tests:: \
+  subtitle_ranges::tests:: http::live_tv::tests:: \
+  live_tv::tests::live_tv_ serving_fence::tests::restart_drain_ \
+  requeue_through_the_no_holder_arm_after_converting_artifact_hydrates \
+  --test-threads=4
+```
