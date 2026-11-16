@@ -700,3 +700,15 @@ scheduler no longer await verified recovery; the store sweep releases an
 owner whose authority lapsed. The recovery-module and challenge-preparation
 pins are removed with their sources. Links above to the removed files are
 kept as plain text for history. No modeled wait changes.
+
+## Source lease steps 3+4 — one lease table, per-node capacity, 2026-11-16
+
+[SOURCE-LEASE-AS-BUILT.md](../../docs/server/SOURCE-LEASE-AS-BUILT.md).
+Repinned after review of each anchored item. `06 queue heartbeat
+retirement`: `finish` still cancels `lost`, stops and joins the heartbeat
+and retires before it releases the source lease; only the release itself is
+simpler (a direct lease delete). `recovery dependency outside model:
+immutable physical custody lookup` now resolves the lease by its id, still
+an identity lookup with no wait. `recovery dependency outside model: custody
+activation and cleanup` is removed with `activate_background_with_journal`.
+No modeled wait changes.
