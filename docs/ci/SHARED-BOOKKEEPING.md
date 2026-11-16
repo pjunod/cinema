@@ -103,14 +103,37 @@ built.
 
 ### The high-water mark
 
-The commit count only rises while `main` is never rewritten. The release job
-therefore appends every publication to `cinema-published-builds.jsonl` in its
-state directory — platform, number, source commit, stamp commit, time — and
-refuses a number at or below the last one for that platform before it builds.
-A failed upload records nothing and may be retried. Before the first record
-the floor is the last hand-claimed build (Apple 301, Android 207). The stores
-remain the authority; this is the local refusal that comes before a
-twenty-minute archive instead of after it.
+The commit count only rises while `main` is never rewritten, so every store
+upload records itself **in the forge**: `refs/cinema-published/<platform>` on
+`origin` is moved to the `main` commit that was published
+(`ios` · `tvos` · `android`). Before any build, the release job and
+`scripts/ship --apple` fetch those refs and refuse a number at or below the
+one they hold. The floor therefore survives a new controller or a wiped state
+directory, and both upload paths share it.
+
+**How to read it:** `git ls-remote origin 'refs/cinema-published/*'` shows the
+last published commit per platform; its build number is
+`git rev-list --count <commit>`. Before the first ref exists the floor is the
+last hand-claimed build (Apple 301, Android 207). A failed upload records
+nothing and may be retried. An upload that cannot be recorded fails loudly
+and prints the `git push` that records it. The controller also appends
+platform, number, source commit, stamp commit and time to
+`cinema-published-builds.jsonl` in its state directory; that file is a second
+local check, not the floor. The stores remain the authority.
+
+A stamp commit ends with `Build-Scope: store` or `Build-Scope: devices`. Only
+a commit on `main` gets `store`, and the Ansible upload task refuses anything
+else, so a branch checkout cannot reach TestFlight by hand.
+
+**Where the channel playbook lives:** `media/mobile-channels.yml` is not
+tracked in `pjunod/ansible` (checked on every branch, 2026-11-15); it exists
+only on the signing controller. Whether it reads the build number through
+`noirr_mobile_metadata` cannot be verified from either repository, so the
+first publish after this lands is its acceptance.
+
+**Landing order:** the Ansible change goes on the controller's snapshot
+before or with this one. The old role would build `origin/main` unstamped,
+and `devicectl` accepts a lower build number than the device holds.
 
 ### A hotfix
 
@@ -147,6 +170,12 @@ shared total they both wrote the same next number, merged cleanly, and left
 cannot change without a recorded, reasoned row, and `scripts/paperwork`
 refuses an edit to a total in the ledger itself.
 
+`scripts/release-cut` is the ledger's one writer: it folds every recorded
+delta into its total, keeps each reason as a comment on the row, and deletes
+the files, so the directory starts each release empty. Paperwork tells that
+fold from a hand edit — a total may move only by the deltas of the files
+deleted with it.
+
 ## Client fix anchors (`tests/client-fixes.d/`)
 
 One or more `[[fixes]]` tables per file, same keys as before. The ledger keeps
@@ -167,7 +196,8 @@ add = ["scripts/vod-plan-probe"]
 
 `load_catalog` appends them to the point, so `scripts/validate lint` and every
 lane see them. A new point, check, timeout or setting still goes in
-`validation/points.toml`. Format:
+`validation/points.toml`, and so does a rename or a narrowed glob of an
+existing path: paperwork refuses only a point's list growing. Format:
 [validation/points.d/README.md](../../validation/points.d/README.md).
 
 ## Vendored patches (`vendor/hiqlite*/patches.d/`)
@@ -211,7 +241,10 @@ which it prints so you can keep it in your fragment. Everything is staged,
 nothing committed.
 
 **How to read it:** `moved` lines are done. A `MANUAL` line names a file whose
-other edits genuinely conflict with `main`'s; resolve that one by hand.
+other edits genuinely conflict with `main`'s; for that file nothing was
+written — no fragment, no change — the line says exactly what to do, and the
+run exits non-zero. Conflict markers a branch committed are refused, never
+carried into a fragment.
 Anything under "still conflicted" is your code, not bookkeeping.
 `scripts/paperwork` names whatever is left — typically a build number quoted
 in a status line or a `Build:` line in a new Apple fragment.
@@ -224,7 +257,9 @@ the build number and the vendored patch ledgers.
 
 | File | Touches | Why it is not a per-change file yet |
 |---|---|---|
-| `verification/durable-jobs/mapping.json`, `verification/operation-progress/mapping.json` | 32, 31 | Not an append. Each row pins the SHA-256 of a whole source file, so any edit to that file must restate it, and two edits to one file merge to content neither hash describes. Per-entry files would hide the conflict and fail on `main` instead. Removing it means changing what "reviewed" covers (the anchored function rather than the file), which is the formal-model owners' decision. |
+| `verification/durable-jobs/mapping.json`, `verification/operation-progress/mapping.json` | 32, 31 | Not an append. Each row pins the SHA-256 of a whole source file, so any edit to that file must restate it; 23 of the 32 touches changed only `sha256` values. Pinning the anchored item instead of the file would remove those 23. It is not done here because the packages say the whole-file pin is deliberate ("Whole-file source hashes are intentional", `verification/operation-progress/README.md`; "Pins are refreshed by whole file", `durable-jobs/CONTRACT.md`): narrowing it changes what a review covers, which is the owner's ruling to make. |
+| `validation/main-preflight-inputs.json` | 5 | Hand-kept input closures per test family; this change alone edited about thirty to add one imported module. They are derivable from each module's imports, but the digest of those inputs is what every stored unit receipt is matched against, so deriving it invalidates all of them once. Left for a change that schedules that rerun. |
+| `validation/merge-errata.toml` | 12 | Append-only rows at the end of one file. The per-file layout fits (as `validation/regressions.d/` already does for its ledger); not converted here. |
 | `docs/features/PROJECT-BACKLOG.md` | 32 | One row per project at an anchor. The same per-file layout fits; it is a status ledger with its own readers and was left for a change of its own. |
 | `docs/streaming/README.md` and the other folder indexes | 27 | An index row per document. `make paperwork-fix` already writes a missing row; removing the shared edit means generating the index, which was left for a change of its own. |
 | `validation/native_receipts.py` | 22 | Reviewed hashes of build recipes (`Makefile`, `project.yml`). The same shape as `mapping.json`: a hash of a whole file. |

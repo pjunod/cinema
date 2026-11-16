@@ -643,13 +643,11 @@ Play takes an **App Bundle**, not the APK the README builds for sideloading:
 
 ```bash
 cd clients/android
-# → app/build/outputs/bundle/release/app-release.aab
-./gradlew :app:bundleRelease
+# → app/build/outputs/bundle/release/app-release.aab; without the number it is build 1
+./gradlew -PplurxBuildNumber="$(make -s -C ../.. mobile-build-number)" :app:bundleRelease
 ```
 
-The sideload APK (`make android`) stays exactly as documented — Play
-distribution and the server's own `/download/plurx-android.apk` are independent
-channels, and keeping both is deliberate.
+The sideload APK (`make android`) is a separate, deliberate channel.
 
 Upload the `.aab` in Play Console → Testing → Closed testing, run the 14-day
 gate, then promote to production. `versionCode` must increase on every upload,
