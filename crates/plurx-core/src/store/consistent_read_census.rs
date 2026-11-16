@@ -559,6 +559,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("custody_migration_settled", STARTUP),
     ("delegation_schema_version", STARTUP),
     ("drain_deadline_column_present", STARTUP),
+    ("dv_refit_schema_version", STARTUP),
     ("dv_title_jobs_schema_version", STARTUP),
     ("invitation_schema_version", STARTUP),
     ("library_annotations_schema_version", STARTUP),

@@ -585,9 +585,7 @@ pub(super) async fn run(
     let stdout = spool.open_run().await.map_err(transient)?;
     // The spool is a freshly created file inside the daemon-owned cache. Keep
     // its exact registration alive through every child write and the reap.
-    let _stdout_registration = if plurx_core::process::source_lifetime::daemon_roots_configured()
-        .map_err(|error| transient(error.to_string()))?
-    {
+    let _stdout_registration = if plurx_core::process::source_lifetime::daemon_roots_configured() {
         Some(
             plurx_core::process::source_lifetime::register_daemon_file(
                 &stdout,
