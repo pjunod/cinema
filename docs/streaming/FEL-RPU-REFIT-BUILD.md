@@ -100,7 +100,9 @@ native results by SHA-256.
 
 On `359641a06`, affected core/daemon all-target compilation (including
 `hiqlite-store`), Clippy with `-D warnings`, all three formal source mappings
-and paperwork 17/17 pass. Focused integration regressions remain in progress.
+and paperwork 17/17 pass. Store inventory and the three focused daemon
+regressions pass; the daemon cases ran under a 20 GiB/no-swap/four-CPU
+learner allocation after their first binary build exhausted its 15 GiB cap.
 Earlier native 30/36 passes have historical source scopes. PR #1565 stays
 `WIP:` pending M6 and required CI. `MERGE_TRAIN` is on; readiness then boards
 the train under [the merge convention](../ci/MERGE-TRAIN.md).
