@@ -275,6 +275,24 @@ T1.1's risk note covers `encoder_and_grade_preferring` only.
 | M1 correction (§5) | | | | open — flag to the M1 owner |
 | T4.2 | | | | |
 | T4.3 | | | | |
-| T4.4 | | | | |
+| T4.4 | GPT (Activity task) | shared M4 task | — | implementation in worktree; adversarial review and fast lane pending |
 | T4.5 | | | | |
 | T4.6 | | | | |
+
+## 8. T4.4 Activity and Stop implementation note
+
+The Source actor owns one Activity record from trial admission through its VOD
+rendition. Activity reads resolve its title from the Store, retain the grant,
+viewer, reason and Source node, and use one-way identifiers. The admin page joins
+a published record to its ordinary delivery by `session_id`; before publication
+it shows a separate preparation row. Stop takes the record's `stop_id` through
+the Source actor's retirement and settlement path. A failure to settle answers
+503 instead of claiming completion.
+
+Cluster Activity now reads the committed operations peer directory, including
+learners. Each snapshot is an exact signed member read with a signed bounded
+response. A remote Stop resolves the one owner from that snapshot and sends one
+signed request binding its node and operation ID. An older node without this
+exchange appears as an unavailable Activity peer until the coordinated cluster
+upgrade finishes. The task worktree has not run the focused tests or compile
+lane; T4.4 remains unqualified.

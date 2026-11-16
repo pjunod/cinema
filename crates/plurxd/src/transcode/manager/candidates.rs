@@ -150,7 +150,7 @@ impl TranscodeManager {
             .as_ref()
             .ok_or("processed rate requires current client capabilities")?;
         let file = &snapshot.file;
-        let rung = if !context.names_processed && context.encoded_rung {
+        let rung = if !context.names_processed && context.route == CandidateRoute::Encode {
             options.video_bitrate_kbps
         } else {
             super::bitrate_for_height(options.target_height)
@@ -258,10 +258,9 @@ impl TranscodeManager {
             }
             Ok(envelope)
         };
-        let selected = &context.selected_candidate;
-        if !selected.processed_dv {
+        if !context.names_processed {
             return if matches!(
-                selected.route,
+                context.route,
                 CandidateRoute::Original | CandidateRoute::Remux
             ) {
                 source_envelope()
@@ -270,8 +269,8 @@ impl TranscodeManager {
             };
         }
         let costs_match = |envelope: transcode::EnhancementRateEnvelope| {
-            selected.average_bps == Some(u64::from(envelope.target_kbps()) * 1000 + audio_bps)
-                && selected.peak_bps == Some(envelope.peak_bps() + audio_bps)
+            context.average_bps == Some(u64::from(envelope.target_kbps()) * 1000 + audio_bps)
+                && context.peak_bps == Some(envelope.peak_bps() + audio_bps)
         };
         // Bandwidth descriptions select only independently derived recipes;
         // fresh full recipe identity is still mandatory after preparation.

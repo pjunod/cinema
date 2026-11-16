@@ -1588,9 +1588,57 @@ impl TranscodeManager {
             let request = prepared.request().clone();
             let ask = prepared.processed_upgrade_ask().clone();
             let deadline = deadline.min(Instant::now() + super::PROCESSED_UPGRADE_TRIAL_BUDGET);
+            let activity = SourceProcessedActivity {
+                stop_id: format!(
+                    "source-{}",
+                    super::session_log_id(&owner.assignment.binding().incarnation_id().to_string())
+                ),
+                session_id: None,
+                title: prepared.file().path.file_name().map_or_else(
+                    || "Shared title".to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                viewer: match owner.assignment.binding().principal() {
+                    plurx_core::playback_principal::PlaybackPrincipal::Sharing {
+                        viewer_key,
+                        ..
+                    } => viewer_key.as_str().to_owned(),
+                    _ => String::new(),
+                },
+                grant: match owner.assignment.binding().principal() {
+                    plurx_core::playback_principal::PlaybackPrincipal::Sharing {
+                        grant_id, ..
+                    } => grant_id.to_string(),
+                    _ => String::new(),
+                },
+                file_id: prepared.file().id,
+                item_id: prepared.file().item_id,
+                started_unix: crate::fragment_index_cluster::unix_ms() / 1000,
+                reason: match prepared.request().dv_processing_destination {
+                    Some(plurx_core::transcode::dv_processing::DvDestination::Profile81) => {
+                        "Processed Dolby Vision upgrade; Source FEL re-encode setting".to_owned()
+                    }
+                    Some(plurx_core::transcode::dv_processing::DvDestination::Sdr) => {
+                        "Processed SDR upgrade; Source Dolby Vision processing setting".to_owned()
+                    }
+                    _ => {
+                        "Processed HDR10 upgrade; Source Dolby Vision processing setting".to_owned()
+                    }
+                },
+            };
             *processed_work = Some(super::source_preparation::start_source_processed(
                 owner.assignment.clone(),
+                deadline,
                 move |producer, cancel| async move {
+                    {
+                        let mut current =
+                            trial_owner.state.lock().expect("Source processed activity");
+                        current.processed_cancel = Some(cancel.clone());
+                        current.processed_activity = Some(activity);
+                        if current.retirement_requested {
+                            cancel.cancel();
+                        }
+                    }
                     let current = trial_owner
                         .gate
                         .current_preparation(&trial_owner.assignment)
@@ -1620,49 +1668,6 @@ impl TranscodeManager {
                 },
             ));
             let operation = processed_work.as_ref().expect("Source processed owner");
-            {
-                let mut current = owner.state.lock().expect("Source processed activity");
-                current.processed_cancel = Some(operation.cancellation());
-                current.processed_activity = Some(SourceProcessedActivity {
-                    stop_id: format!(
-                        "source-{}",
-                        super::session_log_id(
-                            &owner.assignment.binding().incarnation_id().to_string()
-                        )
-                    ),
-                    session_id: None,
-                    title: prepared.file().path.file_name().map_or_else(
-                        || "Shared title".to_owned(),
-                        |name| name.to_string_lossy().into_owned(),
-                    ),
-                    viewer: owner.assignment.binding().principal().owner_key(),
-                    grant: match owner.assignment.binding().principal() {
-                        plurx_core::playback_principal::PlaybackPrincipal::Sharing {
-                            grant_id,
-                            ..
-                        } => grant_id.to_string(),
-                        _ => String::new(),
-                    },
-                    file_id: prepared.file().id,
-                    item_id: prepared.file().item_id,
-                    started_unix: crate::fragment_index_cluster::unix_ms() / 1000,
-                    reason: match prepared.request().dv_processing_destination {
-                        Some(plurx_core::transcode::dv_processing::DvDestination::Profile81) => {
-                            "Processed Dolby Vision upgrade; Source FEL re-encode setting"
-                                .to_owned()
-                        }
-                        Some(plurx_core::transcode::dv_processing::DvDestination::Sdr) => {
-                            "Processed SDR upgrade; Source Dolby Vision processing setting"
-                                .to_owned()
-                        }
-                        _ => "Processed HDR10 upgrade; Source Dolby Vision processing setting"
-                            .to_owned(),
-                    },
-                });
-                if current.retirement_requested {
-                    operation.cancel();
-                }
-            }
             let trial = operation
                 .outcome()
                 .await

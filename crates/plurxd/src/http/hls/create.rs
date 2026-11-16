@@ -6849,16 +6849,29 @@ pub(crate) async fn prepare_source_playback<
     let processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk {
         canonical_caps: Some(caps.clone()),
         target_height: u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
-        grade: if resolved.request.hdr10 || decision.delivered_dynamic_range == "hdr10" {
+        grade: if resolved.request.hdr10 || decision.decision.delivered_dynamic_range == "hdr10" {
             plurx_core::transcode::OutputGrade::Hdr10
         } else {
             plurx_core::transcode::OutputGrade::Sdr
         },
         names_processed: false,
-        encoded_rung: matches!(
-            resolved.request.kind,
-            crate::transcode::SessionKind::Transcode { .. }
-        ),
+        route: resolved
+            .request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.route)
+            .unwrap_or(
+                if matches!(
+                    resolved.request.kind,
+                    crate::transcode::SessionKind::Copy { .. }
+                ) {
+                    plurx_core::playback::candidate::CandidateRoute::Remux
+                } else {
+                    plurx_core::playback::candidate::CandidateRoute::Encode
+                },
+            ),
+        average_bps: None,
+        peak_bps: None,
         recipe_digest: [0; 32],
         required_fel_qualification: None,
         catalog_query: Some(processed_query),

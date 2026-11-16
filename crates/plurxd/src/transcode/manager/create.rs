@@ -3963,6 +3963,9 @@ impl TranscodeManager {
                     // The same explicitly scoped FG/BG owner that prepared
                     // this recipe must own its first actual original reads.
                     // Clone the held descriptor; never reacquire path authority.
+                    if processed_work.is_some_and(|work| work.cancel.is_cancelled()) {
+                        return Err("Source processed preparation cancelled".to_owned());
+                    }
                     let source_open_started = tokio::time::Instant::now();
                     let input=crate::source_input::SourceInput::open_current_held(
                         &runtime.source.handle,"processed-first-window").await?
@@ -3971,11 +3974,14 @@ impl TranscodeManager {
                         entry, &executable.path, admission,
                         processed_work.map_or_else(|| Arc::new(crate::prodrun::ProducerSlot::new()), |work| Arc::clone(&work.producer)),
                         processed_work.map_or_else(tokio_util::sync::CancellationToken::new, |work| work.cancel.clone()), None,
-                        input, processing_deadline, Some(source_open_started.elapsed())).await {
+                        input, if processed_work.is_some() { None } else { processing_deadline }, Some(source_open_started.elapsed())).await {
                             // This awaited owner still holds the frozen graph's
                             // admission. Dropping it never reaches this branch;
                             // normal cancellation makes no backend claim.
-                            Err(cause) => { runtime.refuse_episode(); return Err(cause); },
+                            Err(cause) => {
+                                if !processed_work.is_some_and(|work| work.cancel.is_cancelled()) { runtime.refuse_episode(); }
+                                return Err(cause);
+                            },
                             Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
                             Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled) => return Err("processed preparation cancelled".into()),
                         };

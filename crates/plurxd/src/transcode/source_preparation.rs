@@ -448,9 +448,6 @@ impl SourceProcessedOperation {
     pub(crate) fn cancel(&self) {
         self.cancel.cancel();
     }
-    pub(crate) fn cancellation(&self) -> tokio_util::sync::CancellationToken {
-        self.cancel.clone()
-    }
     pub(crate) async fn settle(&self) -> SourceProcessedSettlement {
         loop {
             let changed = self.state.changed.notified();
@@ -479,6 +476,7 @@ impl SourceProcessedOperation {
 /// it never treats dropping that waiter as proof that children have stopped.
 pub(crate) fn start_source_processed<F, Fut>(
     assignment: SourceDispatchAssignment,
+    deadline: Instant,
     run: F,
 ) -> SourceProcessedOperation
 where
@@ -498,7 +496,18 @@ where
     let token = cancel.clone();
     let producer = Arc::new(crate::prodrun::ProducerSlot::new());
     tokio::spawn(async move {
-        let result = run(producer, token).await;
+        let operation = run(producer, token.clone());
+        tokio::pin!(operation);
+        let result = tokio::select! {
+            result = &mut operation => result,
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                token.cancel();
+                // A deadline cancels, then joins: dropping this future could
+                // abandon readers or release admission while tools still run.
+                let _ = operation.await;
+                Err("Source processed preparation deadline".to_owned())
+            }
+        };
         *owned.result.lock().expect("Source processed result") = Some(result);
         owned.settled.store(true, Ordering::Release);
         owned.changed.notify_waiters();
