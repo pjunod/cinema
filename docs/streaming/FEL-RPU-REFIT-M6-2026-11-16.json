@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-16",
+  "candidate": "359641a06c8eee46b31fe9d5ff7cd0cd45b80aac",
+  "candidate_scope": "Merge integration into main90678ab468; helper/composer/writer inputs unchanged from a88fa74cb. Native experiment uses the exact retained published RPU and source-bound instrument.",
+  "milestone": "M6",
+  "qualification": "failed",
+  "remaining_42_executed": false,
+  "instrument": {
+    "hardware": "Apple M3 Max",
+    "macos": "27.2.1",
+    "renderer_sha256": "a9692e07bf1243a6a0faf2dd931d08b76d42e6dbd1c3fdec685e793e5789476f",
+    "kernel_sha256": "2639c4bb85e9f5a659588bba55c3ec7d0dbf3e72bc07a7c30bff8627755d1faa",
+    "source_rpu_sha256": "3d77fd15b551593013bc753a8fb3b15193e7a3d6990a54696718a9d1bbc89a3c"
+  },
+  "six_point_all_rgb_overlap": {
+    "00": [
+      true,
+      true,
+      true
+    ],
+    "06": [
+      false,
+      false,
+      true
+    ],
+    "07": [
+      true,
+      true,
+      true
+    ],
+    "09": [
+      true,
+      true,
+      true
+    ],
+    "20": [
+      true,
+      true,
+      true
+    ],
+    "44": [
+      true,
+      true,
+      true
+    ]
+  },
+  "controls": {
+    "six_point": {
+      "method_sound": true,
+      "constant_honored_all_rgb_overlap": true,
+      "identity_all_rgb_nonoverlap": true,
+      "repeat_all_rgb_overlap": true,
+      "all_captures_uniform_within_fp16_bins": true
+    },
+    "component_hybrids": {
+      "method_sound": true,
+      "constant_honored_all_rgb_overlap": true,
+      "identity_all_rgb_nonoverlap": true,
+      "repeat_all_rgb_overlap": true,
+      "all_captures_uniform_within_fp16_bins": true
+    },
+    "cr_only": {
+      "method_sound": true,
+      "constant_honored_all_rgb_overlap": true,
+      "identity_all_rgb_nonoverlap": true,
+      "repeat_all_rgb_overlap": true,
+      "all_captures_uniform_within_fp16_bins": true
+    }
+  },
+  "point_06": {
+    "base_codes_10bit": [
+      371,
+      521,
+      544
+    ],
+    "actual_fp16_rgb_hex": [
+      "3552",
+      "30ab",
+      "3361"
+    ],
+    "oracle_fp16_rgb_hex": [
+      "354a",
+      "30ad",
+      "3361"
+    ],
+    "actual_minus_oracle_fp16_steps": [
+      8,
+      -2,
+      0
+    ],
+    "hybrid_f": "Constant luma and Cb with actual Cr MMR matches actual in every RGB channel.",
+    "component_result": "Actual Cr MMR is sufficient to reproduce the mismatch at point06; luma polynomial and one-versus-eight-piece luma layout do not explain this observation.",
+    "cause": "Native arithmetic or oracle-path cause remains unidentified; no production repair inferred."
+  },
+  "result_artifacts": {
+    "six_point": {
+      "name": "m6-oracle-diagnostic-20261114-v1/result.json",
+      "sha256": "8d01293effe05794112a6169a9c902380af27597db0c42cf55d361b153b7eb6f",
+      "epoch": "codex-pr1565-sixpoint-20261116-1600z-v1"
+    },
+    "component_hybrids": {
+      "name": "m6-oracle-hybrid06-20261116-v1/result.json",
+      "sha256": "ee9f673c15e07f1e4e4d9c5108993b45d450e24475811bb29a239880113ff81e",
+      "epoch": "codex-pr1565-hybrid06-20261116-v1"
+    },
+    "cr_only": {
+      "name": "m6-oracle-cr06-20261116-v1/result.json",
+      "sha256": "4250ff3d0424135ab230098c83fd004813ef7f21f751d2711b9cdb712914032c",
+      "epoch": "codex-pr1565-cr06-20261116-v1"
+    }
+  },
+  "evidence_storage": "Original captures, media, per-frame RPU readbacks, parsed metadata, resource receipts and frozen/revised harnesses retained in the external task-owned receipt tree; original failed mux evidence preserved.",
+  "resource_outcome": "All native phases exited0 and reaped owned children; Mac resources released before offline scoring.",
+  "acceptance": "Existing M6 exact FP16-bin overlap criterion retained; PR1565 remains draft pending native qualification and its required CI."
+}

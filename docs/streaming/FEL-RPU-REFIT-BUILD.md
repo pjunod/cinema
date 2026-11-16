@@ -1,9 +1,10 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565 on main
-`59022fd2a`; M6 physical equivalence and the PR's fast lane remain open.
+**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565,
+`359641a06` integrating main `90678ab468`. M6 has a measured native-oracle
+mismatch; physical equivalence and the PR's fast lane remain open.
 Milestone 7 follows served F+ scores · **Updated:** 2026-11-16 · **Written:** 2026-11-12 ·
-**Owner:** Claude (Opus 5.5, continuing Codex) · **Decision:** Paul approved building F+
+**Owner:** Codex (continuing Claude's reviewed candidate) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
 
 Companion to the offline result,
@@ -34,8 +35,8 @@ existing F+ tables, then `open` refuses at `delegation::verify_sqlite`
 Such a database must be recreated; none is known to exist. No candidate build
 was deployed, the F+ work area on the learner build node holds no SQLite
 database outside build targets, and that node's running plurxd is an unrelated
-image. The M3 could not be checked (asleep); its F+ use was render diagnostics,
-not a plurxd store.
+image. The earlier store check did not inspect the M3; its F+ work was render
+diagnostics. The 2026-11-16 capture work does not qualify an existing store.
 
 Results, each stamped with the commit it ran on (learner build node, capped
 scope, Rust 1.97.1):
@@ -74,13 +75,35 @@ scope, Rust 1.97.1):
   48-patch mapping control, each recorded with its own source in the PR
   history. Disk conversion's nonzero-origin refusal remains explicit (§3.6).
 
-The earlier native 48-patch control showed improved mapping, not the full M6
-equivalence criterion. A reviewed six-point Q23 constant-composition diagnostic
-is staged on the M3; its eight base-colour streams passed 96-frame lossless
-decode checks, but no native mux or capture has completed. M6 remains
-unqualified. The current-main PlayerView changed native test inputs, so earlier
-30/36 native passes are historical. PR #1565 stays `WIP:` until M6 is complete;
-with `MERGE_TRAIN` off it then lands through `scripts/land` after its fast lane.
+The 2026-11-16 [native receipt](FEL-RPU-REFIT-M6-2026-11-16.json) records
+completed six-point capture on an M3 Max with macOS 27.2.1. Constant, identity,
+repeat and spatial-uniformity controls pass. Five points overlap the exact-Q23
+constant oracle in every RGB channel. Point 06 (`[371,521,544]`) differs by
+8 FP16 steps in red and 2 in green; blue matches. M6 remains unqualified and
+the remaining 42 points have not run. The historical 48-patch improvement
+measurement remains separate evidence.
+
+Two independently reviewed component-isolation epochs reproduce the difference.
+Actual luma with constant chroma matches the oracle, as does eight-piece
+constant luma. Constant luma/Cb with actual Cr MMR exactly reproduces the
+actual output. This localizes the observation to Cr MMR at point 06; its
+underlying native-arithmetic or oracle-path cause is unresolved. No tolerance
+or production change follows from the diagnosis. Every native phase exited
+successfully, reaped its children and released the Mac before offline scoring.
+
+The initial mux failure was a diagnostic comparison of wall-clock stream
+creation tags. A reviewed harness correction excludes only that tag, as the
+existing protocol specifies; all raw proofs and original failed-run evidence
+remain intact. Payload, timing, decoder, colour and other metadata differences
+still refuse adoption. The receipt binds the revised runner and all three
+native results by SHA-256.
+
+On `359641a06`, affected core/daemon all-target compilation (including
+`hiqlite-store`), Clippy with `-D warnings`, all three formal source mappings
+and paperwork 17/17 pass. Focused integration regressions remain in progress.
+Earlier native 30/36 passes have historical source scopes. PR #1565 stays
+`WIP:` pending M6 and required CI. `MERGE_TRAIN` is on; readiness then boards
+the train under [the merge convention](../ci/MERGE-TRAIN.md).
 
 ## 1. Objective
 
@@ -599,10 +622,11 @@ completed applicable results.
    - **Acceptance:** each state renders on the web and Apple Settings, and
      a dv_patch_clips run on macOS against a served fragment shows A == B.
      This remains open: the historical control measured improvement, while the
-     exact-Q23 oracle diagnostic is prepared but has no native result. Preserve
-     the criterion; do not substitute a recovery percentage or an invented RGB
-     tolerance. The first six points must validate the method before completing
-     the remaining points.
+     2026-11-16 six-point native run has valid controls but point 06 fails
+     exact FP16-bin overlap in red and green; the linked native receipt records
+     Cr-MMR isolation. Preserve the criterion; do not substitute a recovery
+     percentage or an invented RGB tolerance. Resolve the six-point failure
+     before completing the remaining 42 points.
 7. **Re-encode trials (§5):** plan first, then build.
 
 ## 7. Non-goals
