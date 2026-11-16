@@ -50,7 +50,6 @@ async fn sharing_membership_write(
     use crate::store::state_machine::sqlite::state_machine::{Query, QueryWrite};
     let response = state
         .raft_db
-        .raft
         .client_write(QueryWrite::Transaction(vec![Query {
             sql: sql.into(),
             params,

@@ -4013,6 +4013,7 @@ dependencies = [
  "plurx-notification-broker",
  "plurx-pgs",
  "plurx-worker-control",
+ "proc-macro2",
  "qrcode",
  "quick-xml",
  "rayon",

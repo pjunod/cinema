@@ -168,11 +168,14 @@ struct HttpRouteCell {
 
 /// The most `(route_group, class, method)` series
 /// `plurx_http_store_operations_by_method_total` ever holds. The method label
-/// is a `&'static str` chosen at a Store call site, so the set is bounded by
-/// the source (about 470 distinct labels today), but the product with route
-/// groups and classes is not what is expected to be reached: a method is
-/// issued in one or two classes, from two or three groups, so the live series
-/// number a few thousand at most. The cap is the guarantee, not the
+/// is a `&'static str` chosen at a call site, so the set is bounded by the
+/// source: about 530 Store-method labels and, since the membership manager's
+/// operations are counted too, about 100 membership-function labels. The
+/// product with route groups and classes is not what is expected to be
+/// reached: a method is issued in one or two classes, from two or three
+/// groups, and only the few membership functions a request path calls (the
+/// peer authorizers, `media_peers`, `activity_peers`) appear here at all, so
+/// the live series number a few thousand at most. The cap is the guarantee, not the
 /// arithmetic: past it a new series is not created and the operation is counted
 /// in `plurx_http_store_operations_by_method_dropped_total` instead, so a
 /// mistake can never grow the exposition without bound. At the cap the series
@@ -180,9 +183,10 @@ struct HttpRouteCell {
 /// dropped counter is what says a reading is incomplete.
 const HTTP_METHOD_SERIES_CAP: usize = 4096;
 
-/// Replicated Store operations by the Store method that issued them, per
-/// route group and class. Fed once per request from the request's own
-/// [`plurx_core::store::HttpStoreOperationCounts::method_snapshot`].
+/// Replicated operations by the method that issued them, per route group and
+/// class. Fed once per request, when the last holder of the request's
+/// [`plurx_core::store::HttpStoreOperationCounts`] is dropped
+/// ([`plurx_core::store::HttpStoreOperationCounts::fold_methods_into`]).
 struct HttpMethodMetrics {
     cap: usize,
     series: std::sync::Mutex<std::collections::BTreeMap<(usize, usize, &'static str), u64>>,
@@ -231,7 +235,7 @@ impl HttpMethodMetrics {
         use std::fmt::Write;
 
         let mut out = String::from(
-            "# HELP plurx_http_store_operations_by_method_total Replicated Store operations by the Store method that issued them, attributed to matched HTTP route group. Series exist only for methods that have run; their count is capped.\n\
+            "# HELP plurx_http_store_operations_by_method_total Replicated operations (Store and cluster membership manager) by the method that issued them, attributed to matched HTTP route group; added when the request and every task it spawned in its scope have finished. Series exist only for methods that have run; their count is capped.\n\
              # TYPE plurx_http_store_operations_by_method_total counter\n",
         );
         for ((group, class, method), count) in self
@@ -791,6 +795,11 @@ async fn http_store_attribution(
         state.membership.local_serving_role().await.map_err(|_| ()),
     );
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
+    // The by-method split is folded when the last holder of these counts is
+    // dropped, not here after the handler: a task the handler spawned in its
+    // scope, or a request whose future is dropped when the client goes away,
+    // still lands in this route group's series, once.
+    counts.fold_methods_into(move |methods| HTTP_ROUTE_METRICS.by_method.record(group, methods));
     let watch_ack = plurx_core::store::HttpWatchWriteAck::default();
     let started_at = Instant::now();
     let mut response = plurx_core::store::scope_http_store_operations(
@@ -799,9 +808,6 @@ async fn http_store_attribution(
     )
     .await;
     HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
-    HTTP_ROUTE_METRICS
-        .by_method
-        .record(group, &counts.method_snapshot());
     // K-04 M2: offer the acknowledged watch-write position so a client can
     // echo it as `X-Plurx-Read-After` to whichever node serves its next read,
     // or say that a watch write's position is unknown so it drops its echo.

@@ -1152,6 +1152,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
 	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \
 	  --lib -- --exact
+	PLURX_EXPECT_TEST_COUNT=6 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  applied_mark::watch_tests --lib
 
 .PHONY: cluster-store-check
 # 8 MiB test threads: in a debug build, one poll of the hundred-step replicated
@@ -1591,6 +1594,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/web-media-recovery.test.js
 	@node tests/playback/web-control.test.js
 	@node --test tests/playback/seek-control.test.js
+	@node --test tests/playback/prepared-successor-chase.test.js
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js
 	@node tests/web/player-dom.test.js

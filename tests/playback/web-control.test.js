@@ -4346,11 +4346,14 @@ async function main() {
         shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
+        shippedConst("PREPARED_CHASE_ATTEMPTS"), shippedConst("PREPARED_CHASE_LEAD_MS"),
+        shippedSource("preparedSuccessorBehind"), shippedSource("preparedChaseTargetSec"),
+        shippedSource("preparedChaseIncumbent"),
         shippedSource("notePreparedBuffer"), shippedSource("preparedClockAlignmentSlackMs"), shippedSource("commitPreparedReplacement"),
         // §7.3: the commit is two phases now. Alignment finishes before the
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
-        shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
+        shippedSource("alignPreparedReplacement"), shippedSource("holdPreparedNativeSuccessor"), shippedSource("preparedAlignSeek"),
         shippedSource("preparedAlignedBuffered"), shippedSource("preparedFrameCadence"),
         shippedSource("preparedFramesMeet"), shippedSource("exposePreparedReplacementAtFrame"),
         shippedSource("preparedDecodedFrameCount"), shippedSource("exposePreparedReplacementAfterDecodedFrames"),

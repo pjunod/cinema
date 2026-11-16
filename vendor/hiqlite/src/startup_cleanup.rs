@@ -426,7 +426,7 @@ mod tests {
             drop(lease);
             let _ = done.send(());
         });
-        let requester = tokio::spawn(async move { cleanup.await });
+        let requester = tokio::spawn(cleanup);
         requester.abort();
         assert!(requester.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(5), async {

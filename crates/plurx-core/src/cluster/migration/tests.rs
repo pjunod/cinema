@@ -1555,9 +1555,11 @@ async fn restored_voter_join_fixture() {
         metrics.purged
     );
     assert!(
-        !super::super::membership::restored_image_lacks_join_snapshot(&restored_client)
-            .await
-            .expect("restored admission check")
+        !super::super::membership::restored_image_lacks_join_snapshot(
+            &crate::store::CountedClient::membership(restored_client.clone()),
+        )
+        .await
+        .expect("restored admission check")
     );
     let (restored_tables, restored_marker) = local_tables_and_marker(&restored_client).await;
     assert_eq!(restored_marker.as_deref(), Some("restored"));
@@ -5798,6 +5800,149 @@ async fn capability_observation_fixture() {
             crate::store::AUTH_PROTOCOL_MIN,
             crate::store::AUTH_PROTOCOL_MIN
         )
+    );
+
+    selected.shutdown().await.expect("stop the voter");
+}
+
+/// Authority reads `future` issued, by the method that issued them.
+#[cfg(feature = "hiqlite-store")]
+async fn authority_reads_of<T>(
+    future: impl std::future::Future<Output = T>,
+) -> (T, Vec<(&'static str, u64)>) {
+    let counts = crate::store::HttpStoreOperationCounts::default();
+    let output = crate::store::scope_http_store_operations(counts.clone(), future).await;
+    let authority = counts
+        .method_snapshot()
+        .into_iter()
+        .filter(|(_, [_, authority, _])| *authority > 0)
+        .map(|(method, [_, authority, _])| (method, authority))
+        .collect();
+    (output, authority)
+}
+
+/// A4: the offline probe loop runs every 500 ms on every node. An idle pass
+/// reads this replica only; a probe addressed here is still answered.
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_offline_probe_pass_asks_the_authority_nothing() {
+    install_default_crypto_provider();
+    let directory = tempfile::tempdir().expect("probe loop data");
+    let config = membership_test_config(directory.path());
+    drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+    let selected = startup_observer::select_applied_singleton(&config)
+        .await
+        .expect("actual one voter selection");
+    let membership = selected.membership_manager();
+
+    let (answered, authority) = authority_reads_of(membership.answer_offline_source_probes()).await;
+    assert_eq!(answered.expect("idle pass"), 0);
+    assert_eq!(
+        authority,
+        Vec::new(),
+        "an idle pass must not read the authority"
+    );
+
+    let owner = selected
+        .store
+        .create_user("probe-owner", "hash", false)
+        .await
+        .expect("package owner");
+    let client = selected.local_client().expect("actual voter");
+    client
+        .execute(
+            "INSERT INTO offline_packages(id,request_id,user_id,file_id,node_id,source_path,\
+             source_size,source_mtime,target_height,audio_offset_ms,subtitle_mode,state,phase,\
+             progress_millis,estimated_bytes,reserved_bytes,created_at,updated_at,\
+             last_access_at,expires_at) VALUES('probe-package','probe-request',$1,1,\
+             'departing-node','/synthetic/source.mkv',4096,123,720,0,'none','queued','queued',\
+             0,4096,4096,1,1,1,10000)",
+            hiqlite::params!(owner.id),
+        )
+        .await
+        .expect("package on the departing node");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    assert_eq!(
+        selected
+            .store
+            .request_offline_source_probes(
+                &["probe-package".to_owned()],
+                std::slice::from_ref(&selected.identity.node_id),
+                now,
+            )
+            .await
+            .expect("ask this node"),
+        1
+    );
+
+    let (answered, authority) = authority_reads_of(membership.answer_offline_source_probes()).await;
+    assert_eq!(
+        answered.expect("pass with a probe"),
+        1,
+        "the probe is answered"
+    );
+    assert_eq!(
+        authority,
+        vec![("pending_offline_source_probes", 1)],
+        "work present still takes today's authoritative read"
+    );
+    assert_eq!(
+        selected
+            .store
+            .outstanding_offline_source_probes(now)
+            .await
+            .expect("outstanding"),
+        0
+    );
+
+    selected.shutdown().await.expect("stop the voter");
+}
+
+/// A4: the heartbeat's sharing purpose factory runs every ten seconds on
+/// every node. With sharing off it asks the authority nothing; with sharing
+/// on it still takes the factory's authoritative read of the switch.
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_heartbeat_purpose_factory_reads_no_authority_while_sharing_is_off() {
+    install_default_crypto_provider();
+    let directory = tempfile::tempdir().expect("heartbeat factory data");
+    let config = membership_test_config(directory.path());
+    drop(SqliteStore::open(&directory.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+    let selected = startup_observer::select_applied_singleton(&config)
+        .await
+        .expect("actual one voter selection");
+    let membership = selected.membership_manager();
+
+    for saved in [None, Some("false")] {
+        if let Some(value) = saved {
+            selected
+                .store
+                .put_setting("sharing_enabled", value)
+                .await
+                .expect("saved choice");
+        }
+        let (result, authority) = authority_reads_of(membership.heartbeat_purpose_keys()).await;
+        result.expect("sharing off");
+        assert_eq!(
+            authority,
+            Vec::new(),
+            "sharing {saved:?}: the heartbeat must not read the authority"
+        );
+    }
+
+    selected
+        .store
+        .put_setting("sharing_enabled", "1")
+        .await
+        .expect("sharing on");
+    let (result, authority) = authority_reads_of(membership.heartbeat_purpose_keys()).await;
+    result.expect("no master yet: the factory waits");
+    assert!(
+        authority.iter().any(|(method, _)| *method == "get_setting"),
+        "sharing on takes the factory's authoritative read: {authority:?}"
     );
 
     selected.shutdown().await.expect("stop the voter");

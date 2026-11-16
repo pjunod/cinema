@@ -364,7 +364,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         });
     }
     state_mut.store = Arc::clone(&selected.store);
-    state_mut.membership = membership.clone();
+    state_mut.replace_membership(membership.clone());
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         membership.clone(),
         Arc::clone(&state_mut.store),
@@ -1351,7 +1351,7 @@ async fn source_actual_actor(
             let mut other = source_fixture_state();
             let owned = Arc::get_mut(&mut other).expect("sole replacement registry fixture");
             owned.store = Arc::clone(&state.store);
-            owned.membership = state.membership.clone();
+            owned.replace_membership(state.membership.clone());
             owned.node_id = state.node_id.clone();
             assert_ne!(
                 owned.sharing.accepted_drivers.boot_id(),

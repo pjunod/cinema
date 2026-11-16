@@ -2593,7 +2593,9 @@ fn valid_resource_name(value: &str) -> bool {
 
 #[derive(Clone)]
 pub(crate) struct MediaSessionCoordinator {
-    membership: MembershipManager,
+    /// The process's peer directory: `peer_base` resolves one owner per
+    /// relayed segment, from the cached roster rather than a read each time.
+    directory: crate::cluster::Directory,
     transport: PeerTransport,
     store: Arc<dyn Store>,
     routes: Arc<tokio::sync::Mutex<HashMap<String, CachedRoute>>>,
@@ -2775,16 +2777,30 @@ impl MediaSessionCoordinator {
         Self::with_applied_view(membership, store, Arc::new(applied))
     }
 
-    /// The coordinator over this node's store and applied view (`AppState`'s
-    /// `applied`, which reads the same store's replica).
+    /// A coordinator over its own peer directory, for a test that wires one
+    /// membership by hand.
+    #[cfg(test)]
     pub(crate) fn with_applied_view(
         membership: MembershipManager,
         store: Arc<dyn Store>,
         applied: Arc<dyn RouteView>,
     ) -> Arc<Self> {
+        let directory = crate::cluster::Directory::new(membership.clone());
+        Self::with_directory(membership, directory, store, applied)
+    }
+
+    /// The coordinator over this node's store and applied view (`AppState`'s
+    /// `applied`, which reads the same store's replica), sharing the
+    /// process's peer directory.
+    pub(crate) fn with_directory(
+        membership: MembershipManager,
+        directory: crate::cluster::Directory,
+        store: Arc<dyn Store>,
+        applied: Arc<dyn RouteView>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport: PeerTransport::new(membership),
+            directory,
             store,
             routes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             release_fences: Arc::new(
@@ -3903,6 +3919,11 @@ impl MediaSessionCoordinator {
         );
     }
 
+    /// Whether an adoption has left a seed the next tick will take.
+    async fn has_lease_seeds(&self) -> bool {
+        !self.lease_seeds.lock().await.is_empty()
+    }
+
     async fn take_lease_seeds(&self) -> HashMap<String, LeaseSeed> {
         std::mem::take(&mut *self.lease_seeds.lock().await)
     }
@@ -3912,14 +3933,15 @@ impl MediaSessionCoordinator {
         node_id: &str,
         deadline: tokio::time::Instant,
     ) -> Result<String, PeerTransportError> {
-        tokio::time::timeout_at(deadline, self.membership.media_peers())
+        owner_base(
+            tokio::time::timeout_at(
+                deadline,
+                self.directory.peers(crate::cluster::Purpose::MediaWorkers),
+            )
             .await
-            .map_err(|_| PeerTransportError::TimedOut)?
-            .map_err(|_| PeerTransportError::Unreachable)?
-            .into_iter()
-            .find(|peer| peer.node_id == node_id && peer.reachable)
-            .and_then(|peer| peer.http_base)
-            .ok_or(PeerTransportError::Unreachable)
+            .ok(),
+            node_id,
+        )
     }
 
     /// Shared receiver bytes retain the existing authenticated streaming driver.
@@ -5395,6 +5417,61 @@ async fn reconcile_owned_publication_fences(
         .await;
 }
 
+/// The tick's owner inventory, or `None` when it could not be read.
+///
+/// The inventory is a linearizable read, and on a node with no playback it
+/// is one every three seconds to learn there is nothing to renew. So it is
+/// skipped — an empty inventory, the tick's ordinary empty case — only when
+/// all of these hold: the loop remembers no lease (`idle_process`, so no
+/// loss can need detecting), this process runs no renewable or
+/// settlement-protected worker, no adoption has left a lease seed, and this
+/// replica holds no unexpired active row owned by this node. The process's
+/// own registry and seeds, not the replica, drive renewal of what it started;
+/// a row a replica has not applied yet (a takeover) is inventoried on the
+/// first tick after it applies, and rows left by an earlier process of this
+/// node are found the same way. Anything else takes today's read.
+async fn lease_tick_inventory(
+    state: &AppState,
+    idle_process: bool,
+    now_ms: i64,
+) -> Option<Vec<OwnedMediaSessionLease>> {
+    // One deadline for the hint and the inventory together: an idle tick
+    // that times out on its local read cannot then spend a second one.
+    let deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+    if idle_process
+        && lease_tick_live(state.transcode.renewable_session_ids().await).is_empty()
+        && !state.media_sessions.has_lease_seeds().await
+        && matches!(
+            tokio::time::timeout_at(
+                deadline,
+                state
+                    .store
+                    .owned_media_sessions_hint(&state.node_id, now_ms),
+            )
+            .await,
+            Ok(Ok(false))
+        )
+    {
+        return Some(Vec::new());
+    }
+    match tokio::time::timeout_at(
+        deadline,
+        state.store.owned_media_sessions(&state.node_id, now_ms),
+    )
+    .await
+    {
+        Ok(Ok(routes)) => Some(routes),
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "media-session lease inventory unavailable");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("media-session lease inventory timed out");
+            None
+        }
+    }
+}
+
 /// Renew only locally live workers. Lost ownership self-fences immediately;
 /// a transient store outage is allowed to use the already-committed lease but
 /// never past its exact expiry.
@@ -5675,22 +5752,12 @@ pub(crate) async fn lease_loop(state: AppState) {
                 .into_iter()
                 .collect::<HashSet<_>>(),
         );
-        let routes = match tokio::time::timeout(
-            LEASE_RENEWAL_DEADLINE,
-            state.store.owned_media_sessions(&state.node_id, now_ms),
+        let routes = lease_tick_inventory(
+            &state,
+            known.is_empty() && vod_capabilities.is_empty(),
+            now_ms,
         )
-        .await
-        {
-            Ok(Ok(routes)) => Some(routes),
-            Ok(Err(error)) => {
-                tracing::debug!(%error, "media-session lease inventory unavailable");
-                None
-            }
-            Err(_) => {
-                tracing::debug!("media-session lease inventory timed out");
-                None
-            }
-        };
+        .await;
         // Sample process-local liveness *after* the owner inventory. A
         // takeover that commits while the Store read is in flight is then
         // observed either through its settlement guard or through the adopted
@@ -7686,6 +7753,21 @@ fn take_stale_settlement_candidates(
     candidates
 }
 
+/// A relay owner's HTTP base from one media-worker answer: `None` is the
+/// deadline passing, an error is a roster read that failed, and an owner
+/// that is not a reachable worker with a base is unreachable.
+fn owner_base(
+    answer: Option<Result<crate::cluster::Peers, crate::cluster::ClusterError>>,
+    node_id: &str,
+) -> Result<String, PeerTransportError> {
+    answer
+        .ok_or(PeerTransportError::TimedOut)?
+        .map_err(|_| PeerTransportError::Unreachable)?
+        .find(node_id)
+        .map(|(_, base)| base)
+        .ok_or(PeerTransportError::Unreachable)
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -7700,3 +7782,8 @@ pub(crate) mod route_view_tests;
 /// K-03: the takeover loop's switch reads, on a virtual clock.
 #[cfg(test)]
 mod takeover_gate_tests;
+
+/// A4: the lease loop's owner inventory on an idle node.
+#[cfg(test)]
+#[path = "media_sessions/lease_inventory_tests.rs"]
+mod lease_inventory_tests;
