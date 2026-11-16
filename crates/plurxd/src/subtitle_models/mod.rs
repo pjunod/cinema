@@ -1175,7 +1175,7 @@ pub(crate) async fn worker_pass(
     refresh_local(state).await?;
     use plurx_core::store::background_jobs::{ClaimJob, JobKind, JobSettlement};
     let authority = state.jobs.execution_authority();
-    let settings = config::read(state.store.as_ref()).await?;
+    let settings = config::read_applied(&state.applied).await?;
     if settings.mode == config::Mode::Managed
         && settings.effective_enabled
         && settings.interval_mins > 0

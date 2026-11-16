@@ -2915,6 +2915,74 @@ async fn empty_pretranscode_queue_rate_limits_local_cache_maintenance() {
     );
 }
 
+// ---- A4: the background lanes' idle looks --------------------------
+
+/// Settings reads `jobs`' applied view answered, and how many it sent to the
+/// authority.
+fn lane_view_reads(jobs: &JobManager) -> (u64, u64) {
+    use plurx_core::store::{AppliedTable, ViewSource};
+    let observation = jobs.applied.observation();
+    (
+        observation.view_total(AppliedTable::Settings, ViewSource::View),
+        observation.view_total(AppliedTable::Settings, ViewSource::Authority),
+    )
+}
+
+/// A4: every pass of the background lanes looks at their switches and
+/// tunables. They read them through the node's applied settings view (a
+/// replica answers it locally under its serving proof; a standalone view
+/// counts a `view` read, a direct Store read counts nothing), and a switch
+/// that is on still opens its lane. The output drain, which cancels rows,
+/// keeps reading the Store.
+#[tokio::test]
+async fn background_lanes_look_at_their_settings_through_the_applied_view() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let artwork = crate::test_tempdir().expect("artwork");
+    let jobs = manager(Arc::clone(&store) as Arc<dyn Store>, artwork.path());
+    let look = |jobs: Arc<JobManager>| async move {
+        let (lanes, read) = read_preparation_lanes(&jobs.applied).await;
+        assert!(read, "a readable view is a read switch");
+        (
+            lanes,
+            lane_cluster_fragment_index_enabled(&jobs.applied).await,
+            lane_subtitle_source_queue_enabled(&jobs.applied).await,
+            lane_analysis_retry_policy(&jobs.applied).await,
+        )
+    };
+
+    // Idle: nothing configured, every lane closed, nothing from authority.
+    let (lanes, fragments, subtitles, policy) = look(Arc::clone(&jobs)).await;
+    assert!(lanes.is_empty() && !fragments && !subtitles);
+    assert_eq!(policy, jobs.analysis_retry_policy().await);
+    assert_eq!(
+        lane_view_reads(&jobs),
+        (4, 0),
+        "four looks, all from the view"
+    );
+
+    // Work present: each switch on opens its lane, still from the view.
+    for (key, value) in [
+        (keys::JOB_CACHE_PRODUCE_MINS, "5"),
+        (keys::VOD_OUTPUT_PREPARATION, "copy"),
+        (keys::VOD_INDEX_CLUSTER_CACHE, "1"),
+        (keys::SUBTITLE_CLUSTER_SOURCES, "1"),
+    ] {
+        store.put_setting(key, value).await.expect("setting");
+    }
+    let (lanes, fragments, subtitles, _) = look(Arc::clone(&jobs)).await;
+    assert!(lanes.speculative, "the discovery schedule opens its lane");
+    assert_eq!(lanes.output, crate::vodserve::OutputPreparation::Copy);
+    assert!(fragments && subtitles);
+    assert_eq!(lane_view_reads(&jobs), (8, 0));
+
+    // The drain's switch is the Store's: no view read.
+    assert_eq!(
+        jobs.output_preparation_for_drain().await,
+        Some(crate::vodserve::OutputPreparation::Copy)
+    );
+    assert_eq!(lane_view_reads(&jobs), (8, 0));
+}
+
 // ---- D2 (main-merge defects 2026-10-04): preparation lanes ----------
 
 async fn d2_lanes(settings: &[(&str, &str)]) -> crate::background_jobs::PreparationLanes {

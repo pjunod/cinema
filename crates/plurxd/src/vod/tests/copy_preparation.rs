@@ -653,6 +653,35 @@ async fn disabled_queued_rows_are_cancelled_without_a_claim() {
     assert_eq!(d2_job_state(&store, &kept).await, JobState::Queued);
 }
 
+/// A4 review: the preparation lane opens on the applied view, but the drain
+/// cancels work, so it acts on the Store's switch. A view that still says
+/// copy does not save a row the Store's switch has turned off, and a view
+/// that has not applied an enable does not cancel a row the Store admits.
+#[tokio::test]
+async fn the_output_drain_acts_on_the_store_switch_not_the_view() {
+    use plurx_core::store::background_jobs::JobState;
+    use crate::vodserve::OutputPreparation;
+    let (store, file, base) = d2_store_with_file().await;
+    let view: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("view store"));
+    let jobs = Arc::new(
+        crate::state::JobManager::new(Arc::clone(&store), base.path().join("art"))
+            .with_applied_view(plurx_core::store::AppliedView::authority(Arc::clone(&view))),
+    );
+    let key = plurx_core::store::keys::VOD_OUTPUT_PREPARATION;
+
+    view.put_setting(key, OutputPreparation::COPY).await.expect("view on");
+    store.put_setting(key, OutputPreparation::OFF).await.expect("store off");
+    let cancelled = d2_queue_copy_row(&store, &file, "absent-node", "store-off").await;
+    assert_eq!(jobs.drain_output_preparation_from_store().await, 1);
+    assert_eq!(d2_job_state(&store, &cancelled).await, JobState::Cancelled);
+
+    view.put_setting(key, OutputPreparation::OFF).await.expect("view off");
+    store.put_setting(key, OutputPreparation::COPY).await.expect("store on");
+    let kept = d2_queue_copy_row(&store, &file, "absent-node", "store-on").await;
+    assert_eq!(jobs.drain_output_preparation_from_store().await, 0);
+    assert_eq!(d2_job_state(&store, &kept).await, JobState::Queued);
+}
+
 #[tokio::test]
 async fn a_row_claimed_during_the_drain_settles_and_never_stays_cancelling() {
     use plurx_core::store::background_jobs::*;
