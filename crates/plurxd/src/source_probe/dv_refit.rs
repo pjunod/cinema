@@ -550,6 +550,19 @@ pub(super) async fn settle_child(
     }
 }
 
+/// Register the spool's run file for the child's writes. Unconfigured roots
+/// record nothing and succeed (the registry is advisory there); a descriptor
+/// that is not the named file, roots outside the owned cache or a poisoned
+/// registry fail the attempt, which resumes from the spool, rather than
+/// launching with an unregistered output.
+fn register_spool_output(
+    stdout: &std::fs::File,
+    path: &std::path::Path,
+) -> Result<plurx_core::process::source_lifetime::DaemonFileRegistration, RunError> {
+    plurx_core::process::source_lifetime::register_daemon_file(stdout, path)
+        .map_err(|error| RunError::Transient(error.to_string()))
+}
+
 /// The whole run over the held source, as the title scan reads it: a
 /// complete spool re-solves without decoding; otherwise the helper resumes
 /// from the spool's whole scene lines (or starts), reading the source
@@ -585,19 +598,7 @@ pub(super) async fn run(
     let stdout = spool.open_run().await.map_err(transient)?;
     // The spool is a freshly created file inside the daemon-owned cache. Keep
     // its exact registration alive through every child write and the reap.
-    let _stdout_registration = if plurx_core::process::source_lifetime::daemon_roots_configured() {
-        Some(
-            plurx_core::process::source_lifetime::register_daemon_file(
-                &stdout,
-                &spool.path(".run"),
-            )
-            .map_err(|error| transient(error.to_string()))?,
-        )
-    } else {
-        // No roots grants no verification. Configured registration failures
-        // remain fatal, and every launch still passes the unchanged policy.
-        None
-    };
+    let _stdout_registration = register_spool_output(&stdout, &spool.path(".run"))?;
     let input = match crate::background_jobs::source_budget() {
         Some(budget) => Some(
             crate::source_input::SourceInput::open_background_held(
@@ -671,6 +672,51 @@ pub(super) async fn run(
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+
+    /// The attempt registers its spool output on every path: without roots
+    /// that records nothing and succeeds, and a foreign descriptor still
+    /// fails the attempt. Runs in its own process so no peer has configured
+    /// the process-wide roots.
+    #[tokio::test]
+    async fn the_spool_output_registers_without_roots_and_refuses_a_foreign_descriptor() {
+        const CHILD: &str = "PLURX_REFIT_SPOOL_REGISTRATION_CHILD";
+        let production = include_str!("dv_refit.rs")
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("production source");
+        assert!(production.contains("register_spool_output(&stdout, &spool.path(\".run\"))?"));
+        assert!(
+            !production.contains("daemon_roots_configured"),
+            "registration is unconditional"
+        );
+        if std::env::var_os(CHILD).is_none() {
+            let output = tokio::process::Command::new(std::env::current_exe().expect("test image"))
+                .args(["--exact", "source_probe::dv_refit::tests::the_spool_output_registers_without_roots_and_refuses_a_foreign_descriptor", "--nocapture"])
+                .env(CHILD, "1").kill_on_drop(true).output().await.expect("isolated registration test");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().expect("spool directory");
+        let path = dir.path().join("title.run");
+        let file = std::fs::File::create(&path).expect("run file");
+        assert!(
+            register_spool_output(&file, &path).is_ok(),
+            "no roots: nothing recorded, attempt continues"
+        );
+        let other = dir.path().join("other.run");
+        std::fs::write(&other, b"other").expect("other file");
+        assert!(
+            matches!(
+                register_spool_output(&file, &other),
+                Err(RunError::Transient(_))
+            ),
+            "a descriptor that is not the named file fails the attempt"
+        );
+    }
 
     /// Run policy configuration in its own test process. This exercises the
     /// actual file-output launcher without changing the global policy of peers.
