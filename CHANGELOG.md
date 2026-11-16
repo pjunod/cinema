@@ -18,6 +18,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- An idle cluster no longer pays a settings quorum read per background-loop tick to learn that
+  nothing changed. The offline source probe loop and the media-session lease loop check this node's own
+  replica (and, for leases, its own registry) before their authoritative read; the playback cache
+  ceiling, the sharing listener and claim switch, the background work lanes, the subtitle
+  worker passes and the Live TV loops read their settings from the applied settings view; the
+  heartbeat looks at the sharing switch locally. Every read before a write or a fence is unchanged.
+  Still paid every tick: the recording loop's row listings, the reminder loop's transition write,
+  and the background lanes' and subtitle passes' queue reads (cluster layer audit, item A4,
+  [build plan](docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md)).
 - Linux replicated servers validate actual-host reboot identity before serving;
   required deployment mounts preserve source-custody recovery after a reboot.
 - Android prepared Dolby Vision handoffs now keep the executing playback choice

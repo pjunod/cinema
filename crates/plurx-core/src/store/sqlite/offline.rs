@@ -1077,6 +1077,14 @@ impl OfflinePackageStore for SqliteStore {
         Ok(Vec::new())
     }
 
+    async fn local_pending_offline_source_probes(
+        &self,
+        _node_id: &str,
+        _requested_since: i64,
+    ) -> Result<Vec<OfflinePackage>, StoreError> {
+        Ok(Vec::new())
+    }
+
     async fn answer_offline_source_probe(
         &self,
         _package_id: &str,

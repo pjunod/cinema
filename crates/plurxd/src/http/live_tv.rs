@@ -165,15 +165,28 @@ pub(crate) async fn owner_guide(
 
 /// Keep a sanitized durable guide copy on every serving node, including nodes
 /// with no tuner network path. Source fetches have a separate cluster lease.
+/// Whether this node's applied settings view holds Live TV on with a guide
+/// source; an unreadable view answers yes, so the Store decides.
+async fn guide_viewed_on(applied: &plurx_core::store::AppliedView, node_id: &str) -> bool {
+    match applied.settings_snapshot().await {
+        Ok(snapshot) => LiveTvConfig::from_snapshot(&snapshot.values, node_id).guide_fetches(),
+        Err(_) => true,
+    }
+}
+
 pub(crate) async fn guide_replica_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     loop {
-        if let Ok(config) = state.live_tv.config().await {
-            if config.guide_fetches() && state.serving.is_ready() {
-                let _ =
-                    owner_guide(&state, &config, guide::refresh_window(config.guide_hours)).await;
+        // The applied view says whether this node fetches a guide (A4); only
+        // then is the configuration read from the Store and acted on.
+        if guide_viewed_on(&state.applied, &state.node_id).await {
+            if let Ok(config) = state.live_tv.config().await {
+                if config.guide_fetches() && state.serving.is_ready() {
+                    let _ = owner_guide(&state, &config, guide::refresh_window(config.guide_hours))
+                        .await;
+                }
             }
         }
         tokio::select! { _ = shutdown.cancelled() => return,

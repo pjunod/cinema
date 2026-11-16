@@ -3919,6 +3919,11 @@ impl MediaSessionCoordinator {
         );
     }
 
+    /// Whether an adoption has left a seed the next tick will take.
+    async fn has_lease_seeds(&self) -> bool {
+        !self.lease_seeds.lock().await.is_empty()
+    }
+
     async fn take_lease_seeds(&self) -> HashMap<String, LeaseSeed> {
         std::mem::take(&mut *self.lease_seeds.lock().await)
     }
@@ -5412,6 +5417,61 @@ async fn reconcile_owned_publication_fences(
         .await;
 }
 
+/// The tick's owner inventory, or `None` when it could not be read.
+///
+/// The inventory is a linearizable read, and on a node with no playback it
+/// is one every three seconds to learn there is nothing to renew. So it is
+/// skipped — an empty inventory, the tick's ordinary empty case — only when
+/// all of these hold: the loop remembers no lease (`idle_process`, so no
+/// loss can need detecting), this process runs no renewable or
+/// settlement-protected worker, no adoption has left a lease seed, and this
+/// replica holds no unexpired active row owned by this node. The process's
+/// own registry and seeds, not the replica, drive renewal of what it started;
+/// a row a replica has not applied yet (a takeover) is inventoried on the
+/// first tick after it applies, and rows left by an earlier process of this
+/// node are found the same way. Anything else takes today's read.
+async fn lease_tick_inventory(
+    state: &AppState,
+    idle_process: bool,
+    now_ms: i64,
+) -> Option<Vec<OwnedMediaSessionLease>> {
+    // One deadline for the hint and the inventory together: an idle tick
+    // that times out on its local read cannot then spend a second one.
+    let deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+    if idle_process
+        && lease_tick_live(state.transcode.renewable_session_ids().await).is_empty()
+        && !state.media_sessions.has_lease_seeds().await
+        && matches!(
+            tokio::time::timeout_at(
+                deadline,
+                state
+                    .store
+                    .owned_media_sessions_hint(&state.node_id, now_ms),
+            )
+            .await,
+            Ok(Ok(false))
+        )
+    {
+        return Some(Vec::new());
+    }
+    match tokio::time::timeout_at(
+        deadline,
+        state.store.owned_media_sessions(&state.node_id, now_ms),
+    )
+    .await
+    {
+        Ok(Ok(routes)) => Some(routes),
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "media-session lease inventory unavailable");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("media-session lease inventory timed out");
+            None
+        }
+    }
+}
+
 /// Renew only locally live workers. Lost ownership self-fences immediately;
 /// a transient store outage is allowed to use the already-committed lease but
 /// never past its exact expiry.
@@ -5692,22 +5752,12 @@ pub(crate) async fn lease_loop(state: AppState) {
                 .into_iter()
                 .collect::<HashSet<_>>(),
         );
-        let routes = match tokio::time::timeout(
-            LEASE_RENEWAL_DEADLINE,
-            state.store.owned_media_sessions(&state.node_id, now_ms),
+        let routes = lease_tick_inventory(
+            &state,
+            known.is_empty() && vod_capabilities.is_empty(),
+            now_ms,
         )
-        .await
-        {
-            Ok(Ok(routes)) => Some(routes),
-            Ok(Err(error)) => {
-                tracing::debug!(%error, "media-session lease inventory unavailable");
-                None
-            }
-            Err(_) => {
-                tracing::debug!("media-session lease inventory timed out");
-                None
-            }
-        };
+        .await;
         // Sample process-local liveness *after* the owner inventory. A
         // takeover that commits while the Store read is in flight is then
         // observed either through its settlement guard or through the adopted
@@ -7732,3 +7782,8 @@ pub(crate) mod route_view_tests;
 /// K-03: the takeover loop's switch reads, on a virtual clock.
 #[cfg(test)]
 mod takeover_gate_tests;
+
+/// A4: the lease loop's owner inventory on an idle node.
+#[cfg(test)]
+#[path = "media_sessions/lease_inventory_tests.rs"]
+mod lease_inventory_tests;

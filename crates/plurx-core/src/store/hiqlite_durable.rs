@@ -1657,6 +1657,20 @@ fn package_cols(alias: &str) -> String {
         .join(", ")
 }
 
+/// The probes addressed to `$1` and not answered since `$2`, with the package
+/// row each one needs. One statement for the authoritative read and its
+/// `local_` twin, so the hint and the authority select the same rows.
+fn pending_offline_source_probes_sql() -> String {
+    format!(
+        "SELECT {} FROM offline_packages p \
+         JOIN offline_source_probes probe ON probe.package_id = p.id \
+         WHERE probe.node_id = $1 AND probe.answered_at IS NULL \
+           AND probe.requested_at >= $2 \
+         ORDER BY probe.requested_at, p.id",
+        package_cols("p")
+    )
+}
+
 fn one_package(rows: Vec<OfflinePackageRow>) -> Option<OfflinePackage> {
     rows.into_iter().next().map(Into::into)
 }
@@ -2993,14 +3007,28 @@ impl OfflinePackageStore for HiqliteAuthStore {
             .client()
             .query_consistent_map::<OfflinePackageRow, _>(
                 "pending_offline_source_probes",
-                format!(
-                    "SELECT {} FROM offline_packages p \
-                     JOIN offline_source_probes probe ON probe.package_id = p.id \
-                     WHERE probe.node_id = $1 AND probe.answered_at IS NULL \
-                       AND probe.requested_at >= $2 \
-                     ORDER BY probe.requested_at, p.id",
-                    package_cols("p")
-                ),
+                pending_offline_source_probes_sql(),
+                params!(node_id, requested_since),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn local_pending_offline_source_probes(
+        &self,
+        node_id: &str,
+        requested_since: i64,
+    ) -> Result<Vec<OfflinePackage>, StoreError> {
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. The same statement as the authoritative read above, so
+        // the two cannot disagree about which rows are pending; see the trait
+        // method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<OfflinePackageRow, _>(
+                "local_pending_offline_source_probes",
+                pending_offline_source_probes_sql(),
                 params!(node_id, requested_since),
             )
             .await
