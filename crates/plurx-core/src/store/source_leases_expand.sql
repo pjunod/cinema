@@ -79,7 +79,9 @@ END;
 -- next statement
 -- Analysis leases follow analysis_source_reserve_on_claim (as redefined by
 -- analysis coordination: a coordinated request is charged per physical
--- phase, by begin_phase), analysis_source_renew and _release_on_success.
+-- phase, by begin_phase, as 'analysis:<hex request>:<fence>:<phase>'),
+-- analysis_source_renew and _release_on_success; renewal and success
+-- therefore match the owner, not one id.
 -- A cancelled or retried request keeps its lease to expiry, as its
 -- reservation does.
 CREATE TRIGGER source_lease_analysis_claim AFTER UPDATE OF state,fence ON analysis_requests
@@ -90,7 +92,7 @@ WHEN NEW.state='running' AND NEW.fence>OLD.fence
  AND EXISTS(SELECT 1 FROM analysis_required_resources r WHERE r.request_id=NEW.request_id)
 BEGIN
   INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
-  SELECT 'analysis:'||NEW.request_id||':'||NEW.fence,'analysis',NEW.request_id,NEW.fence,NEW.owner_node_id,
+  SELECT 'analysis:'||hex(NEW.request_id)||':'||NEW.fence,'analysis',NEW.request_id,NEW.fence,NEW.owner_node_id,
     json_object('kind','analysis','component',NEW.component,'trigger',NEW.trigger),
     (SELECT json_group_array(resource_key) FROM (SELECT DISTINCT resource_key FROM analysis_required_resources
        WHERE request_id=NEW.request_id ORDER BY resource_key)),
@@ -102,13 +104,13 @@ CREATE TRIGGER source_lease_analysis_renew AFTER UPDATE OF lease_expires_ms ON a
 WHEN NEW.state='running' AND NEW.fence=OLD.fence AND NEW.lease_expires_ms>OLD.lease_expires_ms
 BEGIN
   UPDATE source_leases SET expires_at_ms=NEW.lease_expires_ms,renewed_at_ms=NEW.updated_at_ms
-  WHERE lease_id='analysis:'||NEW.request_id||':'||NEW.fence;
+  WHERE owner_kind='analysis' AND work_id=NEW.request_id AND fence=NEW.fence;
 END;
 -- next statement
 CREATE TRIGGER source_lease_analysis_success AFTER UPDATE OF state ON analysis_requests
 WHEN OLD.state='running' AND NEW.state IN ('submitted','ready')
 BEGIN
-  DELETE FROM source_leases WHERE lease_id='analysis:'||NEW.request_id||':'||NEW.fence;
+  DELETE FROM source_leases WHERE owner_kind='analysis' AND work_id=NEW.request_id AND fence=NEW.fence;
 END;
 -- next statement
 -- A read attestation is renewed (and closed, by lowering expiry) on its
@@ -133,7 +135,7 @@ END;
 -- next statement
 -- Pause and resume act on the job's lease; resume takes a fresh source
 -- reservation slot (source reservations are the bundle record, not a cap).
-DROP TRIGGER background_source_pause_effects;
+DROP TRIGGER IF EXISTS background_source_pause_effects;
 -- next statement
 CREATE TRIGGER background_source_pause_effects
 AFTER INSERT ON background_job_commands WHEN NEW.operation='source_pause' AND NEW.result_json='true'
@@ -152,7 +154,7 @@ BEGIN
     DELETE FROM background_job_commands WHERE id=NEW.id;
 END;
 -- next statement
-DROP TRIGGER background_source_resume_effects;
+DROP TRIGGER IF EXISTS background_source_resume_effects;
 -- next statement
 CREATE TRIGGER background_source_resume_effects
 AFTER INSERT ON background_job_commands WHEN NEW.operation='source_resume' AND NEW.result_json='true'
@@ -174,7 +176,7 @@ END;
 -- Dispatch turns read the same leases and the same three claim terms
 -- (claim_foreground_window!, claim_source_holders!, claim_maintenance_reader!
 -- in background_jobs.rs). A ready scan is maintenance work.
-DROP VIEW dispatch_turn_ordinary_occupancy;
+DROP VIEW IF EXISTS dispatch_turn_ordinary_occupancy;
 -- next statement
 CREATE VIEW dispatch_turn_ordinary_occupancy AS
 SELECT k.value AS resource_key,h.work_id,h.lease_id,h.node_id
@@ -184,7 +186,7 @@ AND NOT (h.owner_kind='job' AND EXISTS(SELECT 1 FROM dispatch_turn_protected_job
 AND NOT (h.owner_kind='analysis' AND EXISTS(SELECT 1 FROM background_job_waiters viewer WHERE viewer.job_id=h.work_id
     AND viewer.request_scope='playback-analysis' AND viewer.state='pending' AND viewer.deadline_ms>a.now_ms));
 -- next statement
-DROP VIEW dispatch_turn_contenders;
+DROP VIEW IF EXISTS dispatch_turn_contenders;
 -- next statement
 CREATE VIEW dispatch_turn_contenders AS
 SELECT r.job_id,min(i.created_at_ms) AS queued_ms
@@ -213,19 +215,19 @@ AND NOT EXISTS (
           OR (fg.expires_at_ms<=a.now_ms AND fg.expires_at_ms>a.now_ms-60000 AND fg.source_quiescent=0)))
       OR (SELECT count(*) FROM source_leases h WHERE h.node_id=r.node_id AND h.owner_kind!='playback'
           AND h.phase!='paused' AND h.expires_at_ms>a.now_ms-60000)
-        >=MAX(1,MIN(16,COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||r.node_id),
-          (SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node'),2)))+1
+        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||r.node_id AND CAST(value AS INTEGER) BETWEEN 1 AND 16),
+          (SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node' AND CAST(value AS INTEGER) BETWEEN 1 AND 16),2)+1
       OR (SELECT count(DISTINCT h.lease_id) FROM dispatch_turn_ordinary_occupancy h WHERE h.node_id=r.node_id)
-        >=MAX(1,MIN(16,COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||r.node_id),
-          (SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node'),2)))
+        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node.'||r.node_id AND CAST(value AS INTEGER) BETWEEN 1 AND 16),
+          (SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.source_readers_per_node' AND CAST(value AS INTEGER) BETWEEN 1 AND 16),2)
       OR (k.resource_key!='source_io' AND ((SELECT count(*) FROM source_leases h, json_each(h.resource_keys_json) hk
           WHERE hk.value=k.resource_key AND h.owner_kind!='playback' AND h.phase!='paused' AND h.expires_at_ms>a.now_ms-60000)
-        >=MAX(1,MIN(16,COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(k.resource_key,11)),1)))+1
+        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(k.resource_key,11) AND CAST(value AS INTEGER) BETWEEN 1 AND 16),1)+1
         OR (SELECT count(DISTINCT h.lease_id) FROM dispatch_turn_ordinary_occupancy h WHERE h.resource_key=k.resource_key)
-        >=MAX(1,MIN(16,COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(k.resource_key,11)),1)))))))
+        >=COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(k.resource_key,11) AND CAST(value AS INTEGER) BETWEEN 1 AND 16),1)))))
 GROUP BY r.job_id;
 -- next statement
-DROP TRIGGER dispatch_turn_independent;
+DROP TRIGGER IF EXISTS dispatch_turn_independent;
 -- next statement
 CREATE TRIGGER dispatch_turn_independent BEFORE INSERT ON source_leases
 WHEN NEW.owner_kind IN ('lease','offline') AND EXISTS(SELECT 1 FROM dispatch_turn_ready WHERE expires_at_ms>NEW.started_at_ms)
@@ -239,7 +241,7 @@ END;
 -- next statement
 -- Storage-domain Rule A holders: every source lease x stored key. A
 -- lease's liveness includes the 60 s grace, exactly as the claim counts it.
-DROP VIEW background_storage_domain_holders;
+DROP VIEW IF EXISTS background_storage_domain_holders;
 -- next statement
 CREATE VIEW background_storage_domain_holders AS
 SELECT CASE l.owner_kind WHEN 'playback' THEN 'foreground' ELSE l.owner_kind END AS holder_kind,
@@ -257,9 +259,9 @@ json_each(paused.resource_keys_json) resource WHERE resource.value LIKE 'source_
 -- next statement
 -- Retention no longer consults source custody: the enqueue and upkeep
 -- triggers return to their v85 and v86 text (pinned by test).
-DROP INDEX background_source_custody_owner_work;
+DROP INDEX IF EXISTS background_source_custody_owner_work;
 -- next statement
-DROP TRIGGER background_job_enqueue_command;
+DROP TRIGGER IF EXISTS background_job_enqueue_command;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command
 AFTER INSERT ON background_job_commands WHEN NEW.operation = 'enqueue'
@@ -475,7 +477,7 @@ BEGIN
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
 -- next statement
-DROP TRIGGER background_job_maintenance_command;
+DROP TRIGGER IF EXISTS background_job_maintenance_command;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command
 AFTER INSERT ON background_job_commands WHEN NEW.operation = 'maintain'
@@ -614,7 +616,7 @@ WHERE paused.phase='paused' AND job.state IN ('running','cancelling') AND job.le
   AND json_array_length(paused.resource_keys_json)>0;
 -- next statement
 INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
-SELECT 'analysis:'||request.request_id||':'||request.fence,'analysis',request.request_id,request.fence,request.owner_node_id,
+SELECT 'analysis:'||hex(request.request_id)||':'||request.fence,'analysis',request.request_id,request.fence,request.owner_node_id,
   json_object('kind','analysis','component',request.component,'trigger',request.trigger),
   (SELECT json_group_array(resource_key) FROM (SELECT DISTINCT held.resource_key FROM analysis_source_reservations held
      WHERE held.request_id=request.request_id AND held.fence=request.fence ORDER BY held.resource_key)),

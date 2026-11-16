@@ -26,6 +26,79 @@ pub(crate) const SQLITE_EXPAND: &str = concat!(
 /// SQLite schema version before the expand and after it.
 pub(crate) const PRE_LEASE_VERSION: usize = 132;
 pub(crate) const EXPANDED_VERSION: usize = 133;
+/// The SQLite schema that first carries `source_leases` (import plans).
+pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = EXPANDED_VERSION as i64;
+
+/// How long past its expiry a lease still holds capacity: absorbs a renewal
+/// racing the sweep and clock skew between nodes. Not a proof window.
+pub const SOURCE_LEASE_GRACE_MS: i64 = 60_000;
+
+/// Lease alias `held` still holds source capacity at `now`.
+pub(crate) fn counted(now: &str) -> String {
+    format!(lease_counted!("{now}"), now = now)
+}
+/// Lease alias `held` serves live demand at `now`.
+pub(crate) fn live(now: &str) -> String {
+    format!(lease_live!("{now}"), now = now)
+}
+/// A playback window overlapping source key `key` refuses background reads.
+pub(crate) fn foreground_window(key: &str, now: &str) -> String {
+    format!(
+        claim_foreground_window!("{key}", "{now}"),
+        key = key,
+        now = now
+    )
+}
+/// `node`, or the mapped domain of `key`, has no reader slot left at all.
+pub(crate) fn source_holders(key: &str, node: &str, now: &str) -> String {
+    source_holders_except(key, node, now, "")
+}
+/// [`source_holders`], counting only leases `held` that also match `extra`
+/// (`" AND ..."`).
+pub(crate) fn source_holders_except(key: &str, node: &str, now: &str, extra: &str) -> String {
+    format!(
+        claim_source_holders!("{key}", "{node}", "{now}", "{extra}"),
+        key = key,
+        node = node,
+        now = now,
+        extra = extra
+    )
+}
+/// Maintenance readers fill `node`, or the mapped domain of `key`.
+pub(crate) fn maintenance_reader(key: &str, node: &str, now: &str) -> String {
+    maintenance_reader_except(key, node, now, "")
+}
+/// [`maintenance_reader`], counting only leases `held` that match `extra`.
+pub(crate) fn maintenance_reader_except(key: &str, node: &str, now: &str, extra: &str) -> String {
+    format!(
+        claim_maintenance_reader!("{key}", "{node}", "{now}", "{extra}"),
+        key = key,
+        node = node,
+        now = now,
+        extra = extra
+    )
+}
+/// Background readers `node` may run (its override, else the default).
+pub(crate) fn node_readers(node: &str) -> String {
+    format!(node_source_readers!("{node}"), node = node)
+}
+/// Background readers the mapped storage domain key `key` may serve.
+pub(crate) fn domain_readers(key: &str) -> String {
+    format!(domain_source_readers!("{key}"), key = key)
+}
+/// SQLite's `hex()` of the text's UTF-8 bytes.
+pub(crate) fn hex_upper(text: &str) -> String {
+    text.bytes().map(|byte| format!("{byte:02X}")).collect()
+}
+
+/// A lease id is a kind prefix and the owner's identity, never free text.
+pub(crate) fn lease_id_valid(lease_id: &str) -> bool {
+    !lease_id.is_empty()
+        && lease_id.len() <= 1024
+        && lease_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_' | b'.'))
+}
 
 pub(crate) const SHAPE_SQL: &str = "SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name GLOB 'source_lease*' AND sql IS NOT NULL ORDER BY name";
 
@@ -48,6 +121,44 @@ fn shape(catalogue: &[(String, String)]) -> Vec<(String, String)> {
 fn canonical(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+static EXPANDED_CATALOGUE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    super::sqlite::catalogue_through(EXPANDED_VERSION).expect("expanded catalogue")
+});
+static CONTRACTED_CATALOGUE: LazyLock<Vec<(String, String)>> =
+    LazyLock::new(|| contracted_catalogue().expect("contracted catalogue"));
+
+/// Whether `installed` is another extension's objects as this binary
+/// installs them (`own`), or as the source-lease expand or contract left
+/// those same names. The four extensions the expand rewrites (source
+/// arbitration, dispatch turns, custody retention, storage-domain pending)
+/// accept exactly these three shapes and refuse anything else.
+pub(crate) fn accepts_extension_shape(
+    installed: &[(String, String)],
+    own: &[(String, String)],
+) -> bool {
+    let canonical_rows = |rows: &[(String, String)]| {
+        let mut rows = rows
+            .iter()
+            .map(|(name, sql)| (name.clone(), canonical(sql)))
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+    let installed = canonical_rows(installed);
+    let variant = |catalogue: &[(String, String)]| {
+        canonical_rows(
+            &catalogue
+                .iter()
+                .filter(|(name, _)| own.iter().any(|(own, _)| own == name))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    installed == canonical_rows(own)
+        || installed == variant(&EXPANDED_CATALOGUE)
+        || installed == variant(&CONTRACTED_CATALOGUE)
+}
+
 static EXPANDED: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
     shape(&super::sqlite::catalogue_through(EXPANDED_VERSION).expect("expanded catalogue"))
 });
@@ -75,6 +186,38 @@ pub(crate) fn version(installed: &[(String, String)]) -> Result<Option<i64>, Sto
         Err(StoreError::Migration(
             "source lease schema partial or incompatible".into(),
         ))
+    }
+}
+
+/// Test fixtures that build a hand-made catalogue: add the dispatch-turn
+/// objects (when absent) and the expand, once.
+#[cfg(test)]
+pub(crate) fn install_for_fixture(conn: &rusqlite::Connection) {
+    let present = |name: &str| {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name=?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("fixture catalogue")
+            > 0
+    };
+    if present("source_leases") {
+        return;
+    }
+    if !present("dispatch_turn_ready") {
+        conn.execute_batch(super::background_job_turns::SCHEMA)
+            .expect("fixture dispatch turns");
+    }
+    // The expand restores the v85/v86 retention triggers; a hand-made
+    // catalogue without queue retention keeps none.
+    let retention = present("background_job_enqueue_command");
+    conn.execute_batch(EXPAND).expect("fixture source leases");
+    if !retention {
+        conn.execute_batch(
+            "DROP TRIGGER background_job_enqueue_command; DROP TRIGGER background_job_maintenance_command;",
+        )
+        .expect("fixture without retention");
     }
 }
 

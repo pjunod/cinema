@@ -57,7 +57,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Custody retention (main) checks its trigger shape and marker: two more.
     // Offload: committed column shape before its additive schema migration.
     // Storage-domain pending apply checks its trigger shape and marker: two more.
-    ("hiqlite.rs", 74),
+    // Source leases check their object shape and marker (source_leases_schema_version,
+    // install_source_leases_schema): two more.
+    ("hiqlite.rs", 76),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -575,6 +577,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("settle_migration_attempt", STARTUP),
     ("shared_caption_schema_version", STARTUP),
     ("source_arbitration_shape", STARTUP),
+    ("source_leases_schema_version", STARTUP),
     ("storage_domain_pending_schema_version", STARTUP),
     ("subtitle_managed_schema_version", STARTUP),
     ("subtitle_text_translation_schema_version", STARTUP),

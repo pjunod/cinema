@@ -1953,7 +1953,6 @@ async fn run(config: Config) -> anyhow::Result<()> {
             tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
         }
         let store = Arc::clone(&selected.store);
-        crate::source_custody::configure_settlement_journal(&config.storage.data_dir);
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
         let catalogue = selected.catalogue_reader();

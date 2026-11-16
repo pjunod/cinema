@@ -396,51 +396,23 @@ async fn claim_with_resolution_inner(
     Ok(None)
 }
 
-/// Called by the operation owner only after its read/child join, or before
-/// input was ever exposed. The proof write is durable before the exact row is
-/// deleted, so restart replay can finish an unacknowledged DELETE.
+/// Called by the operation owner after its read/child join, or before input
+/// was ever exposed: deletes its source lease so the capacity frees now. A
+/// lost delete costs nothing more than waiting for the lease's expiry.
 pub(crate) async fn settle_joined_source_custody(
     store: &Arc<dyn Store>,
     receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
 ) {
-    let _receipt_owner = crate::source_custody::lock_background_settlement(&receipt).await;
-    loop {
-        match crate::source_custody::persist_background_settlement(&receipt) {
-            Ok(()) => break,
-            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
-                "joined source journal remains pending"),
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    loop {
-        match store.mark_background_source_settled(receipt.clone()).await {
-            Ok(false) => {
-                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
-                    tracing::warn!(%error,"background source journal cleanup will replay");
-                }
-                return;
-            }
-            Ok(true) => break,
-            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
-                "joined source proof remains pending"),
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    loop {
+    for attempt in 0..3 {
         let deleted = store
             .release_background_source_custody(receipt.clone(), unix_ms().unwrap_or_default())
             .await;
         #[cfg(test)]
         let deleted = faults::after_commit(faults::SOURCE_RELEASE, deleted);
         match deleted {
-            Ok(_) => {
-                if let Err(error) = crate::source_custody::clear_background_settlement(&receipt) {
-                    tracing::warn!(%error,"background source journal cleanup will replay");
-                }
-                return;
-            }
-            Err(error) => tracing::warn!(custody_id=%receipt.custody_id,%error,
-                "joined source deletion remains pending"),
+            Ok(_) => return,
+            Err(error) => tracing::warn!(lease_id=%receipt.custody_id,%error,attempt,
+                "source lease release failed; it frees at expiry"),
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -583,15 +555,6 @@ impl ActiveBackgroundJob {
             return Err(StoreError::Task(
                 "source custody registration exceeded the claim deadline".into(),
             ));
-        }
-        if let Some(receipt) = &source_custody {
-            if let Err(error) =
-                crate::source_custody::activate_background_with_journal(&store, receipt.clone())
-                    .await
-            {
-                settle_unstarted_job_source(&store, owner, source_custody).await;
-                return Err(StoreError::Task(error));
-            }
         }
         let lost = CancellationToken::new();
         let source_budget = SourceReadBudget::new(
@@ -4178,11 +4141,6 @@ pub(crate) mod tests {
             .expect("source custody");
         let ((), dropped) = faults::dropping(faults::SOURCE_RELEASE, active.finish()).await;
         assert_eq!(dropped, faults::SOURCE_RELEASE);
-        assert!(store
-            .settled_background_source_custody()
-            .await
-            .expect("proof rows")
-            .is_empty());
         assert!(!store
             .release_background_source_custody(receipt, unix_ms().expect("clock"))
             .await

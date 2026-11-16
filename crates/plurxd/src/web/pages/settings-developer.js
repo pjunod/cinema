@@ -387,7 +387,7 @@ function processedDvUpgradeCard(readiness){
     <p class="hint">Advisory: the upgrade runs whether or not these rows are met.</p>
     ${devGraduation("each platform has recorded twenty measured switches with complete ±2 s frame samples, independently observed audio continuity and no reopen.","this card goes; the upgrade is simply how Dolby Vision processing plays.")}`,{id:"processed-dv-upgrade-card"});
 }
-function sourceRecoveryCard(value,error=""){
+function sourceLaunchCard(value,error=""){
   const node=value&&value.node_name?String(value.node_name):"Node status unavailable";
   const unavailable=error||(value&&value.error)||(!value?"Waiting for this node's launch status.":"");
   const count=(number)=>number!==null&&number!==undefined&&number!==""&&Number.isFinite(Number(number))?String(Number(number)):"Unknown";
@@ -410,16 +410,16 @@ function sourceRecoveryCard(value,error=""){
     ${latest?`<p>Latest unknown launch: ${esc(latest.purpose)} · ${Number.isFinite(Number(latest.observed_at_ms))?esc(new Date(Number(latest.observed_at_ms)).toLocaleString()):"time unavailable"}</p>`:""}`:""}
     <p class="hint">Verified counts mean the final program, arguments, working directory and inherited descriptors passed the launch access check. Unknown includes undeclared and failed declarations; explicitly unverified is a subset of unknown. This read-only status never gates playback.</p>
     ${devGraduation("every production launch carries a verified source access declaration.","this card goes; launch verification is simply part of how plurx works.")}
-    <button type="button" class="ghost sm" onclick="reloadSourceRecovery(this)">${unavailable?"Retry":"Refresh this node"}</button>`);
+    <button type="button" class="ghost sm" onclick="reloadSourceLaunch(this)">${unavailable?"Retry":"Refresh this node"}</button>`);
 }
-function sourceRecoveryMount(value,error=""){
-  return `<div id="settings-source-recovery">${sourceRecoveryCard(value,error)}</div>`;
+function sourceLaunchMount(value,error=""){
+  return `<div id="settings-source-launch">${sourceLaunchCard(value,error)}</div>`;
 }
-function applySourceRecovery(value,error=""){
-  const mount=document.getElementById("settings-source-recovery");
-  if(mount)mount.innerHTML=sourceRecoveryCard(value,error);
+function applySourceLaunch(value,error=""){
+  const mount=document.getElementById("settings-source-launch");
+  if(mount)mount.innerHTML=sourceLaunchCard(value,error);
 }
-function developerPanel(settings,readiness,httpsCard="",sourceRecoveryHtml=""){
+function developerPanel(settings,readiness,httpsCard="",sourceLaunchHtml=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
   // lives in its own section; the links below are the way back to them.
@@ -430,7 +430,7 @@ function developerPanel(settings,readiness,httpsCard="",sourceRecoveryHtml=""){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${httpsCard}${sourceRecoveryHtml}${diagnosticDeveloperCard()}
+      ${destinations}${httpsCard}${sourceLaunchHtml}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}

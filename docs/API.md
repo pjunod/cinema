@@ -494,6 +494,8 @@ of never storing it.
 |---|---|---|---|
 | GET | `/api/v1/settings` | admin | Full settings snapshot, from one store read |
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
+
+Source readers (source-lease plan step 4) are three settings fields. `source_readers_per_node` (1–16, default 2) is how many background (maintenance) reads of original media each node runs at once; one more is always kept for live demand and playback is never counted. `source_readers_node_overrides` is `{node_id: 1–16 \| null}` (null returns a node to the default) and `storage_domain_source_readers` is `{domain_id: 1–16 \| null}` (default 1), charged across the cluster beside the node limit. A PUT is refused (400) only for an out-of-range value or a malformed id; a value below what a node is running now saves at once and applies as its readers finish. `GET /api/v1/analysis/summary` reports `source_capacity: {per_node, nodes: [{node_id, readers, overridden, maintenance, live, playback, paused, waiting_to_apply}], domains: [{domain_id, readers, maintenance, live, waiting_to_apply}]}` beside `source_io_holders`, one row per source lease and key with `lease_id`, `origin_node_id`, `priority` (`foreground` · `viewer` · `maintenance`), `live_demand` and `counts_against` (`node` · `domain` · `none`).
 | GET | `/api/v1/system` | admin | Environment diagnostics and counters |
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
@@ -510,7 +512,7 @@ of never storing it.
 | POST | `/api/v1/system/tone-map/census/stop` | admin | Stops a queued or running census, killing its child |
 | GET | `/api/v1/system/tone-map/census/stills/{name}` | admin | One PNG still from the stored census result |
 | POST | `/api/v1/system/search-index/rebuild` | admin | Rebuilds the derived search index on every voter |
-| GET | `/api/v1/developer/source-recovery` | admin | Node-local launch verification: `node_name`, bounded launch-attempt counts (`launches`), plus `roots_configured` and, when false, `roots_unconfigured_reason` (launches then run unverified; nothing is blocked). Diagnostic only. |
+| GET | `/api/v1/developer/source-launch` | admin | Node-local launch verification: `node_name`, bounded launch-attempt counts (`launches`), plus `roots_configured` and, when false, `roots_unconfigured_reason` (launches then run unverified; nothing is blocked). Diagnostic only. |
 | GET | `/api/v1/developer/readiness` | admin | Reports advisory observations for Playback, Analysis, Maintenance, Cluster and Developer settings; never gates controls |
 | POST | `/api/v1/developer/macos-video-processing/reprobe` | admin | Returns 202 with the current report and requests a bounded worker-local compatibility observation; saved preference and running plans stay unchanged |
 | POST | `/api/v1/client-log` | bearer | Files one client-side playback error into the server log |
@@ -3778,7 +3780,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 |---|---|---|---|
 | POST | `/api/v1/cluster/join-tokens` | admin | Mints one single-use **voter** join token |
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
-| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots, applied `mappings`, latest `pending` revision/state, `waiting_on` (at most 32 rows) and distinct `waiting_total`; two readers per domain and two library workers per provider |
+| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots, applied `mappings`, latest `pending` revision/state, `waiting_on` (at most 32 rows) and distinct `waiting_total`; each domain's background source readers are a setting (`storage_domain_source_readers` on `/api/v1/settings`, default 1, plus one for live demand) and two library workers per provider |
 | PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` saves the desired revision immediately, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 200 with `saved`, `revision`, `applied`, latest `pending`, `waiting_on` and `waiting_total`; 400 for invalid input or a stale library root. Eligible nodes apply atomically when affected jobs and disturbed-domain readers no longer depend on the previous mapping. [Apply status](server/STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) |
 | GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, `node_id`, `limit` (1–100; default 100), and `cursor` query parameters; owner/destination filtering precedes pagination; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
 | GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |

@@ -112,7 +112,7 @@ function settingsPanel(tab,d){
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="sharing")      return sharingManagementPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https),sourceRecoveryMount(d.sourceRecovery))+cinemaRemoteLocalCards();
+  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https),sourceLaunchMount(d.sourceLaunch))+cinemaRemoteLocalCards();
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.
@@ -458,13 +458,85 @@ function librariesPanel(libs,status,settings,dv){
     <div class="card" style="padding:8px 10px 4px">
       <table><thead><tr><th>Name</th><th>Kind</th><th>Paths</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table>
-    </div>${storageDomainsCard()}`;
+    </div>${sourceReadersCard(settings)}${storageDomainsCard()}`;
+}
+// Source readers per node (source-lease plan step 4, Paul 2026-11-15): a
+// cluster default, an optional override per node, and a number per mapped
+// storage domain. Every claim reads them from the replicated settings, so a
+// save never waits on, refuses or stops a running reader: a node above its
+// new number applies it as its readers finish.
+function sourceReadersCard(settings){
+  const s=settings||{};
+  return setCard(`${cardHead("Background source readers","How many background reads of original media each node runs at once.",`<span class="pill">${esc(s.source_readers_per_node||2)} per node</span>`)}
+    <div class="setfields">
+      <div><label for="source-readers-per-node">Background source readers per node</label><input id="source-readers-per-node" type="number" min="1" max="16" value="${esc(s.source_readers_per_node||2)}"></div>
+    </div>
+    <p class="hint">One more reader is always kept for live demand (a viewer waiting on analysis or a fragment). Playback is never counted and never waits for these. A mapped storage domain is also charged across the cluster: its own number below, 1 unless set. Lowering a number never stops a reader; a node above it applies the new number as its readers finish.</p>
+    <div id="source-readers-nodes"><button type="button" class="ghost sm" onclick="loadSourceReaders(this)">Load nodes and domains</button></div>
+    <div id="source-readers-status" role="status"></div>
+    <div class="err" id="source-readers-error" role="alert"></div>
+    ${setCardFoot("saveSourceReaders")}`,{id:"source-readers-card"});
+}
+function sourceReadersRows(settings,capacity,domainIds){
+  const s=settings||{},c=capacity||{};
+  const overrides=s.source_readers_node_overrides||{},domainReaders=s.storage_domain_source_readers||{};
+  const nodes=(c.nodes||[]).map(n=>String(n.node_id));
+  for(const id of Object.keys(overrides))if(!nodes.includes(id))nodes.push(id);
+  const nodeRows=nodes.sort().map(id=>{
+    const n=(c.nodes||[]).find(row=>String(row.node_id)===id)||{};
+    const value=overrides[id]??"";
+    return `<tr data-source-reader-node="${esc(id)}"><td>${esc(id)}</td><td>${esc(n.maintenance??0)} running · ${esc(n.live??0)} live</td><td><input type="number" min="1" max="16" placeholder="Use default" aria-label="Background source readers on ${esc(id)}" value="${esc(value)}"></td></tr>`;
+  }).join("");
+  const domains=[...new Set([...(domainIds||[]),...Object.keys(domainReaders),...(c.domains||[]).map(d=>String(d.domain_id))])].sort();
+  const domainRows=domains.map(id=>{
+    const d=(c.domains||[]).find(row=>String(row.domain_id)===id)||{};
+    return `<tr data-source-reader-domain="${esc(id)}"><td>${esc(id)}</td><td>${esc(d.maintenance??0)} running · ${esc(d.live??0)} live</td><td><input type="number" min="1" max="16" placeholder="1" aria-label="Background source readers on domain ${esc(id)}" value="${esc(domainReaders[id]??"")}"></td></tr>`;
+  }).join("");
+  return `<table><thead><tr><th>Node</th><th>Readers now</th><th>Override</th></tr></thead><tbody>${nodeRows||`<tr><td colspan="3" class="muted">No node is reading source media.</td></tr>`}</tbody></table>
+    ${domains.length?`<table><thead><tr><th>Storage domain</th><th>Readers now</th><th>Readers</th></tr></thead><tbody>${domainRows}</tbody></table>`:""}`;
+}
+// "Saved — in effect", or which nodes and domains still run more than their
+// new number. Read from the same leases Activity lists.
+function sourceReadersEffect(capacity){
+  const c=capacity||{},waiting=[];
+  for(const n of c.nodes||[])if(n.waiting_to_apply)waiting.push(`${n.node_id} is running ${n.maintenance} of ${n.readers}`);
+  for(const d of c.domains||[])if(d.waiting_to_apply)waiting.push(`domain ${d.domain_id} is running ${d.maintenance} of ${d.readers}`);
+  return waiting.length?`Saved — ${waiting.join("; ")}; applies as they finish.`:"Saved — in effect.";
+}
+async function loadSourceReaders(btn){
+  const mount=document.getElementById("source-readers-nodes"),error=document.getElementById("source-readers-error");
+  if(btn)btn.disabled=true;
+  if(error)error.textContent="";
+  try{
+    const [summary,domains]=await Promise.all([api("/analysis/summary"),api("/cluster/work/storage-domains").catch(()=>({mappings:[]}))]);
+    const ids=(domains.mappings||[]).map(m=>m.domain_id).filter(Boolean);
+    if(mount)mount.innerHTML=sourceReadersRows(SETTINGS_DATA&&SETTINGS_DATA.settings,summary.source_capacity,ids);
+  }catch(e){if(error)error.textContent=e.message;if(btn)btn.disabled=false;}
+}
+async function saveSourceReaders(btn){
+  const error=document.getElementById("source-readers-error"),status=document.getElementById("source-readers-status");
+  if(error)error.textContent="";
+  if(btn)btn.disabled=true;
+  const number=input=>input.value.trim()===""?null:Number(input.value);
+  const body={source_readers_per_node:Number(document.getElementById("source-readers-per-node").value)};
+  const nodes=[...document.querySelectorAll("[data-source-reader-node]")];
+  if(nodes.length)body.source_readers_node_overrides=Object.fromEntries(nodes.map(row=>[row.dataset.sourceReaderNode,number(row.querySelector("input"))]));
+  const domains=[...document.querySelectorAll("[data-source-reader-domain]")];
+  if(domains.length)body.storage_domain_source_readers=Object.fromEntries(domains.map(row=>[row.dataset.sourceReaderDomain,number(row.querySelector("input"))]));
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body}));
+    const summary=await api("/analysis/summary");
+    const line=sourceReadersEffect(summary.source_capacity);
+    if(status)status.textContent=line;
+    setCardSaved(btn,"Saved");
+    toast(line);
+  }catch(e){if(error)error.textContent=e.message;if(btn)btn.disabled=false;}
 }
 // Shared storage budgets. Graduated from Developer on 2026-09-28 under Paul's
 // Developer lifecycle: durable cluster work is deployed and its plan has no
 // fleet receipt to wait for, so the editor lives beside the roots it names.
 function storageDomainsCard(){
-  return setCard(`${cardHead(settingsClusterEnabled()?"Shared storage budgets":"Storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
+  return setCard(`${cardHead(settingsClusterEnabled()?"Shared storage budgets":"Storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">readers per domain above</span>')}
     <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced${settingsClusterEnabled()?" across nodes":" on this server"}: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
     <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
     <p class="hint">Changes save at once and take effect as soon as nothing would lose its budget: library jobs on a changed root finish first, and readers on a domain a root is leaving finish first. Playback never has to stop.</p>
@@ -512,7 +584,7 @@ function storageDomainsStatus(data,libraries){
     const total=Number(data.waiting_total??pending.waiting_total??identities.size);
     line=`Saved (revision ${revision}). ${waiting.join(" ")}`;
     if(total>identities.size)line+=` Waiting on ${total} holders in total.`;
-    if(stuckIdentities.size)line+=` ${stuckIdentities.size} of the readers ${stuckIdentities.size===1?"belongs":"belong"} to a process that is no longer running. They clear when source custody recovery settles them (Activity → Source readers).`;
+    if(stuckIdentities.size)line+=` ${stuckIdentities.size} of the readers ${stuckIdentities.size===1?"belongs":"belong"} to a process that is no longer running. They clear within a minute of their lease expiring (Activity → Source readers).`;
     line+=` Playback and jobs keep their current budgets until then.`;
     const kindLabels={job:"Background job",analysis:"Analysis",lease:"Library lease",offline:"Offline download",foreground:"Playback",pause:"Paused job"};
     const visibleRows=rows.slice(0,8).map(holder=>{

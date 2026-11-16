@@ -3200,15 +3200,6 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?;
             match registered {
                 BackgroundSourceRegistration::Registered(token) => {
-                    if crate::source_custody::activate_background_with_journal(
-                        &self.store,
-                        token.clone(),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return Err("offline source custody activation was not acknowledged".into());
-                    }
                     let budget = crate::background_jobs::SourceReadBudget::from_existing_custody(
                         Arc::clone(&self.store),
                         &token,

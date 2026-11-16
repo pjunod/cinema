@@ -81,7 +81,14 @@ pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Val
         metrics.queue_health,
         metrics.sample.map(|sample| sample.analysis.failed_by_code),
     );
+    let settings = state.applied.settings_snapshot().await?.values;
+    let source_capacity = crate::source_custody::capacity::summary(
+        &settings,
+        &source_io_holders,
+        [state.node_id.clone()],
+    );
     if let Some(object) = value.as_object_mut() {
+        object.insert("source_capacity".to_owned(), source_capacity);
         object.insert(
             "source_io_holders".to_owned(),
             serde_json::to_value(source_io_holders).map_err(|error| {

@@ -23516,3 +23516,166 @@ async fn get_it_back_asks_curator_and_says_what_it_answered() {
     let (status, _) = call(&app, post(&uri, Some(viewer), json!({}))).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "Get it back is for admins");
 }
+
+/// Background source readers (source-lease plan step 4) are ordinary
+/// settings: the default reads back as 2, a value below what a node runs now
+/// saves at once and the summary says it applies as readers finish, and only
+/// out-of-range values or malformed ids are refused.
+#[tokio::test]
+async fn source_readers_setting_round_trips_and_rejects_only_bad_input() {
+    use plurx_core::store::background_jobs::{
+        ClaimJob, ClaimOutcome, EnqueueJob, JobKind, JobPayload, JobRequest,
+    };
+    let (app, state) = test_app_with_state();
+    let admin = setup_admin(&app).await;
+    let (_, before) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(before["source_readers_per_node"], 2);
+    assert_eq!(before["source_readers_node_overrides"], json!({}));
+
+    let (status, raised) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({ "source_readers_per_node": 3 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raised}");
+    let now = crate::state::clock_ms();
+    for index in 0..3 {
+        let id = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::FragmentIndexBuild {
+                    file_id: 1,
+                    source_generation: "source:1".into(),
+                    source_size: 100,
+                    source_mtime: 1,
+                    source_sha256: "d".repeat(64),
+                    cache_key: format!("{index:064}"),
+                    pipeline_digest: "a".repeat(64),
+                },
+                dedupe_key: format!("fragment:{index}"),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "user:1".into(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_digest: "b".repeat(64),
+                    consumer_kind: "analysis".into(),
+                    consumer_ref: format!("analysis:{index}"),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue");
+        let outcome = state
+            .store
+            .claim_job(ClaimJob {
+                job_id: id,
+                expected_revision: 0,
+                node_id: state.node_id.clone(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::FragmentIndexBuild,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("claim");
+        assert!(
+            matches!(outcome, ClaimOutcome::Claimed { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    // Three readers run; lowering to one is a normal save.
+    let (status, lowered) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({ "source_readers_per_node": 1 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "lowering never refuses: {lowered}");
+    assert_eq!(lowered["source_readers_per_node"], 1);
+    let (status, summary) = call(&app, get("/api/v1/analysis/summary", Some(&admin))).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let node = summary["source_capacity"]["nodes"]
+        .as_array()
+        .and_then(|nodes| {
+            nodes
+                .iter()
+                .find(|node| node["node_id"] == state.node_id.as_str())
+        })
+        .cloned()
+        .expect("this node");
+    assert_eq!(node["maintenance"], 3, "{summary}");
+    assert_eq!(node["readers"], 1);
+    assert_eq!(node["waiting_to_apply"], true, "applies as they finish");
+
+    let (status, overridden) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({ "source_readers_node_overrides": { "node-x": 4 },
+                    "storage_domain_source_readers": { "nas": 2 } }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{overridden}");
+    assert_eq!(
+        overridden["source_readers_node_overrides"],
+        json!({"node-x": 4})
+    );
+    assert_eq!(
+        overridden["storage_domain_source_readers"],
+        json!({"nas": 2})
+    );
+    let (status, cleared) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({ "source_readers_node_overrides": { "node-x": null } }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(
+        cleared["source_readers_node_overrides"],
+        json!({}),
+        "use default"
+    );
+
+    for body in [
+        json!({ "source_readers_per_node": 0 }),
+        json!({ "source_readers_per_node": 17 }),
+        json!({ "source_readers_node_overrides": { "node-x": 17 } }),
+        json!({ "source_readers_node_overrides": { "not a node": 2 } }),
+        json!({ "storage_domain_source_readers": { "nas": 0 } }),
+    ] {
+        let (status, refused) =
+            call(&app, put("/api/v1/settings", Some(&admin), body.clone())).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{body} was accepted: {refused}"
+        );
+    }
+    let (_, after) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+    assert_eq!(
+        after["source_readers_per_node"], 1,
+        "a refused write changes nothing"
+    );
+}

@@ -93,43 +93,36 @@ END;
 
 /// The terms of [`analysis_source_capacity_clause`], each with the reason it
 /// names. Each term is evaluated for one required resource (`required`) of
-/// one `analysis_requests` row; any true term refuses the source read.
+/// one `analysis_requests` row read on `node`; any true term refuses the read.
+/// They are the claim's own source terms (`source_leases`).
 ///
-/// `exclude_self` leaves the row's own holdings out of every count, so the
-/// same rule can be asked again after the claim, while the request holds its
-/// reservation and custody (`BackgroundJobStore::analysis_source_admission`).
-/// Claim selection passes `false`: an unclaimed row holds nothing.
+/// `exclude_self` leaves the row's own lease out of every count, so the same
+/// rule can be asked again after the claim, while the request holds its lease
+/// (`BackgroundJobStore::analysis_source_admission`). Claim selection passes
+/// `false`: an unclaimed row holds nothing.
 pub(crate) fn analysis_source_capacity_terms(
     now: &str,
+    node: &str,
     exclude_self: bool,
 ) -> [(&'static str, String); 3] {
-    let (own_occupancy, own_reservation) = if exclude_self {
-        (
-            " AND NOT (held.owner_kind='analysis' AND held.work_id=analysis_requests.request_id)",
-            " AND held.request_id<>analysis_requests.request_id",
-        )
+    let own = if exclude_self {
+        " AND NOT (held.owner_kind='analysis' AND held.work_id=analysis_requests.request_id)"
     } else {
-        ("", "")
+        ""
     };
+    let key = "required.resource_key";
     [
         // A foreground stream needs this domain now.
         (
             "foreground_source",
-            format!(
-                r#"EXISTS(SELECT 1 FROM foreground_source_permissions fg WHERE (fg.resource_key=required.resource_key OR fg.resource_key='source_io' OR required.resource_key='source_io')
-          AND (fg.lease_expires_at_ms>{now} OR fg.custody_held=1)
-          AND (fg.lease_expires_at_ms<={now} OR COALESCE(fg.permits_through_ms,0)<={now}))"#
-            ),
+            super::source_leases::foreground_window(key, now),
         ),
-        // Two readers already occupy the domain.
+        // Every reader slot of the node, or of the mapped domain, is taken.
         (
             "domain_readers_full",
-            format!(
-                r#"(SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io')))
-          AND held.active_occupancy=1 AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL){own_occupancy})>=2"#
-            ),
+            super::source_leases::source_holders_except(key, node, now, own),
         ),
-        // Without a live viewer, a background read takes only an idle domain.
+        // Without a live viewer, a background read takes only a maintenance slot.
         (
             "background_reader_busy",
             format!(
@@ -137,46 +130,19 @@ pub(crate) fn analysis_source_capacity_terms(
               WHERE viewer.request_scope = 'playback-analysis'
                 AND viewer.job_id = analysis_requests.request_id
                 AND viewer.state = 'pending' AND viewer.deadline_ms > {now})
-          AND (SELECT COUNT(*) FROM background_job_reservations held
-              WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}
-                AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
-                    WHERE viewer.job_id = held.job_id
-                      AND viewer.state IN ('pending','awaiting_hydration')
-                      AND (viewer.deadline_ms IS NULL OR viewer.deadline_ms > {now})
-                      AND (viewer.consumer_kind = 'playback_fragment'
-                        OR (viewer.consumer_kind = 'background_delivery' AND EXISTS (
-                            SELECT 1 FROM background_job_waiters parent
-                            WHERE parent.job_id = viewer.consumer_ref
-                              AND parent.target_node_id = viewer.target_node_id
-                              AND parent.consumer_kind = 'playback_fragment'
-                              AND parent.state IN ('pending','awaiting_hydration')
-                              AND parent.deadline_ms > {now}))
-                        OR (viewer.consumer_kind = 'subtitle_source' AND EXISTS (
-                            SELECT 1 FROM analysis_requests source
-                            WHERE source.request_id = viewer.consumer_ref
-                              AND source.component = 'subtitle_source'
-                              AND source.trigger = 'playback'
-                              AND source.state IN ('queued','running'))))))
-            + (SELECT COUNT(*) FROM analysis_source_reservations held
-                WHERE (held.resource_key=required.resource_key OR (held.resource_key LIKE 'source_io%' AND required.resource_key LIKE 'source_io%' AND (held.resource_key='source_io' OR required.resource_key='source_io'))) AND held.expires_at_ms > {now}{own_reservation}
-                  AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
-                      WHERE viewer.request_scope = 'playback-analysis'
-                        AND viewer.job_id = held.request_id
-                        AND viewer.state = 'pending' AND viewer.deadline_ms > {now}))
-            + (SELECT COUNT(DISTINCT json_array(held.owner_kind,held.work_id,held.fence)) FROM source_io_occupancy held
-              WHERE held.owner_kind IN ('lease','offline') AND held.active_occupancy=1
-                AND (held.resource_key=required.resource_key OR held.resource_key='source_io' OR required.resource_key='source_io')
-                AND (held.expires_at_ms>{now} OR held.custody_id IS NOT NULL)) >= 1)"#
+          AND {})"#,
+                super::source_leases::maintenance_reader_except(key, node, now, own)
             ),
         ),
     ]
 }
 
-/// Shared capacity predicate for the pre-artifact source read. Both Store
-/// backends place it in candidate selection and the fenced claim mutation.
-pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
+/// Shared capacity predicate for the pre-artifact source read, for a reader
+/// on `node`. Both Store backends place it in candidate selection and the
+/// fenced claim mutation.
+pub(crate) fn analysis_source_capacity_clause(now: &str, node: &str) -> String {
     let [foreground, readers, background] =
-        analysis_source_capacity_terms(now, false).map(|(_, term)| term);
+        analysis_source_capacity_terms(now, node, false).map(|(_, term)| term);
     format!(
         "NOT EXISTS (SELECT 1 FROM analysis_required_resources required
       WHERE required.request_id = analysis_requests.request_id AND (
@@ -284,7 +250,9 @@ pub(crate) fn analysis_claim_exclusions_json(excluded: &[String]) -> Result<Stri
 pub(crate) fn analysis_source_admission_sql() -> String {
     let now = "json_extract($1,'$.now_ms')";
     let mut cases = String::new();
-    for (reason, term) in analysis_source_capacity_terms(now, true) {
+    for (reason, term) in
+        analysis_source_capacity_terms(now, "json_extract($1,'$.owner_node_id')", true)
+    {
         cases.push_str(&format!(
             "\n  WHEN EXISTS (SELECT 1 FROM analysis_requests JOIN analysis_required_resources required
         ON required.request_id = analysis_requests.request_id

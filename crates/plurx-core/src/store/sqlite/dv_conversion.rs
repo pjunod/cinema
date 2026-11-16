@@ -1777,6 +1777,10 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_storage_domain_pending",
             // v132: exact title-v2 triggers and marker are removed by the shared title teardown.
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
+            // v133/v134: the shared source-extension fixture drops the empty
+            // lease table and restores the v1 owners and replaced dependents.
+            "CREATE TABLE source_leases",
+            "UPDATE source_lease_schema SET version=3",
         ];
 
         assert!(

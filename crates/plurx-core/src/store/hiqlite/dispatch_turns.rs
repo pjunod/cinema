@@ -31,12 +31,11 @@ fn installed_matches(
     if installed.is_empty() {
         return Ok(false);
     }
-    if installed.len() != expected.len()
-        || installed
-            .iter()
-            .zip(expected)
-            .any(|(row, (name, sql))| row.name != *name || row.sql != *sql)
-    {
+    let rows = installed
+        .iter()
+        .map(|row| (row.name.clone(), row.sql.clone()))
+        .collect::<Vec<_>>();
+    if !crate::store::source_leases::accepts_extension_shape(&rows, expected) {
         return Err(StoreError::Migration(
             "dispatch turn schema has an incompatible or partial shape".into(),
         ));

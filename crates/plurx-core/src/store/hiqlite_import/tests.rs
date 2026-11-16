@@ -458,11 +458,13 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     // Playback handoff codes and tokens are durable account state.
     assert!(names.contains(&"playback_handoffs"));
     assert!(names.contains(&"playback_handoffs_tokens"));
-    // SQLite v122 preserves source reservations, suspended work and its service credits.
+    // SQLite v122 preserves source reservations, suspended work and its
+    // service credits; v133 replaces the two v1 owner tables with leases.
+    assert!(!names.contains(&"foreground_source_owners"));
+    assert!(!names.contains(&"background_source_custody"));
     for name in [
-        "foreground_source_owners",
+        "source_leases",
         "background_source_pauses",
-        "background_source_custody",
         "background_source_service_epochs",
         "background_source_service_grants",
         "analysis_source_checkpoints",
@@ -479,8 +481,9 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(!names.contains(&"background_scan_request_v2_schema"));
     // 104 with the source arbitration tables (SQLite v122), 105 with the scan
     // request sidecar (SQLite v125), 106 with pending storage-domain changes
-    // (SQLite v131).
-    assert_eq!(names.len(), 106, "review every imported durable table");
+    // (SQLite v131), 105 once source leases replace the two v1 owner tables
+    // (SQLite v133).
+    assert_eq!(names.len(), 105, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1066,7 +1069,6 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_embeddings" => 80,
                 "background_artifact_repairs" => 82,
                 "background_source_pauses"
-                | "background_source_custody"
                 | "background_source_service_epochs"
                 | "background_source_service_grants" => 122,
                 "background_scan_request_v2" => 125,

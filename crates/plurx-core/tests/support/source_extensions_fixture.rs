@@ -761,10 +761,111 @@ fn rewind_custody_retention_to_v128(connection: &rusqlite::Connection) {
         .expect("published custody retention rewind");
 }
 
-/// Rewind an owned, empty v127-v132 coordination tail to published v126;
+/// One published statement of a migration, found by its opening text.
+fn published_statement(migration: &str, opening: &str) -> String {
+    let mut statements = migration
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|statement| {
+            statement
+                .lines()
+                .skip_while(|line| line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .starts_with(opening)
+        });
+    let statement = statements.next().expect("published statement").to_owned();
+    assert!(statements.next().is_none(), "one published {opening}");
+    format!("{};", statement.trim_end_matches(';'))
+}
+
+/// Rewind an owned, empty v133-v134 source-lease tail to published v132:
+/// drop the lease objects and restore the v1 source owners and the four
+/// dependents the expand replaced, from their own published text.
+fn rewind_empty_source_leases_to_v132(connection: &rusqlite::Connection) {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture source lease ordinal");
+    if version != 134 {
+        return;
+    }
+    // A job or analysis lease is also recorded by its owner's claim and
+    // reservations; playback, attestation and offline leases are not.
+    let leases: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM source_leases WHERE owner_kind NOT IN ('job','analysis')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("source leases");
+    assert_eq!(
+        leases, 0,
+        "historical fixture must not discard source leases"
+    );
+    let foreground = include_str!("../../src/store/background_jobs_foreground.sql");
+    let turns = include_str!("../../src/store/background_job_turns.sql");
+    let pending = include_str!("../../src/store/storage_domain_pending.sql");
+    let retention = include_str!("../../src/store/background_jobs_custody_retention.sql");
+    let mut plan = vec![
+        "DROP TABLE source_leases;".to_owned(),
+        "DROP VIEW source_lease_permissions;".to_owned(),
+        "DROP TABLE source_lease_schema;".to_owned(),
+    ];
+    for trigger in [
+        "source_lease_job_claim",
+        "source_lease_job_renew",
+        "source_lease_job_cancelling",
+        "source_lease_job_settled",
+        "source_lease_analysis_claim",
+        "source_lease_analysis_renew",
+        "source_lease_analysis_success",
+        "source_lease_attestation_renew",
+        "source_lease_offline_end",
+        "source_lease_offline_delete",
+        "background_source_pause_effects",
+        "background_source_resume_effects",
+        "background_job_enqueue_command",
+        "background_job_maintenance_command",
+    ] {
+        plan.push(format!("DROP TRIGGER {trigger};"));
+    }
+    for view in [
+        "dispatch_turn_ordinary_occupancy",
+        "dispatch_turn_contenders",
+        "background_storage_domain_holders",
+    ] {
+        plan.push(format!("DROP VIEW {view};"));
+    }
+    plan.push(foreground.to_owned());
+    for opening in [
+        "CREATE VIEW dispatch_turn_ordinary_occupancy",
+        "CREATE VIEW dispatch_turn_contenders",
+        "CREATE TRIGGER dispatch_turn_independent",
+    ] {
+        plan.push(published_statement(turns, opening));
+    }
+    plan.push(published_statement(
+        pending,
+        "CREATE VIEW IF NOT EXISTS background_storage_domain_holders",
+    ));
+    for opening in [
+        "CREATE INDEX IF NOT EXISTS background_source_custody_owner_work",
+        "CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command",
+        "CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command",
+    ] {
+        plan.push(published_statement(retention, opening));
+    }
+    plan.push("PRAGMA user_version=132;".to_owned());
+    connection
+        .execute_batch(&plan.join("\n"))
+        .expect("published source lease rewind");
+}
+
+/// Rewind an owned, empty v127-v134 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
+    rewind_empty_source_leases_to_v132(connection);
     rewind_title_v2_to_v131(connection);
     rewind_empty_storage_domain_pending_to_v130(connection);
     rewind_offload_to_v129(connection);

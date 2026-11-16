@@ -70,7 +70,7 @@ let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false, SETTINGS_TICKING=null;
 let LOGS_RUN=null, CLUSTER_LOGS_RUN=null;
 let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
 let SETTINGS_HTTPS_EPOCH=0;
-let SETTINGS_SOURCE_RECOVERY_EPOCH=0;
+let SETTINGS_SOURCE_LAUNCH_EPOCH=0;
 const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   dvConversions:()=>api("/dv-conversions"),
@@ -78,7 +78,7 @@ const SETTINGS_ENDPOINTS={
   sharingStatus:()=>sharingManagementRead("/sharing/status"),sharingImports:()=>sharingManagementRead("/sharing/imports"),sharingExports:()=>sharingManagementRead("/sharing/exports"),
   developerReadiness:()=>api("/developer/readiness"),
   https:()=>api("/system/https"),
-  sourceRecovery:()=>api("/developer/source-recovery"),
+  sourceLaunch:()=>api("/developer/source-launch"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
   cluster:()=>api("/cluster/nodes").catch(error=>{
@@ -117,7 +117,7 @@ const SETTINGS_MANIFEST={
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
   sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
-  developer:{required:["settings"],secondary:["developerReadiness","https","sourceRecovery"]},
+  developer:{required:["settings"],secondary:["developerReadiness","https","sourceLaunch"]},
 };
 // The configured mode, not the current peer count or a failed status read,
 // determines whether cluster controls apply. /server is loaded before routing.
@@ -148,7 +148,7 @@ function settingsCurrent(generation,tab){
 function loadSettingsKey(key,generation,cacheResult=true){
   if(SETTINGS_LOADED.has(key)) return Promise.resolve(SETTINGS_DATA[key]);
   const httpsEpoch=SETTINGS_HTTPS_EPOCH;
-  const sourceRecoveryEpoch=key==="sourceRecovery"?SETTINGS_SOURCE_RECOVERY_EPOCH:0;
+  const sourceLaunchEpoch=key==="sourceLaunch"?SETTINGS_SOURCE_LAUNCH_EPOCH:0;
   const candidate=SETTINGS_LOADS.get(key);
   const active=key==="https"&&candidate?.httpsEpoch!==httpsEpoch?null:candidate;
   let transport=active&&active.promise;
@@ -165,14 +165,14 @@ function loadSettingsKey(key,generation,cacheResult=true){
       throw Object.assign(new Error("Superseded HTTPS read"),{staleHttps:true});
     }
   };
-  const fenceSourceRecovery=()=>{
-    if(key==="sourceRecovery"&&sourceRecoveryEpoch!==SETTINGS_SOURCE_RECOVERY_EPOCH){
-      throw Object.assign(new Error("Superseded source recovery read"),{staleSourceRecovery:true});
+  const fenceSourceLaunch=()=>{
+    if(key==="sourceLaunch"&&sourceLaunchEpoch!==SETTINGS_SOURCE_LAUNCH_EPOCH){
+      throw Object.assign(new Error("Superseded source launch read"),{staleSourceLaunch:true});
     }
   };
   return transport.then(value=>{
     fenceHttps();
-    fenceSourceRecovery();
+    fenceSourceLaunch();
     if(generation!==PAGE_RENDER_GENERATION||!cacheResult) return value;
     SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
     if(key==="dvConversions") DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
@@ -182,26 +182,26 @@ function loadSettingsKey(key,generation,cacheResult=true){
     return value;
   },error=>{
     fenceHttps();
-    fenceSourceRecovery();
+    fenceSourceLaunch();
     throw error;
   });
 }
-async function loadSourceRecoveryCard(generation){
+async function loadSourceLaunchCard(generation){
   try{
-    const value=await loadSettingsKey("sourceRecovery",generation);
-    if(settingsCurrent(generation,"developer"))applySourceRecovery(value);
+    const value=await loadSettingsKey("sourceLaunch",generation);
+    if(settingsCurrent(generation,"developer"))applySourceLaunch(value);
   }catch(error){
-    if(error?.staleSourceRecovery)return;
-    if(settingsCurrent(generation,"developer"))applySourceRecovery(null,error&&error.message||"request failed");
+    if(error?.staleSourceLaunch)return;
+    if(settingsCurrent(generation,"developer"))applySourceLaunch(null,error&&error.message||"request failed");
   }
 }
-async function reloadSourceRecovery(btn){
+async function reloadSourceLaunch(btn){
   const generation=PAGE_RENDER_GENERATION;
   if(!settingsCurrent(generation,"developer"))return;
   if(btn)btn.disabled=true;
-  SETTINGS_SOURCE_RECOVERY_EPOCH++;SETTINGS_LOADED.delete("sourceRecovery");SETTINGS_LOADS.delete("sourceRecovery");
-  applySourceRecovery(null,"Loading this node's recovery status…");
-  await loadSourceRecoveryCard(generation);
+  SETTINGS_SOURCE_LAUNCH_EPOCH++;SETTINGS_LOADED.delete("sourceLaunch");SETTINGS_LOADS.delete("sourceLaunch");
+  applySourceLaunch(null,"Loading this node’s launch verification…");
+  await loadSourceLaunchCard(generation);
 }
 function settingsTabsHtml(tab){
   // The rail. Every entry routes to #/settings/<section>, so the back button
@@ -298,11 +298,11 @@ async function loadSettingsTab(generation,tab){
     if(body) body.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="retrySettingsTab()">Retry</button></div></div>`;
     if(tab==="developer"&&body){
       body.innerHTML+=httpsSettingsMount(SETTINGS_DATA.https);
-      const hasSourceRecovery=manifest.secondary.includes("sourceRecovery");
-      if(hasSourceRecovery)body.innerHTML+=sourceRecoveryMount(SETTINGS_DATA.sourceRecovery);
+      const hasSourceLaunch=manifest.secondary.includes("sourceLaunch");
+      if(hasSourceLaunch)body.innerHTML+=sourceLaunchMount(SETTINGS_DATA.sourceLaunch);
       await loadHttpsCard(generation);
       if(!settingsCurrent(generation,tab)) return false;
-      if(hasSourceRecovery)await loadSourceRecoveryCard(generation);
+      if(hasSourceLaunch)await loadSourceLaunchCard(generation);
       if(!settingsCurrent(generation,tab)) return false;
     }
     setPageFailure(route,generation,"render_error");
@@ -317,7 +317,7 @@ async function loadSettingsTab(generation,tab){
     // already-rendered roster can open a decision dialog before this secondary
     // response arrives. Other secondary data can keep the ordinary eager cache.
     const staged=tab==="cluster"&&key==="clusterOps";
-    if(tab==="developer"&&key==="sourceRecovery")return loadSourceRecoveryCard(generation);
+    if(tab==="developer"&&key==="sourceLaunch")return loadSourceLaunchCard(generation);
     return loadSettingsKey(key,generation,!staged).then(value=>{
       if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key,value);
     }).catch(error=>{

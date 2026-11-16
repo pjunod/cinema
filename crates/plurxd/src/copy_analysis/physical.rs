@@ -125,6 +125,14 @@ impl ActivePhase {
             return Err("copy phase sequence is invalid".into());
         }
         let attempted_owner = claim.physical_owner();
+        let phase_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or("copy phase sequence exhausted")?;
+        let lease_id = format!(
+            "{}:{phase_sequence}",
+            plurx_core::store::background_jobs_resources::background_owner_key(&attempted_owner)
+                .map_err(|error| error.to_string())?
+        );
         let attempted = AnalysisPhysicalPhase {
             claim,
             source: source.clone(),
@@ -132,7 +140,7 @@ impl ActivePhase {
                 .checked_add(1)
                 .ok_or("copy phase sequence exhausted")?,
             custody: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken {
-                custody_id: uuid::Uuid::new_v4().to_string(),
+                custody_id: lease_id,
                 owner: attempted_owner,
             },
         };
@@ -142,7 +150,6 @@ impl ActivePhase {
                 attempted.claim.clone(),
                 source.clone(),
                 expected_sequence,
-                attempted.custody.custody_id.clone(),
                 began_at_ms,
             )
             .await
@@ -156,18 +163,6 @@ impl ActivePhase {
                 return Err(error.to_string());
             }
         };
-        if let Err(error) =
-            crate::source_custody::activate_background_with_journal(store, phase.custody.clone())
-                .await
-        {
-            // This operation has not created a budget or exposed an Input. The
-            // activation helper resolves its own exact activation-id abort before
-            // returning Err; durable release still refuses an armed Input row.
-            crate::background_jobs::settle_no_reader_source_custody(store, phase.custody.clone())
-                .await;
-            finish_exact_phase(store, &phase).await;
-            return Err(error);
-        }
         let cancel = lost.child_token();
         let budget = crate::background_jobs::SourceReadBudget::from_analysis_phase(
             Arc::clone(store),

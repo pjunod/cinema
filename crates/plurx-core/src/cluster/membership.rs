@@ -162,6 +162,10 @@ const LEGACY_CACHE_ADMIN_REVOCATION_V2_CAPABILITY: &str = "cache_admin_revocatio
 /// proves the running process understands the v1 owner/snapshot protocol;
 /// runtime enablement remains off until every active node proves it.
 pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
+/// A fresh heartbeat row proves the running binary counts source capacity
+/// on `source_leases` and no longer reads the v1 source-owner objects; the
+/// source-lease contract waits for it on every active node.
+pub const SOURCE_LEASES_CAPABILITY: &str = "source_leases_v2";
 /// Proof that a running member implements the rebuilt, complete-principal
 /// media-session family. This declaration does not advertise support: the
 /// heartbeat must publish it only after every reader/writer and migration is
@@ -3140,6 +3144,13 @@ macro_rules! committed_voter_ids {
     ($membership_config:expr) => {
         $membership_config.voter_ids()
     };
+}
+
+/// Every active node runs a binary that reads source leases (the contract's
+/// guard), as SQL evaluated inside the installer's transaction.
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn source_leases_ready_predicate() -> String {
+    capability_ready_predicate(SOURCE_LEASES_CAPABILITY)
 }
 
 /// "Every active node proves `capability` with the binary it is running now."
@@ -6973,6 +6984,18 @@ impl MembershipManager {
                        last_seen_at = excluded.last_seen_at"
                     .to_owned(),
                 params!(inner.identity.node_id.as_str(), LIVE_TV_CAPABILITY, now),
+            ),
+            (
+                "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    SOURCE_LEASES_CAPABILITY,
+                    now
+                ),
             ),
         ];
         // Same transaction, same timestamp, same coupling: a rolling

@@ -270,6 +270,14 @@ async fn playback_viewers_share_exact_analysis_and_retire_urgency_independently(
 async fn source_io_keeps_second_slot_for_playback_analysis() {
     use crate::store::background_jobs::{AnalysisViewerInterest, BackgroundJobStore};
     let store = SqliteStore::open_in_memory().expect("store");
+    // One maintenance reader per node; the second slot is the live one.
+    crate::store::SettingsStore::put_setting(
+        &store,
+        crate::store::keys::JOB_SOURCE_READERS_PER_NODE,
+        "1",
+    )
+    .await
+    .expect("source readers per node");
     seed_files(&store).await;
     store
         .with_conn(|conn| {

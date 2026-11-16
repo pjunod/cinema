@@ -102,7 +102,7 @@ impl AnalysisPhysicalPhase {
         self.claim.valid()
             && self.source.valid()
             && self.phase_sequence > 0
-            && uuid::Uuid::parse_str(&self.custody.custody_id).is_ok()
+            && super::source_leases::lease_id_valid(&self.custody.custody_id)
             && matches!(&self.custody.owner, BackgroundSourceOwner::Analysis { request_id, node_id, fence }
                 if request_id == &self.claim.request_id && node_id == &self.claim.node_id && fence == &self.claim.fence)
     }
@@ -256,14 +256,14 @@ pub(super) async fn claim<T: QueueSql>(
     Ok(None)
 }
 
-/// Reserve and register an exact no-reader custody UUID atomically. The
-/// expected monotonic sequence fences delayed registration after phase close.
+/// Reserve and write the phase's source lease atomically; its id is the
+/// owner's lease id. The expected monotonic sequence fences a delayed
+/// registration after phase close.
 pub(super) async fn begin_phase<T: QueueSql>(
     store: &T,
     claim: AnalysisCoordinationClaim,
     source: AnalysisCoordinationSource,
     expected_sequence: i64,
-    custody_id: String,
     now_ms: i64,
 ) -> Result<Option<AnalysisPhysicalPhase>, StoreError> {
     if !claim.valid()
@@ -271,24 +271,27 @@ pub(super) async fn begin_phase<T: QueueSql>(
         || claim.node_id != source.origin_node_id
         || expected_sequence < 0
         || expected_sequence == i64::MAX
-        || uuid::Uuid::parse_str(&custody_id).is_err()
         || now_ms < 0
     {
         return Err(invalid());
     }
     let owner = claim.physical_owner();
     let owner_key = super::background_jobs_resources::background_owner_key(&owner)?;
+    // One lease per physical phase, so a delayed release of an earlier
+    // phase can never delete a later phase's lease.
+    let lease_id = format!("{owner_key}:{}", expected_sequence + 1);
     let body = encode(
-        &serde_json::json!({"claim":claim,"source":source,"expected_sequence":expected_sequence,"custody_id":custody_id,"now_ms":now_ms,"owner":owner,"owner_key":owner_key}),
+        &serde_json::json!({"claim":claim,"source":source,"expected_sequence":expected_sequence,"custody_id":lease_id,"now_ms":now_ms,"owner":owner,"owner_key":owner_key}),
     )?;
     let capacity = super::fragment_index_cluster::analysis_source_capacity_clause(
         "json_extract($1,'$.now_ms')",
+        "json_extract($1,'$.claim.node_id')",
     );
-    let start=format!("UPDATE analysis_coordination_roles AS role SET phase_sequence=phase_sequence+1,phase_registered=0,active_custody_id=json_extract($1,'$.custody_id'),physical_node_id=json_extract($1,'$.claim.node_id'),physical_fence=json_extract($1,'$.claim.fence') WHERE role.request_id=json_extract($1,'$.claim.request_id') AND {} AND role.phase_sequence=json_extract($1,'$.expected_sequence') AND role.active_custody_id IS NULL AND NOT EXISTS(SELECT 1 FROM background_source_custody custody WHERE custody.owner_kind='analysis' AND custody.work_id=role.request_id) AND EXISTS(SELECT 1 FROM analysis_requests request WHERE {} AND EXISTS(SELECT 1 FROM files file WHERE file.id=role.file_id AND file.size=role.source_size AND file.mtime=role.source_mtime)) AND EXISTS(SELECT 1 FROM analysis_requests WHERE analysis_requests.request_id=role.request_id AND {capacity})",source_match("role"),owned_request());
+    let start=format!("UPDATE analysis_coordination_roles AS role SET phase_sequence=phase_sequence+1,phase_registered=0,active_custody_id=json_extract($1,'$.custody_id'),physical_node_id=json_extract($1,'$.claim.node_id'),physical_fence=json_extract($1,'$.claim.fence') WHERE role.request_id=json_extract($1,'$.claim.request_id') AND {} AND role.phase_sequence=json_extract($1,'$.expected_sequence') AND role.active_custody_id IS NULL AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.owner_kind='analysis' AND lease.work_id=role.request_id) AND EXISTS(SELECT 1 FROM analysis_requests request WHERE {} AND EXISTS(SELECT 1 FROM files file WHERE file.id=role.file_id AND file.size=role.source_size AND file.mtime=role.source_mtime)) AND EXISTS(SELECT 1 FROM analysis_requests WHERE analysis_requests.request_id=role.request_id AND {capacity})",source_match("role"),owned_request());
     let current="role.request_id=json_extract($1,'$.claim.request_id') AND role.active_custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.expected_sequence')+1 AND role.physical_node_id=json_extract($1,'$.claim.node_id') AND role.physical_fence=json_extract($1,'$.claim.fence')";
     let reserve=format!("INSERT INTO analysis_source_reservations(request_id,resource_key,fence,expires_at_ms) SELECT role.request_id,required.resource_key,role.physical_fence,request.lease_expires_ms FROM analysis_coordination_roles role JOIN analysis_requests request ON request.request_id=role.request_id JOIN analysis_required_resources required ON required.request_id=role.request_id WHERE {current} AND {} ON CONFLICT(request_id,resource_key) DO UPDATE SET fence=excluded.fence,expires_at_ms=excluded.expires_at_ms",owned_request());
-    let register=format!("INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms) SELECT role.active_custody_id,json_extract($1,'$.owner_key'),json_extract($1,'$.owner'),(SELECT json_group_array(resource_key) FROM analysis_source_reservations held WHERE held.request_id=role.request_id AND held.fence=role.physical_fence),'analysis',role.request_id,role.physical_fence,'active',json_extract($1,'$.now_ms'),json_extract($1,'$.now_ms'),request.lease_expires_ms FROM analysis_coordination_roles role JOIN analysis_requests request ON request.request_id=role.request_id WHERE {current} AND role.phase_registered=0 AND {} AND EXISTS(SELECT 1 FROM analysis_source_reservations held WHERE held.request_id=role.request_id AND held.fence=role.physical_fence) ON CONFLICT(owner_key) DO NOTHING",owned_request());
-    let registered = format!("UPDATE analysis_coordination_roles AS role SET phase_registered=1 WHERE {current} AND EXISTS(SELECT 1 FROM background_source_custody custody WHERE custody.custody_id=role.active_custody_id)");
+    let register=format!("INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms) SELECT role.active_custody_id,'analysis',role.request_id,role.physical_fence,role.physical_node_id,json_extract($1,'$.owner'),(SELECT json_group_array(resource_key) FROM analysis_source_reservations held WHERE held.request_id=role.request_id AND held.fence=role.physical_fence),'active',json_extract($1,'$.now_ms'),json_extract($1,'$.now_ms'),request.lease_expires_ms FROM analysis_coordination_roles role JOIN analysis_requests request ON request.request_id=role.request_id WHERE {current} AND role.phase_registered=0 AND {} AND EXISTS(SELECT 1 FROM analysis_source_reservations held WHERE held.request_id=role.request_id AND held.fence=role.physical_fence) ON CONFLICT(lease_id) DO NOTHING",owned_request());
+    let registered = format!("UPDATE analysis_coordination_roles AS role SET phase_registered=1 WHERE {current} AND EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)");
     let attempt = store
         .queue_transaction(vec![
             (start, body.clone()),
@@ -297,7 +300,7 @@ pub(super) async fn begin_phase<T: QueueSql>(
             (registered, body.clone()),
         ])
         .await;
-    let rows=store.queue_sql(format!("SELECT json_object('custody_id',custody.custody_id,'owner',json(custody.owner_json)) AS result_json FROM analysis_coordination_roles role JOIN analysis_requests request ON request.request_id=role.request_id JOIN background_source_custody custody ON custody.custody_id=role.active_custody_id AND custody.owner_key=json_extract($1,'$.owner_key') WHERE {current} AND {} AND {}",source_match("role"),owned_request()),body,false,true).await?;
+    let rows=store.queue_sql(format!("SELECT json_object('custody_id',custody.lease_id,'owner',json(custody.owner_json)) AS result_json FROM analysis_coordination_roles role JOIN analysis_requests request ON request.request_id=role.request_id JOIN source_leases custody ON custody.lease_id=role.active_custody_id AND custody.lease_id=json_extract($1,'$.custody_id') WHERE {current} AND {} AND {}",source_match("role"),owned_request()),body,false,true).await?;
     if let Some(row) = rows.first() {
         return Ok(Some(AnalysisPhysicalPhase {
             claim,
@@ -310,9 +313,9 @@ pub(super) async fn begin_phase<T: QueueSql>(
     Ok(None)
 }
 
-/// Existing joined/no-reader settlement must delete the exact receipt first.
-/// Lease expiry never substitutes for that physical-stop proof. A successor
-/// may finish this bookkeeping only once the old receipt is actually absent.
+/// The phase closes once its source lease is gone: released by its owner, or
+/// collected by the sweep after expiry plus the grace. A successor may finish
+/// this bookkeeping only once that lease is actually absent.
 pub(super) async fn finish_phase<T: QueueSql>(
     store: &T,
     phase: AnalysisPhysicalPhase,
@@ -323,7 +326,7 @@ pub(super) async fn finish_phase<T: QueueSql>(
     let body = encode(
         &serde_json::json!({"claim":phase.claim,"source":phase.source,"sequence":phase.phase_sequence,"custody_id":phase.custody.custody_id}),
     )?;
-    let closed=format!("role.request_id=json_extract($1,'$.claim.request_id') AND role.active_custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.sequence') AND role.physical_node_id=json_extract($1,'$.claim.node_id') AND role.physical_fence=json_extract($1,'$.claim.fence') AND {} AND NOT EXISTS(SELECT 1 FROM background_source_custody custody WHERE custody.custody_id=role.active_custody_id)",source_match("role"));
+    let closed=format!("role.request_id=json_extract($1,'$.claim.request_id') AND role.active_custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.sequence') AND role.physical_node_id=json_extract($1,'$.claim.node_id') AND role.physical_fence=json_extract($1,'$.claim.fence') AND {} AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)",source_match("role"));
     let release=format!("DELETE FROM analysis_source_reservations WHERE request_id=json_extract($1,'$.claim.request_id') AND fence=json_extract($1,'$.claim.fence') AND EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE {closed})");
     let clear=format!("UPDATE analysis_coordination_roles AS role SET active_custody_id=NULL,physical_node_id=NULL,physical_fence=NULL WHERE {closed}");
     let attempt = store
@@ -463,10 +466,10 @@ pub(super) fn metadata_owned_condition() -> String {
 /// Exact metadata ownership of a physical phase. Foreground pressure governs
 /// further reads separately; it cannot invalidate a full hash already joined.
 pub(super) fn physical_phase_owned_condition() -> String {
-    format!("EXISTS(SELECT 1 FROM analysis_coordination_roles role JOIN analysis_requests request ON request.request_id=role.request_id JOIN background_source_custody custody ON custody.custody_id=role.active_custody_id AND custody.owner_kind='analysis' AND custody.work_id=role.request_id AND custody.fence=role.physical_fence WHERE {} AND {} AND role.active_custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.sequence') AND role.physical_node_id=request.owner_node_id AND role.physical_fence=request.fence AND custody.settlement_proof IS NULL AND custody.phase IN ('active','paused') AND EXISTS(SELECT 1 FROM files file WHERE file.id=role.file_id AND file.size=role.source_size AND file.mtime=role.source_mtime))",source_match("role"),owned_request())
+    format!("EXISTS(SELECT 1 FROM analysis_coordination_roles role JOIN analysis_requests request ON request.request_id=role.request_id JOIN source_leases custody ON custody.lease_id=role.active_custody_id AND custody.owner_kind='analysis' AND custody.work_id=role.request_id AND custody.fence=role.physical_fence WHERE {} AND {} AND role.active_custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.sequence') AND role.physical_node_id=request.owner_node_id AND role.physical_fence=request.fence AND custody.phase IN ('active','paused') AND EXISTS(SELECT 1 FROM files file WHERE file.id=role.file_id AND file.size=role.source_size AND file.mtime=role.source_mtime))",source_match("role"),owned_request())
 }
 
-/// Exact UUID/sequence/source gate for background byte service and readers.
+/// Exact lease/sequence/source gate for background byte service and readers.
 pub(super) async fn phase_current<T: QueueSql>(
     store: &T,
     phase: &AnalysisPhysicalPhase,
@@ -483,7 +486,7 @@ pub(super) async fn phase_current<T: QueueSql>(
         "json_extract($1,'$.now_ms')",
     );
     let owned = physical_phase_owned_condition();
-    let sql = format!("SELECT CASE WHEN {owned} AND NOT EXISTS(SELECT 1 FROM background_source_custody custody,json_each(custody.resource_keys_json) resource WHERE custody.custody_id=json_extract($1,'$.custody_id') AND {blocked}) THEN 'true' ELSE 'false' END AS result_json");
+    let sql = format!("SELECT CASE WHEN {owned} AND NOT EXISTS(SELECT 1 FROM source_leases custody,json_each(custody.resource_keys_json) resource WHERE custody.lease_id=json_extract($1,'$.custody_id') AND {blocked}) THEN 'true' ELSE 'false' END AS result_json");
     let rows = store.queue_sql(sql, body, false, true).await?;
     rows.first()
         .map(|row| decode(row))

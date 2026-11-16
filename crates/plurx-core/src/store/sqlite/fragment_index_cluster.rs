@@ -881,7 +881,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let node_id = node_id.to_owned();
         let pipeline_version = pipeline_version.map(str::to_owned);
         self.with_conn(move |conn| {
-            let capacity = super::super::fragment_index_cluster::analysis_source_capacity_clause("?3");
+            let capacity = super::super::fragment_index_cluster::analysis_source_capacity_clause("?3", "?1");
             let viewer = if viewer_only {
                 super::super::fragment_index_cluster::analysis_live_viewer_clause("?3")
             } else { "1".to_owned() };

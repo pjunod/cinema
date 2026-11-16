@@ -824,15 +824,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "foreground_source_pressure",
     "list_foreground_source_owners",
     "resolve_foreground_source",
-    "activate_foreground_source_custody",
-    "abort_foreground_source_activation",
-    "mark_foreground_source_settled",
-    "reap_settled_source_custody",
-    "settled_foreground_source_custody",
-    "activate_background_source_custody",
-    "abort_background_source_activation",
-    "mark_background_source_settled",
-    "settled_background_source_custody",
+    "reap_expired_source_leases",
     "resolve_background_source_custody",
     "register_background_source_custody",
     "claim_background_source_service",
@@ -19338,7 +19330,6 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "background_predictions",
             "background_provider_budgets",
             "background_scan_request_v2",
-            "background_source_custody",
             "background_source_pauses",
             "background_source_service_epochs",
             "background_source_service_grants",
@@ -19361,7 +19352,6 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "dvr_rules",
             "file_grants",
             "files",
-            "foreground_source_owners",
             "items",
             "jellyfin_entity_ids",
             "jellyfin_login_tokens",
@@ -19415,6 +19405,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "sharing_rotations",
             "sharing_viewers",
             "sharing_watch",
+            "source_leases",
             "timeline_annotation_sets",
             "timeline_manual_overrides",
             "tokens",
@@ -26125,13 +26116,7 @@ async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim(
         }
 
         let blocked = store
-            .begin_analysis_source_phase(
-                claim.clone(),
-                source.clone(),
-                0,
-                uuid::Uuid::new_v4().to_string(),
-                1_005,
-            )
+            .begin_analysis_source_phase(claim.clone(), source.clone(), 0, 1_005)
             .await
             .expect("capacity refusal is retryable");
         assert!(
@@ -26173,13 +26158,7 @@ async fn analysis_phase_retries_after_storage_domain_apply_without_losing_claim(
             );
         }
         let phase = store
-            .begin_analysis_source_phase(
-                claim.clone(),
-                source.clone(),
-                0,
-                uuid::Uuid::new_v4().to_string(),
-                1_007,
-            )
+            .begin_analysis_source_phase(claim.clone(), source.clone(), 0, 1_007)
             .await
             .expect("retry physical phase")
             .expect("retry succeeds");

@@ -937,25 +937,13 @@ WHERE job.id=json_extract($1,'$.candidate') AND job.kind='dv_title_scan' AND job
   WHERE w.job_id=job.id AND w.consumer_kind='playback_qualification' AND w.state IN ('pending','awaiting_hydration')
   AND w.deadline_ms>json_extract($1,'$.now') AND json_extract(r.value,'$.identity')=w.consumer_ref
   AND json_extract(r.value,'$.source_size')=f.size AND json_extract(r.value,'$.source_mtime')=f.mtime)
- AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r JOIN source_io_occupancy h
-  ON (h.resource_key=r.resource_key OR (h.resource_key LIKE 'source_io%' AND r.resource_key LIKE 'source_io%'
-   AND (h.resource_key='source_io' OR r.resource_key='source_io')))
-  WHERE r.job_id=job.id AND h.custody_id IS NOT NULL AND h.active_occupancy=1
-   AND h.expires_at_ms<=json_extract($1,'$.now'))
- AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r JOIN foreground_source_permissions fg
-  ON r.resource_key LIKE 'source_io%' AND (fg.resource_key=r.resource_key OR fg.resource_key='source_io' OR r.resource_key='source_io')
-  WHERE r.job_id=job.id AND (fg.lease_expires_at_ms>json_extract($1,'$.now') OR fg.custody_held=1)
-   AND (fg.lease_expires_at_ms<=json_extract($1,'$.now') OR COALESCE(fg.permits_through_ms,0)<=json_extract($1,'$.now')))
+ -- The claim's own source terms, with the job it would preempt left out.
  AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r WHERE r.job_id=job.id AND r.resource_key LIKE 'source_io%'
-  AND (SELECT count(DISTINCT json_array(h.owner_kind,h.work_id,h.fence)) FROM source_io_occupancy h
-   WHERE (h.resource_key=r.resource_key OR (h.resource_key LIKE 'source_io%' AND r.resource_key LIKE 'source_io%'
-    AND (h.resource_key='source_io' OR r.resource_key='source_io'))) AND h.active_occupancy=1
-    AND (h.expires_at_ms>json_extract($1,'$.now') OR h.custody_id IS NOT NULL)
-    AND NOT (h.owner_kind='job' AND h.work_id=current.id AND h.fence=current.fence))>=2)
+  AND ({SOURCE_TERMS}))
  AND NOT EXISTS(SELECT 1 FROM background_job_required_resources r WHERE r.job_id=job.id AND r.resource_key NOT LIKE 'source_io%'
   AND (EXISTS(SELECT 1 FROM background_job_reservations h WHERE h.resource_key=r.resource_key
    AND h.job_id!=current.id AND h.expires_at_ms>json_extract($1,'$.now'))
   OR EXISTS(SELECT 1 FROM analysis_source_reservations h WHERE h.resource_key=r.resource_key AND h.expires_at_ms>json_extract($1,'$.now'))))
-"#.into(),encode(&serde_json::json!({"candidate":candidate_id,"current":current_id,"node":node,"now":now}))?,false,true).await?;
+"#.replace("{SOURCE_TERMS}",&format!("{} OR {}",super::source_leases::foreground_window("r.resource_key","json_extract($1,'$.now')"),super::source_leases::source_holders_except("r.resource_key","json_extract($1,'$.node')","json_extract($1,'$.now')"," AND NOT (held.owner_kind='job' AND held.work_id=current.id)"))),encode(&serde_json::json!({"candidate":candidate_id,"current":current_id,"node":node,"now":now}))?,false,true).await?;
     Ok(!rows.is_empty())
 }

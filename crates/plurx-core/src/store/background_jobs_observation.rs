@@ -33,7 +33,7 @@ pub struct JobAttemptObservation {
     pub error_code: Option<String>,
 }
 
-/// A live shared source reader. Paths and ownership tokens stay private; a
+/// A source lease: one reader, on one node. Paths and ownership tokens stay private; a
 /// phase timestamp is reported only for analysis, where it is recorded apart
 /// from lease renewal. `None` means useful progress is not observable here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,78 +51,76 @@ pub struct SourceIoHolder {
     pub lease_expires_at_ms: i64,
     pub phase: Option<String>,
     pub last_phase_at_ms: Option<i64>,
+    /// What this lease is charged against: `node` (its node's background
+    /// readers), `domain` (its node and its mapped storage domain), or
+    /// `none` (playback, paused, or past its grace).
+    #[serde(default)]
+    pub counts_against: Option<String>,
+    /// The lease serves live demand, so it may take the node's reserved slot.
+    #[serde(default)]
+    pub live_demand: bool,
+    #[serde(default)]
+    pub lease_id: Option<String>,
 }
 
 fn source_occupancy_default() -> bool {
     true
 }
-pub(super) const SOURCE_IO_HOLDERS_SQL: &str = r#"
+/// Every source lease and stored key. `{live}` and `{counted}` are the claim's
+/// own terms (`source_leases::{live, counted}`) over the alias `held`.
+pub(super) fn source_io_holders_sql() -> String {
+    SOURCE_IO_HOLDERS_SQL
+        .replace(
+            "{live}",
+            &super::source_leases::live("json_extract($1,'$.now_ms')"),
+        )
+        .replace(
+            "{counted}",
+            &super::source_leases::counted("json_extract($1,'$.now_ms')"),
+        )
+}
+const SOURCE_IO_HOLDERS_SQL: &str = r#"
 SELECT json_object('resource_key', resource_key, 'work_id', work_id,
     'kind', kind, 'priority', priority, 'started_at_ms', started_at_ms,
     'origin_node_id',origin_node_id,'origin_job_kind',origin_job_kind,'origin_job_state',origin_job_state,
     'lease_expires_at_ms', lease_expires_at_ms, 'phase', phase,
-    'last_phase_at_ms', last_phase_at_ms, 'active_occupancy',json(CASE WHEN active_occupancy=1 THEN 'true' ELSE 'false' END)) AS result_json
+    'last_phase_at_ms', last_phase_at_ms, 'active_occupancy',json(CASE WHEN active_occupancy=1 THEN 'true' ELSE 'false' END),
+    'counts_against', counts_against, 'live_demand', json(CASE WHEN live_demand=1 THEN 'true' ELSE 'false' END),
+    'lease_id', lease_id) AS result_json
 FROM (
-  SELECT held.resource_key, held.job_id AS work_id, job.kind,
-    CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters viewer
-        WHERE viewer.job_id = job.id AND viewer.state IN ('pending','awaiting_hydration')
-          AND viewer.deadline_ms > json_extract($1, '$.now_ms')
-          AND viewer.request_scope = 'playback-analysis')
-      THEN 'viewer' ELSE 'maintenance' END AS priority,
-    COALESCE(attempt.started_at_ms, job.updated_at_ms) AS started_at_ms,
+  -- One row per source lease and stored key: who holds which source
+  -- capacity on which node, and why.
+  SELECT key.value AS resource_key, held.lease_id,
+    CASE held.owner_kind WHEN 'playback' THEN held.lease_id ELSE held.work_id END AS work_id,
+    CASE held.owner_kind WHEN 'playback' THEN 'foreground_source' WHEN 'job' THEN COALESCE(job.kind,json_extract(held.owner_json,'$.job_kind'))
+      WHEN 'analysis' THEN 'analysis_source' ELSE 'background_source' END AS kind,
+    CASE WHEN held.owner_kind='playback' THEN 'foreground' WHEN {live} THEN 'viewer' ELSE 'maintenance' END AS priority,
+    CASE WHEN held.owner_kind='playback' THEN 0 WHEN {live} THEN 1 ELSE 0 END AS live_demand,
+    COALESCE(attempt.started_at_ms, analysis_attempt.started_at_ms, held.started_at_ms) AS started_at_ms,
     held.expires_at_ms AS lease_expires_at_ms,
-    NULL AS phase, NULL AS last_phase_at_ms, 1 AS active_occupancy, job.owner_node_id AS origin_node_id, job.kind AS origin_job_kind, job.state AS origin_job_state
-  FROM background_job_reservations held JOIN background_jobs job ON job.id = held.job_id
-  LEFT JOIN background_job_attempts attempt ON attempt.job_id = held.job_id
-    AND attempt.fence = held.fence
-  WHERE (held.resource_key = 'source_io' OR held.resource_key GLOB 'source_io:*')
-    AND held.expires_at_ms > json_extract($1, '$.now_ms')
-  UNION ALL
-  SELECT held.resource_key, held.request_id AS work_id, 'analysis_source' AS kind,
-    CASE WHEN request.trigger = 'playback' AND EXISTS (SELECT 1 FROM background_job_waiters viewer
-        WHERE viewer.request_scope = 'playback-analysis'
-          AND viewer.job_id = held.request_id AND viewer.state = 'pending'
-          AND viewer.deadline_ms > json_extract($1, '$.now_ms'))
-      THEN 'viewer' ELSE 'maintenance' END AS priority,
-    COALESCE(attempt.started_at_ms, request.updated_at_ms) AS started_at_ms,
-    held.expires_at_ms AS lease_expires_at_ms,
-    attempt.phase AS phase, attempt.phase_updated_at_ms AS last_phase_at_ms, 1 AS active_occupancy,request.owner_node_id,NULL,NULL
-  FROM analysis_source_reservations held
-  JOIN analysis_requests request ON request.request_id = held.request_id
-  LEFT JOIN analysis_attempts attempt ON attempt.request_id = held.request_id
-    AND attempt.claim_epoch = held.fence
-  WHERE (held.resource_key = 'source_io' OR held.resource_key GLOB 'source_io:*')
-    AND held.expires_at_ms > json_extract($1, '$.now_ms')
-  UNION ALL
-  SELECT resource.resource_key,owner.owner_id,'foreground_source','foreground',owner.started_at_ms,
-    owner.lease_expires_at_ms,CASE WHEN owner.lease_expires_at_ms<=json_extract($1,'$.now_ms')
-      AND json_extract(owner.projection_json,'$.source_quiescent')!=1 THEN 'cleanup_pending' ELSE owner.phase END,owner.updated_at_ms,
-    CASE WHEN owner.phase IN ('source_idle','sharing') AND json_extract(owner.projection_json,'$.source_quiescent')=1 THEN 0 ELSE 1 END
-    ,json_extract(owner.identity_json,'$.node_id'),NULL,NULL
-  FROM foreground_source_owners owner JOIN foreground_source_required_resources resource ON resource.owner_id=owner.owner_id
-  WHERE owner.lease_expires_at_ms>json_extract($1,'$.now_ms') OR json_extract(owner.projection_json,'$.source_quiescent')!=1
-  UNION ALL
-  SELECT resource.value,custody.work_id,'background_source','maintenance',custody.started_at_ms,
-    -- custody_lapsed_at_sql("custody"); not yet stamped reads as lapsing now.
-    COALESCE((CASE WHEN custody.authority_expires_at_ms>0 THEN custody.authority_expires_at_ms WHEN custody.phase='cleanup_pending' THEN custody.updated_at_ms WHEN custody.phase='paused' THEN 0 ELSE NULL END),json_extract($1,'$.now_ms')),
-    CASE WHEN custody.phase='paused' THEN 'source_paused' WHEN custody.authority_expires_at_ms>json_extract($1,'$.now_ms')
-      THEN CASE custody.owner_kind WHEN 'lease' THEN 'read_attestation' WHEN 'offline' THEN 'offline_source' ELSE custody.phase END ELSE 'cleanup_pending' END,custody.updated_at_ms,
-    CASE WHEN custody.phase='paused' THEN 0 ELSE 1 END
-    ,COALESCE(json_extract(custody.owner_json,'$.token.node_id'),json_extract(custody.owner_json,'$.node_id'),json_extract(custody.owner_json,'$.lease.owner_node_id')),origin.kind,origin.state
-  FROM background_source_current_owners custody LEFT JOIN background_jobs origin
-    ON custody.owner_kind='job' AND origin.id=custody.work_id,json_each(custody.resource_keys_json) resource
-  WHERE NOT EXISTS(SELECT 1 FROM background_job_reservations held WHERE custody.owner_kind='job' AND held.job_id=custody.work_id
-      AND held.fence=custody.fence AND held.resource_key=resource.value AND held.expires_at_ms>json_extract($1,'$.now_ms'))
-    AND NOT EXISTS(SELECT 1 FROM analysis_source_reservations held WHERE custody.owner_kind='analysis' AND held.request_id=custody.work_id
-      AND held.fence=custody.fence AND held.resource_key=resource.value AND held.expires_at_ms>json_extract($1,'$.now_ms'))
-    AND NOT EXISTS(SELECT 1 FROM background_source_pauses paused WHERE custody.owner_kind='job' AND paused.job_id=custody.work_id
-      AND paused.fence=custody.fence AND paused.phase='paused')
-  UNION ALL
-  SELECT resource.value,job.id,job.kind,'maintenance',paused.paused_at_ms,job.lease_expires_ms,'source_paused',paused.paused_at_ms,0,paused.node_id,job.kind,job.state
-  FROM background_source_pauses paused JOIN background_jobs job ON job.id=paused.job_id AND job.fence=paused.fence,
-    json_each(paused.resource_keys_json) resource
-  WHERE paused.phase='paused' AND job.state IN ('running','cancelling') AND job.lease_expires_ms>json_extract($1,'$.now_ms')
-) ORDER BY (active_occupancy=1 AND phase='cleanup_pending') DESC,(priority='foreground') DESC,started_at_ms, work_id LIMIT 128
+    CASE WHEN held.phase='paused' THEN 'source_paused'
+      WHEN held.expires_at_ms<=json_extract($1,'$.now_ms') THEN 'cleanup_pending'
+      WHEN held.owner_kind='playback' THEN held.phase
+      WHEN held.owner_kind='analysis' THEN analysis_attempt.phase
+      WHEN held.owner_kind='lease' THEN 'read_attestation' WHEN held.owner_kind='offline' THEN 'offline_source'
+      ELSE NULL END AS phase,
+    CASE WHEN held.owner_kind='analysis' THEN analysis_attempt.phase_updated_at_ms ELSE held.renewed_at_ms END AS last_phase_at_ms,
+    CASE WHEN held.owner_kind='playback' THEN
+        CASE WHEN held.phase IN ('source_idle','sharing') AND json_extract(held.projection_json,'$.source_quiescent')=1 THEN 0 ELSE 1 END
+      WHEN {counted} THEN 1 ELSE 0 END AS active_occupancy,
+    CASE WHEN held.owner_kind='playback' OR NOT {counted} THEN 'none' WHEN key.value='source_io' THEN 'node' ELSE 'domain' END AS counts_against,
+    held.node_id AS origin_node_id,
+    CASE held.owner_kind WHEN 'job' THEN COALESCE(job.kind,json_extract(held.owner_json,'$.job_kind')) END AS origin_job_kind,
+    job.state AS origin_job_state
+  FROM source_leases held, json_each(held.resource_keys_json) key
+  LEFT JOIN background_jobs job ON held.owner_kind='job' AND job.id=held.work_id
+  LEFT JOIN background_job_attempts attempt ON held.owner_kind='job' AND attempt.job_id=held.work_id AND attempt.fence=held.fence
+  LEFT JOIN analysis_attempts analysis_attempt ON held.owner_kind='analysis' AND analysis_attempt.request_id=held.work_id
+    AND analysis_attempt.claim_epoch=held.fence
+  -- Every lease, including one past its grace that the sweep has not yet
+  -- collected: it holds nothing, and its growing age shows the sweep stopped.
+  WHERE key.value LIKE 'source_io%'
+) ORDER BY origin_node_id,(active_occupancy=1 AND phase='cleanup_pending') DESC,(priority='foreground') DESC,started_at_ms,work_id LIMIT 128
 "#;
 
 pub(super) const COUNTS_SQL: &str = r#"
@@ -217,7 +215,15 @@ pub struct BackgroundJobMetrics {
     pub source_io_reservations: i64,
     pub source_recovery_pending: i64,
     pub legacy_pending: i64,
+    /// This node's source leases by [`SOURCE_LEASE_KINDS`].
+    pub source_leases: [i64; SOURCE_LEASE_KINDS.len()],
+    /// Background source readers this node may run (its override or the default).
+    pub source_readers_per_node: i64,
+    /// 2 expanded (v1 objects still present for older binaries), 3 contracted.
+    pub source_lease_schema_version: i64,
 }
+/// Lease holder kinds, in metric order.
+pub const SOURCE_LEASE_KINDS: [&str; 5] = ["playback", "job", "analysis", "lease", "offline"];
 impl Default for BackgroundJobMetrics {
     fn default() -> Self {
         Self {
@@ -226,6 +232,9 @@ impl Default for BackgroundJobMetrics {
             source_io_reservations: 0,
             source_recovery_pending: 0,
             legacy_pending: 0,
+            source_leases: [0; SOURCE_LEASE_KINDS.len()],
+            source_readers_per_node: 0,
+            source_lease_schema_version: 0,
         }
     }
 }
@@ -241,6 +250,12 @@ pub(crate) fn background_job_metrics(
         source_io_reservations: i64,
         source_recovery_pending: i64,
         legacy_pending: i64,
+        #[serde(default)]
+        source_leases: std::collections::BTreeMap<String, i64>,
+        #[serde(default)]
+        source_readers_per_node: i64,
+        #[serde(default)]
+        source_lease_schema_version: i64,
     }
     let rows: Aggregate = serde_json::from_str(json).map_err(|error| {
         crate::error::StoreError::Database(format!("background metrics: {error}"))
@@ -249,6 +264,10 @@ pub(crate) fn background_job_metrics(
         source_io_reservations: rows.source_io_reservations,
         source_recovery_pending: rows.source_recovery_pending,
         legacy_pending: rows.legacy_pending,
+        source_leases: SOURCE_LEASE_KINDS
+            .map(|kind| rows.source_leases.get(kind).copied().unwrap_or(0).max(0)),
+        source_readers_per_node: rows.source_readers_per_node,
+        source_lease_schema_version: rows.source_lease_schema_version,
         ..Default::default()
     };
     for row in rows.jobs {
@@ -262,15 +281,4 @@ pub(crate) fn background_job_metrics(
         }
     }
     Ok(metrics)
-}
-
-#[cfg(test)]
-mod lapse_tests {
-    /// The Activity panel, the recovery metric and the sweep must agree on when
-    /// an owner lapsed; the observation inlines the shared expression.
-    #[test]
-    fn source_holders_use_the_shared_custody_lapse_expression() {
-        assert!(super::SOURCE_IO_HOLDERS_SQL
-            .contains(&super::super::background_jobs_resources::custody_lapsed_at_sql("custody")));
-    }
 }

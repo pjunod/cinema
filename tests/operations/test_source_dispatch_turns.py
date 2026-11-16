@@ -141,3 +141,80 @@ class SourceDispatchTurns(unittest.TestCase):
         self.assertEqual(self.analysis_claim(1010), 0)
         self.db.execute("UPDATE job_leases SET fence=9223372036854775807")
         self.assertEqual(self.analysis_claim(1011), 1)
+
+
+EXPAND = SCHEMA.with_name("source_leases_expand.sql")
+
+
+class SourceLeaseDispatchTurns(SourceDispatchTurns):
+    """The same grants after the source-lease expand: a ready scan displaces
+    other work only where its own claim would be admitted on its node."""
+
+    def setUp(self):
+        super().setUp()
+        statements = [s for s in EXPAND.read_text().split("-- next statement")
+                      if "CREATE TABLE source_leases" in s or "source_lease_permissions AS" in s
+                      or "dispatch_turn" in s]
+        for statement in statements:
+            self.db.executescript(statement)
+
+    def lease(self, name, node, key="source_io", expires=9000, kind="job", phase="active", projection=None):
+        self.db.execute("INSERT INTO source_leases VALUES(?,?,?,1,?,'{}',json_array(?),?,?,1,1,?)",
+                        (name, kind, name, node, key, phase, projection, expires))
+
+    def custody(self, owner, key, now):
+        before = self.db.execute("SELECT count(*) FROM source_leases").fetchone()[0]
+        self.db.execute("INSERT INTO source_leases VALUES(?,?,?,1,'worker','{}',json_array(?),'active',NULL,?,?,?)",
+                        (owner, owner, owner, key, now, now, now + 30000))
+        return self.db.execute("SELECT count(*) FROM source_leases").fetchone()[0] - before
+
+    # The v1 occupancy rows these inherited cases seed have no lease
+    # successor here; the lease cases below replace them.
+    def test_wildcard_scan_on_blocked_disk_leaves_disjoint_job_free(self):
+        self.manual("scan", 1000)
+        self.lease("reader", "worker", "source_io:a")
+        self.db.execute("INSERT INTO settings VALUES('jobs.source_readers_per_node.worker','1')")
+        self.lease("reader-2", "worker", "source_io:a")
+        self.assertEqual(self.analysis_claim(1001), 1, "the scan's node is full; other work is free")
+
+    def test_other_root_respects_playback_slot_and_foreground_permission(self):
+        self.manual("scan", 1000)
+        self.lease("playback", "elsewhere", "source_io:a", 9000, "playback", "refill", '{"source_quiescent":false}')
+        self.assertEqual(self.analysis_claim(1100), 1, "a refilling playback on any node blocks the scan's read")
+        self.db.execute("UPDATE source_leases SET phase='source_idle',projection_json='{\"source_quiescent\":true}'")
+        self.assertEqual(self.analysis_claim(1101, "index"), 0, "an idle playback permits it")
+
+    def test_node_cap_is_the_scan_nodes(self):
+        self.manual("scan", 1000)
+        self.lease("a", "elsewhere")
+        self.lease("b", "elsewhere")
+        self.assertEqual(self.analysis_claim(1001), 0, "another node's readers leave the scan grantable")
+        self.lease("c", "worker")
+        self.lease("d", "worker")
+        self.assertEqual(self.analysis_claim(1002), 1, "the scan's node runs its two")
+        self.db.execute("INSERT INTO settings VALUES('jobs.source_readers_per_node.worker','3')")
+        self.db.execute("UPDATE analysis_requests SET state='queued' WHERE request_id='index'")
+        self.assertEqual(self.analysis_claim(1003), 0, "its override raises it")
+
+    def test_domain_cap_and_grace(self):
+        self.manual("scan", 1000)
+        self.lease("other", "elsewhere", "source_io:a")
+        self.assertEqual(self.analysis_claim(1001), 1, "domain a's one background reader is taken")
+        self.db.execute("INSERT INTO settings VALUES('jobs.domain_source_readers.a','2')")
+        self.db.execute("UPDATE analysis_requests SET state='queued' WHERE request_id='index'")
+        self.assertEqual(self.analysis_claim(1002), 0)
+        self.db.execute("DELETE FROM settings")
+        self.db.execute("UPDATE source_leases SET expires_at_ms=1003-60001")
+        self.db.execute("UPDATE analysis_requests SET state='queued' WHERE request_id='index'")
+        self.assertEqual(self.analysis_claim(1003), 0, "a lease past its grace holds nothing")
+
+    def test_held_library_publication_lease_defers_only_until_expiry(self):
+        self.manual("scan", 1000)
+        self.db.execute("INSERT INTO job_leases VALUES('scan:library:1','old-worker',1,1,1010)")
+        self.db.execute("INSERT INTO settings VALUES('internal.cluster_job_owner_removed.old-worker','true')")
+        self.assertEqual(self.custody("lease", "source_io:a", 1009), 1)
+        # That read attestation finished; its lease would otherwise fill domain a.
+        self.db.execute("DELETE FROM source_leases")
+        self.assertEqual(self.analysis_claim(1010), 0)
+        self.db.execute("UPDATE job_leases SET fence=9223372036854775807")
+        self.assertEqual(self.analysis_claim(1011), 1)

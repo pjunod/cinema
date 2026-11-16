@@ -53,7 +53,7 @@ fn canonical(rows: &[(String, String)]) -> Vec<(String, String)> {
 pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {
     if shape.is_empty() {
         Ok(None)
-    } else if canonical(shape) == canonical(&SHAPE) {
+    } else if super::source_leases::accepts_extension_shape(shape, &SHAPE) {
         Ok(Some(1))
     } else {
         Err(StoreError::Migration(

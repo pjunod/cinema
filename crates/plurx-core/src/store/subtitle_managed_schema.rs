@@ -349,6 +349,14 @@ mod tests {
         use rusqlite::OptionalExtension;
         conn.execute_batch(super::super::background_jobs_resources::SOURCE_ARBITRATION_SCHEMA)
             .expect("current source authority for current claim query");
+        super::super::source_leases::install_for_fixture(conn);
+        // These contracts were written against one maintenance source reader
+        // (plus the live slot); keep that number on the one node they use.
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES('jobs.source_readers_per_node','1')",
+            [],
+        )
+        .expect("one maintenance reader");
         let body = serde_json::json!({"job_id":id,"expected_revision":0,"node_id":"node-a","boot_id":"boot","claim_id":format!("claim-{id}"),"kind":kind,"payload_version":1,"now_ms":1001,"dispatched_at_ms":1001});
         conn.query_row(
             &format!("{} RETURNING id", super::super::background_jobs::CLAIM_SQL),
