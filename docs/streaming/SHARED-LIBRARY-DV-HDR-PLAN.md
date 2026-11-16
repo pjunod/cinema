@@ -1,8 +1,6 @@
 # Shared Dolby Vision and HDR — deliver every local shape over sharing
 
-**Status:** in progress (M1 and T2.1 on `claude/shared-dv-hdr-m1`, T3.1 on `claude/shared-dv-hdr-m3`) · **Branch:** `effort/shared-dv-hdr` · **Written:** 2026-11-15 ·
-**Verified against:** origin/main @ `29b35e713` (read, not compiled) ·
-**For:** the build agent (Opus). Nothing here is for review by another model.
+**Status:** M1–M4 integrated on the Codex stack; qualification and deployment remain open. PRs #1714, #1719, #1720 and #1721 · **Written:** 2026-11-15 · **Baseline:** `29b35e713` (read, not compiled).
 
 Companion to `docs/streaming/SHARED-LIBRARY-PLAYBACK-RCA.md`
 (why shared starts fail) and `docs/features/SHARED-LIBRARIES-IMPLEMENTATION.md`
@@ -426,21 +424,12 @@ fence, authority, deadline, `cancel`/`settle` and its existing slot in
 
 ### M4 — Processed DV / FEL re-encode over sharing
 
-**T4.1 — Design note first** (a new `SHARED-DV-PROCESSED-PLAN.md` beside this plan,
-with its row in `docs/streaming/README.md`), then tasks. Local processed DV
-is a post-first-frame upgrade through the M6 prepared replacement; a shared
-session stages no successor on the Source
-(`web/core/shared-decision.js:93-101`) and `prepare_vod_encoding_with_source`
-treats a processed destination as needing a "fresh admitted owner
-qualification" the Source path never supplies
-(`manager/create.rs:2903-2910`, `:2945-2974`, `dv_runtime::ToolSet::capture`).
-The note must settle: Source custody of the `dv_runtime` tools and scratch,
-how the processed instance key namespaces per grant
-(`vod/serve/create.rs:16`, `source_rendition_key`), and whether the upgrade
-rides B's existing successor (`shared_receiver_successor.rs`) or a new Source
-Start. Depends on A1/S8–S9 of the playback-start plan. Until then the Source
-serves the first-frame delivery (preserve / convert / base) that local also
-starts with, which is the planner's own next-best.
+Implementation is integrated; qualification and deployment remain open. The
+design and remaining T4 acceptance are in
+[SHARED-DV-PROCESSED-PLAN.md](SHARED-DV-PROCESSED-PLAN.md). Source preparation
+owns the processed trial, and B's existing successor carries an upgrade only
+after receiver affirmation. The Source still starts with first-frame delivery;
+it never stages a processed first window as Start.
 
 ## 5. Unknowns
 
@@ -467,25 +456,26 @@ starts with, which is the planner's own next-best.
 
 ## 6. Execution log
 
-Branch `claude/shared-dv-hdr-m1` (stacked on `effort/shared-dv-hdr`); no PR
-opened yet. Tests run on the pinned gate image (FFmpeg 6.1, no `dovi_rpu`).
+Historical task records from the original Claude sessions; current integration
+is in PRs #1714, #1719, #1720 and #1721. Results below are not current-branch
+qualification. The pinned gate image uses FFmpeg 6.1 without `dovi_rpu`.
 
-| Task | Agent-Model | Agent-Session | PR | State |
-|---|---|---|---|---|
-| T1.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `c9f1c464f`; 4 new tests pass, fail on the old policy |
-| T1.2 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `df5fb09f5`; 2 new tests pass, fail with `false` restored |
-| T1.3 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `7b3344929`; 4 new tests pass (3 admit tests fail on old code) |
-| T1.4 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `022cbadf2`; index test passes; DV strip actor test SKIPs without `dovi_rpu` |
-| T1.5 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `60ea3ae03`; 4 new/rewritten tests pass, fail on old decoder/ingress |
-| T1.6 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `a7602fc27` (+ ledger `468e9e90d`); 4 e2e fixtures pass |
-| T2.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `5c4542676`; 3 new tests pass, fail on mutated old behaviour |
+| Task | PR | State and retained evidence |
+|---|---|---|
+| T1.1 | — | `c9f1c464f`; 4 tests pass, fail on old policy. |
+| T1.2 | — | `df5fb09f5`; 2 tests pass, fail with `false` restored. |
+| T1.3 | — | `7b3344929`; 4 tests pass; 3 admission tests fail on old code. |
+| T1.4 | — | `022cbadf2`; index test passes; DV strip actor test skips without `dovi_rpu`. |
+| T1.5 | — | `60ea3ae03`; 4 tests pass, fail on old decoder/ingress. |
+| T1.6 | — | `a7602fc27` (+ ledger `468e9e90d`); 4 e2e fixtures pass. |
+| T2.1 | — | `5c4542676`; 3 tests pass, fail on old behavior. |
 
-| T3.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built on `claude/shared-dv-hdr-m3` (`0ee5b8470`); 4 new tests pass and fail on a restored refusal or a no-op `record`; the P5 e2e passes on the real P5 control under jellyfin-ffmpeg 8.1 and SKIPs in the gate image (§6.1) |
+| T3.1 | — | `0ee5b8470`; 4 tests pass and fail on restored refusal/no-op record; real P5 e2e passes on jellyfin-ffmpeg 8.1, skips on gate image (§6.1). |
 
-| Review | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `9ee8d7dcb`..`ad9364440` (findings 1–11); each new test fails on the old behaviour |
-| T2.2 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `d9f38cc93` (+ rustfmt `ed2ba5abe`), branch `claude/shared-dv-hdr-m2`; 1 unit test + master check in 3 e2e fixtures pass, fail on the old URL and on a native-only master |
-| T2.3 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `87b2df581`; web 55/55 + web-policy + web-control pass (2 changed tests fail on old guards); Android new test passes, fails on old sources; Apple tests not run (no Xcode reachable) |
-| T2.4 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built in the commit after `87b2df581`; decode test and DV e2e rows assertion pass, fail without the decoder; the `plurx-core` shape test is not run (`plurx-core --lib` tests do not compile on this base: `store/applied_view.rs` E0282) |
+| Review | — | `9ee8d7dcb`..`ad9364440`; findings 1–11, each new test fails on old behavior. |
+| T2.2 | — | `d9f38cc93` (+ rustfmt `ed2ba5abe`); 1 unit test and 3 fixture master checks pass, fail on old URL/native-only master. |
+| T2.3 | — | `87b2df581`; web 55/55 plus policy/control pass; Android regression passes and fails on old sources; Apple tests not run (no Xcode). |
+| T2.4 | — | Decode and DV e2e assertions pass; core shape test not run (base `store/applied_view.rs` E0282). |
 
 Review fixes (2026-11-16): T2.1 no longer adds a relay token — Dolby Vision
 is withheld in the effective recipe itself (`normalize_wire`), so an older
@@ -537,12 +527,10 @@ both pass on the gate's FFmpeg 6.1 and are open questions for M2.
   `plurx_core::testfixtures`. The fixtures do the same and inspect the
   delivered record and RPU NAL units. An HEVC copy also needs the VOD side's
   cluster node identity for the cold index's header proof.
-- **T2.1.** The affirmation is recorded by the Source ingress in the effective
-  recipe as a reserved transport token (`plurx-internal-relay-dolby-vision-v1`),
-  which every forwarded owner plans from, so the forwarding wire
-  (`shared_source_forwarding.rs` `:253`, `:270`) needs no new field.
-  `public_recipe_hash` strips every reserved token, so it is unchanged for an
-  old receiver.
+- **T2.1 (review correction).** An earlier design used a reserved recipe token;
+  review removed it. Dolby Vision is withheld in `normalize_wire`, and the
+  ordinary recipe remains byte-identical for old receivers. No forwarding
+  wire field or token is needed.
 - **T2.2.** The copy's probe evidence lived on `SourceNativeTracks`, so the
   master could not be built without subtitle tracks; it moved to
   `SourceViewerState::presentation_probe`. The plan's
@@ -649,3 +637,11 @@ checks the boot record's encoder choice and the capability-child spawn count
 for both proven and unproven hardware. Unit execution and its old-code
 counterfactual remain pending final qualification. No new feature switch or
 watchdog is introduced.
+
+### Source processed admin Stop regression (2026-11-16)
+
+Added `admin_stop_of_a_source_processed_session_settles_and_ends_the_start`:
+the Linux fixture observes the Source Activity row, stops its assigned work,
+and holds the actual child's reader after EOF to prove Stop waits for physical
+settlement before ending the Source start. The regression has not been run;
+it is not physical qualification.

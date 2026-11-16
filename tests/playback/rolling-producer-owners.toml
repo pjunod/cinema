@@ -689,6 +689,32 @@
 # Command and kill-on-drop sites, and five bounded timeout observations.
 # No inherited production owner or pattern/scope/equality exception is added.
 
+# M4 Source processed-upgrade integration census (2026-11-16), measured with
+# the inventory's pure structural scanner over module_roots and source scopes.
+# Structural deltas from the prior ledger: detached tokio tasks 121->126,
+# task shapes 1161->1166, timers 2236->2251, method-spawn 99->102, Command
+# constructors 356->359, and launch-shaped methods 934->943. The new
+# SourceProcessedOperation owns one detached operation task for the actual
+# Source assignment: its sole trial deadline cancels the token and the owner
+# joins the closure before publishing settlement or releasing the preparation
+# slot. The two test-only `sleep` children and two reader tasks are gated until
+# real child retirement/EOF and reader release; they test joined physical
+# settlement, not a new production process owner. The signed Activity/Stop
+# requests and HTTP assertions are control-plane operations, not subprocesses.
+# Exact Source processed-root attachment adds one keyed rendition_build_gate
+# occurrence (34->35), rechecking the captured physical graph before reuse.
+# B suppresses retries only for its processed successor after decline/failure,
+# preserving the ordinary retry path. Counts are source shape
+# only, not test execution or physical qualification.
+# The Linux-only `admin_stop_of_a_source_processed_session_settles_and_ends_the_start`
+# fixture adds two joined tasks (processed reader and admin-Stop caller), four
+# finite fixture bounds, and one real `sleep` child attached to the existing
+# Source `ProducerSlot`. Stop retains the activity and Source owner while the
+# actual reader is gated after EOF, then joins settlement; this is test-only
+# lifecycle evidence, not a new production process or timer owner. One added
+# HTTP `Response::status()` assertion is a protocol observation. No matcher,
+# source scope, or ownership allowance changed.
+
 version = 1
 source = "crates/plurxd/src/transcode.rs"
 module_roots = [
@@ -1133,7 +1159,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # observe_until, and an observer timeout leaves the task holding the counted
 # guard so Source retirement waits for real child/reader settlement. It decides
 # no recovery and retries nothing. +1 joined test caller in tests/source_actor.rs.
-expected_occurrences = 121
+expected_occurrences = 126
 # PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
 # spawn_prepare. Callers abort/await it for cancellation or release the pause
 # and await refusal; exact-owner cleanup is observed separately. It exercises
@@ -2714,7 +2740,7 @@ pattern = "rendition_build_gate"
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
 # Shared cache eviction takes this same keyed gate before retiring a title.
-expected_occurrences = 34
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -3993,7 +4019,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
 # the staging task, joined by tokio::time::timeout on its JoinHandle.
 
-expected_occurrences = 1161
+expected_occurrences = 1166
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4248,7 +4274,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # reader/tests.rs fixture threads/children, joined or reaped before return.
 # 93 -> 94 with the A1/B1 batch (#1495): prodrun's natural-exit test spawns
 # one real child. Test-only.
-expected_occurrences = 99
+expected_occurrences = 102
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5922,7 +5948,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # released its custody, then removes its local witness. It owns no producer,
 # process or child, spawns nothing, and decides nothing about capacity: the
 # sweep does; the loop only ends the ledger task once there is nothing left.
-expected_occurrences = 2236
+expected_occurrences = 2251
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6459,7 +6485,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # start deadline and cancellation; that operation reaps the child and joins
 # both pipes before its settlement, which `SourcePreparationSettlements`
 # already joins on retirement. The local proof's command is unchanged.
-expected_occurrences = 356
+expected_occurrences = 359
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -7185,7 +7211,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Sharing outage policy (A6 M1): -1. The listener tests were rewritten
 # around UnknownSpan with one fewer SharingManager::status() read; none of
 # them launches a process.
-expected_occurrences = 934
+expected_occurrences = 943
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

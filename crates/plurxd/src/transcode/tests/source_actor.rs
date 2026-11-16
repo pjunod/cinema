@@ -191,10 +191,54 @@ enum SourceFixtureVideo {
 
 /// The actor mode that pauses a Source's own Profile 5 pixel-proof child.
 const SOURCE_FIXTURE_PROFILE5_PROOF: u8 = 66;
+const SOURCE_FIXTURE_PROCESSED_SETTLEMENT: u8 = 67;
+const SOURCE_FIXTURE_PROCESSED_DEADLINE: u8 = 68;
+const SOURCE_FIXTURE_PROCESSED_ADMIN_STOP: u8 = 69;
+
+/// Activity is visible under the admitted Source owner before any processed
+/// Start publishes, and its admin Stop waits for the owned child and reader.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_stop_of_a_source_processed_session_settles_and_ends_the_start() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROCESSED_ADMIN_STOP,
+        SourceFixtureVideo::DolbyVisionStrip,
+    ))
+    .await;
+}
+
+/// A real Source Store assignment drives the detached processed operation;
+/// its receipt cannot be used for a different live assignment. The operation
+/// must also wait for its actual child and reader before issuing that receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_processed_settlement_of_another_assignment_is_a_mismatch() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROCESSED_SETTLEMENT,
+        SourceFixtureVideo::H264,
+    ))
+    .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_processed_trial_past_its_deadline_releases_the_preparation_slot() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROCESSED_DEADLINE,
+        SourceFixtureVideo::H264,
+    ))
+    .await;
+}
 
 /// Modes whose Source owns native subtitles.
 fn source_fixture_native(mode: u8) -> bool {
-    mode >= 21 && mode != SOURCE_FIXTURE_PROFILE5_PROOF
+    mode >= 21
+        && !matches!(
+            mode,
+            SOURCE_FIXTURE_PROFILE5_PROOF
+                | SOURCE_FIXTURE_PROCESSED_SETTLEMENT
+                | SOURCE_FIXTURE_PROCESSED_DEADLINE
+                | SOURCE_FIXTURE_PROCESSED_ADMIN_STOP
+        )
 }
 
 /// Modes whose prepared recipe is an encode.
@@ -292,6 +336,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         .put_setting(keys::SHARING_ENABLED, "true")
         .await
         .expect("saved Source choice before startup");
+    if mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
+        selected
+            .store
+            .put_setting(keys::DV_HDR_PROCESSING, "true")
+            .await
+            .expect("enable processed HDR10 upgrade for actual Source owner");
+    }
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual Source startup coordinator"));
@@ -608,6 +659,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         body.aac = Some(true);
         body.caps = Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","max_height":2160,"present":["pq","sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]})).expect("HDR10 client"));
     }
+    if mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
+        body.processed_upgrade = Some(true);
+        body.caps
+            .as_mut()
+            .expect("processed client caps")
+            .hls_hevc_sample_entries = Some(vec!["hvc1".into()]);
+    }
     if source_fixture_encoded(mode) {
         body.copy = Some(false);
         body.height = Some(if mode == 31 { 144 } else { 36 });
@@ -632,7 +690,10 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         "cinemashare-viewer",
         "c".repeat(64).parse().expect("viewer"),
     );
-    let second_prepared = if mode == 53 {
+    let second_prepared = if matches!(
+        mode,
+        53 | SOURCE_FIXTURE_PROCESSED_SETTLEMENT | SOURCE_FIXTURE_PROCESSED_DEADLINE
+    ) {
         let mut second: CreateSession =
             serde_json::from_value(serde_json::to_value(&body).expect("second actual ask"))
                 .expect("second complete ask");
@@ -661,7 +722,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let mut prepared = preparation.await.expect("actual Source engine preparation");
-    if hdr10 && !source_fixture_encoded(mode) {
+    if hdr10 && !source_fixture_encoded(mode) && mode != SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
         assert_eq!(
             store
                 .get_file_probe_json(1)
@@ -693,7 +754,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
             matches!(video, SourceFixtureVideo::Hdr10Retention)
         );
     }
-    if source_fixture_encoded(mode) {
+    if source_fixture_encoded(mode) || mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
             "actual common preparation resolves an encoded recipe"
@@ -839,6 +900,18 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
             .await
             .expect("actual second assignment")
             .expect("second assigned owner");
+        if mode == SOURCE_FIXTURE_PROCESSED_SETTLEMENT {
+            source_processed_assignment_settlement(&assignment, &second_assignment).await;
+        }
+        #[cfg(target_os = "linux")]
+        if mode == SOURCE_FIXTURE_PROCESSED_DEADLINE {
+            source_processed_deadline_settlement(
+                &assignment,
+                &second_assignment,
+                Arc::clone(&manager.processed_preparation_slot),
+            )
+            .await;
+        }
         Box::pin(source_two_owner_generation_fixture(
             state,
             manager,
@@ -1397,6 +1470,45 @@ async fn source_actual_actor(
             .await
             .expect("restore independent video attestation before encoded Start");
     }
+    #[cfg(target_os = "linux")]
+    let processed_stop = if mode == SOURCE_FIXTURE_PROCESSED_ADMIN_STOP {
+        use tokio::io::AsyncReadExt;
+        let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+        let (reader_closed_tx, reader_closed_rx) = tokio::sync::oneshot::channel();
+        let (reader_release_tx, reader_release_rx) = tokio::sync::oneshot::channel();
+        manager.arm_source_processed_activity_hook(Box::new(move |producer, cancel| {
+            Box::pin(async move {
+                let mut child = tokio::process::Command::new("sleep")
+                    .arg("30")
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("actual processed child");
+                let mut stdout = child.stdout.take().expect("actual processed stdout");
+                producer.attach(child, 0).await;
+                let reader = tokio::spawn(async move {
+                    let mut drained = Vec::new();
+                    stdout
+                        .read_to_end(&mut drained)
+                        .await
+                        .expect("actual reader EOF");
+                    let _ = reader_closed_tx.send(());
+                    reader_release_rx
+                        .await
+                        .expect("reader held until admin Stop checks");
+                });
+                let _ = spawned_tx.send(());
+                cancel.cancelled().await;
+                producer
+                    .retire_storage()
+                    .await
+                    .expect("reap processed child");
+                reader.await.expect("join processed reader");
+            })
+        }));
+        Some((spawned_rx, reader_closed_rx, reader_release_tx))
+    } else {
+        None
+    };
     let actor = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
@@ -1468,6 +1580,64 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    #[cfg(target_os = "linux")]
+    if let Some((spawned, reader_closed, reader_release)) = processed_stop {
+        tokio::time::timeout(Duration::from_secs(5), spawned)
+            .await
+            .expect("processed child spawn deadline")
+            .expect("actual processed child spawned");
+        let activities = manager.source_processed_activities();
+        let [activity] = activities.as_slice() else {
+            panic!("one admitted Source processed Activity before publication");
+        };
+        let stop_id = activity.stop_id.clone();
+        assert_eq!(activity.title, "source.mp4");
+        assert_eq!(activity.viewer, "c".repeat(64));
+        let plurx_core::playback_principal::PlaybackPrincipal::Sharing { grant_id, .. } =
+            assignment.binding().principal()
+        else {
+            panic!("actual shared Source principal");
+        };
+        assert_eq!(activity.grant, grant_id.to_string());
+        assert!(activity.session_id.is_none());
+        assert!(state
+            .store
+            .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
+            .await
+            .expect("unpublished processed route")
+            .is_none());
+        let stop_manager = Arc::clone(&manager);
+        let mut stop =
+            tokio::spawn(async move { stop_manager.stop_source_processed_session(&stop_id).await });
+        tokio::time::timeout(Duration::from_secs(5), reader_closed)
+            .await
+            .expect("processed reader EOF deadline")
+            .expect("reader closed after actual child reap");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut stop)
+                .await
+                .is_err(),
+            "admin Stop waits for the retained reader after child reap"
+        );
+        assert_eq!(manager.source_processed_activities().len(), 1);
+        reader_release.send(()).expect("release retained reader");
+        assert!(tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("admin Stop settlement deadline")
+            .expect("admin Stop task")
+            .expect("actual Source retirement"));
+        assert!(manager.source_processed_activities().is_empty());
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        assert!(actor.wait_ready(Instant::now()).await.is_err());
+        assert!(state
+            .store
+            .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
+            .await
+            .expect("no processed publication after Stop")
+            .is_none());
+        ingress_monitor.join().await;
+        return;
+    }
     if matches!(mode, 22..=27 | 57 | 58) {
         // The hook is armed before Start. Publication must happen without
         // reaching a native child, for both copy and encoded recipes.
@@ -3665,6 +3835,165 @@ impl SourceFactoryIngressFixture {
             self.close_transport(false, Some(actor)).await;
         })))
     }
+}
+
+async fn source_processed_assignment_settlement(
+    assignment: &SourceDispatchAssignment,
+    another: &SourceDispatchAssignment,
+) {
+    use tokio::io::AsyncReadExt;
+    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+    let (reader_closed_tx, reader_closed_rx) = tokio::sync::oneshot::channel();
+    let (reader_release_tx, reader_release_rx) = tokio::sync::oneshot::channel();
+    let operation = super::super::source_preparation::start_source_processed(
+        assignment.clone(),
+        Instant::now() + Duration::from_secs(30),
+        move |producer, cancel| async move {
+            let mut child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let mut stdout = child.stdout.take().expect("actual child stdout");
+            producer.attach(child, 0).await;
+            let reader = tokio::spawn(async move {
+                let mut drained = Vec::new();
+                stdout
+                    .read_to_end(&mut drained)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let _ = reader_closed_tx.send(());
+                reader_release_rx
+                    .await
+                    .map_err(|_| "reader release dropped".to_owned())?;
+                Ok::<(), String>(())
+            });
+            let _ = spawned_tx.send(());
+            cancel.cancelled().await;
+            producer
+                .retire_storage()
+                .await
+                .map_err(|error| error.to_string())?;
+            reader.await.map_err(|error| error.to_string())??;
+            Err("cancelled after actual child and reader settlement".to_owned())
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(5), spawned_rx)
+        .await
+        .expect("actual child spawn deadline")
+        .expect("child spawned");
+    operation.cancel();
+    tokio::time::timeout(Duration::from_secs(5), reader_closed_rx)
+        .await
+        .expect("actual child reap and reader EOF deadline")
+        .expect("reader reached EOF");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), operation.settle())
+            .await
+            .is_err(),
+        "the receipt waits for the retained reader, even after its child exits"
+    );
+    reader_release_tx.send(()).expect("release actual reader");
+    let receipt = tokio::time::timeout(Duration::from_secs(5), operation.settle())
+        .await
+        .expect("processed operation settlement deadline");
+    assert!(receipt.matches(assignment));
+    assert!(
+        !receipt.matches(another),
+        "a separate actual Source assignment cannot settle with this receipt"
+    );
+    assert!(
+        operation.outcome().await.is_err(),
+        "cancelled trial does not claim a processed root"
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn source_processed_deadline_settlement(
+    assignment: &SourceDispatchAssignment,
+    another: &SourceDispatchAssignment,
+    preparation_slot: Arc<tokio::sync::Semaphore>,
+) {
+    use tokio::io::AsyncReadExt;
+    let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+    let (deadline_tx, deadline_rx) = tokio::sync::oneshot::channel();
+    let (reader_closed_tx, reader_closed_rx) = tokio::sync::oneshot::channel();
+    let (reader_release_tx, reader_release_rx) = tokio::sync::oneshot::channel();
+    let deadline = Instant::now() + Duration::from_millis(150);
+    let slot_for_assertions = Arc::clone(&preparation_slot);
+    let operation = super::super::source_preparation::start_source_processed(
+        assignment.clone(),
+        deadline,
+        move |producer, cancel| async move {
+            let _permit = Arc::clone(&preparation_slot)
+                .acquire_owned()
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            let mut stdout = child.stdout.take().expect("actual child stdout");
+            producer.attach(child, 0).await;
+            let reader = tokio::spawn(async move {
+                let mut drained = Vec::new();
+                stdout
+                    .read_to_end(&mut drained)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let _ = reader_closed_tx.send(());
+                reader_release_rx
+                    .await
+                    .map_err(|_| "reader release dropped".to_owned())?;
+                Ok::<(), String>(())
+            });
+            let _ = spawned_tx.send(());
+            cancel.cancelled().await;
+            let _ = deadline_tx.send(());
+            producer
+                .retire_storage()
+                .await
+                .map_err(|error| error.to_string())?;
+            reader.await.map_err(|error| error.to_string())??;
+            Err("deadline after actual child and reader settlement".to_owned())
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(5), spawned_rx)
+        .await
+        .expect("actual child spawn deadline")
+        .expect("child spawned before deadline");
+    tokio::time::timeout(Duration::from_secs(5), deadline_rx)
+        .await
+        .expect("constructor deadline cancellation")
+        .expect("deadline cancellation observed by owned closure");
+    tokio::time::timeout(Duration::from_secs(5), reader_closed_rx)
+        .await
+        .expect("actual child reap and reader EOF deadline")
+        .expect("reader reached EOF after deadline retirement");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), operation.settle())
+            .await
+            .is_err(),
+        "deadline receipt waits for the retained reader"
+    );
+    assert!(
+        Arc::clone(&slot_for_assertions)
+            .try_acquire_owned()
+            .is_err(),
+        "the actual preparation slot remains held while the reader is retained"
+    );
+    reader_release_tx.send(()).expect("release actual reader");
+    let receipt = tokio::time::timeout(Duration::from_secs(5), operation.settle())
+        .await
+        .expect("deadline operation settlement deadline");
+    assert!(receipt.matches(assignment));
+    assert!(!receipt.matches(another));
+    assert!(operation.outcome().await.is_err());
+    let _permit = tokio::time::timeout(Duration::from_secs(1), slot_for_assertions.acquire_owned())
+        .await
+        .expect("preparation slot released after physical settlement")
+        .expect("preparation semaphore remains open");
 }
 
 async fn source_two_owner_generation_fixture(

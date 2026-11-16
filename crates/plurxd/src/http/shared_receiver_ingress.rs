@@ -140,6 +140,11 @@ fn parse_request(bytes: &[u8]) -> Result<RetainedRequest, ApiError> {
     }) {
         return Err(invalid());
     }
+    // Only B's server-owned prepared successor may request processed output.
+    // A public client cannot enter that branch or claim receiver affirmation.
+    if typed.processed_upgrade.is_some() {
+        return Err(invalid());
+    }
     // An explicit `preserve_dolby_vision` ask is forwarded untouched: the
     // Source's shared planner derives the delivery from the player's caps
     // (the ask only clamps), and B never re-plans.
@@ -346,6 +351,14 @@ mod tests {
             libraries: vec![library],
         };
         (scope, reference)
+    }
+    #[test]
+    fn public_receiver_ingress_rejects_client_processed_upgrade_flags() {
+        for flag in [Value::Bool(false), Value::Bool(true)] {
+            let mut value = request();
+            value["processed_upgrade"] = flag;
+            assert!(parse_request(&serde_json::to_vec(&value).expect("encode")).is_err());
+        }
     }
     #[test]
     fn sharing_receiver_ingress_preserves_complete_original_request_and_lossless_source_context() {

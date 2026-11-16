@@ -1,5 +1,23 @@
 use super::*;
 use serde_json::json;
+
+/// The Source actor emits this worker result only for a validated pending
+/// title qualification. Its public reply has a closed retry contract.
+#[tokio::test]
+async fn sharing_source_http_pending_verdict_maps_to_typed_not_yet() {
+    use axum::response::IntoResponse;
+    let response =
+        SourceStartFailure::from(crate::transcode::source_actor::SourceWorkerError::NotYet)
+            .response()
+            .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("bounded pending-verdict body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("typed pending body");
+    assert_eq!(body["code"], "sharing_source_not_prepared");
+}
 pub(super) async fn actual_resource_request(
     address: std::net::SocketAddr,
     h2: bool,
@@ -926,6 +944,106 @@ async fn sharing_source_http_dolby_vision_unaffirmed_receiver_gets_the_hdr10_bas
         SourceFixtureMode::DolbyVisionUnaffirmed,
     ))
     .await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_offers_a_processed_upgrade_only_to_an_affirming_receiver() {
+    use super::receiver_presentation::{
+        PROCESSED_UPGRADE_RECEIVER_HEADER, PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+    };
+
+    let fixture =
+        real_source_start_fixture_with(SourceFixtureMode::DolbyVisionUnaffirmed, None).await;
+    fixture
+        .state
+        .store
+        .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "true")
+        .await
+        .expect("enable Source HDR processing");
+
+    let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("DV8 recipe");
+    recipe["session"]["preserve_dolby_vision"] = json!(false);
+    recipe["session"]["caps"] = json!({
+        "v": 2,
+        "video": [
+            {"codec":"hevc","profiles":["main","main10"],"max_height":2160,"present":["sdr","pq"]},
+            {"codec":"h264","max_height":2160,"present":["sdr"]}
+        ],
+        "audio":["aac"],
+        "containers":["mp4"],
+        "transports":["hls","progressive"],
+        "hls_hevc_sample_entries":["hvc1"],
+        "display":{"hdr":true}
+    });
+    assert!(recipe["session"].get("processed_upgrade").is_none());
+
+    let mut ordinary = recipe.clone();
+    ordinary["session"]["request_id"] = json!(Uuid::new_v4());
+    ordinary["session"]["playback_id"] = json!("ordinary-processed-upgrade-ask");
+    let ordinary = fixture_start(
+        axum::extract::State((*fixture.state).clone()),
+        fixture.headers.clone(),
+        axum::extract::Path((
+            fixture.reference.item_id.as_str().to_owned(),
+            fixture.reference.file_id.as_str().to_owned(),
+        )),
+        axum::body::Body::from(serde_json::to_vec(&ordinary).expect("ordinary recipe")),
+    )
+    .await
+    .expect("ordinary Source Start");
+    assert_eq!(ordinary.status(), StatusCode::OK);
+    let ordinary_bytes = axum::body::to_bytes(ordinary.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("ordinary Start body");
+    let ordinary = super::super::decode_source_start_response(&ordinary_bytes, &fixture.reference)
+        .expect("ordinary Start DTO");
+    assert_eq!(ordinary.response().processed_upgrade, None);
+    assert_eq!(
+        ordinary.response().delivered_dynamic_range.as_deref(),
+        Some("hdr10"),
+        "the ordinary source output remains its compatible HDR10 base"
+    );
+    assert_eq!(ordinary.response().delivered_dolby_vision_profile, None);
+
+    let mut affirmed_headers = fixture.headers.clone();
+    affirmed_headers.insert(
+        PROCESSED_UPGRADE_RECEIVER_HEADER,
+        PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE
+            .parse()
+            .expect("processed-upgrade affirmation header"),
+    );
+    let mut affirmed = recipe;
+    affirmed["session"]["request_id"] = json!(Uuid::new_v4());
+    affirmed["session"]["playback_id"] = json!("affirmed-processed-upgrade-ask");
+    let response = fixture_start(
+        axum::extract::State((*fixture.state).clone()),
+        affirmed_headers,
+        axum::extract::Path((
+            fixture.reference.item_id.as_str().to_owned(),
+            fixture.reference.file_id.as_str().to_owned(),
+        )),
+        axum::body::Body::from(serde_json::to_vec(&affirmed).expect("affirmed recipe")),
+    )
+    .await
+    .expect("affirmed Source Start");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("affirmed Start body");
+    let affirmed = super::super::decode_source_start_response(&bytes, &fixture.reference)
+        .expect("affirmed Start DTO");
+    assert_eq!(
+        affirmed.response().processed_upgrade.as_deref(),
+        Some("offered"),
+        "the exact authenticated header offers a successor without changing this Start"
+    );
+    assert_eq!(
+        affirmed.response().delivered_dynamic_range.as_deref(),
+        Some("hdr10")
+    );
+    assert_eq!(affirmed.response().delivered_dolby_vision_profile, None);
+
+    fixture.shutdown().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_dolby_vision_stripped_h1_h2_and_confirmed_end() {

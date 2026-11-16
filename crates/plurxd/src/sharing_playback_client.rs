@@ -387,6 +387,10 @@ impl PeerConnection {
                 .header("cinemashare-viewer", viewer)
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+                )
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -778,6 +782,10 @@ impl PeerConnection {
                 .header("cinemashare-viewer", viewer)
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+                )
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -1065,6 +1073,10 @@ impl PeerConnection {
                 .header("cinemashare-viewer", viewer)
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+                )
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender
@@ -1861,6 +1873,10 @@ impl PeerConnection {
                 .header("cinemashare-viewer", viewer)
                 .header(crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE)
                 .header(crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE)
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
+                )
                 .body(Body::from(body))
                 .map_err(|_| PeerError::InvalidResponse)?;
             self.sender

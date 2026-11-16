@@ -17,6 +17,9 @@ pub(crate) const RECEIVER_HEADER_VALUE: &str = "bounded-range-v1";
 /// Start it would refuse.
 pub(crate) const DOLBY_VISION_RECEIVER_HEADER: &str = "x-plurx-receiver-dynamic-range";
 pub(crate) const DOLBY_VISION_RECEIVER_HEADER_VALUE: &str = "dolby-vision-v1";
+/// Exact server implementation affirmation for the optional processed successor wire.
+pub(crate) const PROCESSED_UPGRADE_RECEIVER_HEADER: &str = "x-plurx-receiver-processed-upgrade";
+pub(crate) const PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE: &str = "processed-upgrade-v1";
 /// The plan note a Dolby Vision title's shared Start carries when the
 /// receiver did not affirm Dolby Vision relay.
 pub(crate) const DOLBY_VISION_WITHHELD_NOTE: &str = "receiver does not relay Dolby Vision";
@@ -79,6 +82,14 @@ mod tests {
 /// and the decision endpoint read it: the ingress applies the answer to the
 /// effective recipe ([`normalize_wire`]), which every forwarded owner then
 /// plans from, so the forwarding wire carries nothing new.
+pub(crate) fn authenticated_receiver_processed_upgrade(headers: &axum::http::HeaderMap) -> bool {
+    let mut values = headers.get_all(PROCESSED_UPGRADE_RECEIVER_HEADER).iter();
+    values
+        .next()
+        .is_some_and(|value| value.as_bytes() == PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE.as_bytes())
+        && values.next().is_none()
+}
+
 pub(crate) fn authenticated_receiver_dolby_vision(headers: &axum::http::HeaderMap) -> bool {
     let mut values = headers.get_all(DOLBY_VISION_RECEIVER_HEADER).iter();
     values
@@ -194,6 +205,18 @@ pub(super) fn normalize_wire(
     ready: bool,
     dolby_vision: bool,
 ) -> Result<Vec<u8>, ApiError> {
+    normalize_wire_with_upgrade(bytes, ready, dolby_vision, false)
+}
+
+/// Only a grant-authenticated receiver affirmation may put this optional
+/// field into the effective recipe. False records support without asking for
+/// work; true remains a distinct request and is never inferred from caps.
+pub(super) fn normalize_wire_with_upgrade(
+    bytes: &[u8],
+    ready: bool,
+    dolby_vision: bool,
+    processed_upgrade: bool,
+) -> Result<Vec<u8>, ApiError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
     let mut normalized = value.clone();
     let direct = value
@@ -223,6 +246,17 @@ pub(super) fn normalize_wire(
             withhold_dolby_vision_json(caps);
         }
     }
+    if let Some(session) = normalized.get_mut("session").and_then(Value::as_object_mut) {
+        if processed_upgrade && !direct {
+            // A server-created successor is the sole writer of true; the
+            // ordinary receiver-affirmed Start is represented by false.
+            session
+                .entry("processed_upgrade")
+                .or_insert(Value::Bool(false));
+        } else {
+            session.remove("processed_upgrade");
+        }
+    }
     if normalized == value {
         return Ok(bytes.to_vec());
     }
@@ -233,9 +267,21 @@ pub(super) fn public_recipe_hash(bytes: &[u8]) -> Result<[u8; 32], ApiError> {
     // public identity of a recipe is the same with or without either receiver
     // affirmation; a recipe that makes no Dolby Vision claim hashes exactly as
     // it always has.
-    let normalized = normalize_wire(bytes, false, false)?;
-    let value: Value = serde_json::from_slice(&normalized).map_err(|_| invalid())?;
-    Ok(sha2::Sha256::digest(serde_json::to_vec(&value).map_err(|_| invalid())?).into())
+    let requested: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let true_successor = requested
+        .get("session")
+        .and_then(|session| session.get("processed_upgrade"))
+        == Some(&Value::Bool(true));
+    // A support-only false has the old public identity. A true successor is
+    // a new recipe, even before a route is selected.
+    let normalized = normalize_wire_with_upgrade(bytes, false, false, true_successor)?;
+    let mut normalized: Value = serde_json::from_slice(&normalized).map_err(|_| invalid())?;
+    if let Some(session) = normalized.get_mut("session").and_then(Value::as_object_mut) {
+        if !true_successor {
+            session.remove("processed_upgrade");
+        }
+    }
+    Ok(sha2::Sha256::digest(serde_json::to_vec(&normalized).map_err(|_| invalid())?).into())
 }
 pub(super) fn range_bound(input: &SourceStartInput) -> bool {
     internal_range(&input.canonical_recipe).unwrap_or(false)
@@ -295,16 +341,41 @@ pub(super) fn select_persisted_recipe(
     // recipes before Dolby Vision withholding existed).
     let legacy_dolby_vision = normalize_wire(raw, false, true)?;
     let range_dolby_vision = normalize_wire(raw, true, true)?;
+    let requested: Value = serde_json::from_slice(raw).map_err(|_| invalid())?;
+    let true_successor = requested
+        .get("session")
+        .and_then(|session| session.get("processed_upgrade"))
+        == Some(&Value::Bool(true));
+    let processed_legacy = normalize_wire_with_upgrade(raw, false, false, true)?;
+    let processed_range = normalize_wire_with_upgrade(raw, true, false, true)?;
+    let processed_dolby_vision = normalize_wire_with_upgrade(raw, false, true, true)?;
+    let processed_range_dolby_vision = normalize_wire_with_upgrade(raw, true, true, true)?;
     [
         (raw.to_vec(), false, true),
         (legacy, false, false),
         (range, true, false),
         (legacy_dolby_vision, false, false),
         (range_dolby_vision, true, false),
+        (processed_legacy, false, false),
+        (processed_range, true, false),
+        (processed_dolby_vision, false, false),
+        (processed_range_dolby_vision, true, false),
     ]
     .into_iter()
     .find(|(recipe, range, raw)| {
-        (cleanup || !*raw || !has_reserved_tokens(recipe))
+        // A true successor can never join an ordinary route by stripping
+        // the request bit during persisted-recipe recovery.
+        let candidate_true =
+            serde_json::from_slice::<Value>(recipe)
+                .ok()
+                .is_some_and(|candidate| {
+                    candidate
+                        .get("session")
+                        .and_then(|session| session.get("processed_upgrade"))
+                        == Some(&Value::Bool(true))
+                });
+        true_successor == candidate_true
+            && (cleanup || !*raw || !has_reserved_tokens(recipe))
             && super::ingress::fingerprint_recipe(recipe, *range) == stored
     })
     .map(|(recipe, _, _)| recipe)
@@ -574,6 +645,55 @@ mod normalization_tests {
             select_persisted_recipe(&injected, &old, true).expect("exact old cleanup bytes"),
             injected
         );
+    }
+    #[test]
+    fn processed_upgrade_header_and_recipe_identity_are_closed() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!authenticated_receiver_processed_upgrade(&headers));
+        headers.insert(
+            PROCESSED_UPGRADE_RECEIVER_HEADER,
+            PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE
+                .parse()
+                .expect("header"),
+        );
+        assert!(authenticated_receiver_processed_upgrade(&headers));
+        headers.append(
+            PROCESSED_UPGRADE_RECEIVER_HEADER,
+            PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE
+                .parse()
+                .expect("header"),
+        );
+        assert!(!authenticated_receiver_processed_upgrade(&headers));
+        let raw = recipe();
+        let affirmed = normalize_wire_with_upgrade(&raw, false, false, true).expect("affirmed");
+        let affirmed_value: Value = serde_json::from_slice(&affirmed).expect("json");
+        assert_eq!(affirmed_value["session"]["processed_upgrade"], false);
+        assert_eq!(
+            public_recipe_hash(&raw).expect("legacy hash"),
+            public_recipe_hash(&affirmed).expect("support-only hash")
+        );
+        assert_eq!(
+            normalize_wire_with_upgrade(&affirmed, false, false, false).expect("stripped"),
+            raw
+        );
+        let mut successor = affirmed_value;
+        successor["session"]["processed_upgrade"] = Value::Bool(true);
+        let successor = serde_json::to_vec(&successor).expect("successor");
+        assert_ne!(
+            public_recipe_hash(&successor).expect("successor hash"),
+            public_recipe_hash(&raw).expect("ordinary hash")
+        );
+        assert_eq!(
+            normalize_wire_with_upgrade(&successor, false, false, false).expect("unaffirmed"),
+            raw
+        );
+        let stored = super::super::ingress::fingerprint_recipe(&successor, false);
+        assert_eq!(
+            select_persisted_recipe(&successor, &stored, false).expect("true replay"),
+            successor
+        );
+        let ordinary = super::super::ingress::fingerprint_recipe(&raw, false);
+        assert!(select_persisted_recipe(&successor, &ordinary, false).is_err());
     }
     #[test]
     fn normalization_requires_hls_end_token_and_non_direct_presentation() {

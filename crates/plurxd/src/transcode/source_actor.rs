@@ -227,6 +227,7 @@ use plurx_core::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceWorkerError {
     Unavailable,
+    NotYet,
     RescanRequired,
     CopyTargetExceeded,
     CopyInitContractChanged,
@@ -321,7 +322,17 @@ pub(super) struct SourceWorkerRegistry {
     index_hooks: Arc<crate::fragindex::SourceIndexHookOwner>,
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
     pub(super) native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
+    #[cfg(test)]
+    processed_activity_hook: std::sync::Mutex<Option<SourceProcessedActivityHook>>,
 }
+#[cfg(test)]
+pub(crate) type SourceProcessedActivityHook = Box<
+    dyn FnOnce(
+            Arc<crate::prodrun::ProducerSlot>,
+            tokio_util::sync::CancellationToken,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send,
+>;
 struct SourceViewerInner {
     control_target_duration_ms: i64,
     control_hooks: control::SourceControlHookOwner,
@@ -341,6 +352,7 @@ struct SourceViewerInner {
 struct SourcePreparationSettlements {
     index: Option<crate::fragindex::SourceIndexSettlement>,
     probe: Option<super::source_preparation::SourceProbeSettlement>,
+    processed: Option<super::source_preparation::SourceProcessedSettlement>,
 }
 impl SourcePreparationSettlements {
     fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
@@ -349,6 +361,10 @@ impl SourcePreparationSettlements {
             .is_none_or(|receipt| receipt.matches(assignment))
             && self
                 .probe
+                .as_ref()
+                .is_none_or(|receipt| receipt.matches(assignment))
+            && self
+                .processed
                 .as_ref()
                 .is_none_or(|receipt| receipt.matches(assignment))
     }
@@ -381,6 +397,21 @@ struct SourceViewerState {
         Option<Result<crate::http::sharing_direct_wire::SourceDirectStart, SourceWorkerError>>,
     /// The last admitted direct byte open; status never moves it.
     direct_activity: Option<Instant>,
+    processed_cancel: Option<tokio_util::sync::CancellationToken>,
+    processed_activity: Option<SourceProcessedActivity>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SourceProcessedActivity {
+    pub(crate) stop_id: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) title: String,
+    pub(crate) viewer: String,
+    pub(crate) grant: String,
+    pub(crate) file_id: i64,
+    pub(crate) item_id: i64,
+    pub(crate) started_unix: i64,
+    pub(crate) reason: String,
 }
 
 /// A waiter for one actual registered owner. Dropping this value cannot cancel
@@ -557,6 +588,9 @@ impl SourceViewerActor {
         let backing = {
             let mut current = self.0.state.lock().expect("Source worker state");
             current.retirement_requested = true;
+            if let Some(cancel) = current.processed_cancel.as_ref() {
+                cancel.cancel();
+            }
             current.backing.clone()
         };
         #[cfg(unix)]
@@ -1273,6 +1307,8 @@ impl TranscodeManager {
                 presentation_probe: None,
                 direct_start: None,
                 direct_activity: None,
+                processed_cancel: None,
+                processed_activity: None,
             }),
             changed: tokio::sync::Notify::new(),
         });
@@ -1455,12 +1491,61 @@ impl TranscodeManager {
         Ok(())
     }
 
-    async fn prepare_source_encoded_recipe(
+    pub(crate) fn source_processed_activities(&self) -> Vec<SourceProcessedActivity> {
+        let entries = self.source_workers.entries.lock().expect("Source workers");
+        entries
+            .iter()
+            .filter_map(|owner| {
+                let current = owner.state.lock().expect("Source worker state");
+                (!current.finished)
+                    .then(|| current.processed_activity.clone())
+                    .flatten()
+            })
+            .collect()
+    }
+    #[cfg(test)]
+    pub(crate) fn arm_source_processed_activity_hook(&self, hook: SourceProcessedActivityHook) {
+        *self
+            .source_workers
+            .processed_activity_hook
+            .lock()
+            .expect("Source processed activity hook") = Some(hook);
+    }
+    pub(crate) async fn stop_source_processed_session(
         &self,
+        id: &str,
+    ) -> Result<bool, SourceWorkerError> {
+        let owner = {
+            let entries = self.source_workers.entries.lock().expect("Source workers");
+            entries
+                .iter()
+                .find(|owner| {
+                    let current = owner.state.lock().expect("Source worker state");
+                    !current.finished
+                        && current
+                            .processed_activity
+                            .as_ref()
+                            .is_some_and(|activity| activity.stop_id == id)
+                })
+                .cloned()
+        };
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        let actor = SourceViewerActor(owner);
+        actor.request_retirement();
+        actor.retire().await?;
+        Ok(true)
+    }
+
+    async fn prepare_source_encoded_recipe(
+        self: &Arc<Self>,
         owner: &Arc<SourceViewerInner>,
         prepared: &crate::http::hls::PreparedSourcePlayback,
         deadline: Instant,
         work: &mut Option<super::source_preparation::SourceProbeOperation>,
+        processed_work: &mut Option<super::source_preparation::SourceProcessedOperation>,
+        processed_root: &mut Option<crate::vodserve::PreparedRootAdmission>,
     ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
         let permit = self.admit_source_copy(deadline).await.inspect_err(|error| { tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.probe_admission", error_class = ?error, "Source encoded preparation refused"); })?;
         let source =
@@ -1527,6 +1612,117 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unavailable);
                 }
             }
+        }
+        if prepared.processed_upgrade_requested() {
+            let manager = Arc::clone(self);
+            let trial_owner = Arc::clone(owner);
+            let request = prepared.request().clone();
+            let ask = prepared.processed_upgrade_ask().clone();
+            let deadline = deadline.min(Instant::now() + super::PROCESSED_UPGRADE_TRIAL_BUDGET);
+            let activity = SourceProcessedActivity {
+                stop_id: format!(
+                    "source-{}",
+                    super::session_log_id(&owner.assignment.binding().incarnation_id().to_string())
+                ),
+                session_id: None,
+                title: prepared.file().path.file_name().map_or_else(
+                    || "Shared title".to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                viewer: match owner.assignment.binding().principal() {
+                    plurx_core::playback_principal::PlaybackPrincipal::Sharing {
+                        viewer_key,
+                        ..
+                    } => viewer_key.as_str().to_owned(),
+                    _ => String::new(),
+                },
+                grant: match owner.assignment.binding().principal() {
+                    plurx_core::playback_principal::PlaybackPrincipal::Sharing {
+                        grant_id, ..
+                    } => grant_id.to_string(),
+                    _ => String::new(),
+                },
+                file_id: prepared.file().id,
+                item_id: prepared.file().item_id,
+                started_unix: crate::fragment_index_cluster::unix_ms() / 1000,
+                reason: match prepared.request().dv_processing_destination {
+                    Some(plurx_core::transcode::dv_processing::DvDestination::Profile81) => {
+                        "Processed Dolby Vision upgrade; Source FEL re-encode setting".to_owned()
+                    }
+                    Some(plurx_core::transcode::dv_processing::DvDestination::Sdr) => {
+                        "Processed SDR upgrade; Source Dolby Vision processing setting".to_owned()
+                    }
+                    _ => {
+                        "Processed HDR10 upgrade; Source Dolby Vision processing setting".to_owned()
+                    }
+                },
+            };
+            *processed_work = Some(super::source_preparation::start_source_processed(
+                owner.assignment.clone(),
+                deadline,
+                move |producer, cancel| async move {
+                    {
+                        let mut current =
+                            trial_owner.state.lock().expect("Source processed activity");
+                        current.processed_cancel = Some(cancel.clone());
+                        current.processed_activity = Some(activity);
+                        if current.retirement_requested {
+                            cancel.cancel();
+                        }
+                    }
+                    #[cfg(test)]
+                    {
+                        let hook = manager
+                            .source_workers
+                            .processed_activity_hook
+                            .lock()
+                            .expect("Source processed activity hook")
+                            .take();
+                        if let Some(hook) = hook {
+                            hook(Arc::clone(&producer), cancel.clone()).await;
+                        }
+                    }
+                    let current = trial_owner
+                        .gate
+                        .current_preparation(&trial_owner.assignment)
+                        .await
+                        .map_err(|_| {
+                            "Source processed preparation authority unavailable".to_owned()
+                        })?;
+                    let trial = manager
+                        .prepare_source_processed_upgrade(
+                            &request,
+                            &ask,
+                            &evidence,
+                            &current,
+                            Arc::clone(&trial_owner.gate),
+                            producer,
+                            cancel,
+                            tokio::time::Instant::from_std(deadline),
+                        )
+                        .await?;
+                    trial_owner
+                        .gate
+                        .current_preparation(&trial_owner.assignment)
+                        .await
+                        .map_err(|_| {
+                            "Source authority changed during processed preparation".to_owned()
+                        })?;
+                    Ok(trial)
+                },
+            ));
+            let operation = processed_work.as_ref().expect("Source processed owner");
+            let trial = operation.outcome().await.map_err(|reason| {
+                if super::pending_fel_qualification(&reason).is_some() {
+                    SourceWorkerError::NotYet
+                } else {
+                    SourceWorkerError::Unavailable
+                }
+            })?;
+            owner.gate.current_preparation(&owner.assignment).await?;
+            let encoding = Arc::clone(&trial.root.encoding);
+            *processed_root = Some(trial.root);
+            return Ok(encoding);
         }
         // The probe permit is already dropped only after actual reap/pipes.
         // Encoder admission is separate and cannot self-deadlock against it.
@@ -1603,6 +1799,8 @@ impl TranscodeManager {
         let mut reserved: Option<crate::vodserve::ReservedSourceVodRendition> = None;
         let mut index_work = None;
         let mut probe_work = None;
+        let mut processed_work = None;
+        let mut processed_root = None;
         let mut unowned_existing = true;
         let mut startup_stage = "deadline";
         // Retirement (a Source End, a drain, a revocation) ends a start that
@@ -1696,6 +1894,8 @@ impl TranscodeManager {
                             &prepared,
                             deadline,
                             &mut probe_work,
+                            &mut processed_work,
+                            &mut processed_root,
                         ))
                         .await?,
                     )
@@ -1716,7 +1916,7 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unavailable);
                 }
                 startup_stage = "vod_admission";
-                let admitted = Box::pin(self.vod.prepare_admitted_source_vod(
+                let admitted = Box::pin(self.vod.prepare_admitted_source_vod_with_processed_root(
                     &prepared,
                     &owner.assignment,
                     &settings,
@@ -1725,6 +1925,7 @@ impl TranscodeManager {
                     deadline,
                     encoding,
                     self.dv_strippable(),
+                    processed_root.take(),
                 ))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -1745,6 +1946,15 @@ impl TranscodeManager {
                 startup_stage = "start_facts";
                 let reservation = reserved.as_mut().expect("Source reservation");
                 let session_id = uuid::Uuid::new_v4().to_string();
+                if let Some(activity) = owner
+                    .state
+                    .lock()
+                    .expect("Source processed activity")
+                    .processed_activity
+                    .as_mut()
+                {
+                    activity.session_id = Some(super::session_log_id(&session_id));
+                }
                 let facts = reservation
                     .start_info(&session_id)
                     .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -1951,6 +2161,13 @@ impl TranscodeManager {
             work.cancel();
             preparations.probe = Some(work.settle().await);
         }
+        if let Some(work) = processed_work.as_ref() {
+            work.cancel();
+            preparations.processed = Some(work.settle().await);
+        }
+        // A trial completed just before retirement can still have an unattached
+        // root. Its held source and admission close before the SQL owner does.
+        drop(processed_root.take());
         // These operations' settle methods join the detached reader/child,
         // including work which outlived the startup deadline.
         drop(preparation_custody);
