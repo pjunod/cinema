@@ -1702,6 +1702,13 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
 async fn background_library_publication_requires_both_live_owners() {
     use super::{acquired, publication_successor};
     for_each_backend(|store, backend| async move {
+        // Every scenario claims on one node and each earlier scenario's lease
+        // still charges its 60 s grace; this contract is about publication
+        // ownership, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .await
+            .expect("source readers per node");
         for scenario in ["live", "cancelled", "expired", "taken_over", "roots_changed"] {
             let (_, file_id) = seed_file(&store, &format!("dual-owner-{scenario}")).await;
             let file = store
@@ -2179,7 +2186,9 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             ),
             "{backend}"
         );
-        assert!(matches!(store.apply_pending_storage_domains(100_000).await.expect("expired owners no longer block remap"),
+        // The last claim's lease expires at 61_001 and charges the domain for
+        // the 60 s lease grace after that.
+        assert!(matches!(store.apply_pending_storage_domains(121_002).await.expect("expired owners no longer block remap"),
             plurx_core::store::background_jobs_resources::StorageDomainApply::Applied { .. }), "{backend}");
         assert!(store.storage_domains().await.expect("cleared").is_empty());
     })
@@ -6010,6 +6019,12 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
     for_each_backend(|store, backend| async move {
         let boot = uuid::Uuid::new_v4().to_string();
         let (_, id) = seed_file(&store, "progressive-translation").await;
+        // One background reader per node beside the live slot: the numbers
+        // this contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .await
+            .expect("one background reader");
         let user = store
             .create_user("translation-admin", "hash", true)
             .await

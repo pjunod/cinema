@@ -492,6 +492,12 @@ async fn title_demand_and_manual_cancel_suppression_survive_store_reopen() {
 async fn title_priority_observation_requires_live_higher_priority_same_node_work() {
     use plurx_core::store::background_jobs_probe::{generation, ProbeCoordinator};
     for_each_backend(|store, backend| async move {
+        // One background reader per node beside the live slot: the numbers this
+        // contract was written against.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .await
+            .expect("source readers per node");
         let scanner = "a".repeat(64);
         let file = seed(&store, "title-priority").await;
         let (_, title) = active(&store, file.id, &scanner, 1_000).await;

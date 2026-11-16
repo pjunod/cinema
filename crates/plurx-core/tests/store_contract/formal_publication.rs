@@ -369,6 +369,13 @@ async fn bound_scan(
 #[tokio::test]
 async fn formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit() {
     for_each_backend(|store, backend| async move {
+        // Every scenario claims on one node and each earlier scenario's lease
+        // still charges its 60 s grace; this contract is about publication
+        // ownership, not source capacity.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "16")
+            .await
+            .expect("source readers per node");
         for scenario in ["live", "cancel_before", "takeover_before", "cancel_after"] {
             let now = unix_now_ms();
             let library_id = create_library(store.as_ref(), &format!("formal-{scenario}")).await;
