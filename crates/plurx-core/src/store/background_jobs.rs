@@ -230,6 +230,12 @@ macro_rules! domain_source_readers {
     ($key:literal) => { concat!("COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='jobs.domain_source_readers.'||substr(", $key, ",11) AND CAST(value AS INTEGER) BETWEEN 1 AND 16),1)") };
 }
 
+/// Current source keys for a file, shared by independent registration,
+/// offline re-admission and the temporary v1 grant compatibility path.
+macro_rules! source_file_resources {
+    ($file:literal) => { concat!("SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key FROM files file JOIN items item ON item.id=file.item_id LEFT JOIN libraries library ON library.id=item.library_id LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value WHERE file.id=", $file) };
+}
+
 /// A playback lease overlapping `$key` is outside its permission window:
 /// live and not permitting, or just lapsed (within the grace) while its
 /// source was still being read. Any node, as v1.

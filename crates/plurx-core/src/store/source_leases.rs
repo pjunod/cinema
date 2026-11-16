@@ -24,7 +24,20 @@ macro_rules! offline_service_admission {
     "AND json_extract(NEW.request_json,'$.kind')='offline' ",
     "AND NOT EXISTS(SELECT 1 FROM source_leases owned WHERE owned.lease_id=json_extract(NEW.request_json,'$.owner_key') ",
     "AND owned.owner_kind='offline' AND owned.phase!='paused' AND owned.expires_at_ms>json_extract(NEW.request_json,'$.now_ms')-60000) ",
-    "BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(NEW.result_json,'$.resource_keys') resource WHERE ",
+    "BEGIN ",
+    // A v1 caller reads stored custody keys. If expiry allowed a domain-map
+    // change, refresh that input and refuse this stale proposal so its
+    // existing next grant request recalculates permission and byte service.
+    "UPDATE background_source_custody SET resource_keys_json=(SELECT json_group_array(resource_key) FROM (",
+    source_file_resources!("(SELECT file_id FROM offline_packages WHERE id=json_extract(NEW.request_json,'$.package_id'))"),
+    " ORDER BY resource_key)) WHERE owner_kind='offline' AND owner_key=json_extract(NEW.request_json,'$.owner_key') AND (",
+    "EXISTS(SELECT value FROM json_each(background_source_custody.resource_keys_json) EXCEPT ",
+    source_file_resources!("(SELECT file_id FROM offline_packages WHERE id=json_extract(NEW.request_json,'$.package_id'))"),
+    ") OR EXISTS(",
+    source_file_resources!("(SELECT file_id FROM offline_packages WHERE id=json_extract(NEW.request_json,'$.package_id'))"),
+    " EXCEPT SELECT value FROM json_each(background_source_custody.resource_keys_json))); ",
+    "SELECT CASE WHEN changes()>0 THEN RAISE(IGNORE) END; ",
+    "SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(NEW.result_json,'$.resource_keys') resource WHERE ",
     claim_foreground_window!("resource.value", "json_extract(NEW.request_json,'$.now_ms')"),
     " OR ",
     claim_source_holders!("resource.value", "json_extract(NEW.request_json,'$.node_id')", "json_extract(NEW.request_json,'$.now_ms')"),

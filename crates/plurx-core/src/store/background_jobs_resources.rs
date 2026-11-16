@@ -2689,6 +2689,101 @@ mod source_tests {
         }
     }
 
+    /// Mutation: omit the v1 grant's stored-resource refresh after expiry.
+    #[tokio::test]
+    async fn a_v1_offline_grant_refreshes_changed_domains_before_readmission() {
+        for swept in [false, true] {
+            let store = fixture();
+            let package = uuid::Uuid::new_v4().to_string();
+            let owner = BackgroundSourceOwner::Offline {
+                package_id: package.clone(),
+                node_id: "worker".into(),
+                claim_generation: 1,
+            };
+            let key = background_owner_key(&owner).expect("key");
+            {
+                let db = store.0.lock().expect("connection");
+                db.execute(
+                    "INSERT INTO offline_packages VALUES(?1,'worker',1,100,1,1,'preparing',604800)",
+                    [&package],
+                )
+                .expect("package");
+                db.execute(
+                    "INSERT INTO background_storage_domains VALUES(1,'/media','old')",
+                    [],
+                )
+                .expect("original mapping");
+                db.execute("INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('legacy-domain-reader',?1,?2,'[\"source_io:old\"]','offline',?3,1,'active',1000,1000,604800000)",rusqlite::params![key,serde_json::to_string(&owner).expect("owner"),package]).expect("old node registers once");
+            }
+            if swept {
+                reap_expired_source_leases(&store, 100_000)
+                    .await
+                    .expect("sweep");
+            }
+            {
+                let db = store.0.lock().expect("connection");
+                // With expiry plus grace elapsed, the mapping may apply.
+                db.execute("UPDATE background_storage_domains SET domain_id='new'", [])
+                    .expect("new mapping");
+                db.execute("INSERT INTO source_leases VALUES('lease:peer:1','lease','peer',1,'peer','{}','[\"source_io:new\"]','active',NULL,100000,100000,200000)",[]).expect("new domain maintenance slot is occupied");
+            }
+            let mut body = serde_json::to_value(&owner).expect("flat v1 body");
+            body["id"] = uuid::Uuid::new_v4().to_string().into();
+            body["owner_key"] = key.into();
+            body["now_ms"] = 100_000.into();
+            body["epoch_id"] = 20.into();
+            body["charge_bytes"] = 0.into();
+            body["grant"] = serde_json::json!({"receipt_id":uuid::Uuid::new_v4().to_string(),"epoch_id":20,"expires_at_ms":105000,"byte_allowance":null,"resource_keys":["source_io:old"]});
+            let propose = |body: String| {
+                store.queue_sql("INSERT INTO background_job_commands(id,operation,request_json,result_json) VALUES(json_extract($1,'$.id'),'source_service',$1,json_extract($1,'$.grant')) RETURNING result_json".into(),body,true,true)
+            };
+            assert!(
+                propose(encode(&body).expect("body"))
+                    .await
+                    .expect("stale grant is refused")
+                    .is_empty(),
+                "swept={swept}"
+            );
+            let keys:String=store.0.lock().expect("connection").query_row("SELECT resource_keys_json FROM background_source_custody WHERE custody_id='legacy-domain-reader'",[],|r|r.get(0)).expect("legacy reader input refreshed");
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&keys).expect("keys"),
+                ["source_io:new"]
+            );
+            assert_eq!(store.0.lock().expect("connection").query_row("SELECT count(*) FROM source_leases WHERE owner_kind='offline' AND expires_at_ms>100000",[],|r|r.get::<_,i64>(0)).expect("metadata does not readmit"),0);
+            // The old caller's existing retry now computes from current
+            // custody keys, so the current domain cap must still refuse it.
+            body["grant"]["resource_keys"] = serde_json::json!(["source_io:new"]);
+            assert!(propose(encode(&body).expect("retry"))
+                .await
+                .expect("current domain is full")
+                .is_empty());
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .execute("DELETE FROM source_leases WHERE work_id='peer'", [])
+                .expect("domain free");
+            assert!(!propose(encode(&body).expect("same epoch"))
+                .await
+                .expect("new domain admitted")
+                .is_empty());
+            let keys: String = store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT resource_keys_json FROM source_leases WHERE owner_kind='offline'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("lease uses current domain");
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&keys).expect("keys"),
+                ["source_io:new"]
+            );
+        }
+    }
+
     #[tokio::test]
     async fn offline_source_owner_uses_exact_package_generation_and_keeps_old_physical_custody() {
         let store = fixture();
@@ -3222,7 +3317,7 @@ fn background_owner_resources(owner: &BackgroundSourceOwner) -> String {
         BackgroundSourceOwner::Analysis{..}=>"SELECT resource_key FROM analysis_source_reservations WHERE request_id=json_extract($1,'$.request_id') AND fence=json_extract($1,'$.fence') AND expires_at_ms>json_extract($1,'$.now_ms')".to_owned(),
         BackgroundSourceOwner::ReadAttestation{..}|BackgroundSourceOwner::Offline{..}=>{
             let file=if matches!(owner,BackgroundSourceOwner::Offline{..}){"(SELECT file_id FROM offline_packages WHERE id=json_extract($1,'$.package_id'))"}else{"json_extract($1,'$.file_id')"};
-            format!("SELECT DISTINCT COALESCE('source_io:'||mapping.domain_id,'source_io') AS resource_key FROM files file JOIN items item ON item.id=file.item_id LEFT JOIN libraries library ON library.id=item.library_id LEFT JOIN json_each(CASE WHEN json_valid(library.paths) THEN library.paths ELSE '[]' END) root LEFT JOIN background_storage_domains mapping ON mapping.library_id=library.id AND mapping.root_path=root.value WHERE file.id={file}")
+            format!(source_file_resources!("{file}"), file=file)
         },
     }
 }
