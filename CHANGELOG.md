@@ -55,6 +55,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- F+ publishes chroma MMR coefficients on the Q12 grid tested on the native path and
+  qualifies their actual stored precision. The new fitting method reuses
+  existing statistics; new sessions wait for its replacement table while
+  existing digest pins retain their original coefficients.
 - A Raft apply that is cancelled or torn down mid-write (the Raft core
   stopping, the runtime shutting down) no longer takes the node's store
   writers down with it. The vendored Hiqlite SQLite writer and WAL writer

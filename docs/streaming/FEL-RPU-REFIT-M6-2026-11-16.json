@@ -112,5 +112,133 @@
   },
   "evidence_storage": "Original captures, media, per-frame RPU readbacks, parsed metadata, resource receipts and frozen/revised harnesses retained in the external task-owned receipt tree; original failed mux evidence preserved.",
   "resource_outcome": "All native phases exited0 and reaped owned children; Mac resources released before offline scoring.",
-  "acceptance": "Existing M6 exact FP16-bin overlap criterion retained; PR1565 remains draft pending native qualification and its required CI."
+  "acceptance": "Existing M6 exact FP16-bin overlap criterion retained; PR1565 remains draft pending native qualification and its required CI.",
+  "repair_candidate": {
+    "fit_version": "dv-refit-safe-v2-mmr12",
+    "state": "implementation candidate; production-bound full48 and CI pending",
+    "cause": "Fine-grid software qualification did not describe the native MMR mapping. All-six explicit coefficient-grid controls identify a compatible publication representation; no claim about the location of native quantization.",
+    "wire_denominator_bits": 23,
+    "published_mmr_fraction_bits": 12,
+    "rounding": "nearest ties away after Q23 wire normalization",
+    "luma_fraction_bits": 23,
+    "qualification_scores": "exact published coefficients",
+    "retention": "current selections require current fit method; existing pinned digests retain exact legacy coefficients",
+    "diagnostic": {
+      "name": "m6-oracle-q12six-20261116-v1/result.json",
+      "sha256": "8cd3cbb3787de71fa7a7953cef312dc21890a19aeffaaf057699f36905438c9a",
+      "selector_sha256": "02ef41b4439f70541f355cf61e6236d2f408bd1731a426bc9c07abaa285098b7",
+      "equivalence_proof_sha256": "b67f3cc1ac96485ec52fe2fab80ca645ad0675b502860e19a4f0f46455bc71de",
+      "controls": {
+        "constant_honored": true,
+        "identity_nonoverlap": true,
+        "repeat": true,
+        "uniform": true
+      },
+      "comparisons": {
+        "0": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            false
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "20": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "44": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "6": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            false,
+            false,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "7": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "9": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        }
+      },
+      "full48_qualified": false
+    }
+  }
 }

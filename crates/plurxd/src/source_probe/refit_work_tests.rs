@@ -10,8 +10,8 @@ use plurx_core::{
     },
     scan::dv_title::{DvTitleStats, TitleConstant},
     store::{
-        background_jobs::{BackgroundJob, CancelJob, JobState},
-        dv_refit_jobs::RefitVerdict,
+        background_jobs::{BackgroundJob, CancelJob, JobPublishOutcome, JobState},
+        dv_refit_jobs::{PublishRefitJob, RefitVerdict},
         dv_title_jobs::{PublishTitleJob, TitleOutput},
         SqliteStore, Store,
     },
@@ -605,6 +605,111 @@ async fn a_fake_helper_run_publishes_solved_and_refused_scenes() {
             .await
             .expect("by digest"),
         Some(table)
+    );
+}
+
+/// A fit-method upgrade stops new selections without rewriting a table an
+/// existing session pinned, including its legacy off-grid coefficients.
+#[tokio::test]
+async fn new_refit_selections_require_current_method_but_legacy_pins_keep_exact_curves() {
+    use crate::dv_refit_serving::{current_table, digest_bytes, pinned_table};
+
+    let fx = fixture().await;
+    let file = title(&fx, "fit-method-upgrade", 7, true).await;
+    let src = source(
+        &demand(&fx.store, file.id).await.expect("demand"),
+        &helper(),
+    );
+    let legacy_version = "dv-refit-safe-v1";
+    assert_ne!(FIT_VERSION, legacy_version, "the method upgrade is versioned");
+    let (mut legacy_title, mut legacy_scenes) =
+        dv_refit_title::fit(dv_refit_title::parse(mixed().as_bytes()).expect("run"))
+            .rows(&src)
+            .expect("rows");
+    legacy_title.fit_version = legacy_version.into();
+    let legacy_coefficients = legacy_scenes[0]
+        .coefficients
+        .as_mut()
+        .expect("first scene fitted");
+    // Retained v1 curves need not lie on the new method's Q12 grid.
+    legacy_coefficients.chroma[0][0] += 1;
+    let legacy_coefficients = legacy_coefficients.clone();
+    let legacy_pts = legacy_scenes[0].first_pts;
+    legacy_title.curve_digest = dv_refit_title::curve_digest(legacy_scenes.iter().map(|s| DigestScene {
+        first_frame: s.first_frame as u64,
+        frames: s.frames as u64,
+        first_pts: s.first_pts,
+        end_pts: s.end_pts,
+        time_base: &s.time_base,
+        coefficients: s.coefficients.as_ref(),
+    }));
+    let legacy_digest = digest_bytes(&legacy_title.curve_digest).expect("legacy digest");
+    let mut request = enqueue_request(&src, now_ms());
+    let JobPayload::DvRefit { fit_version, .. } = &mut request.payload else {
+        panic!("refit payload");
+    };
+    *fit_version = legacy_version.into();
+    request.dedupe_key = format!("dv-refit:{}", "f".repeat(64));
+    request.request.request_id = "f".repeat(64);
+    request.request.request_digest = "f".repeat(64);
+    let EnqueueOutcome::Accepted { job_id, .. } = fx
+        .store
+        .enqueue_job(request)
+        .await
+        .expect("enqueue legacy fit")
+    else {
+        panic!("legacy fit accepted");
+    };
+    let job = claim(&fx.store, &job_id, JobKind::DvRefit).await;
+    assert!(matches!(
+        fx.store
+            .publish_dv_refit_job(PublishRefitJob {
+                token: job.token.expect("token"),
+                title: legacy_title,
+                scenes: legacy_scenes,
+                now_ms: now_ms(),
+            })
+            .await
+            .expect("publish legacy fit"),
+        JobPublishOutcome::Published { .. }
+    ));
+    assert!(current_table(fx.store.as_ref(), &file)
+        .await
+        .expect("current selection")
+        .is_none());
+    let pinned = pinned_table(fx.store.as_ref(), &file, legacy_digest)
+        .await
+        .expect("legacy pin")
+        .expect("legacy table retained");
+    assert_eq!(
+        pinned.curves_at(legacy_pts).expect("legacy scene").quantised(),
+        legacy_coefficients
+    );
+
+    let found = demand(&fx.store, file.id).await.expect("new method demanded");
+    let src = source(&found, &helper());
+    let output = dv_refit_title::parse(mixed().as_bytes()).expect("run");
+    let (_, settlement) = fit_with(&fx.store, &src, Ok(HelperRun::Stats(output))).await;
+    assert!(settlement.is_none(), "{settlement:?}");
+    let current = table(&fx.store, file.id).await;
+    assert_eq!(current.title.fit_version, FIT_VERSION);
+    let selected = current_table(fx.store.as_ref(), &file)
+        .await
+        .expect("current selection")
+        .expect("current method selected");
+    assert_eq!(selected.digest(), current.title.curve_digest);
+    assert_ne!(selected.digest(), pinned.digest());
+    let retained = pinned_table(fx.store.as_ref(), &file, legacy_digest)
+        .await
+        .expect("superseded legacy pin")
+        .expect("legacy table retained after replacement");
+    assert_eq!(retained.digest(), pinned.digest());
+    assert_eq!(
+        retained
+            .curves_at(legacy_pts)
+            .expect("legacy scene")
+            .quantised(),
+        legacy_coefficients
     );
 }
 

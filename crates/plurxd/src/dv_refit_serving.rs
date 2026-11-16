@@ -18,6 +18,7 @@ use std::sync::Arc;
 use plurx_core::domain::MediaFile;
 use plurx_core::store::dv_refit_jobs::{RefitCurveTable, RefitVerdict};
 use plurx_core::store::Store;
+use plurx_core::transcode::dv_refit::FIT_VERSION;
 use plurx_core::transcode::dv_refit_serve::ServedCurveTable;
 use plurx_core::transcode::CopyVideoOptions;
 
@@ -153,6 +154,11 @@ async fn current_selection(
     else {
         return Ok(None);
     };
+    // A method change queues replacement fits, but its old table can remain
+    // current until publication. Only existing digest pins may keep using it.
+    if table.title.fit_version != FIT_VERSION {
+        return Ok(None);
+    }
     fitted_selection(&table)
 }
 

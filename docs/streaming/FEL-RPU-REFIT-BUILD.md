@@ -1,8 +1,10 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565,
-`359641a06` integrating main `90678ab468`. M6 has a measured native-oracle
-mismatch; physical equivalence and the PR's fast lane remain open.
+**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565.
+The Q23 MMR candidate failed native equivalence. The replacement method,
+`dv-refit-safe-v2-mmr12`, publishes and scores a common Q12 chroma grid;
+its six-input diagnostic passes, while production-bound full 48-point qualification
+and the PR's fast lane remain open.
 Milestone 7 follows served F+ scores · **Updated:** 2026-11-16 · **Written:** 2026-11-12 ·
 **Owner:** Codex (continuing Claude's reviewed candidate) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
@@ -87,9 +89,31 @@ Two independently reviewed component-isolation epochs reproduce the difference.
 Actual luma with constant chroma matches the oracle, as does eight-piece
 constant luma. Constant luma/Cb with actual Cr MMR exactly reproduces the
 actual output. This localizes the observation to Cr MMR at point 06; its
-underlying native-arithmetic or oracle-path cause is unresolved. No tolerance
-or production change follows from the diagnosis. Every native phase exited
-successfully, reaped its children and released the Mac before offline scoring.
+first isolation did not identify a repair. Subsequent equivalent-value
+programs demonstrated representation-dependent native results. Perturbing the
+constant oracle by ±1 Q23 LSB, and using a closer fractional reference, did not
+reproduce the actual output; the original round12-only float32 comparison was
+insufficient to test that question directly.
+
+The decisive counterfactual explicitly truncates each signed MMR coefficient
+toward zero to Q12 while retaining denominator 23, orders, pivots and luma.
+Native captures remain identical to the original at all six inputs. Rounding
+MMR coefficients to nearest Q12 instead then matches independently calculated
+constant references in all RGB channels at all six inputs. This establishes a
+usable coefficient compatibility boundary, not the location or precision of
+Apple's internal arithmetic. The design error was qualifying the fine-grid
+software curve independently of the effective native mapping.
+
+The repair makes the served coefficient grid explicit before qualification:
+nearest Q12 MMR after Q23 wire normalization, with Q23 luma unchanged. Held-out
+errors and stored-curve guards evaluate the exact coefficients publication
+writes. The method version changes so reusable statistics are solved again;
+new selections exclude obsolete methods while existing digest pins retain
+their exact coefficients. No threshold, acceptance tolerance or enable gate
+changes. The new production writer must be bound to these candidate curves
+before completing full 48-point; the diagnostic alone is not M6 qualification.
+Every native phase exited successfully, reaped its children and released the
+Mac before offline scoring.
 
 The initial mux failure was a diagnostic comparison of wall-clock stream
 creation tags. A reviewed harness correction excludes only that tag, as the
@@ -373,9 +397,13 @@ review of PR #1565):
 
 ### 3.4 Solving and guard rails
 
-The job solves each scene with `RefitStats::solve` (PR 1). A scene's curves
-are served only when all of these hold; otherwise that scene keeps identity
-curves:
+The job solves each scene with `RefitStats::solve` (PR 1). The optimizer
+retains its fine-grid reference result. `servable` normalizes luma to Q23 and
+chroma MMR coefficients to nearest Q12 on the Q23 wire grid. The stored
+integers, held-out error and shape/departure checks use that published program,
+not the finer optimizer coefficients. The RPU denominator remains 23; new MMR
+numerators have eleven zero low bits. A scene's curves are served only when
+all of these hold; otherwise that scene keeps identity curves:
 - the luma curve rises;
 - every coefficient is writable, in [−64, 63);
 - the luma curve departs from identity by ≤ 256 12-bit codes;
@@ -625,10 +653,11 @@ completed applicable results.
      a dv_patch_clips run on macOS against a served fragment shows A == B.
      This remains open: the historical control measured improvement, while the
      2026-11-16 six-point native run has valid controls but point 06 fails
-     exact FP16-bin overlap in red and green; the linked native receipt records
-     Cr-MMR isolation. Preserve the criterion; do not substitute a recovery
-     percentage or an invented RGB tolerance. Resolve the six-point failure
-     before completing the remaining 42 points.
+     exact FP16-bin overlap in red and green. The linked receipt retains that
+     failure and the common-grid repair diagnostic: nearest-Q12 MMR agrees
+     with independent references at all six inputs. Bind the production
+     candidate to the tested program, then complete the remaining 42. Preserve
+     the exact overlap criterion; no recovery percentage or invented tolerance.
 7. **Re-encode trials (§5):** plan first, then build.
 
 ## 7. Non-goals
