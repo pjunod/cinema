@@ -2854,11 +2854,6 @@ would reload. `plurx_applied_view_proof{mode}`,
 answer now, and `plurx_hiqlite_read_pool_wait_seconds` is the wait for a local
 read-pool connection. Settings → Developer → Applied view shows the same facts.
 
-`plurx_hiqlite_writer_abandoned_replies_total{request,outcome}` counts store
-writer replies nobody was waiting for (a cancelled Raft apply or a teardown);
-zero outside shutdown. The node log's `SQL writer reply abandoned` warning has
-the request, applied index and error.
-
 Since E1b, request-path settings reads answer from this replica while it
 holds the proof; `reason="floor"` is this node reading back its own settings
 write until its replica applied it, `reason="reload_in_flight"` a page that
