@@ -3022,7 +3022,7 @@ mod processed_selection_has_no_software_gates {
     fn every_catalog_start_is_offered_processing() {
         let source = include_str!("http/hls/create.rs");
         let guard = source
-            .split_once("let processed_upgrade_applies = if")
+            .split_once("let processed_upgrade_applies =")
             .expect("processed upgrade guard")
             .1
             .split_once("processed_upgrade_gates(")

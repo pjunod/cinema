@@ -20,11 +20,13 @@ fn restored_request(playback: &str) -> crate::transcode::SessionRequest {
     // the intent must take the ask's.
     request.hdr10 = false;
     request.automatic = false;
-    request.candidate_context = Some(Box::new(crate::transcode::continuous_test_candidate_context(
-        plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x41; 32]),
-        [0x41; 32],
-        2160,
-    )));
+    request.candidate_context = Some(Box::new(
+        crate::transcode::continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x41; 32]),
+            [0x41; 32],
+            2160,
+        ),
+    ));
     request
 }
 
@@ -96,7 +98,8 @@ fn a_handed_over_start_registers_from_its_restored_request_without_viewer_eviden
         average_bps: Some(20_000_000),
         peak_bps: None,
     });
-    let before = crate::playback_control::processed_upgrade_registration_count(true, Outcome::Registered);
+    let before =
+        crate::playback_control::processed_upgrade_registration_count(true, Outcome::Registered);
     assert_eq!(
         super::processed_upgrade::register_owned(
             owned(&ids, &request),
@@ -108,8 +111,14 @@ fn a_handed_over_start_registers_from_its_restored_request_without_viewer_eviden
     let intent = super::processed_upgrade::waiting_intent(&ids.session).expect("waiting intent");
     assert_eq!(intent.incarnation_id, ids.incarnation);
     assert_eq!(intent.playback_id, ids.playback);
-    assert!(intent.hdr10_intent && intent.auto_policy, "the ask's facts, not the request's");
-    assert!(intent.request.candidate_context.is_some(), "the restored context");
+    assert!(
+        intent.hdr10_intent && intent.auto_policy,
+        "the ask's facts, not the request's"
+    );
+    assert!(
+        intent.request.candidate_context.is_some(),
+        "the restored context"
+    );
     assert!(intent.network.is_none() && intent.network_prior.is_none());
     assert!(intent.incumbent_receipt.is_none());
     assert_eq!(
@@ -155,7 +164,10 @@ fn the_owner_start_registers_a_created_handed_over_start_and_never_a_replay() {
         None,
         "a replay registers nothing"
     );
-    assert!(super::processed_upgrade::is_running(&ids.session), "the running upgrade is untouched");
+    assert!(
+        super::processed_upgrade::is_running(&ids.session),
+        "the running upgrade is untouched"
+    );
     drop(run);
     super::processed_upgrade::cancel_for_session(&ids.session);
 }
@@ -164,7 +176,9 @@ fn the_owner_start_registers_a_created_handed_over_start_and_never_a_replay() {
 /// viewer evidence and no handed-over admission.
 #[test]
 fn a_local_registration_keeps_the_viewers_evidence() {
-    use super::processed_upgrade::{IntentOrigin, Registration, RegistrationSource, ViewerEvidence};
+    use super::processed_upgrade::{
+        IntentOrigin, Registration, RegistrationSource, ViewerEvidence,
+    };
     let ids = ids();
     let mut request = restored_request(&ids.playback);
     request.candidate_context = None;
@@ -196,7 +210,8 @@ fn a_handed_over_start_without_its_context_records_a_named_skip() {
     let ids = ids();
     let mut request = restored_request(&ids.playback);
     request.candidate_context = None;
-    let before = crate::playback_control::processed_upgrade_registration_count(true, Outcome::Skipped);
+    let before =
+        crate::playback_control::processed_upgrade_registration_count(true, Outcome::Skipped);
     assert_eq!(
         super::processed_upgrade::register_owned(
             owned(&ids, &request),
@@ -209,7 +224,9 @@ fn a_handed_over_start_without_its_context_records_a_named_skip() {
     let skip = super::processed_upgrade::processing_skip(&ids.session, &ids.incarnation)
         .expect("the named skip for this generation");
     assert_eq!(skip.reason, HANDED_OVER_WITHOUT_CONTEXT);
-    assert!(super::processed_upgrade::processing_skip(&ids.session, "another-generation").is_none());
+    assert!(
+        super::processed_upgrade::processing_skip(&ids.session, "another-generation").is_none()
+    );
     assert!(
         crate::playback_control::processed_upgrade_registration_count(true, Outcome::Skipped)
             > before
@@ -222,7 +239,9 @@ fn a_handed_over_start_without_its_context_records_a_named_skip() {
 /// any other start, and its trial's recipe is admitted.
 #[test]
 fn auto_handed_over_without_link_evidence_registers_and_admits_its_trial() {
-    use super::processed_upgrade::{handed_over_auto_admission, IntentOrigin, Registration, RegistrationSource};
+    use super::processed_upgrade::{
+        handed_over_auto_admission, IntentOrigin, Registration, RegistrationSource,
+    };
     let ids = ids();
     let request = restored_request(&ids.playback);
     let mut ask = handoff_ask(true);
@@ -343,9 +362,13 @@ async fn the_relayed_control_exchange_starts_the_upgrade_and_returns_the_skip() 
         },
     });
     let scheduled = crate::playback_control::processed_upgrade_count("scheduled");
+    // One client instance across both exchanges, so the second is the next
+    // in its sequence rather than a stale fence.
+    let base = control_request(route.incarnation_id.clone());
     let relay = |sequence: u64| {
-        let mut control = control_request(route.incarnation_id.clone());
+        let mut control = base.clone();
         control.sequence = sequence;
+        control.position_ms = 1_000 + 1_000 * sequence as i64;
         crate::playback_control::ControlRelayRequest {
             session_id: session_id.clone(),
             generation: route.incarnation_id.clone(),
@@ -359,11 +382,16 @@ async fn the_relayed_control_exchange_starts_the_upgrade_and_returns_the_skip() 
         crate::http::internal_media_sessions::control_authorized(fixture.state.clone(), relay(1))
             .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(!super::processed_upgrade::is_waiting(&session_id), "the exchange took it");
+    assert!(
+        !super::processed_upgrade::is_waiting(&session_id),
+        "the exchange took it"
+    );
     assert!(crate::playback_control::processed_upgrade_count("scheduled") > scheduled);
 
-    // A named skip for this generation rides back on the relay.
+    // A named skip for this generation rides back on the relay, on the
+    // next exchange at the real control cadence.
     super::processed_upgrade::cancel_for_session(&session_id);
+    tokio::time::sleep(std::time::Duration::from_millis(260)).await;
     let mut skipped = restored_request(&playback);
     skipped.candidate_context = None;
     super::processed_upgrade::register_owned(
@@ -388,10 +416,15 @@ async fn the_relayed_control_exchange_starts_the_upgrade_and_returns_the_skip() 
         .to_str()
         .expect("ASCII")
         .to_owned();
-    let report =
-        super::processed_upgrade::ProcessingSkip::from_owner_wire(header.as_bytes(), &route.incarnation_id)
-            .expect("the ingress accepts it");
-    assert_eq!(report.reason, super::processed_upgrade::HANDED_OVER_WITHOUT_CONTEXT);
+    let report = super::processed_upgrade::ProcessingSkip::from_owner_wire(
+        header.as_bytes(),
+        &route.incarnation_id,
+    )
+    .expect("the ingress accepts it");
+    assert_eq!(
+        report.reason,
+        super::processed_upgrade::HANDED_OVER_WITHOUT_CONTEXT
+    );
     super::processed_upgrade::cancel_for_session(&session_id);
 }
 
@@ -430,7 +463,10 @@ async fn a_peer_abort_cancels_the_owners_running_upgrade() {
         },
     )
     .await;
-    assert!(run.cancelled().is_cancelled(), "the trial's token is cancelled");
+    assert!(
+        run.cancelled().is_cancelled(),
+        "the trial's token is cancelled"
+    );
     assert!(!super::processed_upgrade::is_running(&session_id));
 }
 
@@ -464,13 +500,21 @@ async fn the_owner_registers_a_remote_successor_only_while_its_route_is_current(
     let mut without = recipe.clone();
     without.processed_upgrade = None;
     assert_eq!(
-        super::processed_upgrade::register_handed_over_successor(&fixture.state, without, &session_id)
-            .await,
+        super::processed_upgrade::register_handed_over_successor(
+            &fixture.state,
+            without,
+            &session_id
+        )
+        .await,
         None
     );
     assert_eq!(
-        super::processed_upgrade::register_handed_over_successor(&fixture.state, recipe, &session_id)
-            .await,
+        super::processed_upgrade::register_handed_over_successor(
+            &fixture.state,
+            recipe,
+            &session_id
+        )
+        .await,
         Some(super::processed_upgrade::Registration::Waiting)
     );
     let (intent, run) =
@@ -522,7 +566,10 @@ fn a_handed_over_auto_upgrade_admits_only_the_ingress_admitted_recipe() {
     )
     .selected_candidate;
     let admitted = crate::media_sessions::AdmittedProcessedRecipe::of(&candidate);
-    assert_eq!(handed_over_auto_admission(Some(&admitted), false, &candidate), Ok(()));
+    assert_eq!(
+        handed_over_auto_admission(Some(&admitted), false, &candidate),
+        Ok(())
+    );
     let mut froze = candidate.clone();
     froze.recipe_digest = [0x44; 32];
     assert_eq!(
@@ -578,7 +625,10 @@ fn route_file_id(route: &MediaSessionRoute) -> i64 {
 }
 
 /// A probed 4K source for the fixture's route, so the trial height is known.
-async fn probe_4k(fixture: &HlsDeliveryFixture, route: &MediaSessionRoute) -> plurx_core::domain::MediaFile {
+async fn probe_4k(
+    fixture: &HlsDeliveryFixture,
+    route: &MediaSessionRoute,
+) -> plurx_core::domain::MediaFile {
     let unprobed = fixture
         .store
         .get_file(route_file_id(route))
@@ -641,15 +691,44 @@ async fn a_handed_over_auto_admission_after_the_trial_admits_only_the_admitted_r
         },
     };
     let consulted = intent(false);
-    assert!(admit_processed_candidate(&fixture.state, &consulted, &source, &route, &frozen,
-        AdmissionStage::AfterTrial).await.is_ok(), "the admitted recipe stages");
+    assert!(
+        admit_processed_candidate(
+            &fixture.state,
+            &consulted,
+            &source,
+            &route,
+            &frozen,
+            AdmissionStage::AfterTrial
+        )
+        .await
+        .is_ok(),
+        "the admitted recipe stages"
+    );
     assert_eq!(
-        admit_processed_candidate(&fixture.state, &consulted, &source, &route, &other,
-            AdmissionStage::AfterTrial).await,
+        admit_processed_candidate(
+            &fixture.state,
+            &consulted,
+            &source,
+            &route,
+            &other,
+            AdmissionStage::AfterTrial
+        )
+        .await,
         Err(super::processed_upgrade::HANDED_OVER_AUTO_RECIPE_CHANGED.to_owned())
     );
-    assert!(admit_processed_candidate(&fixture.state, &intent(true), &source, &route, &other,
-        AdmissionStage::AfterTrial).await.is_ok(), "no link evidence admits the trial's recipe");
+    assert!(
+        admit_processed_candidate(
+            &fixture.state,
+            &intent(true),
+            &source,
+            &route,
+            &other,
+            AdmissionStage::AfterTrial
+        )
+        .await
+        .is_ok(),
+        "no link evidence admits the trial's recipe"
+    );
 }
 
 /// Test plan 9 before the trial, where the owner's catalog describes the
@@ -668,7 +747,10 @@ async fn a_handed_over_auto_run_is_refused_before_its_trial_unless_its_recipe_wa
             },
             Some(super::processed_upgrade::HANDED_OVER_AUTO_RECIPE_CHANGED),
         ),
-        (crate::media_sessions::AdmittedProcessedRecipe::of(&described), None),
+        (
+            crate::media_sessions::AdmittedProcessedRecipe::of(&described),
+            None,
+        ),
     ] {
         let dir = crate::test_tempdir().expect("state dir");
         let playback = unique_playback_id("handoff-auto-admission");
@@ -707,12 +789,13 @@ async fn a_handed_over_auto_run_is_refused_before_its_trial_unless_its_recipe_wa
         match expected_reason {
             Some(reason) => {
                 assert_eq!(outcome, "admission_refused");
-                assert!(!reached.load(std::sync::atomic::Ordering::SeqCst), "no GPU spent");
-                let skip = super::processed_upgrade::processing_skip(
-                    &session_id,
-                    &route.incarnation_id,
-                )
-                .expect("the named skip the relayed exchange returns");
+                assert!(
+                    !reached.load(std::sync::atomic::Ordering::SeqCst),
+                    "no GPU spent"
+                );
+                let skip =
+                    super::processed_upgrade::processing_skip(&session_id, &route.incarnation_id)
+                        .expect("the named skip the relayed exchange returns");
                 assert_eq!(skip.reason, reason);
             }
             None => {
@@ -735,7 +818,8 @@ async fn a_handed_over_run_reads_the_owners_catalog_before_its_trial() {
     let playback = unique_playback_id("handoff-owner-catalog");
     let (fixture, session_id, route) = staging_fixture_for_playback(dir.path(), &playback).await;
     let source = probe_4k(&fixture, &route).await;
-    let (mut intent, run, _) = upgrade_after_playing_to(&fixture, &session_id, &route, 60_000).await;
+    let (mut intent, run, _) =
+        upgrade_after_playing_to(&fixture, &session_id, &route, 60_000).await;
     intent.origin = super::processed_upgrade::IntentOrigin::HandedOver {
         admitted: None,
         link_unconsulted: true,
@@ -788,9 +872,11 @@ async fn a_handed_over_run_reads_the_owners_catalog_before_its_trial() {
     // A local intent keeps the catalog its create held (or none).
     let mut local = intent.clone();
     local.origin = super::processed_upgrade::IntentOrigin::Local;
-    assert!(super::processed_upgrade::handed_over_catalog(&fixture.state, &local)
-        .await
-        .is_none());
+    assert!(
+        super::processed_upgrade::handed_over_catalog(&fixture.state, &local)
+            .await
+            .is_none()
+    );
     drop(run);
     super::processed_upgrade::cancel_for_session(&session_id);
 }
@@ -815,31 +901,71 @@ async fn the_ingress_hands_over_its_verdict_and_admits_auto_for_the_chosen_owner
     let auto = handoff_ask(true);
 
     assert_eq!(
-        super::handed_over_ask(&state, None, true, &no_identity, &request, Some(&source), "media2").await,
+        super::handed_over_ask(
+            &state,
+            None,
+            true,
+            &no_identity,
+            &request,
+            Some(&source),
+            "media2"
+        )
+        .await,
         None,
         "no verdict, no ask"
     );
     assert_eq!(
-        super::handed_over_ask(&state, Some(&manual), true, &no_identity, &request, Some(&source), &state.node_id)
-            .await,
+        super::handed_over_ask(
+            &state,
+            Some(&manual),
+            true,
+            &no_identity,
+            &request,
+            Some(&source),
+            &state.node_id
+        )
+        .await,
         None,
         "this node registers its own"
     );
     assert_eq!(
-        super::handed_over_ask(&state, Some(&manual), true, &no_identity, &request, Some(&source), "media2")
-            .await,
+        super::handed_over_ask(
+            &state,
+            Some(&manual),
+            true,
+            &no_identity,
+            &request,
+            Some(&source),
+            "media2"
+        )
+        .await,
         Some(manual.clone())
     );
     assert_eq!(
-        super::handed_over_ask(&state, Some(&manual), false, &no_identity, &request, Some(&source), "media2")
-            .await,
+        super::handed_over_ask(
+            &state,
+            Some(&manual),
+            false,
+            &no_identity,
+            &request,
+            Some(&source),
+            "media2"
+        )
+        .await,
         None,
         "with the control protocol off the owner has no proof of the first frame: nothing travels"
     );
-    let unconsulted =
-        super::handed_over_ask(&state, Some(&auto), true, &no_identity, &request, Some(&source), "media3")
-            .await
-            .expect("the ask travels");
+    let unconsulted = super::handed_over_ask(
+        &state,
+        Some(&auto),
+        true,
+        &no_identity,
+        &request,
+        Some(&source),
+        "media3",
+    )
+    .await
+    .expect("the ask travels");
     assert!(unconsulted.link_unconsulted && unconsulted.admitted.is_none());
 
     // A viewer with a network identity, and network priors on: the link
@@ -853,24 +979,46 @@ async fn the_ingress_hands_over_its_verdict_and_admits_auto_for_the_chosen_owner
         network: Some(crate::telemetry::NetworkIdentity {
             client_class: "web".to_owned(),
             network_fingerprint: "handoff".to_owned(),
-            credential_generation: None,
+            credential_generation: Some(plurx_core::domain::CredentialGeneration::from(
+                "handoff-gen".to_owned(),
+            )),
             user_id: Some(i64::MAX),
         }),
         ..Default::default()
     };
-    let sent = super::handed_over_ask(&state, Some(&auto), true, &identified, &request, Some(&source), "media2")
-        .await
-        .expect("the ask travels");
+    let sent = super::handed_over_ask(
+        &state,
+        Some(&auto),
+        true,
+        &identified,
+        &request,
+        Some(&source),
+        "media2",
+    )
+    .await
+    .expect("the ask travels");
     assert!(!sent.link_unconsulted);
     assert_eq!(
         sent.admitted,
-        Some(crate::media_sessions::AdmittedProcessedRecipe::of(&described))
+        Some(crate::media_sessions::AdmittedProcessedRecipe::of(
+            &described
+        ))
     );
-    let elsewhere =
-        super::handed_over_ask(&state, Some(&auto), true, &identified, &request, Some(&source), "media3")
-            .await
-            .expect("the ask still travels, so the owner names its skip");
-    assert_eq!(elsewhere.admitted, None, "another node's row admits nothing for this owner");
+    let elsewhere = super::handed_over_ask(
+        &state,
+        Some(&auto),
+        true,
+        &identified,
+        &request,
+        Some(&source),
+        "media3",
+    )
+    .await
+    .expect("the ask still travels, so the owner names its skip");
+    assert_eq!(
+        elsewhere.admitted, None,
+        "another node's row admits nothing for this owner"
+    );
     assert!(!elsewhere.link_unconsulted);
 
     // What the start says about it, on the ingress.
@@ -924,7 +1072,10 @@ fn a_full_registry_is_counted_not_silent() {
         Registration::Full,
         "a skip the full registry could not record is reported as full"
     );
-    assert!(crate::playback_control::processed_upgrade_registration_count(true, Outcome::Full) >= before + 2);
+    assert!(
+        crate::playback_control::processed_upgrade_registration_count(true, Outcome::Full)
+            >= before + 2
+    );
     for session in filled {
         super::processed_upgrade::cancel_for_session(&session);
     }

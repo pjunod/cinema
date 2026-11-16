@@ -897,8 +897,7 @@ pub(super) async fn handed_over_ask(
     }
     let admitted = match source {
         Some(source) => {
-            super::processed_upgrade::admit_for_owner(state, evidence, request, source, owner)
-                .await
+            super::processed_upgrade::admit_for_owner(state, evidence, request, source, owner).await
         }
         None => Err("the source row is unavailable".to_owned()),
     };

@@ -312,7 +312,7 @@
         );
         assert!(include_str!("../processed_upgrade.rs").contains(".prepare_processed_upgrade("));
         let gates = create
-            .split_once("let processed_upgrade_applies = if pinned_owner")
+            .split_once("let processed_upgrade_applies =")
             .expect("the create's processed gates")
             .1
             .split_once("let advertise_control")
@@ -336,7 +336,7 @@
                 .split_once("Ok(Json(response))")
                 .expect("the answer")
                 .0
-                .contains("super::processed_upgrade::register("),
+                .contains("super::processed_upgrade::register_owned("),
             "an applicable upgrade waits for the first frame on the owning node"
         );
         let degraded = source
