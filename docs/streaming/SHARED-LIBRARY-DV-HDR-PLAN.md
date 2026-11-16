@@ -435,7 +435,7 @@ is withheld in the effective recipe itself (`normalize_wire`), so an older
 owner reads an ordinary recipe and a non-DV recipe is byte-identical; the
 shared decision withholds the same way; a non-P5 DV copy head needs a known
 base; a Source Start never renders a processed first window. The DV strip
-fixtures ran with jellyfin-ffmpeg 8.1 (`dovi_rpu`) on m6: strip, conversion,
+fixtures ran with jellyfin-ffmpeg 8.1 (`dovi_rpu`) on a lab node: strip, conversion,
 unaffirmed and the cold strip index pass there. Under FFmpeg 8.1 a Profile
 8.1 preserve copy's init carried no `dvvC` and the base encode did not start;
 both pass on the gate's FFmpeg 6.1 and are open questions for M2.
