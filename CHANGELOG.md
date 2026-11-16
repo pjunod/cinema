@@ -18,7 +18,6 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-<<<<<<< HEAD
 - An idle cluster no longer pays a settings quorum read per background-loop tick to learn that
   nothing changed. The offline source probe loop and the media-session lease loop check this node's own
   replica (and, for leases, its own registry) before their authoritative read; the playback cache
@@ -28,7 +27,6 @@ bump may break compatibility and a **patch** bump never does.
   Still paid every tick: the recording loop's row listings, the reminder loop's transition write,
   and the background lanes' and subtitle passes' queue reads (cluster layer audit, item A4,
   [build plan](docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md)).
-=======
 - Linux replicated servers validate actual-host reboot identity before serving;
   required deployment mounts preserve source-custody recovery after a reboot.
 - Android prepared Dolby Vision handoffs now keep the executing playback choice
@@ -39,7 +37,6 @@ bump may break compatibility and a **patch** bump never does.
 - Android reports its playhead in title time for streams that began at a
   resume point, so a processed HDR upgrade starts where the viewer is instead
   of minutes behind them.
->>>>>>> claude/store-read-attribution
 - Signed node-to-node requests (`PeerTransport`) reuse connections: the membership manager owns
   one pooled client with a two-second connect bound, and every peer transport takes it. Before, each of about twenty
   call sites built its own client — the peer-status loop a new one every three seconds — so
