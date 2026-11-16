@@ -3929,3 +3929,63 @@ async fn shared_decision_reports_a_locally_indexed_dolby_vision_title_as_indexed
         "the Source decision must find the index local playback built for this Dolby Vision copy"
     );
 }
+
+/// The shared decision a receiver shows is the Start it gets: without the
+/// receiver's Dolby Vision affirmation a Profile 8.1 title is planned as its
+/// HDR10 base, with it as Dolby Vision.
+#[tokio::test]
+async fn shared_decision_withholds_dolby_vision_from_an_unaffirmed_receiver() {
+    use plurx_core::playback::PlaybackMethod;
+    let _serial = BODY_FIXTURES.lock().await;
+    let mut fixture = body_fixture().await;
+    fixture.state.system = Arc::new(crate::state::SystemInfo {
+        dovi_rpu: true,
+        ..(*fixture.state.system).clone()
+    });
+    let source = fixture._directory.path().join("p81.mkv");
+    std::fs::write(&source, b"planning fixture source presence").expect("source");
+    let writer = rusqlite::Connection::open(&fixture.path).expect("writer");
+    writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,video_profile,width,height,bit_depth,bitrate,hdr,hdr_format,dv_profile,dv_level,dv_bl_compat_id,dv_el_present,dv_rpu_present,audio_streams) VALUES(0,?1,?2,20,1000,60000,'mkv','hevc','Main 10',3840,2160,10,1000000,'dolby_vision','Dolby Vision · Profile 8.1 (HDR10-compatible)',8,6,1,0,1,'[{\"index\":0,\"codec\":\"aac\",\"channels\":2,\"default\":true}]')",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("Source file");
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(json!({
+        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"max_height":2160,"present":["sdr","pq"],"dv_profiles":[8]}],
+        "audio":["aac"],"containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls"
+    })).expect("caps");
+    let file = fixture
+        .state
+        .store
+        .get_file(0)
+        .await
+        .expect("file read")
+        .expect("file");
+    let mut affirming = axum::http::HeaderMap::new();
+    affirming.insert(
+        super::super::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+        super::super::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE
+            .parse()
+            .expect("header"),
+    );
+    let decide = |headers: axum::http::HeaderMap| {
+        let caps = super::super::shared_playback::receiver_decision_caps(&headers, caps.clone());
+        let state = fixture.state.clone();
+        let file = file.clone();
+        async move {
+            super::super::stream::decision_for_source_file(
+                &state,
+                file,
+                super::super::stream::Caps {
+                    caps_v2: Some(caps),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("shared decision")
+        }
+    };
+    let withheld = decide(axum::http::HeaderMap::new()).await;
+    assert_eq!(withheld.decision.method, PlaybackMethod::Remux);
+    assert!(!withheld.decision.preserve_dolby_vision);
+    assert_eq!(withheld.decision.delivered_dynamic_range, "hdr10");
+    let affirmed = decide(affirming).await;
+    assert!(affirmed.decision.preserve_dolby_vision);
+    assert_eq!(affirmed.decision.delivered_dynamic_range, "dolby_vision");
+}

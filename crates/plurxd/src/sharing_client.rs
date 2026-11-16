@@ -472,7 +472,13 @@ impl PeerConnection {
                 .method(method)
                 .uri(path)
                 .header(header::HOST, &self.host)
-                .header(header::ACCEPT, "application/json");
+                .header(header::ACCEPT, "application/json")
+                // This receiver relays a Dolby Vision Start; the Source's
+                // shared decision plans Dolby Vision only when it is told so.
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+                );
             if let Some(secret) = credential {
                 let mut value = HeaderValue::from_str(&format!("CinemaShare {}", secret.expose()))
                     .map_err(|_| PeerError::InvalidResponse)?;
