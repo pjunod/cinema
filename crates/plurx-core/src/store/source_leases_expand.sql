@@ -122,6 +122,16 @@ BEGIN
   WHERE lease_id='lease:'||NEW.resource||':'||NEW.fence;
 END;
 -- next statement
+-- An offline reader renews its lease by taking service: every grant (at
+-- most one epoch, 5 s, long) extends it to one job lease past the grant.
+CREATE TRIGGER source_lease_offline_renew AFTER INSERT ON background_job_commands
+WHEN NEW.operation='source_service' AND NEW.result_json<>'false'
+BEGIN
+  UPDATE source_leases SET expires_at_ms=MAX(expires_at_ms,json_extract(NEW.request_json,'$.now_ms')+30000),
+    renewed_at_ms=json_extract(NEW.request_json,'$.now_ms')
+  WHERE lease_id=json_extract(NEW.request_json,'$.owner_key') AND owner_kind='offline';
+END;
+-- next statement
 CREATE TRIGGER source_lease_offline_end AFTER UPDATE ON offline_packages
 WHEN OLD.state='preparing' AND (NEW.state!='preparing' OR NEW.claim_generation!=OLD.claim_generation OR NEW.node_id IS NOT OLD.node_id)
 BEGIN
@@ -629,7 +639,10 @@ INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,ow
 SELECT custody.owner_kind||':'||custody.work_id||':'||custody.fence,custody.owner_kind,custody.work_id,custody.fence,
   CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
   custody.owner_json,custody.resource_keys_json,CASE WHEN custody.phase='paused' THEN 'paused' ELSE 'active' END,
-  custody.started_at_ms,custody.updated_at_ms,custody.authority_expires_at_ms
+  custody.started_at_ms,custody.updated_at_ms,
+  -- An offline holder carries a job-length lease; a reader still taking
+  -- service renews it (source_lease_offline_renew).
+  CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
 FROM background_source_current_owners custody
 WHERE custody.owner_kind IN ('lease','offline') AND custody.authority_expires_at_ms>0 AND custody.fence>0
   AND CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END IS NOT NULL;

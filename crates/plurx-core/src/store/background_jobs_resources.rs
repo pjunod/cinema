@@ -2259,6 +2259,51 @@ mod source_tests {
             .await
             .expect("only after blocking join"));
     }
+    /// Mutations: register the offline lease with the package's expiry, or
+    /// drop `source_lease_offline_renew`.
+    #[tokio::test]
+    async fn an_offline_lease_lives_while_its_reader_takes_service() {
+        let store = fixture();
+        let package = uuid::Uuid::new_v4().to_string();
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO offline_packages VALUES(?1,'worker',1,100,1,1,'preparing',604800)",
+                [&package],
+            )
+            .expect("offline claim with a seven-day package");
+        let owner = BackgroundSourceOwner::Offline {
+            package_id: package.clone(),
+            node_id: "worker".into(),
+            claim_generation: 1,
+        };
+        assert!(matches!(
+            register_background_typed(&store, owner.clone(), 1_000)
+                .await
+                .expect("register"),
+            BackgroundSourceRegistration::Registered(_)
+        ));
+        let expiry = || {
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT expires_at_ms FROM source_leases WHERE owner_kind='offline'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("offline lease")
+        };
+        assert_eq!(expiry(), 31_000, "a job-length lease, not the package's");
+        assert!(claim_background_service(&store, owner, 20_000)
+            .await
+            .expect("service")
+            .is_some());
+        assert_eq!(expiry(), 50_000, "reading renews it");
+    }
     #[tokio::test]
     async fn offline_source_owner_uses_exact_package_generation_and_keeps_old_physical_custody() {
         let store = fixture();
@@ -2551,9 +2596,24 @@ pub(super) async fn register_background_custody<T: QueueSql>(
     let (kind, work, fence, node, expiry) = match &owner {
         BackgroundSourceOwner::ReadAttestation { .. } => {
             identity=format!("{identity} AND EXISTS(SELECT 1 FROM job_leases exact WHERE exact.resource=json_extract($1,'$.lease.resource') AND exact.revision=json_extract($1,'$.lease.revision') AND exact.expires_at_ms=json_extract($1,'$.lease.expires_at_unix_ms'))");
-            ("lease","json_extract($1,'$.lease.resource')","json_extract($1,'$.lease.fence')","json_extract($1,'$.lease.owner_node_id')","json_extract($1,'$.lease.expires_at_unix_ms')")
+            (
+                "lease",
+                "json_extract($1,'$.lease.resource')",
+                "json_extract($1,'$.lease.fence')",
+                "json_extract($1,'$.lease.owner_node_id')",
+                "json_extract($1,'$.lease.expires_at_unix_ms')",
+            )
         }
-        _ => ("offline","json_extract($1,'$.package_id')","json_extract($1,'$.claim_generation')","json_extract($1,'$.node_id')","(SELECT expires_at*1000 FROM offline_packages WHERE id=json_extract($1,'$.package_id'))"),
+        // An offline reader holds a job-length lease, renewed by its own
+        // service grants (`source_lease_offline_renew`), so a dead node's
+        // reader frees like any other instead of at the package's expiry.
+        _ => (
+            "offline",
+            "json_extract($1,'$.package_id')",
+            "json_extract($1,'$.claim_generation')",
+            "json_extract($1,'$.node_id')",
+            OFFLINE_LEASE_EXPIRY,
+        ),
     };
     let now = "json_extract($1,'$.now_ms')";
     let blocked = foreground_blocks("required.resource_key", now);
@@ -2567,6 +2627,8 @@ pub(super) async fn register_background_custody<T: QueueSql>(
       RETURNING 'true' AS result_json"#),encode(&body)?,true,true).await?;
     Ok(token(rows))
 }
+const OFFLINE_LEASE_EXPIRY: &str = "json_extract($1,'$.now_ms')+30000";
+const _: () = assert!(super::background_jobs::JOB_LEASE_MS == 30_000);
 /// A lease id is the owner's key, or (for a coordinated analysis phase) the
 /// owner's key and its phase sequence.
 fn lease_of_owner(lease_id: &str, key: &str) -> bool {
