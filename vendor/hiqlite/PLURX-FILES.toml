@@ -41,6 +41,7 @@ patched = [
     "src/network/raft_server.rs",
     "src/network/snapshot_executor.rs",
     "src/network/web_socket_connect.rs",
+    "src/proposal_gate.rs",
     "src/query/mod.rs",
     "src/query/rows.rs",
     "src/reduction.rs",

@@ -28,6 +28,69 @@ impl VodServe {
         Some((session.last_control_snapshot.clone(), touched))
     }
 
+    /// Ask `session_id`'s own incumbent encoded rendition to give its encoder
+    /// permit to this viewer's processed upgrade trial, through the same
+    /// predecessor-yield handoff a staged successor uses.
+    ///
+    /// `None`, and nothing changed, unless every guard holds: the session is
+    /// live here, its rendition is encoded and holds a permit, only that
+    /// viewer's playback reads it, the trial's `wanted` would fit once that
+    /// permit returned, and the published runway already covers `reserve_ms`.
+    /// Another viewer's work is never asked: their renditions are not this
+    /// session's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn claim_incumbent_permit(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        wanted: crate::admission::TranscodeResourceEstimate,
+        hardware_limit: usize,
+        software_budget: usize,
+        reserve_ms: i64,
+    ) -> Option<IncumbentPermitClaim> {
+        let (rendition, playback_id) = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(session_id)?;
+            (
+                Arc::clone(session.live_rendition()?),
+                session.playback_id.clone(),
+            )
+        };
+        let encoding = rendition.recipe.encoding.as_ref()?;
+        if rendition.closed.load(Relaxed)
+            || !crate::prodexec::holds_permit(rendition.slot.belief().await, true)
+            || !encoding.admissions.live_fits_after_release(
+                hardware_limit,
+                software_budget,
+                &wanted,
+                &encoding.resources(),
+            )
+        {
+            return None;
+        }
+        let claim = Arc::new(TrialClaim {
+            playback_id,
+            incarnation: incarnation.to_owned(),
+            reserve_ms,
+            admitted: Arc::new(AtomicBool::new(false)),
+            token: StdMutex::new(None),
+            ready: Notify::new(),
+            closed: AtomicBool::new(false),
+            staged: AtomicBool::new(false),
+        });
+        if !trial_claim_bound(&self.shared, &rendition, &claim).await
+            || !rendition.request_trial_handoff(&claim, wanted)
+        {
+            return None;
+        }
+        rendition.kick();
+        Some(IncumbentPermitClaim {
+            claim,
+            incumbent: Arc::downgrade(&rendition),
+            admissions: encoding.admissions.clone(),
+        })
+    }
+
     /// Where the viewer of `session_id` is now on the source timeline: the
     /// latest newly accepted control demand, advanced by that observation's
     /// age the way the delivery driver reads it

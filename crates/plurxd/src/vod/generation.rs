@@ -178,6 +178,9 @@ pub(super) async fn spawn_generation(
         });
     #[cfg(not(target_os = "linux"))]
     let source_needed = true;
+    // Diagnostic only: the processed window's timing line reports it.
+    #[cfg(target_os = "linux")]
+    let source_open_started = tokio::time::Instant::now();
     let source_custody = if !source_needed {
         None
     } else if let Some(preparation) = rendition.preparation() {
@@ -261,6 +264,8 @@ pub(super) async fn spawn_generation(
             None => None,
         }
     };
+    #[cfg(target_os = "linux")]
+    let source_open = source_needed.then(|| source_open_started.elapsed());
     if let Some(observer) = source_custody
         .as_ref()
         .and_then(|input| input.foreground_observer())
@@ -369,6 +374,7 @@ pub(super) async fn spawn_generation(
                     Some(hook),
                     source_custody,
                     None,
+                    source_open,
                 )
                 .await
                 .and_then(|outcome| match outcome {

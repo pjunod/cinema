@@ -1027,47 +1027,83 @@ impl Drop for ReservedPreparationGuard {
     }
 }
 
+/// How a reservation that did not produce a guard ended.
+enum ReservationEnd {
+    Refused(PreparationStageRefusal),
+    /// The reservation answered `false` because an outside cancellation (a
+    /// foreground watch, a newer claim) had already landed: not a refusal.
+    Cancelled,
+}
+
 async fn reserve_preparation_before(
     active: ActivePreparedSuccessor,
-) -> Option<ReservedPreparationGuard> {
+) -> Result<ReservedPreparationGuard, ReservationEnd> {
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        if active
-            .executor
-            .reserve(&active.preparation)
-            .await
-            .is_ok_and(|reserved| reserved)
-        {
-            let _ = send.send(ReservedPreparationGuard::new(active));
-        } else {
-            settle_cancelled_preparation(active, "prepared successor reservation refused").await;
+        let result = active.executor.reserve(&active.preparation).await;
+        match result {
+            Ok(true) => {
+                let _ = send.send(Ok(ReservedPreparationGuard::new(active)));
+            }
+            refused => {
+                // Read before the settlement below, which cancels this same
+                // token itself and would make every refusal look cancelled.
+                let cancelled = matches!(refused, Ok(false)) && active.cancelled.is_cancelled();
+                let end = if cancelled {
+                    ReservationEnd::Cancelled
+                } else if refused.is_err() {
+                    ReservationEnd::Refused(PreparationStageRefusal::ReservationError)
+                } else {
+                    ReservationEnd::Refused(PreparationStageRefusal::ReservationRefused)
+                };
+                // Keep the original cleanup-before-return ordering. The outer
+                // budget covers reservation and this exact owner's settlement.
+                settle_cancelled_preparation(active, "prepared successor reservation refused")
+                    .await;
+                let _ = send.send(Err(end));
+            }
         }
     });
-    tokio::time::timeout(PREPARATION_STORE_BUDGET, receive)
-        .await
-        .ok()
-        .and_then(Result::ok)
+    match tokio::time::timeout(PREPARATION_STORE_BUDGET, receive).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(ReservationEnd::Refused(
+            PreparationStageRefusal::ReservationTaskClosed,
+        )),
+        Err(_) => Err(ReservationEnd::Refused(
+            PreparationStageRefusal::ReservationSettlementDeadline,
+        )),
+    }
 }
 
 async fn activate_preparation_before(
     guard: ReservedPreparationGuard,
-) -> Option<ReservedPreparationGuard> {
+) -> Result<ReservedPreparationGuard, PreparationStageRefusal> {
     let (send, receive) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let active = guard.active();
-        if active
-            .executor
-            .activate_reserved(&active.preparation)
-            .await
-            .is_ok_and(|activated| activated)
-        {
-            let _ = send.send(guard);
+        let result = active.executor.activate_reserved(&active.preparation).await;
+        match result {
+            Ok(true) => {
+                let _ = send.send(Ok(guard));
+            }
+            refused => {
+                let reason = if refused.is_err() {
+                    PreparationStageRefusal::ActivationError
+                } else {
+                    PreparationStageRefusal::ActivationRefused
+                };
+                // Publish the observed failure before this guard's own cleanup
+                // cancels the child. A closed receiver still drops the same guard.
+                let _ = send.send(Err(reason));
+                drop(guard);
+            }
         }
     });
-    tokio::time::timeout(PREPARATION_STORE_BUDGET, receive)
-        .await
-        .ok()
-        .and_then(Result::ok)
+    match tokio::time::timeout(PREPARATION_STORE_BUDGET, receive).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(PreparationStageRefusal::ActivationTaskClosed),
+        Err(_) => Err(PreparationStageRefusal::ActivationDeadline),
+    }
 }
 
 /// Last delivered selection of each *playback*, so a session that replaces
@@ -2534,8 +2570,73 @@ pub(super) async fn stage_prepared_successor_with_prime(
     .await;
 }
 
+/// The staging result is a lifecycle decision, not just a success bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparationStageOutcome {
+    Staged,
+    Cancelled,
+    Refused(PreparationStageRefusal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparationStageRefusal {
+    SettingUnavailable,
+    Disabled,
+    QualityIntentUnavailable,
+    RelocationSuperseded,
+    NoLocalWorkerGate,
+    SourceUnavailable,
+    PrincipalUnsupported,
+    RecipeSerialization,
+    ResponseSerialization,
+    PlanningCapsSerialization,
+    PlanningOverridesSerialization,
+    ReservationRefused,
+    ReservationError,
+    ReservationTaskClosed,
+    ReservationSettlementDeadline,
+    PrimeFailed,
+    PrimeNotReady,
+    ActivationRefused,
+    ActivationError,
+    ActivationTaskClosed,
+    ActivationDeadline,
+    UnprimedRefused,
+    UnprimedError,
+    UnprimedDeadline,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreparationStageCancellation {
+    QualityIntent,
+    BeforeReservation,
+    Reservation,
+    Prime,
+    PrimeReadiness,
+    Activation,
+}
+
+impl PreparationStageOutcome {
+    fn refused(session_id: &str, reason: PreparationStageRefusal) -> Self {
+        tracing::info!(target: "plurxd::http::hls",
+            session = %crate::transcode::session_log_id(session_id),
+            outcome = "refused", ?reason, "prepared successor staging ended");
+        crate::playback_control::record_preparation_staged(false);
+        Self::Refused(reason)
+    }
+
+    fn cancelled(session_id: &str, reason: PreparationStageCancellation) -> Self {
+        tracing::info!(target: "plurxd::http::hls",
+            session = %crate::transcode::session_log_id(session_id),
+            outcome = "cancelled", ?reason, "prepared successor staging ended");
+        crate::playback_control::record_preparation_staged(false);
+        Self::Cancelled
+    }
+}
+
 /// [`stage_prepared_successor_with_prime`] under identities the caller minted.
-/// True when the successor was activated (primed) or staged (unprimed).
+/// Preserve cancellation separately from a refused preparation: a live processed
+/// upgrade displaced by incumbent demand waits for its next rendering exchange.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn stage_prepared_successor_as(
     state: &AppState,
@@ -2549,23 +2650,30 @@ pub(super) async fn stage_prepared_successor_as(
     accepted: AcceptedAsk,
     prime_worker: bool,
     ids: StagedSuccessorIds,
-) -> bool {
+) -> PreparationStageOutcome {
     // Saving the switch off takes the write side, persists the choice, and
     // settles every registered successor before releasing it. Holding this
     // read side through the final setting read and stage closes the race where
     // an older detached candidate reserved after the administrator disabled
     // preparation.
     let _handoff_transition = prepared_handoff_transition().read_owned().await;
-    let enabled = state
+    let setting = match state
         .store
         .get_setting(plurx_core::store::keys::PREPARED_QUALITY_HANDOFF)
         .await
-        .ok()
-        .is_some_and(|value| plurx_core::store::stored_switch(value.as_deref(), true));
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::SettingUnavailable,
+            )
+        }
+    };
+    let enabled = plurx_core::store::stored_switch(setting.as_deref(), true);
     if !enabled {
         trace_auto_preparation_stage(candidate, "disabled");
-        crate::playback_control::record_preparation_staged(false);
-        return false;
+        return PreparationStageOutcome::refused(session_id, PreparationStageRefusal::Disabled);
     }
     let AcceptedAsk {
         prepared_proof,
@@ -2576,7 +2684,7 @@ pub(super) async fn stage_prepared_successor_as(
         quality_intent,
     } = accepted;
     if let Some(identity) = quality_intent.as_ref() {
-        let cancelled = state
+        let cancelled = match state
             .store
             .quality_intent_cancelled(
                 &identity.generation,
@@ -2585,20 +2693,32 @@ pub(super) async fn stage_prepared_successor_as(
                 i64::try_from(identity.recipe_revision).unwrap_or(i64::MAX),
             )
             .await
-            .unwrap_or(true);
+        {
+            Ok(cancelled) => cancelled,
+            Err(_) => {
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::QualityIntentUnavailable,
+                )
+            }
+        };
         if cancelled {
             trace_auto_preparation_stage(candidate, "intent_cancelled");
             if let Some(token) = planning_cancellation.as_ref() {
                 token.cancel();
             }
-            crate::playback_control::record_preparation_staged(false);
-            return false;
+            return PreparationStageOutcome::cancelled(
+                session_id,
+                PreparationStageCancellation::QualityIntent,
+            );
         }
     }
     if let PreparationPurpose::PlannedRelocation(fence) = purpose {
         if !state.serving.planned_outage_is_current(fence).await {
-            crate::playback_control::record_preparation_staged(false);
-            return false;
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::RelocationSuperseded,
+            );
         }
     }
     // The actor owns the slot. No live local worker means no slot to take, and
@@ -2609,15 +2729,20 @@ pub(super) async fn stage_prepared_successor_as(
         // exactly what the first version of this did on every production
         // session, and an uncounted return made that indistinguishable from
         // "nothing was admitted".
-        crate::playback_control::record_preparation_staged(false);
-        return false;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::NoLocalWorkerGate,
+        );
     };
     // The source snapshot has to be the file's real one. `0/0` is this
     // codebase's documented "this placement never read the file" sentinel, and
     // `takeover_source_matches` refuses a takeover on it forever — so writing
     // it as a placeholder would poison the successor the moment it committed.
     let Some(source) = source else {
-        return false;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::SourceUnavailable,
+        );
     };
     let now_ms = crate::media_sessions::unix_ms();
     let StagedSuccessorIds {
@@ -2664,7 +2789,10 @@ pub(super) async fn stage_prepared_successor_as(
         ..candidate.clone()
     };
     let Some(local_user_id) = route.principal.local_user_id() else {
-        return false;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::PrincipalUnsupported,
+        );
     };
     let staged_recipe = RemoteStartRequest {
         retained_output: None,
@@ -2697,7 +2825,10 @@ pub(super) async fn stage_prepared_successor_as(
         request: staged_request.clone(),
     };
     let Ok(recipe_json) = serde_json::to_string(&staged_recipe) else {
-        return false;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::RecipeSerialization,
+        );
     };
     // A real `StartResponse`, because every reader of a route's
     // `response_json` parses it as one — and `control_start_response` filters
@@ -2809,7 +2940,12 @@ pub(super) async fn stage_prepared_successor_as(
     };
     let mut response_value = match serde_json::to_value(response) {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => {
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::ResponseSerialization,
+            )
+        }
     };
     let captures_output = successor_owner_captures_output(
         state,
@@ -2835,7 +2971,12 @@ pub(super) async fn stage_prepared_successor_as(
                 PLANNING_CAPS_RESPONSE_FIELD.to_owned(),
                 match serde_json::to_value(caps) {
                     Ok(value) => value,
-                    Err(_) => return false,
+                    Err(_) => {
+                        return PreparationStageOutcome::refused(
+                            session_id,
+                            PreparationStageRefusal::PlanningCapsSerialization,
+                        )
+                    }
                 },
             );
     }
@@ -2847,7 +2988,12 @@ pub(super) async fn stage_prepared_successor_as(
                 PLANNING_OVERRIDES_RESPONSE_FIELD.to_owned(),
                 match serde_json::to_value(overrides) {
                     Ok(value) => value,
-                    Err(_) => return false,
+                    Err(_) => {
+                        return PreparationStageOutcome::refused(
+                            session_id,
+                            PreparationStageRefusal::PlanningOverridesSerialization,
+                        )
+                    }
                 },
             );
     }
@@ -2861,7 +3007,10 @@ pub(super) async fn stage_prepared_successor_as(
             );
     }
     let Ok(response_json) = serde_json::to_string(&response_value) else {
-        return false;
+        return PreparationStageOutcome::refused(
+            session_id,
+            PreparationStageRefusal::ResponseSerialization,
+        );
     };
     let executor = crate::playback_control::PreparationExecutor::new(
         Arc::clone(&state.store),
@@ -2923,8 +3072,10 @@ pub(super) async fn stage_prepared_successor_as(
     if prime_worker {
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
-                crate::playback_control::record_preparation_staged(false);
-                return false;
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::RelocationSuperseded,
+                );
             }
         }
         let active = ActivePreparedSuccessor {
@@ -2966,19 +3117,30 @@ pub(super) async fn stage_prepared_successor_as(
             if let Some(active) = take_active_preparation(&preparation.incarnation_id) {
                 spawn_cancelled_preparation(active, "predecessor superseded by a new session");
             }
-            crate::playback_control::record_preparation_staged(false);
-            return false;
+            return PreparationStageOutcome::cancelled(
+                session_id,
+                PreparationStageCancellation::BeforeReservation,
+            );
         }
         arm_preparation_foreground_watch(active.clone());
-        let Some(reservation) = reserve_preparation_before(active.clone()).await else {
-            trace_auto_preparation_stage(candidate, "reservation_refused");
-            crate::playback_control::record_preparation_staged(false);
-            return false;
+        let reservation = match reserve_preparation_before(active.clone()).await {
+            Ok(reservation) => reservation,
+            Err(ReservationEnd::Refused(reason)) => {
+                return PreparationStageOutcome::refused(session_id, reason)
+            }
+            Err(ReservationEnd::Cancelled) => {
+                return PreparationStageOutcome::cancelled(
+                    session_id,
+                    PreparationStageCancellation::Reservation,
+                )
+            }
         };
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
-                crate::playback_control::record_preparation_staged(false);
-                return false;
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::RelocationSuperseded,
+                );
             }
         }
         let prime_deadline = Instant::now() + PREPARATION_PRIME_BUDGET;
@@ -3038,23 +3200,42 @@ pub(super) async fn stage_prepared_successor_as(
                     .is_ok()
             }
         };
+        // This frame still owns the reservation guard through prime/readiness.
+        // Neither inner bool operation cancels this token on failure, so a
+        // ready cancellation is outside displacement, even if it also caused
+        // the worker or seal check to answer false. Activation differs: its
+        // detached guard can cancel the token while cleaning up its own refusal.
         let primed = tokio::select! {
-            () = active.cancelled.cancelled() => false,
+            biased;
+            () = active.cancelled.cancelled() => return PreparationStageOutcome::cancelled(session_id, PreparationStageCancellation::Prime),
             primed = prime => primed,
         };
-        if !state
-            .transcode
-            .prepared_prime_is_ready(&preparation, primed)
-            .await
-        {
+        // A completed prime refusal is terminal. Do not let a later cleanup
+        // cancellation relabel that known failure as displacement.
+        if !primed {
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::PrimeFailed,
+            );
+        }
+        let prime_ready = tokio::select! {
+            biased;
+            () = active.cancelled.cancelled() => return PreparationStageOutcome::cancelled(session_id, PreparationStageCancellation::PrimeReadiness),
+            ready = state.transcode.prepared_prime_is_ready(&preparation, primed) => ready,
+        };
+        if !prime_ready {
             trace_auto_preparation_stage(candidate, "prime_not_ready");
-            crate::playback_control::record_preparation_staged(false);
-            return false;
+            return PreparationStageOutcome::refused(
+                session_id,
+                PreparationStageRefusal::PrimeNotReady,
+            );
         }
         if let PreparationPurpose::PlannedRelocation(fence) = purpose {
             if !state.serving.planned_outage_is_current(fence).await {
-                crate::playback_control::record_preparation_staged(false);
-                return false;
+                return PreparationStageOutcome::refused(
+                    session_id,
+                    PreparationStageRefusal::RelocationSuperseded,
+                );
             }
         }
         let cached_recovery_owner = if successor_owner == state.node_id
@@ -3072,11 +3253,35 @@ pub(super) async fn stage_prepared_successor_as(
         } else {
             None
         };
+        if active.cancelled.is_cancelled() {
+            return PreparationStageOutcome::cancelled(
+                session_id,
+                PreparationStageCancellation::Activation,
+            );
+        }
+        // A completed Store refusal keeps its classification even when its
+        // own guard cleanup also makes the cancellation branch ready. Without
+        // a completed answer, the live cancellation branch still wins.
         let activated = tokio::select! {
-            () = active.cancelled.cancelled() => None,
+            biased;
             activated = activate_preparation_before(reservation) => activated,
+            () = active.cancelled.cancelled() => return PreparationStageOutcome::cancelled(session_id, PreparationStageCancellation::Activation),
         };
-        return if let Some(guard) = activated {
+        let guard = match activated {
+            // A success answered in the same poll as an outside cancellation
+            // is a successor the watcher is tearing down: dropping the guard
+            // settles it, and the cancellation keeps its retry. Refusals keep
+            // their classification (no recheck on the failure arm).
+            Ok(_guard) if active.cancelled.is_cancelled() => {
+                return PreparationStageOutcome::cancelled(
+                    session_id,
+                    PreparationStageCancellation::Activation,
+                )
+            }
+            Ok(guard) => guard,
+            Err(reason) => return PreparationStageOutcome::refused(session_id, reason),
+        };
+        return {
             let active = guard.disarm();
             // Arm cleanup before publishing the optional proof or observations.
             arm_preparation_deadline(active.clone());
@@ -3154,11 +3359,7 @@ pub(super) async fn stage_prepared_successor_as(
             }
             trace_auto_preparation_stage(candidate, "activated");
             crate::playback_control::record_preparation_staged(true);
-            true
-        } else {
-            trace_auto_preparation_stage(candidate, "activation_refused");
-            crate::playback_control::record_preparation_staged(false);
-            false
+            PreparationStageOutcome::Staged
         };
     }
 
@@ -3166,11 +3367,16 @@ pub(super) async fn stage_prepared_successor_as(
     match staged {
         Ok(Ok(true)) => {
             crate::playback_control::record_preparation_staged(true);
-            true
+            PreparationStageOutcome::Staged
         }
-        Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {
-            crate::playback_control::record_preparation_staged(false);
-            false
+        Ok(Ok(false)) => {
+            PreparationStageOutcome::refused(session_id, PreparationStageRefusal::UnprimedRefused)
+        }
+        Ok(Err(_)) => {
+            PreparationStageOutcome::refused(session_id, PreparationStageRefusal::UnprimedError)
+        }
+        Err(_) => {
+            PreparationStageOutcome::refused(session_id, PreparationStageRefusal::UnprimedDeadline)
         }
     }
 }

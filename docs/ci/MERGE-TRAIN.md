@@ -20,6 +20,8 @@ Nothing changes: open your PR, take `WIP:` off the title when it is ready, the
 `Main promotion gate` passes (AGENTS.md "Large efforts" for the merge message).
 The train service writes nothing to your PR while it is off.
 
+Merge it with `scripts/land <pr> --head <sha>`, never the raw merge API: the script requires that head's `Main promotion gate` to be green, lands with the train's own message (the description, with its `Regression-Test:` lines, and `Reviewed-on:`) and checks the landing commit, and `.github/workflows/landing-check.yml` fails on `main` for a landing made any other way that lost its lines.
+
 ## Train on — what you do instead
 
 1. **Open your PR.** If its title has no `WIP:`, the bot adds it and posts one
@@ -105,6 +107,16 @@ ordinary lanes still require preflight success before allocating compile work. T
 through pull requests and never pushes to `main`. `paperwork` never fixes a
 bot-authored `train/` head in place (it fails instead); a `train/` branch of
 anyone else is an ordinary PR and keeps the auto-fix.
+
+A probe whose `Train-Jobs:` names `rust_units` may add `Train-Tests: <id>,<id>`,
+each id exactly as cargo-nextest prints it (`<binary id> <test path>`, for example
+`plurx-core::store_contract contract_inventory_matches_every_store_method`). The
+same authority rule applies (bot-authored `train/` head); a malformed or empty list
+fails the scope job. The unit stage then runs exactly those tests, whatever the
+content keys say, adopts nothing from receipts, and its verdict and gate report each
+named test as PASS, FAIL, NOT RUN or `ABSENT <id>` (an id the archive lacks, for example a new test probed on main alone; the others still run): a failing, absent, skipped or unrun named test
+fails the gate, and the stage's own merge-base excuse is not applied. The train
+classifies by comparing the main-alone probe with the branch probe.
 
 One limit to know: a probe on `main` alone has an empty diff, so a job that
 decides from the diff what to check (the worker controller proof, the formal

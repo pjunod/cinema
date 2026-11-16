@@ -96,14 +96,16 @@ function activitySourceRecovery(d){
   return summary.source_io_holders.filter(holder=>holder&&holder.active_occupancy!==false
     &&typeof holder.resource_key==="string"&&(holder.resource_key==="source_io"||holder.resource_key.startsWith("source_io:"))
     &&Number.isSafeInteger(holder.lease_expires_at_ms)&&holder.lease_expires_at_ms>=0
-    &&(holder.phase==="cleanup_pending"||holder.lease_expires_at_ms<=observed));
+    // The store sweep releases an owner a minute after its lease lapses and
+    // runs every minute; three minutes on, the sweep itself is not running.
+    &&holder.lease_expires_at_ms<=observed-180000);
 }
 function activitySourceRecoveryHtml(d){
   if(!ME?.is_admin)return "";
   const holders=activitySourceRecovery(d);
   if(holders===null)return '<p class="hint" data-activity-source-capacity role="status">Source capacity unknown: a fresh shared-reader observation is unavailable.</p>';
   if(!holders.length)return "";
-  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Shared source reads need recovery</h2><p>These reservations can block queued scans and other media work even when their jobs are no longer listed. Lease expiry does not prove a physical read has stopped. Recovery must confirm it has stopped before releasing capacity.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(holder.resource_key)} · ${holder.phase==="cleanup_pending"?"cleanup pending":"lease expired"} · ${holder.lease_expires_at_ms===0?"previous authority expired":`authority expiry ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}`}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
+  return `<section class="system-attention" data-activity-source-recovery role="status"><h2>Source capacity held past its lease</h2><p>These owners stopped renewing their leases more than three minutes ago but still hold source capacity, so media jobs that read a source are waiting. The lease-expiry sweep normally releases them within two minutes; this means it is not running.</p><ul>${holders.map(holder=>`<li>${holder.origin_job_kind?`<a href="#/activity/jobs/${esc(encodeURIComponent(holder.work_id))}">${esc(holder.origin_job_kind.replace(/_/g," "))}</a> · job now ${esc(holder.origin_job_state||"unknown")} · `:""}<b>${esc(holder.work_id)}</b>${holder.origin_node_id?` · reader on ${esc(nodeLabel(d.node_hostnames||{},holder.origin_node_id))}`:""} · ${esc(holder.resource_key)} · lease lapsed ${esc(new Date(holder.lease_expires_at_ms).toLocaleString())}</li>`).join("")}</ul><a class="ghost sm" href="#/analysis">Review source readers and analysis</a></section>`;
 }
 const ACTIVITY_TABS=["status","jobs","starts"];
 const ACTIVITY_TAB_LABELS={status:"Status",jobs:"Jobs",starts:"Starts"};
@@ -160,7 +162,7 @@ function durableJobReason(job){
   // A domain-specific reader cannot be attributed to this library from this
   // projection. Only the global source_io reservation applies to every root.
   const recovery=ME?.is_admin&&activitySourceRecovery(ACTIVITY_SNAPSHOT||{})?.some(holder=>holder.resource_key==="source_io");
-  return [root,recovery?"Shared source capacity is reserved by work awaiting recovery; its physical read is not confirmed stopped.":""].filter(Boolean).join(" ");
+  return [root,recovery?"Shared source capacity is still held by an owner whose lease lapsed long ago; the lease-expiry sweep is not releasing it.":""].filter(Boolean).join(" ");
 }
 // Compute both views from the same server window, independent of job filters.
 function durableProcessingHtml(nodeNames={}){

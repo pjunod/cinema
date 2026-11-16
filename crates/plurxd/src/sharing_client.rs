@@ -1628,6 +1628,37 @@ fn source_start_refusal(
     PeerError::Rejected(status)
 }
 
+/// A Source that cannot read its own authority answers 503 with
+/// `Retry-After`: unavailable for now, never a refusal that retires the
+/// receiver's session. Every other non-success answer is a refusal.
+pub(crate) fn peer_status_refusal(status: StatusCode, retry_after: bool) -> PeerError {
+    if status == StatusCode::SERVICE_UNAVAILABLE && retry_after {
+        PeerError::Unavailable
+    } else {
+        PeerError::Rejected(status)
+    }
+}
+
+#[cfg(test)]
+mod peer_status_refusal_tests {
+    use super::*;
+    #[test]
+    fn a_source_outage_is_unavailable_and_a_plain_refusal_is_not() {
+        assert!(matches!(
+            peer_status_refusal(StatusCode::SERVICE_UNAVAILABLE, true),
+            PeerError::Unavailable
+        ));
+        assert!(matches!(
+            peer_status_refusal(StatusCode::SERVICE_UNAVAILABLE, false),
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+        assert!(matches!(
+            peer_status_refusal(StatusCode::GONE, true),
+            PeerError::Rejected(StatusCode::GONE)
+        ));
+    }
+}
+
 #[cfg(test)]
 mod source_start_refusal_tests {
     use super::*;

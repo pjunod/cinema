@@ -775,6 +775,30 @@ impl Fragment {
             .map(|t| t.duration())
             .unwrap_or(0)
     }
+
+    /// One track's samples in decode order, each with its bytes, or `None`
+    /// for a sample whose declared span does not lie inside this fragment's
+    /// `mdat` payload.
+    pub fn samples_with_bytes(&self, track_id: u32) -> Vec<(&Sample, Option<&[u8]>)> {
+        let mut out = Vec::new();
+        for run in self
+            .track(track_id)
+            .into_iter()
+            .flat_map(|track| &track.runs)
+        {
+            let mut at = Some(run.data_offset);
+            for sample in &run.samples {
+                let span = at.and_then(|start| {
+                    let end = start.checked_add(sample.size as usize)?;
+                    (start >= self.mdat_payload.start && end <= self.mdat_payload.end)
+                        .then_some(start..end)
+                });
+                at = span.as_ref().map(|span| span.end);
+                out.push((sample, span.map(|span| &self.bytes[span])));
+            }
+        }
+        out
+    }
 }
 
 /// What [`FragmentReader::next_unit`] hands back.
@@ -5260,6 +5284,34 @@ pub fn hevc_cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u
         return malformed("fitted packet has a truncated header or unescaped Annex-B delimiter");
     }
     Ok(hash.finalize().into())
+}
+
+/// The length a length-prefixed HEVC sample's NAL units have as the Annex B
+/// packet FFmpeg's coded-bitstream writer emits for them.
+///
+/// Every CBS bitstream filter a copy recipe runs (`filter_units`, `dovi_rpu`)
+/// reassembles its output as Annex B whatever framing it read: a three-byte
+/// start code before every unit, preceded by a `zero_byte` only for the first
+/// unit of the access unit and for VPS/SPS/PPS
+/// (`cbs_h2645_unit_requires_zero_byte`, H.265 B.2.2). It copies each unit's
+/// bytes unchanged. The MP4 muxer then reframes each unit with its length
+/// prefix, so a packet clock taken after the filter counts the same units in
+/// different framing from the muxed sample: one byte shorter for every other
+/// unit, with a four-byte length prefix.
+pub fn hevc_sample_cbs_annex_b_len(sample: &[u8], length_size: u8) -> Result<usize, Fmp4Error> {
+    let mut len = 0usize;
+    let mut units = 0usize;
+    visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
+        let zero_byte = units == 0 || matches!(kind, Some(32..=34));
+        len = len
+            .saturating_add(framed.len() - usize::from(length_size))
+            .saturating_add(3 + usize::from(zero_byte));
+        units += 1;
+    })?;
+    if units == 0 {
+        return malformed("HEVC sample carries no NAL unit");
+    }
+    Ok(len)
 }
 
 fn hevc_sample_without_parameter_sets_len(

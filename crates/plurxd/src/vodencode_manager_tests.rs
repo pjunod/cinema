@@ -1363,6 +1363,13 @@ async fn admit_native_processed_window_control(
         processed.request_id.as_deref(),
         Some(recovery.incarnation_id.as_str())
     );
+    // Staged and committed by the viewer's control stream, the upgrade
+    // declares film demand whatever the client's own request promised, so
+    // its windows' source owners register as rolling, not finite transfer.
+    assert_eq!(
+        processed.source_telemetry,
+        Some(crate::transcode::SourceTelemetry::FilmV1)
+    );
     // The verified root is held for exactly one successor, once.
     let context = processed
         .candidate_context

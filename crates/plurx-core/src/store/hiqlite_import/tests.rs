@@ -487,9 +487,22 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
         assert!(names.contains(&name), "durable F+ table: {name}");
     }
     assert!(!names.contains(&"background_dv_refit_schema"));
+    // Scoped login state is durable account state, imported with its users;
+    // its schema marker is installed locally, like the scan request marker.
+    for name in [
+        "delegation_clients",
+        "delegation_codes",
+        "delegation_grants",
+    ] {
+        assert!(names.contains(&name), "durable scoped login table: {name}");
+    }
+    assert!(!names.contains(&"delegation_schema"));
     // 104 with the source arbitration tables (SQLite v122), 105 with the scan
-    // request sidecar (SQLite v125), 108 with the F+ curve tables (SQLite v130).
-    assert_eq!(names.len(), 108, "review every imported durable table");
+    // request sidecar (SQLite v125), 106 with pending storage-domain changes
+    // (SQLite v131), 109 with the scoped login clients, codes and grants
+    // (SQLite v133; their schema marker is installed locally), 112 with the
+    // F+ curve titles, scenes and outcomes (SQLite v134).
+    assert_eq!(names.len(), 112, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its
@@ -1081,7 +1094,7 @@ async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
                 "background_scan_request_v2" => 125,
                 "background_dv_refit_titles"
                 | "background_dv_refit_scenes"
-                | "background_dv_refit_outcomes" => 130,
+                | "background_dv_refit_outcomes" => 134,
                 _ => 71,
             };
             assert_eq!(table.minimum_schema, introduced, "{}", table.name);

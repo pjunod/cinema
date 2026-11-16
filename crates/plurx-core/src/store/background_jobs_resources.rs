@@ -378,10 +378,51 @@ pub(super) async fn mark_foreground_settled<T: QueueSql>(
     Ok(!rows.is_empty())
 }
 
-/// A no-reader registration can still arm while its exact owner is live.
-/// Joined and aborted owners have already settled. Recheck both the proof
-/// and current authority in the writer because a sweep can race a renewal,
-/// activation, or a new registration.
+/// How long an owner's authority may have lapsed before the sweep releases
+/// its source capacity. The grace only absorbs a renewal racing the sweep and
+/// clock skew between nodes; it is not a proof window.
+pub const SOURCE_AUTHORITY_REAP_GRACE_MS: i64 = 60_000;
+
+/// Lapse after which a still-charged owner means the sweep itself is not
+/// running: the grace plus two one-minute scheduler ticks. The metrics
+/// snapshots in `hiqlite.rs` and `sqlite/mod.rs` inline it as `180000`.
+pub const SOURCE_RECOVERY_OVERDUE_MS: i64 = SOURCE_AUTHORITY_REAP_GRACE_MS + 120_000;
+const _: () = assert!(SOURCE_RECOVERY_OVERDUE_MS == 180_000);
+
+/// When a background custody row's authority lapsed, as SQL over the
+/// `background_source_current_owners` alias `c`; NULL while it has not.
+///
+/// A live owner's authority is its owning job/request/lease expiry. Once that
+/// owner is no longer running (finished, cancelling, re-fenced) authority reads
+/// 0, which says nothing about *when* it ended — so the sweep stamps such a row
+/// `cleanup_pending` with the time it first saw it, and the grace runs from
+/// that stamp. A paused row holds no capacity and lapses at once. The sweep,
+/// the recovery metric and the Activity observation all use this one
+/// expression so they can never disagree about how long an owner has been gone
+/// (the metric snapshots inline it; `lapse_expression_is_shared` pins that).
+pub fn custody_lapsed_at_sql(c: &str) -> String {
+    format!(
+        "(CASE WHEN {c}.authority_expires_at_ms>0 THEN {c}.authority_expires_at_ms \
+         WHEN {c}.phase='cleanup_pending' THEN {c}.updated_at_ms \
+         WHEN {c}.phase='paused' THEN 0 ELSE NULL END)"
+    )
+}
+
+/// Releases source custody whose owner is gone.
+///
+/// Lease expiry IS the release. An owner whose authority has lapsed for longer
+/// than [`SOURCE_AUTHORITY_REAP_GRACE_MS`] is deleted whether or not it ever
+/// published a settlement proof: its job lease has expired (or the job ended),
+/// so the scheduler treats the work itself as gone, and keeping its source
+/// charge only wedged every other source reader in the cluster. If an orphaned
+/// child of a dead daemon is somehow still reading, the cost is one extra
+/// concurrent read of a media file, never a correctness problem.
+///
+/// Settled (joined/aborted) owners and never-armed registrations go at once,
+/// as before. Each sweep also stamps newly ownerless rows (see
+/// [`custody_lapsed_at_sql`]) and clears analysis coordination roles that
+/// still point at a custody the sweep deleted. Recheck in the writer because a
+/// sweep can race a renewal, activation, or a new registration.
 pub(super) async fn reap_settled_source_custody<T: QueueSql>(
     store: &T,
     now_ms: i64,
@@ -389,18 +430,82 @@ pub(super) async fn reap_settled_source_custody<T: QueueSql>(
     let foreground = "SELECT owner_id FROM foreground_source_owners
         WHERE settlement_proof IN ('joined','aborted')
            OR (settlement_proof='no_reader' AND lease_expires_at_ms<=json_extract($1,'$.now_ms'))
+           OR lease_expires_at_ms<=json_extract($1,'$.lapsed_before_ms')
         ORDER BY started_at_ms,owner_id LIMIT 128";
-    let background = "SELECT custody_id FROM background_source_current_owners
+    let background = format!(
+        "SELECT custody_id FROM background_source_current_owners c
         WHERE settlement_proof IN ('joined','aborted')
            OR (settlement_proof='no_reader' AND authority_expires_at_ms<=json_extract($1,'$.now_ms'))
-        ORDER BY started_at_ms,custody_id LIMIT 128";
-    let body = encode(&serde_json::json!({"now_ms": now_ms}))?;
+           OR {lapsed}<=json_extract($1,'$.lapsed_before_ms')
+        ORDER BY started_at_ms,custody_id LIMIT 128",
+        lapsed = custody_lapsed_at_sql("c")
+    );
+    let ownerless = "SELECT custody_id FROM background_source_current_owners
+        WHERE phase='active' AND authority_expires_at_ms=0 LIMIT 128";
+    let body = encode(&serde_json::json!({
+        "now_ms": now_ms,
+        "lapsed_before_ms": now_ms.saturating_sub(SOURCE_AUTHORITY_REAP_GRACE_MS),
+    }))?;
     let pending = store
         .queue_sql(
             format!(
-                "SELECT 'true' AS result_json WHERE EXISTS ({foreground}) OR EXISTS ({background})"
+                "SELECT 'true' AS result_json WHERE EXISTS ({foreground}) OR EXISTS ({background}) OR EXISTS ({ownerless})"
             ),
             body.clone(),
+            false,
+            true,
+        )
+        .await?;
+    if !pending.is_empty() {
+        store
+            .queue_transaction(vec![
+                (
+                    format!("DELETE FROM foreground_source_owners WHERE owner_id IN ({foreground})"),
+                    body.clone(),
+                ),
+                (
+                    format!("DELETE FROM background_source_custody WHERE custody_id IN ({background})"),
+                    body.clone(),
+                ),
+                (
+                    format!(
+                        "UPDATE background_source_custody SET phase='cleanup_pending',updated_at_ms=json_extract($1,'$.now_ms')
+                        WHERE custody_id IN ({ownerless})"
+                    ),
+                    body.clone(),
+                ),
+            ])
+            .await?;
+    }
+    clear_orphaned_coordination_roles(store, &body).await
+}
+
+/// An analysis coordination role whose physical custody the sweep deleted
+/// would otherwise stay pinned: role release, the next phase start, sharing
+/// retirement and request deletion all wait on `active_custody_id IS NULL`.
+/// The owner's own close clears exactly these columns once its custody is
+/// gone; this does the same for an owner that died first.
+async fn clear_orphaned_coordination_roles<T: QueueSql>(
+    store: &T,
+    body: &str,
+) -> Result<(), StoreError> {
+    let orphaned = "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM background_source_custody custody WHERE custody.custody_id=role.active_custody_id)";
+    // The coordination extension is not installed on every store.
+    let pending = store
+        .queue_sql(
+            "SELECT 'true' AS result_json WHERE json_valid($1) AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_coordination_roles')".to_owned(),
+            body.to_owned(),
+            false,
+            true,
+        )
+        .await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let pending = store
+        .queue_sql(
+            format!("SELECT 'true' AS result_json WHERE EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE {orphaned})"),
+            body.to_owned(),
             false,
             true,
         )
@@ -409,16 +514,10 @@ pub(super) async fn reap_settled_source_custody<T: QueueSql>(
         return Ok(());
     }
     store
-        .queue_transaction(vec![
-            (
-                format!("DELETE FROM foreground_source_owners WHERE owner_id IN ({foreground})"),
-                body.clone(),
-            ),
-            (
-                format!("DELETE FROM background_source_custody WHERE custody_id IN ({background})"),
-                body,
-            ),
-        ])
+        .queue_transaction(vec![(
+            format!("UPDATE analysis_coordination_roles AS role SET active_custody_id=NULL,physical_node_id=NULL,physical_fence=NULL WHERE {orphaned}"),
+            body.to_owned(),
+        )])
         .await
 }
 
@@ -1458,6 +1557,94 @@ mod source_tests {
         .is_some());
     }
 
+    /// An old coordinator owner that dies without joining or closing its phase
+    /// does not pin the role: the sweep releases its custody after the grace
+    /// and clears the role's pointer, so the successor can start its phase.
+    #[tokio::test]
+    async fn dead_coordinator_custody_is_released_and_unpins_its_role() {
+        use super::super::analysis_coordination as coordinator;
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish");
+        let first_claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("claim")
+        .expect("claimed");
+        let first = coordinator::begin_phase(
+            &store,
+            first_claim,
+            source.clone(),
+            0,
+            uuid::Uuid::new_v4().to_string(),
+            1000,
+        )
+        .await
+        .expect("begin")
+        .expect("phase");
+        activate_background_custody(
+            &store,
+            first.custody.clone(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect("activate");
+        store.0.lock().expect("connection").execute("UPDATE analysis_requests SET state='queued',owner_node_id=NULL,lease_expires_ms=NULL,last_error_code='lease_expired' WHERE request_id='coordinator'",[]).expect("existing lease expiry");
+        let successor = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            1,
+            40000,
+            80000,
+        )
+        .await
+        .expect("takeover")
+        .expect("metadata successor");
+        // The old owner never joins or closes. The sweep stamps, then releases.
+        reap_settled_source_custody(&store, 40000)
+            .await
+            .expect("stamp");
+        reap_settled_source_custody(&store, 40000 + SOURCE_AUTHORITY_REAP_GRACE_MS)
+            .await
+            .expect("release");
+        assert!(resolve_background_custody(&store, first.custody.clone())
+            .await
+            .expect("lookup old custody")
+            .is_none());
+        let pinned: i64 = store
+            .0
+            .lock()
+            .expect("connection")
+            .query_row(
+                "SELECT count(*) FROM analysis_coordination_roles WHERE active_custody_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("role");
+        assert_eq!(pinned, 0, "the role no longer points at released custody");
+        assert!(coordinator::begin_phase(
+            &store,
+            successor,
+            source,
+            1,
+            uuid::Uuid::new_v4().to_string(),
+            40000
+        )
+        .await
+        .expect("successor phase")
+        .is_some());
+    }
+
     #[tokio::test]
     async fn old_claims_and_reconciliation_cannot_acquire_or_rewrite_coordinator() {
         use super::super::analysis_coordination as coordinator;
@@ -1953,10 +2140,12 @@ mod source_tests {
         .await
         .expect("renewed background can still activate"));
 
-        // Losing authority after arming does not prove the input has stopped.
-        reap_settled_source_custody(&store, 120000)
+        // Inside the reap grace an armed owner whose authority just lapsed
+        // (foreground lease 2000, sweep 61000) stays charged, so a renewal
+        // racing the sweep is never mistaken for a dead owner.
+        reap_settled_source_custody(&store, 2000 + SOURCE_AUTHORITY_REAP_GRACE_MS - 1000)
             .await
-            .expect("sweep expired active owners");
+            .expect("sweep inside the grace");
         assert!(resolve_foreground(&store, foreground.clone())
             .await
             .expect("lookup armed foreground")
@@ -1982,6 +2171,154 @@ mod source_tests {
             .await
             .expect("lookup retired background")
             .is_none());
+    }
+
+    /// Lease expiry is the release: an armed owner that never published a
+    /// settlement proof (a daemon that died, a ledger that never joined) stops
+    /// holding source capacity once its authority has lapsed for the grace.
+    #[tokio::test]
+    async fn armed_owners_without_settlement_are_released_after_the_grace() {
+        let store = fixture();
+        let foreground =
+            register_foreground(&store, owner(ForegroundSourcePolicy::Rolling), 1000, 2000)
+                .await
+                .expect("register foreground")
+                .expect("foreground receipt");
+        assert!(activate_foreground_custody(
+            &store,
+            foreground.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("activate foreground"));
+        let job = seed_job(&store);
+        let background = register_background_custody(
+            &store,
+            BackgroundSourceOwner::Job { token: job.clone() },
+            1000,
+        )
+        .await
+        .expect("register background")
+        .expect("background receipt");
+        assert!(activate_background_custody(
+            &store,
+            background.clone(),
+            uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .expect("activate background"));
+        let charged = |store: &SourceSql| -> i64 {
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT count(*) FROM source_io_occupancy WHERE custody_id IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("occupancy")
+        };
+        assert_eq!(charged(&store), 1, "the armed job charges source_io");
+
+        // One millisecond before the grace ends, both owners stay.
+        let job_lease = 30_000;
+        reap_settled_source_custody(&store, job_lease + SOURCE_AUTHORITY_REAP_GRACE_MS - 1)
+            .await
+            .expect("sweep before the grace ends");
+        assert!(
+            resolve_foreground(&store, foreground.clone())
+                .await
+                .expect("lookup foreground")
+                .is_none(),
+            "the foreground lease (2000) lapsed long before this sweep"
+        );
+        assert!(
+            resolve_background_custody(&store, background.clone())
+                .await
+                .expect("lookup background")
+                .is_some(),
+            "background authority is the job lease, still inside the grace"
+        );
+
+        // At the end of the grace the unsettled background owner is released
+        // and its capacity is free; no physical proof is asked for.
+        reap_settled_source_custody(&store, job_lease + SOURCE_AUTHORITY_REAP_GRACE_MS)
+            .await
+            .expect("sweep at the end of the grace");
+        assert!(resolve_background_custody(&store, background)
+            .await
+            .expect("lookup background")
+            .is_none());
+        assert_eq!(charged(&store), 0, "no custody still charges source_io");
+    }
+
+    /// A job that left `running` (finished, or `cancelling` while its child is
+    /// killed) gives its custody no authority. The sweep stamps when it first
+    /// sees that, and the owner keeps the full grace from the stamp: a
+    /// cancelling reader is not cut off mid-teardown, and a ledger that never
+    /// settles still cannot hold the slot past it.
+    #[tokio::test]
+    async fn ownerless_custody_keeps_the_grace_from_when_the_sweep_first_saw_it() {
+        for state in ["succeeded", "cancelling"] {
+            let store = fixture();
+            let job = seed_job(&store);
+            let background = register_background_custody(
+                &store,
+                BackgroundSourceOwner::Job { token: job.clone() },
+                1000,
+            )
+            .await
+            .expect("register background")
+            .expect("background receipt");
+            assert!(activate_background_custody(
+                &store,
+                background.clone(),
+                uuid::Uuid::new_v4().to_string()
+            )
+            .await
+            .expect("activate background"));
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .execute(
+                    "UPDATE background_jobs SET state=?2 WHERE id=?1",
+                    [&job.job_id, state],
+                )
+                .expect("job left running");
+            let seen = 500_000;
+            reap_settled_source_custody(&store, seen)
+                .await
+                .expect("first sweep stamps");
+            reap_settled_source_custody(&store, seen + SOURCE_AUTHORITY_REAP_GRACE_MS - 1)
+                .await
+                .expect("sweep inside the grace");
+            assert!(
+                resolve_background_custody(&store, background.clone())
+                    .await
+                    .expect("lookup background")
+                    .is_some(),
+                "{state}: still inside the grace from the stamp"
+            );
+            reap_settled_source_custody(&store, seen + SOURCE_AUTHORITY_REAP_GRACE_MS)
+                .await
+                .expect("sweep at the end of the grace");
+            assert!(
+                resolve_background_custody(&store, background)
+                    .await
+                    .expect("lookup background")
+                    .is_none(),
+                "{state}: released at the end of the grace"
+            );
+        }
+    }
+
+    #[test]
+    fn lapse_expression_is_shared() {
+        let lapsed = custody_lapsed_at_sql("c");
+        assert!(include_str!("hiqlite.rs").contains(&lapsed));
+        assert!(include_str!("sqlite/mod.rs").contains(&lapsed));
     }
 
     #[tokio::test]

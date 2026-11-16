@@ -53,9 +53,13 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // The contract v2 scan request sidecar does the same: two more.
     // Analysis coordination checks its table marker, canonical objects and
     // protocol singleton before admitting adjunct work: three more.
-    // D3t planning keys and custody retention add two reads each; offload
-    // checks its committed column shape. F+ adds two shape/marker reads.
-    ("hiqlite.rs", 74),
+    // The planning-key extension (D3t) checks its object shape and marker: two more.
+    // Custody retention (main) checks its trigger shape and marker: two more.
+    // Offload: committed column shape before its additive schema migration.
+    // Storage-domain pending apply checks its trigger shape and marker: two more.
+    // Scoped application login (delegation) checks its shape and marker: two more.
+    // F+ curve fits check their extension shape and marker: two more.
+    ("hiqlite.rs", 78),
     // Dispatch installation and lost-ack reconciliation share one catalog probe.
     ("hiqlite/dispatch_turns.rs", 1),
     // Two rating-cache reads and three person-owned list membership/page reads.
@@ -553,6 +557,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("dispatch_turns_installed", STARTUP),
     ("committed_schema_version_unchecked", STARTUP),
     ("custody_migration_settled", STARTUP),
+    ("delegation_schema_version", STARTUP),
     ("drain_deadline_column_present", STARTUP),
     ("dv_title_jobs_schema_version", STARTUP),
     ("invitation_schema_version", STARTUP),
@@ -573,6 +578,7 @@ const NOT_A_STORE_METHOD: &[(&str, &str)] = &[
     ("settle_migration_attempt", STARTUP),
     ("shared_caption_schema_version", STARTUP),
     ("source_arbitration_shape", STARTUP),
+    ("storage_domain_pending_schema_version", STARTUP),
     ("subtitle_managed_schema_version", STARTUP),
     ("subtitle_text_translation_schema_version", STARTUP),
     ("subtitle_translation_schema_version", STARTUP),

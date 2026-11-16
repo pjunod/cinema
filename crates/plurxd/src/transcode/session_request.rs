@@ -696,8 +696,10 @@ impl ContinuousMediaRequest {
     }
 }
 
-/// A client's explicit promise to report accepted film demand. This is source
-/// service metadata, independent of HLS teardown and media recipe identity.
+/// A promise to report accepted film demand: a client's own, or the server's
+/// for a successor it stages under the control protocol, which the viewer's
+/// control stream commits. This is source service metadata, independent of
+/// HLS teardown and media recipe identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SourceTelemetry {
     #[serde(rename = "film-v1")]

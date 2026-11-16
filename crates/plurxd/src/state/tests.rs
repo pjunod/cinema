@@ -1042,8 +1042,31 @@ async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+/// Attest the FFmpeg engine, then pause the clock for a wake-path test.
+///
+/// The analysis worker attests the engine before its first claim: `ffmpeg
+/// -version`, `ldd`, and a hash of every object the engine loads. Those are
+/// child processes, and tokio's paused clock runs on while the runtime waits
+/// for one, so under `start_paused` the two virtual seconds these tests allow
+/// were spent on the engine's real size, not on the wake path: with the CI
+/// image's Jellyfin FFmpeg 8 the bound expired before the first claim. The
+/// engine identity is per process and a daemon holds it long before a viewer
+/// asks, so the tests establish it first. What follows is Store work on
+/// blocking tasks, which holds the paused clock still; the bound is then a
+/// comparison of virtual time against the worker's polling delay alone.
+async fn pause_clock_with_engine_attested() {
+    plurx_core::testfixtures::require_ffmpeg();
+    crate::ffmpeg::fragment_index_engine_digest().await;
+    assert!(
+        crate::ffmpeg::fragment_index_engine_is_current().await,
+        "the fixture FFmpeg engine attests before the clock is paused"
+    );
+    tokio::time::pause();
+}
+
+#[tokio::test]
 async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() {
+    pause_clock_with_engine_attested().await;
     use plurx_core::store::{
         BackgroundJobStore as _, ClusterFragmentIndexStore as _, UserStore as _,
     };
@@ -1215,8 +1238,9 @@ async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() 
     assert!(!lost.is_cancelled(), "viewer departure is not claim loss");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
+    pause_clock_with_engine_attested().await;
     use plurx_core::store::ClusterFragmentIndexStore as _;
     use plurx_core::transcode::CopyVideoOptions;
 
@@ -1272,9 +1296,15 @@ async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let consumer =
         tokio::spawn(Arc::clone(&jobs).background_work_loop_with_ready(transcode, Some(ready_tx)));
-    // Measure the wake path from an idle subscribed worker. CI can spend
-    // wall time scheduling this test among thousands of concurrent tests.
+    // Measure the wake path from an idle subscribed worker. `ready` fires as
+    // the worker subscribes, before its first pass, and a request enqueued
+    // during that pass is claimed by it with no wake at all. With the clock
+    // paused this sleep returns only once every task is parked, so the first
+    // pass is over and the worker is inside its polling delay (five seconds
+    // or more) when the request arrives: only the wake can admit it within
+    // two.
     ready_rx.await.expect("analysis worker subscribed");
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let request = enqueue_copy_preparation(
         store.as_ref(),
         "test-node",
@@ -2883,6 +2913,74 @@ async fn empty_pretranscode_queue_rate_limits_local_cache_maintenance() {
         !orphan.exists(),
         "a producer-enabled node did not maintain its local cache on an empty queue"
     );
+}
+
+// ---- A4: the background lanes' idle looks --------------------------
+
+/// Settings reads `jobs`' applied view answered, and how many it sent to the
+/// authority.
+fn lane_view_reads(jobs: &JobManager) -> (u64, u64) {
+    use plurx_core::store::{AppliedTable, ViewSource};
+    let observation = jobs.applied.observation();
+    (
+        observation.view_total(AppliedTable::Settings, ViewSource::View),
+        observation.view_total(AppliedTable::Settings, ViewSource::Authority),
+    )
+}
+
+/// A4: every pass of the background lanes looks at their switches and
+/// tunables. They read them through the node's applied settings view (a
+/// replica answers it locally under its serving proof; a standalone view
+/// counts a `view` read, a direct Store read counts nothing), and a switch
+/// that is on still opens its lane. The output drain, which cancels rows,
+/// keeps reading the Store.
+#[tokio::test]
+async fn background_lanes_look_at_their_settings_through_the_applied_view() {
+    let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let artwork = crate::test_tempdir().expect("artwork");
+    let jobs = manager(Arc::clone(&store) as Arc<dyn Store>, artwork.path());
+    let look = |jobs: Arc<JobManager>| async move {
+        let (lanes, read) = read_preparation_lanes(&jobs.applied).await;
+        assert!(read, "a readable view is a read switch");
+        (
+            lanes,
+            lane_cluster_fragment_index_enabled(&jobs.applied).await,
+            lane_subtitle_source_queue_enabled(&jobs.applied).await,
+            lane_analysis_retry_policy(&jobs.applied).await,
+        )
+    };
+
+    // Idle: nothing configured, every lane closed, nothing from authority.
+    let (lanes, fragments, subtitles, policy) = look(Arc::clone(&jobs)).await;
+    assert!(lanes.is_empty() && !fragments && !subtitles);
+    assert_eq!(policy, jobs.analysis_retry_policy().await);
+    assert_eq!(
+        lane_view_reads(&jobs),
+        (4, 0),
+        "four looks, all from the view"
+    );
+
+    // Work present: each switch on opens its lane, still from the view.
+    for (key, value) in [
+        (keys::JOB_CACHE_PRODUCE_MINS, "5"),
+        (keys::VOD_OUTPUT_PREPARATION, "copy"),
+        (keys::VOD_INDEX_CLUSTER_CACHE, "1"),
+        (keys::SUBTITLE_CLUSTER_SOURCES, "1"),
+    ] {
+        store.put_setting(key, value).await.expect("setting");
+    }
+    let (lanes, fragments, subtitles, _) = look(Arc::clone(&jobs)).await;
+    assert!(lanes.speculative, "the discovery schedule opens its lane");
+    assert_eq!(lanes.output, crate::vodserve::OutputPreparation::Copy);
+    assert!(fragments && subtitles);
+    assert_eq!(lane_view_reads(&jobs), (8, 0));
+
+    // The drain's switch is the Store's: no view read.
+    assert_eq!(
+        jobs.output_preparation_for_drain().await,
+        Some(crate::vodserve::OutputPreparation::Copy)
+    );
+    assert_eq!(lane_view_reads(&jobs), (8, 0));
 }
 
 // ---- D2 (main-merge defects 2026-10-04): preparation lanes ----------

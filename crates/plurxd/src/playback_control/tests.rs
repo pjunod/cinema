@@ -2474,13 +2474,18 @@ fn a_commit_carries_the_origin_it_adopted_and_not_a_wall_clock() {
     // Range, so a garbage origin is refused at the door rather than
     // compared against an offer it could never match.
     assert_eq!(
-        ack(AcknowledgementState::Committed, Some(-1), None).validate(),
+        ack(
+            AcknowledgementState::Committed,
+            Some(-MAX_MEDIA_ORIGIN_MILLIS - 1),
+            None
+        )
+        .validate(),
         Err("acknowledgement.committed_media_origin_ms"),
     );
     assert_eq!(
         ack(
             AcknowledgementState::Committed,
-            Some(MAX_MEDIA_MILLIS + 1),
+            Some(MAX_MEDIA_ORIGIN_MILLIS + 1),
             None,
         )
         .validate(),
@@ -2787,14 +2792,16 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
             },
         ),
         (
-            "an origin before the start of the film",
+            // Origins are signed source time (a copy range may start before
+            // zero); only one outside the representable range is garbage.
+            "an origin outside the representable media range",
             ControlAction::Prepare {
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
                 playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
-                media_origin_ms: -1,
+                media_origin_ms: -MAX_MEDIA_ORIGIN_MILLIS - 1,
                 effective_selection: effective_selection.clone(),
             },
         ),

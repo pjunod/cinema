@@ -12,6 +12,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::*;
 
+mod delegation;
 mod playback_handoffs;
 mod public_copy_wire;
 mod storage_domains;
@@ -2103,7 +2104,8 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
         ),
         &[
             "get_library",
-            "list_top_items_in_genre",
+            "list_top_items_filtered",
+            "offloaded_leaf_counts",
             "watch_summary",
             "item_max_heights",
             "item_media_facts",
@@ -2245,7 +2247,7 @@ fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
     );
     assert_catalogue_methods(
         &compact_handler(plex, "pub async fn section_all", "pub async fn metadata"),
-        &["get_library", "list_top_items_in_genre"],
+        &["get_library", "list_top_items_filtered"],
     );
     assert_catalogue_methods(
         &compact_handler(plex, "pub async fn children", "pub async fn part"),
@@ -5505,6 +5507,21 @@ async fn settle() {
     }
 }
 
+/// Wait until no admitted scan request is queued or running.
+async fn settle_admitted_scans(state: &AppState) {
+    for _ in 0..200 {
+        let requests = state.jobs.scan_requests().await;
+        if !requests
+            .iter()
+            .any(|request| matches!(request.status.as_str(), "queued" | "running"))
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("an admitted scan never finished");
+}
+
 /// The counters that answer "is the fast path actually being used?".
 ///
 /// A plurx scanning 400 times a day tells you nothing. 398 scheduled and
@@ -5551,6 +5568,12 @@ async fn scans_and_notifications_are_counted_by_what_asked_for_them() {
     let (_, counts) = state.jobs.metrics().snapshot();
     assert_eq!(counts, 2, "both requests reached plurx, so both count");
 
+    // The library's own scan and the placed request are two durable jobs
+    // admitted before the worker has taken either, and nothing orders their
+    // claims: on a busy runner the targeted one runs first and settles while
+    // the manual scan is still queued. A scan is counted when it starts, so
+    // read the counters once every admitted scan has finished.
+    settle_admitted_scans(&state).await;
     let (by_trigger, _) = state.jobs.metrics().snapshot();
     let map: std::collections::HashMap<_, _> = by_trigger.into_iter().collect();
     assert!(map["manual"] >= 1, "creating a library is a manual scan");
@@ -8766,6 +8789,9 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // the proof is met, the image is unobservable and there are no
             // readers yet.
             "applied_view",
+            // Create plan: no switch; its rows read this node's planning
+            // counters, so a node that has planned nothing reports `unknown`.
+            "create_plan",
             "cluster_backup",
             "windows_server",
             // D-01 adds the Android TV display-mode card. Its one row is
@@ -8962,6 +8988,7 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
         green,
         vec![
             "applied_view_proof",
+            "applied_view_reads",
             "authoritative_store",
             "backfill_bytes",
             "backfill_enqueued",
@@ -8975,6 +9002,10 @@ async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
             // is uncovered and current evidence would refuse nothing.
             "consequence",
             "coverage",
+            "create_plan_owner",
+            "create_plan_peer_catalogs",
+            "create_plan_refusals",
+            "create_plan_replans",
             "durable_queue",
             "durable_role",
             "dv_target_cache",
@@ -10356,7 +10387,9 @@ async fn activity_requires_auth_and_reports_idle() {
             "scans",
             "sessions",
             "trakt",
-            // Local worker observations are useful on SQLite too.
+            // Local worker observations are useful on SQLite too, with the
+            // nodes that were observed (learner workers included).
+            "worker_observed_nodes",
             "workers",
         ]
         .into_iter()
@@ -18110,6 +18143,14 @@ async fn seeded_write_surface() {
         .0,
         StatusCode::BAD_REQUEST
     );
+    // The seed records the file at its real size and mtime, so reanalyze
+    // admits a durable leaf probe and waits for it; run the probe worker the
+    // daemon runs (main.rs) so that job executes as it would in production.
+    let probe_shutdown = tokio_util::sync::CancellationToken::new();
+    let probe_worker = tokio::spawn(crate::source_probe::run(
+        state.clone(),
+        probe_shutdown.clone(),
+    ));
     let (st, report) = call(
         &app,
         post(
@@ -18119,6 +18160,8 @@ async fn seeded_write_surface() {
         ),
     )
     .await;
+    probe_shutdown.cancel();
+    probe_worker.await.expect("probe worker joins");
     assert_eq!(st, StatusCode::OK, "body: {report:?}");
     assert_eq!(report["attempted"], 1);
     assert_eq!(report["repaired"], 0, "placeholder bytes are not media");

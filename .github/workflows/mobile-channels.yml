@@ -21,7 +21,16 @@ jobs:
     name: affected mobile release platforms
     if: github.server_url != 'https://github.com' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 5
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 10
     outputs:
       publish: ${{ steps.scope.outputs.publish }}
     steps:
@@ -41,6 +50,11 @@ jobs:
           set -euo pipefail
           if [ "$MOBILE_EVENT" = workflow_dispatch ]; then export MOBILE_BEFORE="$MOBILE_RETRY_BASE"; fi
           python3 -m validation.mobile_channels scope >> "$GITHUB_OUTPUT"
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   publish:
     name: upload TestFlight and Google Play internal builds

@@ -101,8 +101,11 @@ pub(crate) async fn configure_access_roots(
     #[cfg(not(target_os = "linux"))]
     let validated = Vec::new();
     let (owned, tools) = access_root_paths(config, dirs, &validated);
-    plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools)
-        .map_err(|error| error.to_string())
+    plurx_core::process::source_lifetime::set_daemon_roots(&owned, &tools).map_err(|error| {
+        let error = error.to_string();
+        ACCESS_ROOTS_ERROR.get_or_init(|| error.clone());
+        error
+    })
 }
 
 /// Construct startup's managed paths from the same validated tool capture
@@ -164,6 +167,28 @@ pub(crate) fn access_root_paths(
     tools.push(dirs.runtime_cache.clone());
     tools.extend_from_slice(validated_tool_directories);
     (owned, tools)
+}
+
+/// Why startup could not configure the roots, for the Developer status only.
+static ACCESS_ROOTS_ERROR: OnceLock<String> = OnceLock::new();
+
+/// Node-local fact for `GET /developer/source-recovery`: whether launches on
+/// this process can be verified at all, and why not. Advisory; nothing reads
+/// it to allow or refuse work.
+pub(crate) fn access_roots_fact() -> serde_json::Value {
+    access_roots_fact_from(
+        plurx_core::process::source_lifetime::daemon_roots_configured(),
+        ACCESS_ROOTS_ERROR.get().map(String::as_str),
+    )
+}
+
+fn access_roots_fact_from(configured: bool, startup_error: Option<&str>) -> serde_json::Value {
+    let reason = (!configured).then(|| {
+        startup_error
+            .unwrap_or("startup has not configured source-access roots in this process")
+            .to_owned()
+    });
+    serde_json::json!({"roots_configured": configured, "roots_unconfigured_reason": reason})
 }
 
 /// Local observations only; source recovery never uses these diagnostics as proof.
@@ -1750,4 +1775,31 @@ pub(crate) async fn with_request<T>(
 }
 pub(crate) fn current_request() -> Option<SourceRequest> {
     FOREGROUND_REQUEST.try_with(Clone::clone).ok()
+}
+
+#[cfg(test)]
+mod access_roots_tests {
+    #[test]
+    fn unconfigured_roots_are_reported_with_their_startup_reason() {
+        let configured = super::access_roots_fact_from(true, Some("stale"));
+        assert_eq!(configured["roots_configured"], true);
+        assert!(configured["roots_unconfigured_reason"].is_null());
+        let failed = super::access_roots_fact_from(false, Some("reader roots cannot be empty"));
+        assert_eq!(failed["roots_configured"], false);
+        assert_eq!(
+            failed["roots_unconfigured_reason"],
+            "reader roots cannot be empty"
+        );
+        let never = super::access_roots_fact_from(false, None);
+        assert_eq!(
+            never["roots_unconfigured_reason"],
+            "startup has not configured source-access roots in this process"
+        );
+        // A test binary never runs startup, so the live reading is the degraded one.
+        let live = super::access_roots_fact();
+        assert_eq!(
+            live["roots_configured"],
+            plurx_core::process::source_lifetime::daemon_roots_configured()
+        );
+    }
 }

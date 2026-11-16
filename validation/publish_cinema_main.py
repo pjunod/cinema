@@ -320,7 +320,7 @@ def runtime_completion(api, release, rust):
                 and bound['rustc_pinned_1_97_1_observed'] is True
                 and bound['git_archive_sha256'] == phase['source_archive_sha256']
                 and bound['saved_container_inspect']['image'].rsplit('@', 1)[-1]
-                == 'sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855'
+                == 'sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d'
                 and bound['build_finished'] == {'reason': 'build-finished', 'success': True}
                 and len(artifacts) == 1 and artifacts[0]['profile']['test'] is True
                 and artifacts[0]['features'] == []

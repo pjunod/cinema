@@ -138,6 +138,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # The discarded-Store-result regression parses production Rust syntax instead
 # of guessing from receiver spelling or a bounded source suffix.
 syn = { version = "2", features = ["full", "visit"] }
+# The cluster census scans macro bodies, which `syn` leaves as raw tokens.
+proc-macro2 = "1"
 
 [lints]
 workspace = true

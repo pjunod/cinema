@@ -12,6 +12,8 @@ remaining milestones stay in the build handoff. The
 
 ## 1. Current boundary
 
+CM4 source-gamut/MS corrections: [qualification ledger](CM4-TRIM-FIDELITY.md).
+
 **CM4 active area (2026-11-09, merged #1481):** checked L5 offsets bound the
 CM4 detail filter to the uncropped native active rectangle, with vertical
 neighbours clamped to the active rows. This matches all 54 sampled codes of

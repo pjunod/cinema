@@ -20,6 +20,8 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hiqlite::macros::params;
 use hiqlite::{Client, Node, Param, Row};
+
+use crate::store::CountedClient;
 use hmac::{Hmac, Mac};
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,7 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
+pub mod directory;
 pub mod lifecycle;
 mod sharing_source_schema;
 
@@ -132,6 +135,21 @@ const OFFLINE_RESOLVE_ROUNDS: u32 = 3;
 /// Bound the required odd-voter handoff. Survivor probes run in parallel, so
 /// one unavailable voter cannot multiply this deadline.
 const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
+/// The one bound on a stopping leader's handoff: the survivor wait plus the
+/// election trigger's own 1 s budget and one more 1 s survivor probe round.
+/// A stop never waits longer than this for leadership to move.
+const SHUTDOWN_HANDOFF_WAIT: Duration = SURVIVOR_LEADER_WAIT.saturating_add(Duration::from_secs(2));
+/// How long a handing-off leader may hold off its own proposals (Hiqlite
+/// patch 31), counted from when it starts to take the hold: taking it, the
+/// wait for a survivor to match its log, the trigger and the wait to follow
+/// the new leader all end by then, so writers on this node wait at most this
+/// long. Inside the handoff's one deadline.
+const PROPOSAL_HOLD_WAIT: Duration = Duration::from_secs(2);
+/// The share of [`PROPOSAL_HOLD_WAIT`] spent taking the hold. A proposal that
+/// does not finish in it means quorum trouble; the handoff then proceeds
+/// without the hold, and a slow acquisition still leaves the rest for the
+/// match, the trigger and the step-down.
+const PROPOSAL_HOLD_ACQUIRE: Duration = Duration::from_millis(500);
 /// A committed self-removal must return to the HTTP layer promptly so the
 /// daemon can drain. The durable pending-removal row is already authoritative
 /// if this best-effort final tombstone write does not finish in time.
@@ -207,6 +225,19 @@ impl SharingMemberFloor {
                 SHARING_SESSION_PRINCIPAL_CAPABILITY,
                 SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
             ],
+        }
+    }
+
+    const COUNT: usize = 6;
+
+    fn index(self) -> usize {
+        match self {
+            Self::SessionPrincipal => 0,
+            Self::CatalogueItemIdentity => 1,
+            Self::PrincipalAndCatalogue => 2,
+            Self::PurposeKeys => 3,
+            Self::IngressCustody => 4,
+            Self::AllSharing => 5,
         }
     }
 }
@@ -1142,6 +1173,128 @@ pub fn prometheus_cluster_activity_authority() -> String {
 /// commit and local monotonic-fence installation.
 const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration = Duration::from_secs(5);
 
+/// What a stopping node did about Raft leadership before its drain.
+///
+/// [`MembershipManager::handoff_for_shutdown`] never fails: whatever it
+/// returns, the caller carries on stopping. The value exists so the one log
+/// line, and the tests, can say what happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShutdownHandoff {
+    /// SQLite or a process without a replicated store: there is no Raft.
+    NotReplicated,
+    /// This node does not lead, so there is nothing to move.
+    NotLeader,
+    /// This node is the only voter; no successor can exist.
+    SoleVoter,
+    /// A majority of the survivors confirmed `successor` as leader.
+    HandedOff { successor: u64 },
+    /// No reachable, caught-up voter outside maintenance could campaign.
+    NoCandidate,
+    /// Leadership had not moved when the one bounded wait ran out.
+    TimedOut,
+    /// Reading status, triggering the election or confirming it failed.
+    Failed,
+}
+
+impl ShutdownHandoff {
+    /// The stable word logged for this outcome.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReplicated => "not_replicated",
+            Self::NotLeader => "not_leader",
+            Self::SoleVoter => "sole_voter",
+            Self::HandedOff { .. } => "handed_off",
+            Self::NoCandidate => "no_candidate",
+            Self::TimedOut => "timed_out",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// The confirmed successor's Raft id, when leadership moved.
+    #[must_use]
+    pub const fn successor(self) -> Option<u64> {
+        match self {
+            Self::HandedOff { successor } => Some(successor),
+            _ => None,
+        }
+    }
+
+    /// Whether the stop left leadership where it should be. Only the last
+    /// three outcomes mean the survivors elect on their own timers.
+    #[must_use]
+    pub const fn settled(self) -> bool {
+        !matches!(self, Self::NoCandidate | Self::TimedOut | Self::Failed)
+    }
+}
+
+/// The survivor a handoff triggers: the first eligible voter whose matched
+/// log index equals the leader's last log index, preferring `preferred` when
+/// it has matched too. `None` until one has.
+fn matched_survivor(
+    eligible: &[u64],
+    preferred: Option<u64>,
+    last_log_index: Option<u64>,
+    matched: impl Fn(u64) -> Option<u64>,
+) -> Option<u64> {
+    let last = last_log_index?;
+    let caught_up = |raft_id: &u64| matched(*raft_id) == Some(last);
+    preferred
+        .filter(|raft_id| eligible.contains(raft_id) && caught_up(raft_id))
+        .or_else(|| eligible.iter().copied().find(caught_up))
+}
+
+/// `raft_id`'s API address among the survivors.
+fn survivor_api(survivor_nodes: &[(u64, String)], raft_id: u64) -> Result<&str, MembershipError> {
+    survivor_nodes
+        .iter()
+        .find(|(id, _)| *id == raft_id)
+        .map(|(_, api)| api.as_str())
+        .ok_or(MembershipError::ElectionCandidateUnavailable)
+}
+
+/// Run `operation` while this node holds its proposals, ending it at the
+/// hold's deadline rather than letting it hold every write.
+async fn within_hold(
+    hold_deadline: tokio::time::Instant,
+    operation: impl Future<Output = Result<(), MembershipError>>,
+) -> Result<(), MembershipError> {
+    tokio::time::timeout_at(hold_deadline, operation)
+        .await
+        .unwrap_or_else(|_| {
+            Err(MembershipError::Internal(
+                "the election trigger did not answer while proposals were held".to_owned(),
+            ))
+        })
+}
+
+/// This leader's matched log index for `raft_id`, from its own replication
+/// progress.
+fn matched_index(metrics: &hiqlite::RaftMetricsDb, raft_id: u64) -> Option<u64> {
+    metrics
+        .replication
+        .as_ref()?
+        .get(&raft_id)?
+        .as_ref()
+        .map(|log_id| log_id.index)
+}
+
+/// Run one handoff attempt under [`SHUTDOWN_HANDOFF_WAIT`] and name its
+/// outcome. Kept apart from the manager so the bound itself is testable
+/// without a cluster.
+async fn bounded_shutdown_handoff(
+    attempt: impl Future<Output = Result<u64, MembershipError>>,
+) -> (ShutdownHandoff, Option<MembershipError>) {
+    match tokio::time::timeout(SHUTDOWN_HANDOFF_WAIT, attempt).await {
+        Ok(Ok(successor)) => (ShutdownHandoff::HandedOff { successor }, None),
+        Ok(Err(MembershipError::ElectionCandidateUnavailable)) => {
+            (ShutdownHandoff::NoCandidate, None)
+        }
+        Ok(Err(error)) => (ShutdownHandoff::Failed, Some(error)),
+        Err(_) => (ShutdownHandoff::TimedOut, None),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
     #[error("cluster clock cannot authorize new membership authority: {0:?}")]
@@ -1428,6 +1581,7 @@ impl ClusterJobAuthority for MembershipManager {
         inner.client
             // authority: artifact dispatch/publication requires non-removed committed membership.
             .query_consistent_map::<CountRow, _>(
+                "may_execute_job",
                 "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id = $1 AND removed_at IS NULL
                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals WHERE node_id = $1)",
                 params!(inner.identity.node_id.as_str()),
@@ -1609,9 +1763,9 @@ impl From<&mut Row<'_>> for SharingAdmissionMarkers {
 }
 
 async fn sharing_admission_markers(
-    client: &Client,
+    client: &CountedClient,
 ) -> Result<SharingAdmissionMarkers, MembershipError> {
-    let rows = client.query_consistent_map::<SharingAdmissionMarkers,_>(format!(
+    let rows = client.query_consistent_map::<SharingAdmissionMarkers,_>("sharing_admission_markers", format!(
         "SELECT {} AS principal, {} AS catalogue, {} AS purpose_keys, EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_join_intents') AS intents",
         sharing_installed_marker_predicate(SHARING_SESSION_PRINCIPAL_CAPABILITY),
         sharing_installed_marker_predicate(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY),sharing_installed_marker_predicate(SHARING_PURPOSE_KEYS_CAPABILITY)),params!()).await?;
@@ -1708,7 +1862,7 @@ fn sharing_admission_schema_names() -> Vec<String> {
         .collect()
 }
 async fn bootstrap_purpose_admission_schema(
-    client: &Client,
+    client: &CountedClient,
     local_raft_id: u64,
     master: &crate::secrets::CredentialKey,
 ) -> Result<(), MembershipError> {
@@ -1734,12 +1888,14 @@ async fn bootstrap_purpose_admission_schema(
         .join(",");
     let existing = client
         .query_consistent_map::<CountRow, _>(
+            "bootstrap_purpose_admission_schema",
             format!("SELECT count(*) AS count FROM sqlite_master WHERE name IN ({names})"),
             params!(),
         )
         .await?;
     if !matches!(existing.as_slice(),[row] if row.count==0) {
         let generation = client.query_consistent_map::<CountRow, _>(
+            "bootstrap_purpose_admission_schema",
             "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'", params!(),
         ).await?;
         if !matches!(generation.as_slice(), [row] if row.count == 1) {
@@ -1747,6 +1903,7 @@ async fn bootstrap_purpose_admission_schema(
         }
         let valid = client
             .query_consistent_map::<CountRow, _>(
+                "bootstrap_purpose_admission_schema",
                 format!(
                     "SELECT CASE WHEN ({shape}) AND ({}) THEN 1 ELSE 0 END AS count",
                     sharing_membership_generation_shape_predicate()
@@ -1798,11 +1955,12 @@ async fn bootstrap_purpose_admission_schema(
     );
     statements.push((format!("UPDATE cluster_sharing_purpose_bootstrap_guard SET passed=CASE WHEN ({shape}) AND ({guard}) AND ({exact_roster}) AND ({master_guard}) AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) THEN 1 ELSE 0 END WHERE singleton=1"),params!(roster,cutoff,observed)));
     let result = client
-        .txn(statements)
+        .txn("bootstrap_purpose_admission_schema", statements)
         .await
         .and_then(|rows| rows.into_iter().collect::<Result<Vec<_>, _>>());
     if result.is_err() {
         let generation = client.query_consistent_map::<CountRow, _>(
+            "bootstrap_purpose_admission_schema",
             "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'", params!(),
         ).await?;
         if !matches!(generation.as_slice(), [row] if row.count == 1) {
@@ -1812,6 +1970,7 @@ async fn bootstrap_purpose_admission_schema(
         // be repaired. The caller still obtains a fresh normal key witness.
         let valid = client
             .query_consistent_map::<CountRow, _>(
+                "bootstrap_purpose_admission_schema",
                 format!(
                     "SELECT CASE WHEN ({shape}) AND ({}) THEN 1 ELSE 0 END AS count",
                     sharing_membership_generation_shape_predicate()
@@ -1832,7 +1991,12 @@ pub async fn bootstrap_purpose_admission_schema_for_contract(
     actual_local_raft_id: u64,
     master: &crate::secrets::CredentialKey,
 ) -> Result<(), MembershipError> {
-    bootstrap_purpose_admission_schema(client, actual_local_raft_id, master).await
+    bootstrap_purpose_admission_schema(
+        &CountedClient::membership(client.clone()),
+        actual_local_raft_id,
+        master,
+    )
+    .await
 }
 
 /// Candidate membership guards. Installation is deliberately unconfigured:
@@ -1999,7 +2163,7 @@ pub fn sharing_join_intent_statements(
 }
 
 async fn require_installed_sharing_promotion_floor(
-    client: &Client,
+    client: &CountedClient,
     node_id: &str,
 ) -> Result<(), MembershipError> {
     let now = unix_ms()?;
@@ -2008,6 +2172,7 @@ async fn require_installed_sharing_promotion_floor(
         sharing_installed_marker_predicate(capability))).collect::<Vec<_>>().join(" AND ");
     let rows = client
         .query_consistent_map::<CountRow, _>(
+            "require_installed_sharing_promotion_floor",
             format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
             params!(
                 node_id,
@@ -2516,6 +2681,56 @@ impl PassiveMembershipMetrics {
             errors: state.errors,
             sample: state.sample.map(|(_, sample)| sample),
         }
+    }
+}
+
+/// How long a node-to-node HTTP connection may take to establish.
+///
+/// Without a bound, a peer that silently drops packets consumes the caller's
+/// whole deadline — up to eight seconds on the hydrate paths. Two seconds is
+/// above one TCP SYN retransmission (Linux's initial RTO is one second), so a
+/// single lost SYN still connects, and a caller's own shorter deadline still
+/// applies first. The cost is at the long end: a caller with an eight-second
+/// or longer deadline that would have connected on the second retransmission,
+/// about three seconds in, now fails at two.
+const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long an unused pooled connection is kept.
+///
+/// The peer listener closes a connection that has waited fifteen seconds for
+/// its next request head (`HEADER_READ_TIMEOUT` in plurxd's `main.rs`). A
+/// pooled connection must be retired before the server does that, or a
+/// request can be written into a socket the peer is closing and fail as
+/// unreachable on a healthy peer. reqwest's default of ninety seconds is
+/// longer than the server's close, so it is set here, with margin.
+const PEER_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The one pooled HTTP client for `PeerTransport` requests between this node
+/// and its peers. (The short-lived clients this module builds for the Hiqlite
+/// management API are a different listener and are not pooled here.)
+///
+/// The membership manager owns it because every peer request is made on the
+/// manager's behalf, and every clone of the manager shares it. A client built
+/// per caller is a connection pool per caller: nothing is reused, and each
+/// request pays a fresh TCP and TLS handshake.
+#[derive(Clone)]
+pub struct PeerHttpClient(Result<reqwest::Client, String>);
+
+impl PeerHttpClient {
+    fn new() -> Self {
+        Self(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(PEER_CONNECT_TIMEOUT)
+                .pool_idle_timeout(PEER_POOL_IDLE_TIMEOUT)
+                .build()
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    /// The pooled client, or why it could not be built.
+    pub fn into_result(self) -> Result<reqwest::Client, String> {
+        self.0
     }
 }
 
@@ -3197,7 +3412,12 @@ pub async fn sharing_session_principal_floor_ready(
     client: &Client,
     local_raft_id: u64,
 ) -> Result<bool, MembershipError> {
-    sharing_member_floor_ready(client, local_raft_id, SharingMemberFloor::SessionPrincipal).await
+    member_floor_ready(
+        &CountedClient::membership(client.clone()),
+        local_raft_id,
+        SharingMemberFloor::SessionPrincipal,
+    )
+    .await
 }
 
 /// Quorum observation of the allocator-specific writer floor.
@@ -3205,8 +3425,8 @@ pub async fn sharing_catalogue_item_identity_floor_ready(
     client: &Client,
     local_raft_id: u64,
 ) -> Result<bool, MembershipError> {
-    sharing_member_floor_ready(
-        client,
+    member_floor_ready(
+        &CountedClient::membership(client.clone()),
         local_raft_id,
         SharingMemberFloor::CatalogueItemIdentity,
     )
@@ -3220,6 +3440,20 @@ pub async fn sharing_member_floor_ready(
     local_raft_id: u64,
     required: SharingMemberFloor,
 ) -> Result<bool, MembershipError> {
+    member_floor_ready(
+        &CountedClient::membership(client.clone()),
+        local_raft_id,
+        required,
+    )
+    .await
+}
+
+/// The three public observations above, on the manager's counted client.
+async fn member_floor_ready(
+    client: &CountedClient,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
     Ok(
         sharing_member_floor_observation(client, local_raft_id, required, false)
             .await?
@@ -3228,6 +3462,138 @@ pub async fn sharing_member_floor_ready(
 }
 
 const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
+
+/// What an advisory floor answer was read under. A change in the caller's
+/// serving-loss generation, the applied membership log or the known leader
+/// discards the answer before its age does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FloorAdvisoryKey {
+    epoch: u64,
+    /// The applied membership log id, serialized as the Source admission
+    /// observation records it (`membership_log_json`).
+    membership_log_json: String,
+    leader: Option<u64>,
+}
+
+/// One floor read and when it ran. `ready` is `None` for a read that failed.
+struct FloorAnswer<K> {
+    ready: Option<bool>,
+    started: tokio::time::Instant,
+    completed: tokio::time::Instant,
+    key: K,
+}
+
+/// One shared answer to "is this sharing member floor ready", for read-only
+/// observers only: stream monitors and serving-read admission. Concurrent
+/// callers wait on the one read in flight instead of each proving quorum.
+///
+/// - A ready answer serves later callers for up to
+///   `SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS`, because readiness also rests on
+///   replicated heartbeat, capability and join rows that the key does not see.
+/// - A not-ready answer serves only the callers that were already waiting
+///   while it was read. Keeping it would hold an outage past its recovery
+///   and spend the monitors' whole outage grace on one stale answer.
+/// - A failed read likewise answers only the callers already waiting on it,
+///   so callers queued behind a slow quorum share one failure rather than
+///   each reading again after its own caller has gone.
+///
+/// Guarded writes take `observe_*_members` instead, which stay fresh reads:
+/// this is advisory evidence, never a readiness permission.
+struct FloorAdvisory<K> {
+    held: tokio::sync::Mutex<Option<FloorAnswer<K>>>,
+}
+
+impl<K> Default for FloorAdvisory<K> {
+    fn default() -> Self {
+        Self {
+            held: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl<K: PartialEq> FloorAdvisory<K> {
+    async fn answer<E, KF, KFut, R>(
+        &self,
+        arrived: tokio::time::Instant,
+        max_age: Duration,
+        key: KF,
+        read: R,
+        failed: fn() -> E,
+    ) -> Result<bool, E>
+    where
+        KF: Fn() -> KFut,
+        KFut: Future<Output = Result<K, E>>,
+        R: Future<Output = Result<bool, E>>,
+    {
+        let mut held = self.held.lock().await;
+        let before = key().await?;
+        // Strictly after: an answer that completed before this caller arrived
+        // never serves it unless it is ready and young. A not-ready or failed
+        // answer left in `held` is therefore never served to a later caller.
+        if let Some(answer) = held.as_ref().filter(|answer| {
+            answer.key == before
+                && (answer.completed > arrived
+                    || (answer.ready == Some(true) && answer.started.elapsed() < max_age))
+        }) {
+            return answer.ready.ok_or_else(failed);
+        }
+        *held = None;
+        let started = tokio::time::Instant::now();
+        let read = read.await;
+        // An answer read across a change of key answers this caller but is
+        // not kept for the next.
+        if key().await.is_ok_and(|after| after == before) {
+            *held = Some(FloorAnswer {
+                ready: read.as_ref().ok().copied(),
+                started,
+                completed: tokio::time::Instant::now(),
+                key: before,
+            });
+        }
+        read
+    }
+}
+
+impl<K: PartialEq + Send + Sync + 'static> FloorAdvisory<K> {
+    /// The read runs on its own task, so a caller that gives up (its own
+    /// timeout, a dropped request) leaves it running for the callers waiting
+    /// behind it. `failed` answers a caller served a failed read, or whose
+    /// task did not complete.
+    async fn answer_detached<E, KF, KFut, R>(
+        self: Arc<Self>,
+        max_age: Duration,
+        key: KF,
+        read: R,
+        failed: fn() -> E,
+    ) -> Result<bool, E>
+    where
+        E: Send + 'static,
+        KF: Fn() -> KFut + Send + 'static,
+        KFut: Future<Output = Result<K, E>> + Send,
+        R: Future<Output = Result<bool, E>> + Send + 'static,
+    {
+        let arrived = tokio::time::Instant::now();
+        tokio::spawn(async move { self.answer(arrived, max_age, key, read, failed).await })
+            .await
+            .unwrap_or_else(|_| Err(failed()))
+    }
+}
+
+/// One floor read on its own task never holds the advisory longer than this.
+const SHARING_FLOOR_ADVISORY_READ_BOUND: Duration = Duration::from_secs(1);
+
+async fn floor_advisory_key(
+    client: &CountedClient,
+    epoch: u64,
+) -> Result<FloorAdvisoryKey, MembershipError> {
+    let metrics = client.metrics_db().await?;
+    Ok(FloorAdvisoryKey {
+        epoch,
+        membership_log_json: serde_json::to_string(&metrics.membership_config.log_id())
+            .map_err(|_| MembershipError::Incompatible)?,
+        leader: metrics.current_leader,
+    })
+}
 
 /// Server-derived membership inputs for a Source admission write. There is no
 /// wire decoder or caller-supplied roster constructor. This observation alone
@@ -3416,7 +3782,7 @@ fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
 }
 
 async fn sharing_member_floor_observation(
-    client: &Client,
+    client: &CountedClient,
     local_raft_id: u64,
     required: SharingMemberFloor,
     require_transition_absence: bool,
@@ -3449,6 +3815,7 @@ async fn sharing_member_floor_observation(
     let mut guard = sharing_member_guard_with_freshness(required, 1, 2, None);
     let generation_projection = if require_transition_absence {
         let present = client.query_consistent_map::<CountRow,_>(
+            "sharing_member_floor_observation",
             "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'",params!()).await?;
         if present.first().is_none_or(|row| row.count != 1) {
             #[cfg(feature = "fixtures")]
@@ -3495,6 +3862,7 @@ async fn sharing_member_floor_observation(
     };
     let rows = client
         .query_consistent_map::<SourceFloorGenerationRow, _>(
+            "sharing_member_floor_observation",
             format!(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
                  MIN(node.last_seen_at) AS oldest_heartbeat, MAX(node.last_seen_at) AS newest_heartbeat, {generation_projection} AS generation{diagnostic_projection} \
@@ -3571,7 +3939,7 @@ async fn sharing_member_floor_observation(
 }
 
 async fn purpose_key_member_observation(
-    client: &Client,
+    client: &CountedClient,
     local_raft_id: u64,
     master: &crate::secrets::CredentialKey,
 ) -> Result<Option<PurposeKeyMembers>, MembershipError> {
@@ -3605,6 +3973,7 @@ async fn purpose_key_member_observation(
     let (guard, roster, cutoff, observed) = result.write_guard(now, 1, 2, 3)?;
     let rows = client
         .query_consistent_map::<CountRow, _>(
+            "purpose_key_member_observation",
             format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
             params!(roster, cutoff, observed),
         )
@@ -3623,19 +3992,25 @@ pub async fn observe_purpose_key_members_for_contract(
     actual_local_raft_id: u64,
     master: &crate::secrets::CredentialKey,
 ) -> Result<Option<PurposeKeyMembers>, MembershipError> {
-    purpose_key_member_observation(client, actual_local_raft_id, master).await
+    purpose_key_member_observation(
+        &CountedClient::membership(client.clone()),
+        actual_local_raft_id,
+        master,
+    )
+    .await
 }
 
 fn source_purpose_material_marker() -> &'static str {
     "EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_installation','sharing_purpose_key_archive','sharing_purpose_transaction_guard'))"
 }
 async fn source_member_observation(
-    client: &Client,
+    client: &CountedClient,
     local_raft_id: u64,
     master: Option<&crate::secrets::CredentialKey>,
 ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
     let rows = client
         .query_consistent_map::<CountRow, _>(
+            "source_member_observation",
             format!(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
                 source_purpose_material_marker()
@@ -3667,6 +4042,7 @@ async fn source_member_observation(
     let (guard, roster, cutoff, observed) = observation.write_guard(unix_ms()?, 1, 2, 3)?;
     let rows = client
         .query_consistent_map::<CountRow, _>(
+            "source_member_observation",
             format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
             params!(roster, cutoff, observed),
         )
@@ -3688,7 +4064,12 @@ pub async fn observe_source_admission_members_for_contract(
     actual_local_raft_id: u64,
     master: &crate::secrets::CredentialKey,
 ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
-    source_member_observation(client, actual_local_raft_id, Some(master)).await
+    source_member_observation(
+        &CountedClient::membership(client.clone()),
+        actual_local_raft_id,
+        Some(master),
+    )
+    .await
 }
 
 /// SQLite unit fixtures still execute every SQL authority fence, but have no
@@ -4360,7 +4741,7 @@ async fn admit_cache_admin_exclusion(
 
 struct ReplicatedCacheAdminSlot<'a> {
     manager: &'a MembershipManager,
-    client: &'a Client,
+    client: &'a CountedClient,
     metrics: hiqlite::LocalDbRaftMetrics,
     lease: &'a mut CacheAdminRevocationLease,
 }
@@ -4410,7 +4791,11 @@ impl CacheAdminExclusionSlot for ReplicatedCacheAdminSlot<'_> {
         }
         // Read the cause from this replica once it has applied through the
         // refusal, so its rows are at least as new as the ones that refused.
-        let through = self.client.db_quorum_watermark().await?.committed_index;
+        let through = self
+            .client
+            .db_quorum_watermark("membership_offer")
+            .await?
+            .committed_index;
         while self
             .metrics
             .snapshot()
@@ -4425,6 +4810,7 @@ impl CacheAdminExclusionSlot for ReplicatedCacheAdminSlot<'_> {
         let rows = self
             .client
             .query_map::<CacheAdminRefusalRow, _>(
+                "membership_offer",
                 cache_admin_refusal_sql(),
                 params!(self.lease.node_id.as_str(), self.lease.claim.as_str()),
             )
@@ -4444,7 +4830,11 @@ impl CacheAdminExclusionSlot for ReplicatedCacheAdminSlot<'_> {
             let observed = self.metrics.snapshot().last_applied_index;
             let current = self
                 .client
-                .query_map::<CacheAdminHolderRow, _>(CACHE_ADMIN_EXCLUSION_HOLDER_SQL, params!())
+                .query_map::<CacheAdminHolderRow, _>(
+                    "holder_changed_by",
+                    CACHE_ADMIN_EXCLUSION_HOLDER_SQL,
+                    params!(),
+                )
                 .await?;
             if current.first().map(|row| row.claim_id.as_str()) != Some(holder) {
                 return Ok(true);
@@ -4720,41 +5110,50 @@ impl ArtworkRepairClaim {
     }
 }
 
-/// The membership manager's replicated client: hiqlite's [`Client`] with
-/// the store's settings floor armed around every write (playback-start E1b,
-/// `docs/streaming/PLAYBACK-START-E1-BUILD.md` §4.3). Membership writes
-/// `settings` in its own transactions (the reduction reference, the removal
-/// owner fence, the Live TV activation tuple), outside the store's
-/// `TimedClient`; without this the saving node's applied view could answer
-/// from a replica that has not applied them. Reads deref to the client.
+/// The membership manager's replicated client: the store's
+/// [`CountedClient`] with the store's settings floor armed around every write
+/// (playback-start E1b, `docs/streaming/PLAYBACK-START-E1-BUILD.md` §4.3).
+/// Membership writes `settings` in its own transactions (the reduction
+/// reference, the removal owner fence, the Live TV activation tuple), outside
+/// the store's `TimedClient`; without this the saving node's applied view
+/// could answer from a replica that has not applied them. Reads deref to the
+/// counted client, which takes the issuing function's name as a label on every
+/// replicated call; nothing here or there derefs to hiqlite's raw [`Client`],
+/// so an unlabelled (uncounted) SQL call does not compile.
 #[derive(Clone)]
 struct FlooredClient {
-    client: Client,
+    client: CountedClient,
     floor: crate::store::SettingsWriteFloor,
 }
 
 impl std::ops::Deref for FlooredClient {
-    type Target = Client;
+    type Target = CountedClient;
 
-    fn deref(&self) -> &Client {
+    fn deref(&self) -> &CountedClient {
         &self.client
     }
 }
 
 impl FlooredClient {
-    async fn execute<S>(&self, sql: S, params: hiqlite::Params) -> Result<usize, hiqlite::Error>
+    async fn execute<S>(
+        &self,
+        label: &'static str,
+        sql: S,
+        params: hiqlite::Params,
+    ) -> Result<usize, hiqlite::Error>
     where
         S: Into<std::borrow::Cow<'static, str>>,
     {
         let sql = sql.into();
         let settings = self.floor.arm([sql.as_ref()]);
-        let result = self.client.execute(sql, params).await;
+        let result = self.client.execute(label, sql, params).await;
         drop(settings);
         result
     }
 
     async fn txn<C, Q>(
         &self,
+        label: &'static str,
         statements: Q,
     ) -> Result<Vec<Result<usize, hiqlite::Error>>, hiqlite::Error>
     where
@@ -4768,7 +5167,7 @@ impl FlooredClient {
         let settings = self
             .floor
             .arm(statements.iter().map(|(sql, _)| sql.as_ref()));
-        let result = self.client.txn(statements).await;
+        let result = self.client.txn(label, statements).await;
         drop(settings);
         result
     }
@@ -4776,6 +5175,7 @@ impl FlooredClient {
 
 struct ReplicatedMembership {
     client: FlooredClient,
+    peer_http: PeerHttpClient,
     local_metrics: hiqlite::LocalDbRaftMetrics,
     store: Arc<dyn Store>,
     identity: ClusterIdentity,
@@ -4814,6 +5214,7 @@ struct ReplicatedMembership {
     replication: ReplicationMonitor,
     membership_metrics: PassiveMembershipMetrics,
     heartbeat_writes: HeartbeatWriteGate,
+    floor_advisories: [Arc<FloorAdvisory<FloorAdvisoryKey>>; SharingMemberFloor::COUNT],
     /// Fast request-path projection of committed role plus the local route
     /// fence. Heartbeats refresh it from local applied SQL and Raft metrics
     /// before publishing progress, so removal cannot cross its barrier while
@@ -5180,6 +5581,16 @@ impl MembershipManager {
         }
     }
 
+    /// The pooled client for node-to-node HTTP. Every clone of a replicated
+    /// manager returns the same pool. A manager with no cluster has no peers
+    /// to call, so it has no pool to share and builds a client on request.
+    #[must_use]
+    pub fn peer_http(&self) -> PeerHttpClient {
+        self.inner
+            .as_ref()
+            .map_or_else(PeerHttpClient::new, |inner| inner.peer_http.clone())
+    }
+
     #[must_use]
     pub fn clock_guard(&self) -> Arc<super::clock::ClusterClockGuard> {
         Arc::clone(&self.clock)
@@ -5367,6 +5778,7 @@ impl MembershipManager {
             inner
                 .client
                 .execute(
+                    "clock_observation",
                     "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, \
                   last_seen_at, removed_at, role) VALUES ($1,$2,$3,$4,0,NULL,'voter') \
                   ON CONFLICT(node_id) DO NOTHING",
@@ -5409,6 +5821,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "require_clock_observation_identity",
                 "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 \
              AND removed_at IS NULL AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
                WHERE removal.node_id=cluster_nodes.node_id)",
@@ -5560,9 +5973,10 @@ impl MembershipManager {
                 .clock_guard(),
             inner: Some(Arc::new(ReplicatedMembership {
                 client: FlooredClient {
-                    client,
+                    client: CountedClient::membership(client),
                     floor: settings_floor,
                 },
+                peer_http: PeerHttpClient::new(),
                 local_metrics,
                 store,
                 identity,
@@ -5606,6 +6020,7 @@ impl MembershipManager {
                 replication,
                 membership_metrics,
                 heartbeat_writes: HeartbeatWriteGate::default(),
+                floor_advisories: Default::default(),
                 local_serving_role: AtomicU8::new(LocalServingRole::Fenced.encoded()),
                 local_maintenance: AtomicBool::new(true),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
@@ -5655,6 +6070,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<MembershipSchemaRow, _>(
+                "require_membership_schema",
                 "SELECT schema_version FROM cluster_membership_meta WHERE singleton = 1",
                 params!(),
             )
@@ -5691,6 +6107,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "membership_column_exists",
                 "SELECT COUNT(*) AS count FROM pragma_table_info($1) WHERE name = $2",
                 params!(column.table, column.column),
             )
@@ -5731,7 +6148,11 @@ impl MembershipManager {
             if let Some(original) = original {
                 original.revalidate()?;
             }
-            match inner.client.txn(pending).await {
+            match inner
+                .client
+                .txn("apply_additive_membership_columns_admitted", pending)
+                .await
+            {
                 Ok(results) => {
                     for result in results {
                         match result {
@@ -5772,7 +6193,14 @@ impl MembershipManager {
             if let Some(original) = original {
                 original.revalidate()?;
             }
-            inner.client.execute(*statement, params!()).await?;
+            inner
+                .client
+                .execute(
+                    "install_membership_schema_only_admitted",
+                    *statement,
+                    params!(),
+                )
+                .await?;
         }
         self.apply_additive_membership_columns_admitted(original)
             .await?;
@@ -5785,72 +6213,78 @@ impl MembershipManager {
         }
         inner
             .client
-            .txn(vec![
-                (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
-                (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
-                (REQUIRE_LEARNER_JOIN_INTENT_SQL.to_owned(), params!()),
-                (
-                    "DROP TRIGGER IF EXISTS cluster_operation_lease_heartbeat_expiry".to_owned(),
-                    params!(),
-                ),
-                (
-                    EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    // Replace the aborting d0 candidate trigger atomically:
-                    // the compatibility guard below still refuses every
-                    // unproved mutation, but lets a legacy heartbeat advance
-                    // to the trusted UPDATE-owned expiry path.
-                    "DROP TRIGGER IF EXISTS cluster_operation_lease_delete_intent_guard".to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_CACHE_ADMIN_LEASE_INSERT_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_CACHE_ADMIN_LEASE_UPDATE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    "DROP TRIGGER IF EXISTS cluster_cache_admin_lease_heartbeat_expiry".to_owned(),
-                    params!(),
-                ),
-                (
-                    EXPIRE_CACHE_ADMIN_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
-                    params!(),
-                ),
-                (BACKFILL_LIVE_TV_ACTIVATION_SQL.to_owned(), params!()),
-                (
-                    MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL.to_owned(),
-                    params!(),
-                ),
-                (
-                    MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL.to_owned(),
-                    params!(),
-                ),
-            ])
+            .txn(
+                "install_membership_schema_only_admitted",
+                vec![
+                    (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
+                    (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
+                    (REQUIRE_LEARNER_JOIN_INTENT_SQL.to_owned(), params!()),
+                    (
+                        "DROP TRIGGER IF EXISTS cluster_operation_lease_heartbeat_expiry"
+                            .to_owned(),
+                        params!(),
+                    ),
+                    (
+                        EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        // Replace the aborting d0 candidate trigger atomically:
+                        // the compatibility guard below still refuses every
+                        // unproved mutation, but lets a legacy heartbeat advance
+                        // to the trusted UPDATE-owned expiry path.
+                        "DROP TRIGGER IF EXISTS cluster_operation_lease_delete_intent_guard"
+                            .to_owned(),
+                        params!(),
+                    ),
+                    (
+                        REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        REQUIRE_CACHE_ADMIN_LEASE_INSERT_INTENT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        REQUIRE_CACHE_ADMIN_LEASE_UPDATE_INTENT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        "DROP TRIGGER IF EXISTS cluster_cache_admin_lease_heartbeat_expiry"
+                            .to_owned(),
+                        params!(),
+                    ),
+                    (
+                        EXPIRE_CACHE_ADMIN_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (BACKFILL_LIVE_TV_ACTIVATION_SQL.to_owned(), params!()),
+                    (
+                        MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL.to_owned(),
+                        params!(),
+                    ),
+                    (
+                        MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL.to_owned(),
+                        params!(),
+                    ),
+                ],
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -5878,6 +6312,7 @@ impl MembershipManager {
         let current = inner
             .client
             .execute(
+                "install_membership_schema_only_admitted",
                 "INSERT INTO cluster_membership_meta (singleton, schema_version) VALUES (1, $1) \
                  ON CONFLICT(singleton) DO UPDATE SET schema_version = excluded.schema_version \
                  WHERE cluster_membership_meta.schema_version = excluded.schema_version",
@@ -5888,6 +6323,7 @@ impl MembershipManager {
             let rows = inner
                 .client
                 .query_consistent_map::<MembershipSchemaRow, _>(
+                    "install_membership_schema_only_admitted",
                     "SELECT schema_version FROM cluster_membership_meta WHERE singleton = 1",
                     params!(),
                 )
@@ -5972,6 +6408,7 @@ impl MembershipManager {
             let rows = inner
                 .client
                 .query_consistent_map::<MaxRaftIdRow, _>(
+                    "issue_token_for_role",
                     "SELECT MAX(raft_id) AS max_raft_id FROM (\
                        SELECT raft_id FROM cluster_nodes \
                        UNION ALL \
@@ -6028,6 +6465,7 @@ impl MembershipManager {
             let inserted = inner
                 .client
                 .execute(
+                    "issue_token_for_role",
                     "INSERT INTO cluster_join_tokens \
                      (token_hash, raft_id, expires_at, state, node_id, created_at, redeemed_at, \
                       role) \
@@ -6431,7 +6869,7 @@ impl MembershipManager {
             .map_err(MembershipError::ClockUnbounded)?;
         // Once submitted, the existing ambiguous-result/identity repair path
         // below remains available. A later clock refusal is not cancellation.
-        let transaction = inner.client.txn(statements).await;
+        let transaction = inner.client.txn("redeem_for_role", statements).await;
         match transaction {
             Ok(results) => {
                 results.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -6509,6 +6947,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "live_tv_enabled",
                 "SELECT COUNT(*) AS count FROM settings \
                  WHERE key = 'live_tv.enabled' AND value = '1'",
                 params!(),
@@ -6522,6 +6961,7 @@ impl MembershipManager {
         inner
             .client
             .execute(
+                "upsert_hostname",
                 "INSERT INTO cluster_node_hostnames (node_id, hostname) VALUES ($1, $2) \
                  ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname",
                 params!(node_id, hostname),
@@ -6593,6 +7033,7 @@ impl MembershipManager {
                 Ok(inner
                     .client
                     .execute(
+                        "finalize_for_role",
                         FINALIZE_JOIN_TOKEN_SQL,
                         params!(now, transition.token_digest, transition.node_id),
                     )
@@ -6607,6 +7048,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<JoinTokenRow, _>(
+                "token_record",
                 "SELECT raft_id, expires_at, state, node_id, role FROM cluster_join_tokens \
                  WHERE token_hash = $1",
                 params!(token_hash),
@@ -6620,6 +7062,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "node_identity_exists",
                 "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id = $1",
                 params!(node_id),
             )
@@ -6638,6 +7081,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<RedeemingNodeRow, _>(
+                "redeeming_node_matches",
                 "SELECT node.raft_id, node.raft_address, node.api_address, node.removed_at, \
                    EXISTS (SELECT 1 FROM cluster_node_removals removal \
                      WHERE removal.node_id = node.node_id) AS removal_pending \
@@ -6665,9 +7109,11 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let transaction = inner
             .client
-            .txn(vec![
-                (
-                    "INSERT INTO cluster_node_http (node_id, public_http_url) \
+            .txn(
+                "claim_redeeming_http_origin",
+                vec![
+                    (
+                        "INSERT INTO cluster_node_http (node_id, public_http_url) \
                      SELECT $1, $2 WHERE EXISTS (\
                        SELECT 1 FROM cluster_join_tokens token \
                        WHERE token.token_hash = $3 AND token.raft_id = $4 \
@@ -6691,28 +7137,29 @@ impl MembershipManager {
                      ON CONFLICT(node_id) DO UPDATE SET \
                        public_http_url = excluded.public_http_url \
                      RETURNING node_id"
-                        .to_owned(),
-                    params!(
-                        request.node_id.as_str(),
-                        http_base,
-                        request.token_digest.as_str(),
-                        request.raft_id as i64,
-                        request.raft_address.as_str(),
-                        request.api_address.as_str()
+                            .to_owned(),
+                        params!(
+                            request.node_id.as_str(),
+                            http_base,
+                            request.token_digest.as_str(),
+                            request.raft_id as i64,
+                            request.raft_address.as_str(),
+                            request.api_address.as_str()
+                        ),
                     ),
-                ),
-                (
-                    "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                    (
+                        "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
                        public_http_url = excluded.public_http_url \
                      WHERE cluster_node_http_claims.public_http_url = excluded.public_http_url"
-                        .to_owned(),
-                    vec![
-                        Param::StmtOutputNamed(0, "node_id".into()),
-                        Param::Text(http_base.to_owned()),
-                    ],
-                ),
-            ])
+                            .to_owned(),
+                        vec![
+                            Param::StmtOutputNamed(0, "node_id".into()),
+                            Param::Text(http_base.to_owned()),
+                        ],
+                    ),
+                ],
+            )
             .await;
         match transaction {
             Ok(results) => {
@@ -7063,7 +7510,7 @@ impl MembershipManager {
         }
         inner
             .client
-            .txn(statements)
+            .txn("commit_heartbeat_admitted", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -7091,6 +7538,7 @@ impl MembershipManager {
         let requested = inner
             .client
             .query_map::<CountRow, _>(
+                "refresh_local_maintenance",
                 NODE_MAINTENANCE_COUNT_SQL,
                 params!(inner.identity.node_id.as_str()),
             )
@@ -7120,6 +7568,7 @@ impl MembershipManager {
         let active = inner
             .client
             .query_map::<CountRow, _>(
+                "refresh_local_route_admission",
                 "SELECT COUNT(*) AS count FROM cluster_nodes \
                  WHERE node_id = $1 AND removed_at IS NULL \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
@@ -7228,6 +7677,7 @@ impl MembershipManager {
         let changed = inner
             .client
             .execute(
+                "publish_activity_signing_key_admitted",
                 "INSERT INTO cluster_node_activity_keys (node_id, public_key) \
                  SELECT $1, $2 WHERE EXISTS (\
                    SELECT 1 FROM cluster_nodes node \
@@ -7256,6 +7706,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<ActivityPublicKeyRow, _>(
+                "refresh_activity_public_keys",
                 "SELECT key.node_id, key.public_key \
                  FROM cluster_node_activity_keys key \
                  JOIN cluster_nodes node ON node.node_id = key.node_id \
@@ -7358,9 +7809,11 @@ impl MembershipManager {
         }
         let transaction = inner
             .client
-            .txn(vec![
-                (
-                    "INSERT INTO cluster_node_http (node_id, public_http_url) \
+            .txn(
+                "publish_http_url_value_admitted",
+                vec![
+                    (
+                        "INSERT INTO cluster_node_http (node_id, public_http_url) \
                      SELECT $1, $2 WHERE EXISTS (\
                        SELECT 1 FROM cluster_nodes self_node \
                        WHERE self_node.node_id = $1 AND self_node.removed_at IS NULL \
@@ -7385,20 +7838,21 @@ impl MembershipManager {
                      ON CONFLICT(node_id) DO UPDATE SET \
                        public_http_url = excluded.public_http_url \
                      RETURNING node_id"
-                        .to_owned(),
-                    params!(inner.identity.node_id.as_str(), artwork_http),
-                ),
-                (
-                    "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                            .to_owned(),
+                        params!(inner.identity.node_id.as_str(), artwork_http),
+                    ),
+                    (
+                        "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
                        public_http_url = excluded.public_http_url"
-                        .to_owned(),
-                    vec![
-                        Param::StmtOutputNamed(0, "node_id".into()),
-                        Param::Text(artwork_http.to_owned()),
-                    ],
-                ),
-            ])
+                            .to_owned(),
+                        vec![
+                            Param::StmtOutputNamed(0, "node_id".into()),
+                            Param::Text(artwork_http.to_owned()),
+                        ],
+                    ),
+                ],
+            )
             .await;
         match transaction {
             Ok(results) => {
@@ -7448,6 +7902,7 @@ impl MembershipManager {
         let existing = inner
             .client
             .query_consistent_map::<ArtworkRepairLeaseRow, _>(
+                "observe_artwork_source_repair",
                 "SELECT owner_node_id, leader_term, generation FROM cluster_artwork_repairs \
                  WHERE item_id = $1",
                 params!(item_id),
@@ -7505,6 +7960,7 @@ impl MembershipManager {
         let existing = inner
             .client
             .query_consistent_map::<ArtworkRepairLeaseRow, _>(
+                "claim_artwork_source_repair",
                 "SELECT owner_node_id, leader_term, generation FROM cluster_artwork_repairs \
                  WHERE item_id = $1",
                 params!(item_id),
@@ -7569,6 +8025,7 @@ impl MembershipManager {
         let changed = inner
             .client
             .execute(
+                "claim_artwork_source_repair",
                 "INSERT INTO cluster_artwork_repairs \
                  (item_id, owner_node_id, leader_term, generation) \
                  SELECT $1, $2, $3, $4 WHERE EXISTS (\
@@ -7632,6 +8089,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "local_node_is_active_voter",
                 "SELECT COUNT(*) AS count FROM cluster_nodes \
                  WHERE node_id = $1 AND removed_at IS NULL \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
@@ -7685,6 +8143,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "reconcile_local_maintenance_commit",
                 NODE_MAINTENANCE_COUNT_SQL,
                 params!(inner.identity.node_id.as_str()),
             )
@@ -7745,6 +8204,7 @@ impl MembershipManager {
         let changed = inner
             .client
             .execute(
+                "retire_artwork_source_repair",
                 "UPDATE cluster_artwork_repairs SET generation = generation + 1 \
                  WHERE item_id = $1 AND owner_node_id = $2 AND leader_term = $3 \
                    AND generation = $4 AND generation < 9223372036854775807",
@@ -7837,29 +8297,32 @@ impl MembershipManager {
             let now = unix_ms()?;
             let result = inner
                 .client
-                .txn(vec![
-                    (
-                        "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
+                .txn(
+                    "commit_cluster_operation_lease",
+                    vec![
+                        (
+                            "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
                          ON CONFLICT(claim_id) DO NOTHING"
-                            .to_owned(),
-                        params!(lease.claim_id.as_str()),
-                    ),
-                    (
-                        acquire_cluster_operation_lease_sql(),
-                        params!(
-                            lease.node_id.as_str(),
-                            lease.operation,
-                            lease.claim_id.as_str(),
-                            lease.expires_at_unix_ms,
-                            now
+                                .to_owned(),
+                            params!(lease.claim_id.as_str()),
                         ),
-                    ),
-                    (
-                        "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1"
-                            .to_owned(),
-                        params!(lease.claim_id.as_str()),
-                    ),
-                ])
+                        (
+                            acquire_cluster_operation_lease_sql(),
+                            params!(
+                                lease.node_id.as_str(),
+                                lease.operation,
+                                lease.claim_id.as_str(),
+                                lease.expires_at_unix_ms,
+                                now
+                            ),
+                        ),
+                        (
+                            "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1"
+                                .to_owned(),
+                            params!(lease.claim_id.as_str()),
+                        ),
+                    ],
+                )
                 .await;
             match result {
                 Ok(results) => {
@@ -7906,29 +8369,32 @@ impl MembershipManager {
             let now = unix_ms()?;
             let result = inner
                 .client
-                .txn(vec![
-                    (
-                        "INSERT INTO cluster_cache_admin_revocation_lease_intents \
+                .txn(
+                    "commit_cache_admin_revocation_lease",
+                    vec![
+                        (
+                            "INSERT INTO cluster_cache_admin_revocation_lease_intents \
                          (claim_id) VALUES ($1) ON CONFLICT(claim_id) DO NOTHING"
-                            .to_owned(),
-                        params!(lease.claim.as_str()),
-                    ),
-                    (
-                        acquire_cache_admin_revocation_lease_sql(),
-                        params!(
-                            lease.node_id.as_str(),
-                            lease.claim.as_str(),
-                            lease.expires_at_unix_ms,
-                            1_i64
+                                .to_owned(),
+                            params!(lease.claim.as_str()),
                         ),
-                    ),
-                    (
-                        "DELETE FROM cluster_cache_admin_revocation_lease_intents \
+                        (
+                            acquire_cache_admin_revocation_lease_sql(),
+                            params!(
+                                lease.node_id.as_str(),
+                                lease.claim.as_str(),
+                                lease.expires_at_unix_ms,
+                                1_i64
+                            ),
+                        ),
+                        (
+                            "DELETE FROM cluster_cache_admin_revocation_lease_intents \
                          WHERE claim_id = $1"
-                            .to_owned(),
-                        params!(lease.claim.as_str()),
-                    ),
-                ])
+                                .to_owned(),
+                            params!(lease.claim.as_str()),
+                        ),
+                    ],
+                )
                 .await;
             match result {
                 Ok(results) => {
@@ -7953,24 +8419,27 @@ impl MembershipManager {
                     // response may make ordinary cleanup receipt-free.
                     let definitive = inner
                         .client
-                        .txn(vec![
-                            (
-                                "INSERT INTO cluster_cache_admin_revocation_lease_intents \
+                        .txn(
+                            "commit_cache_admin_revocation_lease",
+                            vec![
+                                (
+                                    "INSERT INTO cluster_cache_admin_revocation_lease_intents \
                                  (claim_id) VALUES ($1) ON CONFLICT(claim_id) DO NOTHING"
-                                    .to_owned(),
-                                params!(lease.claim.as_str()),
-                            ),
-                            (
-                                MARK_CACHE_ADMIN_REVOCATION_ACQUIRE_DEFINITIVE_SQL.to_owned(),
-                                params!(lease.node_id.as_str(), lease.claim.as_str()),
-                            ),
-                            (
-                                "DELETE FROM cluster_cache_admin_revocation_lease_intents \
+                                        .to_owned(),
+                                    params!(lease.claim.as_str()),
+                                ),
+                                (
+                                    MARK_CACHE_ADMIN_REVOCATION_ACQUIRE_DEFINITIVE_SQL.to_owned(),
+                                    params!(lease.node_id.as_str(), lease.claim.as_str()),
+                                ),
+                                (
+                                    "DELETE FROM cluster_cache_admin_revocation_lease_intents \
                                  WHERE claim_id = $1"
-                                    .to_owned(),
-                                params!(lease.claim.as_str()),
-                            ),
-                        ])
+                                        .to_owned(),
+                                    params!(lease.claim.as_str()),
+                                ),
+                            ],
+                        )
                         .await;
                     match definitive {
                         Ok(results) => {
@@ -8040,30 +8509,34 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let result = inner
             .client
-            .txn(vec![
-                (
-                    "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
+            .txn(
+                "release_cluster_operation_lease",
+                vec![
+                    (
+                        "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
                      ON CONFLICT(claim_id) DO NOTHING"
-                        .to_owned(),
-                    params!(lease.claim_id.as_str()),
-                ),
-                (
-                    TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
-                    params!(lease.claim_id.as_str()),
-                ),
-                (
-                    RELEASE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
-                    params!(
-                        lease.node_id.as_str(),
-                        lease.operation,
-                        lease.claim_id.as_str()
+                            .to_owned(),
+                        params!(lease.claim_id.as_str()),
                     ),
-                ),
-                (
-                    "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1".to_owned(),
-                    params!(lease.claim_id.as_str()),
-                ),
-            ])
+                    (
+                        TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                    (
+                        RELEASE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
+                        params!(
+                            lease.node_id.as_str(),
+                            lease.operation,
+                            lease.claim_id.as_str()
+                        ),
+                    ),
+                    (
+                        "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1"
+                            .to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                ],
+            )
             .await;
         match result {
             Ok(results) => {
@@ -8119,7 +8592,10 @@ impl MembershipManager {
                 params!(lease.claim.as_str()),
             ));
         }
-        let result = inner.client.txn(statements).await;
+        let result = inner
+            .client
+            .txn("release_cache_admin_revocation_lease", statements)
+            .await;
         match result {
             Ok(results) => {
                 results.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -8142,32 +8618,35 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let result = inner
             .client
-            .txn(vec![
-                (
-                    "INSERT INTO cluster_operation_lease_intents (claim_id) \
+            .txn(
+                "release_restart_preparation",
+                vec![
+                    (
+                        "INSERT INTO cluster_operation_lease_intents (claim_id) \
                          SELECT claim_id FROM cluster_operation_leases \
                          WHERE singleton = 1 AND node_id = $1 AND operation = 'restart' \
                          ON CONFLICT(claim_id) DO NOTHING"
-                        .to_owned(),
-                    params!(node_id),
-                ),
-                (
-                    "INSERT INTO cluster_operation_lease_releases (claim_id) \
+                            .to_owned(),
+                        params!(node_id),
+                    ),
+                    (
+                        "INSERT INTO cluster_operation_lease_releases (claim_id) \
                          SELECT claim_id FROM cluster_operation_leases \
                          WHERE singleton = 1 AND node_id = $1 AND operation = 'restart' \
                          ON CONFLICT(claim_id) DO NOTHING"
-                        .to_owned(),
-                    params!(node_id),
-                ),
-                (RELEASE_RESTART_PREPARATION_SQL.to_owned(), params!(node_id)),
-                (
-                    "DELETE FROM cluster_operation_lease_intents \
+                            .to_owned(),
+                        params!(node_id),
+                    ),
+                    (RELEASE_RESTART_PREPARATION_SQL.to_owned(), params!(node_id)),
+                    (
+                        "DELETE FROM cluster_operation_lease_intents \
                          WHERE claim_id IN (SELECT claim_id FROM cluster_operation_lease_releases) \
                            AND claim_id NOT IN (SELECT claim_id FROM cluster_operation_leases)"
-                        .to_owned(),
-                    params!(),
-                ),
-            ])
+                            .to_owned(),
+                        params!(),
+                    ),
+                ],
+            )
             .await;
         match result {
             Ok(results) => {
@@ -8227,50 +8706,54 @@ impl MembershipManager {
         let now = unix_ms()?;
         let transition = inner
             .client
-            .txn(vec![
-                (
-                    enter_maintenance_admission_sql(),
-                    params!(node_id, now, lease.claim_id.as_str()),
-                ),
-                (
-                    "INSERT INTO cluster_operation_lease_intents (claim_id) \
+            .txn(
+                "enter_maintenance",
+                vec![
+                    (
+                        enter_maintenance_admission_sql(),
+                        params!(node_id, now, lease.claim_id.as_str()),
+                    ),
+                    (
+                        "INSERT INTO cluster_operation_lease_intents (claim_id) \
                      SELECT lease.claim_id FROM cluster_operation_leases lease \
                      WHERE lease.singleton = 1 AND lease.node_id = $1 \
                        AND lease.operation = 'maintenance' AND lease.claim_id = $2 \
                      ON CONFLICT(claim_id) DO NOTHING"
-                        .to_owned(),
-                    vec![
-                        Param::StmtOutputNamed(0, "node_id".into()),
-                        Param::Text(lease.claim_id.clone()),
-                    ],
-                ),
-                (
-                    "INSERT INTO cluster_operation_lease_releases (claim_id) \
+                            .to_owned(),
+                        vec![
+                            Param::StmtOutputNamed(0, "node_id".into()),
+                            Param::Text(lease.claim_id.clone()),
+                        ],
+                    ),
+                    (
+                        "INSERT INTO cluster_operation_lease_releases (claim_id) \
                      SELECT lease.claim_id FROM cluster_operation_leases lease \
                      WHERE lease.singleton = 1 AND lease.node_id = $1 \
                        AND lease.operation = 'maintenance' AND lease.claim_id = $2 \
                      ON CONFLICT(claim_id) DO NOTHING"
-                        .to_owned(),
-                    vec![
-                        Param::StmtOutputNamed(0, "node_id".into()),
-                        Param::Text(lease.claim_id.clone()),
-                    ],
-                ),
-                (
-                    "DELETE FROM cluster_operation_leases \
+                            .to_owned(),
+                        vec![
+                            Param::StmtOutputNamed(0, "node_id".into()),
+                            Param::Text(lease.claim_id.clone()),
+                        ],
+                    ),
+                    (
+                        "DELETE FROM cluster_operation_leases \
                      WHERE singleton = 1 AND node_id = $1 \
                        AND operation = 'maintenance' AND claim_id = $2"
-                        .to_owned(),
-                    vec![
-                        Param::StmtOutputNamed(0, "node_id".into()),
-                        Param::Text(lease.claim_id.clone()),
-                    ],
-                ),
-                (
-                    "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1".to_owned(),
-                    params!(lease.claim_id.as_str()),
-                ),
-            ])
+                            .to_owned(),
+                        vec![
+                            Param::StmtOutputNamed(0, "node_id".into()),
+                            Param::Text(lease.claim_id.clone()),
+                        ],
+                    ),
+                    (
+                        "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1"
+                            .to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                ],
+            )
             .await;
         match transition {
             Ok(results) => {
@@ -8324,6 +8807,7 @@ impl MembershipManager {
         let changed = inner
             .client
             .execute(
+                "exit_maintenance",
                 EXIT_MAINTENANCE_SQL,
                 params!(node_id, cutoff, NODE_MAINTENANCE_CAPABILITY, now),
             )
@@ -8368,6 +8852,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "require_maintenance_capability",
                 format!(
                     "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
                     capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
@@ -8387,6 +8872,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<CountRow, _>(
+                "require_maintenance_capability_local",
                 format!(
                     "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
                     capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
@@ -8405,7 +8891,11 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<CountRow, _>(LIFECYCLE_OPERATION_PENDING_SQL, params!())
+            .query_consistent_map::<CountRow, _>(
+                "lifecycle_operation_pending",
+                LIFECYCLE_OPERATION_PENDING_SQL,
+                params!(),
+            )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
@@ -8414,7 +8904,11 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_map::<CountRow, _>(LIFECYCLE_OPERATION_PENDING_SQL, params!())
+            .query_map::<CountRow, _>(
+                "lifecycle_operation_pending_local",
+                LIFECYCLE_OPERATION_PENDING_SQL,
+                params!(),
+            )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
@@ -8424,6 +8918,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "maintenance_operation_pending",
                 "SELECT (SELECT COUNT(*) FROM cluster_node_maintenance) \
                    + (SELECT COUNT(*) FROM cluster_operation_leases) AS count",
                 params!(),
@@ -8432,12 +8927,22 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
 
+    /// Move leadership off `departed` to a caught-up survivor.
+    ///
+    /// When `departed` is this node and it leads, this is a real transfer
+    /// (Hiqlite patch 31): stop proposing, wait until an eligible voter's
+    /// matched log equals this leader's last entry, then trigger it, keeping
+    /// the hold until this node has stepped down. Without the hold the trigger
+    /// raced in-flight appends, and a candidate one entry behind was refused
+    /// by the old leader in 5 of 14 real-daemon runs. Every phase shares one
+    /// [`SURVIVOR_LEADER_WAIT`] deadline, as the survivor wait alone did.
     async fn handoff_leadership(
         &self,
         departed: u64,
         status: &MembershipStatus,
     ) -> Result<u64, MembershipError> {
         let inner = self.replicated_inner()?;
+        let deadline = tokio::time::Instant::now() + SURVIVOR_LEADER_WAIT;
         let metrics = inner.client.metrics_db().await?;
         let remaining = metrics
             .membership_config
@@ -8451,23 +8956,184 @@ impl MembershipManager {
             .filter(|(raft_id, _)| remaining.contains(raft_id))
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
-        let candidate = status.nodes.iter().find(|node| {
-            remaining.contains(&node.raft_id)
-                && node.is_voter
-                && node.reachable
-                && !node.maintenance
-                && !node.removal_pending
-                && node.apply_lag_entries == Some(0)
-        });
-        let candidate = candidate.ok_or(MembershipError::ElectionCandidateUnavailable)?;
-        let candidate_api = survivor_nodes
+        let eligible = status
+            .nodes
             .iter()
-            .find(|(raft_id, _)| *raft_id == candidate.raft_id)
-            .map(|(_, api)| api.as_str())
-            .ok_or(MembershipError::ElectionCandidateUnavailable)?;
-        trigger_election(candidate_api, &inner.secrets.api).await?;
-        self.await_survivor_leader(departed, &remaining, &survivor_nodes, &inner.secrets.api)
-            .await
+            .filter(|node| {
+                remaining.contains(&node.raft_id)
+                    && node.is_voter
+                    && node.reachable
+                    && !node.maintenance
+                    && !node.removal_pending
+            })
+            .collect::<Vec<_>>();
+        // The heartbeat-published apply lag is a seconds-old row; it now only
+        // orders the choice. Whether a voter can win is the leader's own,
+        // current matched index below.
+        let preferred = eligible
+            .iter()
+            .find(|node| node.apply_lag_entries == Some(0))
+            .map(|node| node.raft_id);
+        let eligible = eligible.iter().map(|node| node.raft_id).collect::<Vec<_>>();
+        let local_leader =
+            departed == inner.identity.raft_id && metrics.current_leader == Some(departed);
+        if !local_leader {
+            // Another node leads, or this node is not the one departing: no
+            // local log to hold or match. The original rule and trigger.
+            let candidate = preferred.ok_or(MembershipError::ElectionCandidateUnavailable)?;
+            let candidate_api = survivor_api(&survivor_nodes, candidate)?;
+            trigger_election(candidate_api, &inner.secrets.api).await?;
+        } else {
+            if eligible.is_empty() {
+                // Nothing to wait for: answer at once, without a hold.
+                return Err(MembershipError::ElectionCandidateUnavailable);
+            }
+            // Everything done under the hold ends by `hold_deadline`, so
+            // writers on this node wait at most PROPOSAL_HOLD_WAIT; taking
+            // the hold gets its own share so a slow acquisition still leaves
+            // time for the rest.
+            let hold_started = tokio::time::Instant::now();
+            let hold_deadline = deadline.min(hold_started + PROPOSAL_HOLD_WAIT);
+            let acquire_deadline = hold_deadline.min(hold_started + PROPOSAL_HOLD_ACQUIRE);
+            let hold = inner
+                .client
+                .hold_local_db_proposals(acquire_deadline)
+                .await?;
+            if hold.is_none() {
+                tracing::warn!(
+                    target: "plurx::cluster",
+                    "a proposal did not finish in time to hold this leader's log; \
+                     handing off without the hold"
+                );
+            }
+            // The hold stops new proposals, but a cancelled caller's entry may
+            // still be queued in the Raft core; matching against the leader's
+            // own last log index in one metrics snapshot covers that.
+            let caught_up = inner
+                .client
+                .wait_local_db_metrics(hold_deadline, |metrics| {
+                    metrics.current_leader != Some(departed)
+                        || matched_survivor(&eligible, preferred, metrics.last_log_index, |id| {
+                            matched_index(metrics, id)
+                        })
+                        .is_some()
+                })
+                .await
+                // Eligible voters exist but none caught up in time: the same
+                // answer as having none, and the hold drops on return.
+                .map_err(|_| MembershipError::ElectionCandidateUnavailable)?;
+            if caught_up.current_leader != Some(departed) {
+                return Err(MembershipError::Internal(format!(
+                    "Raft voter {departed} lost leadership before choosing a successor"
+                )));
+            }
+            let candidate =
+                matched_survivor(&eligible, preferred, caught_up.last_log_index, |id| {
+                    matched_index(&caught_up, id)
+                })
+                .ok_or(MembershipError::ElectionCandidateUnavailable)?;
+            let candidate_api = survivor_api(&survivor_nodes, candidate)?;
+            if let Some(hold) = hold {
+                // An unanswered trigger must not hold every write: bounded by
+                // the hold, and an error drops the hold on return.
+                within_hold(
+                    hold_deadline,
+                    trigger_election(candidate_api, &inner.secrets.api),
+                )
+                .await?;
+                // Keep the log still until this node follows the new leader:
+                // an append between the trigger and the vote request would put
+                // the candidate behind again, and a writer released before
+                // this node knows the winner gets a forward to nobody. Then
+                // waiting writers forward to the named leader.
+                let _ = inner
+                    .client
+                    .wait_local_db_metrics(hold_deadline, |metrics| {
+                        metrics
+                            .current_leader
+                            .is_some_and(|leader| leader != departed)
+                    })
+                    .await;
+                drop(hold);
+            } else {
+                trigger_election(candidate_api, &inner.secrets.api).await?;
+            }
+        }
+        self.await_survivor_leader(
+            departed,
+            &remaining,
+            &survivor_nodes,
+            &inner.secrets.api,
+            deadline,
+        )
+        .await
+    }
+
+    /// Move Raft leadership off this node before it stops, and stop this
+    /// node from ever campaigning again in this process.
+    ///
+    /// The first act of a plurxd drain, while its Raft node and listeners
+    /// are still fully up. Every replicated node switches its own election
+    /// timer off (Hiqlite patch 30), leader or not, so a stopping node never
+    /// wins leadership back. A non-leader or a sole voter returns without
+    /// touching the network. A leader runs the one existing handoff,
+    /// [`Self::handoff_leadership`], under one bound,
+    /// [`SHUTDOWN_HANDOFF_WAIT`]. It writes nothing and never returns an
+    /// error: the caller always continues its drain.
+    pub async fn handoff_for_shutdown(&self) -> ShutdownHandoff {
+        let started = tokio::time::Instant::now();
+        let (outcome, error) = self.shutdown_handoff_outcome().await;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let error = error.map(|error| error.to_string());
+        if outcome.settled() {
+            tracing::info!(
+                target: "plurx::cluster",
+                outcome = outcome.as_str(),
+                successor = outcome.successor(),
+                elapsed_ms,
+                "shutdown leadership handoff"
+            );
+        } else {
+            tracing::warn!(
+                target: "plurx::cluster",
+                outcome = outcome.as_str(),
+                elapsed_ms,
+                error = error.as_deref(),
+                "shutdown leadership handoff did not move leadership; the survivors elect on their own timers"
+            );
+        }
+        outcome
+    }
+
+    async fn shutdown_handoff_outcome(&self) -> (ShutdownHandoff, Option<MembershipError>) {
+        let Some(inner) = self.inner.as_deref() else {
+            return (ShutdownHandoff::NotReplicated, None);
+        };
+        if let Err(error) = inner.client.disable_local_db_elections() {
+            // Only a remote client refuses, and a daemon's client is local.
+            // A node that could not switch its timer off still hands off.
+            tracing::warn!(
+                target: "plurx::cluster",
+                %error,
+                "could not stop this node's own elections before shutdown"
+            );
+        }
+        let metrics = match inner.client.metrics_db().await {
+            Ok(metrics) => metrics,
+            Err(error) => return (ShutdownHandoff::Failed, Some(error.into())),
+        };
+        if metrics.current_leader != Some(inner.identity.raft_id) {
+            return (ShutdownHandoff::NotLeader, None);
+        }
+        if metrics.membership_config.voter_ids().count() <= 1 {
+            return (ShutdownHandoff::SoleVoter, None);
+        }
+        bounded_shutdown_handoff(async {
+            let status = self.status().await?;
+            self.handoff_leadership(inner.identity.raft_id, &status)
+                .await
+        })
+        .await
     }
 
     async fn campaign_without_leader(
@@ -8501,8 +9167,14 @@ impl MembershipManager {
             .map(|(_, api)| api.as_str())
             .ok_or(MembershipError::ElectionCandidateUnavailable)?;
         trigger_election(candidate_api, &inner.secrets.api).await?;
-        self.await_survivor_leader(0, &voters, &voter_nodes, &inner.secrets.api)
-            .await
+        self.await_survivor_leader(
+            0,
+            &voters,
+            &voter_nodes,
+            &inner.secrets.api,
+            tokio::time::Instant::now() + SURVIVOR_LEADER_WAIT,
+        )
+        .await
     }
 
     async fn force_leader_change(
@@ -8540,8 +9212,14 @@ impl MembershipManager {
         trigger_election(candidate_api, &inner.secrets.api).await?;
         // Unlike maintenance, the old leader is not about to leave. Its vote
         // and observation count toward the unchanged cluster majority.
-        self.await_survivor_leader(departed, &voters, &voter_nodes, &inner.secrets.api)
-            .await
+        self.await_survivor_leader(
+            departed,
+            &voters,
+            &voter_nodes,
+            &inner.secrets.api,
+            tokio::time::Instant::now() + SURVIVOR_LEADER_WAIT,
+        )
+        .await
     }
 
     /// Public HTTP bases for currently reachable peers.
@@ -8561,6 +9239,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<HttpUrlRow, _>(
+                "reachable_peer_http_urls",
                 "SELECT http.public_http_url \
                  FROM cluster_node_http http \
                  JOIN cluster_nodes node ON node.node_id = http.node_id \
@@ -8618,6 +9297,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "verify_artwork_peer_auth",
                 "SELECT COUNT(*) AS count FROM cluster_nodes \
                  WHERE node_id = $1 AND removed_at IS NULL AND last_seen_at >= $2 \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
@@ -8645,6 +9325,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<ActivityPeerRow, _>(
+                "activity_peers",
                 "SELECT node.node_id, node.raft_id, node.last_seen_at, \
                         http.public_http_url \
                  FROM cluster_nodes node \
@@ -8698,6 +9379,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<NodeHostnameRow, _>(
+                "node_hostnames",
                 "SELECT node.node_id, node.api_address, \
                         COALESCE(host.hostname, '') AS hostname \
                  FROM cluster_nodes node \
@@ -8737,6 +9419,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<ActivityPeerRow, _>(
+                "operations_peers",
                 OPERATIONS_PEERS_SQL,
                 params!(inner.identity.node_id.as_str(), members_json),
             )
@@ -8813,6 +9496,7 @@ impl MembershipManager {
             let rows = inner
                 .client
                 .query_consistent_map::<AuthenticatedClockPeerRow, _>(
+                    "clock_peers_for_request",
                     AUTHENTICATED_CLOCK_PEERS_SQL,
                     params!(inner.identity.node_id.as_str(), members_json, sender),
                 )
@@ -8829,6 +9513,7 @@ impl MembershipManager {
             inner
                 .client
                 .query_consistent_map::<ActivityPeerRow, _>(
+                    "clock_peers_for_request",
                     CACHE_ADMIN_REVOCATION_PEERS_SQL,
                     params!(inner.identity.node_id.as_str(), members_json),
                 )
@@ -8837,6 +9522,7 @@ impl MembershipManager {
             inner
                 .client
                 .query_map::<ActivityPeerRow, _>(
+                    "clock_peers_for_request",
                     CACHE_ADMIN_REVOCATION_PEERS_SQL,
                     params!(inner.identity.node_id.as_str(), members_json),
                 )
@@ -8889,6 +9575,7 @@ impl MembershipManager {
         inner
             .client
             .execute(
+                "cache_admin_revocation_peers",
                 activate_credential_guard_sql(),
                 params!(members_json.clone(), claim_id),
             )
@@ -8896,6 +9583,7 @@ impl MembershipManager {
         let capability = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "cache_admin_revocation_peers",
                 committed_credential_guard_ready_sql(),
                 params!(members_json.clone(), claim_id),
             )
@@ -8906,6 +9594,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<ActivityPeerRow, _>(
+                "cache_admin_revocation_peers",
                 CACHE_ADMIN_REVOCATION_PEERS_SQL,
                 params!(inner.identity.node_id.as_str(), members_json),
             )
@@ -8988,6 +9677,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<MediaPeerRow, _>(
+                "media_peers_for_route",
                 "SELECT node.node_id, node.raft_id, node.last_seen_at, node.role, \
                         http.public_http_url, \
                         COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
@@ -9523,6 +10213,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<ActivityPublicKeyRow, _>(
+                "activity_signature_is_valid",
                 "SELECT key.node_id, key.public_key \
                  FROM cluster_node_activity_keys key \
                  JOIN cluster_nodes node ON node.node_id = key.node_id \
@@ -9719,6 +10410,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
+                "verify_live_peer_authority_counted",
                 "SELECT node.raft_id, node.last_seen_at \
                  FROM cluster_nodes node \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL \
@@ -9756,6 +10448,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
+                "verify_committed_clock_peer_authority",
                 "SELECT node.raft_id, node.last_seen_at FROM cluster_nodes node \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
@@ -9785,6 +10478,7 @@ impl MembershipManager {
             let rows = inner
                 .client
                 .query_map::<MembershipMetricsRow, _>(
+                    "refresh_membership_metrics",
                     "SELECT node.raft_id, node.last_seen_at, \
                             EXISTS (SELECT 1 FROM cluster_node_removals removal \
                               WHERE removal.node_id = node.node_id) AS removal_pending \
@@ -9843,7 +10537,7 @@ impl MembershipManager {
                 Ok(()) => {
                     match tokio::time::timeout(
                         Duration::from_secs(5),
-                        self.coordinate_purpose_keys(),
+                        self.heartbeat_purpose_keys(),
                     )
                     .await
                     {
@@ -9894,6 +10588,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<MembershipNodeRow, _>(
+                "membership_status",
                 "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, n.role, \
                         COALESCE(h.hostname, '') AS hostname, \
                         progress.apply_lag_entries, \
@@ -10057,6 +10752,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<CountRow, _>(
+                "cache_admin_revocation_ready",
                 committed_cache_admin_revocation_ready_sql(),
                 params!(members_json),
             )
@@ -10087,6 +10783,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<CacheAdminBlockerRow, _>(
+                "cache_admin_exclusion_blockers",
                 sql,
                 params!(inner.identity.node_id.as_str(), now),
             )
@@ -10154,6 +10851,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "cache_admin_revocation_activation_ready",
                 committed_cache_admin_revocation_activation_needed_sql(),
                 params!(members_json),
             )
@@ -10172,6 +10870,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<CountRow, _>(
+                "cache_admin_revocation_activated_locally",
                 "SELECT EXISTS (SELECT 1 FROM cluster_credential_guard_activation) AS count",
                 params!(),
             )
@@ -10194,6 +10893,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<CountRow, _>(
+                "cache_admin_revocation_claim_applied",
                 "SELECT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
                  WHERE claim_id = $1) AS count",
                 params!(claim_id),
@@ -10259,6 +10959,7 @@ impl MembershipManager {
         let existing = inner
             .client
             .query_consistent_map::<PromotionAttemptRow, _>(
+                "promote_learner",
                 "SELECT attempt_id \
                  FROM cluster_node_promotions WHERE node_id = $1",
                 params!(node_id),
@@ -10305,6 +11006,7 @@ impl MembershipManager {
             let inserted = inner
                 .client
                 .execute(
+                    "promote_learner",
                     "INSERT INTO cluster_node_promotions \
                  (node_id, attempt_id, barrier_index, started_at) \
                  SELECT $1, $2, NULL, $3 \
@@ -10327,7 +11029,7 @@ impl MembershipManager {
         // target-local barrier. Reusing the first request's watermark would
         // let a learner go offline and still be added to the voter set from a
         // stale progress row during the freshness window.
-        let barrier = match inner.client.db_quorum_watermark().await {
+        let barrier = match inner.client.db_quorum_watermark("promote_learner").await {
             Ok(watermark) => watermark.committed_index,
             Err(error) => {
                 if new_attempt {
@@ -10339,6 +11041,7 @@ impl MembershipManager {
         inner
             .client
             .execute(
+                "promote_learner",
                 "UPDATE cluster_node_promotions SET barrier_index = $1 \
                      WHERE node_id = $2 AND attempt_id = $3",
                 params!(
@@ -10423,6 +11126,7 @@ impl MembershipManager {
         inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
+                "promotion_target",
                 PROMOTION_TARGET_SQL,
                 params!(node_id, false),
             )
@@ -10519,18 +11223,21 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         inner
             .client
-            .txn(vec![
-                (
-                    "UPDATE cluster_nodes SET role = 'voter' \
+            .txn(
+                "finish_learner_promotion",
+                vec![
+                    (
+                        "UPDATE cluster_nodes SET role = 'voter' \
                      WHERE node_id = $1 AND removed_at IS NULL"
-                        .to_owned(),
-                    params!(node_id),
-                ),
-                (
-                    "DELETE FROM cluster_node_promotions WHERE node_id = $1".to_owned(),
-                    params!(node_id),
-                ),
-            ])
+                            .to_owned(),
+                        params!(node_id),
+                    ),
+                    (
+                        "DELETE FROM cluster_node_promotions WHERE node_id = $1".to_owned(),
+                        params!(node_id),
+                    ),
+                ],
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -10544,6 +11251,7 @@ impl MembershipManager {
         if let Err(error) = inner
             .client
             .execute(
+                "clear_learner_promotion",
                 "DELETE FROM cluster_node_promotions WHERE node_id = $1 AND attempt_id = $2",
                 params!(node_id, attempt_id),
             )
@@ -10566,6 +11274,7 @@ impl MembershipManager {
         let target = inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
+                "remove_node",
                 PROMOTION_TARGET_SQL,
                 params!(node_id, true),
             )
@@ -10725,6 +11434,7 @@ impl MembershipManager {
         let fences = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "freeze_reduction_reference",
                 EXACT_REDUCTION_FENCE_SQL,
                 params!(
                     node_id,
@@ -10744,7 +11454,11 @@ impl MembershipManager {
             target_node_id: node_id.to_owned(),
             target_raft_id: raft_id,
             attempt_id: attempt_id.to_owned(),
-            barrier_index: inner.client.db_quorum_watermark().await?.committed_index,
+            barrier_index: inner
+                .client
+                .db_quorum_watermark("freeze_reduction_reference")
+                .await?
+                .committed_index,
         };
         if !reference.has_valid_shape() {
             return Err(MembershipError::RemovalPending(
@@ -10762,6 +11476,7 @@ impl MembershipManager {
         inner
             .client
             .execute(
+                "freeze_reduction_reference",
                 FREEZE_REDUCTION_REFERENCE_SQL,
                 params!(
                     key.as_str(),
@@ -10779,6 +11494,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<ReductionReferenceRow, _>(
+                "freeze_reduction_reference",
                 READ_REDUCTION_REFERENCE_SQL,
                 params!(key, node_id, attempt_id, removed_job_owner_key(node_id)),
             )
@@ -10826,6 +11542,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<ReductionReferenceRow, _>(
+                "prove_reduction_reference",
                 READ_REDUCTION_REFERENCE_SQL,
                 params!(
                     reduction_reference_key(reference),
@@ -10974,6 +11691,7 @@ impl MembershipManager {
         let target = inner
             .client
             .query_consistent_map::<TargetNodeRow, _>(
+                "remove_voter_captured",
                 "SELECT raft_id FROM cluster_nodes WHERE node_id = $1",
                 params!(node_id),
             )
@@ -11203,28 +11921,11 @@ impl MembershipManager {
                     "cluster has no leadership successor".to_owned(),
                 ));
             }
-            let mut triggered = false;
-            for (_, candidate_api) in &survivor_nodes {
-                if trigger_election(candidate_api, &inner.secrets.api)
-                    .await
-                    .is_ok()
-                {
-                    triggered = true;
-                    break;
-                }
-            }
-            if !triggered {
-                return Err(MembershipError::Internal(
-                    "no surviving voter accepted the bounded leadership handoff".to_owned(),
-                ));
-            }
+            // The one gated transfer every leader handoff uses: hold this
+            // leader's log, trigger a survivor that has matched it, and confirm.
+            let status = self.status().await?;
             let new_leader = self
-                .await_survivor_leader(
-                    inner.identity.raft_id,
-                    &remaining,
-                    &survivor_nodes,
-                    &inner.secrets.api,
-                )
+                .handoff_leadership(inner.identity.raft_id, &status)
                 .await?;
             commit_leader_api = survivor_nodes
                 .iter()
@@ -11383,7 +12084,7 @@ impl MembershipManager {
         }
         let results = inner
             .client
-            .txn(statements)
+            .txn("begin_node_removal", statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -11393,7 +12094,11 @@ impl MembershipManager {
             }
             let promotions = inner
                 .client
-                .query_consistent_map::<CountRow, _>(NODE_PROMOTION_COUNT_SQL, params!(node_id))
+                .query_consistent_map::<CountRow, _>(
+                    "begin_node_removal",
+                    NODE_PROMOTION_COUNT_SQL,
+                    params!(node_id),
+                )
                 .await?;
             if promotions.first().is_some_and(|row| row.count > 0) {
                 return Err(MembershipError::LearnerLifecyclePending(node_id.to_owned()));
@@ -11401,6 +12106,7 @@ impl MembershipManager {
             let active_sessions = inner
                 .client
                 .query_consistent_map::<CountRow, _>(
+                    "begin_node_removal",
                     "SELECT COUNT(*) AS count FROM media_sessions \
                      WHERE owner_node_id = $1 AND state = 'active' \
                        AND lease_expires_at_ms > $2",
@@ -11429,6 +12135,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "require_removal_capability",
                 format!(
                     "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
                     capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY)
@@ -11448,6 +12155,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
+                "require_learner_lifecycle_capability",
                 format!(
                     "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
                     capability_ready_predicate(LEARNER_LIFECYCLE_CAPABILITY)
@@ -11477,13 +12185,13 @@ impl MembershipManager {
             Read::Quorum => {
                 inner
                     .client
-                    .query_consistent_map::<ProtocolRangeRow, _>(SQL, params!())
+                    .query_consistent_map::<ProtocolRangeRow, _>("protocol_range", SQL, params!())
                     .await?
             }
             Read::Local => {
                 inner
                     .client
-                    .query_map::<ProtocolRangeRow, _>(SQL, params!())
+                    .query_map::<ProtocolRangeRow, _>("protocol_range", SQL, params!())
                     .await?
             }
         };
@@ -11511,7 +12219,12 @@ impl MembershipManager {
     /// the same guard in the Store admission write remain required separately.
     pub async fn sharing_session_principal_floor_ready(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
-        sharing_session_principal_floor_ready(&inner.client, inner.identity.raft_id).await
+        member_floor_ready(
+            &inner.client,
+            inner.identity.raft_id,
+            SharingMemberFloor::SessionPrincipal,
+        )
+        .await
     }
 
     /// Quorum-confirm the allocator-specific floor without advertising it.
@@ -11560,6 +12273,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<CountRow, _>(
+                "media_relay_acquisition_supported",
                 MEDIA_RELAY_ACQUISITION_PROOF_SQL,
                 params!(
                     members_json,
@@ -11615,7 +12329,43 @@ impl MembershipManager {
         required: SharingMemberFloor,
     ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
-        sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required).await
+        member_floor_ready(&inner.client, inner.identity.raft_id, required).await
+    }
+
+    /// The shared advisory answer for read-only observers (see
+    /// `FloorAdvisory`). `epoch` is the caller's serving-loss generation while
+    /// its serving fence is ready, so a published outage discards the answer
+    /// at once; `None` (not ready, or a loss still pending) reads fresh and
+    /// keeps nothing.
+    pub async fn sharing_member_floor_advisory(
+        &self,
+        required: SharingMemberFloor,
+        epoch: Option<u64>,
+    ) -> Result<bool, MembershipError> {
+        let inner = Arc::clone(self.inner.as_ref().ok_or(MembershipError::Unavailable)?);
+        let Some(epoch) = epoch else {
+            return member_floor_ready(&inner.client, inner.identity.raft_id, required).await;
+        };
+        let advisory = Arc::clone(&inner.floor_advisories[required.index()]);
+        let keyed = Arc::clone(&inner);
+        advisory
+            .answer_detached(
+                Duration::from_millis(SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS.unsigned_abs()),
+                move || {
+                    let keyed = Arc::clone(&keyed);
+                    async move { floor_advisory_key(&keyed.client, epoch).await }
+                },
+                async move {
+                    tokio::time::timeout(
+                        SHARING_FLOOR_ADVISORY_READ_BOUND,
+                        member_floor_ready(&inner.client, inner.identity.raft_id, required),
+                    )
+                    .await
+                    .map_err(|_| MembershipError::Unavailable)?
+                },
+                || MembershipError::Unavailable,
+            )
+            .await
     }
 
     /// Observe the actual serving member and both Source writer capabilities.
@@ -11684,7 +12434,7 @@ impl MembershipManager {
             .verify_sharing_purpose_material(&master)
             .await
             .map_err(|_| MembershipError::Incompatible)?;
-        let rows=inner.client.query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 AND removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1)",params!(inner.identity.node_id.as_str(),inner.identity.raft_id as i64)).await?;
+        let rows=inner.client.query_consistent_map::<CountRow,_>("prepare_purpose_master", "SELECT count(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 AND removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1)",params!(inner.identity.node_id.as_str(),inner.identity.raft_id as i64)).await?;
         if !matches!(rows.as_slice(),[row] if row.count==1) {
             return Err(MembershipError::Incompatible);
         }
@@ -11699,6 +12449,30 @@ impl MembershipManager {
         self.commit_heartbeat(inner).await?;
         *committed = Some(tokio::time::Instant::now());
         Ok(())
+    }
+
+    /// The heartbeat's turn of [`Self::coordinate_purpose_keys`], every ten
+    /// seconds on every node: the sharing switch is looked at in this node's
+    /// own replica first, as the clock guard's `enforcement_hint` looks at
+    /// its switch, and only a switch this replica holds on pays the
+    /// factory's authoritative read and what follows it. Sharing is off on
+    /// most clusters, so this is the whole idle cost. An enable this replica
+    /// has not applied yet is coordinated on the first heartbeat after it
+    /// applies; startup and the Source schema step still call the factory
+    /// itself.
+    pub async fn heartbeat_purpose_keys(&self) -> Result<(), MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        let hint = inner
+            .store
+            .local_setting_hint("sharing_enabled")
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        if !crate::store::stored_switch(hint.as_deref(), false) {
+            return Ok(());
+        }
+        self.coordinate_purpose_keys().await
     }
 
     /// Bounded explicit startup/heartbeat factory. A member completing a later
@@ -11816,20 +12590,23 @@ impl MembershipManager {
         );
         let results = inner
             .client
-            .txn(ordered.iter().map(|(key, value)| {
-                (
-                    sql.clone(),
-                    params!(
-                        *key,
-                        *value,
-                        now,
-                        generation_key,
-                        expected_generation,
-                        owner_node_id,
-                        absence_cutoff
-                    ),
-                )
-            }))
+            .txn(
+                "activate_live_tv_settings_if_ready",
+                ordered.iter().map(|(key, value)| {
+                    (
+                        sql.clone(),
+                        params!(
+                            *key,
+                            *value,
+                            now,
+                            generation_key,
+                            expected_generation,
+                            owner_node_id,
+                            absence_cutoff
+                        ),
+                    )
+                }),
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -11847,13 +12624,13 @@ impl MembershipManager {
             Read::Quorum => {
                 inner
                     .client
-                    .query_consistent_map::<NodeIdRow, _>(sql, params!())
+                    .query_consistent_map::<NodeIdRow, _>("unready_nodes", sql, params!())
                     .await?
             }
             Read::Local => {
                 inner
                     .client
-                    .query_map::<NodeIdRow, _>(sql, params!())
+                    .query_map::<NodeIdRow, _>("unready_nodes", sql, params!())
                     .await?
             }
         };
@@ -11930,6 +12707,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<NodeIdRow, _>(
+                "committed_unready_nodes",
                 committed_capability_unready_nodes_sql(capability),
                 params!(members_json),
             )
@@ -12013,6 +12791,7 @@ impl MembershipManager {
         let changed = inner
             .client
             .execute(
+                "activate_learner_protocol",
                 narrow_protocol_range_sql(Some(activation_guard_predicate())),
                 params!(AUTH_LEARNER_PROTOCOL, AUTH_PROTOCOL_MIN, absence_cutoff),
             )
@@ -12066,7 +12845,11 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<NodeIdRow, _>(join_in_flight_nodes_sql(), params!())
+            .query_consistent_map::<NodeIdRow, _>(
+                "join_in_flight_nodes",
+                join_in_flight_nodes_sql(),
+                params!(),
+            )
             .await?;
         Ok(rows.into_iter().map(|row| row.node_id).collect())
     }
@@ -12076,7 +12859,11 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<NodeIdRow, _>(absent_nodes_sql(), params!(cutoff))
+            .query_consistent_map::<NodeIdRow, _>(
+                "absent_nodes",
+                absent_nodes_sql(),
+                params!(cutoff),
+            )
             .await?;
         Ok(rows.into_iter().map(|row| row.node_id).collect())
     }
@@ -12114,6 +12901,7 @@ impl MembershipManager {
         let changed = inner
             .client
             .execute(
+                "deactivate_learner_protocol",
                 narrow_protocol_range_sql(Some(no_admitted_learner_predicate().to_owned())),
                 params!(AUTH_PROTOCOL_MIN, AUTH_LEARNER_PROTOCOL),
             )
@@ -12167,7 +12955,11 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<NodeIdRow, _>(admitted_learner_nodes_sql(), params!())
+            .query_consistent_map::<NodeIdRow, _>(
+                "admitted_learner_nodes",
+                admitted_learner_nodes_sql(),
+                params!(),
+            )
             .await?;
         Ok(rows.into_iter().map(|row| row.node_id).collect())
     }
@@ -12180,7 +12972,7 @@ impl MembershipManager {
         let now = unix_ms()?;
         inner
             .client
-            .txn(vec![
+            .txn("backfill_removed_job_owner_fences", vec![
                 (
                     "INSERT INTO settings (key, value, updated_at) \
                      SELECT 'internal.cluster_job_owner_removed.' || removed.node_id, '1', $1 \
@@ -12219,7 +13011,7 @@ impl MembershipManager {
         let owner_fence_key = removed_job_owner_key(node_id);
         inner
             .client
-            .txn(vec![
+            .txn("fence_removed_job_owner", vec![
                 (
                     "INSERT INTO settings (key, value, updated_at) VALUES ($1, '1', $2) \
                      ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at"
@@ -12271,22 +13063,25 @@ impl MembershipManager {
         let owner_fence_key = removed_job_owner_key(node_id);
         let results = inner
             .client
-            .txn(vec![
-                (rollback_removal_attempt_sql(), params!(node_id, attempt_id)),
-                (
-                    ROLLBACK_REMOVAL_OWNER_FENCE_SQL.to_owned(),
-                    params!(owner_fence_key, node_id),
-                ),
-                (ROLLBACK_REMOVAL_FENCE_SQL.to_owned(), params!(node_id)),
-                (
-                    RETIRE_OWNED_REDUCTION_REFERENCE_SQL.to_owned(),
-                    params!(
-                        format!("internal.cluster_reduction.v1.{node_id}.{attempt_id}"),
-                        node_id,
-                        attempt_id
+            .txn(
+                "rollback_node_removal",
+                vec![
+                    (rollback_removal_attempt_sql(), params!(node_id, attempt_id)),
+                    (
+                        ROLLBACK_REMOVAL_OWNER_FENCE_SQL.to_owned(),
+                        params!(owner_fence_key, node_id),
                     ),
-                ),
-            ])
+                    (ROLLBACK_REMOVAL_FENCE_SQL.to_owned(), params!(node_id)),
+                    (
+                        RETIRE_OWNED_REDUCTION_REFERENCE_SQL.to_owned(),
+                        params!(
+                            format!("internal.cluster_reduction.v1.{node_id}.{attempt_id}"),
+                            node_id,
+                            attempt_id
+                        ),
+                    ),
+                ],
+            )
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -12325,23 +13120,26 @@ impl MembershipManager {
         inner.internal_read_authority.lock().await.remove(node_id);
         if let Err(error) = inner
             .client
-            .txn(vec![
-                (
-                    "UPDATE cluster_nodes SET removed_at = COALESCE(removed_at, $1) \
+            .txn(
+                "finalize_node_removal",
+                vec![
+                    (
+                        "UPDATE cluster_nodes SET removed_at = COALESCE(removed_at, $1) \
                      WHERE node_id = $2"
-                        .to_owned(),
-                    params!(unix_ms().unwrap_or(i64::MAX), node_id),
-                ),
-                (
-                    "DELETE FROM settings WHERE key IN \
+                            .to_owned(),
+                        params!(unix_ms().unwrap_or(i64::MAX), node_id),
+                    ),
+                    (
+                        "DELETE FROM settings WHERE key IN \
                      (SELECT 'internal.cluster_reduction.v1.' || node_id || '.' || attempt_id \
                        FROM cluster_node_removal_attempts WHERE node_id = $1) \
                      AND EXISTS (SELECT 1 FROM cluster_nodes \
                        WHERE node_id = $1 AND removed_at IS NOT NULL)"
-                        .to_owned(),
-                    params!(node_id),
-                ),
-            ])
+                            .to_owned(),
+                        params!(node_id),
+                    ),
+                ],
+            )
             .await
             .and_then(|results| results.into_iter().collect::<Result<Vec<_>, _>>())
         {
@@ -12376,7 +13174,11 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<CountRow, _>(NODE_TOMBSTONED_SQL, params!(node_id))
+            .query_consistent_map::<CountRow, _>(
+                "node_is_tombstoned",
+                NODE_TOMBSTONED_SQL,
+                params!(node_id),
+            )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
@@ -12388,6 +13190,7 @@ impl MembershipManager {
         remaining: &BTreeSet<u64>,
         survivor_nodes: &[(u64, String)],
         api_secret: &str,
+        deadline: tokio::time::Instant,
     ) -> Result<u64, MembershipError> {
         let Ok(client) = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -12402,7 +13205,6 @@ impl MembershipManager {
         let required = remaining.len() / 2 + 1;
         let mut stable_rounds = 0_u8;
         let mut stable_leader = None;
-        let deadline = Instant::now() + SURVIVOR_LEADER_WAIT;
         loop {
             let mut confirmations = BTreeMap::<u64, usize>::new();
             let observations =
@@ -12452,7 +13254,7 @@ impl MembershipManager {
                 stable_rounds = 0;
                 stable_leader = None;
             }
-            if Instant::now() >= deadline {
+            if tokio::time::Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -12645,6 +13447,19 @@ impl MembershipManager {
             return Ok(0);
         };
         let now = unix_seconds()?;
+        // An idle pass is this replica's word that nothing is addressed to
+        // this node, and costs no leader round trip. A probe this replica has
+        // not applied yet is answered on the first pass after it applies; the
+        // removal that asked waits on the answer, not on a particular pass.
+        // Only a hit pays the authoritative read, and that read, not the
+        // hint, decides what is answered.
+        let hint = inner
+            .store
+            .local_pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
+            .await;
+        if !probe_hint_owes_authority(&hint) {
+            return Ok(0);
+        }
         let pending = inner
             .store
             .pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
@@ -12677,8 +13492,8 @@ impl MembershipManager {
     ///
     /// A removal blocks an operator while it waits for these answers, so the
     /// cadence is the responsiveness of node removal itself, not a background
-    /// housekeeping interval. Idle passes cost one indexed lookup that
-    /// normally returns nothing.
+    /// housekeeping interval. Idle passes cost one indexed lookup on this
+    /// node's own replica that normally returns nothing.
     pub async fn offline_source_probe_loop(self) {
         if self.inner.is_none() {
             return;
@@ -12699,6 +13514,14 @@ impl MembershipManager {
             }
         }
     }
+}
+
+/// Whether the offline probe pass owes the authoritative read, given this
+/// replica's answer. An empty answer is the idle case. A replica that cannot
+/// answer says nothing about the leader, which may well hold a probe a
+/// removal is waiting on: that is a hit, as the lease loop treats its hint.
+fn probe_hint_owes_authority<T>(hint: &Result<Vec<T>, crate::error::StoreError>) -> bool {
+    !matches!(hint, Ok(rows) if rows.is_empty())
 }
 
 /// Positive proof that *this* machine can read a package's exact source.
@@ -13549,13 +14372,14 @@ impl From<&mut Row<'_>> for MembershipSchemaRow {
 /// a restore and its first snapshot. A cluster that was never restored has no
 /// restore generation and is never refused.
 pub(crate) async fn restored_image_lacks_join_snapshot(
-    client: &Client,
+    client: &CountedClient,
 ) -> Result<bool, hiqlite::Error> {
     if client.metrics_db().await?.purged.is_some() {
         return Ok(false);
     }
     let rows = client
         .query_map::<SettingValueRow, _>(
+            "restored_image_lacks_join_snapshot",
             "SELECT value FROM settings WHERE key = $1",
             params!(crate::store::keys::CLUSTER_RESTORE_GENERATION),
         )
@@ -14513,6 +15337,8 @@ pub fn system_short_hostname() -> Option<String> {
         .and_then(|hostname| short_hostname(&hostname))
 }
 
+#[cfg(test)]
+mod operation_census;
 #[cfg(test)]
 mod tests;
 

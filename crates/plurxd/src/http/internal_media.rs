@@ -532,7 +532,7 @@ pub(crate) async fn shared_cache_canary(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<crate::shared_cache::CanaryResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
     authorize(
         &state,
         &headers,
@@ -543,12 +543,16 @@ pub(crate) async fn shared_cache_canary(
     .await?;
     let request = serde_json::from_slice::<crate::shared_cache::CanaryRequest>(&body)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    state
-        .shared_cache
-        .answer_canary(&request)
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::CONFLICT)
+    // A refusal stays `409` for older askers; its typed body tells a newer
+    // asker whether it is evidence of a different mount or no evidence.
+    Ok(match state.shared_cache.answer_canary(&request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(refusal) => (
+            StatusCode::CONFLICT,
+            Json(crate::shared_cache::CanaryRefusal { refusal }),
+        )
+            .into_response(),
+    })
 }
 
 /// At most two playback ranges execute on a node. HTTP cancellation or the

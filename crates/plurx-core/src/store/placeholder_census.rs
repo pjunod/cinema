@@ -2291,7 +2291,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // retire_subtitle_source_ready constructs its UPDATE beside its one five-value
 // execute. The former moved out of line in ee47539ed without updating the old
 // 107 inventory, so the observed 108-site set falls to 106 with both checked.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 106;
+// 106 -> 107: media::library_file_paths_under (48ebff9b5) prepares its ?1/?2
+// folder SELECT separately, then binds exactly [library_id, folder] in the
+// following query_map call.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 107;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
@@ -3447,14 +3450,67 @@ fn production() { let _ = "SELECT $1 FROM b"; }
 /// either would change rows without moving its revision, and an applied view
 /// would keep answering from a memo the replica no longer matches.
 ///
-/// It reads string literals, so SQL assembled with `format!` is invisible
-/// to it, and it covers this binary only: an entry an older binary wrote is
+/// It reads string literals (a `format!` template is one, so only an
+/// interpolated table name is invisible, and a DELETE may not interpolate
+/// one), and it covers this binary only: an entry an older binary wrote is
 /// applied as written (PLAYBACK-START-E1-BUILD.md §4.1).
 #[test]
 fn applied_view_tables_never_escape_the_update_hook() {
+    let (scanned, offenders) =
+        update_hook_offenders(STORE_SOURCES.iter().chain(SHARED_CONSTANT_SOURCES));
+    assert!(
+        scanned > 0,
+        "the census found no DELETE on an applied-view table; it is not looking"
+    );
+    assert_eq!(offenders, Vec::<String>::new());
+}
+
+/// The membership sources, read for the same two hazards as the store: the
+/// manager writes registered tables too (`settings`), and an unqualified
+/// `DELETE` or a `WITHOUT ROWID` table there would change rows without
+/// moving their revision. The store census never read these files. Once the
+/// mark registers the roster tables (`cluster::membership::directory`), this
+/// is also what keeps the directory's per-table stamp honest.
+/// `cluster/migration.rs` is not read: its table-clearing `DELETE`s run on a
+/// stopped restore image through rusqlite, before any mark exists.
+const MEMBERSHIP_SOURCES: &[(&str, &str)] = &[
+    (
+        "../cluster/membership.rs",
+        include_str!("../cluster/membership.rs"),
+    ),
+    (
+        "../cluster/membership/directory.rs",
+        include_str!("../cluster/membership/directory.rs"),
+    ),
+    (
+        "../cluster/membership/lifecycle.rs",
+        include_str!("../cluster/membership/lifecycle.rs"),
+    ),
+    (
+        "../cluster/membership/sharing_source_schema.rs",
+        include_str!("../cluster/membership/sharing_source_schema.rs"),
+    ),
+];
+
+#[test]
+fn roster_tables_never_escape_the_update_hook_in_membership() {
+    let (scanned, offenders) = update_hook_offenders(MEMBERSHIP_SOURCES.iter());
+    assert!(
+        scanned > 0,
+        "the census found no DELETE on a roster table in membership; it is not looking"
+    );
+    assert_eq!(offenders, Vec::<String>::new());
+}
+
+/// Every statement literal in `sources` that would change an applied-mark
+/// table without the update hook seeing it, and how many `DELETE`s on those
+/// tables it judged.
+fn update_hook_offenders<'a>(
+    sources: impl Iterator<Item = &'a (&'a str, &'a str)>,
+) -> (usize, Vec<String>) {
     let mut offenders = Vec::new();
     let mut scanned = 0_usize;
-    for (name, source) in STORE_SOURCES.iter().chain(SHARED_CONSTANT_SOURCES) {
+    for (name, source) in sources {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         for literal in &literals {
@@ -3470,7 +3526,15 @@ fn applied_view_tables_never_escape_the_update_hook() {
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_ascii_lowercase();
-            for table in super::APPLIED_VIEW_TABLES {
+            // An interpolated table name would hide a registered table from
+            // the delete check below (A6 M3): every DELETE names its table.
+            if text.contains("delete from {") {
+                offenders.push(format!(
+                    "{name}:{}: a DELETE interpolates its table name",
+                    literal.line
+                ));
+            }
+            for table in super::applied_mark_tables() {
                 for statement in text.split(';') {
                     let statement = statement.trim();
                     let delete = format!("delete from {table}");
@@ -3523,9 +3587,5 @@ fn applied_view_tables_never_escape_the_update_hook() {
             }
         }
     }
-    assert!(
-        scanned > 0,
-        "the census found no DELETE on an applied-view table; it is not looking"
-    );
-    assert_eq!(offenders, Vec::<String>::new());
+    (scanned, offenders)
 }

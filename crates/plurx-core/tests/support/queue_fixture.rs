@@ -919,8 +919,6 @@ fn historical_title_rewind_restores_published_v1_topology_and_sequence_before_re
         )
         .expect("fixture sequence history");
     source_extensions_fixture::within_fixture_savepoint(&connection, || {
-        // Remove only the exact empty F+133 tail before exercising132→131.
-        source_extensions_fixture::rewind_dv_refit_to_v132(&connection);
         source_extensions_fixture::rewind_title_v2_to_v131(&connection);
     });
     assert_eq!(

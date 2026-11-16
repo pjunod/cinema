@@ -1,4 +1,14 @@
 use super::*;
+
+/// Tools whose renderer key is synthetic; nothing here launches them.
+fn synthetic_tools() -> Arc<ToolSet> {
+    use plurx_core::transcode::dv_processing::{DvBackendIdentity, DvDigest};
+    let digest = |n: u8| DvDigest::new(format!("{n:064x}")).expect("digest");
+    Arc::new(ToolSet::lifecycle_fixture(
+        DvBackendIdentity::new(digest(1), digest(2), digest(3), digest(4), 1, digest(5))
+            .expect("backend"),
+    ))
+}
 use plurx_core::{
     domain::{DolbyVisionFacts, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult},
     store::{
@@ -225,7 +235,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         probe_pipeline: "a".repeat(64),
         probe_after: None,
         scanner: "a".repeat(64),
-        backend_digest: "b".repeat(64),
+        tools: synthetic_tools(),
         file_id: file,
         probe_revision: revision,
         playback_requested: false,
@@ -318,9 +328,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
     )
     .expect("exact recipe envelope");
     let recipe = plurx_core::transcode::dv_fel_qualification::FelRecipeRequest::new(
-        state
-            .transcode
-            .fel_identity(&task.backend_digest)
+        super::fel_backend(&state, &task.tools)
             .await
             .expect("synthetic backend identity"),
         size,
@@ -426,7 +434,7 @@ async fn title_stop_awaits_owned_work_instead_of_dropping_it() {
         probe_pipeline: "a".repeat(64),
         probe_after: None,
         scanner: "a".repeat(64),
-        backend_digest: "b".repeat(64),
+        tools: synthetic_tools(),
         file_id: 0,
         probe_revision: 0,
         playback_requested: false,

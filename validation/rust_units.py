@@ -11,6 +11,10 @@ Four steps, one module (docs/ci/RUST-UNIT-FANOUT.md is the operating guide):
   A test that already passed under that exact key — in any earlier run, on any
   branch — is not run again. A crate whose whole test listing passed is
   dropped. Anything that cannot be authenticated is simply not adopted.
+  With ``select --tests`` (a merge-train probe's ``Train-Tests:``) exactly the
+  named tests are due: their crates, restricted to those tests, whatever the
+  content keys say; nothing is adopted for them and a named test that did not
+  run fails the verdict.
 * ``plan`` / ``shard`` build one cargo-nextest archive of the due crates and
   run it in ``hash:i/N`` partitions on idle runners.
 * ``verdict`` / ``baseline`` / ``gate`` prove the partitions covered the plan
@@ -33,6 +37,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import urllib.error
@@ -472,6 +477,45 @@ def changed_inputs(head, base, name, limit=5):
     return changed[:limit] + ([f"... {len(changed) - limit} more"] if len(changed) > limit else [])
 
 
+TEST_ID = re.compile(r"[A-Za-z0-9_-]+(?:::[A-Za-z0-9_./-]+)* [A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*")
+
+
+def parse_test_ids(text):
+    """`<binary id> <test path>,...` exactly as nextest prints a test; [] for none."""
+    ids = sorted({item.strip() for item in (text or "").split(",") if item.strip()})
+    for item in ids:
+        require(TEST_ID.fullmatch(item), f"not a test id (`<binary id> <test path>`): {item!r}")
+    return ids
+
+
+def restrict_to_tests(doc, test_ids):
+    """Make exactly `test_ids` due, in the crates that own them, whatever the keys say.
+
+    Reuses the `only` mechanism (restrict a due crate to named tests) and adds
+    `exact`, the full ids, so a test of the same name in another binary of the
+    crate is not pulled in. An id whose crate is not a unit crate of this tree
+    (or that the listing lacks, in `make_plan`) is carried as absent and
+    reported `ABSENT <id>` by the verdict; it never stops the other tests.
+    """
+    named, absent = {}, []
+    for test_id in test_ids:
+        crate = crate_of(test_id.split(" ", 1)[0])
+        if crate in doc["crates"]:
+            named.setdefault(crate, []).append(test_id)
+        else:
+            absent.append(test_id)
+    for crate, entry in doc["crates"].items():
+        if crate in named:
+            ids = sorted(named[crate])
+            entry.update(due=True, only=sorted({i.split(" ", 1)[1] for i in ids}), exact=ids,
+                         reason=[f"named by Train-Tests: {len(ids)} test(s)"])
+        else:
+            entry.update(due=False, only=None, exact=None, reason=[])
+    doc["tests"] = sorted(test_ids)
+    doc["absent"] = sorted(absent)
+    return doc
+
+
 def selection(head_rev, base_rev, repository=".", config=None):
     head_tree = Tree(head_rev, repository)
     config = config or Config.load(head_tree.text(str(CONFIG)))
@@ -840,17 +884,26 @@ def make_plan(selection_doc, pending, listing, config, run):
         if only is not None:
             tests = [t for t in tests if t.split(" ", 1)[1] in only]
             serial = [t for t in serial if t.split(" ", 1)[1] in only]
+        exact = entry.get("exact")
+        if exact is not None:
+            # A named test the archive lacks (a train member's new test, probed
+            # on main alone) is reported as absent; it never stops the others.
+            absent = sorted(set(exact) - set(everything))
+            tests = [t for t in tests if t in exact]
+            serial = [t for t in serial if t in exact]
+        else:
+            absent = []
         adopted = sorted(set(entry["passed"]) & set(everything))
         remaining = sorted(set(tests) - set(adopted))
         remaining_serial = sorted(set(serial) - set(adopted))
-        crates[crate] = {"key": entry["key"], "only": only,
+        crates[crate] = {"key": entry["key"], "only": only, "exact": exact, "absent": absent,
                          "listing": {"count": len(everything), "sha256": digest_lines(sorted(everything))},
                          "adopted": adopted, "remaining": remaining, "serial": remaining_serial}
         partitioned += remaining
         serial_all += remaining_serial
     count = shard_count(len(partitioned))
     return {"schema": SCHEMA, "run": run, "head": selection_doc["head"], "base": selection_doc["base"],
-            "shards": count, "crates": crates,
+            "shards": count, "crates": crates, "absent": list(pending.get("absent", [])),
             "filters": filter_expressions(partitioned, suites) if partitioned else [],
             "serial_filters": filter_expressions(serial_all, {}) if serial_all else []}
 
@@ -912,10 +965,47 @@ def bound_cpus(limit=SHARD_CPUS):
           f"cgroup quota {quota if quota is not None else 'none'}")
 
 
+# plurxd's playback cache keeps max(1 GiB, 2% of the filesystem) free and
+# refuses every write below that (crates/plurxd/src/playback_cache.rs
+# `DiskSpace::floor`; tests/validation/test_rust_units.py holds these two
+# numbers to that source). The tests that play real media build that cache in
+# the temp directory, so on a runner whose disk is under the floor they fail
+# as playback faults ("filesystem reserve exhausted", `Capacity`, 429, 502)
+# that name neither the disk nor the runner: run 7724 lost 24 tests that way
+# on one full host. The headroom is room for the fixtures themselves.
+CACHE_FLOOR_MIN_BYTES = 1 << 30
+CACHE_FLOOR_FRACTION = 50
+TEST_DISK_HEADROOM_BYTES = 1 << 30
+
+
+def cache_floor(total):
+    return max(CACHE_FLOOR_MIN_BYTES, total // CACHE_FLOOR_FRACTION)
+
+
+def require_test_disk(directory=None, statvfs=os.statvfs):
+    """Refuse to run tests where the playback cache's own reserve is not free.
+
+    A shard that cannot run its tests must say so; one that runs them on a
+    full disk reports product failures that are not the product's.
+    """
+    directory = directory or tempfile.gettempdir()
+    stat = statvfs(directory)
+    total = stat.f_blocks * stat.f_frsize
+    free = stat.f_bavail * stat.f_frsize
+    needed = cache_floor(total) + TEST_DISK_HEADROOM_BYTES
+    runner = os.environ.get("RUNNER_NAME") or os.uname().nodename
+    require(free >= needed,
+            f"{runner} cannot run unit tests: {free / 2**30:.1f} GiB free at {directory}, "
+            f"under the {needed / 2**30:.1f} GiB the playback cache floor and the fixtures need "
+            f"(filesystem of {total / 2**30:.1f} GiB); free the runner's disk and rerun")
+    print(f"test disk: {free / 2**30:.1f} GiB free at {directory} (need {needed / 2**30:.1f} GiB)")
+
+
 def run_shard(plan_path, archive, index, threads):
     plan = read_json(plan_path)
     count = plan["shards"]
     require(1 <= index <= count, f"shard {index} is outside 1..{count}")
+    require_test_disk()
     bound_cpus()
     outcomes = {}
     runs = []
@@ -1003,6 +1093,7 @@ def crate_receipt(plan, crate, outcome, run, publisher, evidence_jobs, key=None,
             "key": key or entry["key"], "commit": commit or plan["head"], "run": run,
             "publisher": publisher, "evidence_jobs": evidence_jobs,
             "listing": entry.get("listing") if listing else None,
+            "absent": list(entry.get("absent") or []),
             "passed": sorted(t for t in ran if outcome[t] == "passed"),
             "failed": sorted(t for t in ran if outcome[t] == "failed")}
 
@@ -1033,27 +1124,38 @@ def command_select(args):
     base = subprocess.run(["git", "merge-base", args.base, args.head], stdout=subprocess.PIPE,
                           text=True, check=True).stdout.strip()
     doc = selection(args.head, base)
+    if args.tests:
+        restrict_to_tests(doc, parse_test_ids(args.tests))
     write_json(args.output, doc)
     due = sorted(name for name, entry in doc["crates"].items() if entry["due"])
     lines = [f"Rust units: {len(due)} of {len(doc['crates'])} unit crates have different content "
              f"keys at {doc['head'][:12]} than at merge-base {doc['base'][:12]}."]
+    if args.tests:
+        lines = [f"Rust units probe: exactly {len(doc['tests'])} named test(s) in {len(due)} crate(s), "
+                 "re-run now; content keys and earlier receipts are not consulted."]
     for name in due:
         lines.append(f"- `{name}` key {doc['crates'][name]['key'][:16]} — " +
                      ", ".join(doc["crates"][name]["reason"]))
     summarize(lines)
     emit("due", due)
-    emit("any", "true" if due else "false")
+    emit("any", "true" if due or doc.get("absent") else "false")
     return 0
 
 
 def command_adopt(args):
     doc = read_json(args.selection)
     config = Config.load(Tree(doc["head"]).text(str(CONFIG)))
-    pending = {"schema": SCHEMA, "head": doc["head"], "base": doc["base"], "crates": {}, "adopted": {}}
+    pending = {"schema": SCHEMA, "head": doc["head"], "base": doc["base"], "crates": {}, "adopted": {},
+               "absent": doc.get("absent", [])}
     forge = forge_from_environment() if os.environ.get("GITHUB_TOKEN") else None
     authenticator = Authenticator(forge, int(os.environ.get("GITHUB_RUN_ID", "0")), config) if forge else None
     for crate, entry in sorted(doc["crates"].items()):
         if not entry["due"]:
+            continue
+        if entry.get("exact") is not None:
+            # A probe exists to run these tests now: no receipt may stand in.
+            pending["crates"][crate] = {"key": entry["key"], "passed": [], "only": entry.get("only"),
+                                        "exact": entry["exact"]}
             continue
         found = (history(forge, authenticator, crate, entry["key"]) if forge
                  else {"passed": set(), "failed": set(), "listings": [], "runs": []})
@@ -1063,9 +1165,17 @@ def command_adopt(args):
             print(f"{crate}: every test already passed under key {entry['key'][:16]}; not run")
             continue
         pending["crates"][crate] = {"key": entry["key"], "passed": sorted(found["passed"]),
-                                    "only": entry.get("only")}
+                                    "only": entry.get("only"), "exact": entry.get("exact")}
     write_json(args.output, pending)
     emit("build", "true" if pending["crates"] else "false")
+    # Every named id is absent: nothing to build or run. The plan is written
+    # here with no shards, and the verdict job reports the ABSENT lines directly.
+    only_absent = bool(pending["absent"]) and not pending["crates"]
+    if only_absent:
+        plan = make_plan(doc, pending, {}, config, int(os.environ.get("GITHUB_RUN_ID", "0")))
+        plan["shards"] = 0
+        write_json(STATE / "plan.json", plan)
+    emit("absent_only", "true" if only_absent else "false")
     emit("crates", sorted(pending["crates"]))
     return 0
 
@@ -1082,7 +1192,9 @@ def command_plan(args):
                f"{adopted} already passed under the same keys."] +
               [f"- `{name}`: {len(c['remaining']) + len(c['serial'])} to run of {c['listing']['count']}"
                for name, c in sorted(plan["crates"].items())])
-    emit("shards", list(range(1, plan["shards"] + 1)) if total else [])
+    # An all-absent named probe still needs its verdict to say so.
+    absent = len(plan.get("absent", [])) + sum(len(c.get("absent") or []) for c in plan["crates"].values())
+    emit("shards", list(range(1, plan["shards"] + 1)) if total or absent else [])
     emit("tests", str(total))
     return 0
 
@@ -1122,11 +1234,27 @@ def command_verdict(args):
     for crate, tests in sorted(failures.items()):
         lines.append(f"- `{crate}` failed: " + ", ".join(f"`{t}`" for t in tests[:20])
                      + (f" … {len(tests) - 20} more" if len(tests) > 20 else ""))
+    named = sorted([t for entry in plan["crates"].values() for t in entry.get("exact") or []]
+                   + list(plan.get("absent", [])))
+    absent = set(plan.get("absent", [])) | {t for entry in plan["crates"].values() for t in entry.get("absent") or []}
+    statuses = {}
+    for test in named:
+        state = "absent" if test in absent else outcome.get(test, "not run")
+        statuses[test] = state
+        # ABSENT is a result, not an incomplete run: the verdict still succeeds
+        # and the gate alone fails on it (the train reads these lines).
+        lines.append(f"ABSENT {test}" if state == "absent" else f"- named `{test}`: " +
+                     {"passed": "PASS", "failed": "FAIL"}.get(state, "NOT RUN"))
+        if state not in ("passed", "failed", "absent"):
+            problems.append(f"named test did not run: {test}")
+    if named:
+        write_json(STATE / "named.json", {"head": plan["head"], "tests": statuses})
     lines += [f"- incomplete: {problem}" for problem in problems]
     summarize(lines)
     write_json(STATE / "failures.json", {"head": plan["head"], "base": plan["base"], "failures": failures})
     emit("failures", "true" if failures else "false")
     emit("complete", "false" if problems else "true")
+    emit("absent", "true" if absent else "false")
     emit("receipts", [receipt_name(r["crate"], r["key"]) for r in out])
     for receipt in out:
         emit(f"key_{receipt['crate'].replace('-', '_')}", receipt["key"])
@@ -1219,6 +1347,7 @@ def main(argv=None):
     p.add_argument("--base", required=True)
     p.add_argument("--head", default="HEAD")
     p.add_argument("--output", default=str(STATE / "selection.json"))
+    p.add_argument("--tests", default="", help="a probe's Train-Tests: run exactly these test ids")
     p.set_defaults(func=command_select)
     p = sub.add_parser("adopt", help="drop tests already passed under the same key")
     p.add_argument("--selection", default=str(STATE / "selection.json"))

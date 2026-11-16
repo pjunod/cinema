@@ -487,6 +487,17 @@ async fn execute(
                 probe::probe_single_threaded(std::path::Path::new(input.url())),
             )
             .await;
+            // FFprobe reads through the bridge: a failed source read reaches
+            // it as truncated input, so its refusal is not a file verdict.
+            let result = match result {
+                Err(error) if error.is_file_verdict() && input.source_read_failed() => {
+                    Err(ProbeError::Transient {
+                        path: file.path.display().to_string(),
+                        reason: format!("source read failed during probe: {error}"),
+                    })
+                }
+                other => other,
+            };
             input
                 .close_and_wait()
                 .await
@@ -577,6 +588,17 @@ async fn execute(
                         }
                     }
                 }
+            }
+            // FFprobe ran to completion on reads that all succeeded and
+            // refused this exact file. The verdict settles this generation
+            // (the next coordinator pass or a changed file enqueues anew);
+            // retrying it only keeps every waiter (an admin reanalyze, a scan
+            // page) queued to its deadline.
+            Err(error) if error.is_file_verdict() => {
+                tracing::warn!(job=job.id,%error,"leaf probe refused the file");
+                Some(JobSettlement::Fail {
+                    error_code: "probe_refused".into(),
+                })
             }
             Err(error) => {
                 tracing::warn!(job=job.id,%error,"leaf probe failed");

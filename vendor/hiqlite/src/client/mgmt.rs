@@ -254,7 +254,6 @@ impl Client {
         })?;
         let applied = state
             .raft_db
-            .raft
             .client_write(QueryWrite::RTT)
             .await?
             .log_id
@@ -302,6 +301,21 @@ impl Client {
             Error::Connect("the local applied mark requires a local node client".to_owned())
         })?;
         Ok(state.raft_db.applied_mark.handle())
+    }
+
+    /// Plurx patch 30: stop this node's database Raft from starting an
+    /// election on its own timer, for the rest of this process. A stopping
+    /// node calls it first so that it never campaigns again; it still votes,
+    /// replicates and answers an explicit election trigger. Not persisted:
+    /// the next start campaigns normally. Remote clients return an error;
+    /// this method never performs IO and has no HTTP fallback.
+    #[cfg(feature = "sqlite")]
+    pub fn disable_local_db_elections(&self) -> Result<(), Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("the local election switch requires a local node client".to_owned())
+        })?;
+        state.raft_db.raft.runtime_config().elect(false);
+        Ok(())
     }
 
     /// The same caller-owned admission installed before listeners. Remote or
@@ -545,6 +559,49 @@ impl Client {
             }
             rows.swap_remove(0).into_db_quorum_watermark()
         }
+    }
+
+    /// Plurx patch 31: stop new database proposals on this node until the
+    /// returned hold drops. The hold waits for in-flight permits; new
+    /// proposals wait rather than fail. A cancelled caller's entry may still
+    /// be queued in the Raft core, so callers must not treat the hold as proof
+    /// that the log stopped. Returns `None` when the hold cannot be taken by
+    /// `deadline` (an in-flight proposal can hang when quorum is lost), so a
+    /// caller never blocks past its own budget. Local clients only; no IO.
+    #[cfg(feature = "sqlite")]
+    pub async fn hold_local_db_proposals(
+        &self,
+        deadline: time::Instant,
+    ) -> Result<Option<crate::ProposalHold>, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("the local proposal hold requires a local node client".to_owned())
+        })?;
+        Ok(state.raft_db.proposals.hold_until(deadline).await)
+    }
+
+    /// Plurx patch 31: wait, by `deadline`, for this node's own database Raft
+    /// metrics to satisfy `condition`, woken by each metrics change rather than
+    /// by polling. Local clients only.
+    #[cfg(feature = "sqlite")]
+    pub async fn wait_local_db_metrics<F>(
+        &self,
+        deadline: time::Instant,
+        condition: F,
+    ) -> Result<RaftMetrics<NodeId, Node>, Error>
+    where
+        F: Fn(&RaftMetrics<NodeId, Node>) -> bool + Send,
+    {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("the local metrics wait requires a local node client".to_owned())
+        })?;
+        let budget = deadline.saturating_duration_since(time::Instant::now());
+        state
+            .raft_db
+            .raft
+            .wait(Some(budget))
+            .metrics(condition, "local database Raft condition")
+            .await
+            .map_err(|error| Error::Timeout(error.to_string()))
     }
 
     /// Get cluster metrics for the database Raft.
@@ -1448,6 +1505,45 @@ mod tests {
         assert!(!accessor.contains("get_metrics_remote"));
         assert!(!accessor.contains("send_with_retry"));
         assert!(!accessor.contains(".await"));
+    }
+
+    #[test]
+    fn local_election_switch_has_no_remote_fallback() {
+        let source = include_str!("mgmt.rs");
+        let accessor = source
+            .split_once("pub fn disable_local_db_elections")
+            .expect("local election switch")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of local election switch")
+            .0;
+        assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
+        assert!(accessor.contains("raft_db.raft.runtime_config().elect(false)"));
+        assert!(!accessor.contains("raft_cache"));
+        assert!(!accessor.contains("build_addr"));
+        assert!(!accessor.contains("send_with_retry"));
+        assert!(!accessor.contains(".await"));
+    }
+
+    #[test]
+    fn proposal_hold_and_metrics_wait_are_local_only() {
+        let source = include_str!("mgmt.rs");
+        for signature in [
+            "pub async fn hold_local_db_proposals",
+            "pub async fn wait_local_db_metrics",
+        ] {
+            let accessor = source
+                .split_once(signature)
+                .expect("local accessor")
+                .1
+                .split_once("\n    }\n")
+                .expect("end of local accessor")
+                .0;
+            assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
+            assert!(!accessor.contains("build_addr"));
+            assert!(!accessor.contains("send_with_retry"));
+            assert!(!accessor.contains("sleep"));
+        }
     }
 
     #[test]
