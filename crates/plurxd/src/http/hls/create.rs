@@ -6458,6 +6458,9 @@ pub(crate) struct PreparedSourcePlayback {
     source_presentation: Option<SourceCopyPresentation>,
     copy_head_caps: plurx_core::playback::DeviceCaps,
     decision: super::super::stream::DecisionResponse,
+    /// The receiver affirmed Dolby Vision relay, and with it that its Start
+    /// decoder relays the enhancement rows.
+    relays_enhancement: bool,
 }
 #[allow(dead_code)]
 impl PreparedSourcePlayback {
@@ -6475,6 +6478,11 @@ impl PreparedSourcePlayback {
     }
     pub(crate) fn plan_notes(&self) -> &[String] {
         &self.resolved.plan_notes
+    }
+    /// The receiver affirmed Dolby Vision relay: the Start carries the
+    /// enhancement rows.
+    pub(crate) fn relay_enhancement(&mut self) {
+        self.relays_enhancement = true;
     }
     /// A note the Source's own start policy adds to what this plan says.
     pub(crate) fn add_plan_note(&mut self, note: &str) {
@@ -6618,13 +6626,25 @@ impl PreparedSourcePlayback {
             delivered_dynamic_range,
         );
         Ok(StartResponse {
-            // The FEL / RPU / DYN rows are a local response field that
-            // `StartResponse` never deserializes, so the receiver's closed
-            // Start decoder cannot relay them: a Source Start carrying them
-            // for a Dolby Vision source is refused by every receiver as a
-            // protocol violation. The delivered range and profile above are
-            // what a shared Start carries.
-            enhancement: None,
+            // The FEL / RPU / DYN rows local playback shows. A receiver that
+            // affirmed Dolby Vision relay decodes and relays them; an older
+            // one round-trips the Start through a `StartResponse` that never
+            // deserializes them and would refuse it, so it gets none.
+            enhancement: self
+                .relays_enhancement
+                .then(|| {
+                    session_enhancement(
+                        Some(&self.file),
+                        &info.kind,
+                        info.grade,
+                        info.processed_dv_profile,
+                        info.processed_fel,
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .flatten(),
             effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,
@@ -6899,6 +6919,7 @@ pub(crate) async fn prepare_source_playback<
         file,
         resolved,
         decision,
+        relays_enhancement: false,
     })
 }
 

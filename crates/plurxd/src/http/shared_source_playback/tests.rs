@@ -1323,8 +1323,39 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     if dolby_vision {
         // Profile 8.1 preserved, and Profile 7 converted to 8.1.
         assert_eq!(decoded.response().delivered_dolby_vision_profile, Some(8));
+        // The FEL / RPU / DYN rows local playback shows: computed by the
+        // Source, decoded by B's closed Start decoder, and carried unchanged
+        // into the Start B answers its own client with.
+        let enhancement = decoded
+            .response()
+            .enhancement
+            .clone()
+            .expect("a Dolby Vision Start carries its enhancement rows");
+        assert!(enhancement.is_well_formed());
+        assert!(!enhancement.details.is_empty(), "{enhancement:?}");
+        let source_session =
+            Uuid::parse_str(&decoded.response().session_id).expect("Source session");
+        let client = super::super::sharing_playback_wire::project_shared_start_with_receiver(
+            decoded.response().clone(),
+            source_session,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            3,
+            true,
+        )
+        .expect("B's client Start");
+        assert_eq!(client.enhancement, Some(enhancement.clone()));
+        assert_eq!(
+            serde_json::to_value(&client).expect("client Start")["enhancement"],
+            serde_json::to_value(&enhancement).expect("rows")
+        );
     } else {
         assert_eq!(decoded.response().delivered_dolby_vision_profile, None);
+    }
+    if matches!(mode, SourceFixtureMode::DolbyVisionUnaffirmed) {
+        // A receiver that never affirmed relay may be one whose decoder
+        // refuses the rows: it is sent none.
+        assert!(decoded.response().enhancement.is_none());
     }
     let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     let request = recipe["session"]["request_id"]

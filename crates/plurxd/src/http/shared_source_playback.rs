@@ -2035,6 +2035,19 @@ async fn own_start(
         super::hls::SourceCopyPresentation::FullVod
     };
     validate_initial_source_start(&input.session)?;
+    // The FEL / RPU / DYN rows go only to a receiver known to decode them,
+    // one that affirmed Dolby Vision relay: its own headers say so here, and
+    // a recipe whose caps still claim Dolby Vision passed an ingress that
+    // withholds those claims from every receiver that did not. An older
+    // receiver round-trips the Start through a `StartResponse` that never
+    // deserializes the rows, and would refuse it.
+    let relays_enhancement = (headers.forwarded_ingress().is_none()
+        && receiver_presentation::authenticated_receiver_dolby_vision(&headers))
+        || input
+            .session
+            .caps
+            .as_ref()
+            .is_some_and(|caps| caps.video.iter().any(|video| !video.dv_profiles.is_empty()));
     let mut prepared = Box::pin(direct::prepare_source_start(
         &state,
         &headers,
@@ -2046,6 +2059,7 @@ async fn own_start(
         // tell a withheld recipe from one that never claimed Dolby Vision.
         headers.forwarded_ingress().is_none()
             && !receiver_presentation::authenticated_receiver_dolby_vision(&headers),
+        relays_enhancement,
     ))
     .await?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
