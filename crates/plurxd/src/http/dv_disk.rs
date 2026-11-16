@@ -79,7 +79,16 @@ pub async fn status(
             state.store.dv_conversion_eligibility_for_files(&ids),
             state.jobs.dv_disk_modes(),
         )?;
+        let mut waiting_reasons = std::collections::BTreeMap::new();
+        for row in &conversions {
+            if row.state == plurx_core::store::DvConversionState::Queued {
+                if let Some(reason) = state.jobs.disk_refit_waiting_reason(row.file_id).await? {
+                    waiting_reasons.insert(row.file_id.to_string(), reason);
+                }
+            }
+        }
         return Ok(Json(serde_json::json!({
+            "waiting_reasons_by_file": waiting_reasons,
             "conversions_by_file": conversions.into_iter().map(|row| {
                 (row.file_id.to_string(), row)
             }).collect::<std::collections::BTreeMap<_, _>>(),
@@ -159,6 +168,7 @@ pub async fn file_status(
         "eligible": eligible,
         "dolby_vision": file.dolby_vision,
         "conversion": state.store.dv_conversion(file_id).await?,
+        "waiting_reason": state.jobs.disk_refit_waiting_reason(file_id).await?,
         "capabilities": state.jobs.dv_disk_capabilities(),
     })))
 }

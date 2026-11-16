@@ -3953,6 +3953,11 @@ fn adopt_observation_token(
 }
 
 impl ControlState {
+    /// The typed platform accepted for this session's current control epoch.
+    pub(crate) fn client_platform(&self) -> Option<ClientPlatform> {
+        self.client_platform
+    }
+
     pub(crate) fn invalidate_observational_attachment(&mut self) {
         self.advance_observational_lifetime();
     }

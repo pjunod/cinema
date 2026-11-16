@@ -176,7 +176,7 @@ ORDER BY job.id
 "#;
 
 /// Closed metric labels: persisted unknown kinds never become labels.
-pub const JOB_METRIC_KINDS: [&str; 22] = [
+pub const JOB_METRIC_KINDS: [&str; 23] = [
     "transcode_prepare",
     "fragment_index_build",
     "artifact_hydrate",
@@ -199,6 +199,7 @@ pub const JOB_METRIC_KINDS: [&str; 22] = [
     "subtitle_text_model_operation",
     "subtitle_text_translate_artifact",
     "fragment_index_publish",
+    "dv_refit",
 ];
 pub const JOB_METRIC_STATES: [&str; 6] = [
     "queued",

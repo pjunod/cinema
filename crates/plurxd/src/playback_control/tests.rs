@@ -984,6 +984,9 @@ fn vod_status_delivering(
     delivered_bps: Option<i64>,
 ) -> HlsSessionInfo {
     HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+        dolby_vision_refit: None,
+        dv_refit_digest: None,
+        dv_refit_identity_reason: None,
         stream_format: None,
         active_encode_milli_realtime: None,
         active_encode_age_ms: None,
@@ -10098,6 +10101,7 @@ fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
         source_telemetry: None,
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -10717,6 +10721,7 @@ fn a_grade_intent_comes_off_the_request() {
             source_telemetry: None,
             dv_processing_destination: None,
             sdr_master_codecs: None,
+            dv_refit_digest: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,

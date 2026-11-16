@@ -4213,6 +4213,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
     let mut recipe = crate::transcode::SessionRequest {
         dv_processing_destination: None,
         sdr_master_codecs: None,
+        dv_refit_digest: None,
         continuous_media: None,
         quality_catalog: None,
         candidate_context: None,
@@ -6866,6 +6867,7 @@ mod delivered_plan_note_tests {
                 index: 0,
                 custom_xy: None,
             }),
+            el_kind: plurx_core::scan::dv_title::TitleConstant::Unknown,
         };
         let probe = serde_json::json!({PROBE_FIELD: stats}).to_string();
         let (target, note) = TranscodeManager::display_target_policy(

@@ -183,6 +183,9 @@ pub async fn output_command(
         work,
         Environment::Service,
         None,
+        &[],
+        None,
+        None,
     )
     .await
 }
@@ -208,6 +211,9 @@ pub async fn output_command_clean_env(
         work,
         Environment::Clean,
         None,
+        &[],
+        None,
+        None,
     )
     .await
 }
@@ -228,6 +234,109 @@ pub async fn output_command_inherited_env(
         work,
         Environment::Inherited,
         None,
+        &[],
+        None,
+        None,
+    )
+    .await
+}
+
+/// A clean-environment child of a validated helper bundle: `LC_ALL` and only
+/// the bundle's own declared variables (its library path), never the
+/// daemon's environment. Otherwise identical to [`output_command_clean_env`].
+pub async fn output_command_bundle_env(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    bundle_env: &[(String, std::ffi::OsString)],
+) -> io::Result<Output> {
+    if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed child executable must be absolute",
+        ));
+    }
+    output_command_environment(
+        command,
+        wall_time,
+        max_output_bytes,
+        work,
+        Environment::Clean,
+        None,
+        bundle_env,
+        None,
+        None,
+    )
+    .await
+}
+
+/// [`output_command_bundle_env`] with the child's stdout written straight to
+/// `stdout` (an open, writable file) as it is produced, so whatever a long
+/// run printed survives its interruption. The returned output's `stdout` is
+/// empty; `max_stderr_bytes` bounds stderr and `max_stdout_bytes` bounds
+/// the child's regular-file writes. Exceeding it terminates the writer.
+/// A supplied manifest must come from the audited descriptor builder, including
+/// its installed file-stdio mappings; it is bound after final configuration.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "file-backed output retains its final descriptor manifest through the bounded owner"
+)]
+pub async fn output_command_bundle_env_to_file(
+    command: &mut Command,
+    wall_time: Duration,
+    max_stderr_bytes: usize,
+    max_stdout_bytes: usize,
+    work: super::ChildWork,
+    bundle_env: &[(String, std::ffi::OsString)],
+    stdout: std::fs::File,
+    manifest: Option<std::sync::Arc<super::source_lifetime::DescriptorManifest>>,
+) -> io::Result<Output> {
+    if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed child executable must be absolute",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        // Keep stdout as a direct child descriptor: cancellation/reaping
+        // then settles every write before the caller reads its progress.
+        // A separate async file pump could outlive cancellation with an
+        // in-flight filesystem write. The kernel bounds the child's file.
+        let limit = max_stdout_bytes as libc::rlim_t;
+        unsafe {
+            command.pre_exec(move || {
+                let bounds = libc::rlimit {
+                    rlim_cur: limit,
+                    rlim_max: limit,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &bounds) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = max_stdout_bytes;
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file-backed helper output needs Unix file limits",
+        ));
+    }
+    output_command_environment(
+        command,
+        wall_time,
+        max_stderr_bytes,
+        work,
+        Environment::Clean,
+        None,
+        bundle_env,
+        Some(stdout),
+        manifest,
     )
     .await
 }
@@ -256,6 +365,9 @@ pub async fn output_command_clean_env_selected_stderr(
         work,
         Environment::Clean,
         Some(select),
+        &[],
+        None,
+        None,
     )
     .await
 }
@@ -267,6 +379,10 @@ enum Environment {
     Inherited,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one process owner binds environment, pipe selection and retained output destination"
+)]
 async fn output_command_environment(
     command: &mut Command,
     wall_time: Duration,
@@ -274,6 +390,9 @@ async fn output_command_environment(
     work: super::ChildWork,
     environment: Environment,
     stderr_selector: Option<fn(&[u8]) -> bool>,
+    bundle_env: &[(String, std::ffi::OsString)],
+    stdout_file: Option<std::fs::File>,
+    manifest: Option<std::sync::Arc<super::source_lifetime::DescriptorManifest>>,
 ) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
@@ -284,9 +403,13 @@ async fn output_command_environment(
             super::source_lifetime::tag_descriptor_handoff(command);
         }
     }
+    for (name, value) in bundle_env {
+        command.env(name, value);
+    }
+    let stdout_to_file = stdout_file.is_some();
     command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
+        .stdout(stdout_file.map_or_else(std::process::Stdio::piped, std::process::Stdio::from))
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     if matches!(environment, Environment::Service) {
@@ -321,16 +444,29 @@ async fn output_command_environment(
         Some(controller) => Some(controller.enlist(&cancellation).await?),
         None => None,
     };
-    let (mut child, job) = super::spawn_job_owned(command, work)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("probe stdout was not piped"))?;
+    let (mut child, job) = if let Some(manifest) = manifest {
+        manifest.bind(command.as_std())?;
+        super::source_lifetime::with_descriptors(manifest, || {
+            super::spawn_job_owned(command, work)
+        })?
+    } else {
+        super::spawn_job_owned(command, work)?
+    };
+    let stdout = child.stdout.take();
+    if stdout.is_none() && !stdout_to_file {
+        return Err(io::Error::other("probe stdout was not piped"));
+    }
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
-    let mut stdout = tokio::spawn(drain_capped(stdout, max_output_bytes));
+    let mut stdout = tokio::spawn(async move {
+        match stdout {
+            Some(stdout) => drain_capped(stdout, max_output_bytes).await,
+            // Written straight to the caller's file; nothing to collect.
+            None => Ok(Vec::new()),
+        }
+    });
     let mut stderr = tokio::spawn(async move {
         match stderr_selector {
             Some(select) => drain_selected_lines(stderr, max_output_bytes, select).await,
@@ -484,6 +620,34 @@ mod tests {
     use super::*;
 
     const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_output_is_kernel_bounded_and_owned_until_reaped() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let path = dir.path().join("stdout");
+        let file = std::fs::File::create(&path).expect("stdout file");
+        let mut command = Command::new("/usr/bin/head");
+        command.args(["-c", "131072", "/dev/zero"]);
+        let output = output_command_bundle_env_to_file(
+            &mut command,
+            Duration::from_secs(5),
+            1024,
+            17,
+            TEST_WORK,
+            &[],
+            file,
+            None,
+        )
+        .await
+        .expect("file limit still reaps the owned child");
+        assert!(
+            !output.status.success(),
+            "the writer must observe its file limit"
+        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(std::fs::read(path).expect("saved prefix"), vec![0; 17]);
+    }
 
     fn selected_record(line: &[u8]) -> bool {
         line.starts_with(b"frame:")

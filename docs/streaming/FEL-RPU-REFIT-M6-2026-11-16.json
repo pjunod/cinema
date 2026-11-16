@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-16",
+  "candidate": "359641a06c8eee46b31fe9d5ff7cd0cd45b80aac",
+  "candidate_scope": "Merge integration into main90678ab468; helper/composer/writer inputs unchanged from a88fa74cb. Native experiment uses the exact retained published RPU and source-bound instrument.",
+  "milestone": "M6",
+  "qualification": "failed",
+  "remaining_42_executed": false,
+  "instrument": {
+    "hardware": "Apple M3 Max",
+    "macos": "27.2.1",
+    "renderer_sha256": "a9692e07bf1243a6a0faf2dd931d08b76d42e6dbd1c3fdec685e793e5789476f",
+    "kernel_sha256": "2639c4bb85e9f5a659588bba55c3ec7d0dbf3e72bc07a7c30bff8627755d1faa",
+    "source_rpu_sha256": "3d77fd15b551593013bc753a8fb3b15193e7a3d6990a54696718a9d1bbc89a3c"
+  },
+  "six_point_all_rgb_overlap": {
+    "00": [
+      true,
+      true,
+      true
+    ],
+    "06": [
+      false,
+      false,
+      true
+    ],
+    "07": [
+      true,
+      true,
+      true
+    ],
+    "09": [
+      true,
+      true,
+      true
+    ],
+    "20": [
+      true,
+      true,
+      true
+    ],
+    "44": [
+      true,
+      true,
+      true
+    ]
+  },
+  "controls": {
+    "six_point": {
+      "method_sound": true,
+      "constant_honored_all_rgb_overlap": true,
+      "identity_all_rgb_nonoverlap": true,
+      "repeat_all_rgb_overlap": true,
+      "all_captures_uniform_within_fp16_bins": true
+    },
+    "component_hybrids": {
+      "method_sound": true,
+      "constant_honored_all_rgb_overlap": true,
+      "identity_all_rgb_nonoverlap": true,
+      "repeat_all_rgb_overlap": true,
+      "all_captures_uniform_within_fp16_bins": true
+    },
+    "cr_only": {
+      "method_sound": true,
+      "constant_honored_all_rgb_overlap": true,
+      "identity_all_rgb_nonoverlap": true,
+      "repeat_all_rgb_overlap": true,
+      "all_captures_uniform_within_fp16_bins": true
+    }
+  },
+  "point_06": {
+    "base_codes_10bit": [
+      371,
+      521,
+      544
+    ],
+    "actual_fp16_rgb_hex": [
+      "3552",
+      "30ab",
+      "3361"
+    ],
+    "oracle_fp16_rgb_hex": [
+      "354a",
+      "30ad",
+      "3361"
+    ],
+    "actual_minus_oracle_fp16_steps": [
+      8,
+      -2,
+      0
+    ],
+    "hybrid_f": "Constant luma and Cb with actual Cr MMR matches actual in every RGB channel.",
+    "component_result": "Actual Cr MMR is sufficient to reproduce the mismatch at point06; luma polynomial and one-versus-eight-piece luma layout do not explain this observation.",
+    "cause": "Native arithmetic or oracle-path cause remains unidentified; no production repair inferred."
+  },
+  "result_artifacts": {
+    "six_point": {
+      "name": "m6-oracle-diagnostic-20261114-v1/result.json",
+      "sha256": "8d01293effe05794112a6169a9c902380af27597db0c42cf55d361b153b7eb6f",
+      "epoch": "codex-pr1565-sixpoint-20261116-1600z-v1"
+    },
+    "component_hybrids": {
+      "name": "m6-oracle-hybrid06-20261116-v1/result.json",
+      "sha256": "ee9f673c15e07f1e4e4d9c5108993b45d450e24475811bb29a239880113ff81e",
+      "epoch": "codex-pr1565-hybrid06-20261116-v1"
+    },
+    "cr_only": {
+      "name": "m6-oracle-cr06-20261116-v1/result.json",
+      "sha256": "4250ff3d0424135ab230098c83fd004813ef7f21f751d2711b9cdb712914032c",
+      "epoch": "codex-pr1565-cr06-20261116-v1"
+    }
+  },
+  "evidence_storage": "Original captures, media, per-frame RPU readbacks, parsed metadata, resource receipts and frozen/revised harnesses retained in the external task-owned receipt tree; original failed mux evidence preserved.",
+  "resource_outcome": "All native phases exited0 and reaped owned children; Mac resources released before offline scoring.",
+  "acceptance": "Existing M6 exact FP16-bin overlap criterion retained; PR1565 remains draft pending native qualification and its required CI.",
+  "repair_candidate": {
+    "fit_version": "dv-refit-safe-v2-mmr12",
+    "state": "Production export bound to six passing native inputs; remaining42 and final CI pending",
+    "cause": "Fine-grid software qualification did not describe the native MMR mapping. All-six explicit coefficient-grid controls identify a compatible publication representation; no claim about the location of native quantization.",
+    "wire_denominator_bits": 23,
+    "published_mmr_fraction_bits": 12,
+    "rounding": "nearest ties away after Q23 wire normalization",
+    "luma_fraction_bits": 23,
+    "qualification_scores": "exact published coefficients",
+    "retention": "current selections require current fit method; existing pinned digests retain exact legacy coefficients",
+    "diagnostic": {
+      "name": "m6-oracle-q12six-20261116-v1/result.json",
+      "sha256": "8cd3cbb3787de71fa7a7953cef312dc21890a19aeffaaf057699f36905438c9a",
+      "selector_sha256": "02ef41b4439f70541f355cf61e6236d2f408bd1731a426bc9c07abaa285098b7",
+      "equivalence_proof_sha256": "b67f3cc1ac96485ec52fe2fab80ca645ad0675b502860e19a4f0f46455bc71de",
+      "controls": {
+        "constant_honored": true,
+        "identity_nonoverlap": true,
+        "repeat": true,
+        "uniform": true
+      },
+      "comparisons": {
+        "0": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            false
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "20": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "44": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "6": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            false,
+            false,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "7": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        },
+        "9": {
+          "nearest_vs_reference": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_nearest": [
+            true,
+            true,
+            true
+          ],
+          "original_vs_truncated": [
+            true,
+            true,
+            true
+          ]
+        }
+      },
+      "full48_qualified": false
+    },
+    "production_export": {
+      "source_commit": "74bd64d4daaae795ed826eef907d4ed08c1cea3c",
+      "candidate_rpu_sha256": "7d2b4d39312767afd1e957a6572c8c7e47c3a3c2007cf85ad28897a6137eb9fb",
+      "bytes": 435,
+      "title_curve_digest": "6373ab9d580701c4f8189510304260d157234fa5a36eb7ff75907fe20551325c",
+      "title_gain": 0.811230192898513,
+      "export_envelope_sha256": "1b36536c6760039545ba0406c86a7eededa5737420dc3617457cd4dd409e0196",
+      "native_input_closure_sha256": "fbd550398087da8f3255fb59dfff9bdeb3219f0351337bb103c37663865ff1d8",
+      "helper_redecoded": false
+    },
+    "initial_six_acceptance": {
+      "receipt_sha256": "d9545df8e93645a6c9cb79f293b0198ad2730d467da53ed34be1ae2fd3f5b532",
+      "criterion": "Unchanged exact FP16 mean-bin overlap, valid controls and exact production-RPU byte identity",
+      "all_six_all_rgb_pass": true,
+      "raw_captures_rerendered": false,
+      "full48_qualified": false
+    },
+    "full48_qualification": {
+      "qualified": true,
+      "receipt": "FEL-RPU-REFIT-M6-Q12-2026-11-16.json",
+      "receipt_sha256": "55c5b9584d497a5a04d0c8307e7c03a1927ad83a24085e1f85830a7606d01e7c",
+      "historical_failure_unchanged": true,
+      "native_measurement_receipt_sha256": "d6b63f300a2c2152ea1c6ba5170055ac932b21143121c0a1e98c3ddb4c949486"
+    }
+  },
+  "historical_source_qualification_notes": "Results, each stamped with the commit it ran on (learner build node, capped\nscope, Rust 1.97.1):\n\n- `bfda558e9` (main `40cc6460d` merged): production and test-target Clippy\n  (`-D warnings`) and rustfmt pass. plurx-core `segplan::packet_clock`,\n  `segplan::refit_proof` and `fmp4::`: 120 pass. plurxd `source_probe::dv_refit`,\n  `source_probe::refit_work` and `fragindex::refit_acceptance_tests`: 28 pass.\n  Real-video copy publication read back 310 whole and 139 seek RPUs against\n  source clocks and stored curves. Controlled AAC (zero-origin FEL plus stereo\n  PCM) did the same, plus 602 whole and 272 seek AAC samples.\n  Real zero-origin FEL disk authoring with frame-by-frame readback passed\n  (`dv_disk::tests::real_fel_fit_is_written_and_read_back`). The helper is the\n  retained native build of source 4989. The merged tree's `tools/dv_processing`\n  differs from that source only in display-management and CM29 code, which\n  `--refit-stats` does not reach (`refit_mode.h` hands decoded pairs to\n  `refit_pairs`, not the renderer).\n- `241491459` (main `59022fd2a` merged, plus reconcile fixes): the plurx-core\n  store library cases the v134 renumber touches, 307 pass (run before that\n  commit's census-label line; its 9-case module was re-run after). Store-contract\n  `dv_refit_jobs`, `delegation`, `historical`, `dv_title_jobs` and\n  `contract_inventory_matches_every_store_method`: 39 pass. plurxd\n  `source_probe::`, `source_custody::` and `copy_analysis::`: 121 pass and 3\n  fail. The same 3 fail identically, at the same assertions, on main `59022fd2a`\n  and on `bfda558e9`, so none comes from F+:\n  `copy_analysis::gap_fill_tests::an_analysis_filled_head_and_gap_merge_into_the_whole_title_analysis_observation`\n  (`copy_sync_unverified`, the known main failure in the 2026-11-15 CI triage),\n  and `source_custody::recovery::reader::tests::mediated_reader_crash_recovers_same_kernel_on_native_mac_and_linux`\n  and `\u2026::brokered_cache_parts_keep_reader_recovery_but_raw_fallbacks_remain_fenced`\n  (\"host physical-stop proof does not match the audited reader census\"). Those\n  two read the fixed host path `/run/plurx-physical-stop/legacy-dv-title-v1.json`,\n  which exists on the build node because it is a deployed node; they cannot\n  pass there.\n- `846225459` and earlier F+ candidates: the retained focused core, store and\n  daemon cases, helper digest/resume/thread/refusal results and the native\n  48-patch mapping control, each recorded with its own source in the PR\n  history. Disk conversion's nonzero-origin refusal remains explicit (\u00a73.6).\n\n"
+}
