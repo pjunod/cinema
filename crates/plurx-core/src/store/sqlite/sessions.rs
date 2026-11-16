@@ -4983,6 +4983,28 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn owned_media_sessions_hint(
+        &self,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if owner_node_id.is_empty() || owner_node_id.len() > 256 {
+            return Err(StoreError::Task("invalid media-session owner".to_owned()));
+        }
+        let owner_node_id = owner_node_id.to_owned();
+        self.with_read(move |conn| {
+            let owned: i64 = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM media_sessions \
+                 WHERE owner_node_id = ?1 AND state = 'active' \
+                   AND lease_expires_at_ms > ?2)",
+                params![owner_node_id, now_ms],
+                |row| row.get(0),
+            )?;
+            Ok(owned != 0)
+        })
+        .await
+    }
+
     async fn reserve_producer_recovery(
         &self,
         request: &crate::domain::ProducerRecoveryRequest,

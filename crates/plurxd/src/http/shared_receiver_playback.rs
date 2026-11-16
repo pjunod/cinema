@@ -53,6 +53,15 @@ pub(crate) enum ReceiverStartError {
     Capacity,
     Conflict,
     Unresolved,
+    /// The store could not answer (a read erred or timed out), or answered
+    /// absent for a time or lease term: an outage of this node, resolved
+    /// through `UnknownSpan`, never a revocation.
+    Unknown,
+    /// The Source could not be reached or was busy. Not this node's outage;
+    /// the owner retries inside its lease.
+    PeerUnavailable,
+    /// This owner is already stopping or retiring; nothing to decide.
+    Ending,
     Deadline,
     Unsupported,
     DolbyVisionUnsupported,
@@ -64,6 +73,86 @@ pub(crate) enum ReceiverStartError {
     ResourceBusy {
         retry_after_secs: u64,
     },
+}
+/// A Source that could not be reached or was busy is unavailable, not a
+/// refusal; anything the Source affirmatively answered stays unresolved.
+pub(super) fn peer_failure(error: crate::sharing_client::PeerError) -> ReceiverStartError {
+    match error {
+        crate::sharing_client::PeerError::Unavailable
+        | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::PeerUnavailable,
+        _ => ReceiverStartError::Unresolved,
+    }
+}
+/// Why an exact receiver read came back empty. Inside this owner's own lease
+/// only a non-temporal fact can make it empty (a revoked grant, a logout, a
+/// removed import or a replaced owner): affirmative. Once the lease has
+/// passed, the lease itself is the likelier cause (its renewals failed while
+/// the store could not answer): unknown, and an outage once the grace is
+/// spent.
+pub(crate) fn absence(
+    owner: &plurx_core::sharing_receiver_sessions::ReceiverSourceOwner,
+) -> ReceiverStartError {
+    if owner.now_ms >= owner.lease_expires_at_ms {
+        ReceiverStartError::Unknown
+    } else {
+        ReceiverStartError::Unresolved
+    }
+}
+/// [`absence`] while a renewal may have committed unseen: the route may carry
+/// the pending lease the reads did not find, so emptiness is unknown.
+pub(crate) fn absence_given(
+    owner: &plurx_core::sharing_receiver_sessions::ReceiverSourceOwner,
+    pending: Option<i64>,
+) -> ReceiverStartError {
+    if pending.is_some() {
+        ReceiverStartError::Unknown
+    } else {
+        absence(owner)
+    }
+}
+/// How long a connection monitor sleeps for its time term: just past the
+/// deadline (the lease and login comparisons are strict), or one second
+/// without one.
+fn until_past(deadline_ms: Option<i64>, now_ms: i64) -> Duration {
+    deadline_ms.map_or(Duration::from_secs(1), |deadline| {
+        Duration::from_millis(
+            u64::try_from(deadline.saturating_sub(now_ms))
+                .unwrap_or(0)
+                .saturating_add(1),
+        )
+    })
+}
+
+/// Whether the time term has lapsed, so a deadline wake must look.
+fn lapsed(deadline_ms: Option<i64>, now_ms: i64) -> bool {
+    deadline_ms.is_none_or(|deadline| now_ms > deadline)
+}
+
+/// The tables a receiver connection's authority rests on (A6 M3): the
+/// original login (`tokens`, deletes only; its idle expiry is a time term),
+/// the switch and token policy (`settings`), the import, viewer and
+/// assignment, and the sharing identity. The binding and delivery rows are
+/// rewritten by every renewal and are covered by the owner and the lease.
+const RECEIVER_CONNECTION_WATCH: &[&str] = &[
+    "tokens",
+    "settings",
+    "sharing_imports",
+    "sharing_viewers",
+    "sharing_assignments",
+    "sharing_identity",
+];
+
+/// How a receiver owner reads one look at its delivery authority.
+pub(crate) fn delivery_observation<T>(
+    looked: &Result<T, ReceiverStartError>,
+) -> crate::sharing::SharingObservation {
+    use crate::sharing::SharingObservation;
+    match looked {
+        Ok(_) => SharingObservation::Current,
+        Err(ReceiverStartError::Unknown) => SharingObservation::Unknown,
+        Err(ReceiverStartError::Ending) => SharingObservation::Ending,
+        Err(_) => SharingObservation::Revoked,
+    }
 }
 pub(super) fn resource_busy_response(retry_after_secs: u64) -> super::error::ApiError {
     super::error::ApiError::TypedRetry {
@@ -177,6 +266,13 @@ struct ReceiverStartState {
     ingress_owner_identity: Option<String>,
     /// Why retirement began; read by the connection monitors when it stops.
     retirement_reason: Option<plurx_core::sharing_receiver_retirement::ReceiverRetirementReason>,
+    /// Set by an outage ending: every transport is cut whatever the durable
+    /// reason, so a partitioned node stops its bytes.
+    retirement_cuts: bool,
+    /// A renewal whose answer was lost: the store may hold this lease instead
+    /// of the retained one. Readers try both and adopt the one the route
+    /// carries; until then an empty read is unknown, not a revocation.
+    pending_lease: Option<i64>,
     retired: bool,
     end_confirmation: Option<Arc<retirement::ReceiverEndConfirmation>>,
     /// Present on a session B started as a prepared successor.
@@ -200,10 +296,12 @@ impl ReceiverStartInner {
     /// an administrative stop, or a stop with no recorded reason cut.
     fn retirement_cuts_transports(&self) -> bool {
         use plurx_core::sharing_receiver_retirement::ReceiverRetirementReason as Reason;
-        !matches!(
-            self.state.lock().expect("receiver owner").retirement_reason,
-            Some(Reason::Deleted | Reason::Superseded | Reason::Replaced)
-        )
+        let owned = self.state.lock().expect("receiver owner");
+        owned.retirement_cuts
+            || !matches!(
+                owned.retirement_reason,
+                Some(Reason::Deleted | Reason::Superseded | Reason::Replaced)
+            )
     }
     fn retain_dispatch(
         &self,
@@ -585,6 +683,18 @@ impl ReceiverStartRegistry {
             }
             let result = run_owner(state.clone(), owner.clone(), source_wrapper).await;
             if let Err(error) = result {
+                // An owner whose authority stayed unknown, or whose Source stayed
+                // unreachable until its lease could not be renewed, ended in an
+                // outage, not a revocation.
+                let published = matches!(
+                    owner.state.lock().expect("receiver owner").start,
+                    Some(Ok(_))
+                );
+                let outage = published
+                    && matches!(
+                        error,
+                        ReceiverStartError::Unknown | ReceiverStartError::PeerUnavailable
+                    );
                 // An uncommitted prepared successor that failed or reached its
                 // deadline is withdrawn, as a Local aborted successor is.
                 let reason = if owner.awaiting_commit() {
@@ -594,7 +704,11 @@ impl ReceiverStartRegistry {
                 };
                 owner.state.lock().expect("receiver owner").start = Some(Err(error));
                 owner.changed.notify_waiters();
-                ReceiverStartActor(owner).begin_retirement(state, reason);
+                if outage && !owner.awaiting_commit() {
+                    ReceiverStartActor(owner).begin_outage_retirement(state);
+                } else {
+                    ReceiverStartActor(owner).begin_retirement(state, reason);
+                }
             }
         });
         *entry.start_task.lock().expect("receiver start task") = Some(task);
@@ -749,6 +863,23 @@ impl ReceiverStartActor {
         self.current_delivery_attachment(state).await?;
         Ok((self.0.intent.user_id, self.0.intent.login_hash.clone()))
     }
+    /// The wall-clock millisecond at which the connection monitor must look
+    /// without a change (A6 M3): the owner's current lease or the original
+    /// login's expiry, whichever is first. Read from the owner's state at
+    /// each wait, so a renewal moves it. `None` without a retained Source.
+    /// The delivery grant needs no term of its own: its deadline is at most
+    /// the lease and the login, and is renewed with the lease.
+    fn delivery_deadline_ms(&self, login_expires_at_ms: Option<i64>) -> Option<i64> {
+        let lease = self
+            .0
+            .state
+            .lock()
+            .expect("receiver owner")
+            .source
+            .as_ref()
+            .map(|retained| retained.owner.lease_expires_at_ms)?;
+        Some(login_expires_at_ms.map_or(lease, |login| login.min(lease)))
+    }
     async fn current_delivery_attachment(
         &self,
         state: &AppState,
@@ -775,21 +906,19 @@ impl ReceiverStartActor {
         ReceiverStartError,
     > {
         if self.0.stop.is_cancelled() {
-            return Err(ReceiverStartError::Unresolved);
+            return Err(ReceiverStartError::Ending);
         }
-        let (mut attachment, received) = {
+        let (mut attachment, received, pending) = {
             let owned = self.0.state.lock().expect("receiver owner");
             if !matches!(owned.start, Some(Ok(_))) || owned.retirement_started {
-                return Err(ReceiverStartError::Unresolved);
+                return Err(ReceiverStartError::Ending);
             }
-            let mut attachment = owned.source.clone().ok_or(ReceiverStartError::Unresolved)?;
-            attachment.owner = owned.owner.clone().ok_or(ReceiverStartError::Unresolved)?;
+            let mut attachment = owned.source.clone().ok_or(ReceiverStartError::Ending)?;
+            attachment.owner = owned.owner.clone().ok_or(ReceiverStartError::Ending)?;
             (
                 attachment,
-                owned
-                    .received
-                    .clone()
-                    .ok_or(ReceiverStartError::Unresolved)?,
+                owned.received.clone().ok_or(ReceiverStartError::Ending)?,
+                owned.pending_lease,
             )
         };
         attachment.owner.now_ms = clock_ms();
@@ -797,14 +926,30 @@ impl ReceiverStartActor {
             .store
             .prepare_receiver_session_authority(self.0.intent.clone())
             .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
+            .map_err(|_| ReceiverStartError::Unknown)?
             .ok_or(ReceiverStartError::Unresolved)?;
-        let snapshot = state
+        let mut snapshot = state
             .store
             .receiver_source_binding(&authority, &attachment.owner)
             .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            .ok_or(ReceiverStartError::Unresolved)?;
+            .map_err(|_| ReceiverStartError::Unknown)?;
+        // A renewal whose answer was lost may have committed: the route then
+        // carries the pending lease, which this exact owner adopts.
+        let mut adopted = None;
+        if let Some(lease) = pending.filter(|_| snapshot.is_none()) {
+            let mut committed = attachment.owner.clone();
+            committed.lease_expires_at_ms = lease;
+            snapshot = state
+                .store
+                .receiver_source_binding(&authority, &committed)
+                .await
+                .map_err(|_| ReceiverStartError::Unknown)?;
+            if snapshot.is_some() {
+                attachment.owner = committed;
+                adopted = Some(lease);
+            }
+        }
+        let snapshot = snapshot.ok_or_else(|| absence_given(&attachment.owner, pending))?;
         let a = &attachment.binding;
         let b = &snapshot.binding;
         if snapshot.response_json.is_none()
@@ -821,7 +966,7 @@ impl ReceiverStartActor {
             .store
             .sharing_identity(clock_ms())
             .await
-            .map_err(|_| ReceiverStartError::Unresolved)?;
+            .map_err(|_| ReceiverStartError::Unknown)?;
         // Rewrap changes ciphertext, never the retained actual Source. Open only
         // the current envelope, then pin that exact ciphertext in subsequent CAS.
         let opened = state
@@ -833,7 +978,7 @@ impl ReceiverStartActor {
                 self.0.intent.scope.import_id,
                 &b.capability_envelope,
             )
-            .map_err(|_| ReceiverStartError::Unresolved)?;
+            .map_err(|_| ReceiverStartError::Unknown)?;
         let capsule: UpstreamCapsule =
             serde_json::from_str(opened.expose()).map_err(|_| ReceiverStartError::Unresolved)?;
         if !current_capsule_matches_received(&self.0.intent, b, &capsule, &received)? {
@@ -845,10 +990,12 @@ impl ReceiverStartActor {
             .store
             .receiver_delivery(&authority, &attachment, &hash)
             .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            .ok_or(ReceiverStartError::Unresolved)?;
+            .map_err(|_| ReceiverStartError::Unknown)?
+            .ok_or_else(|| {
+                absence_given(&attachment.owner, pending.filter(|_| adopted.is_none()))
+            })?;
         if self.0.stop.is_cancelled() {
-            return Err(ReceiverStartError::Unresolved);
+            return Err(ReceiverStartError::Ending);
         }
         {
             let mut owned = self.0.state.lock().expect("receiver owner");
@@ -858,12 +1005,9 @@ impl ReceiverStartActor {
                     .as_ref()
                     .is_some_and(|actual| Arc::ptr_eq(actual, &received))
             {
-                return Err(ReceiverStartError::Unresolved);
+                return Err(ReceiverStartError::Ending);
             }
-            let retained = owned
-                .source
-                .as_mut()
-                .ok_or(ReceiverStartError::Unresolved)?;
+            let retained = owned.source.as_mut().ok_or(ReceiverStartError::Ending)?;
             if retained.owner.incarnation_id != attachment.owner.incarnation_id
                 || retained.owner.session_id != attachment.owner.session_id
                 || retained.owner.owner_node_id != attachment.owner.owner_node_id
@@ -872,6 +1016,13 @@ impl ReceiverStartActor {
                 return Err(ReceiverStartError::Unresolved);
             }
             retained.binding = attachment.binding.clone();
+            if let Some(lease) = adopted {
+                retained.owner.lease_expires_at_ms = lease;
+                if let Some(owner) = owned.owner.as_mut() {
+                    owner.lease_expires_at_ms = lease;
+                }
+                owned.pending_lease = None;
+            }
         }
         Ok((authority, attachment, received))
     }
@@ -1195,19 +1346,87 @@ impl ReceiverStartActor {
             // Held for the monitor's whole life: its custody of this
             // connection ends only when the future does.
             let custody = retained;
-            let mut timer = tokio::time::interval(Duration::from_secs(1));
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
+            // One outage budget for this connection's whole life.
+            let mut span = crate::serving_fence::UnknownSpan::default();
+            let mut serving = state.serving.subscribe();
+            // Looks happen when an authority table changes, the serving
+            // fence moves, or the lease or the original login lapses; at
+            // most once a second (A6 M3). The connection was admitted on a
+            // look made before any watch existed, so the first look waits
+            // one interval.
+            let mut watch = plurx_core::store::SharingWatch::Interval;
+            let mut looked = tokio::time::Instant::now();
+            let mut login_expires_at_ms = None;
+            'monitor: loop {
+                {
+                    // Pinned once per wait: an interval watch keeps its own
+                    // deadline across re-sleeps for a moved lease.
+                    let mut changed = std::pin::pin!(watch.changed());
+                    loop {
+                        let due = actor.delivery_deadline_ms(login_expires_at_ms);
+                        tokio::select! {
+                            () = closed.wait() => return,
+                            () = actor.0.stop.cancelled() => break 'monitor,
+                            () = changed.as_mut() => break,
+                            Ok(()) = serving.changed() => break,
+                            () = tokio::time::sleep(until_past(due, clock_ms())) => {
+                                // A renewal moved the lease past this wake: no look.
+                                if lapsed(actor.delivery_deadline_ms(login_expires_at_ms), clock_ms()) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 tokio::select! {
                     () = closed.wait() => return,
-                    () = actor.0.stop.cancelled() => break,
-                    _ = timer.tick() => {}
+                    () = actor.0.stop.cancelled() => break 'monitor,
+                    () = tokio::time::sleep_until(looked + Duration::from_secs(1)) => {}
                 }
+                // Re-armed before the look it follows.
+                watch = state.applied.sharing_watch(RECEIVER_CONNECTION_WATCH);
+                looked = tokio::time::Instant::now();
                 // Original B login and exact delivery binding remain required
                 // while a writer has queued bytes, including after Body EOF.
-                if actor.current_delivery_attachment(&state).await.is_err() {
-                    actor.begin_retirement(state.clone(), plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked);
-                    break;
+                let current = actor.current_delivery_attachment(&state).await;
+                if let Ok((authority, _, _)) = &current {
+                    login_expires_at_ms = authority
+                        .login_expires_at_s()
+                        .map(|seconds| seconds.saturating_mul(1000));
+                }
+                let mut observed = delivery_observation(&current);
+                if observed.is_unknown() {
+                    let look = || async {
+                        delivery_observation(&actor.current_delivery_attachment(&state).await)
+                    };
+                    observed = tokio::select! {
+                        () = closed.wait() => return,
+                        () = actor.0.stop.cancelled() => break,
+                        outcome = span.resolve(
+                            &mut serving,
+                            tokio::time::Instant::now(),
+                            Duration::from_secs(1),
+                            look,
+                            crate::sharing::SharingObservation::is_unknown,
+                        ) => match outcome {
+                            crate::serving_fence::SpanOutcome::Known(observed) => observed,
+                            crate::serving_fence::SpanOutcome::Expired
+                            | crate::serving_fence::SpanOutcome::Closed => {
+                                tracing::warn!(target: "plurx::sharing", "receiver delivery authority stayed unknown past the session grace; retiring as an outage");
+                                actor.begin_outage_retirement(state.clone());
+                                break;
+                            }
+                        },
+                    };
+                }
+                match observed {
+                    crate::sharing::SharingObservation::Current => {}
+                    crate::sharing::SharingObservation::Ending => break,
+                    crate::sharing::SharingObservation::Revoked
+                    | crate::sharing::SharingObservation::Unknown => {
+                        actor.begin_retirement(state.clone(), plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked);
+                        break;
+                    }
                 }
             }
             // A session handed over to its own viewer's successor (superseded
@@ -1278,7 +1497,7 @@ impl ReceiverStartActor {
             lifetime,
         )
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        .map_err(peer_failure)?;
         let known = received
             .lineage()
             .map_err(|_| ReceiverStartError::Unresolved)?;
@@ -1308,7 +1527,7 @@ impl ReceiverStartActor {
             {
                 ReceiverStartError::Unsupported
             }
-            _ => ReceiverStartError::Unresolved,
+            other => peer_failure(other),
         })
     }
     async fn current_source_status(
@@ -1325,7 +1544,7 @@ impl ReceiverStartActor {
     ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
         if self.0.stop.is_cancelled() {
             tracing::warn!(target: "plurx::sharing", stage = "stopped", error_class = "owner_stopped", "receiver Source status refused");
-            return Err(ReceiverStartError::Unresolved);
+            return Err(ReceiverStartError::Ending);
         }
         // Current B policy precedes the network operation; every following
         // committing writer still obtains and repeats its own fresh guard.
@@ -1335,7 +1554,7 @@ impl ReceiverStartActor {
             .await
             .map_err(|_| {
                 tracing::warn!(target: "plurx::sharing", stage = "authority_read", error_class = "store", "receiver Source status refused");
-                ReceiverStartError::Unresolved
+                ReceiverStartError::Unknown
             })?
             .ok_or(ReceiverStartError::Unresolved)
             .inspect_err(|_| {
@@ -1366,7 +1585,7 @@ impl ReceiverStartActor {
         .await
         .map_err(|error| {
             log_source_status_peer_failure("verified_peer", error);
-            ReceiverStartError::Unresolved
+            peer_failure(error)
         })?;
         let known = received
             .lineage()
@@ -1385,7 +1604,7 @@ impl ReceiverStartActor {
             log_source_status_peer_failure("status_exchange", error);
             #[cfg(test)]
             eprintln!("B real Source status exchange error={error:?}");
-            ReceiverStartError::Unresolved
+            peer_failure(error)
         })
     }
     fn close_dispatch(&self) {
@@ -2035,41 +2254,75 @@ async fn run_owner(
         if entry.prepared_expired(clock_ms()) {
             return Err(ReceiverStartError::Deadline);
         }
-        let actor = ReceiverStartActor(entry.clone());
-        actor
-            .current_source_status_owned(&state, connection_lifetime.clone())
-            .await?;
-        // The Source exchange above never holds this lock. A reader may
-        // observe the old or new exact lease, never SQL's new lease paired
-        // with the retained owner's old lease between commit and writeback.
-        let _lease_observation = entry.lease_observation.lock().await;
-        let (_, current_attachment, _) = actor.current_delivery_attachment_locked(&state).await?;
-        attachment = current_attachment;
-        let authority = state
-            .store
-            .prepare_receiver_session_authority(intent.clone())
-            .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            .ok_or(ReceiverStartError::Unresolved)?;
-        attachment.owner.now_ms = clock_ms();
-        let new_lease = attachment.owner.now_ms + 30_000;
-        let renewal = ReceiverSourceRenewal {
-            attachment: attachment.clone(),
-            lease_expires_at_ms: new_lease,
-        };
-        if state
-            .store
-            .renew_receiver_source_session(&authority, &renewal)
-            .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            == ReceiverSourceWrite::Refused
-        {
-            return Err(ReceiverStartError::Unresolved);
+        // One renewal. A store that cannot answer and a Source that cannot be
+        // reached are retried on the next tick while the lease can still be
+        // renewed; only then does the owner end, as an outage.
+        let renewed: Result<(), ReceiverStartError> = async {
+            let actor = ReceiverStartActor(entry.clone());
+            actor
+                .current_source_status_owned(&state, connection_lifetime.clone())
+                .await?;
+            // The Source exchange above never holds this lock. A reader may
+            // observe the old or new exact lease, never SQL's new lease paired
+            // with the retained owner's old lease between commit and writeback.
+            let _lease_observation = entry.lease_observation.lock().await;
+            let (_, current_attachment, _) =
+                actor.current_delivery_attachment_locked(&state).await?;
+            attachment = current_attachment;
+            let authority = state
+                .store
+                .prepare_receiver_session_authority(intent.clone())
+                .await
+                .map_err(|_| ReceiverStartError::Unknown)?
+                .ok_or(ReceiverStartError::Unresolved)?;
+            attachment.owner.now_ms = clock_ms();
+            let new_lease = attachment.owner.now_ms + 30_000;
+            let renewal = ReceiverSourceRenewal {
+                attachment: attachment.clone(),
+                lease_expires_at_ms: new_lease,
+            };
+            match state
+                .store
+                .renew_receiver_source_session(&authority, &renewal)
+                .await
+            {
+                Ok(ReceiverSourceWrite::Refused) => return Err(ReceiverStartError::Unresolved),
+                Ok(_) => {}
+                // The answer was lost, not necessarily the write: adopt the new
+                // lease if the route now carries it for this exact owner.
+                Err(_) => {
+                    let mut committed = attachment.owner.clone();
+                    committed.lease_expires_at_ms = new_lease;
+                    let adopted = state
+                        .store
+                        .receiver_source_binding(&authority, &committed)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    if !adopted {
+                        entry.state.lock().expect("receiver owner").pending_lease = Some(new_lease);
+                        return Err(ReceiverStartError::Unknown);
+                    }
+                }
+            }
+            attachment.owner.lease_expires_at_ms = new_lease;
+            let mut owned = entry.state.lock().expect("receiver owner");
+            owned.owner = Some(attachment.owner.clone());
+            owned.source = Some(attachment.clone());
+            owned.pending_lease = None;
+            Ok(())
         }
-        attachment.owner.lease_expires_at_ms = new_lease;
-        let mut owned = entry.state.lock().expect("receiver owner");
-        owned.owner = Some(attachment.owner.clone());
-        owned.source = Some(attachment.clone());
+        .await;
+        match renewed {
+            Ok(()) => {}
+            Err(ReceiverStartError::Unknown | ReceiverStartError::PeerUnavailable)
+                if attachment.owner.lease_expires_at_ms > clock_ms() + 10_000 =>
+            {
+                tracing::warn!(target: "plurx::sharing", "receiver lease renewal deferred; retrying inside the lease");
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -2341,6 +2594,13 @@ pub(super) async fn receiver_media_actor(
     let opened = match actor.open_source_resource(&state, &resource).await {
         Ok(opened) => opened,
         Err(ReceiverStartError::Capacity) => return resource_busy_response(1).into_response(),
+        // Neither ends the session: the owner and the connection monitors
+        // decide that through the lease and the outage grace.
+        Err(
+            ReceiverStartError::Unknown
+            | ReceiverStartError::PeerUnavailable
+            | ReceiverStartError::Ending,
+        ) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Err(ReceiverStartError::ResourceBusy { retry_after_secs }) => {
             return resource_busy_response(retry_after_secs).into_response();
         }
@@ -3405,4 +3665,181 @@ pub(super) async fn test_actual_lease_commit_read_overlap(state: &AppState, sess
         .expect("finite actual owner proof after writeback")
         .expect("exact retained owner proof");
     assert!(Arc::ptr_eq(&actual_owner.0, &actor.0));
+}
+
+#[cfg(test)]
+mod outage_policy_tests {
+    use super::*;
+    use crate::sharing::SharingObservation;
+
+    /// Only an affirmative answer ends a receiver as revoked: a store that
+    /// cannot answer is an outage and a stopping owner has nothing to decide.
+    #[test]
+    fn receiver_delivery_observation_separates_outage_ending_and_refusal() {
+        assert_eq!(
+            delivery_observation(&Ok::<(), _>(())),
+            SharingObservation::Current
+        );
+        assert_eq!(
+            delivery_observation::<()>(&Err(ReceiverStartError::Unknown)),
+            SharingObservation::Unknown
+        );
+        assert_eq!(
+            delivery_observation::<()>(&Err(ReceiverStartError::Ending)),
+            SharingObservation::Ending
+        );
+        assert_eq!(
+            delivery_observation::<()>(&Err(ReceiverStartError::Unresolved)),
+            SharingObservation::Revoked
+        );
+    }
+
+    /// A6 M3: the connection monitor's time term. A lapsed deadline wakes a
+    /// look at once (1 ms past it), not a re-sleep; one still ahead (a
+    /// renewal moved it) waits for it again.
+    #[test]
+    fn a_lapsed_delivery_deadline_looks_and_a_moved_one_waits() {
+        assert_eq!(super::until_past(Some(100), 40), Duration::from_millis(61));
+        assert_eq!(super::until_past(Some(100), 200), Duration::from_millis(1));
+        assert_eq!(super::until_past(None, 200), Duration::from_secs(1));
+        assert!(!super::lapsed(Some(100), 100));
+        assert!(super::lapsed(Some(100), 101));
+        assert!(super::lapsed(None, 0));
+        let source = include_str!("shared_receiver_playback.rs");
+        let monitor = &source[source.find("'monitor: loop {").expect("monitor")..];
+        let wait = &monitor[..monitor.find("Re-armed before the look").expect("wait")];
+        assert!(
+            wait.contains("if lapsed(actor.delivery_deadline_ms(login_expires_at_ms), clock_ms())")
+        );
+        assert!(wait.contains("std::pin::pin!(watch.changed())"));
+    }
+
+    /// An empty exact read inside the owner's own lease can only be a
+    /// non-temporal fact (a revoked grant, a logout, a replaced owner): it
+    /// revokes at once. Only after the lease has passed is it unknown.
+    #[test]
+    fn receiver_absence_inside_the_lease_is_affirmative_and_after_it_unknown() {
+        let owner = |now_ms, lease_expires_at_ms| {
+            plurx_core::sharing_receiver_sessions::ReceiverSourceOwner {
+                incarnation_id: uuid::Uuid::nil(),
+                session_id: uuid::Uuid::nil(),
+                owner_node_id: String::new(),
+                owner_epoch: 1,
+                request_id: String::new(),
+                lease_expires_at_ms,
+                now_ms,
+            }
+        };
+        assert_eq!(
+            absence(&owner(1_000, 30_000)),
+            ReceiverStartError::Unresolved
+        );
+        assert_eq!(absence(&owner(30_000, 30_000)), ReceiverStartError::Unknown);
+        assert_eq!(absence(&owner(31_000, 30_000)), ReceiverStartError::Unknown);
+    }
+
+    /// While a renewal may have committed unseen, an empty read inside the
+    /// retained lease is unknown: the route may carry the pending lease.
+    #[test]
+    fn a_pending_renewal_keeps_an_empty_read_unknown() {
+        let owner = plurx_core::sharing_receiver_sessions::ReceiverSourceOwner {
+            incarnation_id: uuid::Uuid::nil(),
+            session_id: uuid::Uuid::nil(),
+            owner_node_id: String::new(),
+            owner_epoch: 1,
+            request_id: String::new(),
+            lease_expires_at_ms: 30_000,
+            now_ms: 1_000,
+        };
+        assert_eq!(absence_given(&owner, None), ReceiverStartError::Unresolved);
+        assert_eq!(
+            absence_given(&owner, Some(40_000)),
+            ReceiverStartError::Unknown
+        );
+        let locked = between(
+            include_str!("shared_receiver_playback.rs"),
+            "async fn current_delivery_attachment_locked(",
+            "// Cleanup-only refresh after actual start ownership joins.",
+        );
+        assert!(locked.contains("committed.lease_expires_at_ms = lease;"));
+        assert!(locked.contains("owned.pending_lease = None;"));
+    }
+
+    /// A Source that is unreachable or busy is unavailable, never a refusal
+    /// that retires the viewer's session.
+    #[test]
+    fn receiver_peer_failures_are_unavailable_not_refusals() {
+        use crate::sharing_client::PeerError;
+        assert_eq!(
+            peer_failure(PeerError::Unavailable),
+            ReceiverStartError::PeerUnavailable
+        );
+        assert_eq!(
+            peer_failure(PeerError::Busy {
+                retry_after_secs: 2
+            }),
+            ReceiverStartError::PeerUnavailable
+        );
+        assert_eq!(
+            peer_failure(PeerError::Rejected(axum::http::StatusCode::GONE)),
+            ReceiverStartError::Unresolved
+        );
+        assert_eq!(
+            peer_failure(PeerError::Authentication),
+            ReceiverStartError::Unresolved
+        );
+    }
+
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let from = source.find(start).expect(start);
+        let to = from + source[from..].find(end).expect(end);
+        &source[from..to]
+    }
+
+    /// The receiver monitor, the owner loop and the Source body monitor all
+    /// resolve an unknown proof through the cluster layer's `UnknownSpan`;
+    /// none ends a session on a failed read.
+    #[test]
+    fn sharing_monitors_resolve_unknown_proofs_through_the_outage_policy() {
+        let receiver = include_str!("shared_receiver_playback.rs");
+        let monitor = between(
+            receiver,
+            "pub(crate) fn retain_accepted_connection(",
+            "// A session handed over to its own viewer's successor",
+        );
+        assert!(monitor.contains("span.resolve("));
+        assert!(monitor.contains("begin_outage_retirement"));
+        assert!(!monitor.contains(".await.is_err()"));
+        let owner = between(
+            receiver,
+            "let renewed: Result<(), ReceiverStartError>",
+            "Err(error) => return Err(error),",
+        );
+        assert!(owner.contains("ReceiverStartError::Unknown | ReceiverStartError::PeerUnavailable"));
+        let cuts = between(
+            receiver,
+            "fn retirement_cuts_transports(",
+            "fn retain_dispatch(",
+        );
+        assert!(cuts.contains("owned.retirement_cuts"));
+        let source = include_str!("shared_library.rs");
+        let body = between(
+            source,
+            "pub(super) async fn guard_source_response(",
+            "// EOF only releases the stream's copy.",
+        );
+        assert!(body.contains("observed = source_content_observation(&state, &authority)"));
+        assert!(body.contains("span.resolve("));
+        assert!(!body.contains("current = source_content_current(&state, &authority) =>"));
+        let observation = between(
+            source,
+            "async fn source_content_observation(",
+            "pub(super) async fn source_art_scope_current(",
+        );
+        assert!(observation.contains("SharingObservation::of_floor("));
+        assert_eq!(
+            observation.matches("SharingObservation::of_term(").count(),
+            3
+        );
+    }
 }

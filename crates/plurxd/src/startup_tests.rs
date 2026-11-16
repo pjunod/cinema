@@ -4983,3 +4983,61 @@ fn explicit_bind_advertises_only_that_address() {
     assert!(!info.is_addr_auto());
     assert!(info.get_addresses().contains(&address));
 }
+
+/// The signal path's first act is the stop-time leadership handoff, while
+/// Raft and every listener are still up: before the drain token is
+/// cancelled (which also starts committed-leave teardown), before media
+/// starts are fenced, and before either listener stops accepting.
+#[test]
+fn the_signal_path_hands_leadership_off_before_any_listener_stops() {
+    let source = include_str!("main.rs");
+    assert_eq!(
+        source.matches(".handoff_for_shutdown()").count(),
+        1,
+        "the daemon has exactly one stop-time handoff call"
+    );
+    let future = source
+        .split_once("    let shutdown = async move {\n        tokio::select! {")
+        .expect("the boot shutdown future")
+        .1;
+    let future = future
+        .split_once("\n    };\n")
+        .expect("end of the boot shutdown future")
+        .0;
+    let select_end = future
+        .find("\n        }\n")
+        .expect("the signal/leave select ends the future's first statement");
+    let handoff = future
+        .find("membership_shutdown.handoff_for_shutdown().await;")
+        .expect("the shutdown future hands leadership off");
+    let first_await = future[select_end..]
+        .find(".await")
+        .map(|at| at + select_end)
+        .expect("the drain awaits");
+    assert_eq!(
+        first_await,
+        handoff + "membership_shutdown.handoff_for_shutdown()".len(),
+        "the handoff is the drain's first await"
+    );
+    for later in [
+        "leave_shutdown.cancel();",
+        "begin_restart_preparation_until(",
+        "public_listener_stop.cancel();",
+        "jellyfin_stop.cancel();",
+    ] {
+        let at = future
+            .find(later)
+            .unwrap_or_else(|| panic!("the drain still runs {later}"));
+        assert!(handoff < at, "the handoff must run before {later}");
+    }
+    let clone = source
+        .find("let membership_shutdown = state.membership.clone();")
+        .expect("the handoff owns a membership clone");
+    let router = source
+        .find("let app = http::router(state);")
+        .expect("the router takes the state");
+    assert!(
+        clone < router,
+        "clone membership before the router takes the state"
+    );
+}

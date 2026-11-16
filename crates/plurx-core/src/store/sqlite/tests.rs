@@ -868,9 +868,10 @@ async fn v6_rebuild_preserves_everything() {
     // probe takes no background source reader; v127 metadata-only index
     // coordination with the v3 copy index; v128 the managed v6 view; v129
     // retention that keeps a charged source custody's owner job; v130 offloaded titles;
-    // v131 saved storage-domain changes; v132 exact FEL demand continuity.
+    // v131 saved storage-domain changes; v132 exact FEL demand continuity;
+    // v133 optional scoped application login (delegation).
     assert_eq!(
-        version, 132,
+        version, 133,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );

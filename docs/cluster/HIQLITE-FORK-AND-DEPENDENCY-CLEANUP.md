@@ -1179,8 +1179,8 @@ Hiqlite 1, 8, 9, 10, 11, 17, 19, 26 and 28, plus WAL 1, 2 and 3. Hiqlite 28
 `pending M6`, so ten combined rows are pending; the eleven-row inventory above
 is historical.
 
-**Hiqlite 29 and WAL 7 added, 2026-11-15.** The ledgers now contain fourteen generic rows:
-Hiqlite 1, 8, 9, 10, 11, 17, 19, 26, 28 and 29, plus WAL 1, 2, 3 and 7. Hiqlite 29
+**Hiqlite 32 and WAL 7 added, 2026-11-15.** The ledgers now contain fourteen generic rows:
+Hiqlite 1, 8, 9, 10, 11, 17, 19, 26, 28 and 32, plus WAL 1, 2, 3 and 7. Hiqlite 32
 and WAL 7 (keep the SQLite writer and the WAL writer alive when a reply's
 receiver is gone) are `pending M6`, so twelve combined rows are pending; the
 twelve-row inventory above is historical.

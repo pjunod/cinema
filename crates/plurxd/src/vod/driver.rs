@@ -648,7 +648,11 @@ async fn bound_handoff(shared: &Shared, rendition: &Rendition) -> Option<Handoff
 /// session of the claim's own playback, and the published runway past that
 /// viewer's playhead still covers the claim's reserve: what a failed trial
 /// needs to give the permit back and let this producer re-admit.
-pub(super) async fn trial_claim_bound(shared: &Shared, rendition: &Rendition, claim: &TrialClaim) -> bool {
+pub(super) async fn trial_claim_bound(
+    shared: &Shared,
+    rendition: &Rendition,
+    claim: &TrialClaim,
+) -> bool {
     let readers: Vec<String> = rendition.readers.lock().await.keys().cloned().collect();
     if readers.is_empty() {
         return false;
@@ -663,9 +667,10 @@ pub(super) async fn trial_claim_bound(shared: &Shared, rendition: &Rendition, cl
             if !session.renewable() || session.playback_id != claim.playback_id {
                 return false;
             }
-            if let (Some(demand), Some(observed)) =
-                (session.last_control_snapshot.as_ref(), session.control_observed_at)
-            {
+            if let (Some(demand), Some(observed)) = (
+                session.last_control_snapshot.as_ref(),
+                session.control_observed_at,
+            ) {
                 let at = crate::playback_control::rolling_estimated_position_ms(
                     demand,
                     observed.elapsed(),
@@ -689,10 +694,11 @@ pub(super) async fn trial_claim_bound(shared: &Shared, rendition: &Rendition, cl
         .collect();
     {
         let manifest = rendition.manifest.lock().await;
-        if blocked
-            .iter()
-            .any(|index| !manifest.state(*index).is_some_and(|state| state.is_materialized()))
-        {
+        if blocked.iter().any(|index| {
+            !manifest
+                .state(*index)
+                .is_some_and(|state| state.is_materialized())
+        }) {
             return false;
         }
     }
@@ -730,15 +736,18 @@ async fn trial_runway_ms(rendition: &Rendition, playhead_ms: i64) -> i64 {
             .map(|entry| (entry.end_ticks().saturating_mul(1_000) / timescale) as i64)
     };
     let playhead = playhead_ms.max(0);
-    let Some(first) =
-        (0..rendition.plan.len() as u32).find(|index| end_ms(*index).is_some_and(|end| end > playhead))
+    let Some(first) = (0..rendition.plan.len() as u32)
+        .find(|index| end_ms(*index).is_some_and(|end| end > playhead))
     else {
         return 0;
     };
     let manifest = rendition.manifest.lock().await;
     let mut published = None;
     for index in first..rendition.plan.len() as u32 {
-        if !manifest.state(index).is_some_and(|state| state.is_materialized()) {
+        if !manifest
+            .state(index)
+            .is_some_and(|state| state.is_materialized())
+        {
             break;
         }
         published = end_ms(index);
@@ -780,11 +789,13 @@ fn reserve_for_successor(rendition: &Rendition, request: &HandoffRequest) -> Opt
                 // to whoever asked first. The claim's drop returns it unused.
                 // A claim that needs no runway still needs its reservation to
                 // outlive the hand-back, as a staged successor's does.
-                *token = Some(encoding.admissions.reserve_for_handoff(
-                    &request.wanted,
-                    Duration::from_millis(claim.reserve_ms.max(0) as u64)
-                        .max(HANDOFF_RESERVATION_TTL),
-                ));
+                *token = Some(
+                    encoding.admissions.reserve_for_handoff(
+                        &request.wanted,
+                        Duration::from_millis(claim.reserve_ms.max(0) as u64)
+                            .max(HANDOFF_RESERVATION_TTL),
+                    ),
+                );
             }
             claim.ready.notify_waiters();
             Some(HandoffWoken::Trial)
@@ -792,11 +803,7 @@ fn reserve_for_successor(rendition: &Rendition, request: &HandoffRequest) -> Opt
     }
 }
 
-fn finish_handoff_yield(
-    shared: &Arc<Shared>,
-    rendition: &Rendition,
-    woken: Option<HandoffWoken>,
-) {
+fn finish_handoff_yield(shared: &Arc<Shared>, rendition: &Rendition, woken: Option<HandoffWoken>) {
     let (claimant, successor) = match &woken {
         Some(HandoffWoken::Rendition(successor)) => ("prepared successor", successor.key.as_str()),
         Some(HandoffWoken::Trial) => ("processed upgrade trial", "trial"),
@@ -1005,7 +1012,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
                 drop(manifest);
                 if matches!(step, Step::Restart { .. }) {
-                    let successor = handoff.as_ref().map(|request| reserve_for_successor(rendition, request));
+                    let successor = handoff
+                        .as_ref()
+                        .map(|request| reserve_for_successor(rendition, request));
                     match perform_driver_step(shared, rendition, step).await {
                         Ok(_) => {}
                         Err(error) => {

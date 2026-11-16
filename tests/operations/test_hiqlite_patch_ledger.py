@@ -10,11 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 29),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 32),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 7),
 )
 
-NUMBER_WORDS = {7: "seven", 29: "twenty-nine"}
+NUMBER_WORDS = {7: "seven", 32: "thirty-two"}
 
 # A path a row bullet names, relative to the vendored crate root, written in
 # backticks: `src/writer.rs`, `Cargo.toml`. A repository path such as
@@ -135,7 +135,7 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
         self.assertEqual(
             {key for key, url in generic.items() if url == "pending M6"},
             {
-                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19, 28, 29)
+                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19, 28, 32)
             } | {("hiqlite-wal", 1), ("hiqlite-wal", 3), ("hiqlite-wal", 7)},
         )
         plan = (ROOT / "docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md").read_text(

@@ -6370,7 +6370,7 @@ fn render_applied_view_metrics(
     out
 }
 
-/// Hiqlite patch 29: replies the SQLite writer produced after the Raft apply
+/// Hiqlite patch 32: replies the SQLite writer produced after the Raft apply
 /// or teardown that asked for them had stopped waiting. Fixed labels, loaded
 /// from atomics at scrape time.
 fn render_writer_abandoned_replies(rows: &[hiqlite::DbWriterAbandonedReplies]) -> String {
@@ -6489,7 +6489,7 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
          # TYPE plurx_background_resource_reservations gauge\n\
          plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
-         # HELP plurx_background_source_recovery_pending Distinct background physical readers holding capacity after authority expired.\n\
+         # HELP plurx_background_source_recovery_pending Source owners still holding capacity well after their authority lapsed (the expiry sweep is not running).\n\
          # TYPE plurx_background_source_recovery_pending gauge\n\
          plurx_background_source_recovery_pending {}\n\
          # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\

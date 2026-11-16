@@ -3924,16 +3924,38 @@ mod tests {
     async fn retired_rolling_directory_is_deleted_within_one_tick() {
         // A two-hour title is ~1,800 segments: at 32 files per 30 s tick
         // the old collector needed about 56 minutes to release it.
+        //
+        // What a tick releases is bounded by its deadline and by nothing
+        // else. How many unlinks fit in `RETAINED_GC_TICK_BUDGET` is the
+        // host's speed, not this code's (a loaded runner fits fewer than
+        // 1,800), so neither half below races the budget: the first tick's
+        // deadline is never reached and the second's has already passed.
         let temp = crate::test_tempdir().expect("tick");
         let dir = temp.path().join("artifact");
         d3_rolling_tree(&dir, 1_800);
+        let unreached = Instant::now() + Duration::from_secs(3600);
         assert!(
-            remove_artifact_within(&dir, Instant::now() + RETAINED_GC_TICK_BUDGET)
+            remove_artifact_within(&dir, unreached)
                 .await
                 .expect("bounded removal"),
-            "one tick's budget releases a whole two-hour rolling artifact"
+            "a tick inside its budget releases a whole two-hour rolling artifact, \
+             not one batch of it"
         );
         assert!(!dir.exists());
+
+        d3_rolling_tree(&dir, 1_800);
+        assert!(
+            !remove_artifact_within(&dir, Instant::now())
+                .await
+                .expect("bounded removal"),
+            "a tick past its budget stops with the directory still there"
+        );
+        let left = std::fs::read_dir(&dir).expect("kept directory").count();
+        assert_eq!(
+            left,
+            1_801 - RETAINED_GC_BATCH,
+            "a spent budget costs the one batch in hand, then the tick ends"
+        );
     }
 
     #[tokio::test]

@@ -429,7 +429,7 @@ pub async fn restore_backup_finish(state: &Arc<AppState>) {
     let reqs = 10;
     for _ in 0..reqs {
         let start = Instant::now();
-        match state.raft_db.raft.client_write(QueryWrite::RTT).await {
+        match state.raft_db.client_write(QueryWrite::RTT).await {
             Ok(_) => {
                 info!("Raft RTT: {} micros", start.elapsed().as_micros());
             }

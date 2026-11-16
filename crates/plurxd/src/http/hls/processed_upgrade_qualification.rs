@@ -65,7 +65,7 @@ pub(in crate::http::hls) fn hold_viewer_demand(
             Ok(Some(tools)) => tools,
             Ok(None) => return,
             Err(error) => {
-                tracing::warn!(%error, "title viewer scanner unavailable");
+                tracing::warn!(target: "plurxd::http::hls", %error, "title viewer scanner unavailable");
                 return;
             }
         };

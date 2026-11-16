@@ -77,7 +77,13 @@ BUILD_SPECS = {
     # fast-rust-gate/paperwork-fix targets and offload web-test registration.
     # Recipe changes still require review; project-counter normalization below
     # does not authorize different recipe bytes or transfer native passes.
-    'Makefile': '297cf73d69babf7880ffad1359cd5d71b07f1ec223aaf9e501fe758b03636758',
+    # #1653 removed only `@scripts/knowledge lint --scope pilot --body-env`
+    # #1653 removed only `@scripts/knowledge lint --scope pilot --body-env`
+    # from the validation-lint recipe (the retired knowledge pilot), PR #1586
+    # adds only the web curator-login-browser-check target, and A6 M3 adds the
+    # vendor hiqlite `applied_mark::watch_tests` run to cluster-wal-check; no
+    # native build recipe changed.
+    'Makefile': 'f1b4c9732821a6c423590e9e733d78a50572532ccfe9b6a2ffc38362f7fe066f',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag

@@ -360,10 +360,12 @@ impl Rendition {
     pub(super) fn release_trial_claim(&self, claim: &Arc<TrialClaim>) {
         let released = {
             let mut slot = self.handoff.lock().expect("handoff lock");
-            let owned = slot.as_ref().is_some_and(|request| match &request.claimant {
-                HandoffClaimant::Trial(trial) => Arc::ptr_eq(trial, claim),
-                HandoffClaimant::Rendition(_) => false,
-            });
+            let owned = slot
+                .as_ref()
+                .is_some_and(|request| match &request.claimant {
+                    HandoffClaimant::Trial(trial) => Arc::ptr_eq(trial, claim),
+                    HandoffClaimant::Rendition(_) => false,
+                });
             if owned {
                 *slot = None;
             }
@@ -423,9 +425,7 @@ impl Rendition {
             match slot.as_ref() {
                 // A trial is bound by its claim, not the preparation slot: a
                 // successor settling or aborting here does not end it.
-                Some(request)
-                    if matches!(&request.claimant, HandoffClaimant::Trial(claim) if !claim.is_staged()) =>
-                {
+                Some(request) if matches!(&request.claimant, HandoffClaimant::Trial(claim) if !claim.is_staged()) => {
                     false
                 }
                 Some(request) if Some(request.incarnation.as_str()) != live_incarnation => {

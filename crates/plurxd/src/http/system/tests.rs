@@ -1889,7 +1889,7 @@ fn a_prepared_seam_counts_toward_graduation_only_when_clean_and_fully_measured()
         .contains("plurx_playback_preparation_processed_upgrades_total{outcome=\"scheduled\"}"));
 }
 
-/// Hiqlite patch 29: abandoned writer replies render one fixed-label row per
+/// Hiqlite patch 32: abandoned writer replies render one fixed-label row per
 /// request and outcome.
 #[test]
 fn writer_abandoned_replies_render_by_request_and_outcome() {

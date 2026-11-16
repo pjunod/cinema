@@ -46,15 +46,6 @@ missing = "fail"
 timeout_seconds = 180
 
 [[checks]]
-id = "knowledge-contract"
-title = "Engineering knowledge schema and references"
-command = "scripts/knowledge lint --scope pilot"
-profiles = ["commit", "ci", "full", "nightly"]
-requires = ["python3", "git"]
-missing = "fail"
-timeout_seconds = 30
-
-[[checks]]
 id = "history-regressions"
 title = "Historical corrective commits have current validation evidence"
 command = "scripts/history-audit --report target/validation/history.json"
@@ -644,6 +635,7 @@ paths = [
   "crates/plurx-core/src/metadata/**",
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/hiqlite.rs",
+  "crates/plurx-core/src/store/counted_client.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/file_grants.rs",
   "crates/plurx-core/src/store/playback_handoffs.rs",
@@ -1067,6 +1059,10 @@ id = "identity.access"
 title = "Accounts, tokens, and authorization boundaries"
 contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL. A closed or empty proof cache is that node's condition and never a verdict on the caller: the recovery guard answers its cached proof first and without touching the Store, and on a miss falls back to one bounded Store read, so a Store-known administrator is admitted, a Store-known non-admin is refused as forbidden, only a credential the Store has no row for is unauthorized, and a node that cannot find out answers a named service-unavailable refusal rather than a 401 that ends a working session. The one-time revocation-protocol activation names the precondition blocking it and retries on a bounded backoff."
 paths = [
+  "crates/plurx-core/src/store/delegation.{rs,sql}",
+  "crates/plurx-core/tests/store_contract/delegation.rs",
+  "crates/plurxd/src/http/delegation.rs",
+  "crates/plurxd/src/http/tests/delegation.rs",
   "crates/plurx-core/src/store/hiqlite/custody_settlement_tests.rs",
   "crates/plurx-core/src/store/hiqlite/tests.rs",
   # Fixed-purpose publisher/ticket notification authority and provider boundaries.
@@ -1690,6 +1686,7 @@ paths = [
   "docs/ci/RIPWIRE.md",
   "docs/ci/RIPWIRE-PILOT.md",
   "scripts/history-audit",
+  "scripts/land",
   "scripts/scrub-infra-names",
   "scripts/scrub-infra-names.allow.toml",
   "tests/operations/test_infra_names.py",
@@ -1941,19 +1938,3 @@ contract = "A plurx-player:// URL is played only when it is exactly play?server=
 paths = ["clients/linux-player/**"]
 checks = ["linux-player-launcher"]
 depends_on = ["server.api", "playback.pipeline"]
-
-[[points]]
-id = "knowledge.engineering"
-title = "Scoped engineering intent and evidence graph"
-contract = "Code and proposed changes trace to source-backed intent, scoped obligations and independently labeled execution evidence; unknown coverage and origin never become qualification."
-paths = [
-  "validation/knowledge/**",
-  "scripts/knowledge",
-  ".agents/skills/engineering-knowledge/**",
-  "tests/validation/test_knowledge_*.py",
-  "tests/operations/test_knowledge_pilot.py",
-  "docs/features/ENGINEERING-KNOWLEDGE-GRAPH-*.md",
-  "docs/ci/ENGINEERING-KNOWLEDGE.md",
-]
-checks = ["knowledge-contract", "catalog-contract", "operations-contract"]
-depends_on = ["validation.framework"]

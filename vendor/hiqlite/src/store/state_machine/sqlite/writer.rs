@@ -287,8 +287,12 @@ CREATE TABLE IF NOT EXISTS _metadata
         // turns its bits into revisions once the work has committed.
         let hook_mark = Arc::clone(&mark);
         conn.update_hook(Some(
-            move |_action, database: &str, table: &str, _rowid: i64| {
-                hook_mark.note_row_change(database, table);
+            move |action, database: &str, table: &str, _rowid: i64| {
+                hook_mark.note_row_change(
+                    action == rusqlite::hooks::Action::SQLITE_DELETE,
+                    database,
+                    table,
+                );
             },
         ))
         .expect("the writer owns its connection, so installing the update hook succeeds");
@@ -1077,7 +1081,7 @@ fn publish_then_send<T: ReplyOutcome>(
     send_reply(kind, applied, tx, value);
 }
 
-/// Which request an abandoned reply answered (Plurx patch 29). A fixed set,
+/// Which request an abandoned reply answered (Plurx patch 32). A fixed set,
 /// so it is safe as a log field and a metric label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriterReply {
@@ -1172,7 +1176,7 @@ pub fn db_writer_abandoned_replies() -> [DbWriterAbandonedReplies; WriterReply::
     })
 }
 
-/// Deliver a reply whose receiver may already be gone (Plurx patch 29).
+/// Deliver a reply whose receiver may already be gone (Plurx patch 32).
 /// Every applying request is sent by the Raft state machine's `apply`, which
 /// waits for the reply without a bound, so the receiver is gone only when
 /// that apply was cancelled or torn down: a Raft core shutting down, a
@@ -1705,7 +1709,7 @@ mod snapshot_cut_tests {
             .unwrap()
     }
 
-    /// Plurx patch 29. The Raft apply that sent a transaction was cancelled
+    /// Plurx patch 32. The Raft apply that sent a transaction was cancelled
     /// or torn down, so its receiver is gone before the writer replies. The
     /// commit (or the rollback) is what the database
     /// holds, the writer answers the next request, and the applied-log
@@ -1775,7 +1779,7 @@ mod snapshot_cut_tests {
         (row.ok, row.error)
     }
 
-    /// Plurx patch 29, arms other than the transaction, each sent with its
+    /// Plurx patch 32, arms other than the transaction, each sent with its
     /// receiver already dropped: Execute (applied, constraint failure,
     /// failed prepare), ExecuteReturning (applied, failed prepare), Batch
     /// (applied, failed second statement), a successful Migrate, the
@@ -1932,7 +1936,7 @@ mod snapshot_cut_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Plurx patch 29: failures that exist only in the reply. A migration
+    /// Plurx patch 32: failures that exist only in the reply. A migration
     /// that fails and a transaction whose statements succeed but whose
     /// commit fails (a deferred foreign key) are sent with the receiver
     /// already dropped. Neither leaves anything behind, both are counted as
@@ -2014,7 +2018,7 @@ mod snapshot_cut_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Plurx patch 29: the shutdown acknowledgement is a reply too. With its
+    /// Plurx patch 32: the shutdown acknowledgement is a reply too. With its
     /// receiver gone the writer still persists the metadata, removes its
     /// lock file and ends; the abandoned acknowledgement is counted, which
     /// it can only be if the send returned instead of panicking.
@@ -2874,7 +2878,7 @@ mod applied_mark_tests {
             ),
             "the helper publishes before it sends"
         );
-        // Plurx patch 29: no arm may panic on a reply its caller abandoned.
+        // Plurx patch 32: no arm may panic on a reply its caller abandoned.
         assert!(
             !body.contains("to never be dropped"),
             "a reply send that panics when its receiver is gone"
