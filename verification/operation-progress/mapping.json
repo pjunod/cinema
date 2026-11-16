@@ -165,7 +165,7 @@
         "table": "27 vendor serial SQLite transaction",
         "source": "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs",
         "anchor": "Query::Transaction(req) => {",
-        "sha256": "b0794f362b0efcbef75b40886bf04af40deb1634885a25d95090b6b5490c2a8e"
+        "sha256": "09788791cf51c1a0edb5f1ec91f6323c4c53857ed93c88e55d56658fd4327c1b"
       },
       {
         "table": "28 library completion conditional update",
