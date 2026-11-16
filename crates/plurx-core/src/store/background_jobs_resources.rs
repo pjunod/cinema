@@ -378,19 +378,31 @@ async fn clear_orphaned_coordination_roles<T: QueueSql>(
     store: &T,
     body: &str,
 ) -> Result<(), StoreError> {
-    let orphaned = "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)";
     // The coordination extension is not installed on every store.
-    let pending = store
+    let installed = store
         .queue_sql(
-            "SELECT 'true' AS result_json WHERE json_valid($1) AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_coordination_roles')".to_owned(),
+            "SELECT json_object('roles',EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_coordination_roles'),'custody',EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_source_custody')) AS result_json WHERE json_valid($1)".to_owned(),
             body.to_owned(),
             false,
             true,
         )
         .await?;
-    if pending.is_empty() {
+    let installed = installed
+        .first()
+        .map(|row| decode::<serde_json::Value>(row))
+        .transpose()?
+        .unwrap_or_default();
+    if installed["roles"] != 1 {
         return Ok(());
     }
+    // Between expand and contract a node still on the v1 binary records its
+    // phase in background_source_custody (no bridge mirrors it): that row is
+    // the phase's lease until the contract drops the table.
+    let orphaned = if installed["custody"] == 1 {
+        "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id) AND NOT EXISTS(SELECT 1 FROM background_source_custody v1 WHERE v1.custody_id=role.active_custody_id)"
+    } else {
+        "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)"
+    };
     let pending = store
         .queue_sql(
             format!("SELECT 'true' AS result_json WHERE EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE {orphaned})"),
@@ -1228,6 +1240,77 @@ mod source_tests {
                 .expect("cached read-only receipt remains valid"),
             Some(original)
         );
+    }
+
+    /// Mutation: drop the `background_source_custody` clause from the
+    /// orphaned-role sweep (a new node then clears a v1 node's coordinated
+    /// phase every minute of the roll).
+    #[tokio::test]
+    async fn a_v1_nodes_phase_is_not_orphaned_while_its_custody_row_exists() {
+        use super::super::analysis_coordination as coordinator;
+        let (store, source) = coordinator_fixture();
+        coordinator::establish(&store, "coordinator", source.clone(), 1000)
+            .await
+            .expect("establish");
+        let claim = coordinator::claim(
+            &store,
+            "coordinator",
+            source.clone(),
+            "worker",
+            0,
+            1000,
+            30000,
+        )
+        .await
+        .expect("claim")
+        .expect("claimed");
+        coordinator::begin_phase(&store, claim, source, 0, 1000)
+            .await
+            .expect("begin")
+            .expect("phase");
+        // What a v1 binary leaves: the phase names a UUID custody row in
+        // background_source_custody, and no lease.
+        let active = || {
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT active_custody_id FROM analysis_coordination_roles WHERE request_id='coordinator'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("role")
+        };
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute_batch(
+                "DELETE FROM source_leases;
+                 UPDATE analysis_coordination_roles SET active_custody_id='v1-custody' WHERE request_id='coordinator';
+                 INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+                   VALUES('v1-custody','analysis:v1','{}','[\"source_io\"]','analysis','coordinator',1,'active',1000,1000,31000);",
+            )
+            .expect("v1 phase");
+        reap_expired_source_leases(&store, 2000)
+            .await
+            .expect("sweep");
+        assert_eq!(
+            active().as_deref(),
+            Some("v1-custody"),
+            "the v1 row is its lease"
+        );
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute("DELETE FROM background_source_custody", [])
+            .expect("the v1 node released it");
+        reap_expired_source_leases(&store, 3000)
+            .await
+            .expect("sweep");
+        assert_eq!(active(), None, "then the role is orphaned and cleared");
     }
 
     #[tokio::test]
