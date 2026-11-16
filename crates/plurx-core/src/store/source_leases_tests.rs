@@ -422,6 +422,60 @@ async fn a_successor_fence_does_not_wait_on_its_own_ghost() {
     assert_eq!(again.fence, 2);
 }
 
+/// Mutation: drop `AND OLD.lease_expires_ms>NEW.updated_at_ms` from
+/// `source_lease_job_settled` (an abandoned job's reader is released the
+/// moment maintenance fails it, instead of at expiry plus the grace).
+#[tokio::test]
+async fn an_abandoned_job_keeps_its_reader_charged_through_the_grace() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let id = enqueued(&store, 0, false, 1_000).await;
+    let job = claimed(&store, claim_on(&id, 0, "node-a", 1_001))
+        .await
+        .expect("claim");
+    let expires = job.token.as_ref().expect("token").lease_expires_ms;
+    let row =
+        format!("SELECT lease_id AS result_json FROM source_leases WHERE lease_id='job:{id}:1'");
+    // The owner stopped renewing and its waiter has no attempt left:
+    // maintenance fails the running attempt.
+    sql(
+        &store,
+        &format!("UPDATE background_job_waiters SET failed_attempts=attempt_limit WHERE job_id='{id}' RETURNING 'true' AS result_json"),
+    )
+    .await;
+    store
+        .maintain_jobs(expires + 1_000)
+        .await
+        .expect("maintain");
+    let state = sql(
+        &store,
+        &format!("SELECT state AS result_json FROM background_jobs WHERE id='{id}'"),
+    )
+    .await;
+    assert_ne!(
+        state.first().map(String::as_str),
+        Some("running"),
+        "maintenance ended the abandoned attempt"
+    );
+    assert_eq!(
+        sql(&store, &row).await.len(),
+        1,
+        "the reader may still be running: its lease stays"
+    );
+    store
+        .reap_expired_source_leases(expires + 59_000)
+        .await
+        .expect("sweep");
+    assert_eq!(sql(&store, &row).await.len(), 1, "inside the grace");
+    store
+        .reap_expired_source_leases(expires + 61_000)
+        .await
+        .expect("sweep");
+    assert!(
+        sql(&store, &row).await.is_empty(),
+        "collected past the grace"
+    );
+}
+
 /// Mutation: drop the storage-domain branch of the holder counts.
 #[tokio::test]
 async fn domain_cap_still_binds() {
