@@ -9,18 +9,18 @@ const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/pl
 function ranges(list){return {length:list.length,start:i=>list[i][0],end:i=>list[i][1]};}
 function harness({filmSec=557,spareSec=292,spareBuffered=[[254.7,292.3]]}={}){
   const incumbent=Object.assign(new EventTarget(),{currentTime:filmSec,paused:false,seeking:false});
-  const spare=Object.assign(new EventTarget(),{currentTime:spareSec,seeking:false,readyState:4,
+  const spare=Object.assign(new EventTarget(),{currentTime:spareSec,seeking:false,readyState:4,play(){},
     buffered:ranges(spareBuffered),seeks:[]});
   Object.defineProperty(spare,"position",{get(){return this.currentTime;}});
   const state={sessionId:"successor",mediaOriginMs:0,metadata:true,buffered:false,
     state:"metadata_ready",stageAtMs:0};
-  const player={prepared:state,offset:0,vod:false};
+  const player={prepared:state,offset:0,vod:false,directedChange:null};
   const logs=[],failed=[],commits=[],acks=[];
   const ctx=vm.createContext({PLAYER:player,
     document:{getElementById:id=>id==="video"?incumbent:spare},
     performance:{now:()=>0},setTimeout:(fn)=>0,clearTimeout:()=>{},
     playbackOwnsAttachedMedia:()=>true,bufferRunway:()=>40,playbackContext:()=>({}),
-    clientLog:row=>logs.push(row)});
+    clientLog:row=>logs.push(row),tok:url=>url});
   vm.runInContext(source,ctx);
   ctx.preparedVideoElement=()=>spare;
   ctx.failPreparedReplacement=(p,s,reason)=>{failed.push(reason);s.state="failed";p.prepared=null;};
@@ -86,4 +86,27 @@ test("a successor already past buffer_ready is never re-aimed mid-switch",()=>{
   const h=harness();h.state.buffered=true;h.state.state="committing";
   h.note();
   assert.equal(h.spare.seeks.length,0);
+});
+
+test("a successor that has not started is never judged behind",()=>{
+  const h=harness({spareSec:0,spareBuffered:[]});h.spare.readyState=1;
+  h.note();
+  assert.equal(h.spare.seeks.length,0,"hls.js reports time zero before its first append");
+  assert.equal(h.failed.length,0);
+});
+
+test("a voluntary hls.js trial keeps no back buffer and is not re-aimed",()=>{
+  const h=harness();h.state.hls={};h.player.directedChange={retainIncumbent:true};
+  h.ctx.bufferRunway=()=>40;
+  h.note();
+  assert.equal(h.spare.seeks.length,0);
+});
+
+test("native metadata aims the successor at the incumbent's current second, not the staged one",()=>{
+  const h=harness();h.state.metadata=false;h.state.startAtSec=7.934;h.state.state="building";
+  h.ctx.notePreparedMetadata=(p,s)=>{s.metadata=true;};
+  h.spare.currentTime=0;
+  h.ctx.preparedNativeAttach(h.player,h.state,h.spare);
+  h.spare.dispatchEvent(new Event("loadedmetadata"));
+  assert.equal(h.spare.currentTime,560,"557 s incumbent + 3 s lead, not the 7.9 s staged when the open began");
 });

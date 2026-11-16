@@ -755,7 +755,7 @@ function notePreparedBuffer(p,state){
   }
   if(state.chasing) return;
   const filmMs=playbackFilmPositionMs(v,p);
-  if(preparedSuccessorBehind(state,spare,filmMs)){
+  if(preparedSuccessorBehind(p,state,spare,filmMs)){
     preparedChaseIncumbent(p,state,v,spare,filmMs);
     return;
   }
@@ -793,8 +793,20 @@ function notePreparedBuffer(p,state){
 // while a verified Profile 8.1 successor played 40 s behind, unseen, until the
 // server's preparation deadline reaped it. Behind means its playhead is earlier
 // than the incumbent's second and nothing it has buffered covers that second.
-function preparedSuccessorBehind(state,spare,filmMs){
+//
+// Only a successor that has started counts: hls.js parses its manifest (which
+// is `metadata`) before it applies `startPosition`, and until the first append
+// the element reports time zero with nothing buffered. Judging that "behind"
+// would spend re-aims on a successor that has not begun.
+//
+// A voluntary hls.js trial keeps no back buffer, so a successor re-aimed ahead
+// of the incumbent would evict everything behind its own playhead and could
+// never cover the incumbent's second: re-aiming would trade behind-forever for
+// ahead-forever. Those trials keep their own bounded proof and pressure exits.
+function preparedSuccessorBehind(p,state,spare,filmMs){
   if(!state.metadata||state.buffered||spare.seeking) return false;
+  if(!(Number(spare.readyState)>=2)||!(spare.buffered&&spare.buffered.length>0)) return false;
+  if(state.hls&&p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent)) return false;
   const local=Number(spare.currentTime);
   if(!Number.isFinite(local)) return false;
   if(state.mediaOriginMs+local*1000>=filmMs) return false;
@@ -828,8 +840,11 @@ function preparedChaseIncumbent(p,state,v,spare,filmMs){
     message:`prepared ${state.sessionId} ${lagMs} ms behind the incumbent; `+
       `re-aim ${attempt+1}/${PREPARED_CHASE_ATTEMPTS} at local ${wanted.toFixed(3)}s lead_ms=${leadMs}`},
     playbackContext()));
-  preparedAlignSeek(spare,wanted).then(()=>{
+  preparedAlignSeek(spare,wanted).then((landed)=>{
     state.chasing=false;
+    if(!landed) clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"chase",
+      message:`prepared ${state.sessionId} re-aim ${attempt+1} did not report seeked within ${PREPARED_ALIGN_SEEK_MS} ms`},
+      playbackContext()));
     if(PLAYER===p&&preparedState(p)===state&&preparedVideoElement()===spare
        &&!PREPARED_TERMINAL_STATES.includes(state.state)) notePreparedBuffer(p,state);
   });
