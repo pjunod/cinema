@@ -2691,6 +2691,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2699,6 +2700,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/election" {
@@ -2819,6 +2823,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
                 | internal_clock::PATH
+                | internal_activity::PATH
         )
     {
         return true;
@@ -2829,6 +2834,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         return true;
     }
     if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
+    if method == Method::POST && path == internal_activity::SOURCE_STOP_PATH {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`

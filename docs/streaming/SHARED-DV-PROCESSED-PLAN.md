@@ -1,6 +1,6 @@
 # Shared processed Dolby Vision / FEL re-encode — design note (T4.1)
 
-**Status:** merged to the effort and integrated with main32fa105ee; final review, qualification and deployment outstanding · **Effort:** `effort/shared-dv-hdr`, M4 · **Task PR:** [#1721](http://forge.lan:3000/noirr/plurx/pulls/1721) ·
+**Status:** merged to the effort and integrated with main32fa105ee; final review completed, P1 corrected; qualification and deployment outstanding · **Effort:** `effort/shared-dv-hdr`, M4 · **Task PR:** [#1721](http://forge.lan:3000/noirr/plurx/pulls/1721) ·
 **Written:** 2026-11-15 · **Read against:** `wt-dvhdr-m2` @ `468e9e90d` (M1 code);
 `origin/main` @ `29b35e713` for the original design. The continuation
 execution state is recorded in §7; compile attempts are not test qualification.
@@ -336,3 +336,14 @@ separate from directory caching. The existing transport call remains counted;
 the census ceiling falls by eleven. New-base compiler/static checks precede
 one final adversarial review and runtime qualification. Deployment and real
 shared-title/device acceptance remain open.
+
+### Final review correction
+
+The single adversarial pass found that the outer learner/maintenance route
+policy rejected signed Activity/Stop before their authenticated handlers.
+The exact GET/POST routes are now admitted, without widening other methods or
+work-submission routes. A real committed-learner router test checks signed
+snapshot and absent-owner Stop acknowledgment before/after maintenance;
+physical child/reader Stop settlement is covered separately. The
+[review and owner disposition](../reviews/SHARED-DV-HDR-FINAL-REVIEW.md) keep
+these claims distinct. Compilation and runtime qualification follow this fix.
