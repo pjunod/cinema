@@ -2635,6 +2635,60 @@ mod source_tests {
         );
     }
 
+    /// A delayed v1 activation is metadata, not a new admission or grant.
+    #[tokio::test]
+    async fn legacy_offline_metadata_cannot_reacquire_expired_capacity() {
+        for swept in [false, true] {
+            let store = fixture();
+            let package = uuid::Uuid::new_v4().to_string();
+            let owner = BackgroundSourceOwner::Offline {
+                package_id: package.clone(),
+                node_id: "worker".into(),
+                claim_generation: 1,
+            };
+            let key = background_owner_key(&owner).expect("key");
+            {
+                let db = store.0.lock().expect("connection");
+                db.execute(
+                    "INSERT INTO offline_packages VALUES(?1,'worker',1,100,1,1,'preparing',604800)",
+                    [&package],
+                )
+                .expect("package");
+                db.execute(
+                    "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                    [],
+                )
+                .expect("one maintenance slot");
+                db.execute("INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('legacy-offline-uuid',?1,?2,'[\"source_io\"]','offline',?3,1,'active',1000,1000,604800000)",rusqlite::params![key,serde_json::to_string(&owner).expect("owner"),package]).expect("v1 registration");
+            }
+            if swept {
+                reap_expired_source_leases(&store, 100_000)
+                    .await
+                    .expect("sweep");
+            }
+            {
+                let db = store.0.lock().expect("connection");
+                db.execute("INSERT INTO source_leases VALUES('lease:other:1','lease','other',1,'worker','{}','[\"source_io\"]','active',NULL,100000,100000,200000)",[]).expect("freed slot taken");
+                db.execute("UPDATE background_source_custody SET activation_id='late-activation',settlement_proof=NULL,updated_at_ms=100000 WHERE custody_id='legacy-offline-uuid'",[]).expect("delayed v1 activation");
+            }
+            assert_eq!(store.0.lock().expect("connection").query_row("SELECT count(*) FROM source_leases WHERE owner_kind='offline' AND expires_at_ms>100000",[],|row|row.get::<_,i64>(0)).expect("no metadata revival"),0,"swept={swept}");
+            assert!(claim_background_service(&store, owner.clone(), 100_001)
+                .await
+                .expect("still needs capacity")
+                .is_none());
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .execute("DELETE FROM source_leases WHERE work_id='other'", [])
+                .expect("slot free");
+            assert!(claim_background_service(&store, owner, 100_002)
+                .await
+                .expect("admitted grant resumes it")
+                .is_some());
+        }
+    }
+
     #[tokio::test]
     async fn offline_source_owner_uses_exact_package_generation_and_keeps_old_physical_custody() {
         let store = fixture();
