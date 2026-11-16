@@ -163,12 +163,22 @@ final class SharedProtocolFixtureTests: XCTestCase {
         XCTAssertEqual(playback.start.response.control?.generation, (start["receiver"] as! [String: Any])["incarnation_id"] as? String)
         let base = try XCTUnwrap(start["public"] as? [String: Any])
         let mutations = try XCTUnwrap(start["mutations"] as? [[String: Any]]).filter(clientLayer)
+        let request = request()
+        let boundedRange = request.caps?.transports.contains(SharedPlaybackTimeline.capability) == true
         XCTAssertEqual(mutations.count, 16)
         for row in mutations {
             let wire = mutate(base, path: row["path"] as! [String], row: substituted(row) as! [String: Any])
-            let result = try? SharedStart.decode(JSONSerialization.data(withJSONObject: wire)).bindInitial(context, request: request())
-            XCTAssertEqual(result != nil, row["expected"] as? String == "accepted", row["id"] as! String)
+            let result = try? SharedStart.decode(JSONSerialization.data(withJSONObject: wire)).bindInitial(context, request: request)
+            let expected = (boundedRange ? row["bounded_range_expected"] as? String : nil) ?? (row["expected"] as? String)
+            XCTAssertEqual(result != nil, expected == "accepted", row["id"] as! String)
         }
+        var unadvertised = request
+        unadvertised.caps = nil
+        var whole = base
+        whole["media_origin_ms"] = 0
+        XCTAssertNoThrow(try SharedStart.decode(JSONSerialization.data(withJSONObject: whole)).bindInitial(context, request: unadvertised))
+        whole["vod"] = false
+        XCTAssertThrowsError(try SharedStart.decode(JSONSerialization.data(withJSONObject: whole)).bindInitial(context, request: unadvertised))
     }
 
     func testDirectStartPublicReplyMimesAndClientMutations() async throws {
