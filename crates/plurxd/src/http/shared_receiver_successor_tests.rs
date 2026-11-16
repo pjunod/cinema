@@ -1140,60 +1140,77 @@ fn shared_processed_offer_is_spent_by_viewer_change_before_first_frame() {
 
 #[test]
 fn processed_successor_decline_reports_only_on_its_live_b_generation() {
-    let registry = ReceiverStartRegistry::default();
-    let state = Arc::new(crate::http::source_actor_test_state());
-    let predecessor = registered(&registry, "predecessor", "player", 1);
-    publish_hls(&predecessor);
-    let actor = ReceiverStartActor(predecessor.clone());
-    let digest = selection().desired().digest();
-    let deadline = clock_ms() + SUCCESSOR_DEADLINE_MS;
-    let request_json = successor_request(
-        &predecessor.intent.recipe.request_json,
-        &selection(),
-        61_250,
-        Uuid::new_v4(),
-        true,
-    )
-    .expect("same-selection processed successor");
-    let (successor, _) = registry
-        .register_successor(&actor, request_json, &digest, deadline)
-        .expect("B-owned prepared successor");
-    assert!(actor.install_successor(
-        &ReceiverStartActor(successor.clone()),
-        digest,
-        deadline,
-        true,
-    ));
-    successor.state.lock().expect("successor owner").start =
-        Some(Err(ReceiverStartError::Deadline));
-    let generation = generation(&predecessor);
-    assert!(actor
-        .processed_upgrade_skip(&Uuid::new_v4().to_string())
-        .is_none());
-    let report = actor
-        .processed_upgrade_skip(&generation)
-        .expect("retained decline");
-    assert!(report.reason.contains("did not complete in time"));
-    let header = report.owner_header().expect("bounded owner wire");
-    assert!(
-        crate::http::hls::processed_upgrade::ProcessingSkip::from_owner_wire(
-            header.as_bytes(),
-            &generation,
+    for (failure, expected_reason) in [
+        (ReceiverStartError::Deadline, "did not complete in time"),
+        (
+            ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
+                code: crate::sharing_client::StartRetryCode::StartupTimeout,
+                retry_after_secs: 1,
+            }),
+            "Source has not prepared",
+        ),
+        (
+            ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
+                code: crate::sharing_client::StartRetryCode::Overloaded,
+                retry_after_secs: 1,
+            }),
+            "Source is busy",
+        ),
+    ] {
+        let registry = ReceiverStartRegistry::default();
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let predecessor = registered(&registry, "predecessor", "player", 1);
+        publish_hls(&predecessor);
+        let actor = ReceiverStartActor(predecessor.clone());
+        let digest = selection().desired().digest();
+        let deadline = clock_ms() + SUCCESSOR_DEADLINE_MS;
+        let request_json = successor_request(
+            &predecessor.intent.recipe.request_json,
+            &selection(),
+            61_250,
+            Uuid::new_v4(),
+            true,
         )
-        .is_some()
-    );
-    assert!(
-        crate::http::hls::processed_upgrade::ProcessingSkip::from_owner_wire(
-            header.as_bytes(),
-            &Uuid::new_v4().to_string(),
-        )
-        .is_none()
-    );
-    let exchange = request(&generation, 1, selection());
-    assert!(actor.observe_ask(&state, &exchange, true).is_none());
-    assert!(
-        actor.processed_upgrade_skip(&generation).is_some(),
-        "the reason survives clearing the failed slot"
-    );
-    assert!(!superseding(&predecessor), "ordinary session remains live");
+        .expect("same-selection processed successor");
+        let (successor, _) = registry
+            .register_successor(&actor, request_json, &digest, deadline)
+            .expect("B-owned prepared successor");
+        assert!(actor.install_successor(
+            &ReceiverStartActor(successor.clone()),
+            digest,
+            deadline,
+            true,
+        ));
+        successor.state.lock().expect("successor owner").start = Some(Err(failure));
+        let generation = generation(&predecessor);
+        assert!(actor
+            .processed_upgrade_skip(&Uuid::new_v4().to_string())
+            .is_none());
+        let report = actor
+            .processed_upgrade_skip(&generation)
+            .expect("retained decline");
+        assert!(report.reason.contains(expected_reason), "{}", report.reason);
+        let header = report.owner_header().expect("bounded owner wire");
+        assert!(
+            crate::http::hls::processed_upgrade::ProcessingSkip::from_owner_wire(
+                header.as_bytes(),
+                &generation,
+            )
+            .is_some()
+        );
+        assert!(
+            crate::http::hls::processed_upgrade::ProcessingSkip::from_owner_wire(
+                header.as_bytes(),
+                &Uuid::new_v4().to_string(),
+            )
+            .is_none()
+        );
+        let exchange = request(&generation, 1, selection());
+        assert!(actor.observe_ask(&state, &exchange, true).is_none());
+        assert!(
+            actor.processed_upgrade_skip(&generation).is_some(),
+            "the reason survives clearing the failed slot"
+        );
+        assert!(!superseding(&predecessor), "ordinary session remains live");
+    }
 }

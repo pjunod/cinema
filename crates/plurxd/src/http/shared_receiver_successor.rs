@@ -109,9 +109,15 @@ impl SuccessorSlot {
             .expect("receiver successor owner");
         let error = owned.start.as_ref()?.as_ref().err()?;
         Some(match error {
-            ReceiverStartError::Deadline | ReceiverStartError::NotYet(_) => {
-                "Optional processed upgrade did not complete in time."
-            }
+            ReceiverStartError::Deadline => "Optional processed upgrade did not complete in time.",
+            ReceiverStartError::NotYet(retry) => match retry.code {
+                crate::sharing_client::StartRetryCode::Overloaded => {
+                    "Source is busy; optional processed upgrade was not started."
+                }
+                crate::sharing_client::StartRetryCode::StartupTimeout => {
+                    "Source has not prepared the optional processed upgrade."
+                }
+            },
             ReceiverStartError::DolbyVisionUnsupported | ReceiverStartError::Unsupported => {
                 "Source declined the optional processed upgrade."
             }

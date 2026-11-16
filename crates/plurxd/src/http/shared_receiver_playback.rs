@@ -2013,6 +2013,11 @@ async fn run_owner(
         tokio::select! {
             result = &mut start => break result.map_err(|error| match error {
                 crate::sharing_client::PeerError::DolbyVisionUnsupported => ReceiverStartError::DolbyVisionUnsupported,
+                error @ (crate::sharing_client::PeerError::StartNotYet { .. }
+                    | crate::sharing_client::PeerError::Busy { .. }) if processed_successor => {
+                    ReceiverStartError::NotYet(crate::sharing_client::StartRetry::from_peer(error)
+                        .expect("typed processed Start refusal"))
+                },
                 // A retryable answer that escaped the re-post loop: the
                 // viewer's whole window is spent, and nobody is left to retry.
                 crate::sharing_client::PeerError::StartNotYet { .. }
