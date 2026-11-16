@@ -254,7 +254,6 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
                     bl_compat_id: Some(1),
                     rpu_present: Some(true),
                     el_present: Some(true),
-                    ..Default::default()
                 },
                 raw_json: Some(raw.to_string()),
                 ..Default::default()
