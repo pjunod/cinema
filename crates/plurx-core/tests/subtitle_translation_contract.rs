@@ -1944,6 +1944,7 @@ async fn legacy_range_incarnation_decodes_without_poll_poison_but_cannot_claim_o
             after: None,
             now_ms: 1400,
             limit: 16,
+            admissible_only: false,
         })
         .await
         .expect("legacy candidates");
