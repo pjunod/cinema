@@ -282,9 +282,11 @@ def repo_file(relative: str, label: str) -> Path:
 # constant, SQL statement, lockfile package or Python function), not the file
 # that holds it. An edit elsewhere in the file is not drift; an edit inside
 # the item is; an anchor that no longer selects exactly one item is an error.
+# A pin does not follow calls: a same-file function or constant that carries
+# part of a row's claim has a row of its own.
 # ---------------------------------------------------------------------------
 PIN_SCHEME = "item-v1"
-PIN_SCOPES = ("item", "block")
+PIN_SCOPES = ("item", "arm")
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
@@ -335,8 +337,10 @@ def _normalise(text: str, segments: list[tuple[str, int, int]], start: int, end:
     """
     parts: list[str] = []
     for kind, seg_start, seg_end in segments:
-        if seg_end <= start or seg_start >= end:
+        if seg_end <= start:
             continue
+        if seg_start >= end:
+            break
         piece = text[max(seg_start, start):min(seg_end, end)]
         if kind == "code":
             piece = re.sub(r"\s+", " ", piece)
@@ -422,6 +426,8 @@ _RUST_ITEM = re.compile(
     r"|(?P<impl>impl)\b"
     r"|(?P<macro>macro_rules)\s*!\s*(?P<macro_name>[A-Za-z_]\w*))"
 )
+_RUST_CFG = re.compile(r"#\[(?=\s*cfg(?:_attr)?\b)")
+_RUST_INNER_CFG = re.compile(r"#!\[(?=\s*cfg(?:_attr)?\b)")
 _RUST_QUALIFIERS = {"pub", "async", "unsafe", "const", "extern", "default", "safe"}
 
 
@@ -539,11 +545,33 @@ def _rust_items(text: str, masked: str, matched: dict[int, int],
             label = re.sub(r"\s+", " ", masked[found.start():opener]).strip()
         else:
             label = f"{keyword} {name}"
+        start = _leading(text, masked, matched, comments, qualifiers)
+        # A cfg on the item decides whether it is compiled at all, so it is part of its name.
+        conditions = [
+            re.sub(r"\s+", " ", text[attribute.start():matched[attribute.end() - 1] + 1])
+            for attribute in _RUST_CFG.finditer(masked, start, qualifiers)
+        ]
         items.append({
-            "start": _leading(text, masked, matched, comments, qualifiers),
-            "open": opener, "end": end, "label": label,
+            "start": start, "open": opener, "end": end, "kind": keyword,
+            "label": " ".join([*conditions, label]), "conditions": conditions,
         })
+    # An inner `#![cfg(..)]` conditions the item (or file) whose body holds it.
+    for attribute in _RUST_INNER_CFG.finditer(masked):
+        condition = re.sub(r"\s+", " ", text[attribute.start():matched[attribute.end() - 1] + 1])
+        holders = [item for item in items if item["open"] is not None and item["open"] < attribute.start() < item["end"]]
+        if holders:
+            holder = max(holders, key=lambda item: item["open"])
+            holder["conditions"].append(condition)
+            holder["label"] = f"{condition} {holder['label']}"
+        else:
+            items.append({"start": 0, "open": 0, "end": len(text), "kind": "file",
+                          "label": f"{condition} file", "conditions": [condition]})
     return items
+
+
+def _conditions(chain: list[dict[str, Any]]) -> str:
+    """The cfg attributes of the items around a pinned item, which its own span does not hold."""
+    return "".join(condition + "\n" for item in chain[:-1] for condition in item["conditions"])
 
 
 def _enclosing(items: list[dict[str, Any]], start: int, end: int) -> list[dict[str, Any]]:
@@ -555,59 +583,98 @@ def _enclosing(items: list[dict[str, Any]], start: int, end: int) -> list[dict[s
 
 
 @functools.lru_cache(maxsize=8)
-def _rust_index(text: str) -> tuple[list[tuple[str, int, int]], str, dict[int, int], list[dict[str, Any]]]:
+def _rust_index(text: str) -> tuple[
+    list[tuple[str, int, int]], str, dict[int, int], list[dict[str, Any]], dict[int, int | None]
+]:
     segments = _rust_segments(text)
     masked = _mask(text, segments)
     matched = _match_delimiters(masked)
-    return segments, masked, matched, _rust_items(text, masked, matched, segments)
+    parents: dict[int, int | None] = {}
+    stack: list[int] = []
+    for found in re.finditer(r"[{}]", masked):
+        if found.group() == "{":
+            parents[found.start()] = stack[-1] if stack else None
+            stack.append(found.start())
+        else:
+            stack.pop()
+    return segments, masked, matched, _rust_items(text, masked, matched, segments), parents
 
 
-# What a new pin treats as a region of its own: a match arm, a `match`, a
-# loop, or an async or spawned block. An `if` is pinned with its function,
-# because the order of neighbouring branches is part of what it means.
-_RUST_REGION_HEAD = re.compile(
-    r"(?:=>|\bmatch\b[^{};]*|\b(?:async|move|loop)"
-    r"|[;{}]\s*(?:'\w+\s*:\s*)?(?:for|while)\b[^{};]*)\s*$"
-)
+def _is_match_body(masked: str, opener: int) -> bool:
+    return re.compile(r"\bmatch\b[^{};]*$").search(masked, max(0, opener - 2000), opener) is not None
+
+
+def _is_arm_body(masked: str, opener: int) -> bool:
+    cursor = opener
+    while cursor and masked[cursor - 1].isspace():
+        cursor -= 1
+    return masked[max(0, cursor - 2):cursor] == "=>"
+
+
+def _sibling_arm_bodies(masked: str, matched: dict[int, int], parents: dict[int, int | None],
+                        arm: int, floor: int) -> list[tuple[int, int]]:
+    """Interiors of the other block arms of every `match` around an arm, up to its function.
+
+    Everything else stays in the pin: the scrutinee, every arm's pattern and
+    guard in order, arms that are not blocks, and the code around the match.
+    """
+    hidden: list[tuple[int, int]] = []
+    branch = arm
+    while True:
+        parent = parents.get(branch)
+        if parent is None or parent < floor:
+            return sorted(hidden)
+        if _is_match_body(masked, parent):
+            cursor, close = parent + 1, matched[parent]
+            while cursor < close:
+                if masked[cursor] in "([{":
+                    if masked[cursor] == "{" and cursor != branch and _is_arm_body(masked, cursor):
+                        hidden.append((cursor + 1, matched[cursor]))
+                    cursor = matched[cursor] + 1
+                else:
+                    cursor += 1
+        branch = parent
 
 
 def _rust_pin(text: str, start: int, end: int, scope: str | None) -> tuple[str, str, str]:
-    segments, masked, matched, items = _rust_index(text)
+    segments, masked, matched, items, parents = _rust_index(text)
     last = end - 1
     while last > start and text[last].isspace():
         last -= 1
     opens_block = masked[last] == "{" and last in matched
     opens_item = opens_block and any(item["open"] == last for item in items)
+    is_arm = opens_block and not opens_item and _is_arm_body(masked, last)
     if scope is None:
-        region = opens_block and not opens_item and _RUST_REGION_HEAD.search(masked, max(0, last - 400), last)
-        scope = "block" if region else "item"
-    if scope == "block":
-        if not opens_block:
-            raise AnchorError("a block pin needs an anchor that ends with the block's opening brace")
-        line = _line_start(text, start)
-        span_start = line if not text[line:start].strip() else start
-        span_end = matched[last] + 1
-        chain = _enclosing(items, span_start, span_end)
-        if not chain:
-            raise AnchorError("the anchored block is not inside a named item")
-        label = " > ".join(item["label"] for item in chain) + " > block"
-    else:
-        chain = _enclosing(items, start, end)
-        if not chain:
-            raise AnchorError("the anchor is not inside a named item")
-        span_start, span_end = chain[-1]["start"], chain[-1]["end"]
-        label = " > ".join(item["label"] for item in chain)
-    return scope, label, _normalise(text, segments, span_start, span_end)
+        scope = "arm" if is_arm else "item"
+    chain = _enclosing(items, start, end)
+    if not chain or chain[-1]["kind"] == "file":
+        raise AnchorError("the anchor is not inside a named item")
+    item = chain[-1]
+    label = " > ".join(entry["label"] for entry in chain)
+    if scope == "arm":
+        if not is_arm:
+            raise AnchorError("an arm pin needs an anchor that ends with a match arm's `=> {`")
+        if item["open"] is None or not item["open"] < last < item["end"]:
+            raise AnchorError("the anchored arm is not inside a function body")
+        pieces: list[str] = []
+        cursor = item["start"]
+        for hidden_start, hidden_end in _sibling_arm_bodies(masked, matched, parents, last, item["open"]):
+            pieces.append(_normalise(text, segments, cursor, hidden_start))
+            cursor = hidden_end
+        pieces.append(_normalise(text, segments, cursor, item["end"]))
+        return scope, label + " > arm", _conditions(chain) + " \u2026 ".join(pieces)
+    return scope, label, _conditions(chain) + _normalise(text, segments, item["start"], item["end"])
 
 
 def rust_function(text: str, name: str) -> tuple[str, str]:
     """Pin the one function called `name` (a conformance test) in a Rust file."""
-    segments, _, _, items = _rust_index(text)
-    found = [item for item in items if item["label"] == f"fn {name}"]
+    segments, _, _, items, _ = _rust_index(text)
+    found = [item for item in items if item["label"].split(" ")[-2:] == ["fn", name]]
     if len(found) != 1:
         raise AnchorError(f"expected exactly one fn {name}, found {len(found)}")
     chain = _enclosing(items, found[0]["start"], found[0]["end"])
-    return " > ".join(item["label"] for item in chain), _normalise(text, segments, found[0]["start"], found[0]["end"])
+    canonical = _conditions(chain) + _normalise(text, segments, found[0]["start"], found[0]["end"])
+    return " > ".join(item["label"] for item in chain), canonical
 
 
 _SQL_TOKEN = re.compile(r"--|/\*|'|\"")
@@ -704,12 +771,26 @@ def _sql_statements(text: str, masked: str) -> list[tuple[int, int]]:
 def _sql_pin(text: str, start: int, end: int) -> tuple[str, str, str]:
     segments = _sql_segments(text)
     masked = _mask(text, segments)
-    for span_start, span_end in _sql_statements(text, masked):
+    spans = _sql_statements(text, masked)
+    for span_start, span_end in spans:
         if span_start <= start and end <= span_end:
             created = _SQL_CREATE.search(masked, span_start, span_end)
             if created:
                 kind = re.sub(r"\s+", " ", created.group("kind")).lower()
                 label = f"{kind} {created.group('name')}"
+                # Every other statement that creates, drops or alters the same
+                # object decides what is installed, so it is part of the pin.
+                same = re.compile(
+                    r"\s*(?:CREATE|DROP|ALTER)\s+(?:TEMP(?:ORARY)?\s+)?(?:UNIQUE\s+)?(?:VIRTUAL\s+)?"
+                    r"(?:TABLE|TRIGGER|INDEX|VIEW)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?"
+                    + re.escape(created.group("name")) + r"\b", re.IGNORECASE)
+                parts = [_normalise(text, segments, span_start, span_end)]
+                for other_start, other_end in spans:
+                    code = other_start + len(text[other_start:other_end]) - len(masked[other_start:other_end].lstrip())
+                    if other_start != span_start and same.match(masked, code, other_end):
+                        relation = "before" if other_start < span_start else "after"
+                        parts.append(f"-- {relation}:\n" + _normalise(text, segments, other_start, other_end))
+                return "item", label, "\n".join(parts)
             else:
                 first = masked[span_start:span_end].strip().splitlines()[0] if masked[span_start:span_end].strip() else ""
                 label = "statement " + re.sub(r"\s+", " ", first)[:80]
@@ -733,7 +814,9 @@ def _toml_pin(text: str, start: int, end: int) -> tuple[str, str, str]:
         if offset <= start and end <= bounds[index + 1]:
             table = (offset, bounds[index + 1], header)
     region = table[:2] if table else (0, bounds[0])
-    for found in _TOML_KEY.finditer(text, region[0], region[1]):
+    # One entry of an array of tables (a lockfile package) is pinned whole.
+    keys = () if table and table[2].startswith("[[") else _TOML_KEY.finditer(text, region[0], region[1])
+    for found in keys:
         if _TOML_HEADER.match(text, found.start()):
             continue
         depth, cursor = 0, found.start()
@@ -808,9 +891,9 @@ def item_pin(relative: str, text: str, anchor: str, scope: str | None = None) ->
     """Resolve an anchor to the item it selects and that item's pin.
 
     `scope` is the reviewed choice recorded in the mapping: `item` pins the
-    innermost named item that holds the anchor; `block` pins the brace block
-    the anchor opens (a match arm, loop or spawned task). None chooses the
-    default for a new pin.
+    innermost named item that holds the anchor; `arm` pins the function
+    around a match arm with the bodies of the other arms left out. None
+    chooses the default for a new pin: `arm` for a `=> {` anchor, else `item`.
     """
     if scope is not None and scope not in PIN_SCOPES:
         raise AnchorError(f"unknown pin scope {scope!r}")
@@ -820,8 +903,8 @@ def item_pin(relative: str, text: str, anchor: str, scope: str | None = None) ->
     start = text.index(anchor)
     end = start + len(anchor)
     language = _pin_language(relative, text)
-    if language != "rust" and scope == "block":
-        raise AnchorError("block pins exist only for Rust sources")
+    if language != "rust" and scope == "arm":
+        raise AnchorError("arm pins exist only for Rust sources")
     if language == "rust":
         resolved, label, canonical = _rust_pin(text, start, end, scope)
     elif language == "sql":
@@ -906,7 +989,7 @@ def worker_correspondence_inputs(
     except RunnerError as exc:
         return [*drift, str(exc)]
 
-    allowed_top = {"schema_version", "status", "model_file", "model_sha256", "tests", "actions"}
+    allowed_top = {"schema_version", "status", "model_file", "model_sha256", "tests", "actions", "dependencies"}
     if set(correspondence) != allowed_top:
         drift.append("correspondence has missing or unknown schema fields")
     if correspondence.get("schema_version") != 1 or correspondence.get("status") != "reviewed":
@@ -1035,7 +1118,8 @@ def worker_correspondence_inputs(
                     drift.extend(problems)
                     # The named symbol must be a function that holds the anchor.
                     function = "fn " + symbol.rsplit("::", 1)[-1]
-                    if not problems and function not in source["item"].split(" > "):
+                    held = [part.split(" ")[-2:] for part in source["item"].split(" > ")]
+                    if not problems and function.split(" ") not in held:
                         drift.append(f"worker source symbol does not hold its anchor: {action}: {symbol} is not in {source['item']}")
                 except (RunnerError, UnicodeError) as exc:
                     drift.append(str(exc))
@@ -1074,6 +1158,27 @@ def worker_correspondence_inputs(
                 drift.append(f"abstraction correspondence needs an explicit gap: {action}")
         else:
             drift.append(f"schedules must be test IDs or the literal unchecked: {action}")
+    # Same-file functions and constants that a pinned action, boundary or
+    # conformance test reads and that carry part of its claim.
+    dependencies = correspondence.get("dependencies")
+    if not isinstance(dependencies, list):
+        drift.append("correspondence dependencies must be a list")
+        dependencies = []
+    for row in dependencies:
+        fields = {"file", "anchor", "used_by", "scope", "item", "item_sha256"}
+        if not isinstance(row, dict) or set(row) != fields or not all(
+            isinstance(row.get(key), str) and row[key] for key in ("file", "anchor", "used_by")
+        ):
+            drift.append("correspondence dependency rows need file, anchor, used_by, scope, item, and item_sha256")
+            continue
+        try:
+            dependency_path = repo_file(row["file"], "worker dependency source")
+            hashes[row["file"]] = sha256(dependency_path)
+            drift.extend(check_item_pin(
+                "worker dependency", row["file"], dependency_path.read_text(encoding="utf-8"), row, row["used_by"]
+            ))
+        except (RunnerError, UnicodeError) as exc:
+            drift.append(str(exc))
     if seen_next != next_actions:
         missing = sorted(next_actions - seen_next)
         extra = sorted(seen_next - next_actions)
@@ -1438,9 +1543,10 @@ def mapping_check(base: str | None, package: str = "durable-jobs") -> int:
                     and isinstance(row["source"].get("file"), str)
                 ):
                     governed.add(row["source"]["file"])
-            for row in correspondence.get("tests", []) if isinstance(correspondence.get("tests"), list) else []:
-                if isinstance(row, dict) and isinstance(row.get("file"), str):
-                    governed.add(row["file"])
+            for key in ("tests", "dependencies"):
+                for row in correspondence.get(key, []) if isinstance(correspondence.get(key), list) else []:
+                    if isinstance(row, dict) and isinstance(row.get("file"), str):
+                        governed.add(row["file"])
     affected = base is None or bool(governed.intersection(changed))
     result = {
         "schema_version": 1,
@@ -1498,6 +1604,9 @@ def item_pins(package: str, write: bool) -> int:
         for row in correspondence.get("actions", []):
             if isinstance(row, dict) and isinstance(row.get("source"), dict):
                 refresh(row["source"], "file", f"{row.get('kind')} {row.get('action')}")
+        for row in correspondence.get("dependencies", []):
+            if isinstance(row, dict):
+                refresh(row, "file", f"dependency of {row.get('used_by')}")
         for row in correspondence.get("tests", []):
             if not isinstance(row, dict) or not isinstance(row.get("file"), str) or not isinstance(row.get("name"), str):
                 failures.append("test row has no file or name")

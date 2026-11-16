@@ -66,8 +66,8 @@ def check(text: str, pinned: dict[str, str], source: str = SOURCE) -> list[str]:
 class RustItemPinTests(unittest.TestCase):
     def test_an_edit_outside_the_anchored_item_is_not_drift(self) -> None:
         pinned = row(WRITER, ARM)
-        self.assertEqual(pinned["scope"], "block")
-        self.assertEqual(pinned["item"], "fn spawn_writer > block")
+        self.assertEqual(pinned["scope"], "arm")
+        self.assertEqual(pinned["item"], "fn spawn_writer > arm")
         # Tonight's case in miniature: reply handling changes in another arm,
         # a function is added above, and an unrelated constant changes.
         edited = WRITER.replace(
@@ -88,8 +88,48 @@ class RustItemPinTests(unittest.TestCase):
         problems = check(edited, pinned)
         self.assertEqual(len(problems), 1)
         self.assertIn("authority source drift requires review", problems[0])
-        self.assertIn(f"{SOURCE} :: fn spawn_writer > block", problems[0])
+        self.assertIn(f"{SOURCE} :: fn spawn_writer > arm", problems[0])
         self.assertIn("27 vendor serial SQLite transaction", problems[0])
+
+    def test_an_arm_pin_keeps_everything_but_the_other_arms_bodies(self) -> None:
+        pinned = row(WRITER, ARM)
+        escapes = {
+            # An earlier guarded arm takes the request before the pinned arm sees it.
+            "shadowing arm": WRITER.replace(
+                "            " + ARM, "            Query::Transaction(req) if req.detached => { spawn(req); }\n            " + ARM
+            ),
+            "scrutinee": WRITER.replace("match rx.recv() {", "match rx.try_recv() {"),
+            # "Serial" is a property of the loop around the match, not of the arm.
+            "loop": WRITER.replace("    loop {", "    while concurrent() {"),
+            "sibling pattern": WRITER.replace("Query::Execute(q) => {", "Query::Execute(q) | Query::Other(q) => {"),
+            "code before the match": WRITER.replace("    loop {", "    detach_replies();\n    loop {"),
+            "attribute": WRITER.replace("/// Applies requests one at a time.", "#[cfg(any())]"),
+        }
+        for name, edited in escapes.items():
+            self.assertNotEqual(edited, WRITER, name)
+            self.assertTrue(check(edited, pinned), name)
+        nested = '''\
+fn route(request: Request) {
+    match request {
+        Request::Query(query) => match query {
+            Query::Read(q) => { read(q); }
+            Query::Batch { id, urgent } => run(id, urgent),
+            Query::Write(q) => {
+                write(q);
+            }
+        },
+        Request::Snapshot(s) => {
+            snapshot(s);
+        }
+    }
+}
+'''
+        write = row(nested, "Query::Write(q) => {")
+        self.assertEqual(check(nested.replace("snapshot(s);", "copy(s);").replace("read(q);", "peek(q);"), write), [])
+        self.assertTrue(check(nested.replace("write(q);", "write(q); flush();"), write))
+        # Only another arm's body is left out; a brace in its pattern is not a body.
+        self.assertTrue(check(nested.replace("Batch { id, urgent }", "Batch { id, .. }"), write))
+        self.assertTrue(check(nested.replace("Request::Snapshot(s) =>", "Request::Snapshot(s) | Request::Query(_) =>"), write))
 
     def test_an_item_scope_pin_covers_the_whole_function(self) -> None:
         pinned = row(WRITER, ARM, "item")
@@ -110,7 +150,7 @@ class RustItemPinTests(unittest.TestCase):
         renamed_item = WRITER.replace("pub fn spawn_writer(", "pub fn spawn_db_writer(")
         problem = check(renamed_item, pinned)[0]
         self.assertIn("renamed or moved", problem)
-        self.assertIn("fn spawn_writer > block is now fn spawn_db_writer > block", problem)
+        self.assertIn("fn spawn_writer > arm is now fn spawn_db_writer > arm", problem)
         # A header anchor names the item itself, so a rename removes the anchor.
         header = row(WRITER, "const STORE_TIMEOUT: Duration = Duration::from_secs(3);")
         self.assertEqual(header["item"], "const STORE_TIMEOUT")
@@ -121,8 +161,10 @@ class RustItemPinTests(unittest.TestCase):
             formal.item_pin(SOURCE, WRITER, "use std::sync::Arc;")
         with self.assertRaisesRegex(formal.AnchorError, "no item extractor"):
             formal.item_pin("notes/plan.txt", "an anchor\n", "an anchor")
-        with self.assertRaisesRegex(formal.AnchorError, "opening brace"):
-            formal.item_pin(SOURCE, WRITER, "let rows = apply(req.queries);", "block")
+        with self.assertRaisesRegex(formal.AnchorError, "match arm"):
+            formal.item_pin(SOURCE, WRITER, "let rows = apply(req.queries);", "arm")
+        with self.assertRaisesRegex(formal.AnchorError, "match arm"):
+            formal.item_pin(SOURCE, WRITER, "    loop {", "arm")
         with self.assertRaisesRegex(formal.AnchorError, "unknown pin scope"):
             formal.item_pin(SOURCE, WRITER, ARM, "file")
         pinned = row(WRITER, ARM)
@@ -169,15 +211,20 @@ impl Worker {
             ok: true,
         };
         let results = match transaction {
-            Ok(rows) => rows,
+            Ok(rows) => {
+                rows
+            }
         };
+        let publisher = lease.publisher(self.store.as_ref());
+        publish(publisher, results);
     }
 }
 '''
         expect = {
-            "let heartbeat = tokio::spawn(async move {": "block",
-            "for attempt in 0..4 {": "block",
-            "let results = match transaction {": "block",
+            "let heartbeat = tokio::spawn(async move {": "item",
+            "for attempt in 0..4 {": "item",
+            "let results = match transaction {": "item",
+            "Ok(rows) => {": "arm",
             "if queue_loss.is_ready() {": "item",
             "let Some(token) = self.token.take() else {": "item",
             "let reply = Reply::Released {": "item",
@@ -190,6 +237,30 @@ impl Worker {
             self.assertTrue(pin["item"].startswith("impl Worker"), anchor)
         self.assertEqual(formal.item_pin("src/worker.rs", source, "impl Worker {")["item"], "impl Worker")
         self.assertEqual(formal.item_pin("src/worker.rs", source, "retry(attempt);")["item"], "impl Worker > fn run")
+        # A `let x = match …` only produces a value: what is done with it comes
+        # after the block, so swapping the fenced publisher must be drift.
+        lease = {"table": "genres", "source": "src/worker.rs", "anchor": "let results = match transaction {",
+                 **formal.item_pin("src/worker.rs", source, "let results = match transaction {")}
+        swapped = source.replace("lease.publisher(self.store.as_ref())", "PublicationStore::unfenced(self.store.as_ref())")
+        self.assertIn("src/worker.rs :: impl Worker > fn run", check(swapped, lease, "src/worker.rs")[0])
+
+    def test_a_cfg_on_an_enclosing_item_is_part_of_the_label_and_the_hash(self) -> None:
+        source = "impl JobFence {\n    async fn renew(&self) -> bool {\n        true\n    }\n}\n"
+        pinned = row(source, "async fn renew(&self) -> bool {", source="src/jobs.rs")
+        self.assertEqual(pinned["item"], "impl JobFence > fn renew")
+        compiled_out = "#[cfg(any())]\n" + source
+        self.assertEqual(
+            formal.item_pin("src/jobs.rs", compiled_out, pinned["anchor"])["item"], "#[cfg(any())] impl JobFence > fn renew"
+        )
+        self.assertIn("renamed or moved", check(compiled_out, pinned, "src/jobs.rs")[0])
+        self.assertNotEqual(formal.item_pin("src/jobs.rs", compiled_out, pinned["anchor"])["item_sha256"], pinned["item_sha256"])
+        inner = source.replace("impl JobFence {\n", "impl JobFence {\n    #![cfg(feature = \"x\")]\n")
+        self.assertIn("renamed or moved", check(inner, pinned, "src/jobs.rs")[0])
+        whole_file = "#![cfg(unix)]\n" + source
+        self.assertIn("renamed or moved", check(whole_file, pinned, "src/jobs.rs")[0])
+        on_item = source.replace("    async fn renew", "    #[cfg(test)]\n    async fn renew")
+        self.assertEqual(formal.item_pin("src/jobs.rs", on_item, pinned["anchor"])["item"], "impl JobFence > #[cfg(test)] fn renew")
+        self.assertEqual(formal.rust_function(on_item, "renew")[0], "impl JobFence > #[cfg(test)] fn renew")
 
     def test_item_keywords_inside_types_and_literals_do_not_start_items(self) -> None:
         source = r'''
@@ -281,6 +352,16 @@ SELECT id, 'provider:tmdb' FROM jobs WHERE kind IN ('library_scan','metadata_ref
         self.assertEqual(check(inside, view, path), [])
         renamed = source.replace("TRIGGER IF NOT EXISTS job_completed", "TRIGGER IF NOT EXISTS job_settled")
         self.assertIn("renamed or moved", check(renamed, trigger, path)[0])
+        # A later statement that drops or replaces the object decides what is installed.
+        dropped = source + "DROP TRIGGER IF EXISTS job_completed;\n"
+        self.assertIn(f"{path} :: trigger job_completed", check(dropped, trigger, path)[0])
+        self.assertEqual(check(dropped, view, path), [])
+        replaced = dropped + "CREATE TRIGGER job_completed AFTER UPDATE ON jobs BEGIN SELECT 1; END;\n"
+        self.assertNotEqual(
+            formal.item_pin(path, replaced, trigger["anchor"])["item_sha256"],
+            formal.item_pin(path, dropped, trigger["anchor"])["item_sha256"],
+        )
+        self.assertEqual(check(source + "DROP TRIGGER IF EXISTS another_trigger;\n", trigger, path), [])
 
     def test_lockfile_pins_the_package_and_manifest_pins_the_key(self) -> None:
         lock = '''\
@@ -305,6 +386,9 @@ checksum = "bbbb"
         self.assertEqual(check(lock.replace("49.0.2", "50.0.0").replace("bbbb", "cccc"), pinned, "Cargo.lock"), [])
         self.assertIn("Cargo.lock :: [[package]] tokio 1.53.1", check(lock.replace("aaaa", "dddd"), pinned, "Cargo.lock")[0])
         self.assertIn("exactly once", check(lock.replace("1.53.1", "1.54.0"), pinned, "Cargo.lock")[0])
+        # An anchor on one key of a package still pins the whole entry.
+        single = row(lock, 'name = "tokio"', source="Cargo.lock")
+        self.assertEqual((single["item"], single["item_sha256"]), (pinned["item"], pinned["item_sha256"]))
         manifest = '[workspace.dependencies]\nhiqlite = { version = "=0.14.0", features = [\n    "sqlite",\n] }\ntokio = "1"\n'
         key = row(manifest, 'hiqlite = { version = "=0.14.0"', source="Cargo.toml")
         self.assertEqual(key["item"], "[workspace.dependencies] > hiqlite")
@@ -320,6 +404,100 @@ checksum = "bbbb"
         self.assertIn(f"{path} :: def validated_challenge", check(source.replace("return node", "return node.strip()"), pinned, path)[0])
         with self.assertRaisesRegex(formal.AnchorError, "Python function or class"):
             formal.item_pin(path, source, "import os")
+
+
+def mapped_rows() -> list[tuple[str, str, dict[str, str]]]:
+    """Every pinned source row of the three packages: (package, file, row)."""
+    rows = []
+    for package in ("durable-jobs", "operation-progress"):
+        mapping = json.loads((ROOT / f"verification/{package}/mapping.json").read_text(encoding="utf-8"))
+        rows += [(package, entry["source"], entry) for entry in mapping["source_mapping"]["tables"]]
+    correspondence = json.loads((ROOT / "verification/worker-refinement/correspondence.json").read_text(encoding="utf-8"))
+    rows += [("worker-refinement", entry["source"]["file"], entry["source"]) for entry in correspondence["actions"]]
+    rows += [("worker-refinement", entry["file"], entry) for entry in correspondence["dependencies"]]
+    return rows
+
+
+class ReviewedEscapeTests(unittest.TestCase):
+    """Edits the review of the first item-pin migration got past `check-mapping`.
+
+    Each names a function or constant in the repository's own source that
+    carries part of a mapped claim. The test fails if no row pins it any more,
+    or if an edit at the end of its body passes the check. It does not depend on
+    what the item says, so reviewed changes to it do not break this test.
+    """
+
+    ESCAPES = (
+        # A `let lease = match …` block pin left the publisher after it unpinned.
+        ("durable-jobs", "crates/plurxd/src/state.rs", "fn genre_backfill_pass"),
+        ("durable-jobs", "crates/plurxd/src/state.rs", "fn artwork_retry_pass"),
+        ("worker-refinement", "crates/plurxd/src/background_jobs.rs", "fn start"),
+        # The claim lives in a same-file function or constant the pinned item reads.
+        ("operation-progress", "crates/plurx-core/src/cluster/membership.rs", "fn decide_cluster_job_authority"),
+        ("operation-progress", "crates/plurx-core/src/cluster/membership.rs", "fn local_node_is_committed_voter"),
+        ("operation-progress", "crates/plurxd/src/job_lease.rs", "const RELEASE_ATTEMPTS"),
+        ("operation-progress", "crates/plurxd/src/job_lease.rs", "const RELEASE_RETRY_DELAY"),
+        ("worker-refinement", "crates/plurxd/src/job_lease.rs", "const RELEASE_ATTEMPTS"),
+        ("operation-progress", "crates/plurxd/src/job_lease.rs", "fn lease_time_remaining"),
+        ("operation-progress", "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs", "fn publish_then_send"),
+        ("operation-progress", "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs", "fn is_exact_source_layout_guard"),
+        ("operation-progress", "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs", "fn source_layout_rollback_result"),
+        ("operation-progress", "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs", "fn check_stmt_params_count"),
+        ("durable-jobs", "crates/plurx-core/src/store/hiqlite_publication.rs", "const ATOMIC_PUBLICATION_TTL_MS"),
+        ("durable-jobs", "crates/plurx-core/src/store/hiqlite_publication.rs", "fn fence_rejected"),
+        ("durable-jobs", "crates/plurx-core/src/store/hiqlite_publication.rs", "fn publication_row_id"),
+        ("durable-jobs", "crates/plurx-core/src/store/hiqlite_publication.rs", "fn lease_i64"),
+        ("operation-progress", "crates/plurx-core/src/store/hiqlite_publication.rs", "fn fence_rejected"),
+        ("operation-progress", "crates/plurxd/src/background_jobs.rs", "fn claim_with_resolution"),
+        ("operation-progress", "crates/plurxd/src/background_jobs.rs", "fn library_candidates"),
+        ("operation-progress", "crates/plurxd/src/background_jobs.rs", "fn settle"),
+        ("operation-progress", "crates/plurxd/src/background_jobs.rs", "fn unix_ms"),
+        ("worker-refinement", "crates/plurxd/src/background_jobs.rs", "fn claim_with_resolution"),
+        # `may_execute_job` is a provided method of the authority trait.
+        ("operation-progress", "crates/plurx-core/src/cluster/coordination.rs", "trait ClusterJobAuthority"),
+        ("worker-refinement", "crates/plurx-core/src/cluster/coordination.rs", "trait ClusterJobAuthority"),
+        # Fixtures the conformance tests stand on.
+        ("worker-refinement", "crates/plurxd/src/library_work.rs", "fn spawn_worker"),
+        ("worker-refinement", "crates/plurx-core/tests/store_contract/formal_publication.rs", "fn enqueue_and_claim_library_work"),
+    )
+
+    def test_each_escape_is_pinned_and_an_edit_inside_it_is_drift(self) -> None:
+        rows = mapped_rows()
+        for package, source, tail in self.ESCAPES:
+            with self.subTest(package=package, source=source, item=tail):
+                pinned = [
+                    entry for owner, file, entry in rows
+                    if owner == package and file == source and entry["scope"] == "item"
+                    and entry["item"].split(" > ")[-1].split(" ")[-2:] == tail.split(" ")
+                ]
+                self.assertTrue(pinned, "no item row pins this any more")
+                text = (ROOT / source).read_text(encoding="utf-8")
+                _, _, _, items, _ = formal._rust_index(text)
+                at = text.index(pinned[0]["anchor"])
+                end = formal._enclosing(items, at, at + len(pinned[0]["anchor"]))[-1]["end"]
+                edited = text[:end - 1] + " /* edited */ " + text[end - 1:]
+                current = {**pinned[0], **formal.item_pin(source, text, pinned[0]["anchor"], "item")}
+                problems = formal.check_item_pin("authority", source, edited, current, "escape")
+                self.assertEqual(len(problems), 1)
+                if text.count("\n", at, end):
+                    self.assertIn(f"drift requires review: {source} :: {current['item']}", problems[0])
+                else:  # a one-line constant is its own anchor, so editing it removes the anchor
+                    self.assertIn("anchor must occur exactly once", problems[0])
+
+    def test_the_serial_writer_row_sees_its_loop_and_the_arms_around_it(self) -> None:
+        source = "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs"
+        pinned = [entry for owner, file, entry in mapped_rows()
+                  if owner == "operation-progress" and file == source and entry["scope"] == "arm"]
+        self.assertEqual([entry["item"] for entry in pinned], ["fn spawn_writer > arm"])
+        text = (ROOT / source).read_text(encoding="utf-8")
+        anchor = pinned[0]["anchor"]
+        current = {**pinned[0], **formal.item_pin(source, text, anchor, "arm")}
+        line = text.rfind("\n", 0, text.index(anchor)) + 1
+        shadowed = text[:line] + "Query::Transaction(req) if req.queries.is_empty() => { drop(req); }\n" + text[line:]
+        self.assertTrue(formal.check_item_pin("authority", source, shadowed, current, "27"))
+        body = text.index("{", text.index("pub fn spawn_writer("))
+        self.assertTrue(formal.check_item_pin(
+            "authority", source, text[:body + 1] + " let detached = true; " + text[body + 1:], current, "27"))
 
 
 class ItemPinMappingTests(unittest.TestCase):

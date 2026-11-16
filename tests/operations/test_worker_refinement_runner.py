@@ -83,7 +83,7 @@ Renew(w) == TRUE
 Next == \\E w \\in Workers: Claim(w) \\/ Renew(w)
 Spec == Next
 """
-            source = "// source pin\n#[test]\nfn worker_schedule() {}\n"
+            source = "// source pin\n#[test]\nfn worker_schedule() {}\nfn shared_fixture() {}\n"
             (root / model_file).write_text(model, encoding="utf-8")
             (root / source_file).parent.mkdir(parents=True)
             (root / source_file).write_text(source, encoding="utf-8")
@@ -121,6 +121,10 @@ Spec == Next
                     "item_sha256": formal.text_sha256(formal.rust_function(source, "worker_schedule")[1]),
                 }],
                 "actions": rows,
+                "dependencies": [{
+                    "file": source_file, "anchor": "fn shared_fixture() {", "used_by": "worker_schedule",
+                    **formal.item_pin(source_file, source, "fn shared_fixture() {"),
+                }],
             }
             correspondence_path = "verification/worker-refinement/correspondence.json"
             (root / correspondence_path).write_text(json.dumps(correspondence), encoding="utf-8")
@@ -218,6 +222,16 @@ Spec == Next
                 self.assertTrue(any(
                     f"conformance test drift requires review: {source_file} :: fn worker_schedule" in item for item in drift
                 ))
+                # A fixture the test stands on is pinned as a dependency.
+                (root / source_file).write_text(source.replace("fixture() {}", "fixture() { weaken(); }"), encoding="utf-8")
+                drift = validate(candidate)
+                self.assertEqual(len(drift), 1)
+                self.assertIn(f"worker dependency source drift requires review: {source_file} :: fn shared_fixture", drift[0])
+                candidate = copy.deepcopy(correspondence)
+                del candidate["dependencies"][0]["used_by"]
+                (root / source_file).write_text(source, encoding="utf-8")
+                self.assertTrue(any("dependency rows need" in item for item in validate(candidate)))
+                candidate = copy.deepcopy(correspondence)
                 (root / source_file).write_text(source.replace("fn worker_schedule", "fn renamed_schedule"), encoding="utf-8")
                 drift = validate(candidate)
                 self.assertTrue(any("renamed or moved" in item for item in drift))
