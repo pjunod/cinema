@@ -77,11 +77,17 @@ BUILD_SPECS = {
     # fast-rust-gate/paperwork-fix targets and offload web-test registration.
     # Recipe changes still require review; project-counter normalization below
     # does not authorize different recipe bytes or transfer native passes.
+    # #1653 removed only `@scripts/knowledge lint --scope pilot --body-env`
+    # #1653 removed only `@scripts/knowledge lint --scope pilot --body-env`
+    # from the validation-lint recipe (the retired knowledge pilot), PR #1586
+    # adds only the web curator-login-browser-check target, and A6 M3 adds the
+    # vendor hiqlite `applied_mark::watch_tests` run to cluster-wal-check; no
+    # native build recipe changed.
     # 2026-11-15: apple-build-bump is replaced by mobile-build-number and
     # migrate-bookkeeping is added; android-publish refuses build 1; and
     # android-release passes the release-assigned build number to Gradle
     # (validation/mobile_build.py). No native test recipe changes.
-    'Makefile': 'ce99ad574dcdf081845c628efcadb364e50939b260b0b54a7a0f3a3e3646f6af',
+    'Makefile': '1e6dd816442c84db6e5f2295ca42c4ff165a89b1b2b570ca757d7752a0861fec',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag

@@ -148,6 +148,54 @@ async fn enabled_within(
         .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
     Ok(stored_switch(result.as_deref(), false))
 }
+/// [`enabled`] as this node's applied settings view holds it, for the
+/// listener and claim loops' look at the switch between passes (A4).
+///
+/// Either loop acts at most one poll late on a save made elsewhere today, and
+/// a view answer is older by at most the proof lease plus apply lag; a save
+/// made here raises the settings floor and wakes both loops, and the view
+/// answers it from the authority until this replica holds it. Every step that
+/// acts on an import re-reads [`enabled`] from the Store first. Same bound,
+/// same parse and same error as [`enabled`].
+async fn loop_enabled(applied: &plurx_core::store::AppliedView) -> Result<bool, StoreError> {
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        applied.setting(setting_keys::SHARING_ENABLED),
+    )
+    .await
+    .map_err(|_| StoreError::Identity("sharing authority unavailable".into()))??;
+    Ok(stored_switch(result.as_deref(), false))
+}
+/// The serving listener's switch lives in `settings`.
+const LISTENER_WATCH: &[&str] = &["settings"];
+
+/// When the serving listener next looks at the switch (A6 M3).
+pub(crate) struct ListenerWake<'a> {
+    serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    /// The first look waits one interval: the enable that opened the
+    /// listener was read before any watch existed.
+    watch: plurx_core::store::SharingWatch,
+    arm: Box<dyn Fn() -> plurx_core::store::SharingWatch + Send + Sync + 'a>,
+    looked: tokio::time::Instant,
+    renew_at: tokio::time::Instant,
+}
+
+impl<'a> ListenerWake<'a> {
+    fn new(
+        serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+        arm: Box<dyn Fn() -> plurx_core::store::SharingWatch + Send + Sync + 'a>,
+    ) -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            serving,
+            watch: plurx_core::store::SharingWatch::Interval,
+            arm,
+            looked: now,
+            renew_at: now + Duration::from_secs(86_400 * 365),
+        }
+    }
+}
+
 impl SharingManager {
     /// Dispatch only after B has committed its blocked owner and retained the
     /// Source request identity. A received Source handle must survive a later
@@ -609,7 +657,7 @@ impl SharingManager {
                 self.disable_bodies();
                 return;
             }
-            match enabled(state.store.as_ref()).await {
+            match loop_enabled(&state.applied).await {
                 Ok(false) => {
                     self.disable_bodies();
                     self.listener_status("disabled");
@@ -699,7 +747,10 @@ impl SharingManager {
     ) {
         let mut next_renewal = tokio::time::Instant::now();
         let mut span = UnknownSpan::default();
-        let mut serving = state.serving.subscribe();
+        let mut wake = ListenerWake::new(
+            state.serving.subscribe(),
+            Box::new(|| state.applied.sharing_watch(LISTENER_WATCH)),
+        );
         loop {
             if let Ok((pin, expiry)) = identity.status() {
                 self.status
@@ -724,16 +775,19 @@ impl SharingManager {
                 };
                 next_renewal = tokio::time::Instant::now() + Duration::from_secs(3600);
             }
+            wake.renew_at = next_renewal;
             let look = || enabled(state.store.as_ref());
             if !self
-                .next_look(look, &mut span, &mut serving, &lifetime, &stop, &shutdown)
+                .next_look(look, &mut span, &mut wake, &lifetime, &stop, &shutdown)
                 .await
             {
                 return;
             }
         }
     }
-    /// The serving listener's pause and next look at the switch. False means
+    /// The serving listener's pause and next look at the switch: when the
+    /// switch's table changes or the serving fence moves, at most once a
+    /// second (A6 M3). False means
     /// the listener is stopping; `stop` is already cancelled.
     ///
     /// A confirmed disable closes the listener at once. An unreadable switch
@@ -751,7 +805,7 @@ impl SharingManager {
         &self,
         mut look: Look,
         span: &mut UnknownSpan,
-        serving: &mut tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+        wake: &mut ListenerWake<'_>,
         lifetime: &CancellationToken,
         stop: &CancellationToken,
         shutdown: &CancellationToken,
@@ -763,8 +817,20 @@ impl SharingManager {
         tokio::select! {
             () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return false; }
             () = lifetime.cancelled() => { stop.cancel(); return false; }
-            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            () = wake.watch.changed() => {}
+            Ok(()) = wake.serving.changed() => {}
+            // The certificate's hourly renewal is the caller's; no look.
+            () = tokio::time::sleep_until(wake.renew_at) => return true,
         }
+        tokio::select! {
+            () = shutdown.cancelled() => { self.disable_bodies(); stop.cancel(); return false; }
+            () = lifetime.cancelled() => { stop.cancel(); return false; }
+            () = tokio::time::sleep_until(wake.looked + Duration::from_secs(1)) => {}
+        }
+        // Re-armed before the look it follows.
+        wake.watch = (wake.arm)();
+        wake.looked = tokio::time::Instant::now();
+        let serving = &mut wake.serving;
         let mut observed = match look().await {
             Ok(true) => SharingObservation::Current,
             Ok(false) => SharingObservation::Revoked,
@@ -1398,7 +1464,7 @@ impl SharingManager {
             // Known only after a pass that read the imports; otherwise the
             // loop sleeps the bounded poll, never on a stale schedule.
             let mut next_due = None;
-            if matches!(enabled(state.store.as_ref()).await, Ok(true)) {
+            if matches!(loop_enabled(&state.applied).await, Ok(true)) {
                 if let Ok(imports) = state.store.sharing_imports().await {
                     self.status
                         .write()
@@ -3027,7 +3093,11 @@ mod loop_pacing_tests {
     #[tokio::test(start_paused = true)]
     async fn running_listener_survives_an_unreadable_switch_and_closes_on_a_confirmed_disable() {
         let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
-        let (_fence, mut serving) = ready_fence();
+        let (_fence, serving) = ready_fence();
+        let mut wake = ListenerWake::new(
+            serving,
+            Box::new(|| plurx_core::store::SharingWatch::Interval),
+        );
         // Two missed quorum confirmations, then a readable enable inside the
         // grace: the listener keeps serving and keeps live bodies.
         let manager = running_listener_fixture(43);
@@ -3037,7 +3107,7 @@ mod loop_pacing_tests {
         let reads = scripted(vec![unreadable(), unreadable(), Ok(true)]);
         assert!(
             manager
-                .next_look(reads, &mut span, &mut serving, &bodies, &stop, &shutdown)
+                .next_look(reads, &mut span, &mut wake, &bodies, &stop, &shutdown)
                 .await
         );
         assert!(started.elapsed() < crate::serving_fence::SERVING_FENCE_SESSION_GRACE);
@@ -3056,7 +3126,7 @@ mod loop_pacing_tests {
                 .next_look(
                     scripted(vec![]),
                     &mut span,
-                    &mut serving,
+                    &mut wake,
                     &bodies,
                     &stop,
                     &shutdown
@@ -3077,7 +3147,7 @@ mod loop_pacing_tests {
                 .next_look(
                     scripted(vec![Ok(false)]),
                     &mut span,
-                    &mut serving,
+                    &mut wake,
                     &bodies,
                     &stop,
                     &shutdown
@@ -3093,7 +3163,11 @@ mod loop_pacing_tests {
         let manager = running_listener_fixture(46);
         let lifetime = manager.begin_lifetime();
         let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
-        let (_fence, mut serving) = ready_fence();
+        let (_fence, serving) = ready_fence();
+        let mut wake = ListenerWake::new(
+            serving,
+            Box::new(|| plurx_core::store::SharingWatch::Interval),
+        );
         let mut span = UnknownSpan::default();
         // The real read deadline: a read that never answers maps to unknown;
         // the next read answers, so the span recovers.
@@ -3110,12 +3184,50 @@ mod loop_pacing_tests {
         };
         assert!(
             manager
-                .next_look(reads, &mut span, &mut serving, &lifetime, &stop, &shutdown)
+                .next_look(reads, &mut span, &mut wake, &lifetime, &stop, &shutdown)
                 .await
         );
         assert!(!stop.is_cancelled());
         assert!(!lifetime.is_cancelled());
         assert_eq!(manager.status().listener, "listening");
+    }
+    /// A6 M3: with a change-driven watch the listener reads the switch only
+    /// when its table changes, never on a clock; the change's look then acts
+    /// on the answer at once.
+    #[tokio::test(start_paused = true)]
+    async fn serving_listener_reads_the_switch_only_on_a_change() {
+        let manager = running_listener_fixture(47);
+        let lifetime = manager.begin_lifetime();
+        let (stop, shutdown) = (CancellationToken::new(), CancellationToken::new());
+        let (_fence, serving) = ready_fence();
+        let change = Arc::new(tokio::sync::Notify::new());
+        let armed = Arc::clone(&change);
+        let mut wake = ListenerWake::new(
+            serving,
+            Box::new(move || plurx_core::store::SharingWatch::Notified(Arc::clone(&armed))),
+        );
+        wake.watch = plurx_core::store::SharingWatch::Notified(Arc::clone(&change));
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let look = move || -> SwitchRead {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(std::future::ready(Ok(false)))
+        };
+        let mut span = UnknownSpan::default();
+        let next = manager.next_look(look, &mut span, &mut wake, &lifetime, &stop, &shutdown);
+        tokio::pin!(next);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3_600), next.as_mut())
+                .await
+                .is_err(),
+            "an hour without a change reads nothing"
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        change.notify_one();
+        assert!(!next.await, "the change's look sees the disable and closes");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(manager.status().listener, "disabled");
+        assert!(stop.is_cancelled());
     }
     #[test]
     fn only_a_revoking_term_revokes_and_the_member_floor_never_does() {
@@ -3170,6 +3282,73 @@ mod loop_pacing_tests {
                 );
             }
         }
+    }
+    /// A4: with sharing off, the listener and claim loops look at the switch
+    /// every poll on every node. They look through the node's applied
+    /// settings view (a replica answers it locally under its serving proof;
+    /// a standalone view counts a `view` read and a direct Store read counts
+    /// nothing here), and an off switch is still acted on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sharing_idle_loops_read_the_switch_from_the_applied_view() {
+        use plurx_core::store::{AppliedTable, SqliteStore, ViewSource};
+        let directory = tempfile::tempdir().expect("idle loop fixture");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(setting_keys::SHARING_ENABLED, "false")
+            .await
+            .expect("sharing off");
+        let mut state = crate::state::AppState::new_unhooked(
+            "sharing-idle".to_owned(),
+            Arc::clone(&store),
+            crate::state::Dirs {
+                artwork: directory.path().join("artwork"),
+                transcode: directory.path().join("transcode"),
+                cache: directory.path().join("cache"),
+                subs: directory.path().join("subs"),
+                runtime_cache: directory.path().join("runtime"),
+                renditions: directory.path().join("renditions"),
+            },
+            "sharing-node".to_owned(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(16)),
+        );
+        // A view of its own, so no other component's reads land in its
+        // counters.
+        state.applied = plurx_core::store::AppliedView::authority(Arc::clone(&store));
+        let manager = Arc::new(SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([41; 32])),
+            directory.path().to_path_buf(),
+            Default::default(),
+        ));
+        let view_reads = || {
+            state
+                .applied
+                .observation()
+                .view_total(AppliedTable::Settings, ViewSource::View)
+        };
+        let before = view_reads();
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(Arc::clone(&manager).run(state.clone(), shutdown.clone()));
+        let claims = tokio::spawn(Arc::clone(&manager).claim_loop(state.clone(), shutdown.clone()));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.status().listener != "disabled" || view_reads() < before + 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both loops look at the switch through the view and act on it");
+        assert_eq!(
+            state
+                .applied
+                .observation()
+                .view_total(AppliedTable::Settings, ViewSource::Authority),
+            0,
+            "no idle look asked the authority"
+        );
+        shutdown.cancel();
+        run.await.expect("listener loop");
+        claims.await.expect("claim loop");
     }
     #[tokio::test(start_paused = true)]
     async fn sharing_local_enable_wakes_idle_loops_before_their_remote_polls() {

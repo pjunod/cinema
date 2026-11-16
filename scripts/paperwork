@@ -107,6 +107,13 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
         "in docs/OPERATIONS.md; a new lenient field needs #[serde(default)]",
     ),
     (
+        "test_cluster_facade_ratchet",
+        "the cluster-facade census only tightens against the merge base",
+        "ask `state.cluster` instead of reaching around it; never raise CEILING or a pin, add a "
+        "(file, class) pin, grow EXEMPT or NOT_CLUSTER, or drop a name from TYPES/ROLE/ROSTER in "
+        "crates/plurxd/src/cluster/census.rs",
+    ),
+    (
         "test_doc_size_budget",
         "docs stay under 40 KB, and the shrink-only list only shrinks",
         "split the doc or move detail to a sibling doc; never add to the allowlist",

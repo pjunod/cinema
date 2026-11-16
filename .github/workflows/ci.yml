@@ -1586,6 +1586,8 @@ jobs:
           command -v xauth
       - name: Test Cinema remote browser contracts
         run: make cinema-remote-browser-check
+      - name: Test cold Curator consent and local login in a real browser
+        run: make curator-login-browser-check
       - name: Test ebook reader layout in a real browser
         run: |
           PLAYWRIGHT_MODULE="$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')" \

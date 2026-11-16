@@ -67,6 +67,18 @@ it with the PRs queued with it and merges it (`hold` keeps a ready PR out,
 The bot's single comment on the PR says where it stands. When `MERGE_TRAIN` is
 unset or `off`, land your PR yourself as below.
 
+An off-mode merge goes through `scripts/land <pr> --head <sha>`, never the raw
+merge API. `<sha>` is the full 40-character head you reviewed. The script
+refuses a draft, a moved head, a head whose `Main promotion gate` is not green
+(`--accept-untested '<reason>'` only when the owner ordered a direct merge;
+the reason is recorded in the landing commit) and a `Regression-Test:` line
+that does not resolve in the merge's tree; it merges with the merge train's
+message and reads the landing commit back. It exits 0 when landed, 1 when
+refused or conflicting and 2 on a usage or forge error (nothing merged in
+either case), and exits 3 when the merge happened but the landing commit is
+wrong and needs an errata row. `.github/workflows/landing-check.yml` fails on
+`main` for a landing made any other way that lost its lines.
+
 ## Before you push: paperwork
 
 `make paperwork` (`scripts/paperwork`) checks, in about ten seconds, the
@@ -189,6 +201,19 @@ shape for an agent here — use the source-only loop in
   leader on 2026-11-01
   ([docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md](docs/cluster/PLAYBACK-QUORUM-GAPS-RCA.md));
   `scripts/voter-isolation-check` shows whether a voter is isolated.
+
+## Cluster questions go through `state.cluster`
+
+Feature code asks the cluster through the facade in
+`crates/plurxd/src/cluster.rs` — may this node serve, what is its role, which
+peers can help — not through `state.membership`, `state.replication`,
+`state.serving`, a cloned `MembershipManager`, raw Raft metrics, `hiqlite::`
+or a new `PeerTransport::new`. `cluster::census` pins each production file's
+remaining reach-arounds by class and fails a new one; a change that removes
+one lowers its pin and `CEILING` in the same commit, and
+`tests/operations/test_cluster_facade_ratchet.py` refuses a `CEILING` above
+the merge base's. The plan and the slice order are in
+[CLUSTER-FACADE-BUILD.md](docs/cluster/CLUSTER-FACADE-BUILD.md).
 
 ## Large efforts
 

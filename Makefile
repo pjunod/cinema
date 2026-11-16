@@ -1156,6 +1156,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
 	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \
 	  --lib -- --exact
+	PLURX_EXPECT_TEST_COUNT=6 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  applied_mark::watch_tests --lib
 
 .PHONY: cluster-store-check
 # 8 MiB test threads: in a debug build, one poll of the hundred-step replicated
@@ -2175,3 +2178,9 @@ web-shared-library-browser-check: ## Check Shared browse and enriched details at
 	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
 		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
 		--test tests/web/shared-libraries.browser.cjs
+
+.PHONY: curator-login-browser-check
+curator-login-browser-check: ## Check cold Curator consent and login in the shipped browser shell
+	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
+		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
+		--test tests/web/curator-login.browser.cjs

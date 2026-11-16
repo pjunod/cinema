@@ -18,6 +18,25 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A Raft apply that is cancelled or torn down mid-write (the Raft core
+  stopping, the runtime shutting down) no longer takes the node's store
+  writers down with it. The vendored Hiqlite SQLite writer and WAL writer
+  panicked when they replied to a request nobody was waiting for any more;
+  every later write on that node then failed until the process restarted, and
+  the next start rebuilt the database from a stale lock file. No caller
+  timeout was involved. The write itself is unchanged: it has committed or
+  rolled back before the reply. An abandoned reply is logged with its request,
+  applied index and any error, and counted in
+  `plurx_hiqlite_writer_abandoned_replies_total` (Hiqlite patch 32, WAL patch 7).
+- An idle cluster no longer pays a settings quorum read per background-loop tick to learn that
+  nothing changed. The offline source probe loop and the media-session lease loop check this node's own
+  replica (and, for leases, its own registry) before their authoritative read; the playback cache
+  ceiling, the sharing listener and claim switch, the background work lanes, the subtitle
+  worker passes and the Live TV loops read their settings from the applied settings view; the
+  heartbeat looks at the sharing switch locally. Every read before a write or a fence is unchanged.
+  Still paid every tick: the recording loop's row listings, the reminder loop's transition write,
+  and the background lanes' and subtitle passes' queue reads (cluster layer audit, item A4,
+  [build plan](docs/cluster/IDLE-QUORUM-POLLERS-BUILD.md)).
 - Linux replicated servers validate actual-host reboot identity before serving;
   required deployment mounts preserve source-custody recovery after a reboot.
 - Android prepared Dolby Vision handoffs now keep the executing playback choice
@@ -308,6 +327,29 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Optional, explicit Curator household login connections with independent local
+  accounts, registered HTTPS callbacks, one-use S256 consent codes and revocable
+  household-only grants on standalone and replicated storage. Cinema credentials,
+  administrator permissions and watch history stay in Cinema.
+
+- `/metrics` attributes the daemon's steady-state replicated reads and writes
+  by the method that issued them.
+  `plurx_background_store_operations_by_method_total{class,method}` counts
+  those made outside an HTTP request (background loops, timers, workers),
+  which before were in `plurx_store_operations_total` with no method; a
+  request's split now joins its route group when the request and every task
+  it spawned in its scope have finished, so a dropped request is no longer
+  lost. The cluster membership manager's quorum reads, local reads, writes
+  and watermarks, and the 2 Hz quorum watermark sampler, which reached no
+  metric at all, now go through a counted client: they are in
+  `plurx_store_operations_total` and the request or background split, and the
+  manager's by issuing function in
+  `plurx_cluster_membership_operations_by_method_total{class,method}`.
+  Start-up schema installation, the start-up catch-up watermark and Hiqlite's
+  own Raft traffic stay uncounted. Per-route numbers such as
+  `plurx_http_store_reads_total` now include the membership reads a request
+  makes (peer authorization, `media_peers`, `activity_peers`).
+
 - Each cluster node keeps a lock-free account of what its own replica has
   applied, and Settings → Developer shows an advisory Applied view card with
   the node's replica proof, image state and view reads. `/metrics` adds the
@@ -373,6 +415,15 @@ bump may break compatibility and a **patch** bump never does.
 - New libraries scan every six hours by default. Existing libraries keep their
   schedule; a library at Never shows what that costs and offers a one-click
   "Enable 6-hourly reconcile".
+- Shared-library stream monitors and serving-read admission share one
+  advisory member-floor answer instead of each proving quorum: a ready answer
+  serves for up to five seconds, a not-ready one only the callers already
+  waiting on it, and a read survives the caller that gave up on it.
+- Shared-library monitors look again only when a table their authority rests
+  on changes on this replica, when the serving fence moves, or (receiver)
+  when the lease or the original login lapses, at most once a second, instead
+  of every second; an idle shared stream costs no authority reads. Stores
+  without an applied mark keep the one-second look.
 
 ## [0.8.0] — 2026-10-29
 

@@ -1,10 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-eight numbered patches for clustered
-deployments. An upstream release can retire the nine generic bugs and the one
-dependency-only constraint among them; it cannot retire the eighteen Plurx
-policies.
+Apache-2.0. Plurx carries thirty-two numbered patches for clustered deployments. An
+upstream release can retire the ten generic bugs and the one dependency-only
+constraint; it cannot retire the twenty-one Plurx policies:
 
 A patch added after 2026-11-15 is not a row here: it is a file of its own
 under [`patches.d/`](patches.d/README.md), keyed by name, with the same
@@ -43,8 +42,12 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
-| 27 | Applied mark: registered-table revisions, applied index and image generation, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
+| 27 | Applied mark: registered-table revisions, applied index, image generation and change watches, plus read-pool wait | plurx policy | — | Never; Plurx's applied views (playback-start E1) need a local, publish-before-reply signal of what this replica applied, which no upstream surface offers. |
 | 28 | Lease idle Raft client connections instead of dialing per `new_client` | generic bug | pending M6 | Upstream release stops opening a connection per `RaftNetworkFactory::new_client`, so a read-confirm client reuses an established socket. |
+| 29 | `DbRaftMetrics` type re-export | plurx policy | — | Never; it only names a type Plurx's counted membership client forwards. |
+| 30 | Local switch that stops this node's own election timer | plurx policy | — | Never; a stopping Plurx leader hands off and must not campaign again, and OpenRaft 0.9 exposes the switch only on the embedded `Raft` handle. |
+| 31 | One proposal gate on the database Raft, with a local hold and metrics wait | plurx policy | — | Never; a Plurx leader handing off must stop its own log before triggering its successor, and OpenRaft 0.9 has no leadership transfer. |
+| 32 | Keep the SQLite writer alive when a reply's receiver is gone | generic bug | pending M6 | Upstream release delivers every writer reply without panicking when a cancelled Raft apply or a teardown has dropped its receiver. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -407,7 +410,7 @@ made-up URL and prevents the fork from being declared fully tracked.
   every listener is built from them. The proxy listener is not changed.
   Files: `src/start.rs`.
 - The applied mark (playback-start E1, `docs/streaming/PLAYBACK-START-E1-BUILD.md`
-  §4.1). `NodeConfig::applied_mark_tables` registers up to eight tables; the
+  §4.1). `NodeConfig::applied_mark_tables` registers up to sixteen tables; the
   writer installs an SQLite update hook (rusqlite `hooks`) that sets one bit
   per registered table, and `publish_then_send` turns those bits into
   revisions and stores the applied log index after the SQLite work has
@@ -427,9 +430,13 @@ made-up URL and prevents the fork from being declared fully tracked.
   applies; an unqualified `DELETE` replayed from an older binary's log entry
   would not move a slot (the plurx census refuses one in current source).
   `Client::local_db_applied_mark` is local only, with no remote fallback.
+  `applied_mark_deletes_only` names registered tables whose slot moves on a
+  deleted row only. `AppliedMarkHandle::watch` arms an `AppliedWatch` that
+  wakes when its slots or the generation move (sharing A6 M3); `publish`
+  notifies only for a slot a live watch counts, after bumping revisions.
   The same row times every read-pool checkout into a fixed process-wide
   histogram (`db_read_pool_wait`), the baseline the E1 contract asks for.
-  Nothing crosses the wire. Tests: `applied_mark::tests`,
+  Nothing crosses the wire. Tests: `applied_mark::tests`, `applied_mark::watch_tests`,
   `writer::applied_mark_tests` (including the precommit-hold ordering test
   under `validation-test-helpers` and a source test of the reply order),
   the replacement tests in `state_machine::snapshot_metrics_contracts`, and
@@ -465,6 +472,47 @@ made-up URL and prevents the fork from being declared fully tracked.
   `parked_supervisor_closes_its_socket_at_the_idle_deadline`,
   `parked_connection_whose_socket_ends_exits_and_is_not_leased`.
   Files: `src/network/raft_client.rs`, `src/store/mod.rs`.
+- `hiqlite::DbRaftMetrics` names `openraft::RaftMetrics<NodeId, Node>`, the
+  type `Client::metrics_db` returns. Plurx's counted membership client
+  (`plurx_core::store::CountedClient`) forwards that call by name, and this
+  alias lets it do so without a direct `openraft` dependency. A type alias
+  only; no behaviour.
+  Files: `src/lib.rs`.
+- `Client::disable_local_db_elections` calls OpenRaft's
+  `runtime_config().elect(false)` on the database Raft of a local client. A
+  plurxd told to stop calls it first, leader or not, before it hands
+  leadership off (`docs/cluster/LEADER-SHUTDOWN-HANDOFF-BUILD.md`): the node
+  keeps voting, replicating and answering an explicit election trigger, but
+  its own timer never starts a campaign, so a handoff that loses the vote
+  costs the survivors one election rather than two. It is process state,
+  not persisted; the next start campaigns normally. Remote clients fail
+  immediately, with no HTTP fallback. Test:
+  `mgmt::tests::local_election_switch_has_no_remote_fallback`.
+  Files: `src/client/mgmt.rs`.
+- Every proposal to the database Raft takes a shared permit from one gate
+  (`proposal_gate.rs`): `client_write` from the local client paths and from
+  the API handlers that serve forwarded writes, and the learner and
+  membership changes, all through `StateRaftDB`'s three helpers.
+  `Client::hold_local_db_proposals(deadline)` takes the exclusive side. It
+  waits for in-flight permits, new proposals wait rather than fail, and the
+  hold releases on drop on every path. A blocking learner add holds its
+  permit only for the append; the catch-up wait runs after it drops. It returns `None` when it cannot
+  be taken by the deadline. `Client::wait_local_db_metrics` waits on the
+  metrics watch for a condition. A leader that hands off
+  (`docs/cluster/LEADER-SHUTDOWN-HANDOFF-BUILD.md`) holds its log, waits
+  until a survivor's matched index equals its last entry, and triggers that
+  survivor. Before this, a trigger racing an in-flight append was refused
+  by the old leader in 5 of 14 daemon runs. Heartbeats append nothing; the
+  leader's blank entry comes only at its election. The cache Raft is not
+  gated. Tests: `proposal_gate::tests`, including the source tests
+  `every_database_proposal_goes_through_the_gate` and
+  `a_learner_catch_up_wait_holds_no_permit`, and
+  `mgmt::tests::proposal_hold_and_metrics_wait_are_local_only`.
+  Files: `src/proposal_gate.rs`, `src/app_state.rs`, `src/store/mod.rs`,
+  `src/lib.rs`, `src/client/mgmt.rs`, `src/client/execute.rs`,
+  `src/client/transaction.rs`, `src/client/batch.rs`, `src/client/migrate.rs`,
+  `src/client/backup.rs`, `src/backup.rs`, `src/helpers.rs`,
+  `src/network/api.rs`, `src/network/management.rs`, `src/dashboard/query.rs`.
 
 **Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
 was accepted on 2026-10-05 as
@@ -513,11 +561,54 @@ upstream maintainer disposition or the whole drop condition. The original
 patch description remains the historical/local contract; row 19 stays
 `generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
 
+- The SQLite writer no longer panics when the requester of a reply has
+  stopped waiting. Upstream sends every reply with
+  `.expect("oneshot tx to never be dropped")` (thirteen sites across
+  `Execute`, `ExecuteReturning`, `Transaction` and `Batch`) or `.unwrap()`
+  (`Migrate`, the metadata read, the membership update and the RTT probe),
+  and `.expect`s the shutdown acknowledgement. Every applying request comes
+  from the state machine's `apply`, which waits for its reply without a
+  bound, so a receiver is gone only when that Raft apply was cancelled or
+  torn down (the Raft core stopping, the runtime shutting down, a startup
+  cleanup aborting); no caller timeout reaches the writer. The reply then
+  panicked the writer thread: every later write on that node failed until
+  the process restarted, and the panic skipped the metadata persist and the
+  lock-file removal, so the next start rebuilt the database. All applying
+  replies now go through `send_reply`, which tolerates a closed receiver,
+  logs it at `warn` with the request kind, the applied log index and the
+  abandoned result's error text if it was one (several arms report a failed
+  statement, commit or migration only in the reply), and counts it by
+  request and outcome in `db_writer_abandoned_replies`, which plurxd renders
+  as `plurx_hiqlite_writer_abandoned_replies_total`. The metadata read
+  applies nothing and stays at `debug`, uncounted. `publish_then_send`
+  returns nothing, so no arm can make delivery a condition of the writer
+  staying alive. Nothing else changes: the commit or rollback has already
+  happened when the reply is sent and stays authoritative, the applied mark
+  is still published before the reply, and nothing is retried. Real-writer
+  tests abandon a transaction's success and constraint-error replies
+  (`dropped_transaction_success_reply_preserves_commit_and_writer`,
+  `dropped_transaction_error_reply_preserves_rollback_and_writer`); the
+  success and common error replies of `Execute`, `ExecuteReturning` and
+  `Batch`, a successful `Migrate`, the membership update, the applied
+  marker, the RTT probe and the metadata read
+  (`dropped_reply_on_other_arms_preserves_the_write_and_writer`); a failed
+  migration and a failed commit
+  (`dropped_migrate_and_commit_failure_replies_preserve_rollback_and_writer`);
+  and the shutdown acknowledgement
+  (`dropped_shutdown_reply_still_persists_metadata_and_releases_the_lock`).
+  Each reads the rows and the applied-log metadata back from the database
+  file. Parameter-bind errors, the `ExecuteReturning` column-mapping error, a
+  failed transaction open, `SnapshotApply` and `Backup` are held only by the
+  source pin in `every_applying_reply_publishes_first`. The same repair in
+  the WAL writer is `hiqlite-wal` row 7. First written for the transaction
+  arm in `f39353af2` and `8e2a8cb64` (#1261).
+  Files: `src/store/state_machine/sqlite/writer.rs`, `src/lib.rs`.
+
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 28: the
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26, 28 and 32: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25 and 27) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 27, 29, 30 and 31) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

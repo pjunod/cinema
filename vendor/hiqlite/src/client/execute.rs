@@ -78,7 +78,6 @@ impl Client {
         if let Some(state) = self.is_leader_db_with_state().await {
             let res = state
                 .raft_db
-                .raft
                 .client_write(QueryWrite::Execute(sql))
                 .await?;
             let log_index = res.log_id.index;
@@ -257,7 +256,6 @@ impl Client {
         if let Some(state) = self.is_leader_db_with_state().await {
             let res = state
                 .raft_db
-                .raft
                 .client_write(QueryWrite::ExecuteReturning(sql))
                 .await?;
             let log_index = res.log_id.index;

@@ -21,11 +21,11 @@ from validation import vendor_patches  # noqa: E402
 # and two pull requests that each add a patch touch no common line. The total
 # is derived: these rows plus those files.
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 28),
-    (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 6),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 32),
+    (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 7),
 )
 
-NUMBER_WORDS = {6: "six", 28: "twenty-eight"}
+NUMBER_WORDS = {7: "seven", 32: "thirty-two"}
 
 
 def patch_files(crate: Path) -> tuple[vendor_patches.Patch, ...]:
@@ -150,7 +150,7 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
             for row in table_rows(path.read_text(encoding="utf-8"))
             if row[2] == "generic bug"
         }
-        self.assertEqual(len(generic), 12)
+        self.assertEqual(len(generic), 14)
         self.assertEqual(
             {key: url for key, url in generic.items() if url != "pending M6"},
             {
@@ -161,13 +161,13 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
         self.assertEqual(
             {key for key, url in generic.items() if url == "pending M6"},
             {
-                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19, 28)
-            } | {("hiqlite-wal", 1), ("hiqlite-wal", 3)},
+                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19, 28, 32)
+            } | {("hiqlite-wal", 1), ("hiqlite-wal", 3), ("hiqlite-wal", 7)},
         )
         plan = (ROOT / "docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("M6 two accepted mechanisms, ten numbered generic rows pending", plan)
+        self.assertIn("M6 two accepted mechanisms, twelve numbered generic rows pending", plan)
         self.assertIn("python3 -m validation.vendor_patches", plan)
         for _path, _expected in LEDGERS:
             for patch in patch_files(_path.parent):
@@ -175,7 +175,7 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
                     self.assertTrue(
                         patch.upstream == "pending M6" or patch.upstream.startswith("http")
                     )
-        self.assertIn("twelve generic rows", plan)
+        self.assertIn("fourteen generic rows", plan)
         self.assertIn("https://github.com/sebadob/hiqlite/pull/374", plan)
 
     def test_each_prose_patch_has_one_owned_ledger_row(self):
