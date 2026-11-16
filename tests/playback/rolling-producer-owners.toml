@@ -701,9 +701,10 @@
 # real child retirement/EOF and reader release; they test joined physical
 # settlement, not a new production process owner. The signed Activity/Stop
 # requests and HTTP assertions are control-plane operations, not subprocesses.
-# The B processed-successor retry gate adds one keyed rendition_build_gate
-# occurrence (34->35); it suppresses only that successor after processed
-# decline/failure, preserving the ordinary retry path. Counts are source shape
+# Exact Source processed-root attachment adds one keyed rendition_build_gate
+# occurrence (34->35), rechecking the captured physical graph before reuse.
+# B suppresses retries only for its processed successor after decline/failure,
+# preserving the ordinary retry path. Counts are source shape
 # only, not test execution or physical qualification.
 
 version = 1
