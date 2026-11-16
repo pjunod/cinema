@@ -59,6 +59,18 @@ bump may break compatibility and a **patch** bump never does.
   qualifies their actual stored precision. The new fitting method reuses
   existing statistics; new sessions wait for its replacement table while
   existing digest pins retain their original coefficients.
+- Dolby Vision titles the server reconstructs from the base layer alone no
+  longer have their black level raised: Profile 5, Profile 8, and Profile 7
+  when it is processed without its enhancement layer. The reconstruction pass
+  handed libplacebo the stream's own colour description, which made it
+  tone-map a picture it was only meant to compose: black came out at 0.005
+  nits instead of 0, and in dark scenes every colour channel below a pixel's
+  brightest was lifted with it (washed-out letterbox bars and shadows, on
+  every display bucket, HDR10 master included). Both reconstruction paths now
+  describe the composed master identically on both sides, as the native
+  player does, and every image build renders a control through the base path
+  and fails if black or dark colour moves. Profile 7 FEL and HDR10-E output is
+  byte for byte what it was.
 - A Raft apply that is cancelled or torn down mid-write (the Raft core
   stopping, the runtime shutting down) no longer takes the node's store
   writers down with it. The vendored Hiqlite SQLite writer and WAL writer

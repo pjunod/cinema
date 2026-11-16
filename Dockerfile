@@ -95,6 +95,18 @@ RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplace
         $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm \
         -o /build-inputs/test_dm_active_area \
     && LD_LIBRARY_PATH=/opt/dv-bundle/lib /build-inputs/test_dm_active_area
+# The base reconstruction control drives the production base renderer, which
+# needs a Vulkan device. This stage has the compiler and headers but no
+# Vulkan driver, so it only compiles the control, with the helper's own
+# flags; the runtime stage below runs it on that image's software device.
+RUN placebo_pc=$(dirname "$(find /opt/dv-dependencies/placebo/lib -name libplacebo.pc -print)") \
+    && mkdir /opt/dv-controls \
+    && cc -O2 -fno-math-errno -frounding-math -ffp-contract=off -std=c11 -Wall -Wextra -Werror -Wno-unused-function \
+        -I/opt/dv-dependencies/include \
+        /build-inputs/dv_processing/controls/test_base_master_black.c /opt/dv-dependencies/lib/libdovi.a \
+        $(PKG_CONFIG_PATH=/opt/dv-dependencies/ffmpeg/lib/pkgconfig pkg-config --static --cflags --libs libavformat libavcodec libavutil) \
+        $(PKG_CONFIG_PATH="$placebo_pc" pkg-config --cflags --libs libplacebo) -lm -lpthread -ldl \
+        -o /opt/dv-controls/test_base_master_black
 
 # Published media dependencies are independent of application source.
 # A base published before 2026-11-12 still carries a DV helper bundle of its
@@ -249,6 +261,15 @@ RUN test -n "$(find /usr/share/vulkan/icd.d -name '*.json' -print -quit)" \
       { test "$status" -eq 1 && printf '%s\n' "$message" | grep -q 'usage:'; } \
         || { echo "FATAL: DV helper $helper does not load in this runtime: $message" >&2; exit 1; }; \
     done
+# The installed renderer must reconstruct the composed master, true black
+# included, for Profile 5, Profile 8 and base-only Profile 7
+# (controls/test_base_master_black.c). The control is mounted from the helper
+# stage, never copied, and runs on lavapipe: a failing case fails the image.
+RUN --mount=type=bind,from=dv-processing-helpers,source=/opt/dv-controls,target=/opt/dv-controls \
+    icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd.*.json' -print -quit) \
+    && test -n "$icd" \
+    && VK_ICD_FILENAMES="$icd" LD_LIBRARY_PATH=/usr/lib/plurx/dv-processing/lib \
+        /opt/dv-controls/test_base_master_black
 
 # NVIDIA Container Toolkit must also mount the video encode/decode libraries.
 # This default covers direct Docker users; GPU device access is still runtime
