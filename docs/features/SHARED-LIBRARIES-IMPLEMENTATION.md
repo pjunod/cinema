@@ -6301,20 +6301,18 @@ release its admission while extraction or font work was still running.
    requires the existing encoder and display capability proofs. B validates
    the delivered range against its retained request, including the precise
    PQ/HLG presentation range, before publishing the session.
-4. **Dolby Vision conversion stays a typed limitation.** Its per-source RPU
-   proof is not yet owned by Source preparation. Refuse DV preservation,
-   conversion and re-encoding before dispatch with
-   `sharing_start_dolby_vision_unsupported`. Direct play retains untouched
-   bytes and its normal capability decision. Do not silently claim an HDR10
-   or SDR conversion of a DV source.
+4. **Dolby Vision is planned like local** (see
+   `docs/streaming/SHARED-LIBRARY-DV-HDR-PLAN.md`). Only a Profile 5 encode
+   is refused (`sharing_start_dolby_vision_unsupported`) until its RPU proof
+   is Source-owned. A receiver that does not affirm DV relay gets the base.
 5. **Retain regression definitions, defer execution.** Cover text and bitmap
    burn selection, bounded extraction/settlement, HDR grade binding, and DV
    refusal. Compile test targets now; execute required regressions only after
    the main-promotion adversarial review. A generated fixture without rendered
    output inspection is not evidence of subtitle or HDR fidelity.
 
-Native subtitles beside HDR and downloaded subtitle burns remain typed
-unsupported shapes until their Source-owned preparation is implemented.
+Downloaded subtitle burns remain a typed unsupported shape until their
+Source-owned preparation is implemented; native subtitles beside HDR are built.
 They do not justify a hidden feature gate or a disabled Developer switch.
 
 ### Fresh Source invocation custody before preparation (2026-10-06)
