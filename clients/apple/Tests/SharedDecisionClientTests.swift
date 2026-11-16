@@ -317,7 +317,10 @@ final class SharedDecisionClientTests: XCTestCase {
         let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration)
         var sent: [String: Any]?
         DecisionHTTP.answer = { request in
-            sent = try JSONSerialization.jsonObject(with: try self.body(request)) as? [String: Any]; return nil
+            // Answer at once: a blocked request would hold the start until the
+            // session's 300 s timeout.
+            sent = try JSONSerialization.jsonObject(with: try self.body(request)) as? [String: Any]
+            return (request.url!, 500, [:], Data())
         }
         var request = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
         request.copy = true; request.preserveDolbyVision = true
