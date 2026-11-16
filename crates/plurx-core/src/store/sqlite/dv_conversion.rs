@@ -1779,6 +1779,9 @@ mod tests {
             "INSERT INTO dv_title_jobs_schema VALUES(1,2)",
             // v133: the empty delegation tail is removed first by the shared title rewind.
             "CREATE TABLE IF NOT EXISTS delegation_schema",
+            // v134: the empty library curation tail is removed by the shared
+            // source-extension rewind, ahead of the delegation tail.
+            "CREATE TABLE library_curation_schema",
         ];
 
         assert!(
