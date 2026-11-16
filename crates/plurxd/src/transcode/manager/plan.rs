@@ -1138,6 +1138,13 @@ impl TranscodeManager {
         format!("{}:{}:{}", file.path.display(), file.size, file.mtime)
     }
 
+    /// The remembered Profile 5 pixel verdict for `file`, for tests outside
+    /// the transcode module.
+    #[cfg(test)]
+    pub(crate) fn dovi_proof_verdict(&self, file: &plurx_core::domain::MediaFile) -> Option<bool> {
+        self.dovi_proofs.verdict(&Self::dovi_proof_key(file))
+    }
+
     /// `class` is the caller's: the per-source proof runs two 30-second
     /// FFmpeg probes and memoizes its verdict, so a session start that is
     /// waiting on it must not run them at the background class — nor wait on

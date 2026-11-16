@@ -6450,7 +6450,16 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # FFmpeg 8 fixture fix: +1 test-only command in
 # `build_real_source_start_fixture`, a finite FFprobe of the generated HDR
 # base (awaited with `.output()`), asserting it is really PQ/BT.2020-tagged.
-expected_occurrences = 355
+# Shared Dolby Vision M3 (T3.1): +1 production command in
+# `ffmpeg::source_dovi_pixel_probe_command`, the Source's Profile 5 pixel
+# proof run. It reads the Source's held descriptor as fd 3 and is spawned
+# only through `source_preparation::run_authorized_child` (as
+# `SOURCE_DOVI_PIXEL_PROOF`, listed in Activity with Stop), under the
+# SourceProbeOperation's copy permit, held fence, preparation authority,
+# start deadline and cancellation; that operation reaps the child and joins
+# both pipes before its settlement, which `SourcePreparationSettlements`
+# already joins on retirement. The local proof's command is unchanged.
+expected_occurrences = 356
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

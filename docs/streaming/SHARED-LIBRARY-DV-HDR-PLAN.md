@@ -1,6 +1,6 @@
 # Shared Dolby Vision and HDR — deliver every local shape over sharing
 
-**Status:** in progress (M1 and T2.1 on `claude/shared-dv-hdr-m1`) · **Branch:** `effort/shared-dv-hdr` · **Written:** 2026-11-15 ·
+**Status:** in progress (M1 and T2.1 on `claude/shared-dv-hdr-m1`, T3.1 on `claude/shared-dv-hdr-m3`) · **Branch:** `effort/shared-dv-hdr` · **Written:** 2026-11-15 ·
 **Verified against:** origin/main @ `29b35e713` (read, not compiled) ·
 **For:** the build agent (Opus). Nothing here is for review by another model.
 
@@ -371,6 +371,10 @@ Risk: two 30 s probes inside a start budget; the Source worker row must show
 in Activity as this session's work with Stop (the hardware-attribution rule).
 Until T3.1 lands, a P5 encode keeps today's typed refusal — it has no
 compatible base, so there is no lower plan to fall to.
+*As built (§6.1):* no separate operation — the proof is two more children of
+the existing `SourceProbeOperation`, so it shares that operation's permit,
+fence, authority, deadline, `cancel`/`settle` and its existing slot in
+`SourcePreparationSettlements`.
 
 ### M4 — Processed DV / FEL re-encode over sharing
 
@@ -427,6 +431,7 @@ opened yet. Tests run on the pinned gate image (FFmpeg 6.1, no `dovi_rpu`).
 | T1.5 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `60ea3ae03`; 4 new/rewritten tests pass, fail on old decoder/ingress |
 | T1.6 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `a7602fc27` (+ ledger `468e9e90d`); 4 e2e fixtures pass |
 | T2.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `5c4542676`; 3 new tests pass, fail on mutated old behaviour |
+| T3.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built on `claude/shared-dv-hdr-m3` (`0ee5b8470`); 4 new tests pass and fail on a restored refusal or a no-op `record`; the P5 e2e passes on the real P5 control under jellyfin-ffmpeg 8.1 and SKIPs in the gate image (§6.1) |
 
 | Review | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `9ee8d7dcb`..`ad9364440` (findings 1–11); each new test fails on the old behaviour |
 
@@ -486,6 +491,60 @@ both pass on the gate's FFmpeg 6.1 and are open questions for M2.
   (`shared_source_forwarding.rs` `:253`, `:270`) needs no new field.
   `public_recipe_hash` strips every reserved token, so it is unchanged for an
   old receiver.
+- **T3.1 — one operation, not two.** The proof runs as two more children of
+  the Source's existing `SourceProbeOperation` (`run_probe` →
+  `prove_dovi_pixels`), not a new `SourceDoviProofOperation`: that operation
+  already holds the copy permit, the held `open_source_playback_fence`, the
+  preparation authority check before every spawn, the start deadline and
+  `cancel`/`settle`, and it is already joined in
+  `SourcePreparationSettlements`. Each run is also bounded at 30 s, as local.
+  `dovi_reshape_changes_pixels` was not split: its graph and frame parsing
+  moved into shared helpers (`dovi_pixel_probe_graph`,
+  `dovi_pixel_probe_frames`) and `source_dovi_pixel_probe_command` reads the
+  held descriptor as fd 3, so both proofs measure the same thing.
+- **T3.1 — Activity attribution.** The children spawn as
+  `SOURCE_DOVI_PIXEL_PROOF` ("Dolby Vision pixel proof for a shared playback
+  start", realtime) and are listed in Activity → Processes with Stop. A
+  `ChildWork` purpose is static text, so the row names the work, not the
+  grant or session. Stop kills only the proof; the start then answers
+  not-yet (`sharing_start_unavailable`), as an unfinished local proof does.
+- **T3.1 — the proof runs only when it can matter.** The Source asks for it
+  only when `dolby_vision_needs_rpu_render`, the node has the boot-proved
+  renderer (`dovi_reshape`) and no verdict is remembered. Without the
+  renderer the planner gives local's own refusal. A refuted proof or a
+  renderer this build did not prove (`unsupported_build`) now answers
+  `sharing_start_unsupported` (422) instead of `sharing_start_unavailable`
+  (503): it is a definite answer, not an outage.
+- **T3.1 — the refusal is gone.** `SourceDeliveryRefusal::DolbyVision` and
+  `SourceStartFailure::DolbyVisionUnsupported` are deleted. The
+  `SHARING_START_DOLBY_VISION_UNSUPPORTED` code is kept because B still
+  decodes it from older Sources.
+- **T3.1 — test placement.** `source_profile5_refuted_proof_plans_like_local_and_spawns_no_second_probe`
+  lives in `shared_source_playback/tests.rs` and runs through the HTTP Start,
+  with a scripted Refuted verdict. The P5 e2e
+  (`sharing_source_http_profile5_encoded_to_sdr_h1_h2_and_confirmed_end`) runs
+  the real proof on `strict_p5_fresh.mp4`: the two Source children prove the
+  RPU changes pixels, the verdict is recorded, and the encode tone-maps. It
+  needs jellyfin-ffmpeg's `tonemapx`, so it SKIPs in the gate image. It was run
+  in the gate container with `PLURX_FFMPEG` pointing at a copied
+  jellyfin-ffmpeg 8.1. The binary cannot run inside `plurx/plurxd:latest`,
+  because it needs glibc 2.39 and bookworm has 2.36.
+- **Not closed by T3.1.** `dovi_reshape_encoder` reaches
+  `has_dovi_reshape_with(hardware)`. That is a lazy capability probe
+  (synthetic input, no source read) that is memoized per encoder. Only the
+  software pairing is measured at boot. The first P5 reshape on a node whose
+  preferred encoder is hardware therefore spawns one unattributed capability
+  child, on the Source exactly as locally.
+- **M1 fixture under FFmpeg 8 (`f79cea183`).** The production jellyfin-ffmpeg 8.1
+  takes an encode's colour tags from the lavfi frames and ignores the
+  `-color_*` options, so the HTTP fixture's "PQ" source came out untagged.
+  FFmpeg 8 then drops an HDR10-compatible Dolby Vision record on a stream
+  copy, and `sharing_source_http_dolby_vision_preserved_h1_h2_and_confirmed_end`
+  failed on "the delivered init declares Dolby Vision". The generator now
+  also writes the colour description into the HEVC VUI. Real Profile 8.1
+  titles carry it, so this is a fixture fix, not a production one.
+
+
 
 ### FFmpeg 8 copy colour metadata fix (2026-11-16)
 
