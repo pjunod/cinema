@@ -576,8 +576,7 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
                                              .component_mapping = {0, 1, 2}}},
                                  .repr = {.sys = PL_COLOR_SYSTEM_RGB,
                                           .levels = PL_COLOR_LEVELS_FULL}};
-  require(dv_master_frames(&source, &destination),
-          "master reconstruction is not a colour conversion");
+  dv_master_frames(&source, &destination);
   struct pl_color_map_params color_map = pl_color_map_default_params;
   color_map.tone_mapping_function = &pl_tone_map_clip;
   color_map.gamut_mapping = &pl_gamut_map_clip;

@@ -191,18 +191,15 @@ static inline bool dv_map_decoded_metadata(const AVFrame *frame, int profile,
 // Black-level adaptation belongs to display mapping (dv_target_render), at
 // the target minimum.
 //
-// The luminance range is a label no shader reads while the two sides are
-// equal. The comparison below is libplacebo's own, and a renderer refuses the
-// frame when it fails.
-static inline bool dv_master_frames(struct pl_frame *source,
+// The two sides are equal because one value is assigned to both, here and
+// nowhere else; the luminance range is then a label no shader reads. Nothing
+// at run time checks the outcome: controls/test_base_master_black.c does, on
+// the pixels, in every image build.
+static inline void dv_master_frames(struct pl_frame *source,
                                     struct pl_frame *destination) {
   struct pl_color_space master = pl_color_space_hdr10;
   master.hdr.max_luma = 10000;
   master.hdr.min_luma = 0.005;
   source->color = destination->color = master;
-  // As libplacebo decides it: infer both sides, then compare.
-  struct pl_color_space from = source->color, to = destination->color;
-  pl_color_space_infer_map(&from, &to);
-  return pl_color_space_equal(&from, &to);
 }
 #endif
