@@ -145,7 +145,7 @@ fn valid_source_stop_id(id: &str) -> bool {
 
 pub(super) async fn local_source_processed(state: &AppState) -> Vec<SourceProcessedRow> {
     let mut activities = state.transcode.source_processed_activities();
-    activities.sort_by(|left, right| right.started_unix.cmp(&left.started_unix));
+    activities.sort_by_key(|row| std::cmp::Reverse(row.started_unix));
     activities.truncate(MAX_SOURCE_PROCESSED);
     if activities.is_empty() {
         return Vec::new();
@@ -297,7 +297,7 @@ pub struct ActivityDelivery {
 #[allow(dead_code)] // consumed by #326 once this dependency merges
 #[derive(Clone, Debug, PartialEq)]
 pub enum PeerActivityOutcome {
-    Answered(ActivitySnapshot),
+    Answered(Box<ActivitySnapshot>),
     Unhealthy,
     Unsupported,
     Unreachable,
@@ -840,7 +840,7 @@ fn decode_snapshot(body: &[u8], expected_node_id: &str) -> PeerActivityOutcome {
     if !snapshot_is_bounded(&snapshot, expected_node_id) {
         return PeerActivityOutcome::InvalidResponse;
     }
-    PeerActivityOutcome::Answered(snapshot)
+    PeerActivityOutcome::Answered(Box::new(snapshot))
 }
 
 fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> bool {
@@ -1686,7 +1686,7 @@ mod tests {
             ));
         }
         let aged = age_dvr_observations(
-            PeerActivityOutcome::Answered(snapshot),
+            PeerActivityOutcome::Answered(Box::new(snapshot)),
             Duration::from_secs(1),
         );
         let PeerActivityOutcome::Answered(aged) = aged else {

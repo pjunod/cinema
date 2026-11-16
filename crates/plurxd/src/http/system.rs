@@ -5184,10 +5184,9 @@ fn receiver_processed_owner<'a>(
                     .receiver_processed
                     .iter()
                     .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
                 {
-                    if owner.replace(node_id.as_str()).is_some() {
-                        return Err(());
-                    }
+                    return Err(());
                 }
             }
             _ => incomplete = true,
@@ -5222,10 +5221,9 @@ fn source_processed_owner<'a>(
                     .source_processed
                     .iter()
                     .any(|row| row.stop_id == stop_id)
+                    && owner.replace(node_id.as_str()).is_some()
                 {
-                    if owner.replace(node_id.as_str()).is_some() {
-                        return Err(());
-                    }
+                    return Err(());
                 }
             }
             _ => incomplete = true,

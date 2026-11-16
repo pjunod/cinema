@@ -2246,6 +2246,7 @@ impl VodServe {
     /// No codec/FFprobe/burn work is hidden in this copy-only preparation.
     /// The real reservation is held before first durable blocked activation.
     #[allow(dead_code)] // Source actor integration is deliberately incremental.
+    #[allow(clippy::too_many_arguments)] // same admitted Source inputs as the VOD preparation API
     pub(crate) async fn prepare_admitted_source_copy(
         &self,
         source: &crate::http::hls::PreparedSourcePlayback,
@@ -2708,9 +2709,9 @@ impl VodServe {
         // would be frozen at whatever the node booted with — and applying it
         // at `try_create` alone reached no production path at all.
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
-        let source_binding = source_binding
+        let binding = source_binding
             .ok_or_else(|| "Source rendition requires exact typed binding".to_owned())?;
-        let source_binding = Some(source_binding);
+        let source_binding = Some(binding);
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
             SessionKind::Copy {
@@ -3094,7 +3095,6 @@ impl VodServe {
             .as_ref()
             .and_then(|root| root.instance_nonce);
         let key = if let Some(nonce) = processing_instance {
-            let binding = source_binding.expect("Source rendition requires exact typed binding");
             processed_instance_key(&canonical_key, &binding.incarnation_id().to_string(), nonce)
         } else {
             canonical_key.clone()

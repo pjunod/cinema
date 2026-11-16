@@ -1,5 +1,15 @@
 use crate::vodserve::StagedProcessedPredecessor;
 
+/// Evidence and ownership retained together for one Source preparation.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct SourceProcessedInput<'a> {
+    evidence: &'a crate::transcode::source_preparation::SourceHeldProbeEvidence,
+    proof: &'a plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    producer: Arc<crate::prodrun::ProducerSlot>,
+    cancel: tokio_util::sync::CancellationToken,
+    authority: Arc<crate::transcode::source_actor::SourceProducerAuthority>,
+}
+
 enum VodRecipeAttachment {
     Recovery {
         speculative: bool,
@@ -2404,7 +2414,13 @@ impl TranscodeManager {
                 &recovery,
                 request.hdr10,
                 ask,
-                Some((evidence, proof, producer, cancel.clone(), authority)),
+                Some(SourceProcessedInput {
+                    evidence,
+                    proof,
+                    producer,
+                    cancel: cancel.clone(),
+                    authority,
+                }),
                 Some(deadline),
             )
             .await?
@@ -2423,13 +2439,7 @@ impl TranscodeManager {
         recovery: &SessionRecoveryIdentity,
         hdr10_intent: bool,
         original: &ProcessedUpgradeAsk,
-        source: Option<(
-            &crate::transcode::source_preparation::SourceHeldProbeEvidence,
-            &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
-            Arc<crate::prodrun::ProducerSlot>,
-            tokio_util::sync::CancellationToken,
-            Arc<crate::transcode::source_actor::SourceProducerAuthority>,
-        )>,
+        source: Option<SourceProcessedInput<'_>>,
         source_deadline: Option<tokio::time::Instant>,
     ) -> Result<Option<ProcessedUpgradeTrial>, String> {
         #[cfg(not(target_os = "linux"))]
@@ -2555,23 +2565,19 @@ impl TranscodeManager {
                 context.profile = None;
                 context.planning_snapshot = Some(Arc::new(planning.clone()));
             }
-            let processed_work = source
-                .as_ref()
-                .map(|(_, proof, producer, cancel, authority)| {
-                    let mut ask = original.clone();
-                    ask.display_target = display_target;
-                    ask.display_target_note = display_target_note.clone();
-                    SourceProcessedWork {
-                        ask,
-                        authority: Arc::clone(authority),
-                        assignment: proof.assignment().clone(),
-                        producer: Arc::clone(producer),
-                        cancel: cancel.clone(),
-                    }
-                });
-            let source_evidence = source
-                .as_ref()
-                .map(|(evidence, proof, _, _, _)| (*evidence, *proof));
+            let processed_work = source.as_ref().map(|input| {
+                let mut ask = original.clone();
+                ask.display_target = display_target;
+                ask.display_target_note = display_target_note.clone();
+                SourceProcessedWork {
+                    ask,
+                    authority: Arc::clone(&input.authority),
+                    assignment: input.proof.assignment().clone(),
+                    producer: Arc::clone(&input.producer),
+                    cancel: input.cancel.clone(),
+                }
+            });
+            let source_evidence = source.as_ref().map(|input| (input.evidence, input.proof));
             let reuse_scope = original
                 .catalog_query
                 .as_ref()

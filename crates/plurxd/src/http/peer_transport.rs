@@ -19,6 +19,7 @@ pub(crate) const SIGNATURE_HEADER: &str = "x-plurx-cluster-signature";
 pub(crate) const RESPONSE_SIGNATURE_HEADER: &str = "x-plurx-response-signature";
 
 #[derive(Clone, Copy)]
+#[allow(clippy::enum_variant_names)] // names distinguish the exact request and response authentication scopes
 pub(crate) enum PeerAuthMode {
     ExactRequest,
     /// A voter control response must prove its status and exact body too.

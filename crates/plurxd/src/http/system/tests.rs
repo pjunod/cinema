@@ -300,40 +300,42 @@ fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
         vec![
             (
                 "node-b".to_owned(),
-                PeerActivityOutcome::Answered(crate::http::internal_activity::ActivitySnapshot {
-                    workers: None,
-                    node_id: "node-b".to_owned(),
-                    deliveries: vec![ActivityDelivery {
-                        vod_observation: None,
-                        method: "direct".to_owned(),
-                        presentation: None,
-                        user: "viewer".to_owned(),
-                        file_id: 2,
-                        item_id: 102,
-                        title: "Remote title".to_owned(),
-                        session_id: None,
-                        started_unix: 2,
-                        idle_seconds: 1,
-                        delivered_bytes: None,
-                        delivered_bps: None,
-                    }],
-                    source_processed: Vec::new(),
-                    receiver_processed: Vec::new(),
-                    analysis: Vec::new(),
-                    live_tv: vec![crate::live_tv::LiveTvActivity {
-                        channel_number: "7.1".into(),
-                        channel_name: "Remote TV".into(),
-                        user: "viewer".into(),
-                        owner_node_id: "node-b".into(),
-                        encoder: "software".into(),
-                        age_seconds: 1,
-                        output_height: 720,
-                        state: "active".into(),
-                        programme_title: Some("City Beat".into()),
-                        delivery: None,
-                    }],
-                    dvr: None,
-                }),
+                PeerActivityOutcome::Answered(Box::new(
+                    crate::http::internal_activity::ActivitySnapshot {
+                        workers: None,
+                        node_id: "node-b".to_owned(),
+                        deliveries: vec![ActivityDelivery {
+                            vod_observation: None,
+                            method: "direct".to_owned(),
+                            presentation: None,
+                            user: "viewer".to_owned(),
+                            file_id: 2,
+                            item_id: 102,
+                            title: "Remote title".to_owned(),
+                            session_id: None,
+                            started_unix: 2,
+                            idle_seconds: 1,
+                            delivered_bytes: None,
+                            delivered_bps: None,
+                        }],
+                        source_processed: Vec::new(),
+                        receiver_processed: Vec::new(),
+                        analysis: Vec::new(),
+                        live_tv: vec![crate::live_tv::LiveTvActivity {
+                            channel_number: "7.1".into(),
+                            channel_name: "Remote TV".into(),
+                            user: "viewer".into(),
+                            owner_node_id: "node-b".into(),
+                            encoder: "software".into(),
+                            age_seconds: 1,
+                            output_height: 720,
+                            state: "active".into(),
+                            programme_title: Some("City Beat".into()),
+                            delivery: None,
+                        }],
+                        dvr: None,
+                    },
+                )),
             ),
             ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
             ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
@@ -394,7 +396,7 @@ fn source_processed_stop_selects_only_the_answered_owner() {
     let peers = PeerActivityRead::Peers(
         vec![(
             "source-node".into(),
-            PeerActivityOutcome::Answered(snapshot.clone()),
+            PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
         )]
         .into(),
     );
@@ -404,11 +406,11 @@ fn source_processed_stop_selects_only_the_answered_owner() {
         vec![
             (
                 "source-node".into(),
-                PeerActivityOutcome::Answered(snapshot.clone()),
+                PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
             ),
             (
                 "another-node".into(),
-                PeerActivityOutcome::Answered(snapshot),
+                PeerActivityOutcome::Answered(Box::new(snapshot)),
             ),
         ]
         .into(),
@@ -436,7 +438,7 @@ fn receiver_processed_stop_selects_only_the_answered_b_owner() {
     let peers = PeerActivityRead::Peers(
         vec![(
             "receiver-node".into(),
-            PeerActivityOutcome::Answered(snapshot.clone()),
+            PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
         )]
         .into(),
     );
@@ -452,11 +454,11 @@ fn receiver_processed_stop_selects_only_the_answered_b_owner() {
         vec![
             (
                 "receiver-node".into(),
-                PeerActivityOutcome::Answered(snapshot.clone()),
+                PeerActivityOutcome::Answered(Box::new(snapshot.clone())),
             ),
             (
                 "another-node".into(),
-                PeerActivityOutcome::Answered(snapshot),
+                PeerActivityOutcome::Answered(Box::new(snapshot)),
             ),
         ]
         .into(),

@@ -2038,6 +2038,7 @@ fn source_index_admits(file: &MediaFile) -> bool {
     matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
 }
 
+#[allow(clippy::too_many_arguments)] // exact fenced Source inputs and owned resources
 pub(crate) fn start_source_index(
     file: MediaFile,
     source: crate::fragment_index_cluster::SourceFence,
