@@ -1,7 +1,7 @@
 # CM v2.9 measured gamut — reference data and qualification
 
-**Status:** built; locally qualified, merge checks recorded in PR · **Owner:**
-Codex · **Updated:** 2026-11-13
+**Status:** built; target-black extension numerically qualified, final review and
+affected checks pending · **Owner:** Codex · **Updated:** 2026-11-16
 
 Companion to [the display-targeted build ledger](DISPLAY-TARGETED-DV-BUILD.md).
 This records the measured gamut correction, its limits and its evidence.
@@ -23,20 +23,80 @@ There are no large GLSL constant arrays and no new feature switch.
 
 | Target | Reference ID | Black | Supported vertices |
 |---|---:|---:|---:|
-| P3 D65 / PQ, 600 nits | 27 | 0.005 nits | 40,726 |
-| P3 D65 / PQ, 1000 nits | 48 | 0.005 nits | 30,309 |
-| P3 D65 / PQ, 2000 nits | 37 | 0.005 nits | 28,338 |
+| P3 D65 / PQ, 600 nits | 27 | 0–0.005 nits | 40,726 |
+| P3 D65 / PQ, 1000 nits | 48 | 0–0.005 nits | 30,309 |
+| P3 D65 / PQ, 2000 nits | 37 | 0–0.005 nits | 28,338 |
 
 The lattice has intensity planes 0–64 and chroma indices −16–16. A missing
-vertex retains the analytic calculation. Other peaks, black levels, gamuts
-and encodings also retain it. The 400- and 1600-nit buckets are unmeasured;
+vertex retains the analytic calculation. Other peaks, black levels outside
+the finite 0–0.005-nit range, gamuts and encodings also retain it. The 400- and 1600-nit buckets are unmeasured;
 the reference requires suitable exact L2 metadata and refuses the attempted
 peak overrides. This change makes no claim about those buckets or BT.709.
 
-The 600-nit black-level probe compares 28,399 common direct vertices at zero
-and 0.005 nits. The maximum difference is 0.67 code, with a median channel
-difference of 0.012 code. That does not establish black-level independence;
-the lookup remains limited to the measured 0.005-nit identity.
+## Target black changes the curve, not the normalized gamut vertices
+
+The original 600-nit probe found at most 0.67 native code between 28,399 common
+direct vertices at zero and 0.005 nits. That narrow observation originally
+left lookup eligibility at exactly 0.005. At 0.0001 nits the guard selected
+the analytic lattice instead, reintroducing missing dark-chroma correction.
+The full preserved Dumb Money frame has 23 active pixels above 0.05 dE in the
+double CPU renderer's float export, with a maximum of 0.26448. Keeping its
+correct 0.0001-nit curve and using the existing measured vertices reduces the
+maximum to 0.01168, with none above 0.05. These are CPU numerical measurements;
+they do not establish a deployed GPU helper's RGB48 result.
+
+The [black-range qualification manifest](../../tools/dv_processing/cm29_gamut/black-range-qualification.json)
+binds 48 new licensed CPU reference runs, their inputs and outputs, measurement
+sources and all coordinate-level scores. Private rasters and scripts remain in
+the named retained artifact directory. No existing CSV vertex changes.
+
+| Paired native observation against 0.005 nits | Samples | Maximum difference, 16-bit native codes |
+|---|---:|---:|
+| Integer normalized IPT vertices; neutral and lift −0.5; all three peaks and black 0, 0.0001, 0.001 | 426,189 | 1.0342 |
+| Fixed seeded positions inside cells; lift −0.5; same peaks and black anchors | 834,943 | 1.1040 |
+
+Each point is an 11×5 flat tile; the reference output is native P3/PQ float32,
+so no inverse BT.2020 matrix contaminates dark native channels. The source is
+constructed independently for each target black to hold the normalized IPT
+coordinate fixed. Median channel differences are 0.0039–0.0156 code for direct
+vertices and 0.0049–0.0156 for cell interiors. Each family has one 2000-nit,
+zero-black comparison above one code; all 0.0001/0.001 comparisons stay below
+one. These measurements include source float32 construction and licensed
+renderer numerical variation; they do not assert identical internal table bits.
+
+The implementation's P3/PQ lattice coordinates and native decoding depend on
+peak and gamut; black enters the upstream tone curve. Together with the paired
+observations, that separation supports reuse across the bounded measured black
+interval. Selection therefore accepts finite black from zero through 0.005
+nits for the same exact P3 peaks. Negative, nonfinite and higher blacks retain
+the analytic path, as do unsupported peaks/gamuts and missing vertices. The
+regression compares a fixed dark-red source tile against twelve licensed float
+outputs, exercising both the changing curve and the native lattice.
+
+## The whole stress grid remains an explicit mapper limitation
+
+A separate unpartitioned 120,937-color grid mixes a 33³ BT.2020/PQ cube, seeded
+random colors, log-dark colors and zero-channel colors. Its [recorded scores](../../tools/dv_processing/cm29_gamut/black-range-qualification.json)
+retain every sample and every worsening; no favorable residual subset defines
+the qualified black domain. The grid deliberately reaches outside the declared
+P3 / 4000-nit source mastering volume. At the existing 0.005-nit setting the
+measured mapper already has these absolute residuals:
+
+| Peak | Maximum dE | Samples above 0.05 | Measured worse than analytic and above 0.05 |
+|---|---:|---:|---:|
+| 600 | 122.8288 | 14,742 | 277 |
+| 1000 | 104.5208 | 17,600 | 612 |
+| 2000 | 98.9899 | 15,122 | 556 |
+
+At 0.0001 nits, measured reuse has maxima 119.3581 / 99.6069 / 97.6558 and
+14,267 / 17,074 / 14,763 samples above 0.05 at those peaks; 266 / 592 / 473
+samples are worse than analytic and above 0.05. These stress residuals are
+reported, not accepted as universal mapper fidelity. The black-range conclusion
+comes from paired native coordinates and the complete real frame, while broader
+mapper perfection on arbitrary stress inputs remains unproven. All twelve scalar
+grid evaluations are bound to the candidate headers and are bit-identical to
+the diagnostic table-reuse evaluations; the full-frame score retains all 696,117
+small worsenings, with none above 0.05.
 
 ## Acquire native output and reject unsupported extrapolation
 
