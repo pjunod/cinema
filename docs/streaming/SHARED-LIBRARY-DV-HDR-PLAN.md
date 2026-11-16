@@ -637,3 +637,11 @@ checks the boot record's encoder choice and the capability-child spawn count
 for both proven and unproven hardware. Unit execution and its old-code
 counterfactual remain pending final qualification. No new feature switch or
 watchdog is introduced.
+
+### Source processed admin Stop regression (2026-11-16)
+
+Added `admin_stop_of_a_source_processed_session_settles_and_ends_the_start`:
+the Linux fixture observes the Source Activity row, stops its assigned work,
+and holds the actual child's reader after EOF to prove Stop waits for physical
+settlement before ending the Source start. The regression has not been run;
+it is not physical qualification.
