@@ -379,7 +379,11 @@ impl RefitStats {
         // Qualification must measure the coefficients that publication writes,
         // including the common MMR grid, rather than the finer optimizer result.
         let written = curves.publication_composer();
-        if written.luma.iter().flatten().chain(written.chroma.iter().flatten())
+        if written
+            .luma
+            .iter()
+            .flatten()
+            .chain(written.chroma.iter().flatten())
             .any(|v| !v.is_finite())
         {
             return None;
@@ -405,8 +409,7 @@ impl RefitStats {
             let beta: Vec<f64> = (0..MMR_TERMS)
                 .map(|i| {
                     written.chroma[ch][i]
-                        / ((OUT_SCALE / 4096.0)
-                            * (1024.0 / IN_SCALE).powi(MMR_DEGREE[i]))
+                        / ((OUT_SCALE / 4096.0) * (1024.0 / IN_SCALE).powi(MMR_DEGREE[i]))
                 })
                 .collect();
             let cross: f64 = (0..MMR_TERMS).map(|i| beta[i] * self.xty[2 * i + ch]).sum();
@@ -814,7 +817,11 @@ fn luma_shape(composer: &ComposerCurves) -> Result<(), Unservable> {
 pub fn servable(curves: &RefitCurves) -> Result<ServableCurves, Unservable> {
     let raw = curves.composer();
     let composer = curves.publication_composer();
-    if raw.luma.iter().flatten().chain(raw.chroma.iter().flatten())
+    if raw
+        .luma
+        .iter()
+        .flatten()
+        .chain(raw.chroma.iter().flatten())
         .chain(composer.luma.iter().flatten())
         .chain(composer.chroma.iter().flatten())
         .any(|&v| split(v, 23).is_err())

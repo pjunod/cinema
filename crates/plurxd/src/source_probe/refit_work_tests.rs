@@ -621,7 +621,10 @@ async fn new_refit_selections_require_current_method_but_legacy_pins_keep_exact_
         &helper(),
     );
     let legacy_version = "dv-refit-safe-v1";
-    assert_ne!(FIT_VERSION, legacy_version, "the method upgrade is versioned");
+    assert_ne!(
+        FIT_VERSION, legacy_version,
+        "the method upgrade is versioned"
+    );
     let (mut legacy_title, mut legacy_scenes) =
         dv_refit_title::fit(dv_refit_title::parse(mixed().as_bytes()).expect("run"))
             .rows(&src)
@@ -635,14 +638,15 @@ async fn new_refit_selections_require_current_method_but_legacy_pins_keep_exact_
     legacy_coefficients.chroma[0][0] += 1;
     let legacy_coefficients = legacy_coefficients.clone();
     let legacy_pts = legacy_scenes[0].first_pts;
-    legacy_title.curve_digest = dv_refit_title::curve_digest(legacy_scenes.iter().map(|s| DigestScene {
-        first_frame: s.first_frame as u64,
-        frames: s.frames as u64,
-        first_pts: s.first_pts,
-        end_pts: s.end_pts,
-        time_base: &s.time_base,
-        coefficients: s.coefficients.as_ref(),
-    }));
+    legacy_title.curve_digest =
+        dv_refit_title::curve_digest(legacy_scenes.iter().map(|s| DigestScene {
+            first_frame: s.first_frame as u64,
+            frames: s.frames as u64,
+            first_pts: s.first_pts,
+            end_pts: s.end_pts,
+            time_base: &s.time_base,
+            coefficients: s.coefficients.as_ref(),
+        }));
     let legacy_digest = digest_bytes(&legacy_title.curve_digest).expect("legacy digest");
     let mut request = enqueue_request(&src, now_ms());
     let JobPayload::DvRefit { fit_version, .. } = &mut request.payload else {
@@ -682,11 +686,16 @@ async fn new_refit_selections_require_current_method_but_legacy_pins_keep_exact_
         .expect("legacy pin")
         .expect("legacy table retained");
     assert_eq!(
-        pinned.curves_at(legacy_pts).expect("legacy scene").quantised(),
+        pinned
+            .curves_at(legacy_pts)
+            .expect("legacy scene")
+            .quantised(),
         legacy_coefficients
     );
 
-    let found = demand(&fx.store, file.id).await.expect("new method demanded");
+    let found = demand(&fx.store, file.id)
+        .await
+        .expect("new method demanded");
     let src = source(&found, &helper());
     let output = dv_refit_title::parse(mixed().as_bytes()).expect("run");
     let (_, settlement) = fit_with(&fx.store, &src, Ok(HelperRun::Stats(output))).await;

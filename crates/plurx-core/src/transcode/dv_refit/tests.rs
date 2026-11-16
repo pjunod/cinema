@@ -413,11 +413,7 @@ fn squared_error_from_statistics_equals_the_direct_sum() {
         let p = published.luma[usize::from(b[0]) / 128];
         let fy = (p[0] + p[1] * y + p[2] * y * y) * 4096.0;
         direct_luma += (f64::from(c[0]) - fy).powi(2);
-        let x = mmr_basis(
-            y,
-            f64::from(b[1]) / 1024.0,
-            f64::from(b[2]) / 1024.0,
-        );
+        let x = mmr_basis(y, f64::from(b[1]) / 1024.0, f64::from(b[2]) / 1024.0);
         for ch in 0..2 {
             let fit: f64 = (0..MMR_TERMS)
                 .map(|k| x[k] * published.chroma[ch][k])
@@ -809,11 +805,11 @@ fn the_helper_adds_the_residual_to_a_nonidentity_mapping() {
     assert!(residuals > samples.len());
 }
 
-
 fn native_grid_fixture() -> (QuantisedCurves, QuantisedCurves, Value) {
     let data: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/dv-refit/published-mmr-q12.json"
-    )).expect("native coefficient fixture");
+    ))
+    .expect("native coefficient fixture");
     let original = serde_json::from_value(data["original"].clone()).expect("original Q23 curves");
     let expected = serde_json::from_value(data["expected"].clone()).expect("qualified Q12 curves");
     (original, expected, data["point06"].clone())
@@ -839,10 +835,21 @@ fn optimizer_from_stored(q: &QuantisedCurves) -> RefitCurves {
 #[test]
 fn published_mmr_uses_the_native_qualified_coefficient_grid() {
     let (original, expected, _) = native_grid_fixture();
-    let published = servable(&optimizer_from_stored(&original)).expect("publishable").quantised();
-    assert_eq!(published, expected, "the qualified native program, including signed rounding");
-    assert_eq!(published.luma, original.luma, "luma retains its Q23 precision");
-    assert_ne!(published.chroma, original.chroma, "low MMR bits must not escape into publication");
+    let published = servable(&optimizer_from_stored(&original))
+        .expect("publishable")
+        .quantised();
+    assert_eq!(
+        published, expected,
+        "the qualified native program, including signed rounding"
+    );
+    assert_eq!(
+        published.luma, original.luma,
+        "luma retains its Q23 precision"
+    );
+    assert_ne!(
+        published.chroma, original.chroma,
+        "low MMR bits must not escape into publication"
+    );
     assert!(published.chroma.iter().flatten().all(|n| n % 2048 == 0));
 }
 
@@ -855,8 +862,11 @@ fn held_out_error_uses_the_published_mmr_grid() {
     let scored = held.squared_error(&curves).expect("second moments");
     let output = floats(&point["published_unrounded_codes12"]);
     let expected = (output[1] - 2084.0).powi(2) + (output[2] - 2176.0).powi(2);
-    assert!((scored.chroma - expected).abs() < 1e-6,
-        "held-out scoring must evaluate the published program: {} vs {expected}", scored.chroma);
+    assert!(
+        (scored.chroma - expected).abs() < 1e-6,
+        "held-out scoring must evaluate the published program: {} vs {expected}",
+        scored.chroma
+    );
 }
 
 #[test]
@@ -864,5 +874,9 @@ fn retained_q23_curves_keep_their_original_coefficients() {
     let (original, _, _) = native_grid_fixture();
     assert!(original.chroma.iter().flatten().any(|n| n % 2048 != 0));
     let retained = ServableCurves::from_quantised(&original).expect("retained legacy fit");
-    assert_eq!(retained.quantised(), original, "a pinned digest must never be regridded");
+    assert_eq!(
+        retained.quantised(),
+        original,
+        "a pinned digest must never be regridded"
+    );
 }
