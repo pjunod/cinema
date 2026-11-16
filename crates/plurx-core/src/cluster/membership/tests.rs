@@ -10279,6 +10279,21 @@ fn media_route_directory_excludes_learners_when_the_route_requires_a_voter() {
     );
 }
 
+/// A4 review: the offline probe pass reads the authority on a replica hit,
+/// and also when the replica cannot answer: a local failure must not stall
+/// the probe answers a node removal is waiting on.
+#[test]
+fn a_probe_hint_error_still_owes_the_authoritative_read() {
+    let idle: Result<Vec<u8>, crate::error::StoreError> = Ok(Vec::new());
+    let hit: Result<Vec<u8>, crate::error::StoreError> = Ok(vec![1]);
+    let failed: Result<Vec<u8>, crate::error::StoreError> = Err(
+        crate::error::StoreError::Database("local replica".to_owned()),
+    );
+    assert!(!super::probe_hint_owes_authority(&idle));
+    assert!(super::probe_hint_owes_authority(&hit));
+    assert!(super::probe_hint_owes_authority(&failed));
+}
+
 #[tokio::test(start_paused = true)]
 async fn shutdown_handoff_without_a_replicated_store_returns_at_once() {
     let started = tokio::time::Instant::now();
