@@ -1323,8 +1323,39 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     if dolby_vision {
         // Profile 8.1 preserved, and Profile 7 converted to 8.1.
         assert_eq!(decoded.response().delivered_dolby_vision_profile, Some(8));
+        // The FEL / RPU / DYN rows local playback shows: computed by the
+        // Source, decoded by B's closed Start decoder, and carried unchanged
+        // into the Start B answers its own client with.
+        let enhancement = decoded
+            .response()
+            .enhancement
+            .clone()
+            .expect("a Dolby Vision Start carries its enhancement rows");
+        assert!(enhancement.is_well_formed());
+        assert!(!enhancement.details.is_empty(), "{enhancement:?}");
+        let source_session =
+            Uuid::parse_str(&decoded.response().session_id).expect("Source session");
+        let client = super::super::sharing_playback_wire::project_shared_start_with_receiver(
+            decoded.response().clone(),
+            source_session,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            3,
+            true,
+        )
+        .expect("B's client Start");
+        assert_eq!(client.enhancement, Some(enhancement.clone()));
+        assert_eq!(
+            serde_json::to_value(&client).expect("client Start")["enhancement"],
+            serde_json::to_value(&enhancement).expect("rows")
+        );
     } else {
         assert_eq!(decoded.response().delivered_dolby_vision_profile, None);
+    }
+    if matches!(mode, SourceFixtureMode::DolbyVisionUnaffirmed) {
+        // A receiver that never affirmed relay may be one whose decoder
+        // refuses the rows: it is sent none.
+        assert!(decoded.response().enhancement.is_none());
     }
     let mut recipe: Value = serde_json::from_slice(&fixture.request).expect("recipe");
     let request = recipe["session"]["request_id"]
@@ -1359,7 +1390,36 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         fixture.reference.item_id.as_str(),
         fixture.reference.file_id.as_str()
     );
+    // An HDR or Dolby Vision session opens on the master even without a
+    // selected subtitle: only the master can say VIDEO-RANGE and
+    // SUPPLEMENTAL-CODECS.
+    let ranged_without_subtitles =
+        !native && matches!(expected_range, Some("hdr10" | "hlg" | "dolby_vision"));
+    if ranged_without_subtitles {
+        assert_eq!(
+            decoded.response().playlist_url,
+            format!("/api/v1/hls/{}/master.m3u8", decoded.response().session_id),
+            "{mode:?} opens on the master"
+        );
+    } else if !native {
+        assert_eq!(
+            decoded.response().playlist_url,
+            format!("/api/v1/hls/{}/index.m3u8", decoded.response().session_id),
+            "{mode:?} keeps the media playlist"
+        );
+    }
     for h2 in [false, true] {
+        if ranged_without_subtitles {
+            actual_master_declares_the_range_without_subtitles(
+                address,
+                h2,
+                &url,
+                &fixture,
+                &mut recipe,
+                mode,
+            )
+            .await;
+        }
         recipe["resource"] = json!(if native { "video.m3u8" } else { "index.m3u8" });
         let response = actual_resource_request(
             address,
@@ -1638,6 +1698,67 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     server.await.expect("server").expect("shutdown");
     drop(owned);
     fixture.shutdown().await;
+}
+/// `sharing_source_http_dolby_vision_master_declares_supplemental_codecs_without_subtitles`
+/// (T2.2), run inside the HDR10 encode and Dolby Vision copy fixtures: the master a
+/// subtitle-less session opens on admits no subtitle group and declares the
+/// delivered range and, for Dolby Vision, the enhanced codec.
+async fn actual_master_declares_the_range_without_subtitles(
+    address: std::net::SocketAddr,
+    h2: bool,
+    url: &str,
+    fixture: &RealSourceStartFixture,
+    recipe: &mut Value,
+    mode: SourceFixtureMode,
+) {
+    recipe["resource"] = json!("master.m3u8");
+    let response = actual_resource_request(
+        address,
+        h2,
+        url,
+        fixture.headers.clone(),
+        serde_json::to_vec(&recipe).expect("master request"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{mode:?} master h2={h2}");
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.apple.mpegurl"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("actual master bytes");
+    plurx_core::sharing_resources::validate_sharing_playlist(
+        &plurx_core::sharing_resources::SharingHlsResource::parse("master.m3u8")
+            .expect("master path"),
+        &bytes,
+    )
+    .expect("closed actual master");
+    let master = std::str::from_utf8(&bytes).expect("master text");
+    assert!(master.contains("VIDEO-RANGE=PQ"), "{mode:?}: {master}");
+    assert!(
+        !master.contains("TYPE=SUBTITLES") && !master.contains("SUBTITLES=\"subs\""),
+        "{mode:?} admits no subtitle group: {master}"
+    );
+    assert!(master.ends_with("index.m3u8\n"), "{mode:?}: {master}");
+    if matches!(
+        mode,
+        SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
+    ) {
+        assert!(
+            master.starts_with("#EXTM3U\n#EXT-X-VERSION:10\n"),
+            "{master}"
+        );
+        assert!(
+            master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08."),
+            "{mode:?} declares Profile 8 Dolby Vision: {master}"
+        );
+    } else {
+        assert!(
+            !master.contains("SUPPLEMENTAL-CODECS"),
+            "{mode:?}: {master}"
+        );
+    }
 }
 async fn actual_vtt_writer_end(
     fixture: &RealSourceStartFixture,

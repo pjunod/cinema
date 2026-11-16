@@ -303,6 +303,7 @@ pub(super) async fn prepare_source_start(
     reference: SourcePlaybackTarget,
     session: CreateSession,
     dolby_vision_withheld: bool,
+    relays_enhancement: bool,
 ) -> Result<PreparedSourceStart, SourceStartFailure> {
     if session.presentation.as_deref() == Some(DIRECT_PRESENTATION) {
         return Box::pin(prepare_source_direct(state, headers, reference, session))
@@ -321,6 +322,9 @@ pub(super) async fn prepare_source_start(
     })?;
     if dolby_vision_withheld && plurx_core::playback::is_dolby_vision(prepared.file()) {
         prepared.add_plan_note(super::receiver_presentation::DOLBY_VISION_WITHHELD_NOTE);
+    }
+    if relays_enhancement {
+        prepared.relay_enhancement();
     }
     // The delivery policy is decided here, after a fresh claim, from the
     // Source's own prepared request (the player's real caps through the

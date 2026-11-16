@@ -329,16 +329,64 @@ Update: `sharing_source_bound_invocation_projects_the_complete_start_response`
 (`tests.rs:996`) if its fixture is HDR.
 Risk: see §5 Q1 — confirm on one Apple TV before and after.
 
-**T2.3 — Remove the dead client guards and the stale copy.**
-Files: the five client lines in §1.4, the message at
-`web/core/shared-decision.js:23,90-92`, docs
-(`IMPLEMENTATION.md:6304-6317`, `OPERATIONS.md:179-180`,
-`SHARED-LIBRARIES-STATUS.md:22`, `HANDOFF.md:231`).
-Tests: update `clients/apple/Tests/SharedDecisionClientTests.swift` (case 4,
-`:308`), `SharedPlaybackControlTests.swift:307`,
-`SharedDecisionClientTest.kt:286`. Client edits are code, so they need the
-build bumps and go out through TestFlight / Play internal; nothing in M1–M2
-waits on them.
+**T2.3 — Shared clients ask for Dolby Vision as local does; remove the stale copy.**
+*(Corrected 2026-11-15: the guards are not dead — §6.1.)* The planner clamps
+the derived plan down to the ask, and no shared client sends
+`preserve_dolby_vision: true`, so without this task no device gets Dolby
+Vision over sharing.
+Files: Apple `SharedPlaybackModels.swift` (`SharedPlaybackPlan.make` sends
+`preserveDolbyVision` for a copy from the decision's verdict, the rule of
+`PlayerController.shouldPreserveDolbyVision`; the init guard goes),
+`SharedDecisionClient.swift` and `SharedPlaybackControl.swift` (guards go);
+Android `SharedPlaybackSession.kt` (`sharedPlaybackPlan` sends
+`preserve_dolby_vision` for a copy from `delivery.preserve_dolby_vision ?:
+preserve_dolby_vision`, as `PlayerScreen` / `hlsSessionRequest` do),
+`SharedDecisionClient.kt`, `SharedPlaybackModels.kt` (guards go); web
+`core/shared-decision.js` (guard and `dolbyVisionUnsupported` go; the
+refusal message for an older or Profile 5 Source stays, reworded) and
+`player/decode-tiers.js` (`choosePlayRoute`'s Dolby Vision refusal goes;
+the copy open already sends local's ask). There is no convert field on any
+client: the server's conversion follows the preservation
+(`review.convert_dolby_vision &= review.preserve_dolby_vision`). Docs:
+`IMPLEMENTATION.md` §"Dolby Vision follows the local plan",
+`OPERATIONS.md`, `SHARED-LIBRARIES-STATUS.md`, `HANDOFF.md`.
+Tests: `SharedDecisionClientTests.swift`
+(`testInitialStartSendsTheDolbyVisionPreservationAsk`, case 4 removed),
+`SharedPlaybackControlTests.swift`
+(`testSharedBurnAndHDRPlanUseSourceOwnedStartFields` asserts the ask),
+`SharedDecisionClientTest.kt`
+(`dolbyVisionCapableSharedStartAsksToPreserveExactlyAsLocalDoes`),
+`tests/web/shared-decision.test.js`, `tests/web/file-context.test.js`.
+Client edits are code: Apple build and Android `versionCode` bumped; they go
+out through TestFlight / Play internal.
+
+**T2.4 — B relays the FEL / RPU / DYN rows.** *(Added 2026-11-15.)*
+`StartResponse.enhancement` is `skip_deserializing` (a local replay
+recomputes it), so B's whole-DTO round-trip refused any Source Start that
+carried it; T1.6 stopped the Source sending it. Instead:
+`DecodedSourceHlsStart::parse` (`http/sharing_start_decode.rs`) decodes
+`response.enhancement` as `PlaybackEnhancement` and admits it only when
+`PlaybackEnhancement::is_well_formed` (new, `plurx-core`
+`playback/enhancement.rs`: at most one detail per badge, one bounded
+sentence each, `active` exactly the active details' badges in order — the
+shape `playback_enhancement` builds) holds; `project_shared_start_with_receiver`
+carries it unchanged into B's client Start. The Source restores
+`session_enhancement` in `PreparedSourcePlayback::start_response`, but only
+for a receiver known to decode them (`relay_enhancement()`): one whose own
+Start carries the Dolby Vision affirmation header, or a recipe whose caps
+still claim Dolby Vision (the ingress withholds those claims from every
+unaffirmed receiver in `normalize_wire`), because an older receiver still
+refuses the rows. A forwarded owner planning an SDR or HDR10 player cannot
+tell, so that player gets no rows. T2.1 and T2.4 ship together: a receiver
+that sends the affirmation must also decode the rows.
+Tests: `sharing_start_decode.rs::sharing_start_decoder_relays_the_enhancement_rows_it_can_hold_to_the_planner_shape`,
+`enhancement.rs::every_built_enhancement_is_well_formed_for_a_receiver_to_relay`,
+and the Dolby Vision preserved / converted e2e fixtures assert the rows reach
+`project_shared_start_with_receiver`'s client Start.
+Not covered: a B replay of a persisted create drops the rows, as a local
+replay does (`skip_deserializing`); the real B fixtures
+(`shared_receiver_fixture.rs`) are `#[ignore]` (CGNAT namespace) and were not
+run.
 
 ### M3 — Profile 5 encodes: the Source owns the pixel proof
 
@@ -427,8 +475,10 @@ opened yet. Tests run on the pinned gate image (FFmpeg 6.1, no `dovi_rpu`).
 | T1.5 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `60ea3ae03`; 4 new/rewritten tests pass, fail on old decoder/ingress |
 | T1.6 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `a7602fc27` (+ ledger `468e9e90d`); 4 e2e fixtures pass |
 | T2.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `5c4542676`; 3 new tests pass, fail on mutated old behaviour |
-
 | Review | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `9ee8d7dcb`..`ad9364440` (findings 1–11); each new test fails on the old behaviour |
+| T2.2 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `d9f38cc93` (+ rustfmt `ed2ba5abe`), branch `claude/shared-dv-hdr-m2`; 1 unit test + master check in 3 e2e fixtures pass, fail on the old URL and on a native-only master |
+| T2.3 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `87b2df581`; web 55/55 + web-policy + web-control pass (2 changed tests fail on old guards); Android new test passes, fails on old sources; Apple tests not run (no Xcode reachable) |
+| T2.4 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built in the commit after `87b2df581`; decode test and DV e2e rows assertion pass, fail without the decoder; the `plurx-core` shape test is not run (`plurx-core --lib` tests do not compile on this base: `store/applied_view.rs` E0282) |
 
 Review fixes (2026-11-16): T2.1 no longer adds a relay token — Dolby Vision
 is withheld in the effective recipe itself (`normalize_wire`), so an older
@@ -486,6 +536,23 @@ both pass on the gate's FFmpeg 6.1 and are open questions for M2.
   (`shared_source_forwarding.rs` `:253`, `:270`) needs no new field.
   `public_recipe_hash` strips every reserved token, so it is unchanged for an
   old receiver.
+- **T2.2.** The copy's probe evidence lived on `SourceNativeTracks`, so the
+  master could not be built without subtitle tracks; it moved to
+  `SourceViewerState::presentation_probe`. The plan's
+  `sharing_source_http_dolby_vision_master_declares_supplemental_codecs_without_subtitles`
+  is a helper run inside the HDR10 encode and the Dolby Vision preserved /
+  converted fixtures rather than another fixture run. Those fixtures use the
+  indexed VOD path; the growing path's master change is the same edit and is
+  not exercised by a test. `sharing_source_bound_invocation_projects_the_complete_start_response`
+  is SDR and needed no update. §5 Q1 is still unverified on a device.
+- **T2.3.** See the first correction: the task is the ask, not a guard
+  cleanup. The web copy open already composed local's ask; only the guards
+  blocked it. No Apple per-build fragment was added: its required `Issue:`
+  number is not known for this effort.
+- **T2.4** is new (see §4); the Source sends the rows only to a receiver
+  known to have affirmed Dolby Vision relay, and the unaffirmed fixture
+  asserts it sends none.
+
 
 ### FFmpeg 8 copy colour metadata fix (2026-11-16)
 
