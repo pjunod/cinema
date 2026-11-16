@@ -6647,9 +6647,9 @@ impl JobManager {
     /// between a learner that quietly does nothing and one that schedules the
     /// cluster's jobs a second time.
     async fn schedule_tick(self: &Arc<Self>, transcode: &Arc<TranscodeManager>) -> bool {
-        // Local fsynced join evidence must be replayed even if this daemon
-        // restarted as a learner. Replicated no-reader proof is node-agnostic.
-        self.replay_settled_source_custody().await;
+        // Any node may collect expired source leases, learner or voter; the
+        // collection is garbage only (capacity frees at expiry plus grace).
+        self.collect_expired_source_leases().await;
         if !self.may_run_cluster_jobs().await {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
@@ -6835,7 +6835,7 @@ impl JobManager {
         tokio::join!(preparation, fragments, libraries, subtitles);
     }
 
-    async fn replay_settled_source_custody(&self) {
+    async fn collect_expired_source_leases(&self) {
         if let Err(error) = self.store.reap_expired_source_leases(clock_ms()).await {
             tracing::warn!(%error, "collecting expired source leases");
         }
@@ -10636,7 +10636,7 @@ impl JobManager {
         loop {
             match self.store.register_background_source_custody(owner.clone(), clock_ms()).await {
                 Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::Registered(receipt)) => {
-                    crate::background_jobs::settle_no_reader_source_custody(&self.store, receipt).await;
+                    crate::background_jobs::release_unread_source_lease(&self.store, receipt).await;
                     return;
                 }
                 Ok(plurx_core::store::background_jobs_resources::BackgroundSourceRegistration::NotRequired

@@ -134,6 +134,12 @@ claim refused ──▶ release local capacity ──▶ poll again
 
 ### 2.2 A successful activation removes the only pre-read journal
 
+> Superseded (2026-11-16): the activation journal, `activate_background_with_journal`
+> and settlement proofs were removed by the source-lease build; a reader is one
+> `source_leases` row with an expiry. See
+> [SOURCE-LEASE-AS-BUILT.md](SOURCE-LEASE-AS-BUILT.md). The text below is the
+> record of the defect as it was.
+
 The [activation helper](../../crates/plurxd/src/source_custody.rs)
 `activate_background_with_journal` writes an activation intent, activates the
 exact custody, then clears that journal on success before the reader runs.

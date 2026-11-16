@@ -376,7 +376,7 @@ async fn settle_read_owner(
             if physical_joined {
                 crate::background_jobs::settle_joined_source_custody(store, held).await;
             } else {
-                crate::background_jobs::settle_no_reader_source_custody(store, held).await;
+                crate::background_jobs::release_unread_source_lease(store, held).await;
             }
             return;
         } else {

@@ -428,7 +428,7 @@ skew guard bounds disagreement between them.
    `apply_pending_storage_domains(clock_ms())`. Log `applied` and
    `superseded` at info with the revision; nothing for `waiting`.
 3. **At daemon start.** Once, after migration and before the scheduler
-   loop, beside the first `replay_settled_source_custody` (≈6590), if
+   loop, beside the first `collect_expired_source_leases` (≈6590), if
    `may_run_cluster_jobs()`.
 
 Latency after the last blocker finishes is at most one scheduler tick. No

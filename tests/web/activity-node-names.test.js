@@ -802,7 +802,7 @@ test("Jobs reports independent worker rates and flags overdue scans even when ot
     assert.match(html,/3 manual library jobs have been due/);
     assert.match(html,/href="#\/activity\/jobs\/prior-job">subtitle extract<\/a> · job now succeeded/);
     assert.match(html,/reader on alpha/);
-    assert.ok(html.indexOf("data-activity-source-recovery")<html.indexOf('id="activity-status"'));
+    assert.ok(html.indexOf("data-activity-source-uncollected")<html.indexOf('id="activity-status"'));
     painter.durable.error="observation failed";
     assert.match(paint(d),/Job processing rate unavailable/);
   } finally {Object.assign(painter.durable,prior,{processing:prior.processing});painter.view.tab=tab;}
@@ -810,7 +810,7 @@ test("Jobs reports independent worker rates and flags overdue scans even when ot
 test("a source lease left long past its expiry stays prominent after its job disappears and escapes identities", () => {
   Object.assign(painter.durable,{rows:[],activeJobs:[]});
   const html=paint(snapshot({analysis:sourceObservation([sourceHolder({work_id:'gone-<reader>"',resource_key:'source_io:<disk>'})])}));
-  const banner=html.indexOf("data-activity-source-recovery");
+  const banner=html.indexOf("data-activity-source-uncollected");
   assert.ok(banner>=0 && banner<html.indexOf('id="activity-status"'));
   assert.ok(banner<html.indexOf('id="cluster-workers"'));
   assert.match(html,/Source leases not collected/);
@@ -831,27 +831,27 @@ test("an uncollected lease is flagged only once the sweep is overdue, from obser
     sourceHolder({phase:"cleanup_pending",lease_expires_at_ms:observed-179999}),
   ]) {
     const html=paint(snapshot({analysis:sourceObservation([holder],{now_ms:observed})}));
-    assert.doesNotMatch(html,/data-activity-source-recovery|Source capacity unknown/);
+    assert.doesNotMatch(html,/data-activity-source-uncollected|Source capacity unknown/);
   }
   const overdue=paint(snapshot({analysis:sourceObservation([sourceHolder({phase:"reading",lease_expires_at_ms:observed-180000})],{now_ms:observed})}));
-  assert.match(overdue,/data-activity-source-recovery/);
+  assert.match(overdue,/data-activity-source-uncollected/);
   // A lease past its grace no longer counts, but one still present three
   // minutes after expiry still shows that the sweep is not running.
   const uncounted=paint(snapshot({analysis:sourceObservation([sourceHolder({active_occupancy:false,lease_expires_at_ms:observed-180000})],{now_ms:observed})}));
-  assert.match(uncounted,/data-activity-source-recovery/);
+  assert.match(uncounted,/data-activity-source-uncollected/);
 });
 test("missing unavailable or stale reader observations leave source capacity unknown", () => {
   for(const analysis of [undefined,{available:false},sourceObservation([],{now_ms:Date.now()-60000}),sourceObservation([],{now_ms:Date.now()+60000}),sourceObservation([],{source_io_holders:undefined})]) {
     const html=paint(snapshot({analysis}));
     assert.match(html,/Source capacity unknown/);
-    assert.doesNotMatch(html,/data-activity-source-recovery|No shared source readers/);
+    assert.doesNotMatch(html,/data-activity-source-uncollected|No shared source readers/);
   }
 });
 test("source recovery details stay administrator-only", () => {
   painter.me.is_admin=false;
   try {
     const html=paint(snapshot({analysis:sourceObservation([sourceHolder({work_id:"private-source-owner"})])}));
-    assert.doesNotMatch(html,/data-activity-source-recovery|data-activity-source-capacity|private-source-owner/);
+    assert.doesNotMatch(html,/data-activity-source-uncollected|data-activity-source-capacity|private-source-owner/);
   } finally {painter.me.is_admin=true;}
 });
 test("queued library work explains global source recovery without guessing domain ownership", () => {

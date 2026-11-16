@@ -418,10 +418,10 @@ pub(crate) async fn settle_joined_source_custody(
     }
 }
 
-/// Initial registration itself carries a durable no-reader proof. DELETE is
-/// conditional on that proof, so a duplicate or ambiguously armed reader stays
-/// charged instead of being mistaken for this unstarted operation.
-pub(crate) async fn settle_no_reader_source_custody(
+/// Deletes the source lease of an operation that never exposed input, and
+/// retries until the store answers: nothing else ends a lease whose owner
+/// registered it and then never started reading.
+pub(crate) async fn release_unread_source_lease(
     store: &Arc<dyn Store>,
     receipt: plurx_core::store::background_jobs_resources::BackgroundSourceCustodyToken,
 ) {
@@ -502,7 +502,7 @@ async fn settle_unstarted_job_source(
     }
     loop {
         if let Some(held) = receipt.take() {
-            settle_no_reader_source_custody(store, held).await;
+            release_unread_source_lease(store, held).await;
             return;
         }
         match store.register_background_source_custody(owner.clone(), unix_ms().unwrap_or_default()).await {

@@ -330,8 +330,8 @@ pub(super) async fn release_foreground<T: QueueSql>(
 /// Lapse after which a lease still present means the sweep itself is not
 /// running: the grace plus two one-minute scheduler ticks. The metrics
 /// snapshots in `hiqlite.rs` and `sqlite/mod.rs` inline it as `180000`.
-pub const SOURCE_RECOVERY_OVERDUE_MS: i64 = super::source_leases::SOURCE_LEASE_GRACE_MS + 120_000;
-const _: () = assert!(SOURCE_RECOVERY_OVERDUE_MS == 180_000);
+pub const SOURCE_LEASE_UNCOLLECTED_MS: i64 = super::source_leases::SOURCE_LEASE_GRACE_MS + 120_000;
+const _: () = assert!(SOURCE_LEASE_UNCOLLECTED_MS == 180_000);
 
 /// Collects expired source leases. A lease already stopped holding capacity
 /// at its expiry plus [`super::source_leases::SOURCE_LEASE_GRACE_MS`] (a paused

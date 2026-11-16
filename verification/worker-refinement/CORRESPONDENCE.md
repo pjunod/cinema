@@ -207,9 +207,10 @@ retains post-retirement physical settlement and journal cleanup outside the
 modeled transition and its liveness result.
 
 [Custody integration](../../crates/plurxd/src/source_custody.rs) and
-[recovery](../../crates/plurxd/src/source_custody/recovery.rs) additionally
-persist active-reader evidence, reconcile aborts against the exact Store,
-and settle only after independently verified host reboot. They are external
+recovery (`source_custody/recovery.rs`, removed by source-lease step 2) additionally
+persisted active-reader evidence, reconciled aborts against the exact Store,
+and settled only after independently verified host reboot; source leases now
+replace both (`docs/server/SOURCE-LEASE-AS-BUILT.md`). They are external
 source dependencies, not extra actions in this closed correspondence inventory.
 The [durable contract](../durable-jobs/CONTRACT.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
 and [operation wait map](../operation-progress/WAIT-MAP.md#verified-host-reboot-recovery--scoped-source-audit-on-2026-11-04)
