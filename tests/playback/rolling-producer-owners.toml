@@ -5929,7 +5929,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and their tests are deleted; no shape is added.
 # The tree already measured +4 above the reviewed count before this step
 # (main and #1597 alike); that unreviewed drift is left visible, not absorbed.
-expected_occurrences = 2200
+# Source lease steps 3+4 (2026-11-16): -7, all removals. The retry sleeps of
+# the source-custody activation, settlement and recovery loops in
+# background_jobs.rs and source_custody.rs go with the leases that replace
+# them; no shape is added. The +4 drift above stays visible.
+expected_occurrences = 2193
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
