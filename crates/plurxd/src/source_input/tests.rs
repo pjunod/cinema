@@ -318,14 +318,22 @@ async fn a_failed_served_read_is_recorded_for_the_consumer() {
     );
     file.set_len((bytes.len() + 1) as u64)
         .expect("source replacement mutation");
-    let changed = client
-        .get(input.url())
-        .header("range", format!("bytes={}-", SOURCE_HTTP_CHUNK))
-        .send()
-        .await
-        .expect("changed source range");
-    assert!(changed.bytes().await.is_err(), "the body ends in an error");
-    assert!(input.source_read_failed());
+    // Hyper may observe the failing first body chunk before it delivers the
+    // response headers. Both phases must fail the same consumer operation.
+    let changed = async {
+        let response = client
+            .get(input.url())
+            .header("range", format!("bytes={}-", SOURCE_HTTP_CHUNK))
+            .send()
+            .await?;
+        response.bytes().await
+    }
+    .await;
+    assert!(changed.is_err(), "the changed source cannot be served");
+    assert!(
+        input.source_read_failed(),
+        "the actual served read must record the source failure"
+    );
     input.close_and_wait().await.expect("close source");
 }
 
