@@ -1366,7 +1366,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v132: exact FEL outbox continuity and independent quality waiters.
     super::dv_title_jobs::MIGRATION_V2,
     // v133: source leases expand: one lease row per source reader.
-    super::source_leases::SQLITE_EXPAND,
+    super::source_leases::EXPAND,
     // v134: source leases contract: the v1 source-owner objects go. A
     // single SQLite process has no older binary to wait for.
     super::source_leases::CONTRACT,

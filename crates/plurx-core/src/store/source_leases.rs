@@ -11,18 +11,19 @@
 use crate::error::StoreError;
 use std::sync::LazyLock;
 
-/// The expand, as the replicated installer runs it.
-pub(crate) const EXPAND: &str = include_str!("source_leases_expand.sql");
-/// The contract: drops the v1 source-owner objects.
-pub(crate) const CONTRACT: &str = include_str!("source_leases_contract.sql");
-/// SQLite applies its base job schema once, at its own migration; the expand
-/// therefore reinstalls the claim effects (open-ended source reservation
-/// slots). The replicated store reinstalls them with its base schema.
-pub(crate) const SQLITE_EXPAND: &str = concat!(
+/// The expand, one text for both backends. It reinstalls the claim effects
+/// (open-ended source reservation slots): the replicated store installs its
+/// base job schema only when a cluster is created, so an upgraded cluster
+/// keeps the v1 two-slot trigger unless the expand replaces it.
+pub(crate) const EXPAND: &str = concat!(
     include_str!("source_leases_expand.sql"),
     "\n-- next statement\n",
     include_str!("background_job_claim_effects.sql")
 );
+/// The contract: drops the v1 source-owner objects.
+pub(crate) const CONTRACT: &str = include_str!("source_leases_contract.sql");
+/// The claim-effects trigger the expand rewrites; part of the lease shape.
+pub(crate) const CLAIM_EFFECTS: &str = "background_job_claim_effects";
 /// SQLite schema version before the expand and after it.
 pub(crate) const PRE_LEASE_VERSION: usize = 132;
 pub(crate) const EXPANDED_VERSION: usize = 133;
@@ -92,7 +93,7 @@ pub(crate) fn lease_id_valid(lease_id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'_' | b'.'))
 }
 
-pub(crate) const SHAPE_SQL: &str = "SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE name GLOB 'source_lease*' AND sql IS NOT NULL ORDER BY name";
+pub(crate) const SHAPE_SQL: &str = "SELECT name,COALESCE(sql,'') AS sql FROM sqlite_master WHERE (name GLOB 'source_lease*' OR name='background_job_claim_effects') AND sql IS NOT NULL ORDER BY name";
 
 /// Statements of an extension text, one per `-- next statement`.
 pub(crate) fn statements(sql: &str) -> Vec<String> {
@@ -106,7 +107,7 @@ pub(crate) fn statements(sql: &str) -> Vec<String> {
 fn shape(catalogue: &[(String, String)]) -> Vec<(String, String)> {
     catalogue
         .iter()
-        .filter(|(name, _)| name.starts_with("source_lease"))
+        .filter(|(name, _)| name.starts_with("source_lease") || name == CLAIM_EFFECTS)
         .map(|(name, sql)| (name.clone(), canonical(sql)))
         .collect()
 }
@@ -165,10 +166,14 @@ pub(crate) fn contracted_catalogue() -> Result<Vec<(String, String)>, StoreError
 }
 
 /// `None`: no lease objects (v1 only). `Some(2)`: expanded. `Some(3)`:
-/// contracted. Anything else is a partial or mutated catalogue.
+/// contracted. Anything else, including lease objects beside a claim-effects
+/// trigger the expand did not write, is a partial or mutated catalogue.
 pub(crate) fn version(installed: &[(String, String)]) -> Result<Option<i64>, StoreError> {
     let installed = shape(installed);
-    if installed.is_empty() {
+    if !installed
+        .iter()
+        .any(|(name, _)| name.starts_with("source_lease"))
+    {
         Ok(None)
     } else if installed == *EXPANDED {
         Ok(Some(2))
@@ -204,7 +209,10 @@ pub(crate) fn install_for_fixture(conn: &rusqlite::Connection) {
     // The expand restores the v85/v86 retention triggers; a hand-made
     // catalogue without queue retention keeps none.
     let retention = present("background_job_enqueue_command");
-    conn.execute_batch(EXPAND).expect("fixture source leases");
+    // The lease objects only: a hand-made catalogue has no attempt ledger
+    // for the claim effects to write.
+    conn.execute_batch(include_str!("source_leases_expand.sql"))
+        .expect("fixture source leases");
     if !retention {
         conn.execute_batch(
             "DROP TRIGGER background_job_enqueue_command; DROP TRIGGER background_job_maintenance_command;",

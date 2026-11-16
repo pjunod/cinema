@@ -13344,14 +13344,277 @@ async fn replicated_fixture_shape(client: &Client, sql: &str) -> Vec<(String, St
         .collect()
 }
 
+/// A current replicated store has the contracted source-lease tail; a
+/// historical fixture needs the published v1 source owners and the v1
+/// claim effects instead. The statements that rewind it, to run first in
+/// the caller's one transaction; `None` for a store without a lease tail.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_source_lease_rewind(client: &Client) -> Option<Vec<String>> {
+    use queue_fixture::source_extensions_fixture::{
+        source_lease_rewind_plan, CLAIM_EFFECTS_V1, SOURCE_LEASE_UNOWNED_SQL,
+    };
+    let present: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM sqlite_master WHERE name='source_lease_schema'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("replicated source lease inventory");
+    if present.first().is_none_or(|row| row.value == 0) {
+        return None;
+    }
+    require_replicated_fixture_marker(client, "source_lease_schema", 3).await;
+    let unowned: Vec<I64Value> = client
+        .query_consistent_map(SOURCE_LEASE_UNOWNED_SQL, hiqlite::params!())
+        .await
+        .expect("replicated source lease data inventory");
+    assert_eq!(
+        unowned.first().map(|row| row.value),
+        Some(0),
+        "historical fixture must not discard source leases"
+    );
+    Some(
+        source_lease_rewind_plan()
+            .iter()
+            .flat_map(|text| text.split("-- next statement"))
+            .chain(CLAIM_EFFECTS_V1)
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Review of source-lease steps 2-4, M1: a replicated store installs its
+/// base job schema only when the cluster is created, so an upgraded cluster
+/// keeps the v1 two-slot claim effects unless the expand replaces them. A
+/// populated v1 store: the first open expands and carries the live holder,
+/// the contract waits for every node's lease capability, a later open
+/// contracts, and repeated opens change nothing. Then three nodes each hold
+/// a source reader of the one unmapped key.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v1_source_store_expands_carries_holders_and_contracts_when_every_node_is_ready()
+{
+    use plurx_core::store::background_jobs::{
+        ClaimJob, ClaimOutcome, EnqueueJob, JobKind, JobPayload, JobRequest,
+    };
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("source lease upgrade client");
+    let telemetry = cluster._root.path().join("source-lease-upgrade.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current replicated store");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty owned fixture");
+    let store: Arc<dyn Store> = Arc::new(current);
+    let (_, file_id) = seed_file(&store, "source-lease-upgrade").await;
+    let job = |index: usize| EnqueueJob {
+        id: uuid::Uuid::new_v4().to_string(),
+        payload: JobPayload::FragmentIndexBuild {
+            file_id,
+            source_generation: format!("source:{file_id}"),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "d".repeat(64),
+            cache_key: format!("{index:064}"),
+            pipeline_digest: "a".repeat(64),
+        },
+        dedupe_key: format!("lease-upgrade:{index}"),
+        priority: 1,
+        not_before_ms: 1_000,
+        now_ms: 1_000,
+        request: JobRequest {
+            scope: "user:1".to_owned(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: "b".repeat(64),
+            consumer_kind: "analysis".to_owned(),
+            consumer_ref: format!("analysis:{index}"),
+            target_node_id: None,
+            deadline_ms: None,
+            retain_identity: false,
+        },
+    };
+    let claim = |id: &str, node: &str, now_ms: i64| ClaimJob {
+        job_id: id.to_owned(),
+        expected_revision: 0,
+        node_id: node.to_owned(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        kind: JobKind::FragmentIndexBuild,
+        payload_version: 1,
+        now_ms,
+        dispatched_at_ms: now_ms,
+    };
+    let enqueue = |index: usize| {
+        let store = Arc::clone(&store);
+        async move {
+            let request = job(index);
+            let id = request.id.clone();
+            store.enqueue_job(request).await.expect("enqueue");
+            id
+        }
+    };
+    let held = enqueue(0).await;
+    assert!(matches!(
+        store
+            .claim_job(claim(&held, "node-a", 1_001))
+            .await
+            .expect("claim the v1 holder"),
+        ClaimOutcome::Claimed { .. }
+    ));
+    // The v1 store: v1 source owners, the two-slot claim effects, and a
+    // live job reader recorded only by its job and its reservation.
+    let rewind = replicated_source_lease_rewind(&client)
+        .await
+        .expect("current store has a lease tail");
+    client
+        .txn(
+            rewind
+                .into_iter()
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("v1 source fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("atomic v1 source fixture");
+    client
+        .txn([
+            ("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER)", hiqlite::params!()),
+            ("CREATE TABLE cluster_node_join_staging(node_id TEXT PRIMARY KEY)", hiqlite::params!()),
+            ("CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER,PRIMARY KEY(node_id,capability))", hiqlite::params!()),
+            ("INSERT INTO cluster_nodes VALUES('node-a',10,NULL),('node-b',20,NULL),('node-c',30,NULL)", hiqlite::params!()),
+            ("INSERT INTO cluster_node_capabilities VALUES('node-a','source_leases_v2',10),('node-c','source_leases_v2',30)", hiqlite::params!()),
+        ])
+        .await
+        .expect("membership fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("membership fixture applied");
+    async fn text(client: &Client, sql: &str) -> Vec<String> {
+        client
+            .query_consistent(sql.to_owned(), hiqlite::params!())
+            .await
+            .expect("fixture inventory")
+            .iter_mut()
+            .map(|row| row.get::<String>("value"))
+            .collect()
+    }
+    let claim_effects =
+        "SELECT sql AS value FROM sqlite_master WHERE name='background_job_claim_effects'";
+    let lease_version =
+        "SELECT CAST(COALESCE((SELECT version FROM source_lease_schema),0) AS TEXT) AS value";
+    let catalogue = "SELECT type||' '||name||' '||COALESCE(sql,'') AS value FROM sqlite_master ORDER BY type,name";
+    let leases = "SELECT lease_id AS value FROM source_leases ORDER BY lease_id";
+    assert!(
+        text(&client, claim_effects).await[0].contains("SELECT 0 AS slot UNION ALL SELECT 1"),
+        "the fixture has the v1 two-slot claim effects"
+    );
+
+    let opened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("first lease-aware start");
+    drop(opened);
+    assert_eq!(text(&client, lease_version).await, ["2"], "expanded");
+    assert!(
+        text(&client, claim_effects).await[0].contains("NOT LIKE 'source_io%'"),
+        "the expand replaced the v1 claim effects"
+    );
+    assert_eq!(
+        text(&client, leases).await,
+        [format!("job:{held}:1")],
+        "the live v1 reader is carried as a lease"
+    );
+    let expanded = text(&client, catalogue).await;
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("restart while node-b runs the v1 binary"),
+    );
+    assert_eq!(
+        text(&client, catalogue).await,
+        expanded,
+        "the contract waits for node-b; nothing else changes"
+    );
+    client
+        .execute(
+            "INSERT INTO cluster_node_capabilities VALUES('node-b','source_leases_v2',20)",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("node-b runs a lease-aware binary");
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("start after every node is ready"),
+    );
+    assert_eq!(text(&client, lease_version).await, ["3"], "contracted");
+    let contracted = text(&client, catalogue).await;
+    assert!(
+        !contracted
+            .iter()
+            .any(|row| row.contains(" foreground_source_owners ")),
+        "the v1 source owners are gone"
+    );
+    let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("restart a contracted store");
+    assert_eq!(text(&client, catalogue).await, contracted, "a no-op");
+    let reopened: Arc<dyn Store> = Arc::new(reopened);
+    for (index, node) in [(1, "node-b"), (2, "node-c")] {
+        let id = {
+            let request = job(index);
+            let id = request.id.clone();
+            reopened.enqueue_job(request).await.expect("enqueue");
+            id
+        };
+        assert!(
+            matches!(
+                reopened
+                    .claim_job(claim(&id, node, 2_000))
+                    .await
+                    .unwrap_or_else(|error| panic!("{node}: {error}")),
+                ClaimOutcome::Claimed { .. }
+            ),
+            "{node} takes a reader of the one key"
+        );
+    }
+    assert_eq!(
+        text(
+            &client,
+            "SELECT node_id AS value FROM source_leases ORDER BY node_id"
+        )
+        .await,
+        ["node-a", "node-b", "node-c"],
+        "three readers of the unmapped source on three nodes"
+    );
+}
+
+/// The validated drops of the published source tail. A current store's
+/// contracted lease tail is rewound to it first, in the same statements.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn replicated_source_tail_drops(
     client: &Client,
     remove: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     use queue_fixture::source_extensions_fixture::{
-        validated_source_tail_drops, SOURCE_TAIL_SHAPE,
+        current_source_tail, published_source_tail, validated_source_tail_drops, SOURCE_TAIL_SHAPE,
     };
+    let rewind = replicated_source_lease_rewind(client).await;
     let source_shape: Vec<_> = client
         .query_consistent(SOURCE_TAIL_SHAPE.to_owned(), hiqlite::params!())
         .await
@@ -13378,8 +13641,33 @@ async fn replicated_source_tail_drops(
         assert_eq!(rows.len(), 1);
         source_counts.push((name.clone(), rows[0].value));
     }
-    require_replicated_fixture_marker(client, "background_source_schema", 1).await;
-    validated_source_tail_drops(&source_shape, &source_counts, true, remove)
+    let Some(rewind) = rewind else {
+        require_replicated_fixture_marker(client, "background_source_schema", 1).await;
+        return validated_source_tail_drops(&source_shape, &source_counts, true, remove);
+    };
+    // The current tail exactly, holding no grants, checkpoints or dispatch
+    // demand; the rewind leaves the published tail with only its marker.
+    assert_eq!(
+        source_shape,
+        current_source_tail(),
+        "exact current source tail required"
+    );
+    assert!(
+        source_counts.iter().all(|(_, count)| *count == 0),
+        "source grants, checkpoints or dispatch demand must not be discarded: {source_counts:?}"
+    );
+    let published = published_source_tail(true);
+    let counts = published
+        .iter()
+        .filter(|(kind, _, _)| kind == "table")
+        .map(|(_, name, _)| (name.clone(), i64::from(name == "background_source_schema")))
+        .collect::<Vec<_>>();
+    rewind
+        .into_iter()
+        .chain(validated_source_tail_drops(
+            &published, &counts, true, remove,
+        ))
+        .collect()
 }
 
 /// The v125 scan request sidecar, validated like the source tail: exact
@@ -14766,6 +15054,62 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
     );
 }
 
+/// Start the store once more over an empty membership roster (every node
+/// ready), so an expanded source-lease tail contracts; the roster tables
+/// are the cluster layer's and are removed again.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn contract_source_leases_with_an_empty_roster(client: &Client, telemetry: &std::path::Path) {
+    let roster = [
+        "cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER)",
+        "cluster_node_join_staging(node_id TEXT PRIMARY KEY)",
+        "cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER)",
+    ];
+    client
+        .txn(
+            roster
+                .iter()
+                .map(|table| (format!("CREATE TABLE {table}"), hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("empty roster")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("empty roster applied");
+    drop(
+        HiqliteAuthStore::open_or_migrate(client.clone(), telemetry)
+            .await
+            .expect("start with every node ready"),
+    );
+    client
+        .txn(
+            roster
+                .iter()
+                .map(|table| {
+                    let name = table.split('(').next().expect("table name");
+                    (format!("DROP TABLE {name}"), hiqlite::params!())
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("remove roster")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("roster removed");
+    let version: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT version AS value FROM source_lease_schema",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("source lease marker");
+    assert_eq!(
+        version.iter().map(|row| row.value).collect::<Vec<_>>(),
+        [3],
+        "contracted"
+    );
+}
+
 /// Bootstrap installs every schema object directly and stamps
 /// `AUTH_SCHEMA_VERSION`; the daemon's `open_or_migrate` never reruns a step
 /// the stamp says has happened. So bootstrap is a second copy of the
@@ -14860,6 +15204,11 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             reached.iter().map(|row| row.value).collect::<Vec<_>>(),
             vec![AUTH_SCHEMA_BASELINE_VERSION]
         );
+        // An upgraded cluster keeps the source-lease expand until every node
+        // runs a lease-aware binary; a fresh one contracts at once. Compare
+        // the chain after its contract: with a roster in which every node is
+        // ready (none listed), the next start contracts.
+        contract_source_leases_with_an_empty_roster(&client, &telemetry).await;
         assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await
     };

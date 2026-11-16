@@ -87,12 +87,21 @@ fn source_tail_objects(connection: &rusqlite::Connection) -> Vec<(String, String
         .expect("complete source extension fixture objects")
 }
 
-pub(crate) fn validated_source_tail_drops(
-    objects: &[(String, String, String)],
-    counts: &[(String, i64)],
-    dispatch: bool,
-    remove: impl Fn(&str) -> bool,
-) -> Vec<String> {
+/// The published v1 (v122 source, v124 dispatch) source tail objects.
+pub(crate) fn published_source_tail(dispatch: bool) -> Vec<(String, String, String)> {
+    source_tail_objects(&published_source_tail_witness(dispatch))
+}
+
+/// The source tail of a store migrated by this binary (contracted leases).
+#[allow(dead_code)]
+pub(crate) fn current_source_tail() -> Vec<(String, String, String)> {
+    let directory = tempfile::tempdir().expect("current source tail witness");
+    let path = directory.path().join("current.db");
+    drop(plurx_core::store::SqliteStore::open(&path).expect("current SQLite store"));
+    source_tail_objects(&rusqlite::Connection::open(&path).expect("current catalogue"))
+}
+
+fn published_source_tail_witness(dispatch: bool) -> rusqlite::Connection {
     let expected = rusqlite::Connection::open_in_memory().expect("published source tail witness");
     expected.execute_batch(
         "CREATE TABLE background_jobs(id TEXT PRIMARY KEY,state TEXT,fence INTEGER);
@@ -108,9 +117,18 @@ pub(crate) fn validated_source_tail_drops(
             .execute_batch(include_str!("../../src/store/background_job_turns.sql"))
             .expect("published v124 dispatch extension");
     }
+    expected
+}
+
+pub(crate) fn validated_source_tail_drops(
+    objects: &[(String, String, String)],
+    counts: &[(String, i64)],
+    dispatch: bool,
+    remove: impl Fn(&str) -> bool,
+) -> Vec<String> {
     assert_eq!(
         objects,
-        source_tail_objects(&expected),
+        published_source_tail(dispatch),
         "exact published source tail required"
     );
     let expected_counts = objects
@@ -793,16 +811,29 @@ fn rewind_empty_source_leases_to_v132(connection: &rusqlite::Connection) {
     // A job or analysis lease is also recorded by its owner's claim and
     // reservations; playback, attestation and offline leases are not.
     let leases: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM source_leases WHERE owner_kind NOT IN ('job','analysis')",
-            [],
-            |row| row.get(0),
-        )
+        .query_row(SOURCE_LEASE_UNOWNED_SQL, [], |row| row.get(0))
         .expect("source leases");
     assert_eq!(
         leases, 0,
         "historical fixture must not discard source leases"
     );
+    let mut plan = source_lease_rewind_plan();
+    plan.push("PRAGMA user_version=132;".to_owned());
+    connection
+        .execute_batch(&plan.join("\n"))
+        .expect("published source lease rewind");
+}
+
+/// Leases that only the lease table records (playback, attestation,
+/// offline); a rewind that would discard one is refused.
+pub(crate) const SOURCE_LEASE_UNOWNED_SQL: &str =
+    "SELECT count(*) AS value FROM source_leases WHERE owner_kind NOT IN ('job','analysis')";
+
+/// The statements that take a contracted (v3) source-lease tail back to
+/// the published v1 source owners, on either backend. The claim effects
+/// are left as they are: the replicated rewind restores their v1 text
+/// itself, SQLite's v132 already has the open-ended text.
+pub(crate) fn source_lease_rewind_plan() -> Vec<String> {
     let foreground = include_str!("../../src/store/background_jobs_foreground.sql");
     let turns = include_str!("../../src/store/background_job_turns.sql");
     let pending = include_str!("../../src/store/storage_domain_pending.sql");
@@ -821,6 +852,7 @@ fn rewind_empty_source_leases_to_v132(connection: &rusqlite::Connection) {
         "source_lease_analysis_renew",
         "source_lease_analysis_success",
         "source_lease_attestation_renew",
+        "source_lease_offline_renew",
         "source_lease_offline_end",
         "source_lease_offline_delete",
         "background_source_pause_effects",
@@ -856,11 +888,16 @@ fn rewind_empty_source_leases_to_v132(connection: &rusqlite::Connection) {
     ] {
         plan.push(published_statement(retention, opening));
     }
-    plan.push("PRAGMA user_version=132;".to_owned());
-    connection
-        .execute_batch(&plan.join("\n"))
-        .expect("published source lease rewind");
+    plan
 }
+
+/// The published v1 (two-slot) claim effects, as a v1 replicated store has
+/// them: its base job schema is installed only when the cluster is created.
+#[allow(dead_code)]
+pub(crate) const CLAIM_EFFECTS_V1: [&str; 2] = [
+    "DROP TRIGGER background_job_claim_effects;",
+    include_str!("../fixtures/background-job-claim-effects-v1.sql"),
+];
 
 /// Rewind an owned, empty v127-v134 coordination tail to published v126;
 /// a fixture already at or below v126 is left alone. The caller owns

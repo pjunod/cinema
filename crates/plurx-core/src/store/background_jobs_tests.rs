@@ -1784,7 +1784,7 @@ fn receipt_pressure_literals_match_constants() {
     ));
     assert!(std::ptr::eq(
         super::sqlite::MIGRATIONS[creators[4]],
-        super::source_leases::SQLITE_EXPAND
+        super::source_leases::EXPAND
     ));
 }
 
