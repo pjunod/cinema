@@ -721,9 +721,11 @@ static int audio_compare(int64_t ticks, struct rational value) {
   return av_compare_ts(ticks, audio_stream->time_base, value.num,
                        (AVRational){1, value.den});
 }
-// A packet belongs to a window when any of its samples fall in [from, end).
+// A packet belongs to a window when any of its samples fall in [from, end);
+// one whose extent is not yet known (no duration) when it starts there.
 static bool audio_in_window(const AVPacket *packet) {
-  return audio_compare(packet->pts + packet->duration, audio_from) > 0 &&
+  return (packet->duration > 0 ? audio_compare(packet->pts + packet->duration, audio_from) > 0
+                               : audio_compare(packet->pts, audio_from) >= 0) &&
          audio_compare(packet->pts, audio_end) < 0;
 }
 static int64_t video_demuxed_pts = AV_NOPTS_VALUE;
@@ -740,9 +742,20 @@ static bool audio_wanted(void) {
   return video_demuxed_pts == AV_NOPTS_VALUE || compare_window(video_demuxed_pts, horizon) < 0;
 }
 static int64_t audio_last_pts = AV_NOPTS_VALUE;
-static void audio_packet(const AVPacket *packet) {
-  need(packet->pts != AV_NOPTS_VALUE && packet->duration >= 0 &&
-           packet->pts <= INT64_MAX - packet->duration &&
+static void audio_packet(const AVPacket *source) {
+  // Matroska gives the later frames of a laced block no timestamp, and the
+  // carried container needs one: such a packet follows its predecessor, as
+  // the encoder's own demuxer placed it. One with no predecessor (the first
+  // read after a seek) lies before anything the window's soundtrack uses,
+  // which starts well after the seek point, and is not carried.
+  AVPacket timed = *source;
+  const AVPacket *packet = &timed;
+  if (timed.pts == AV_NOPTS_VALUE) {
+    if (audio_last_pts == AV_NOPTS_VALUE)
+      return;
+    timed.pts = timed.dts = audio_last_pts;
+  }
+  need(packet->duration >= 0 && packet->pts <= INT64_MAX - packet->duration &&
            (audio_last_pts == AV_NOPTS_VALUE || packet->pts >= audio_last_pts),
        "timestamped monotonic soundtrack packet");
   audio_last_pts = packet->pts;
@@ -773,19 +786,17 @@ static void audio_packet(const AVPacket *packet) {
   if (window_audio && audio_in_window(copy))
     audio_queue(copy);
 }
-// Keep what the next window's soundtrack preroll can need. Consecutive
-// windows' preroll starts advance by the window's length to within two AAC
-// frames; half a second of margin keeps every packet that start can reach.
+// Keep what the next window's soundtrack can need. Its interval never starts
+// before this window's: later windows' preroll starts only move forward (and
+// stay at zero for the first windows of a film, where the preroll start is
+// clamped), so everything from this window's start on is kept.
 static void audio_trim(void) {
-  int64_t start_us = av_rescale(window_start.num, 1000000, window_start.den);
-  int64_t end_us = av_rescale(window_end.num, 1000000, window_end.den);
-  int64_t from_us = av_rescale(audio_from.num, 1000000, audio_from.den);
-  int64_t keep = av_rescale_q(from_us + (end_us - start_us) - 500000,
+  int64_t keep = av_rescale_q(av_rescale(audio_from.num, 1000000, audio_from.den),
                               (AVRational){1, 1000000}, audio_stream->time_base);
   size_t kept = 0;
   for (size_t i = 0; i < audio_ring_count; i++) {
     AVPacket *packet = audio_ring[i];
-    if (packet->pts + packet->duration <= keep) {
+    if (packet->duration > 0 ? packet->pts + packet->duration <= keep : packet->pts < keep) {
       if (audio_trimmed_end == INT64_MIN || packet->pts + packet->duration > audio_trimmed_end)
         audio_trimmed_end = packet->pts + packet->duration;
       audio_ring_bytes -= (size_t)packet->size;

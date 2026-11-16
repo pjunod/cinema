@@ -171,6 +171,8 @@ def source_audio_packets(options, start, end):
     base = Fraction(stream['streams'][0]['time_base'])
     rows = []
     for packet in json.loads(probe)['packets']:
+        if 'pts' not in packet:
+            continue
         pts, duration = int(packet['pts']), int(packet.get('duration', 0))
         if (pts + duration) * base > start and pts * base < end:
             rows.append((pts * base, packet['data_hash']))
@@ -222,7 +224,7 @@ def lattice(start):
 def daemon_interval(start, end):
     """dv_runtime::window_soundtrack with a zero origin and no offset."""
     seek, _ = lattice(start)
-    return Fraction(seek, AUDIO_RATE) - Fraction(1, 5), end + Fraction(1, 2)
+    return max(Fraction(seek, AUDIO_RATE) - Fraction(1, 5), Fraction(0)), end + Fraction(1, 2)
 
 
 def lattice_pcm(options, inputs, ordinal, start, samples):
@@ -286,7 +288,7 @@ def check_pcm_join(options, windows, directories, codec):
         '-read_intervals', f'{float(windows[0][0]) - 3}%{float(windows[-1][1])}',
         '-show_entries', 'packet=pts:stream=time_base', '-of', 'json', str(options.source)]))
     millisecond = probe['streams'][0]['time_base'] == '1/1000'
-    pts = sorted(int(p['pts']) for p in probe['packets'])
+    pts = sorted(int(p['pts']) for p in probe['packets'] if 'pts' in p)
     off_lattice = millisecond and len({b - a for a, b in zip(pts, pts[1:])}) > 1
 
     def matches(row, licensed, spread=0.0):

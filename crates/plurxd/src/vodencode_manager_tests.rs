@@ -264,7 +264,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     if profile81 {
         // A current production trial with no receipt must retain conversion.
         let missing =
-            admit_native_processed_window_control(&manager, &store, request.clone(), &file, true)
+            admit_native_processed_window_control(&manager, &store, request.clone(), &file, true, false)
                 .await;
         let reason = match missing {
             Err(reason) => reason,
@@ -332,6 +332,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 request.clone(),
                 &file,
                 true,
+                false,
             )
             .await;
             let reason = match refused {
@@ -361,32 +362,22 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .expect("current file")
         .expect("stored verdict");
     let started = Instant::now();
-    let (encoding, prepared_root) = if sdr || profile81 {
-        // Fresh durable admission, canonical catalog restoration and normal
-        // one-shot lease/source validation precede genuine SDR rendering.
+    // Fresh durable admission, canonical catalog restoration and normal
+    // one-shot lease/source validation precede genuine rendering, as for a
+    // viewer's processed upgrade: a processed destination is prepared only
+    // for a freshly admitted owner.
+    let (encoding, prepared_root) = {
         let root = admit_native_processed_window_control(
             &manager,
             &store,
             request.clone(),
             &file,
             profile81,
+            !sdr && !profile81,
         )
         .await
         .expect("fresh actual processed owner qualification");
         (Arc::clone(&root.encoding), Some(root))
-    } else {
-        // An HDR10 client's ordinary encoded candidate, as playback restores
-        // it: processed preparation sizes its rate from that context.
-        let mut request = request.clone();
-        attach_hdr10_candidate_context(&manager, &store, &mut request, &file).await;
-        (
-            manager
-                .prepare_vod_encoding(&request, &file)
-                .await
-                .expect("actual native preparation")
-                .expect("encoded route"),
-            None,
-        )
     };
     let DvSelection::Selected(selected) = &encoding.dv_processing else {
         panic!(
@@ -529,6 +520,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             },
             &file,
             true,
+            false,
         )
         .await;
         let reason = match second {
@@ -1289,121 +1281,6 @@ async fn settle_publication_control(manager: &TranscodeManager) {
     .expect("isolated sessions and producer ownership settled before offline checks");
 }
 
-/// The canonical candidate context of an HDR10 (not Dolby Vision) display's
-/// ordinary encoded rung at the request's height, as a playback restores it.
-#[cfg(target_os = "linux")]
-async fn attach_hdr10_candidate_context(
-    manager: &TranscodeManager,
-    store: &Arc<dyn Store>,
-    request: &mut SessionRequest,
-    file: &plurx_core::domain::MediaFile,
-) {
-    use plurx_core::playback::{
-        audio::{resolve_audio, AudioClaim, AudioRoute},
-        candidate::CandidateRoute,
-    };
-    let planning = store
-        .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
-        .await
-        .expect("atomic planning snapshot")
-        .expect("source");
-    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
-        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"present":["pq"]}],
-        "display":{"hdr":true,"dolby_vision":false},
-        "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
-        "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
-    }))
-    .expect("explicit HDR10 display and Main10 decoder");
-    request.previous_session_id = None;
-    request.reopen_reason = None;
-    request.audio_index = TranscodeManager::candidate_audio_from_snapshot(&planning, None);
-    request.audio_claim = AudioClaim::from_caps(&caps).expect("canonical audio claim");
-    let track = request.audio_index.and_then(|index| {
-        planning
-            .file
-            .audio_streams
-            .iter()
-            .find(|track| track.index == index)
-    });
-    request.audio_delivery = Some(resolve_audio(
-        track,
-        &request.audio_claim.as_ref().expect("claim").profile(),
-        AudioRoute::EncodedVod,
-        request.audio_offset_ms,
-    ));
-    let query = crate::media_pool::QualityCatalogRequest {
-        file_id: file.id,
-        source_size: file.size,
-        source_mtime: file.mtime,
-        caps: caps.clone(),
-        audio_index: request.audio_index,
-        audio_offset_ms: request.audio_offset_ms,
-        audio_claim: request.audio_claim.clone(),
-        audio_delivery: request.audio_delivery.clone(),
-        subtitle_burn: None,
-        presentation: Presentation::Vod,
-        copy_contract: None,
-    };
-    let catalog = manager
-        .quality_catalog_from_snapshot_progress(
-            &planning,
-            &caps,
-            request.audio_index,
-            request.audio_offset_ms,
-            None,
-            Presentation::Vod,
-            None,
-            request.audio_delivery.as_ref(),
-            request.audio_claim.as_ref(),
-            None,
-            None,
-        )
-        .await;
-    let SessionKind::Transcode { height } = request.kind else {
-        panic!("HDR10 encoded height")
-    };
-    // An HDR10 display that plays the source's own picture is offered its
-    // copy, not an encoded rung; that copy is then the selected candidate.
-    let ordinary = |candidate: &&plurx_core::playback::candidate::QualityCandidate| {
-        !candidate.processed_dv && candidate.decoder_compatible && candidate.grade == OutputGrade::Hdr10
-    };
-    let candidate = catalog
-        .candidates
-        .iter()
-        .filter(ordinary)
-        .find(|candidate| {
-            candidate.route == CandidateRoute::Encode && i64::from(candidate.target_height) == height
-        })
-        .or_else(|| catalog.candidates.iter().find(ordinary))
-        .unwrap_or_else(|| {
-            panic!(
-                "ordinary HDR10 candidate at {height}: {:?}",
-                catalog.candidates
-            )
-        })
-        .clone();
-    let bound = crate::media_sessions::CandidateCatalogContext {
-        caps,
-        candidate: candidate.clone(),
-        binding: crate::media_pool::PlanningBinding::from_snapshot(&planning),
-        catalog_query: None,
-    };
-    let mut context = manager
-        .restore_catalog_context(
-            request,
-            &bound,
-            candidate.id,
-            file.size,
-            file.mtime,
-            None,
-            tokio::time::Instant::now() + Duration::from_secs(30),
-        )
-        .await
-        .expect("canonical candidate restoration");
-    context.catalog_query = Some(query);
-    request.candidate_context = Some(Box::new(context));
-}
-
 /// Bounded physical coverage, not HTTP playback or full-app EOF: the shared
 /// processed-root regression separately verifies registry, HLS and replay facts.
 #[cfg(target_os = "linux")]
@@ -1413,6 +1290,7 @@ async fn admit_native_processed_window_control(
     mut request: SessionRequest,
     file: &plurx_core::domain::MediaFile,
     profile81: bool,
+    hdr10: bool,
 ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
     use plurx_core::playback::{
         audio::{resolve_audio, AudioClaim, AudioRoute},
@@ -1428,6 +1306,11 @@ async fn admit_native_processed_window_control(
         "display":{"hdr":true,"dolby_vision":true},
         "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
         "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
+    }) } else if hdr10 { serde_json::json!({
+        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"present":["pq"]}],
+        "display":{"hdr":true,"dolby_vision":false},
+        "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
+        "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
     }) } else { serde_json::json!({
         "v":2,"video":[
             {"codec":"h264","profiles":["high"],"present":["sdr"]},
@@ -1436,8 +1319,8 @@ async fn admit_native_processed_window_control(
         "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
         "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
     }) })
-    .expect("explicit SDR display and Main10 decoder");
-    request.hdr10 = false;
+    .expect("explicit display and Main10 decoder");
+    request.hdr10 = hdr10;
     request.previous_session_id = None;
     request.reopen_reason = None;
     request.audio_index = TranscodeManager::candidate_audio_from_snapshot(&planning, None);
@@ -1504,6 +1387,10 @@ async fn admit_native_processed_window_control(
                         candidate.route,
                         CandidateRoute::Original | CandidateRoute::Remux
                     )
+                } else if hdr10 {
+                    // An HDR10 display is offered the source's own picture
+                    // (or an HDR10 rung); the processed upgrade replaces it.
+                    candidate.grade == OutputGrade::Hdr10
                 } else {
                     candidate.route == CandidateRoute::Encode && candidate.grade == OutputGrade::Sdr
                 })
@@ -1516,6 +1403,17 @@ async fn admit_native_processed_window_control(
             )
         })
         .clone();
+    if hdr10 && candidate.route != CandidateRoute::Encode {
+        // The display plays the source's own HDR10 picture: its ordinary
+        // delivery is that copy (Dolby Vision not preserved), and the
+        // processed upgrade replaces it.
+        request.kind = SessionKind::Copy {
+            convert_dolby_vision: false,
+            dual_layer_as_copied: false,
+            aac: true,
+            preserve_dolby_vision: false,
+        };
+    }
     let bound = crate::media_sessions::CandidateCatalogContext {
         caps,
         candidate: candidate.clone(),
@@ -1583,7 +1481,7 @@ async fn admit_native_processed_window_control(
     assert!(candidate.processed_dv);
     assert_eq!(
         candidate.grade,
-        if profile81 {
+        if profile81 || hdr10 {
             OutputGrade::Hdr10
         } else {
             OutputGrade::Sdr
