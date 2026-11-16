@@ -83,6 +83,19 @@ the compatibility patches listed in
 one internal `Store` trait; openraft is an implementation dependency, not a
 second ready-to-select backend.
 
+Above the store, feature code asks the cluster its questions through one
+facade, `state.cluster` (`crates/plurxd/src/cluster.rs`, whose module doc is
+the contract): `authority()`, `role()` and `peers(purpose)` today, with
+`read`, `watch` and `call` reserved. `peers()` answers from one cached roster
+snapshot, kept current by the applied mark and the applied Raft membership
+rather than a timer; `/metrics` counts its reads as
+`plurx_cluster_directory_reads_total{outcome}` — `hit` from the snapshot,
+`reload` and `uncached` one local read each. The raw membership, replication and serving handles
+are still on `AppState` while callers move; the census in
+`crates/plurxd/src/cluster/census.rs` pins every remaining reach-around and
+only lets the count fall
+([CLUSTER-FACADE-BUILD.md](cluster/CLUSTER-FACADE-BUILD.md)).
+
 Single-node mode is the same code path with a 1-voter raft (a supported
 openraft/hiqlite pattern) — no "cluster edition" fork, and any single node can
 later grow into a cluster by adding voters. A fresh data directory imports its
@@ -538,7 +551,7 @@ source of truth for "how does this file play," not two.
 | Discovery | mDNS `_plurx._tcp` + Plex GDM responder | LAN only |
 | Passwords / tokens | Argon2id (at rest) · SHA-256 (token lookup) | §5 |
 | Observability | `tracing` + Prometheus exporter | REQ-OPS-1 |
-| Web app | embedded static app, `` `WEB_ASSETS` = 99 `` files, no bundler or framework | [shell layout](clients/WEB-SHELL-LAYOUT.md), [source table](../crates/plurxd/src/http/web.rs) |
+| Web app | embedded static app, `` `WEB_ASSETS` = 100 `` files, no bundler or framework | [shell layout](clients/WEB-SHELL-LAYOUT.md), [source table](../crates/plurxd/src/http/web.rs) |
 | Avoided | sled (stalled), rocksdb (C++ dep), external DBs, ffmpeg linking | — |
 
 The web app is a deliberate non-choice: a hand-written shell loads the checked

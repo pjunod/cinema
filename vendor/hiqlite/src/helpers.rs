@@ -85,7 +85,7 @@ pub async fn add_new_learner(
                 return Ok(());
             }
             redeem_membership_acquisition(state, admission)?;
-            state.raft_db.raft.add_learner(node.id, node, true).await?;
+            state.raft_db.add_learner(node.id, node, true).await?;
             Ok(())
         }
         #[cfg(feature = "cache")]
@@ -128,7 +128,6 @@ pub async fn change_membership(
             }
             state
                 .raft_db
-                .raft
                 .change_membership(members, retain)
                 .await?;
             Ok(())
@@ -219,7 +218,6 @@ pub(crate) async fn remove_learner_with_admission(
             redeem_membership_acquisition(state, admission)?;
             state
                 .raft_db
-                .raft
                 .change_membership(ChangeMembers::RemoveNodes(set), false)
                 .await?;
             Ok(())
@@ -308,7 +306,6 @@ pub(crate) async fn remove_voter_with_admission(
             redeem_membership_acquisition(state, admission)?;
             state
                 .raft_db
-                .raft
                 .change_membership(ChangeMembers::RemoveVoters(set), retain)
                 // .change_membership(ChangeMembers::SetNodes(new_members), retain)
                 .await?;

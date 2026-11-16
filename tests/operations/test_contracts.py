@@ -4884,7 +4884,7 @@ assert.equal(context.ACT_TIMER, null);
         release = {name for name, labels in runners if common | {"release-arm64"} <= labels}
         ci = {name for name, labels in runners if common | {"ci-arm64"} <= labels}
         self.assertEqual(release, {"gha-maca-linux-arm-01"})
-        self.assertEqual(ci, {"gha-maca-linux-arm-02", "gha-macb-linux-arm-01"})
+        self.assertEqual(ci, {"gha-maca-linux-arm-02"})
         self.assertFalse(release & ci, "CI fallback requires workload qualification")
 
     def test_native_arm_compiler_has_its_qualified_labels(self):

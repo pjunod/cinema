@@ -4625,3 +4625,57 @@ fn catalog_provenance_cannot_change_source_tracks_or_capabilities() {
         );
     }
 }
+
+/// `peer_base`'s answer for every roster case, against the body it replaced
+/// (a `media_peers` read per call, copied from `dd76bb88e`).
+#[test]
+fn owner_base_answers_as_the_media_peers_lookup_did() {
+    use plurx_core::cluster::membership::ActivityPeer;
+    fn was(
+        answer: Option<Result<Vec<ActivityPeer>, ()>>,
+        node_id: &str,
+    ) -> Result<String, PeerTransportError> {
+        answer
+            .ok_or(PeerTransportError::TimedOut)?
+            .map_err(|_| PeerTransportError::Unreachable)?
+            .into_iter()
+            .find(|peer| peer.node_id == node_id && peer.reachable)
+            .and_then(|peer| peer.http_base)
+            .ok_or(PeerTransportError::Unreachable)
+    }
+    let peer = |node: &str, reachable: bool, base: bool| ActivityPeer {
+        node_id: node.to_owned(),
+        raft_id: 2,
+        http_base: base.then(|| format!("http://{node}.invalid")),
+        reachable,
+    };
+    let roster = vec![
+        peer("up", true, true),
+        peer("down", false, true),
+        peer("baseless", true, false),
+    ];
+    for node in ["up", "down", "baseless", "missing"] {
+        let new = owner_base(
+            Some(Ok(crate::cluster::Peers::for_test(roster.clone()))),
+            node,
+        );
+        assert_eq!(new, was(Some(Ok(roster.clone())), node), "{node}");
+    }
+    assert_eq!(
+        owner_base(
+            Some(Ok(crate::cluster::Peers::for_test(roster.clone()))),
+            "up"
+        ),
+        Ok("http://up.invalid".to_owned())
+    );
+    assert_eq!(owner_base(None, "up"), Err(PeerTransportError::TimedOut));
+    assert_eq!(was(None, "up"), Err(PeerTransportError::TimedOut));
+    assert_eq!(
+        owner_base(Some(Err(crate::cluster::ClusterError::for_test())), "up"),
+        Err(PeerTransportError::Unreachable)
+    );
+    assert_eq!(
+        was(Some(Err(())), "up"),
+        Err(PeerTransportError::Unreachable)
+    );
+}
