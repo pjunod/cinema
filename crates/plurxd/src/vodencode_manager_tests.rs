@@ -624,6 +624,117 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .collect()
     };
     let entries = entries.as_slice();
+    // PLURX_DV_WINDOW_SESSION=1: the daemon's session path, end to end. The
+    // requested consecutive windows run through `execute_with_source_input`
+    // exactly as a processed rendition's generations do: the first window
+    // opens the helper session on its own custody and admission, every
+    // later one continues it. Each window runs its real encoder with the
+    // daemon's args (the carried soundtrack included) and passes finalize,
+    // verification and the frozen-plan check. One helper serves them all.
+    if std::env::var("PLURX_DV_WINDOW_SESSION").is_ok_and(|value| value == "1") {
+        assert!(
+            display_target.is_none() && !sdr,
+            "the session probe covers the master graph"
+        );
+        assert!(
+            entries.len() >= 3 && entries.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "the session probe needs three or more consecutive windows"
+        );
+        let bundle = crate::vodencode::admit_frozen_preparation(
+            &manager.admissions,
+            manager.max_hw_sessions().await,
+            manager.software_budget().await,
+            &encoding.resources,
+            Some(1),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("actual graph resources");
+        let input_request = manager
+            .foreground_source_request(
+                &file,
+                "processed-session-qualification",
+                uuid::Uuid::new_v4(),
+                plurx_core::store::background_jobs_resources::ForegroundSourcePolicy::Transfer,
+            )
+            .expect("actual original-media fixture has source identity");
+        let input = crate::source_input::SourceInput::open_foreground_held(
+            input_request,
+            crate::fragment_index_cluster::SourceFence::clone_held(
+                &runtime.source.handle,
+                runtime.source.object_version(),
+            )
+            .expect("same held original source"),
+            "qualified-session".to_owned(),
+        )
+        .await
+        .expect("owned source input");
+        let mut source = Some(crate::vodencode::dv_runtime::WindowSource::Open {
+            input,
+            admission: crate::dv_segment::SegmentAdmission::Owned(bundle),
+            home: crate::dv_segment::SessionHome::new("physical session probe".into()),
+        });
+        let mut helper_pid = None;
+        let mut elapsed_ms = Vec::new();
+        for &at in entries {
+            let started = Instant::now();
+            let run = runtime
+                .execute_with_source_input(
+                    &file,
+                    &encoding.plan,
+                    &encoding.options,
+                    encoding.grid,
+                    &segment_plan.entries[at],
+                    &encoding.executable.path,
+                    source.take().expect("window source"),
+                    Arc::new(crate::prodrun::ProducerSlot::new()),
+                    tokio_util::sync::CancellationToken::new(),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            let elapsed = started.elapsed();
+            assert_eq!(run.ended, None, "window {at} ended its session: {:?}", run.result.as_ref().err());
+            let session = run.session.expect("the session continues");
+            let (verified, plan) = match run.result.expect("actual verified session window") {
+                crate::vodencode::dv_runtime::WindowOutcome::Completed(window) => window,
+                crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                    panic!("session window was cancelled")
+                }
+            };
+            assert_eq!(plan.semantic_digest(), selected.semantic_digest());
+            assert_eq!(
+                verified.observed.pictures.len(),
+                usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
+            );
+            assert!(verified.receipt.is_some());
+            let pid = session.pid().expect("live helper");
+            assert_eq!(
+                *helper_pid.get_or_insert(pid),
+                pid,
+                "one helper process serves every window"
+            );
+            elapsed_ms.push(elapsed.as_millis());
+            println!(
+                "{}",
+                serde_json::json!({"session_entry":at,"helper_pid":pid,"elapsed_ms":elapsed.as_millis(),
+                "decoder":format!("{:?}", verified.observed.decoder),"bytes":verified.bytes.len(),
+                "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
+            );
+            source = Some(crate::vodencode::dv_runtime::WindowSource::Session(session));
+        }
+        if let Some(crate::vodencode::dv_runtime::WindowSource::Session(session)) = source {
+            session.retire(crate::dv_segment::SessionEnd::FlowStop).await;
+        }
+        let warm = &elapsed_ms[1..];
+        println!(
+            "{}",
+            serde_json::json!({"session_windows":entries.len(),"cold_ms":elapsed_ms[0],
+            "warm_ms":warm,"warm_mean_ms":warm.iter().sum::<u128>() / warm.len() as u128})
+        );
+        return;
+    }
     if compare_cache {
         assert!(
             entries.len() >= 4
