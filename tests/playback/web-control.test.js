@@ -4353,7 +4353,7 @@ async function main() {
         // §7.3: the commit is two phases now. Alignment finishes before the
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
-        shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
+        shippedSource("alignPreparedReplacement"), shippedSource("holdPreparedNativeSuccessor"), shippedSource("preparedAlignSeek"),
         shippedSource("preparedAlignedBuffered"), shippedSource("preparedFrameCadence"),
         shippedSource("preparedFramesMeet"), shippedSource("exposePreparedReplacementAtFrame"),
         shippedSource("preparedDecodedFrameCount"), shippedSource("exposePreparedReplacementAfterDecodedFrames"),
