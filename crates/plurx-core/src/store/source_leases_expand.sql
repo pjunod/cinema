@@ -119,28 +119,43 @@ CREATE TRIGGER source_lease_attestation_renew AFTER UPDATE OF expires_at_ms ON j
 WHEN NEW.resource LIKE 'subtitle-read-attest:%'
 BEGIN
   UPDATE source_leases SET expires_at_ms=NEW.expires_at_ms,renewed_at_ms=NEW.updated_at_ms
-  WHERE lease_id='lease:'||NEW.resource||':'||NEW.fence;
+  WHERE owner_kind='lease' AND work_id=NEW.resource AND fence=NEW.fence;
 END;
 -- next statement
 -- An offline reader renews its lease by taking service: every grant (at
 -- most one epoch, 5 s, long) extends it to one job lease past the grant.
 CREATE TRIGGER source_lease_offline_renew AFTER INSERT ON background_job_commands
-WHEN NEW.operation='source_service' AND NEW.result_json<>'false'
+WHEN NEW.operation='source_service' AND json_type(NEW.result_json)='object'
+  AND json_extract(NEW.request_json,'$.kind')='offline'
 BEGIN
-  UPDATE source_leases SET expires_at_ms=MAX(expires_at_ms,json_extract(NEW.request_json,'$.now_ms')+30000),
-    renewed_at_ms=json_extract(NEW.request_json,'$.now_ms')
-  WHERE lease_id=json_extract(NEW.request_json,'$.owner_key') AND owner_kind='offline';
+  INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
+  SELECT json_extract(NEW.request_json,'$.owner_key'),'offline',
+    json_extract(NEW.request_json,'$.package_id'),json_extract(NEW.request_json,'$.claim_generation'),
+    json_extract(NEW.request_json,'$.node_id'),
+    COALESCE(json_extract(NEW.request_json,'$.owner'),
+      json_object('kind','offline','package_id',json_extract(NEW.request_json,'$.package_id'),
+        'node_id',json_extract(NEW.request_json,'$.node_id'),
+        'claim_generation',json_extract(NEW.request_json,'$.claim_generation'))),
+    json_extract(NEW.result_json,'$.resource_keys'),'active',NULL,
+    json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms'),
+    json_extract(NEW.request_json,'$.now_ms')+30000
+  ON CONFLICT(lease_id) DO UPDATE SET
+    work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
+    owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,
+    phase='active',projection_json=NULL,renewed_at_ms=excluded.renewed_at_ms,
+    expires_at_ms=MAX(source_leases.expires_at_ms,excluded.expires_at_ms)
+  WHERE source_leases.owner_kind='offline';
 END;
 -- next statement
 CREATE TRIGGER source_lease_offline_end AFTER UPDATE ON offline_packages
 WHEN OLD.state='preparing' AND (NEW.state!='preparing' OR NEW.claim_generation!=OLD.claim_generation OR NEW.node_id IS NOT OLD.node_id)
 BEGIN
-  DELETE FROM source_leases WHERE lease_id='offline:'||OLD.id||':'||OLD.claim_generation;
+  DELETE FROM source_leases WHERE owner_kind='offline' AND work_id=OLD.id AND fence=OLD.claim_generation;
 END;
 -- next statement
 CREATE TRIGGER source_lease_offline_delete AFTER DELETE ON offline_packages
 BEGIN
-  DELETE FROM source_leases WHERE lease_id='offline:'||OLD.id||':'||OLD.claim_generation;
+  DELETE FROM source_leases WHERE owner_kind='offline' AND work_id=OLD.id AND fence=OLD.claim_generation;
 END;
 -- next statement
 -- Pause and resume act on the job's lease; resume takes a fresh source
@@ -633,19 +648,23 @@ SELECT 'analysis:'||hex(request.request_id)||':'||request.fence,'analysis',reque
   'active',request.updated_at_ms,request.updated_at_ms,request.lease_expires_ms
 FROM analysis_requests request WHERE request.state='running' AND request.fence>0 AND request.owner_node_id IS NOT NULL
   AND request.lease_expires_ms IS NOT NULL
+  AND request.pipeline_version NOT LIKE 'coordination-contract:%'
   AND EXISTS(SELECT 1 FROM analysis_source_reservations held WHERE held.request_id=request.request_id AND held.fence=request.fence);
 -- next statement
 INSERT OR IGNORE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
-SELECT custody.owner_kind||':'||custody.work_id||':'||custody.fence,custody.owner_kind,custody.work_id,custody.fence,
+SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
+  custody.owner_kind,custody.work_id,custody.fence,
   CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
-  custody.owner_json,custody.resource_keys_json,CASE WHEN custody.phase='paused' THEN 'paused' ELSE 'active' END,
+  custody.owner_json,custody.resource_keys_json,custody.phase,
   custody.started_at_ms,custody.updated_at_ms,
-  -- An offline holder carries a job-length lease; a reader still taking
-  -- service renews it (source_lease_offline_renew).
   CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
 FROM background_source_current_owners custody
-WHERE custody.owner_kind IN ('lease','offline') AND custody.authority_expires_at_ms>0 AND custody.fence>0
-  AND CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END IS NOT NULL;
+WHERE (custody.owner_kind IN ('lease','offline') OR
+    (custody.owner_kind='analysis' AND EXISTS(SELECT 1 FROM analysis_requests request
+      WHERE request.request_id=custody.work_id AND request.pipeline_version LIKE 'coordination-contract:%')))
+  AND custody.authority_expires_at_ms>0 AND custody.fence>0
+  AND CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END IS NOT NULL
+  AND json_array_length(custody.resource_keys_json)>0;
 -- next statement
 -- Rolling-deploy bridge, both ways, dropped by the contract. A node still on
 -- the v1 binary registers playback in foreground_source_owners: mirror it
@@ -720,4 +739,121 @@ CREATE TRIGGER source_lease_bridge_out_delete AFTER DELETE ON source_leases
 WHEN OLD.owner_kind='playback'
 BEGIN
   DELETE FROM foreground_source_owners WHERE owner_id=OLD.lease_id;
+END;
+
+-- next statement
+-- Legacy v1 custody rows are the other half of a rolling source-lease
+-- deployment. Mirror authoritative legacy owners into the lease catalogue.
+CREATE TRIGGER source_lease_custody_insert AFTER INSERT ON background_source_custody
+WHEN NEW.owner_kind IN ('analysis','lease','offline')
+BEGIN
+  INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
+  SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
+    custody.owner_kind,custody.work_id,custody.fence,
+    CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
+    custody.owner_json,custody.resource_keys_json,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
+    CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
+  FROM background_source_current_owners custody
+  WHERE custody.custody_id=NEW.custody_id AND custody.authority_expires_at_ms>0 AND custody.fence>0
+    AND json_array_length(custody.resource_keys_json)>0
+    AND CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END IS NOT NULL
+    AND (custody.owner_kind!='analysis' OR EXISTS(SELECT 1 FROM analysis_requests request
+      WHERE request.request_id=custody.work_id AND request.pipeline_version LIKE 'coordination-contract:%'))
+  ON CONFLICT(lease_id) DO UPDATE SET
+    owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
+    owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,
+    projection_json=excluded.projection_json,started_at_ms=excluded.started_at_ms,
+    renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
+  WHERE source_leases.owner_kind=excluded.owner_kind
+    AND (source_leases.work_id,source_leases.fence,source_leases.node_id,source_leases.owner_json,
+      source_leases.resource_keys_json,source_leases.phase,source_leases.projection_json,
+      source_leases.started_at_ms,source_leases.renewed_at_ms,source_leases.expires_at_ms)
+      IS NOT (excluded.work_id,excluded.fence,excluded.node_id,excluded.owner_json,
+      excluded.resource_keys_json,excluded.phase,excluded.projection_json,
+      excluded.started_at_ms,excluded.renewed_at_ms,excluded.expires_at_ms);
+END;
+-- next statement
+CREATE TRIGGER source_lease_custody_update AFTER UPDATE ON background_source_custody
+WHEN NEW.owner_kind IN ('analysis','lease','offline')
+BEGIN
+  INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
+  SELECT CASE custody.owner_kind WHEN 'analysis' THEN custody.custody_id ELSE custody.owner_key END,
+    custody.owner_kind,custody.work_id,custody.fence,
+    CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END,
+    custody.owner_json,custody.resource_keys_json,custody.phase,NULL,custody.started_at_ms,custody.updated_at_ms,
+    CASE custody.owner_kind WHEN 'offline' THEN MIN(custody.authority_expires_at_ms,custody.updated_at_ms+30000) ELSE custody.authority_expires_at_ms END
+  FROM background_source_current_owners custody
+  WHERE custody.custody_id=NEW.custody_id AND custody.authority_expires_at_ms>0 AND custody.fence>0
+    AND json_array_length(custody.resource_keys_json)>0
+    AND CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END IS NOT NULL
+    AND (custody.owner_kind!='analysis' OR EXISTS(SELECT 1 FROM analysis_requests request
+      WHERE request.request_id=custody.work_id AND request.pipeline_version LIKE 'coordination-contract:%'))
+  ON CONFLICT(lease_id) DO UPDATE SET
+    owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
+    owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,
+    projection_json=excluded.projection_json,started_at_ms=excluded.started_at_ms,
+    renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
+  WHERE source_leases.owner_kind=excluded.owner_kind
+    AND (source_leases.work_id,source_leases.fence,source_leases.node_id,source_leases.owner_json,
+      source_leases.resource_keys_json,source_leases.phase,source_leases.projection_json,
+      source_leases.started_at_ms,source_leases.renewed_at_ms,source_leases.expires_at_ms)
+      IS NOT (excluded.work_id,excluded.fence,excluded.node_id,excluded.owner_json,
+      excluded.resource_keys_json,excluded.phase,excluded.projection_json,
+      excluded.started_at_ms,excluded.renewed_at_ms,excluded.expires_at_ms);
+END;
+-- next statement
+CREATE TRIGGER source_lease_custody_delete AFTER DELETE ON background_source_custody
+WHEN OLD.owner_kind IN ('analysis','lease','offline')
+BEGIN
+  DELETE FROM source_leases
+  WHERE lease_id=CASE OLD.owner_kind WHEN 'analysis' THEN OLD.custody_id ELSE OLD.owner_key END
+    AND owner_kind=OLD.owner_kind AND work_id=OLD.work_id AND fence=OLD.fence;
+END;
+-- next statement
+-- New binaries also publish independently-created attestation and offline
+-- leases in the v1 custody table so old source_io_occupancy sees their holds.
+CREATE TRIGGER source_lease_custody_out_insert AFTER INSERT ON source_leases
+WHEN NEW.owner_kind IN ('lease','offline')
+BEGIN
+  INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+  VALUES(NEW.lease_id,NEW.lease_id,NEW.owner_json,NEW.resource_keys_json,NEW.owner_kind,NEW.work_id,NEW.fence,
+    NEW.phase,NEW.started_at_ms,NEW.renewed_at_ms,NEW.expires_at_ms)
+  ON CONFLICT(owner_key) DO UPDATE SET
+    owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,owner_kind=excluded.owner_kind,
+    work_id=excluded.work_id,fence=excluded.fence,phase=excluded.phase,started_at_ms=excluded.started_at_ms,
+    updated_at_ms=excluded.updated_at_ms,lease_expires_at_ms=excluded.lease_expires_at_ms
+  WHERE background_source_custody.owner_kind=excluded.owner_kind
+    AND (background_source_custody.owner_json,background_source_custody.resource_keys_json,
+      background_source_custody.work_id,background_source_custody.fence,background_source_custody.phase,
+      background_source_custody.started_at_ms,background_source_custody.updated_at_ms,
+      background_source_custody.lease_expires_at_ms)
+      IS NOT (excluded.owner_json,excluded.resource_keys_json,excluded.work_id,excluded.fence,
+      excluded.phase,excluded.started_at_ms,excluded.updated_at_ms,excluded.lease_expires_at_ms);
+END;
+-- next statement
+CREATE TRIGGER source_lease_custody_out_update AFTER UPDATE ON source_leases
+WHEN NEW.owner_kind IN ('lease','offline')
+  AND EXISTS(SELECT 1 FROM background_source_custody WHERE owner_key=NEW.lease_id)
+BEGIN
+  INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+  VALUES(NEW.lease_id,NEW.lease_id,NEW.owner_json,NEW.resource_keys_json,NEW.owner_kind,NEW.work_id,NEW.fence,
+    NEW.phase,NEW.started_at_ms,NEW.renewed_at_ms,NEW.expires_at_ms)
+  ON CONFLICT(owner_key) DO UPDATE SET
+    owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,owner_kind=excluded.owner_kind,
+    work_id=excluded.work_id,fence=excluded.fence,phase=excluded.phase,started_at_ms=excluded.started_at_ms,
+    updated_at_ms=excluded.updated_at_ms,lease_expires_at_ms=excluded.lease_expires_at_ms
+  WHERE background_source_custody.owner_kind=excluded.owner_kind
+    AND (background_source_custody.owner_json,background_source_custody.resource_keys_json,
+      background_source_custody.work_id,background_source_custody.fence,background_source_custody.phase,
+      background_source_custody.started_at_ms,background_source_custody.updated_at_ms,
+      background_source_custody.lease_expires_at_ms)
+      IS NOT (excluded.owner_json,excluded.resource_keys_json,excluded.work_id,excluded.fence,
+      excluded.phase,excluded.started_at_ms,excluded.updated_at_ms,excluded.lease_expires_at_ms);
+END;
+-- next statement
+CREATE TRIGGER source_lease_custody_out_delete AFTER DELETE ON source_leases
+WHEN OLD.owner_kind IN ('lease','offline')
+BEGIN
+  DELETE FROM background_source_custody WHERE custody_id=OLD.lease_id
+    AND owner_key=OLD.lease_id AND owner_kind=OLD.owner_kind;
 END;

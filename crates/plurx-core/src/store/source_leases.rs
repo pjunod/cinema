@@ -11,6 +11,30 @@
 use crate::error::StoreError;
 use std::sync::LazyLock;
 
+// Compatibility admission is generated from the live claim terms. The
+// fixture catalogue installs it too, without the unrelated claim effects.
+macro_rules! offline_service_admission {
+    () => {
+        concat!(
+    // Older binaries still propose service grants directly. Enforce expired
+    // offline re-admission at the shared writer boundary as well as in the
+    // new caller's statement, using the same capacity terms as every claim.
+    "CREATE TRIGGER source_lease_offline_service_admission BEFORE INSERT ON background_job_commands ",
+    "WHEN NEW.operation='source_service' AND NEW.result_json<>'false' ",
+    "AND json_extract(NEW.request_json,'$.kind')='offline' ",
+    "AND NOT EXISTS(SELECT 1 FROM source_leases owned WHERE owned.lease_id=json_extract(NEW.request_json,'$.owner_key') ",
+    "AND owned.owner_kind='offline' AND owned.phase!='paused' AND owned.expires_at_ms>json_extract(NEW.request_json,'$.now_ms')-60000) ",
+    "BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(NEW.result_json,'$.resource_keys') resource WHERE ",
+    claim_foreground_window!("resource.value", "json_extract(NEW.request_json,'$.now_ms')"),
+    " OR ",
+    claim_source_holders!("resource.value", "json_extract(NEW.request_json,'$.node_id')", "json_extract(NEW.request_json,'$.now_ms')"),
+    " OR ",
+    claim_maintenance_reader!("resource.value", "json_extract(NEW.request_json,'$.node_id')", "json_extract(NEW.request_json,'$.now_ms')"),
+    ") THEN RAISE(IGNORE) END; END;"
+        )
+    };
+}
+
 /// The expand, one text for both backends. It reinstalls the claim effects
 /// (open-ended source reservation slots): the replicated store installs its
 /// base job schema only when a cluster is created, so an upgraded cluster
@@ -18,7 +42,9 @@ use std::sync::LazyLock;
 pub(crate) const EXPAND: &str = concat!(
     include_str!("source_leases_expand.sql"),
     "\n-- next statement\n",
-    include_str!("background_job_claim_effects.sql")
+    include_str!("background_job_claim_effects.sql"),
+    "\n-- next statement\n",
+    offline_service_admission!()
 );
 /// The contract: drops the v1 source-owner objects.
 pub(crate) const CONTRACT: &str = include_str!("source_leases_contract.sql");
@@ -213,6 +239,8 @@ pub(crate) fn install_for_fixture(conn: &rusqlite::Connection) {
     // for the claim effects to write.
     conn.execute_batch(include_str!("source_leases_expand.sql"))
         .expect("fixture source leases");
+    conn.execute_batch(offline_service_admission!())
+        .expect("fixture offline service admission");
     if !retention {
         conn.execute_batch(
             "DROP TRIGGER background_job_enqueue_command; DROP TRIGGER background_job_maintenance_command;",

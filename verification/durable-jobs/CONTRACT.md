@@ -1098,8 +1098,9 @@ modeled transition changes.
 [SOURCE-LEASE-AS-BUILT.md](../../docs/server/SOURCE-LEASE-AS-BUILT.md):
 source readers are rows of `source_leases`, counted per node and per mapped
 storage domain inside the claim's own statement. Repinned after review of
-each anchored item (the mapping still pins whole files, so rows whose item
-is unchanged were repinned without a model note):
+each anchored item (rows keep narrow item anchors; the runner also requires
+a digest of each containing source file, so unchanged items in edited files
+were repinned without a model note):
 
 - `proposal §4.1 resource claim effects` is re-anchored to
   `background_job_claim_effects.sql`, where the trigger now lives (the base
@@ -1116,3 +1117,10 @@ is unchanged were repinned without a model note):
 - `recovery dependency outside model: custody activation and cleanup`
   (`activate_background_with_journal`) is removed: the activation journal
   is deleted and no dependency remains.
+- Registration checks total capacity and maintenance state in the same atomic
+  Store write. An offline source resumes after lease expiry through the
+  existing grant write; full re-admission adds no RPC. The rolling legacy
+  projection is temporary and is removed at the contract boundary.
+
+These source details change no modeled transition and establish no liveness
+claim.

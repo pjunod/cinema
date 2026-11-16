@@ -243,9 +243,10 @@ async fn the_verdict_and_the_admissible_listing_agree_with_the_claim_statement()
                 &db,
                 &mut state,
                 format!(
-                r#"INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,
+                    r#"INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,
                  started_at_ms,renewed_at_ms,expires_at_ms) VALUES('job:{other}:1','job','{other}',1,'node-a',
-                 '{{"kind":"job","job_kind":"fragment_index_build"}}','["source_io"]','active',{now},{now},{expires_at_ms})"#,
+                 '{{"kind":"job","job_kind":"fragment_index_build"}}','["source_io"]','active',{now},{now},{expires_at_ms})"#
+                ),
             );
         }
         // A foreground owner.

@@ -702,3 +702,365 @@ fn contract_waits_for_every_node() {
         .expect("marker");
     assert_eq!(version, 3);
 }
+
+/// Mutation: old source binaries continue writing custody after the lease expand.
+#[test]
+fn old_custody_phase_bridge_tracks_renewal_pause_offline_service_and_release() {
+    for recursive in ["OFF", "ON"] {
+        let conn = rusqlite::Connection::open_in_memory().expect("store");
+        SqliteStore::apply_migrations_for_test(
+            &conn,
+            super::source_leases::EXPANDED_VERSION as i64,
+        )
+        .expect("expanded catalogue");
+        conn.pragma_update(None, "recursive_triggers", recursive)
+            .expect("recursive triggers");
+        conn.execute_batch(
+            r#"PRAGMA foreign_keys=OFF;
+             INSERT INTO settings(key,value) VALUES('jobs.source_readers_per_node','16');
+             INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[]');
+             INSERT INTO items(id,library_id,kind,title,sort_title)
+               VALUES(1,1,'movie','Movie','Movie');
+             INSERT INTO files(id,item_id,path,size,mtime)
+               VALUES(1,1,'/movie.mkv',100,7);
+             INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms)
+               VALUES('subtitle-read-attest:node-a:1','node-a',1,1,30000,1000);
+             INSERT INTO offline_packages(
+               id,request_id,user_id,file_id,node_id,source_path,source_size,source_mtime,
+               target_height,subtitle_mode,state,phase,claim_generation,expires_at)
+               VALUES('offline-package','request',1,1,'node-a','/movie.mkv',100,7,
+                 720,'none','preparing','download',1,100);
+             INSERT INTO analysis_requests(
+               request_id,file_id,source_size,source_mtime,component,video_identity,
+               pipeline_version,requested_generation,force_rebuild,target_node_id,state,
+               owner_node_id,fence,lease_expires_ms,not_before_ms,created_at_ms,updated_at_ms)
+               VALUES('coordinated',1,100,7,'fragment_index',
+                 'coordination-video:1:identity','coordination-contract:1','generation',
+                 0,'node-a','running','node-a',1,30000,0,1000,1000);
+             INSERT INTO analysis_coordination_roles(
+               request_id,file_id,source_size,source_mtime,origin_node_id,object_version,
+               video_identity,contract_version,requested_generation,phase_sequence,
+               active_custody_id,phase_registered,physical_node_id,physical_fence)
+               VALUES('coordinated',1,100,7,'node-a','object','identity',1,'generation',
+                 1,'phase-custody-uuid',1,'node-a',1);
+             INSERT INTO background_source_custody(
+               custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,
+               phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+               VALUES
+               ('phase-custody-uuid','analysis-owner','{"node_id":"node-a"}',
+                 '["source_io"]','analysis','coordinated',1,'active',1000,1000,30000),
+               ('attestation-custody-uuid','lease:subtitle-read-attest:node-a:1:1',
+                 '{"lease":{"owner_node_id":"node-a"},"file_id":1,"source_size":100,"source_mtime":7}',
+                 '["source_io"]','lease','subtitle-read-attest:node-a:1',1,'active',1000,1000,30000),
+               ('offline-custody-uuid','offline:offline-package:1',
+                 '{"kind":"offline","node_id":"node-a"}',
+                 '["source_io"]','offline','offline-package',1,'active',1000,1000,30000);"#,
+        )
+        .expect("v1 writes after expand");
+
+        let leases: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM source_leases WHERE owner_kind IN ('analysis','lease','offline')"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("bridged holders");
+        assert_eq!(leases, 3, "recursive_triggers={recursive}");
+        let phase_id: String = conn
+            .query_row(
+                r#"SELECT lease_id FROM source_leases WHERE owner_kind='analysis'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("physical phase id");
+        assert_eq!(
+            phase_id, "phase-custody-uuid",
+            "preserve exact phase identity"
+        );
+        let attestation_expiry: i64 = conn
+            .query_row(
+                r#"SELECT expires_at_ms FROM source_leases WHERE owner_kind='lease'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("attestation lease");
+        assert_eq!(attestation_expiry, 30000);
+        let offline_id: String = conn
+            .query_row(
+                r#"SELECT lease_id FROM source_leases WHERE owner_kind='offline'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("offline lease");
+        assert_eq!(offline_id, "offline:offline-package:1");
+
+        conn.execute(
+            r#"UPDATE analysis_requests SET lease_expires_ms=50000,updated_at_ms=2000 WHERE request_id='coordinated'"#,
+            [],
+        )
+        .expect("analysis owner renewal");
+        let analysis_expiry: i64 = conn
+            .query_row(
+                r#"SELECT expires_at_ms FROM source_leases WHERE lease_id='phase-custody-uuid'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("renewed analysis phase");
+        assert_eq!(analysis_expiry, 50000);
+        conn.execute(
+            r#"UPDATE background_source_custody SET phase='paused',updated_at_ms=2100 WHERE custody_id='phase-custody-uuid'"#,
+            [],
+        )
+        .expect("old phase pauses");
+        let phase_state: String = conn
+            .query_row(
+                r#"SELECT phase FROM source_leases WHERE lease_id='phase-custody-uuid'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("paused phase");
+        assert_eq!(phase_state, "paused");
+        conn.execute(
+            r#"UPDATE background_source_custody SET phase='active',updated_at_ms=2200 WHERE custody_id='phase-custody-uuid'"#,
+            [],
+        )
+        .expect("old phase resumes");
+
+        conn.execute(
+            r#"UPDATE job_leases SET expires_at_ms=42000,updated_at_ms=2300 WHERE resource='subtitle-read-attest:node-a:1'"#,
+            [],
+        )
+        .expect("attestation renewal");
+        let renewed_attestation: i64 = conn
+            .query_row(
+                r#"SELECT expires_at_ms FROM source_leases WHERE owner_kind='lease'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("renewed attestation");
+        assert_eq!(renewed_attestation, 42000);
+
+        // The pre-upsert binary sends flattened owner fields. Its accepted
+        // grant must recreate the bounded offline lease and preserve the old
+        // custody UUID when the two directions meet.
+        conn.execute(
+            r#"INSERT INTO background_job_commands(id,operation,request_json,result_json)
+             VALUES('service','source_service',
+               '{"kind":"offline","package_id":"offline-package","node_id":"node-a","claim_generation":1,"owner_key":"offline:offline-package:1","now_ms":2500,"epoch_id":0,"charge_bytes":0}',
+               '{"receipt_id":"grant","expires_at_ms":7500,"resource_keys":["source_io"]}')"#,
+            [],
+        )
+        .expect("accepted offline service");
+        let offline: (i64, String, String) = conn
+            .query_row(
+                r#"SELECT expires_at_ms,owner_json,lease_id FROM source_leases WHERE owner_kind='offline'"#,
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("renewed offline lease");
+        assert_eq!(offline.0, 32500);
+        assert_eq!(offline.2, "offline:offline-package:1");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&offline.1).expect("offline owner")["kind"],
+            "offline"
+        );
+        let preserved: String = conn
+            .query_row(
+                r#"SELECT custody_id FROM background_source_custody WHERE owner_key='offline:offline-package:1'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved legacy UUID");
+        assert_eq!(preserved, "offline-custody-uuid");
+
+        conn.execute(
+            r#"DELETE FROM background_source_custody WHERE custody_id='attestation-custody-uuid'"#,
+            [],
+        )
+        .expect("legacy reader release");
+        let after_release: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM source_leases WHERE owner_kind='lease'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("lease released with legacy custody");
+        assert_eq!(after_release, 0);
+        conn.execute(
+            r#"UPDATE offline_packages SET state='ready' WHERE id='offline-package'"#,
+            [],
+        )
+        .expect("offline owner ends");
+        let offline_after_end: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM source_leases WHERE owner_kind='offline'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("offline lease end");
+        assert_eq!(offline_after_end, 0);
+
+        conn.execute_batch(super::source_leases::CONTRACT)
+            .expect("contract drops temporary bridge");
+        let bridges: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (
+                   'source_lease_custody_insert','source_lease_custody_update',
+                   'source_lease_custody_delete','source_lease_custody_out_insert',
+                   'source_lease_custody_out_update','source_lease_custody_out_delete',
+                   'source_lease_offline_service_admission')"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("bridge inventory");
+        assert_eq!(bridges, 0);
+    }
+}
+
+/// Mutation: new independent leases are visible to v1 source admission and
+/// their release removes only the canonical mirror, preserving an old UUID.
+#[test]
+fn source_lease_custody_bridge_round_trips_without_replacing_old_uuid() {
+    for recursive in ["OFF", "ON"] {
+        let conn = rusqlite::Connection::open_in_memory().expect("store");
+        SqliteStore::apply_migrations_for_test(
+            &conn,
+            super::source_leases::EXPANDED_VERSION as i64,
+        )
+        .expect("expanded catalogue");
+        conn.pragma_update(None, "recursive_triggers", recursive)
+            .expect("recursive triggers");
+        conn.execute_batch(
+            r#"PRAGMA foreign_keys=OFF;
+             INSERT INTO settings(key,value) VALUES('jobs.source_readers_per_node','16');
+             INSERT INTO libraries(id,name,kind,paths) VALUES(1,'movies','movies','[]');
+             INSERT INTO items(id,library_id,kind,title,sort_title)
+               VALUES(1,1,'movie','Movie','Movie');
+             INSERT INTO files(id,item_id,path,size,mtime)
+               VALUES(1,1,'/movie.mkv',100,7);
+             INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms)
+               VALUES('subtitle-read-attest:node-a:1','node-a',1,1,30000,1000);
+             INSERT INTO offline_packages(
+               id,request_id,user_id,file_id,node_id,source_path,source_size,source_mtime,
+               target_height,subtitle_mode,state,phase,claim_generation,expires_at)
+               VALUES('offline-package','request',1,1,'node-a','/movie.mkv',100,7,
+                 720,'none','preparing','download',1,100);"#,
+        )
+        .expect("owner fixtures");
+
+        conn.execute_batch(
+            r#"INSERT INTO source_leases(
+               lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,
+               started_at_ms,renewed_at_ms,expires_at_ms)
+             VALUES
+               ('lease:subtitle-read-attest:node-a:1:1','lease','subtitle-read-attest:node-a:1',
+                 1,'node-a','{"lease":{"owner_node_id":"node-a"},"file_id":1,"source_size":100,"source_mtime":7}',
+                 '["source_io"]','active',1000,1000,30000),
+               ('offline:offline-package:1','offline','offline-package',1,'node-a',
+                 '{"kind":"offline","node_id":"node-a","package_id":"offline-package","claim_generation":1}',
+                 '["source_io"]','active',1000,1000,31000);"#,
+        )
+        .expect("new binary leases");
+
+        let legacy_occupancy: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM source_io_occupancy WHERE resource_key='source_io' AND owner_kind IN ('lease','offline') AND active_occupancy=1"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("v1 occupancy");
+        assert_eq!(legacy_occupancy, 2, "recursive_triggers={recursive}");
+        let projected: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM background_source_custody WHERE custody_id=owner_key"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("canonical rows");
+        assert_eq!(projected, 2);
+
+        conn.execute(
+            r#"UPDATE job_leases SET expires_at_ms=40000,updated_at_ms=2000 WHERE resource='subtitle-read-attest:node-a:1'"#,
+            [],
+        )
+        .expect("attestation owner renewal");
+        let mirrored_expiry: i64 = conn
+            .query_row(
+                r#"SELECT lease_expires_at_ms FROM background_source_custody WHERE owner_key='lease:subtitle-read-attest:node-a:1:1'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("mirrored owner renewal");
+        assert_eq!(mirrored_expiry, 40000);
+
+        conn.execute(
+            r#"DELETE FROM source_leases WHERE lease_id='lease:subtitle-read-attest:node-a:1:1'"#,
+            [],
+        )
+        .expect("new lease release");
+        let after_new_release: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM background_source_custody WHERE owner_key='lease:subtitle-read-attest:node-a:1:1'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("new custody release");
+        assert_eq!(after_new_release, 0);
+        conn.execute(
+            r#"DELETE FROM source_leases WHERE lease_id='offline:offline-package:1'"#,
+            [],
+        )
+        .expect("new offline release");
+        let occupancy_after_release: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM source_io_occupancy WHERE resource_key='source_io' AND owner_kind IN ('lease','offline') AND active_occupancy=1"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("old admission release");
+        assert_eq!(occupancy_after_release, 0);
+
+        conn.execute(
+            r#"INSERT INTO background_source_custody(
+               custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,
+               phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
+             VALUES('legacy-owner-uuid','lease:subtitle-read-attest:node-a:1:1',
+               '{"lease":{"owner_node_id":"node-a"},"file_id":1,"source_size":100,"source_mtime":7}',
+               '["source_io"]','lease','subtitle-read-attest:node-a:1',1,'active',1000,1000,30000)"#,
+            [],
+        )
+        .expect("legacy UUID custody");
+        let source_lease_id: String = conn
+            .query_row(
+                r#"SELECT lease_id FROM source_leases WHERE owner_kind='lease'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("canonical new schema id");
+        assert_eq!(source_lease_id, "lease:subtitle-read-attest:node-a:1:1");
+        let custody_id: String = conn
+            .query_row(
+                r#"SELECT custody_id FROM background_source_custody WHERE owner_key='lease:subtitle-read-attest:node-a:1:1'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("old uuid remains canonical owner");
+        assert_eq!(custody_id, "legacy-owner-uuid");
+        conn.execute(
+            r#"DELETE FROM source_leases WHERE lease_id='lease:subtitle-read-attest:node-a:1:1'"#,
+            [],
+        )
+        .expect("sweep-style lease removal");
+        let old_uuid_survives: i64 = conn
+            .query_row(
+                r#"SELECT count(*) FROM background_source_custody WHERE custody_id='legacy-owner-uuid'"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("old binary custody remains");
+        assert_eq!(old_uuid_survives, 1);
+
+        conn.execute_batch(super::source_leases::CONTRACT)
+            .expect("contract drops temporary bridge");
+    }
+}

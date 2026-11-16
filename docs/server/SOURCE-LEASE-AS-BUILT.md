@@ -83,10 +83,10 @@ reason. Section numbers (§) are the plan's.
    differs (upserts with an `IS NOT` guard), so a write ends at the other
    side with `recursive_triggers` on or off. The contract drops all six.
 9c. **Roll-time coordinated phases.** Between expand and contract a v1 node
-   records its coordinated phase in `background_source_custody`; the
-   orphaned-role sweep treats a matching row there as the phase's lease
-   while that table exists (review S2), so new nodes no longer clear v1
-   nodes' phases every minute of the roll.
+   records its coordinated phase in `background_source_custody`; the bridge
+   projects it as a bounded lease under that exact UUID (review S2/F3).
+   The orphaned-role sweep therefore uses only leases. A preserved v1 row
+   cannot pin the role after its authority and grace expire.
 10. **Contract on the replicated store.** A refused or failed contract leaves
     the complete expanded store and returns `Ok`, logged once at info; it
     retries on the next start.
@@ -177,3 +177,39 @@ analysis and resume. Claim, replica verdict and candidate listing wrap those
 terms in the same three admission groups; no local decision grants authority
 or replaces the replicated claim. Provider reservations keep their two-slot
 limit. Only the claimant job is excluded from its own lease holder counts.
+
+
+## Final integration review — capacity and rolling-owner fixes
+
+The final independent source review of `60df4bcf0` found three remaining
+admission/lifecycle gaps. The fixes stay in the replicated Store statements
+and migration, without an additional grant RPC or runtime recovery loop.
+
+1. **Independent registrations check both caps (F1).** Offline readers and
+   read attestations apply the shared total-holder term as well as the
+   maintenance term. A node/domain full of live readers must refuse another
+   maintenance reader even when its maintenance count is zero.
+2. **Offline service re-admits after expiry (F2).** A currently counted lease
+   renews with its service grant. Once expiry plus grace elapsed, the same
+   statement reconstructs resources from the exact preparing package and
+   checks foreground, total-holder and maintenance admission before renewing
+   or recreating the row. Swept and unswept rows therefore behave alike. The
+   grant retains its existing receipt/spend identity. During expand, a
+   compatibility admission trigger generated from the claim macros applies
+   these checks to old writers too; contract removes that temporary trigger.
+3. **The roll projects independent owners both ways (F3).** A v1 coordinated
+   phase keeps its exact custody UUID as its projected lease identity; ordinary
+   analysis claims remain represented once. V1 attestation/offline readers
+   use their canonical owner key. Temporary insert/update/delete bridges make
+   new v1 holders visible to lease readers and make independently registered
+   new-node leases visible to v1 occupancy. Reverse upserts preserve a v1
+   UUID, and lease collection never deletes that old-origin row: old writers
+   still need it to ask for service. That preserved row cannot keep a phase
+   role pinned after its projected lease expires. The contract removes these
+   bridges.
+
+Focused regressions cover live-only full node/domain capacity, offline
+re-admission with and without collection, flattened v1 grant proposals,
+and owners created after expand. Their mutation receipts and the final local
+checks are recorded with the PR; source inspection alone is not execution
+qualification. No deployment is part of this change.

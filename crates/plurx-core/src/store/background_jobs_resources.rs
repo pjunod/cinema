@@ -381,7 +381,7 @@ async fn clear_orphaned_coordination_roles<T: QueueSql>(
     // The coordination extension is not installed on every store.
     let installed = store
         .queue_sql(
-            "SELECT json_object('roles',EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_coordination_roles'),'custody',EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_source_custody')) AS result_json WHERE json_valid($1)".to_owned(),
+            "SELECT json_object('roles',EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_coordination_roles')) AS result_json WHERE json_valid($1)".to_owned(),
             body.to_owned(),
             false,
             true,
@@ -395,14 +395,10 @@ async fn clear_orphaned_coordination_roles<T: QueueSql>(
     if installed["roles"] != 1 {
         return Ok(());
     }
-    // Between expand and contract a node still on the v1 binary records its
-    // phase in background_source_custody (no bridge mirrors it): that row is
-    // the phase's lease until the contract drops the table.
-    let orphaned = if installed["custody"] == 1 {
-        "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id) AND NOT EXISTS(SELECT 1 FROM background_source_custody v1 WHERE v1.custody_id=role.active_custody_id)"
-    } else {
-        "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)"
-    };
+    // The rolling bridge projects each live v1 phase under its exact UUID.
+    // Only that bounded lease can keep a phase charged: an old custody row
+    // left behind after owner expiry must not pin its role indefinitely.
+    let orphaned = "json_valid($1) AND role.active_custody_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)";
     let pending = store
         .queue_sql(
             format!("SELECT 'true' AS result_json WHERE EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE {orphaned})"),
@@ -1268,8 +1264,8 @@ mod source_tests {
             .await
             .expect("begin")
             .expect("phase");
-        // What a v1 binary leaves: the phase names a UUID custody row in
-        // background_source_custody, and no lease.
+        // What a v1 binary writes: the phase names a custody UUID, and
+        // the migration bridge writes its bounded lease in that transaction.
         let active = || {
             store
                 .0
@@ -1290,7 +1286,7 @@ mod source_tests {
                 "DELETE FROM source_leases;
                  UPDATE analysis_coordination_roles SET active_custody_id='v1-custody' WHERE request_id='coordinator';
                  INSERT INTO background_source_custody(custody_id,owner_key,owner_json,resource_keys_json,owner_kind,work_id,fence,phase,started_at_ms,updated_at_ms,lease_expires_at_ms)
-                   VALUES('v1-custody','analysis:v1','{}','[\"source_io\"]','analysis','coordinator',1,'active',1000,1000,31000);",
+                   VALUES('v1-custody','analysis:v1','{\"kind\":\"analysis\",\"request_id\":\"coordinator\",\"node_id\":\"worker\",\"fence\":1}','[\"source_io\"]','analysis','coordinator',1,'active',1000,1000,31000);",
             )
             .expect("v1 phase");
         reap_expired_source_leases(&store, 2000)
@@ -1299,7 +1295,24 @@ mod source_tests {
         assert_eq!(
             active().as_deref(),
             Some("v1-custody"),
-            "the v1 row is its lease"
+            "the live v1 row has a projected lease"
+        );
+        reap_expired_source_leases(&store, 100_000)
+            .await
+            .expect("expiry and grace elapsed");
+        assert_eq!(active(), None, "a preserved v1 corpse cannot pin its role");
+        assert_eq!(
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT count(*) FROM background_source_custody WHERE custody_id='v1-custody'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("old writer still owns its row"),
+            1
         );
         store
             .0
@@ -1307,10 +1320,10 @@ mod source_tests {
             .expect("connection")
             .execute("DELETE FROM background_source_custody", [])
             .expect("the v1 node released it");
-        reap_expired_source_leases(&store, 3000)
+        reap_expired_source_leases(&store, 100_001)
             .await
             .expect("sweep");
-        assert_eq!(active(), None, "then the role is orphaned and cleared");
+        assert_eq!(active(), None, "legacy cleanup does not restore the role");
     }
 
     #[tokio::test]
@@ -2378,6 +2391,250 @@ mod source_tests {
             .is_some());
         assert_eq!(expiry(), 50_000, "reading renews it");
     }
+    /// Mutation: omit the total-holder term from independent registration.
+    #[tokio::test]
+    async fn independent_readers_refuse_a_node_or_domain_full_of_live_holders() {
+        for domain_full in [false, true] {
+            for attestation in [false, true] {
+                let store = fixture();
+                let package = uuid::Uuid::new_v4().to_string();
+                let lease = crate::cluster::coordination::Lease {
+                    resource: "subtitle-read-attest:worker:0".into(),
+                    owner_node_id: "worker".into(),
+                    fence: 1,
+                    revision: 1,
+                    expires_at_unix_ms: 200_000,
+                };
+                {
+                    let db = store.0.lock().expect("connection");
+                    db.execute("INSERT INTO offline_packages VALUES(?1,'worker',1,100,1,1,'preparing',604800)", [&package]).expect("package");
+                    db.execute(
+                        "INSERT INTO job_leases VALUES(?1,'worker',1,1,200000,1000)",
+                        [&lease.resource],
+                    )
+                    .expect("attestation");
+                    db.execute(
+                        "INSERT INTO background_storage_domains VALUES(1,'/media','disk')",
+                        [],
+                    )
+                    .expect("domain");
+                    let count = if domain_full { 2 } else { 3 };
+                    for index in 0..count {
+                        let id = format!("viewer-{index}");
+                        let node = if domain_full {
+                            format!("peer-{index}")
+                        } else {
+                            "worker".into()
+                        };
+                        let keys = if domain_full {
+                            r#"["source_io:disk"]"#
+                        } else {
+                            r#"["source_io:other"]"#
+                        };
+                        db.execute("INSERT INTO source_leases VALUES(?1,'analysis',?2,1,?3,'{}',?4,'active',NULL,1000,1000,200000)",rusqlite::params![format!("analysis:{id}:1"),id,node,keys]).expect("live holder");
+                        db.execute("INSERT INTO background_job_waiters(request_scope,request_id,state,job_id,deadline_ms) VALUES('playback-analysis',?1,'pending',?1,200000)", [&id]).expect("live interest, no maintenance occupancy");
+                    }
+                }
+                let owner = if attestation {
+                    BackgroundSourceOwner::ReadAttestation {
+                        lease,
+                        file_id: 1,
+                        source_size: 100,
+                        source_mtime: 1,
+                    }
+                } else {
+                    BackgroundSourceOwner::Offline {
+                        package_id: package,
+                        node_id: "worker".into(),
+                        claim_generation: 1,
+                    }
+                };
+                assert!(
+                    register_background_custody(&store, owner, 2_000)
+                        .await
+                        .expect("admission")
+                        .is_none(),
+                    "domain_full={domain_full}, attestation={attestation}"
+                );
+                assert_eq!(store.0.lock().expect("connection").query_row("SELECT count(*) FROM source_leases WHERE owner_kind IN ('offline','lease')",[],|row|row.get::<_,i64>(0)).expect("no over-admission"),0);
+            }
+        }
+    }
+
+    /// Mutations: omit offline re-admission, omit its capacity predicates,
+    /// or keep the update-only service renewal trigger.
+    #[tokio::test]
+    async fn an_expired_offline_reader_readmits_atomically_with_or_without_collection() {
+        for swept in [false, true] {
+            let store = fixture();
+            let package = uuid::Uuid::new_v4().to_string();
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .execute(
+                    "INSERT INTO offline_packages VALUES(?1,'worker',1,100,1,1,'preparing',604800)",
+                    [&package],
+                )
+                .expect("package");
+            let owner = BackgroundSourceOwner::Offline {
+                package_id: package,
+                node_id: "worker".into(),
+                claim_generation: 1,
+            };
+            assert!(register_background_custody(&store, owner.clone(), 1_000)
+                .await
+                .expect("register")
+                .is_some());
+            // No grants during a long playback block: the offline row's
+            // 30 s expiry and 60 s grace have both elapsed.
+            if swept {
+                reap_expired_source_leases(&store, 100_000)
+                    .await
+                    .expect("sweep");
+            }
+            {
+                let db = store.0.lock().expect("connection");
+                db.execute(
+                    "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                    [],
+                )
+                .expect("one maintenance slot");
+                db.execute("INSERT INTO source_leases VALUES('lease:other:1','lease','other',1,'worker','{}','[\"source_io\"]','active',NULL,100000,100000,200000)",[]).expect("freed slot taken");
+            }
+            assert!(
+                claim_background_service(&store, owner.clone(), 100_000)
+                    .await
+                    .expect("blocked re-admission")
+                    .is_none(),
+                "swept={swept}"
+            );
+            let rows=store.0.lock().expect("connection").query_row("SELECT count(*) FROM source_leases WHERE owner_kind='offline' AND expires_at_ms>100000",[],|row|row.get::<_,i64>(0)).expect("expired stays uncounted");
+            assert_eq!(rows, 0, "a stale row must not revive over capacity");
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .execute("DELETE FROM source_leases WHERE work_id='other'", [])
+                .expect("slot free");
+            let resumed = claim_background_service(&store, owner.clone(), 100_001)
+                .await
+                .expect("resume without another registration call")
+                .expect("re-admitted");
+            assert_eq!(
+                store
+                    .0
+                    .lock()
+                    .expect("connection")
+                    .query_row(
+                        "SELECT expires_at_ms FROM source_leases WHERE owner_kind='offline'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("lease recreated/renewed"),
+                130_001
+            );
+            let replay = claim_background_service(&store, owner, 100_002)
+                .await
+                .expect("same epoch")
+                .expect("grant replay");
+            assert_eq!(
+                resumed.receipt_id, replay.receipt_id,
+                "re-admission preserves the spend receipt"
+            );
+        }
+    }
+
+    /// Mutation: remove source_lease_offline_service_admission. Old binaries
+    /// do not have the new caller-side re-admission predicate.
+    #[tokio::test]
+    async fn a_v1_offline_service_proposal_cannot_revive_a_reader_above_capacity() {
+        let store = fixture();
+        let package = uuid::Uuid::new_v4().to_string();
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO offline_packages VALUES(?1,'worker',1,100,1,1,'preparing',604800)",
+                [&package],
+            )
+            .expect("package");
+        let owner = BackgroundSourceOwner::Offline {
+            package_id: package,
+            node_id: "worker".into(),
+            claim_generation: 1,
+        };
+        assert!(register_background_custody(&store, owner.clone(), 1_000)
+            .await
+            .expect("register")
+            .is_some());
+        reap_expired_source_leases(&store, 100_000)
+            .await
+            .expect("sweep");
+        {
+            let db = store.0.lock().expect("connection");
+            db.execute(
+                "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                [],
+            )
+            .expect("one maintenance slot");
+            db.execute("INSERT INTO source_leases VALUES('lease:other:1','lease','other',1,'worker','{}','[\"source_io\"]','active',NULL,100000,100000,200000)",[]).expect("slot taken");
+        }
+        // Exactly the flattened v1 owner body; there is no nested `owner`.
+        let mut body = serde_json::to_value(&owner).expect("body");
+        body["owner_key"] = background_owner_key(&owner).expect("key").into();
+        body["now_ms"] = 100_000.into();
+        body["epoch_id"] = 20.into();
+        body["charge_bytes"] = 0.into();
+        body["id"] = uuid::Uuid::new_v4().to_string().into();
+        let grant = serde_json::json!({"receipt_id":uuid::Uuid::new_v4().to_string(),"epoch_id":20,"expires_at_ms":105_000,"byte_allowance":null,"resource_keys":["source_io"]});
+        body["grant"] = grant;
+        let propose = |body: String| {
+            store.queue_sql("INSERT INTO background_job_commands(id,operation,request_json,result_json) VALUES(json_extract($1,'$.id'),'source_service',$1,json_extract($1,'$.grant')) RETURNING result_json".into(),body,true,true)
+        };
+        assert!(propose(encode(&body).expect("body"))
+            .await
+            .expect("old proposal refused")
+            .is_empty());
+        assert_eq!(
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT count(*) FROM source_leases WHERE owner_kind='offline'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("not revived"),
+            0
+        );
+        store
+            .0
+            .lock()
+            .expect("connection")
+            .execute("DELETE FROM source_leases WHERE work_id='other'", [])
+            .expect("slot free");
+        assert!(!propose(encode(&body).expect("same old proposal"))
+            .await
+            .expect("old writer readmitted")
+            .is_empty());
+        assert_eq!(
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .query_row(
+                    "SELECT expires_at_ms FROM source_leases WHERE owner_kind='offline'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("old body renews exact lease"),
+            130_000
+        );
+    }
+
     #[tokio::test]
     async fn offline_source_owner_uses_exact_package_generation_and_keeps_old_physical_custody() {
         let store = fixture();
@@ -2692,11 +2949,12 @@ pub(super) async fn register_background_custody<T: QueueSql>(
     let now = "json_extract($1,'$.now_ms')";
     let blocked = foreground_blocks("required.resource_key", now);
     let maintenance = super::source_leases::maintenance_reader("required.resource_key", node, now);
+    let holders = super::source_leases::source_holders("required.resource_key", node, now);
     let rows=store.queue_sql(format!(r#"INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,started_at_ms,renewed_at_ms,expires_at_ms)
       SELECT json_extract($1,'$.lease_id'),'{kind}',{work},{fence},{node},json_extract($1,'$.owner'),
         (SELECT json_group_array(resource_key) FROM ({resources})),'active',{now},{now},{expiry}
       WHERE {identity} AND EXISTS(SELECT 1 FROM ({resources}))
-        AND NOT EXISTS(SELECT 1 FROM ({resources}) required WHERE {blocked} OR {maintenance})
+        AND NOT EXISTS(SELECT 1 FROM ({resources}) required WHERE {blocked} OR {holders} OR {maintenance})
       ON CONFLICT(lease_id) DO NOTHING
       RETURNING 'true' AS result_json"#),encode(&body)?,true,true).await?;
     Ok(token(rows))
@@ -2790,21 +3048,40 @@ async fn claim_background_service_inner<T: QueueSql>(
     let mut body = serde_json::to_value(&owner).map_err(|e| StoreError::Task(e.to_string()))?;
     body["id"] = uuid::Uuid::new_v4().to_string().into();
     body["owner_key"] = owner_key.into();
+    body["owner"] = serde_json::to_value(&owner).map_err(|e| StoreError::Task(e.to_string()))?;
     body["now_ms"] = now_ms.into();
     body["epoch_id"] = (now_ms / 5000).into();
     if let Some(phase) = exact_phase {
         body["custody_id"] = phase.custody.custody_id.clone().into();
         body["phase_sequence"] = phase.phase_sequence.into();
     }
-    let custody = if exact_phase.is_some() {
+    let offline = matches!(&owner, BackgroundSourceOwner::Offline { .. });
+    let now = "json_extract($1,'$.now_ms')";
+    let counted_offline = format!("EXISTS(SELECT 1 FROM source_leases owned WHERE owned.lease_id=json_extract($1,'$.owner_key') AND owned.owner_kind='offline' AND owned.phase!='paused' AND owned.expires_at_ms>{now}-60000)");
+    // Expiry frees capacity independently of collection. A preparing package
+    // that resumes after that boundary must reacquire capacity in this same
+    // write, whether its expired row is still present or has been collected.
+    let offline_resources = background_owner_resources(&owner);
+    let offline_custody = format!("SELECT resource_keys_json FROM source_leases WHERE lease_id=json_extract($1,'$.owner_key') AND ({counted_offline}) UNION ALL SELECT json_group_array(resource_key) AS resource_keys_json FROM ({offline_resources}) WHERE NOT ({counted_offline}) HAVING count(*)>0");
+    let custody = if offline {
+        offline_custody.as_str()
+    } else if exact_phase.is_some() {
         "SELECT owned.resource_keys_json FROM source_leases owned JOIN analysis_coordination_roles role ON role.active_custody_id=owned.lease_id AND role.request_id=owned.work_id AND role.physical_fence=owned.fence WHERE owned.lease_id=json_extract($1,'$.custody_id') AND owned.owner_kind='analysis' AND role.phase_sequence=json_extract($1,'$.phase_sequence') AND owned.phase IN ('active','paused')"
     } else if companion {
         "SELECT fg.resource_keys_json FROM source_leases fg WHERE fg.lease_id=json_extract($1,'$.token.owner.owner_id') AND fg.owner_kind='playback' AND fg.owner_json=json_extract($1,'$.token.owner') AND json_extract(fg.owner_json,'$.policy')='companion' AND fg.phase='transfer_service' AND fg.expires_at_ms>json_extract($1,'$.now_ms') AND json_extract(fg.projection_json,'$.transfer_grant.expires_at_ms')>json_extract($1,'$.now_ms')"
     } else {
         "SELECT owned.resource_keys_json FROM source_leases owned WHERE owned.lease_id=json_extract($1,'$.owner_key') AND owned.owner_kind!='playback' AND owned.phase IN ('active','paused')"
     };
+    let readmission = if offline {
+        let node = "json_extract($1,'$.node_id')";
+        let holders = super::source_leases::source_holders("resource.value", node, now);
+        let maintenance = super::source_leases::maintenance_reader("resource.value", node, now);
+        format!(" AND (({counted_offline}) OR NOT EXISTS(SELECT 1 FROM custody,json_each(custody.resource_keys_json) resource WHERE {holders} OR {maintenance}))")
+    } else {
+        String::new()
+    };
     let eligibility = format!(
-        r#"{identity} AND NOT EXISTS(SELECT 1 FROM custody,json_each(custody.resource_keys_json) resource WHERE {blocked})"#
+        r#"{identity} AND NOT EXISTS(SELECT 1 FROM custody,json_each(custody.resource_keys_json) resource WHERE {blocked}){readmission}"#
     );
     // Revalidate and reduce a replay in the same transaction as allocation.
     // A pre-pressure unlimited receipt becomes finite under the SAME identity;

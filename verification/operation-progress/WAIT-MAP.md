@@ -699,7 +699,11 @@ the background completion ledger and the host helper. Startup and the
 scheduler no longer await verified recovery; the store sweep releases an
 owner whose authority lapsed. The recovery-module and challenge-preparation
 pins are removed with their sources. Links above to the removed files are
-kept as plain text for history. No modeled wait changes.
+kept as plain text for history. No modeled wait changes. Registration checks total capacity and maintenance
+state in the same atomic Store write. An offline source resumes after lease
+expiry through the existing grant write; full re-admission adds no RPC. The
+rolling legacy projection is temporary and is removed at the contract
+boundary. These source details add no modeled wait edge or liveness claim.
 
 ## Source lease steps 3+4 — one lease table, per-node capacity, 2026-11-16
 
