@@ -4109,6 +4109,12 @@ fn dovi_reshape_probe_args(encoder: Encoder) -> Vec<String> {
     args
 }
 
+/// The boot capability probe of one Dolby Vision reshape graph (software or
+/// one hardware encoder). It runs only from the boot measurement, never from
+/// a session start.
+pub(crate) const DOVI_RESHAPE_CAPABILITY_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("Dolby Vision reshape capability probe");
+
 async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command
@@ -4116,10 +4122,7 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
         .kill_on_drop(true);
     tokio::time::timeout(
         Duration::from_secs(20),
-        crate::process_control::status_job_owned(
-            &mut command,
-            crate::process_control::ChildWork::background("Dolby Vision reshape capability probe"),
-        ),
+        crate::process_control::status_job_owned(&mut command, DOVI_RESHAPE_CAPABILITY_PROBE),
     )
     .await
     .is_ok_and(|result| result.is_ok_and(|status| status.success()))
@@ -4139,7 +4142,9 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
 ///
 /// Nothing is assumed: each pairing is probed once, exactly like the software
 /// route, and an unproved pairing falls back to software rather than failing a
-/// session in front of a viewer.
+/// session in front of a viewer. Every pairing this node's encoders offer is
+/// probed at boot ([`measure_dovi_reshape_hardware`]); a session reads that
+/// boot record and never starts this probe itself.
 pub async fn has_dovi_reshape_with(encoder: plurx_core::transcode::Encoder) -> bool {
     if encoder == Encoder::Software {
         return has_dovi_reshape().await;
@@ -4171,6 +4176,27 @@ pub async fn has_dovi_reshape_with(encoder: plurx_core::transcode::Encoder) -> b
     }
     memo.insert(key, passed);
     passed
+}
+
+/// The hardware encoders this node's Dolby Vision reshape is proved with:
+/// every hardware encoder `encoders` detected, each probed once. Measured at
+/// boot beside the software pairing (`dovi_reshape`), so no session start
+/// ever spawns a capability probe.
+pub async fn measure_dovi_reshape_hardware(
+    encoders: &plurx_core::transcode::EncoderCaps,
+) -> Vec<Encoder> {
+    let mut proved = Vec::new();
+    for (available, encoder) in [
+        (encoders.nvenc, Encoder::Nvenc),
+        (encoders.qsv, Encoder::Qsv),
+        (encoders.vaapi, Encoder::Vaapi),
+        (encoders.videotoolbox, Encoder::VideoToolbox),
+    ] {
+        if available && has_dovi_reshape_with(encoder).await {
+            proved.push(encoder);
+        }
+    }
+    proved
 }
 
 /// The message `tonemapx` prints when its HDR passthrough mode is asked for

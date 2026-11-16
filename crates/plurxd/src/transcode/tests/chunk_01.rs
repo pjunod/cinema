@@ -3512,6 +3512,56 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
     assert_eq!(manager.auto_height_for_file(Some(&file), None).await, 720);
 }
 
+/// A Profile 5 reshape on a node whose preferred encoder is hardware reads
+/// the boot-measured pairing and spawns no capability probe. It used to probe
+/// the pairing lazily on the first reshape: an unattributed child that no
+/// session or job owned, on the Source exactly as locally.
+#[tokio::test]
+async fn the_first_profile5_reshape_on_a_hardware_node_spawns_no_capability_probe() {
+    use plurx_core::store::SqliteStore;
+
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    store
+        .put_settings(&[(keys::HWACCEL, "qsv")])
+        .await
+        .expect("prefer QSV");
+    let dir = crate::test_tempdir().expect("work");
+    let caps = EncoderCaps {
+        qsv: true,
+        ..EncoderCaps::default()
+    };
+    let file = profile5_file();
+    let probes = || {
+        crate::process_control::priority::spawns_of(crate::ffmpeg::DOVI_RESHAPE_CAPABILITY_PROBE)
+    };
+    for (proved, expected) in [(Vec::new(), Encoder::Software), (vec![Encoder::Qsv], Encoder::Qsv)] {
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            dir.path().join(expected.label()),
+            caps.clone(),
+            Pipeline::VppQsv,
+        )
+        .with_dovi_reshape(true)
+        .with_dovi_reshape_hardware(proved);
+        manager
+            .dovi_proofs
+            .record(TranscodeManager::dovi_proof_key(&file), true);
+        let before = probes();
+        let encoder = manager
+            .encoder_for_file(&file, crate::process_control::ChildClass::Realtime)
+            .await
+            .expect("proved source");
+        assert_eq!(encoder, expected, "the boot record decides the encoder");
+        assert_eq!(
+            manager
+                .dovi_reshape_encoder_advisory_with_preference(&file, "qsv")
+                .await,
+            expected
+        );
+        assert_eq!(probes(), before, "a session start spawns no capability probe");
+    }
+}
+
 /// P-02: a Profile 5 pixel proof that did not finish is not a verdict. The
 /// first start's probes fail (the source path does not exist, so ffmpeg
 /// exits non-zero or cannot start at all); that start is refused as
