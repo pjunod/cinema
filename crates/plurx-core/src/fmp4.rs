@@ -5266,19 +5266,13 @@ pub fn hevc_cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u
         return malformed("fitted packet identity has invalid HEVC sample framing");
     }
     let mut hash = Sha256::new();
-    let mut count = 0usize;
     let mut invalid = false;
-    visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
-        let nal = &framed[usize::from(length_size)..];
+    visit_cbs_annex_b_units(sample, length_size, |start_code, nal, kind| {
         if kind.is_none() || nal.windows(3).any(|bytes| bytes == [0, 0, 1]) {
             invalid = true;
         }
-        if count == 0 || matches!(kind, Some(32..=34)) {
-            hash.update([0]);
-        }
-        hash.update([0, 0, 1]);
+        hash.update(start_code);
         hash.update(nal);
-        count += 1;
     })?;
     if invalid {
         return malformed("fitted packet has a truncated header or unescaped Annex-B delimiter");
@@ -5300,18 +5294,40 @@ pub fn hevc_cbs_annex_b_sample_hash(sample: &[u8], length_size: u8) -> Result<[u
 /// unit, with a four-byte length prefix.
 pub fn hevc_sample_cbs_annex_b_len(sample: &[u8], length_size: u8) -> Result<usize, Fmp4Error> {
     let mut len = 0usize;
+    visit_cbs_annex_b_units(sample, length_size, |start_code, nal, _| {
+        len = len
+            .saturating_add(start_code.len())
+            .saturating_add(nal.len());
+    })?;
+    Ok(len)
+}
+
+/// Visit each NAL unit of a length-prefixed HEVC sample as FFmpeg's CBS
+/// writer frames it in Annex B: the start code it writes (`00 00 00 01` for
+/// the access unit's first unit and for VPS/SPS/PPS, whose `zero_byte`
+/// `cbs_h2645_unit_requires_zero_byte` requires; `00 00 01` otherwise), the
+/// unit's bytes unchanged, and its type. Both the F+ packet identity and the
+/// copy packet clock use this one framing rule. A sample with no unit is
+/// malformed.
+fn visit_cbs_annex_b_units(
+    sample: &[u8],
+    length_size: u8,
+    mut visit: impl FnMut(&'static [u8], &[u8], Option<u8>),
+) -> Result<usize, Fmp4Error> {
     let mut units = 0usize;
     visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
-        let zero_byte = units == 0 || matches!(kind, Some(32..=34));
-        len = len
-            .saturating_add(framed.len() - usize::from(length_size))
-            .saturating_add(3 + usize::from(zero_byte));
+        let start_code: &'static [u8] = if units == 0 || matches!(kind, Some(32..=34)) {
+            &[0, 0, 0, 1]
+        } else {
+            &[0, 0, 1]
+        };
+        visit(start_code, &framed[usize::from(length_size)..], kind);
         units += 1;
     })?;
     if units == 0 {
         return malformed("HEVC sample carries no NAL unit");
     }
-    Ok(len)
+    Ok(units)
 }
 
 fn hevc_sample_without_parameter_sets_len(
