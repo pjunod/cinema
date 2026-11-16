@@ -721,6 +721,12 @@ WHERE id = json_extract($1, '$.job_id')
         "json_extract($1,'$.now_ms')"
     ),
     r#")))
+  -- Other shared resources (provider slots) keep their two reservation
+  -- slots (claim effects); a full pair refuses here instead of aborting.
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = json_extract($1, '$.job_id') AND required.resource_key NOT LIKE 'source_io%'
+      AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key = required.resource_key
+          AND held.expires_at_ms > json_extract($1, '$.now_ms') AND held.job_id != background_jobs.id) >= 2)
 "#
 );
 
