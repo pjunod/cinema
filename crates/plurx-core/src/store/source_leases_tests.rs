@@ -887,7 +887,7 @@ fn old_custody_phase_bridge_tracks_renewal_pause_offline_service_and_release() {
             .expect("lease released with legacy custody");
         assert_eq!(after_release, 0);
         conn.execute(
-            r#"UPDATE offline_packages SET state='ready' WHERE id='offline-package'"#,
+            r#"UPDATE offline_packages SET state='ready',claim_generation=claim_generation+1 WHERE id='offline-package'"#,
             [],
         )
         .expect("offline owner ends");
