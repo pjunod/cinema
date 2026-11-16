@@ -508,6 +508,7 @@ paths = [
   "crates/plurx-core/src/store/source_leases{,_tests}.rs",
   "crates/plurx-core/src/store/source_leases_{expand,contract}.sql",
   "crates/plurx-core/src/store/background_job_claim_effects.sql",
+  "crates/plurx-core/tests/fixtures/background-job-claim-effects-v1.sql",
   "crates/plurx-core/src/store/background_jobs_custody_retention.sql",
   "crates/plurx-core/src/store/background_jobs_source_interest.sql",
   "crates/plurx-core/src/store/background_jobs_source_service.sql",
