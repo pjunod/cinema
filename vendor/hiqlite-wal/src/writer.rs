@@ -413,7 +413,17 @@ fn run(
                 meta.write()?.vote = Some(value);
                 let res = Metadata::write(meta.clone(), &wal.base_path);
 
-                ack.send(res).unwrap();
+                // Plurx patch 7: a cancelled `save_vote` drops its receiver.
+                // The vote is already written; losing the reply must not end
+                // the writer and strand its lock file.
+                if let Err(res) = ack.send(res) {
+                    let error = res.err().map(|err| format!("{err:?}"));
+                    warn!(
+                        outcome = if error.is_none() { "ok" } else { "error" },
+                        error,
+                        "WAL vote reply abandoned: the caller stopped waiting; the result stands"
+                    );
+                }
             }
             Action::Sync => {
                 if is_dirty {
@@ -452,8 +462,11 @@ fn run(
     status.record_stopped(Some(durable_index));
 
     if let Some(ack) = shutdown_ack {
-        ack.send(())
-            .expect("Shutdown handler to always wait for ack from logs");
+        // Plurx patch 7: the WAL is flushed and the lock file removed; a
+        // shutdown caller that stopped waiting changes nothing.
+        if ack.send(()).is_err() {
+            warn!("WAL shutdown acknowledgement abandoned: the caller stopped waiting");
+        }
     }
 
     Ok(())
@@ -501,6 +514,75 @@ mod tests {
         let (ack, rx) = oneshot::channel();
         writer.send(Action::Shutdown(ack)).unwrap();
         rx.blocking_recv().unwrap();
+    }
+
+    /// A reply sender whose receiver is already gone.
+    fn abandoned<T>() -> oneshot::Sender<T> {
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        tx
+    }
+
+    /// Plurx patch 7. A cancelled `save_vote` drops its receiver. The vote is
+    /// still written, the writer answers the shutdown that follows, and the
+    /// lock file is released so the WAL reopens. Before the patch the writer
+    /// panicked on the reply, so the shutdown below was never acknowledged.
+    #[test]
+    fn dropped_vote_reply_keeps_the_vote_and_the_writer() -> Result<(), Error> {
+        let path = test_path("abandoned-vote");
+        let (writer, meta, layout) = start_writer(&path)?;
+        writer
+            .send(Action::Vote {
+                value: vec![7, 7, 7],
+                ack: abandoned(),
+            })
+            .unwrap();
+        // The writer drains its queue in order, so the acknowledged shutdown
+        // is a barrier behind the abandoned vote.
+        stop_writer(writer);
+        assert_eq!(meta.read()?.vote, Some(vec![7, 7, 7]));
+        drop(layout);
+        assert!(!LockFile::exists(&path)?, "the lock file is released");
+        assert_eq!(Metadata::read_or_create(&path)?.vote, Some(vec![7, 7, 7]));
+        let (writer, _meta, _layout) = start_writer(&path)?;
+        stop_writer(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    /// Plurx patch 7. A shutdown whose caller stopped waiting still flushes,
+    /// writes the metadata and releases the lock file, and the WAL reopens.
+    /// The acknowledgement is the writer's last act, after all of that, so
+    /// what this run shows is the orderly stop; that the send itself no
+    /// longer panics is in the source.
+    #[test]
+    fn dropped_shutdown_reply_still_releases_the_wal() -> Result<(), Error> {
+        let path = test_path("abandoned-shutdown");
+        let (writer, _meta, layout) = start_writer(&path)?;
+        let (ack, acknowledged) = oneshot::channel();
+        writer
+            .send(Action::Vote {
+                value: vec![9],
+                ack,
+            })
+            .unwrap();
+        acknowledged.blocking_recv().unwrap()?;
+        writer.send(Action::Shutdown(abandoned())).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !writer.is_disconnected() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer stops after an abandoned shutdown acknowledgement"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(layout);
+        assert!(!LockFile::exists(&path)?, "the lock file is released");
+        assert_eq!(Metadata::read_or_create(&path)?.vote, Some(vec![9]));
+        let (writer, _meta, _layout) = start_writer(&path)?;
+        stop_writer(writer);
+        fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[cfg(unix)]
