@@ -62,9 +62,10 @@ access needs routing through the facade.
 
 ## Build and qualification
 
-1. Prepare against the isolated #1646/current-main candidate. After #1646
-   lands, establish effort/cluster-facade from current main and requalify this
-   task against that base. Keep one owned external clone.
+1. Use current main `7829748b9` as the `effort/cluster-facade` base. Slice 2
+   depends on the already-landed #1629, not C7. Exclude #1646's pending
+   commits from this effort; its train remains separate. Keep one owned
+   external clone and requalify the exact task tree after transplanting.
 2. Commit the in-repository plan before Rust edits, with its folder index and
    backlog row. The remaining facade slices share cluster/state/census files. Target this
    task at effort/cluster-facade, dispatch the Effort development gate, and
@@ -135,3 +136,17 @@ Clippy with `-D warnings` remains red on the existing baseline warnings:
 qualification subscription. The same warnings were present in the baseline
 compiler check; this slice does not silence them. No green Clippy result or
 fleet acceptance is claimed. Source is not yet published or deployed.
+
+## Integration base
+
+Slice 2 is isolated onto main `7829748b9`, without C7's pending commits.
+The reviewed media/authority changes are unchanged. The mechanical
+transplant removes the unrelated `core_failure` method from the facade base
+and refreshes source hashes against the pre-C7 main; unique formal anchors
+remain outside the changed hunks. The original contract listed only #1629
+as slice 2's prerequisite. Independent effort qualification therefore does
+not wait for an unrelated hotfix train or indirectly land #1646.
+
+The 130-second check and 98-test pass above describe the preliminary C7
+candidate. Exact current-base compiler and focused-test results follow when
+complete; no old-base result is presented as current-tree qualification.
