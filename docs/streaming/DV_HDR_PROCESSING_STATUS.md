@@ -24,17 +24,19 @@ literals byte for byte (`dv_dm_active_partial`). Three crop-domain CPU
 controls and L5 GPU parity cases cover it. Whole-frame qualification and
 display/performance acceptance remain open.
 
-**P5/P8 master black (2026-11-15):** the base reconstruction kept the
-stream's colour description on its source, so libplacebo tone-mapped a pass
-meant to be an identity: under `PL_HDR_METADATA_NONE` it reads source black as
-0 and compensates to the destination's 0.005 nits. Black became code 988 and
-every channel below a pixel's largest rose with it: three P8 masters were
-12.5-14.9 dE ITP off the corpus master. Both renderers now take one
-description for both sides from `dv_master_frames` (the player's) and refuse
-unless libplacebo finds them equal: master within 0.037 dE and 2 codes,
+**Base master black (2026-11-15):** the base reconstruction (P5, P8, and P7
+rendered without its EL) kept the stream's colour description on its source,
+so libplacebo tone-mapped a pass meant to be an identity: under
+`PL_HDR_METADATA_NONE` it reads source black as 0 and compensates to the
+destination's 0.005 nits. Black became code 988 and every channel below a
+pixel's largest rose with it: three P8 masters were 12.5-14.9 dE ITP off the
+corpus master. Both renderers now set one description on both sides
+(`dv_master_frames`, the player's): master within 0.037 dE and 2 codes,
 mapped within 0.049 of the licensed reference; P7 FEL and HDR10-E bytes
-unchanged. Control: `controls/test_base_master_black.c`. Served P5/P8 masters
-carry the lift until deployed.
+unchanged. A real P5 and a real base-only P7 frame lose the 988 floor; neither
+has a reference master. `controls/test_base_master_black.c` covers the three
+families and runs on lavapipe in every image build. Served base masters carry
+the lift until deployed.
 
 **CM v2.9 active area (2026-11-12):** L5 now bounds the CM v2.9 detail
 filter too. It had blended bars into two boundary rows: on four native frames,
@@ -106,9 +108,7 @@ presentation are implemented; normal serving integration and the installed Linux
 helper bundle have bounded local serving evidence in §22. The effort merged to
 `main` without a qualification receipt; §23 records which suites have and have
 not passed on the merged tree. The [M1 contract](DV_HDR_M1_CONTRACTS.md)
-initially introduced only additive core types, validation and pure/test-only
-selection; code review approved that bounded Rust diff. PR #933 merged at
-`0925e26db633`.
+merged as PR #933 (`0925e26db633`).
 The first task must retain reproducible commands, source pins, actual frame
 artifacts and negative controls. Numerical agreement is evidence for the named
 operation, not full Dolby Vision conformance or an improvement on a movie.
