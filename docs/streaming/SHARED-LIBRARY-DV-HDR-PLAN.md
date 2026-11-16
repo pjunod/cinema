@@ -1,6 +1,6 @@
 # Shared Dolby Vision and HDR — deliver every local shape over sharing
 
-**Status:** ready to build · **Branch:** `effort/shared-dv-hdr` · **Written:** 2026-11-15 ·
+**Status:** in progress (M1 and T2.1 on `claude/shared-dv-hdr-m1`) · **Branch:** `effort/shared-dv-hdr` · **Written:** 2026-11-15 ·
 **Verified against:** origin/main @ `29b35e713` (read, not compiled) ·
 **For:** the build agent (Opus). Nothing here is for review by another model.
 
@@ -374,7 +374,7 @@ compatible base, so there is no lower plan to fall to.
 
 ### M4 — Processed DV / FEL re-encode over sharing
 
-**T4.1 — Design note first** (`docs/streaming/SHARED-DV-PROCESSED-PLAN.md`,
+**T4.1 — Design note first** (a new `SHARED-DV-PROCESSED-PLAN.md` beside this plan,
 with its row in `docs/streaming/README.md`), then tasks. Local processed DV
 is a post-first-frame upgrade through the M6 prepared replacement; a shared
 session stages no successor on the Source
@@ -415,6 +415,62 @@ starts with, which is the planner's own next-best.
 
 ## 6. Execution log
 
+Branch `claude/shared-dv-hdr-m1` (stacked on `effort/shared-dv-hdr`); no PR
+opened yet. Tests run on the pinned gate image (FFmpeg 6.1, no `dovi_rpu`).
+
 | Task | Agent-Model | Agent-Session | PR | State |
 |---|---|---|---|---|
-| | | | | |
+| T1.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `c9f1c464f`; 4 new tests pass, fail on the old policy |
+| T1.2 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `df5fb09f5`; 2 new tests pass, fail with `false` restored |
+| T1.3 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `7b3344929`; 4 new tests pass (3 admit tests fail on old code) |
+| T1.4 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `022cbadf2`; index test passes; DV strip actor test SKIPs without `dovi_rpu` |
+| T1.5 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `60ea3ae03`; 4 new/rewritten tests pass, fail on old decoder/ingress |
+| T1.6 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `a7602fc27` (+ ledger `468e9e90d`); 4 e2e fixtures pass |
+| T2.1 | claude-opus-5-5 | session_01BCWLA21tCtxWeNBWRHWsWn | — | built `5c4542676`; 3 new tests pass, fail on mutated old behaviour |
+
+### 6.1 Corrections found while building
+
+- **The ask clamps the plan down (§1, §1.4).** `review_client_plan_inner`
+  sets a derived `preserve_dolby_vision` to `false` when the client did not
+  ask for it. A DV-capable client therefore gets Dolby Vision over sharing
+  only when it sends `preserve_dolby_vision: true`; the client guards listed
+  in §1.4 are not dead, they withhold Dolby Vision. M1 acceptance on an Apple
+  TV or a Shield needs T2.3's client change (or a server-side rule for the
+  shared ask), so it moves after T2.3.
+- **A fourth closed vocabulary (§1.4).** The Source Start carried the local
+  `enhancement` rows, which `StartResponse` never deserializes, so B's
+  whole-DTO round-trip refused every Start for a Dolby Vision source (strips
+  and base encodes included, before this effort). The Source Start now omits
+  them (T1.6); shared clients show no FEL/RPU/DYN rows.
+- **T1.1.** `dolby_vision_needs_rpu_render` exists (`plurx-core`
+  `playback/mod.rs`) and is Profile 5 only; for an unknown or other
+  non-compatible profile it is `false` where `needs_dovi_reshape` errs, so such
+  a source reaches the planner's own typed refusal, as local does. The risk
+  was checked by reading: for a compatible base `require_dovi_renderer` returns
+  `Ok(false)` and `vaapi_hdr10_source_fits` only reads the store; the T1.6
+  base-encode fixture runs one.
+- **T1.2.** Local serving reads `ffmpeg::has_dovi_rpu()` (a boot-latched
+  `OnceCell`) and local indexing `dv_strippable`; the Source branch of
+  `vod/serve/create.rs` is the only one `prepare_source_rendition` reaches, so
+  the value is threaded in from `dv_strippable`. The shared decision uses
+  `state.system.dovi_rpu`, the input of the planner's own strip decision.
+- **T1.3.** The copy-head tests live in `http/hls/create.rs`
+  (`source_copy_head_tests`), not `http/hls/tests/`. `stream.rs`'s
+  `caps_v2_dv_transport` is a log field, not a predicate, and
+  `hls_hevc_sample_entries` can only name `hvc1`/`hev1`, so `dvh1` is admitted
+  by the delivered-profile claim. The validator also needed the conversion
+  flag.
+- **T1.4.** The Source pass runs only its owned FFmpeg child; the companion
+  Dolby Vision title scan belongs to local `build_attested_pass`. The DV strip
+  actor test needs `dovi_rpu` (FFmpeg 7.1+), which the gate image lacks.
+- **T1.6.** No checked-in RPU sample exists: the `copyseg` / `fragindex` /
+  `stream` Dolby Vision tests inject the real Profile 7 RPU from
+  `plurx_core::testfixtures`. The fixtures do the same and inspect the
+  delivered record and RPU NAL units. An HEVC copy also needs the VOD side's
+  cluster node identity for the cold index's header proof.
+- **T2.1.** The affirmation is recorded by the Source ingress in the effective
+  recipe as a reserved transport token (`plurx-internal-relay-dolby-vision-v1`),
+  which every forwarded owner plans from, so the forwarding wire
+  (`shared_source_forwarding.rs` `:253`, `:270`) needs no new field.
+  `public_recipe_hash` strips every reserved token, so it is unchanged for an
+  old receiver.
