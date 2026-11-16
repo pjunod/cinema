@@ -2376,9 +2376,9 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // The queue bridge now carries the Store method its create-path callers
     // name (D3b, D3a review S5): the copy-index consumer's two reads are
     // `copy_index_v3_variant` and `copy_index_source_attestation`, and the
-    // writes `queue_sql` used to hide are `register_foreground_source`,
-    // `activate_foreground_source_custody` and, on the rolling fallback,
-    // `suspend_playback_analysis_interest`. Any other queue statement keeps
+    // writes `queue_sql` used to hide are `register_foreground_source` and,
+    // on the rolling fallback, `suspend_playback_analysis_interest` (the
+    // source-lease build removed the separate activation write). Any other queue statement keeps
     // the label `queue_sql`, and none is on this path.
     // Layout reads: `session_layout` is its own label. Its reads (the
     // `cluster_meta` marker and guard reads) are paid only by a store whose
@@ -2438,7 +2438,6 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "Auto encode, VOD",
             &[
-                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
@@ -2457,7 +2456,6 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "index miss, rolling copy",
             &[
-                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 ("claim_media_session_request", (1, 0, 1)),
@@ -2479,7 +2477,6 @@ async fn create_path_store_operations_are_pinned_per_shape() {
         (
             "caps-v2 Auto, intent",
             &[
-                ("activate_foreground_source_custody", (0, 0, 1)),
                 ("activate_media_session", (2, 0, 1)),
                 ("assign_media_session_request_owner", (0, 0, 1)),
                 // The claim's one transaction carries the ask (D3c); its

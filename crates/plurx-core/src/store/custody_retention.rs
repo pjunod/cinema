@@ -40,21 +40,14 @@ fn rows(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, StoreError
 /// schema: the triggers reference most of the queue, so the whole catalogue is
 /// their dependency.
 static SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
-    let conn = rusqlite::Connection::open_in_memory().expect("custody retention fixture");
-    super::sqlite::SqliteStore::migrate(&conn).expect("custody retention catalogue");
+    // The shape this extension installs: the catalogue before the
+    // source-lease expand rewrote it (`source_leases::accepts_extension_shape`
+    // admits the expanded and contracted forms of the same objects).
+    let conn =
+        super::sqlite::SqliteStore::open_migrated_through(super::source_leases::PRE_LEASE_VERSION)
+            .expect("custody retention catalogue");
     rows(&conn).expect("custody retention shape")
 });
-
-fn canonical(rows: &[(String, String)]) -> Vec<(String, String)> {
-    rows.iter()
-        .map(|(name, sql)| {
-            (
-                name.clone(),
-                sql.split_whitespace().collect::<Vec<_>>().join(" "),
-            )
-        })
-        .collect()
-}
 
 /// `None` before the extension (no marker table: the older triggers are in
 /// place), `Some(1)` for its exact shape; anything in between is refused.

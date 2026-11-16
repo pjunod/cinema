@@ -37,8 +37,8 @@ pub(crate) fn domain_readers(settings: &BTreeMap<String, String>) -> BTreeMap<St
 
 fn prefixed(settings: &BTreeMap<String, String>, prefix: &str) -> BTreeMap<String, i64> {
     settings
-        .iter()
-        .filter_map(|(key, _)| {
+        .keys()
+        .filter_map(|key| {
             let id = key.strip_prefix(prefix)?;
             Some((id.to_owned(), stored(settings, key)?))
         })

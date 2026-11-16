@@ -24,6 +24,10 @@ use std::path::{Path, PathBuf};
 const VIEW_READS: &[(&str, &str, usize, bool)] = &[
     // Polled pages and their helpers: the `settings` route group.
     ("http/developer.rs", "readiness", 1, false),
+    // Source readers per node beside the leases Activity lists: display
+    // only; every claim reads the limit inside its own statement.
+    ("http/analysis.rs", "activity_summary", 1, true),
+    ("http/developer.rs", "indexing_while_serving", 1, true),
     ("http/system.rs", "configured_server_name", 1, true),
     ("http/system.rs", "features", 1, false),
     ("http/system.rs", "server_info", 3, false),
@@ -72,6 +76,24 @@ const VIEW_READS: &[(&str, &str, usize, bool)] = &[
 /// The direct callers of each helper above, `(helper file, helper,
 /// caller file, caller)`.
 const HELPER_CALLERS: &[(&str, &str, &str, &str)] = &[
+    (
+        "http/analysis.rs",
+        "activity_summary",
+        "http/analysis.rs",
+        "summary",
+    ),
+    (
+        "http/analysis.rs",
+        "activity_summary",
+        "http/system.rs",
+        "activity_detail",
+    ),
+    (
+        "http/developer.rs",
+        "indexing_while_serving",
+        "http/developer.rs",
+        "readiness",
+    ),
     (
         "http/chapter_thumbs.rs",
         "enabled",

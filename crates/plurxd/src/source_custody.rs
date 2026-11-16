@@ -13,7 +13,6 @@ use plurx_core::{
         Store,
     },
 };
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, oneshot};

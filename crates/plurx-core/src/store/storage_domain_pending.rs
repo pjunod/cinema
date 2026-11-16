@@ -32,21 +32,14 @@ fn rows(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, StoreError
 /// Views depend on the full queue catalogue, so derive the exact shape from
 /// a freshly migrated SQLite catalogue rather than a partial fixture.
 static SHAPE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
-    let conn = rusqlite::Connection::open_in_memory().expect("storage domain pending fixture");
-    super::sqlite::SqliteStore::migrate(&conn).expect("storage domain pending catalogue");
+    // The shape this extension installs: the catalogue before the
+    // source-lease expand rewrote it (`source_leases::accepts_extension_shape`
+    // admits the expanded and contracted forms of the same objects).
+    let conn =
+        super::sqlite::SqliteStore::open_migrated_through(super::source_leases::PRE_LEASE_VERSION)
+            .expect("storage domain pending catalogue");
     rows(&conn).expect("storage domain pending shape")
 });
-
-fn canonical(rows: &[(String, String)]) -> Vec<(String, String)> {
-    rows.iter()
-        .map(|(name, sql)| {
-            (
-                name.clone(),
-                sql.split_whitespace().collect::<Vec<_>>().join(" "),
-            )
-        })
-        .collect()
-}
 
 /// An entirely absent extension can be installed; every nonempty partial or
 /// incompatible shape is refused, including objects left without a marker.

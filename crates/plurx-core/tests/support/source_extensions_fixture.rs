@@ -567,6 +567,7 @@ fn published_trigger(migration: &str, name: &str) -> String {
 }
 
 pub(crate) fn rewind_title_v2_to_v131(connection: &rusqlite::Connection) {
+    rewind_empty_source_leases_to_v132(connection);
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("title continuation ordinal");
@@ -865,7 +866,6 @@ fn rewind_empty_source_leases_to_v132(connection: &rusqlite::Connection) {
 /// a fixture already at or below v126 is left alone. The caller owns
 /// atomicity (see [`within_fixture_savepoint`]).
 pub(crate) fn rewind_empty_coordination_tail_to_v126(connection: &rusqlite::Connection) {
-    rewind_empty_source_leases_to_v132(connection);
     rewind_title_v2_to_v131(connection);
     rewind_empty_storage_domain_pending_to_v130(connection);
     rewind_offload_to_v129(connection);

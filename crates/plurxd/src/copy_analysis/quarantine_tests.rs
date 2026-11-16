@@ -1317,7 +1317,7 @@ async fn a_demand_makes_its_request_before_its_source_is_idle() {
     fixture
         .sql()
         .execute(
-            "INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms) VALUES('viewer','{}','[\"source_io\"]',1,'startup','{}',?1,?1,?2)",
+            "INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms) VALUES('viewer','playback','viewer',1,'node-a','{}','[\"source_io\"]','startup','{}',?1,?1,?2)",
             rusqlite::params![NOW, i64::MAX],
         )
         .expect("a playing viewer");

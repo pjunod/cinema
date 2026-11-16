@@ -3116,6 +3116,11 @@ pub(crate) mod tests {
         };
         use plurx_core::store::NewClusterFragmentIndexJob;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        // One background reader per node beside the live slot.
+        store
+            .put_setting(plurx_core::store::keys::JOB_SOURCE_READERS_PER_NODE, "1")
+            .await
+            .expect("one background reader");
         let library = store
             .create_library(&NewLibrary {
                 name: "co-claim".into(),
@@ -3283,7 +3288,7 @@ pub(crate) mod tests {
             [keys[0][2].0.clone()],
             "only the lead file's asked-for sibling"
         );
-        // While that claim holds the storage domain's background source
+        // While that claim holds the node's background source
         // slot, the preserved sibling cannot be claimed beside it — the
         // second slot is the store's for live demand. That is why the worker
         // claims and settles siblings one at a time.

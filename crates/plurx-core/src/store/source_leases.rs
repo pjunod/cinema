@@ -78,14 +78,6 @@ pub(crate) fn maintenance_reader_except(key: &str, node: &str, now: &str, extra:
         extra = extra
     )
 }
-/// Background readers `node` may run (its override, else the default).
-pub(crate) fn node_readers(node: &str) -> String {
-    format!(node_source_readers!("{node}"), node = node)
-}
-/// Background readers the mapped storage domain key `key` may serve.
-pub(crate) fn domain_readers(key: &str) -> String {
-    format!(domain_source_readers!("{key}"), key = key)
-}
 /// SQLite's `hex()` of the text's UTF-8 bytes.
 pub(crate) fn hex_upper(text: &str) -> String {
     text.bytes().map(|byte| format!("{byte:02X}")).collect()

@@ -666,7 +666,7 @@ mod tests {
         let connection = rusqlite::Connection::open(&database).expect("inspect store");
         let remaining: i64 = connection
             .query_row(
-                "SELECT count(*) FROM background_source_custody WHERE custody_id=?1",
+                "SELECT count(*) FROM source_leases WHERE lease_id=?1",
                 [&receipt.custody_id],
                 |row| row.get(0),
             )
