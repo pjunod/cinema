@@ -703,6 +703,12 @@ impl PeerConnection {
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::RECEIVER_HEADER_VALUE,
+                )
+                // This receiver's Start decoder admits a Dolby Vision range
+                // and profile (see `sharing_start_decode`).
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
                 );
             // Outside the canonical body: the Source's Start identity is the
             // digest of those bytes, so a re-post with less time left is

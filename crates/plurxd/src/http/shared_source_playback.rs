@@ -29,6 +29,9 @@ struct SourceStartInput {
     // The canonical complete client recipe is retained for exact retry identity;
     // the actual engine's normalized fingerprint is separately bound at prepare.
     canonical_recipe: Vec<u8>,
+    /// The typed session's caps had their Dolby Vision claims removed because
+    /// the receiver did not affirm Dolby Vision relay.
+    dolby_vision_withheld: bool,
 }
 #[derive(Default)]
 pub(crate) struct SourceStartRegistry {
@@ -2040,6 +2043,7 @@ async fn own_start(
         &headers,
         reference.clone(),
         input.session,
+        input.dolby_vision_withheld,
     ))
     .await?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
@@ -2243,12 +2247,23 @@ fn parse_start_request(bytes: &[u8], item: &str, file: &str) -> Result<SourceSta
         return Err(invalid());
     }
     let session_value = value.get("session").ok_or_else(invalid)?;
-    let session: CreateSession =
+    let mut session: CreateSession =
         serde_json::from_value(session_value.clone()).map_err(|_| invalid())?;
     let typed = serde_json::to_value(&session).map_err(|_| invalid())?;
     if !closed_provided_fields(session_value, &typed) {
         return Err(invalid());
     }
+    // A receiver that has not affirmed Dolby Vision relay would refuse a
+    // Dolby Vision Start: plan its viewer's session without Dolby Vision, so
+    // the shared planner chooses the next-best delivery itself. Direct play
+    // keeps its own caps.
+    let dolby_vision_withheld =
+        !super::sharing_direct_wire::session_presentation_is_direct(session_value)
+            && !receiver_presentation::dolby_vision_relayed(bytes)
+            && session
+                .caps
+                .as_mut()
+                .is_some_and(receiver_presentation::withhold_dolby_vision);
     let request_id = Uuid::parse_str(session.request_id.as_deref().ok_or_else(invalid)?)
         .map_err(|_| invalid())?;
     Ok(SourceStartInput {
@@ -2256,6 +2271,7 @@ fn parse_start_request(bytes: &[u8], item: &str, file: &str) -> Result<SourceSta
         session,
         request_id,
         canonical_recipe: bytes.to_vec(),
+        dolby_vision_withheld,
     })
 }
 // Ordinary CreateSession supports omitted optional fields and explicit numeric
@@ -3257,6 +3273,16 @@ async fn build_real_source_start_fixture(
         "cinemashare-viewer",
         "c".repeat(64).parse().expect("viewer"),
     );
+    if dolby_vision.is_some() {
+        // A receiver that relays a Dolby Vision Start says so; the Source
+        // plans every other receiver's session without Dolby Vision.
+        headers.insert(
+            receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
+            receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE
+                .parse()
+                .expect("Dolby Vision affirmation"),
+        );
+    }
     let request=serde_json::to_vec(&serde_json::json!({"reference":reference,"session":{"playback_id":"actual-http-client","request_id":Uuid::new_v4(),"copy":true,"height":180,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}}})).expect("canonical complete recipe");
     let mut recipe: serde_json::Value =
         serde_json::from_slice(&request).expect("full fixture recipe");

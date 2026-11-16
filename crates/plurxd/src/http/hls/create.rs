@@ -6476,6 +6476,10 @@ impl PreparedSourcePlayback {
     pub(crate) fn plan_notes(&self) -> &[String] {
         &self.resolved.plan_notes
     }
+    /// A note the Source's own start policy adds to what this plan says.
+    pub(crate) fn add_plan_note(&mut self, note: &str) {
+        self.resolved.plan_notes.push(note.to_owned());
+    }
     pub(crate) fn native_subtitles(&self) -> (bool, Option<i64>) {
         (
             self.resolved.native_subtitles,

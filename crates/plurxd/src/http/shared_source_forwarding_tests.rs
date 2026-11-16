@@ -453,3 +453,40 @@ async fn actual_nonowner_forwarding(
         .expect("second actual voter shutdown");
     worker.shutdown().await;
 }
+
+#[test]
+fn sharing_source_forwarding_carries_the_dolby_vision_affirmation() {
+    use super::receiver_presentation::{
+        dolby_vision_relayed, internal_range, normalize_wire, select_persisted_recipe,
+        DOLBY_VISION_RELAY,
+    };
+    let raw = serde_json::to_vec(&json!({"session":{"caps":{"transports":["hls","hls-bounded-range-v1"],"video":[{"codec":"hevc","dv_profiles":[8]}]}}}))
+        .expect("raw");
+    // The ingress records the affirmation in the effective recipe, which is
+    // the canonical body every forwarded owner plans from; the trusted
+    // bounded-range check still reads only its own token.
+    for ready in [false, true] {
+        let effective = normalize_wire(&raw, ready, true).expect("effective");
+        assert!(dolby_vision_relayed(&effective));
+        assert_eq!(internal_range(&effective).expect("closed"), ready);
+        // A later operation re-posts the raw public recipe; the retained
+        // route's fingerprint selects the affirmed recipe it was planned with.
+        let stored = super::ingress::fingerprint_recipe(&effective, ready);
+        assert_eq!(
+            select_persisted_recipe(&raw, &stored, false).expect("affirmed route"),
+            effective
+        );
+    }
+    // Two affirmations, or one on direct play, are not a closed recipe.
+    let mut doubled: serde_json::Value =
+        serde_json::from_slice(&normalize_wire(&raw, false, true).expect("once")).expect("json");
+    doubled["session"]["caps"]["transports"]
+        .as_array_mut()
+        .expect("transports")
+        .push(DOLBY_VISION_RELAY.into());
+    assert!(internal_range(&serde_json::to_vec(&doubled).expect("doubled")).is_err());
+    let direct = serde_json::to_vec(&json!({"session":{"presentation":"direct","caps":{"transports":["hls",DOLBY_VISION_RELAY]}}}))
+        .expect("direct");
+    assert!(internal_range(&direct).is_err());
+    assert!(!dolby_vision_relayed(&direct));
+}
