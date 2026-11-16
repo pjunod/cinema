@@ -189,7 +189,7 @@ async fn pair(root: &Path) -> Pair {
     };
     // Preserve the v1 two-slot cap: one maintenance reader plus the live-demand slot.
     pair.raw(
-        "INSERT OR REPLACE INTO settings(key,value) VALUES('jobs.source_readers_per_node','1')",
+        "INSERT OR REPLACE INTO settings(key,value,updated_at) VALUES('jobs.source_readers_per_node','1',1)",
     )
     .await;
     pair
