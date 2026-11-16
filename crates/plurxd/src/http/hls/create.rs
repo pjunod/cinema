@@ -852,33 +852,61 @@ pub(super) fn processing_declined_note(reason: &str) -> String {
     format!("Dolby Vision processing declined: {reason}")
 }
 
-/// The ask a start sends to `owner`, another node: this create's verdict,
-/// and for Auto the owner's processed recipe this viewer's link admits. An
-/// Auto ask without an admitted recipe still travels, so the owner records
+/// The ask a start sends to `owner`: none for this node, which registers its
+/// own; otherwise this create's verdict, and for Auto what the viewer's link
+/// evidence says. With nothing to consult (no network identity, or network
+/// priors off) the link memory admits any recipe, so the ask says so and the
+/// owner admits its trial's recipe; nothing is read. With evidence to
+/// consult, the ingress admits the owner's described processed row as the
+/// last word. An Auto ask with neither still travels, so the owner records
 /// the named skip the client's enhancement details show.
+///
+/// With the playback control protocol off nothing is handed over: the owner's
+/// only proof of the first frame is the relayed control exchange (`ttff` is a
+/// measurement on this node, not relayed), and the start names the skip
+/// ([`HANDED_OVER_WITHOUT_CONTROL`]).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handed_over_ask(
     state: &AppState,
     ask: Option<&crate::media_sessions::ProcessedUpgradeAsk>,
+    control_advertised: bool,
     evidence: &super::processed_upgrade::ViewerEvidence,
     request: &crate::transcode::SessionRequest,
     source: Option<&plurx_core::domain::MediaFile>,
     owner: &str,
 ) -> Option<crate::media_sessions::ProcessedUpgradeAsk> {
+    if owner == state.node_id || !control_advertised {
+        return None;
+    }
     let mut ask = ask?.clone();
-    if ask.auto_policy {
-        let admitted = match source {
-            Some(source) => {
-                super::processed_upgrade::admit_for_owner(state, evidence, request, source, owner)
-                    .await
-            }
-            None => Err("the source row is unavailable".to_owned()),
-        };
-        match admitted {
-            Ok(admitted) => ask.admitted = Some(admitted),
-            Err(reason) => tracing::info!(target: "plurxd::http::hls",
-                owner_node_id = %owner, %reason,
-                "processed upgrade for Auto handed over without an admitted recipe"),
+    if !ask.auto_policy {
+        return Some(ask);
+    }
+    // An unreadable setting is not "off": the admission below reads the
+    // evidence and, as the last word, refuses what it cannot read.
+    let priors_on = !matches!(
+        state
+            .applied
+            .setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+            .await,
+        Ok(value) if value.as_deref().is_none_or(|value| value.trim() != "1")
+    );
+    if evidence.network.is_none() || !priors_on {
+        ask.link_unconsulted = true;
+        return Some(ask);
+    }
+    let admitted = match source {
+        Some(source) => {
+            super::processed_upgrade::admit_for_owner(state, evidence, request, source, owner)
+                .await
         }
+        None => Err("the source row is unavailable".to_owned()),
+    };
+    match admitted {
+        Ok(admitted) => ask.admitted = Some(admitted),
+        Err(reason) => tracing::info!(target: "plurxd::http::hls",
+            owner_node_id = %owner, %reason,
+            "processed upgrade for Auto handed over without an admitted recipe"),
     }
     Some(ask)
 }
@@ -894,7 +922,7 @@ pub(super) fn handed_over_note(
 ) -> Option<String> {
     let ask = sent?;
     let session = crate::transcode::session_log_id(session_id);
-    if ask.auto_policy && ask.admitted.is_none() {
+    if ask.auto_policy && ask.admitted.is_none() && !ask.link_unconsulted {
         tracing::info!(target: "plurxd::http::hls", owner_node_id = %owner, session = %session,
             "processed upgrade cannot be handed off: Auto on another node needs an admitted recipe");
         return Some(processing_declined_note(
@@ -905,6 +933,11 @@ pub(super) fn handed_over_note(
         "processed upgrade handed to the session's owner; it runs there after the first frame");
     Some(HANDED_OVER_NOTE.to_owned())
 }
+
+/// Skip reason: an applicable upgrade on a start another node serves, with
+/// the playback control protocol off.
+pub(super) const HANDED_OVER_WITHOUT_CONTROL: &str =
+    "the node serving this session offers processed output only with the playback control protocol on";
 
 /// The plan note of a start whose processed upgrade its owner will run.
 pub(super) const HANDED_OVER_NOTE: &str =
@@ -4178,6 +4211,7 @@ async fn create_with_purpose_attempt(
             hdr10_intent: hdr10_requested,
             auto_policy: candidate_auto_policy,
             admitted: None,
+            link_unconsulted: false,
         },
     );
     let viewer_evidence = super::processed_upgrade::ViewerEvidence {
@@ -4407,7 +4441,16 @@ async fn create_with_purpose_attempt(
             break;
         }
         // The ask goes only to another owner: this node registers its own.
-        remote_request.processed_upgrade = None;
+        remote_request.processed_upgrade = handed_over_ask(
+            &state,
+            processed_ask.as_ref(),
+            advertise_control,
+            &viewer_evidence,
+            &request,
+            source.as_ref(),
+            &candidate,
+        )
+        .await;
         let result = if candidate == state.node_id {
             if !ingress_serving_authority.is_current(ingress_serving_generation) {
                 last_error = Some(create_owner_transition(
@@ -4532,15 +4575,6 @@ async fn create_with_purpose_attempt(
                 .retained_output_receiver(&candidate)
                 .await
                 .then_some(1);
-            remote_request.processed_upgrade = handed_over_ask(
-                &state,
-                processed_ask.as_ref(),
-                &viewer_evidence,
-                &request,
-                source.as_ref(),
-                &candidate,
-            )
-            .await;
             // A reply lost in transit leaves the worker holding a session keyed
             // by this create's incarnation (the worker request's id). Asking the
             // same worker again recovers that session (`Recovered`) instead of
@@ -4665,6 +4699,13 @@ async fn create_with_purpose_attempt(
             .unwrap_or_else(|| create_owner_transition("no eligible media worker was available")));
     };
     request_guard.disarm();
+    if owner_node_id != state.node_id && processed_ask.is_some() && !advertise_control {
+        tracing::info!(target: "plurxd::http::hls", owner_node_id = %owner_node_id,
+            session = %crate::transcode::session_log_id(&info.session_id),
+            "processed upgrade cannot be handed off: the playback control protocol is off");
+        plan_notes.push(processing_declined_note(HANDED_OVER_WITHOUT_CONTROL));
+        processing_decline.get_or_insert_with(|| HANDED_OVER_WITHOUT_CONTROL.to_owned());
+    }
     if owner_node_id != state.node_id {
         if let Some(note) = handed_over_note(
             remote_request.processed_upgrade.as_ref(),
@@ -4676,7 +4717,7 @@ async fn create_with_purpose_attempt(
         if remote_request
             .processed_upgrade
             .as_ref()
-            .is_some_and(|ask| ask.auto_policy && ask.admitted.is_none())
+            .is_some_and(|ask| ask.auto_policy && ask.admitted.is_none() && !ask.link_unconsulted)
         {
             processing_decline.get_or_insert_with(|| {
                 super::processed_upgrade::HANDED_OVER_AUTO_UNADMITTED.to_owned()

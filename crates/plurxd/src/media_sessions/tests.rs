@@ -4690,6 +4690,7 @@ fn processed_upgrade_ask(admitted: bool) -> ProcessedUpgradeAsk {
             average_bps: Some(18_000_000),
             peak_bps: Some(30_000_000),
         }),
+        link_unconsulted: !admitted,
     }
 }
 

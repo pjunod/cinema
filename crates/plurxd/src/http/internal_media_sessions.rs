@@ -392,21 +392,12 @@ pub(crate) async fn start(
             // session here: register it from the request this handler
             // restored, the context the trial plans from. A replayed start
             // registered when it was created, and may be running it now.
-            if created {
-                if let Some(ask) = request.processed_upgrade.as_ref() {
-                    super::hls::processed_upgrade::register_owned(
-                        super::hls::processed_upgrade::OwnedSession {
-                            user_id,
-                            playback_id: &request.request.playback_id,
-                            session_id: &info.session_id,
-                            incarnation_id: &request.incarnation_id,
-                            request: &request.request,
-                        },
-                        ask,
-                        super::hls::processed_upgrade::RegistrationSource::HandedOver,
-                    );
-                }
-            }
+            super::hls::processed_upgrade::register_handed_over_start(
+                created,
+                &request,
+                user_id,
+                &info.session_id,
+            );
             let mut response = RemoteStartResponse::from(info);
             if negotiated_ownership {
                 response.activation_generation = Some(admitted_serving_generation);
@@ -485,9 +476,11 @@ pub(crate) async fn start(
                 }
                 // Dropping the armed guard performs exact local cleanup and
                 // releases the replacement gate after an unconfirmed outcome;
-                // an upgrade registered for the start that never activated
-                // goes with it.
-                super::hls::processed_upgrade::cancel_for_session(&confirmation_session);
+                // an upgrade a created start registered goes with it. A
+                // replayed start owns nothing, its upgrade included.
+                if created {
+                    super::hls::processed_upgrade::cancel_for_session(&confirmation_session);
+                }
             });
             Ok::<(RemoteStartResponse, bool), String>((response, created))
         }
@@ -735,28 +728,15 @@ pub(crate) async fn prepare_authorized(state: AppState, body: Bytes) -> Response
         // upgrade in its recipe. Its context is restored off the prime's
         // answer: the upgrade waits for the successor's first presented
         // frame, which is after its commit.
-        if let Some(ask) = recipe.processed_upgrade.clone() {
-            let mut recipe = recipe;
+        if recipe.processed_upgrade.is_some() {
             let session_id = request.session_id.clone();
-            let playback_id = route.playback_id.clone();
             tokio::spawn(async move {
-                // An unrestorable context is not an error here: the
-                // registration records it as the named skip.
-                let _ = state
-                    .transcode
-                    .restore_candidate_context_with_deadline(&mut recipe, deadline, None)
-                    .await;
-                super::hls::processed_upgrade::register_owned(
-                    super::hls::processed_upgrade::OwnedSession {
-                        user_id,
-                        playback_id: &playback_id,
-                        session_id: &session_id,
-                        incarnation_id: &recipe.incarnation_id,
-                        request: &recipe.request,
-                    },
-                    &ask,
-                    super::hls::processed_upgrade::RegistrationSource::HandedOver,
-                );
+                super::hls::processed_upgrade::register_handed_over_successor(
+                    &state,
+                    recipe,
+                    &session_id,
+                )
+                .await;
             });
         }
         StatusCode::NO_CONTENT.into_response()
@@ -812,6 +792,10 @@ fn remote_abort_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
 }
 
 pub(super) async fn settle_remote_abort(state: AppState, request: RemoteAbortRequest) -> bool {
+    // The release reached this owner over the peer route, not through its own
+    // `release_session`: an upgrade waiting for, or trialling on, the session
+    // ends with it here, and frees this node's processed slot.
+    super::hls::processed_upgrade::cancel_for_session(&request.session_id);
     let reason = remote_abort_reason(&request);
     let terminal = crate::vodserve::Terminal::from_control_reason(reason);
     if let Some(terminal) = terminal {

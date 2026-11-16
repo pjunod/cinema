@@ -2823,19 +2823,32 @@ pub(super) async fn stage_prepared_successor_as(
                     Ok(Some(_))
                 )
             });
+    // The predecessor's own ask, when it was handed over, carries the
+    // client's HDR10 ask and Auto policy; otherwise the successor's request is
+    // all there is. Its control exchange carries no viewer link evidence, so
+    // the link was not consulted, as for a locally staged successor. A
+    // channel play is never upgraded.
     let successor_ask = (!processed
         && applies
-        && staged_request.presentation == crate::transcode::Presentation::Vod)
-        .then_some(crate::media_sessions::ProcessedUpgradeAsk {
-            hdr10_intent: staged_request.hdr10,
-            auto_policy: staged_request.automatic,
-            admitted: None,
-        });
+        && staged_request.presentation == crate::transcode::Presentation::Vod
+        && predecessor.library_channel.is_none())
+    .then(|| crate::media_sessions::ProcessedUpgradeAsk {
+        hdr10_intent: predecessor
+            .processed_upgrade
+            .as_ref()
+            .map_or(staged_request.hdr10, |ask| ask.hdr10_intent),
+        auto_policy: predecessor
+            .processed_upgrade
+            .as_ref()
+            .map_or(staged_request.automatic, |ask| ask.auto_policy),
+        admitted: None,
+        link_unconsulted: true,
+    });
     let staged_recipe = RemoteStartRequest {
         // A successor another node owns is registered there, from its recipe.
         processed_upgrade: successor_ask
             .clone()
-            .filter(|_| successor_owner != state.node_id && predecessor.library_channel.is_none()),
+            .filter(|_| successor_owner != state.node_id),
         retained_output: None,
         retained_output_receiver: Some(1),
         candidate_catalog: candidate.candidate_context.as_ref().and_then(|context| {

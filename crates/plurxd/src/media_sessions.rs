@@ -1634,7 +1634,8 @@ impl CandidateCatalogContext {
 /// needs, registers the upgrade from this. It carries only what the owner
 /// cannot recompute: the client's HDR10 ask (not `request.hdr10`), the Auto
 /// policy (not `request.automatic`), and for Auto the one processed recipe
-/// the ingress admitted against the viewer's link. It holds no network
+/// the ingress admitted against the viewer's link, or that it had no link
+/// evidence to consult (`link_unconsulted`). It holds no network
 /// identity, so it may live in the durable recipe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1643,6 +1644,14 @@ pub(crate) struct ProcessedUpgradeAsk {
     pub auto_policy: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted: Option<AdmittedProcessedRecipe>,
+    /// The ingress had no link evidence to consult for this viewer: no
+    /// network identity, or `playback.network_priors` off. Then the link
+    /// memory answers "admissible" for any recipe, so for Auto any recipe the
+    /// owner's trial freezes is one a local admission would also pass. A
+    /// prepared successor sets it too: its control exchange carries no viewer
+    /// evidence, exactly as a locally staged successor's does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub link_unconsulted: bool,
 }
 
 /// The processed recipe an ingress admitted for Auto on the owner's row:
@@ -7455,6 +7464,14 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         // for ordinary rollout skew.
         metric.outcome = TAKEOVER_SKIPPED;
         return Err("persisted takeover recipe no longer matches its route".to_owned());
+    }
+    if envelope.processed_upgrade.is_some() {
+        // Decision 3 of the remote processed upgrade (2026-11-15): the ask
+        // stays in the durable recipe, but a takeover registers no upgrade.
+        tracing::info!(
+            session = %crate::transcode::session_log_id(&route.session_id),
+            "processed upgrade not re-registered after takeover; the session continues ordinary"
+        );
     }
     metric.method = match envelope.request.kind {
         SessionKind::Copy { .. } => TAKEOVER_METHOD_COPY,

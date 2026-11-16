@@ -3363,9 +3363,8 @@ here (`make paperwork` checks this). Newest first:
 - 2026-11-13: protocol 10 — retain validated source, track and full-capability
   catalog-query provenance in `CandidateCatalogContext` so processed commits
   preserve Copy discovery after Encode normalization. This descriptive query
-  grants no execution authority. Follow the cohort/drain sequence above.
-  Old processed rows without provenance cannot commit; retain or reopen
-  ordinary playback instead.
+  grants no execution authority. Older processed rows without it cannot
+  commit; reopen ordinary playback.
 - 2026-11-07 (recorded): protocol 9 — resolved audio claim and delivery on
   `SessionRequest`, `QualityCatalogRequest` and `RemoteStartResponse`.
 
@@ -6067,28 +6066,33 @@ switches nothing.
 
 ### Processed Dolby Vision as an upgrade after the first frame
 
-A create no longer renders or verifies processed Dolby Vision / HDR10-E before
-it answers: it resolves the ordinary plan, and a declined upgrade (setting off,
-no `hvc1` HLS fMP4, burned subtitles, the continuous route) is named on the
-start's enhancement details as before. When the upgrade applies, the node that
-owns the session waits for the viewer's first frame (the `ttff` beacon naming
-the session), then runs one bounded trial (8 s) in its one processed-preparation
-slot. The trial verifies its window where the viewer is (the session's latest
-accepted control position advanced by its age, plus the trial's budget), and
-the successor is staged at the viewer's position when the trial ends, so the
-client's alignment finds it at the playhead. When this node has already
-described the processed recipe, this playback's recovery evidence and Auto's
-link evidence are read before the trial, and a refused recipe costs no GPU.
-The control exchange offers the successor like any prepared switch. Every refusal — slot busy, trial failure, this playback's recovery
-evidence, Auto's link evidence, a viewer's own quality change taking the
-playback's preparation slot, a release, a newer session — leaves the ordinary
-session playing untouched. A create that names a processed candidate (a reopen
-of a processed session), and a viewer who picks the processed rung on an
-ordinary session, get the ordinary rung it enhances, and are upgraded after
-that session's first frame; a prepared successor, once committed. A start or
-successor placed on another node carries a `processed_upgrade` ask its owner
-registers (Auto: only the ingress-admitted recipe), counted in
-`plurx_playback_preparation_processed_upgrade_registrations_total{origin,outcome}`.
+A create never renders or verifies processed Dolby Vision / HDR10-E before it
+answers: it resolves the ordinary plan, and a declined upgrade (setting off, no
+`hvc1` HLS fMP4, burned subtitles, the continuous route) is named on the
+start's enhancement details. When it applies, the session's owner waits for the
+first frame (`ttff`, or an accepted rendering control exchange of the session's
+generation), then runs one bounded trial (8 s) in its one processed-preparation
+slot, verifying its window at the viewer's position (the latest accepted
+control position plus its age and the trial budget); the successor is staged
+there, so the client's alignment finds it. If the owner already described the
+recipe, recovery and Auto link evidence are read first, and a refusal costs no
+GPU. The control exchange offers the successor like any prepared switch: the
+client aligns it, proves a decoded frame and switches, or keeps the ordinary
+session. Every refusal (slot busy, trial failure, recovery or link evidence,
+the viewer's own quality change, a release, a newer session) leaves the
+ordinary session untouched. A processed-candidate create (a reopen of a
+processed session) or a pick of the processed rung gets the ordinary rung it
+enhances, then the upgrade. A prepared successor is upgraded once committed
+(the commit proves its frame).
+
+**On another owner.** A start or successor placed elsewhere carries a
+`processed_upgrade` ask the owner registers
+(`plurx_playback_preparation_processed_upgrade_registrations_total{origin,outcome}`).
+Proof there is the relayed control exchange (`ttff` is not relayed): with the
+control protocol off the ingress hands nothing over and names the skip. Auto
+admits the trial's recipe when the ingress had no link evidence (no network
+identity, or priors off), else only the recipe it admitted. A recipe the owner
+refuses before describing it costs a trial. Takeover does not re-register.
 
 `plurx_playback_preparation_processed_upgrades_total{outcome}` counts the
 upgrades (`scheduled`, `staged`, `not_staged`, `declined`,
@@ -6099,13 +6103,12 @@ prepared switches the clients reported at their seam (`committed`, `refused`,
 `switched_without_a_frame`) and
 `plurx_playback_preparation_seams_qualified_total{platform,processed}` the
 committed ones with complete ±2 s frame samples, zero dropped frames,
-independently observed audio continuity and no reopen (a reopen the change
-actually took within the window, as each client observed it). `processed` is
-read from the durable recipe of the session the report names: `true` for a
-switch to a processed successor. **Settings → Developer → Processed DV upgrade**
-reads the `processed="true"` counts per platform against Paul's bar of twenty; until a platform has
-them its row reads `unqualified`. The rows are advisory: the upgrade runs
-either way. The counts are this node's since it started.
+independently observed audio continuity and no reopen (one taken within
+the window, as the client saw it). `processed` comes from the
+reported session's durable recipe (`true` for a processed successor).
+**Settings → Developer → Processed DV upgrade** compares each platform's
+`processed="true"` count with Paul's bar of twenty (`unqualified` until met).
+Advisory: the upgrade runs either way. Counts are this node's since start.
 
 ### Putting a failed queue back to work
 

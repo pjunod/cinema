@@ -15162,22 +15162,37 @@ pub(crate) fn processed_upgrade_count(outcome: &str) -> u64 {
 /// create or successor (`local`), or another node's ingress through the
 /// start envelope's `processed_upgrade` ask (`handed_over`).
 pub(crate) const PROCESSED_UPGRADE_ORIGINS: [&str; 2] = ["local", "handed_over"];
-/// What the registration came to: left waiting for the first frame, or
-/// recorded as a named skip the client's enhancement details show.
-pub(crate) const PROCESSED_UPGRADE_REGISTRATIONS: [&str; 2] = ["registered", "skipped"];
-static PROCESSED_UPGRADE_REGISTERED: [[AtomicU64; 2]; 2] =
-    [const { [const { AtomicU64::new(0) }; 2] }; 2];
+/// What the registration came to: left waiting for the first frame, recorded
+/// as a named skip the client's enhancement details show, or refused because
+/// the node's upgrade registry was full. Index order is
+/// [`ProcessedUpgradeRegistration`].
+pub(crate) const PROCESSED_UPGRADE_REGISTRATIONS: [&str; 3] = ["registered", "skipped", "full"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessedUpgradeRegistration {
+    Registered = 0,
+    Skipped = 1,
+    Full = 2,
+}
+
+static PROCESSED_UPGRADE_REGISTERED: [[AtomicU64; 3]; 2] =
+    [const { [const { AtomicU64::new(0) }; 3] }; 2];
 
 /// Count one processed-upgrade registration on the node that owns the session.
-pub(crate) fn record_processed_upgrade_registration(handed_over: bool, registered: bool) {
-    PROCESSED_UPGRADE_REGISTERED[usize::from(handed_over)][usize::from(!registered)]
+pub(crate) fn record_processed_upgrade_registration(
+    handed_over: bool,
+    outcome: ProcessedUpgradeRegistration,
+) {
+    PROCESSED_UPGRADE_REGISTERED[usize::from(handed_over)][outcome as usize]
         .fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
-pub(crate) fn processed_upgrade_registration_count(handed_over: bool, registered: bool) -> u64 {
-    PROCESSED_UPGRADE_REGISTERED[usize::from(handed_over)][usize::from(!registered)]
-        .load(Ordering::Relaxed)
+pub(crate) fn processed_upgrade_registration_count(
+    handed_over: bool,
+    outcome: ProcessedUpgradeRegistration,
+) -> u64 {
+    PROCESSED_UPGRADE_REGISTERED[usize::from(handed_over)][outcome as usize].load(Ordering::Relaxed)
 }
 
 /// How a client's prepared switch ended at the seam, as that client reported
