@@ -217,8 +217,13 @@ class MigrateBookkeepingCase(unittest.TestCase):
         self.git("checkout", "-q", "-b", "feature", "old")
         self.write("STATUS.md", STATUS_OLD.replace(
             "this line -->\n", "this line -->\n- **2026-11-15 · New effort:** Owner Claude.\n", 1
-        ).replace("**Updated:** 2026-11-13", "**Updated:** 2026-11-15"))
-        self.commit("status with a header edit")
+        ).replace("| a | b |", "| a | changed by the branch |"))
+        self.commit("status with an index edit")
+        # The target rewrites the same index row, so the page cannot be settled.
+        self.git("checkout", "-q", "main")
+        self.write("STATUS.md", STATUS_NEW.replace("| a | b |", "| a | changed by the target |"))
+        self.commit("the target edits the index too")
+        self.git("checkout", "-q", "feature")
         self.git("merge", "main", check=False)
         result = self.migrate()
         self.assertEqual(result.returncode, 1, result.stdout)
@@ -229,6 +234,20 @@ class MigrateBookkeepingCase(unittest.TestCase):
         self.assertFalse((self.root / "status.d/2026-11-15-new-effort.md").exists())
         self.assertIn("STATUS.md", self.git("diff", "--name-only", "--diff-filter=U").stdout)
         self.assertIn("<<<<<<<", self.read("STATUS.md"))
+
+    def test_an_effort_the_branch_retired_and_an_index_row_it_added_both_carry_over(self) -> None:
+        self.git("checkout", "-q", "-b", "feature", "old")
+        self.write("STATUS.md", STATUS_OLD.replace(
+            "- **2026-11-13 · Trim fidelity:** Owner Codex. Built; [ledger](notes/x.md).\n",
+            "- **2026-11-15 · New effort:** Owner Claude.\n",
+        ).replace("**Updated:** 2026-11-13", "**Updated:** 2026-11-15") + "| trim | history |\n")
+        self.commit("retire the oldest effort, add one, index the retired one")
+        self.git("merge", "main", check=False)
+        result = self.migrate()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.read("STATUS.md"), STATUS_NEW + "| trim | history |\n")
+        self.assertTrue((self.root / "status.d/2026-11-15-new-effort.md").is_file())
+        self.assertFalse((self.root / "status.d/2026-11-13-trim-fidelity.md").exists())
 
     def test_committed_conflict_markers_are_never_carried_into_a_fragment(self) -> None:
         self.git("checkout", "-q", "-b", "feature", "old")

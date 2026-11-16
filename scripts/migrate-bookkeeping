@@ -357,35 +357,55 @@ class Migration:
         base, ours, theirs = versions
         before = {(b["date"], b["title"]): b for b in status_entries.legacy_blocks(base)}
         before_text = {b["text"] for b in before.values()}
-        lines = ours.split("\n")
-        written = 0
-        for block in reversed(status_entries.legacy_blocks(ours)):
-            if block["text"] in before_text:
-                continue
-            original = before.get((block["date"], block["title"]))
+        directory = self.root / status_entries.DIRECTORY
+
+        def file_for(block: dict) -> str:
             slug = status_entries.entry_slug(block["title"])
-            name = None
             if block["date"] is None:
                 # An undated section keeps whatever file the target gave it.
-                existing = sorted((self.root / status_entries.DIRECTORY).glob(f"*-{slug}.md"))
-                name = existing[-1].name if existing else None
-            date = block["date"] or dt.date.today().isoformat()
-            name = name or f"{date}-{slug}.md"
-            self.stage(
-                f"{status_entries.DIRECTORY}/{name}",
-                status_entries.entry_text(block["title"], block["body"]),
-            )
-            written += 1
-            replacement = original["text"].split("\n") if original else []
-            lines[block["first"] : block["last"] + 1] = replacement
-        if not written:
+                existing = sorted(directory.glob(f"*-{slug}.md"))
+                if existing:
+                    return existing[-1].name
+            return f"{block['date'] or dt.date.today().isoformat()}-{slug}.md"
+
+        ours_blocks = status_entries.legacy_blocks(ours)
+        written = 0
+        for block in ours_blocks:
+            if block["text"] not in before_text:
+                self.stage(
+                    f"{status_entries.DIRECTORY}/{file_for(block)}",
+                    status_entries.entry_text(block["title"], block["body"]),
+                )
+                written += 1
+        # An effort the branch took off the page (it moved the oldest out to
+        # stay under the old line cap) leaves the directory too.
+        kept = {(b["date"], b["title"]) for b in ours_blocks}
+        retired = [
+            f"{status_entries.DIRECTORY}/{file_for(block)}"
+            for key, block in before.items() if key not in kept
+        ]
+        retired = [path for path in retired if (self.root / path).is_file()]
+        if not written and not retired:
             return
-        stripped = self.same_but_for_blank_lines("\n".join(lines), base)
-        self.settle(
-            STATUS, stripped, base, theirs, f"{written} effort(s) -> {status_entries.DIRECTORY}/",
-            "Take the target's STATUS.md (`git checkout --theirs STATUS.md`) and write each of "
-            "your efforts as status.d/<YYYY-MM-DD>-<slug>.md (status.d/README.md).",
-        )
+        # The page itself: the efforts are files now, so everything above the
+        # index of moved sections is the target's; the index rows the branch
+        # added below it are merged.
+        index = status_entries.LEGACY_INDEX
+
+        def split(text: str) -> tuple[str, str]:
+            head, found, tail = text.partition(index)
+            return head, found + tail
+
+        stripped = split(base)[0] + split(ours)[1]
+        if self.settle(
+            STATUS, stripped, base, theirs,
+            f"{written} effort(s) -> {status_entries.DIRECTORY}/, {len(retired)} retired",
+            "Take the target's STATUS.md (`git checkout --theirs STATUS.md`), add your rows to "
+            "its index of moved sections, and write each of your efforts as "
+            "status.d/<YYYY-MM-DD>-<slug>.md (status.d/README.md).",
+        ):
+            for path in retired:
+                self.git("rm", "-q", "-f", "--", path)
 
     # --- vendor/*/PLURX-PATCH.md ------------------------------------------
 
@@ -442,7 +462,7 @@ class Migration:
             # The count in words and the removal paragraph's row lists restate
             # what is derived now; put those lines back as the branch found
             # them. Every other edit the branch made stays and is merged.
-            derived = re.compile(r"Plurx carries \S+ |retire the \w+ generic bugs|\(rows? \d")
+            derived = re.compile(r"Plurx carries \S+ |retire the \S+ generic bugs|retire the \S+ Plurx policies|\(rows? \d")
             base_derived = [line for line in base.split("\n") if derived.search(line)]
             indexes = [i for i, line in enumerate(kept) if derived.search(line)]
             if len(indexes) == len(base_derived):
@@ -506,6 +526,16 @@ class Migration:
             self.settle(path, ours.replace(ours_line[0], base_line[0], 1), base, theirs,
                         "claimed build number dropped (the release assigns it)")
 
+    def apple_status_lines(self) -> None:
+        """Status lines that quoted the build number the branch claimed."""
+
+        for path, pattern in (
+            ("clients/apple/README.md", r"^> Status: \*\*v[^*]+\*\*, build `\d+`"),
+            ("docs/clients/APPLE-CLIENT-PARITY.md", r"^> Status \(.*Apple build \d+\."),
+            ("docs/STATUS.html", r"Apple build \d+ source, not yet uploaded|upload Apple build \d+ \(release notes|Install Apple build \d+ and Android versionCode"),
+        ):
+            self.revert_lines(path, pattern, "quoted build number dropped (no document states one)")
+
     def android_readme(self) -> None:
         versions = self.versions(ANDROID_README)
         if versions is None:
@@ -555,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for step in (migration.changelog, migration.client_fixes, migration.owners, migration.catalog,
                  migration.status, migration.vendor_ledgers, migration.build_numbers,
-                 migration.android_readme):
+                 migration.apple_status_lines, migration.android_readme):
         try:
             step()
         except (Refused, changelog_fragments.FragmentError) as refusal:
