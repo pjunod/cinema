@@ -110,3 +110,126 @@ test("native metadata aims the successor at the incumbent's current second, not 
   h.spare.dispatchEvent(new Event("loadedmetadata"));
   assert.equal(h.spare.currentTime,560,"557 s incumbent + 3 s lead, not the 7.9 s staged when the open began");
 });
+
+// The deployed chase reached buffer_ready at film 1035.005 after aiming at
+// 1038.739. Failure followed 3007ms later, consistent with two seek bounds;
+// the old log did not record the exact failing predicate. Exercise that overlap
+// with the real commit, hold, and decoded frame-rendezvous guard.
+function nativeHoldHarness({origin=0,rate=1,runway=40}={}){
+  let now=0,next=0,attached=true;
+  const timers=new Map(),logs=[],failed=[],exposed=[],seeks=[];
+  const element=(time)=>Object.assign(new EventTarget(),{currentTime:time,paused:false,seeking:false,
+    playbackRate:rate,readyState:4,muted:true,style:{},buffered:ranges([[1032,1050]]),callbacks:new Map(),
+    pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();},
+    requestVideoFrameCallback(fn){const id=++next;this.callbacks.set(id,fn);return id;},
+    cancelVideoFrameCallback(id){this.callbacks.delete(id);},removeAttribute(){},setAttribute(){},load(){},
+    emit(name){this.dispatchEvent(new Event(name));}});
+  const incumbent=element(origin/1000+1035.005),spare=element(1038.739);incumbent.muted=false;
+  const state={actionId:"action",sessionId:"successor",mediaOriginMs:origin,metadata:true,
+    state:"metadata_ready",buffered:false,stageAtMs:0,incumbentElement:incumbent};
+  const player={prepared:state,offset:0,vod:false,hitches:{fps:24},wantsPlayback:true};
+  const ctx=vm.createContext({PLAYER:player,document:{getElementById:id=>id==="video"?incumbent:spare},
+    performance:{now:()=>now},setTimeout(fn,ms){const id=++next;timers.set(id,{fn,at:now+ms});return id;},
+    clearTimeout:id=>timers.delete(id),playbackOwnsAttachedMedia:()=>attached,bufferRunway:()=>runway,
+    playbackContext:()=>({}),clientLog:row=>logs.push(row),streamHasVideo:()=>true,destroyHlsInstance(){}});
+  const web=path.join(__dirname,"../../crates/plurxd/src/web/player");
+  vm.runInContext(fs.readFileSync(path.join(web,"video-frames.js"),"utf8"),ctx);
+  vm.runInContext(source,ctx);
+  vm.runInContext(fs.readFileSync(path.join(web,"prepared-switch-measurement.js"),"utf8"),ctx);
+  ctx.queuePlaybackControlAcknowledgement=()=>{};
+  ctx.failPreparedReplacement=(p,s,reason)=>{failed.push(reason);ctx.freePreparedReplacement(p,s);};
+  ctx.exposePreparedReplacement=()=>exposed.push(true);
+  ctx.preparedAlignSeek=async(element,wanted)=>{seeks.push(wanted);return false;};
+  function frame(element,time,display,count){
+    const entry=element.callbacks.entries().next().value;assert.ok(entry,"frame observer remains armed");
+    element.callbacks.delete(entry[0]);element.currentTime=time;
+    entry[1](now,{mediaTime:time,expectedDisplayTime:display,presentedFrames:count});
+  }
+  return {ctx,player,state,incumbent,spare,timers,logs,failed,exposed,seeks,
+    start(){ctx.notePreparedBuffer(player,state);},
+    async arrive(overshoot=0){incumbent.currentTime=origin/1000+1038.739+overshoot;
+      incumbent.emit("timeupdate");await tick();},
+    async advance(ms){now+=ms;for(const [id,t] of [...timers])if(t.at<=now){timers.delete(id);t.fn();}await tick();},
+    detach(){attached=false;},
+    prove({drift=0}={}){
+      for(let i=0;i<4;i++) frame(spare,1038.739+i/24,1000+i*1000/24,1+i);
+      frame(incumbent,origin/1000+1038.739+3/24+drift,1125,100);
+    }};
+}
+
+test("native chase holds its buffered lead and resumes through the unchanged frame guard",async()=>{
+  for(const options of [{},{origin:600000,rate:2}]){
+    const h=nativeHoldHarness(options);h.start();
+    assert.equal(h.state.state,"committing");assert.equal(h.spare.paused,true);
+    assert.equal(h.incumbent.paused,false);assert.equal(h.incumbent.muted,false);
+    assert.equal(h.spare.muted,true);assert.equal(h.seeks.length,0,"no native backward seek");
+    assert.equal(h.exposed.length,0);assert.equal(h.logs.at(-1).detail,"align_hold");
+    await h.arrive();
+    assert.equal(h.spare.paused,false);assert.equal(h.spare.playbackRate,h.incumbent.playbackRate);
+    assert.equal(h.exposed.length,0,"resuming is not proof of an aligned decoded picture");
+    assert.equal(h.state.overlapListeners.length,4,"hold listeners were replaced, not leaked");
+    h.prove();assert.equal(h.exposed.length,1);assert.equal(h.failed.length,0);
+    assert.equal(h.seeks.length,0);assert.equal(h.timers.size,0);
+    assert.equal(h.spare.callbacks.size,0);assert.equal(h.incumbent.callbacks.size,0);
+  }
+});
+
+test("native hold still refuses decoded frame drift after resuming",async()=>{
+  const h=nativeHoldHarness();h.start();await h.arrive();h.prove({drift:0.1});
+  assert.equal(h.exposed.length,0);await h.advance(800);
+  assert.match(h.failed[0],/deadline/);assert.equal(h.incumbent.muted,false);
+});
+
+test("native alignment hold cancels on viewer intent, buffer loss, and exhausted runway",async()=>{
+  for(const reason of ["pause","seeking","ratechange","intent","buffer","late","deadline","runway"]){
+    const h=nativeHoldHarness({runway:reason==="runway"?2:40});h.start();
+    if(reason==="pause")h.incumbent.paused=true;
+    if(reason==="seeking")h.incumbent.seeking=true;
+    if(reason==="ratechange")h.incumbent.playbackRate=2;
+    if(reason==="intent")h.player.wantsPlayback=false;
+    if(reason==="buffer")h.spare.buffered=ranges([]);
+    if(reason==="late")await h.arrive(0.1);
+    else if(reason==="deadline")await h.advance(6000);
+    else if(reason!=="runway")await h.advance(10);
+    assert.equal(h.failed.length,1,reason);assert.equal(h.exposed.length,0,reason);
+    assert.equal(h.incumbent.muted,false);assert.equal(h.timers.size,0);
+    assert.equal(h.state.overlapListeners,null);assert.equal(h.seeks.length,0);
+  }
+});
+
+test("native alignment hold cannot resume after its deadline even at the held position",async()=>{
+  const h=nativeHoldHarness();h.start();h.incumbent.currentTime=1038.739;
+  await h.advance(6000);
+  assert.match(h.failed[0],/deadline/);assert.equal(h.exposed.length,0);
+  assert.equal(h.spare.paused,true);assert.equal(h.timers.size,0);
+});
+
+test("native alignment hold teardown and supersession release their owned work",async()=>{
+  const h=nativeHoldHarness();h.start();
+  h.ctx.freePreparedReplacement(h.player,h.state);
+  assert.equal(h.timers.size,0);assert.equal(h.state.overlapListeners,null);
+  await h.arrive();assert.equal(h.exposed.length,0);assert.equal(h.failed.length,0);
+  const stale=nativeHoldHarness();stale.start();stale.player.prepared={sessionId:"new"};
+  await stale.advance(10);assert.equal(stale.timers.size,0);assert.equal(stale.failed.length,0);
+  assert.equal(stale.state.overlapListeners,null);assert.equal(stale.exposed.length,0);
+});
+
+test("alignment telemetry distinguishes seek timeout, buffer loss, and residual drift",async()=>{
+  for(const outcome of ["timeout","buffer","drift"]){
+    const h=nativeHoldHarness();h.state.hls={};h.spare.currentTime=1034;
+    h.ctx.preparedAlignSeek=async(element,wanted)=>{
+      if(outcome==="timeout")return false;
+      element.currentTime=wanted;
+      if(outcome==="buffer")element.readyState=2;
+      else h.incumbent.currentTime+=0.1;
+      return true;
+    };
+    await h.ctx.alignPreparedReplacement(h.player,h.state,h.incumbent,h.spare);
+    const seeks=h.logs.filter(row=>row.detail==="align_seek");assert.equal(seeks.length,2);
+    assert.match(seeks[0].message,/from_ms=1034000 wanted_ms=1035005/);
+    assert.match(seeks[0].message,new RegExp(`seeked=${outcome!=="timeout"}`));
+    if(outcome==="buffer")assert.match(seeks[0].message,/ready_state=2 buffered=false/);
+    if(outcome==="drift")assert.match(seeks[0].message,/drift_ms=-100/);
+    assert.match(h.failed[0],/could not align: attempt=2/);
+  }
+});
