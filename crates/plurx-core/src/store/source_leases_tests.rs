@@ -396,6 +396,32 @@ async fn job_lease_follows_the_job() {
     );
 }
 
+/// Mutation: drop the claimant self-exclusion from `CLAIM_SQL`'s holder
+/// and maintenance counts. A job taken over after its owner died does not
+/// wait on its own older lease; every other claim still counts that lease.
+#[tokio::test]
+async fn a_successor_fence_does_not_wait_on_its_own_ghost() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    readers_per_node(&store, "1").await;
+    let ghosted = enqueued(&store, 0, false, 1_000).await;
+    claimed(&store, claim_on(&ghosted, 0, "node-a", 1_001))
+        .await
+        .expect("claim");
+    // The owner died: its lease lapsed but is inside the grace.
+    let now = 1_001 + JOB_LEASE_MS + 1_000;
+    let other = enqueued(&store, 1, false, now).await;
+    assert!(
+        claimed(&store, claim_on(&other, 0, "node-a", now))
+            .await
+            .is_none(),
+        "the ghost still charges another job's claim"
+    );
+    let again = claimed(&store, claim_on(&ghosted, 1, "node-a", now))
+        .await
+        .expect("the same job takes itself over");
+    assert_eq!(again.fence, 2);
+}
+
 /// Mutation: drop the storage-domain branch of the holder counts.
 #[tokio::test]
 async fn domain_cap_still_binds() {

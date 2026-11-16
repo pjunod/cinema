@@ -701,7 +701,10 @@ WHERE id = json_extract($1, '$.job_id')
   -- Source capacity is counted on source_leases: per node, plus each mapped
   -- storage domain cluster-wide. A lease charges until its expiry plus the
   -- grace, whether or not a sweep has run. One reader per node and domain
-  -- stays reserved for live demand; playback is never counted.
+  -- stays reserved for live demand; playback is never counted. The
+  -- claimant's own earlier fence (a reader of this job that may still be
+  -- running) charges every other claim until its grace, not this one: a
+  -- job never waits on its own ghost.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
     WHERE required.job_id = json_extract($1, '$.job_id') AND required.resource_key LIKE 'source_io%'
       AND ("#,
@@ -710,7 +713,8 @@ WHERE id = json_extract($1, '$.job_id')
     claim_source_holders!(
         "required.resource_key",
         "json_extract($1,'$.node_id')",
-        "json_extract($1,'$.now_ms')"
+        "json_extract($1,'$.now_ms')",
+        " AND NOT (held.owner_kind='job' AND held.work_id=json_extract($1,'$.job_id'))"
     ),
     " OR (NOT ",
     live_job_interest!("background_jobs.id", "0", "json_extract($1, '$.now_ms')"),
@@ -718,7 +722,8 @@ WHERE id = json_extract($1, '$.job_id')
     claim_maintenance_reader!(
         "required.resource_key",
         "json_extract($1,'$.node_id')",
-        "json_extract($1,'$.now_ms')"
+        "json_extract($1,'$.now_ms')",
+        " AND NOT (held.owner_kind='job' AND held.work_id=json_extract($1,'$.job_id'))"
     ),
     r#")))
   -- Other shared resources (provider slots) keep their two reservation
