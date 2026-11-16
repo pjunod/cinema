@@ -126,6 +126,44 @@ class DvReconstructionSamplingTests(unittest.TestCase):
         self.assertIn("stage(AV_PIX_FMT_P010LE, 2, true);", control)
         self.assertIn("base_restage_software_planes(gpu, frame, &source);", control)
 
+    def test_master_reconstruction_is_one_colour_space_on_both_sides(self):
+        """The base pass once kept the stream's colour description on its source
+        and libplacebo tone-mapped the master: black to 0.005 nits, dark chroma
+        up with it. Pixel proof is controls/test_base_master_black.c (GPU)."""
+        shared = (TOOLS / "dv_metadata.h").read_text()
+        master = shared[shared.index("static inline bool dv_master_frames("):]
+        master = master[:master.index("\n}\n")]
+        self.assertIn("source->color = destination->color = master;", master)
+        self.assertIn("pl_color_space_infer_map(&from, &to);", master)
+        self.assertIn("return pl_color_space_equal(&from, &to);", master)
+        # The description the native player reconstructs with.
+        player = (PLAYER / "patches/mpv/0006-vo_gpu_next-normalize-DV-reconstruction-metadata.patch").read_text()
+        for line in ("struct pl_color_space color = pl_color_space_hdr10;",
+                     "color.hdr.min_luma = 0.005;", "color.hdr.max_luma = 10000;"):
+            self.assertIn("+    " + line, player)
+        self.assertIn("struct pl_color_space master = pl_color_space_hdr10;", master)
+        self.assertIn("master.hdr.min_luma = 0.005;", master)
+        self.assertIn("master.hdr.max_luma = 10000;", master)
+        for name, entry in (("fel_renderer.h", "static void gpu_render_mapped("),
+                            ("base_dv_renderer.h", "static void base_gpu_render(")):
+            source = (TOOLS / name).read_text()
+            render = source[source.index(entry):]
+            render = render[:render.index("\n}\n")]
+            call = "require(dv_master_frames(&source, &destination),"
+            # One description, set once, after the last thing that maps a frame
+            # and before the render; neither side is described anywhere else.
+            self.assertEqual(render.count(call), 1, name)
+            self.assertLess(render.rindex("pl_map_avframe_ex("), render.index(call), name)
+            self.assertLess(render.index(call), render.index("pl_render_image("), name)
+            self.assertIsNone(re.search(r"(source|destination)\.color\b", render), name)
+            self.assertNotIn("hdr.min_luma", source, name)
+            self.assertNotIn("hdr.max_luma", source, name)
+        control = (TOOLS / "controls/test_base_master_black.c").read_text()
+        self.assertIn("base_gpu_render(frame, &mapping, 0,", control)
+        self.assertIn("av_mastering_display_metadata_create_side_data(frame)", control)
+        self.assertIn("if (actual != 0) {", control)
+        self.assertIn("fabs(actual - expected[ch]) > 2", control)
+
     def test_targeted_refusals_name_their_cause(self):
         target = (TOOLS / "display_target.h").read_text()
         render = target[target.index("static inline pl_tex dv_target_render("):]

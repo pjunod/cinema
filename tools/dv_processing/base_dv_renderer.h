@@ -210,10 +210,11 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   struct pl_frame destination = {.num_planes = 1,
       .planes = {{.texture = base_context.native_texture ? base_context.native_texture : base_context.output_texture, .components = 3,
                   .component_mapping = {0, 1, 2}}},
-      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL},
-      .color = pl_color_space_hdr10};
-  source.color.hdr.max_luma = destination.color.hdr.max_luma = 10000;
-  source.color.hdr.min_luma = destination.color.hdr.min_luma = 0.005;
+      .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL}};
+  // The stream's own colour description (pl_map_avframe_ex) is replaced:
+  // the composed master is one colour space on both sides (dv_metadata.h).
+  require(dv_master_frames(&source, &destination),
+          "master reconstruction is not a colour conversion");
   struct pl_color_map_params cmap = pl_color_map_default_params;
   cmap.tone_mapping_function = &pl_tone_map_clip;
   cmap.gamut_mapping = &pl_gamut_map_clip;

@@ -499,7 +499,6 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
                .levels = PL_COLOR_LEVELS_FULL,
                .dovi = &metadata,
                .bits = {.sample_depth = 16, .color_depth = 10, .bit_shift = 6}},
-      .color = pl_color_space_hdr10,
       .enhancement_layer = &enhancement_frame};
   if (hardware) {
     // Map each decoded surface, then restate the representation the native
@@ -576,10 +575,9 @@ static void gpu_render_mapped(uint16_t *decoded[2], const AVFrame *hardware[2],
                                              .components = 3,
                                              .component_mapping = {0, 1, 2}}},
                                  .repr = {.sys = PL_COLOR_SYSTEM_RGB,
-                                          .levels = PL_COLOR_LEVELS_FULL},
-                                 .color = pl_color_space_hdr10};
-  source.color.hdr.max_luma = destination.color.hdr.max_luma = 10000;
-  source.color.hdr.min_luma = destination.color.hdr.min_luma = 0.005;
+                                          .levels = PL_COLOR_LEVELS_FULL}};
+  require(dv_master_frames(&source, &destination),
+          "master reconstruction is not a colour conversion");
   struct pl_color_map_params color_map = pl_color_map_default_params;
   color_map.tone_mapping_function = &pl_tone_map_clip;
   color_map.gamut_mapping = &pl_gamut_map_clip;
