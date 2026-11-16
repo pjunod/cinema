@@ -1119,7 +1119,9 @@ were repinned without a model note):
   is deleted and no dependency remains.
 - Registration checks total capacity and maintenance state in the same atomic
   Store write. An offline source resumes after lease expiry through the
-  existing grant write; full re-admission adds no RPC. The rolling legacy
+  existing grant write; full re-admission adds no RPC. Delayed v1 metadata
+activation cannot recreate or renew an expired offline lease; only an admitted
+service grant renews offline capacity. The rolling legacy
   projection is temporary and is removed at the contract boundary.
 
 These source details change no modeled transition and establish no liveness

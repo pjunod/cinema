@@ -194,7 +194,9 @@ and migration, without an additional grant RPC or runtime recovery loop.
    statement reconstructs resources from the exact preparing package and
    checks foreground, total-holder and maintenance admission before renewing
    or recreating the row. Swept and unswept rows therefore behave alike. The
-   grant retains its existing receipt/spend identity. During expand, a
+   grant retains its existing receipt/spend identity. Legacy activation or
+   cleanup metadata never extends its expiry, nor recreates a collected row;
+   only an admitted grant may renew offline reading. During expand, a
    compatibility admission trigger generated from the claim macros applies
    these checks to old writers too; contract removes that temporary trigger.
 3. **The roll projects independent owners both ways (F3).** A v1 coordinated

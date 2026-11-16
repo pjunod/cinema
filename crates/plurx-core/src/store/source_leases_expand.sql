@@ -785,6 +785,10 @@ BEGIN
   FROM background_source_current_owners custody
   WHERE custody.custody_id=NEW.custody_id AND custody.authority_expires_at_ms>0 AND custody.fence>0
     AND json_array_length(custody.resource_keys_json)>0
+    -- Offline metadata cannot reacquire a collected reader. Only a service
+    -- grant, admitted by the shared writer terms, may create it again.
+    AND (custody.owner_kind!='offline' OR EXISTS(SELECT 1 FROM source_leases current
+      WHERE current.lease_id=custody.owner_key AND current.owner_kind='offline'))
     AND CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END IS NOT NULL
     AND (custody.owner_kind!='analysis' OR EXISTS(SELECT 1 FROM analysis_requests request
       WHERE request.request_id=custody.work_id AND request.pipeline_version LIKE 'coordination-contract:%'))
@@ -792,14 +796,17 @@ BEGIN
     owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
     owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,
     projection_json=excluded.projection_json,started_at_ms=excluded.started_at_ms,
-    renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
+    renewed_at_ms=CASE WHEN excluded.owner_kind='offline' THEN source_leases.renewed_at_ms ELSE excluded.renewed_at_ms END,
+    expires_at_ms=CASE WHEN excluded.owner_kind='offline' THEN source_leases.expires_at_ms ELSE excluded.expires_at_ms END
   WHERE source_leases.owner_kind=excluded.owner_kind
     AND (source_leases.work_id,source_leases.fence,source_leases.node_id,source_leases.owner_json,
       source_leases.resource_keys_json,source_leases.phase,source_leases.projection_json,
       source_leases.started_at_ms,source_leases.renewed_at_ms,source_leases.expires_at_ms)
       IS NOT (excluded.work_id,excluded.fence,excluded.node_id,excluded.owner_json,
       excluded.resource_keys_json,excluded.phase,excluded.projection_json,
-      excluded.started_at_ms,excluded.renewed_at_ms,excluded.expires_at_ms);
+      excluded.started_at_ms,
+      CASE WHEN excluded.owner_kind='offline' THEN source_leases.renewed_at_ms ELSE excluded.renewed_at_ms END,
+      CASE WHEN excluded.owner_kind='offline' THEN source_leases.expires_at_ms ELSE excluded.expires_at_ms END);
 END;
 -- next statement
 CREATE TRIGGER source_lease_custody_delete AFTER DELETE ON background_source_custody

@@ -193,7 +193,7 @@
       },
       {
         "anchor": "pub struct StorageDomainMapping {",
-        "sha256": "59001902251cc45d469e954f3436cbbf197c7220bd34a3825e9d080c7722b6d2",
+        "sha256": "ad6915bab4ac5536847d0aca09bdfde8ff39c9ac712dbdfaf1b5f18f7b7a4e5d",
         "source": "crates/plurx-core/src/store/background_jobs_resources.rs",
         "table": "proposal \u00a74.1 resource mapping"
       },
