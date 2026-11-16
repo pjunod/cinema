@@ -11,6 +11,13 @@ check, against the helper's own single-shot windows on the same source:
 * a window that does not start where the previous one ended is refused, and
   closing the control socket ends the session cleanly.
 
+With --pcm-join each window carries the daemon's own interval (from 200 ms
+before its encoder's rebase point) and the soundtrack PCM the encoder's
+lattice filter produces from the carried pipe is compared with what it
+produces from the source read as main read it (-noaccurate_seek -ss), for
+every window and across each join. With --session-only --growth N the
+helper runs N windows and its descriptor count and RSS must stay flat.
+
 Run inside the media runtime (it needs the helper's Vulkan and VA-API
 runtime), for example:
 
@@ -104,7 +111,12 @@ class Session:
         self.parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         args = argv(options, 64) + ['--session', str(child.fileno())]
         if audio is not None:
-            args += ['--audio-ordinal', str(audio)]
+            # As the daemon does: the channel count from its own probe.
+            channels = subprocess.check_output([
+                options.ffprobe, '-v', 'error', '-select_streams', f'a:{audio}',
+                '-show_entries', 'stream=channels', '-of', 'csv=p=0', str(options.source)],
+                text=True).strip()
+            args += ['--audio-ordinal', str(audio), '--audio-channels', channels]
         self.stderr = (directory / 'session.stderr').open('wb')
         self.process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                         stderr=self.stderr, pass_fds=(3, child.fileno()))
@@ -121,7 +133,9 @@ class Session:
             audio_read, audio_write = os.pipe()
             fds.append(audio_write)
             command += f' {fraction_text(audio[0])} {fraction_text(audio[1])}'
-            audio_reader = Drained(audio_read, (directory / 'audio.mka').open('wb'))
+            # NUT, or Matroska for a codec NUT cannot tag; ffprobe and ffmpeg
+            # probe which.
+            audio_reader = Drained(audio_read, (directory / 'audio.carried').open('wb'))
             audio_reader.start()
         reader = Drained(read)
         reader.start()
@@ -191,6 +205,135 @@ def decoded_audio(options, path, ordinal, start, end, seek=None):
     return [(pts, digest) for pts, digest in rows if start <= pts < end]
 
 
+AUDIO_RATE = 48000
+AAC_FRAME = 1024
+LOSSLESS = ('truehd', 'flac', 'mlp', 'alac') 
+
+
+def lattice(start):
+    """The encoder's soundtrack clock for a window starting at film time
+    `start` (plurx-core AudioClock, no sync offset): its rebase point and the
+    sample at which its kept audio begins, both in 48 kHz samples."""
+    anchor = int(max(float(start) - 2.0, 0.0) * AUDIO_RATE) // AAC_FRAME * AAC_FRAME
+    seek = max(anchor - 2 * AUDIO_RATE, 0) // AAC_FRAME * AAC_FRAME
+    return seek, anchor
+
+
+def daemon_interval(start, end):
+    """dv_runtime::window_soundtrack with a zero origin and no offset."""
+    seek, _ = lattice(start)
+    return Fraction(seek, AUDIO_RATE) - Fraction(1, 5), end + Fraction(1, 2)
+
+
+def lattice_pcm(options, inputs, ordinal, start, samples):
+    """What the encoder's lattice filter makes of a soundtrack input: f64
+    PCM from the window's kept start, `samples` frames long."""
+    seek, anchor = lattice(start)
+    relative = anchor - seek
+    graph = (f'asetpts=PTS-{seek / AUDIO_RATE:.9f}/TB,aresample=48000:async=1:first_pts=0,'
+             f'atrim=start_sample={relative},asetpts=PTS-({relative}),'
+             f'aresample=48000:async=1:first_pts=0,atrim=end_sample={samples}')
+    return subprocess.check_output(
+        [options.ffmpeg, '-v', 'error', '-copyts', *inputs, '-map', f'0:a:{ordinal}', '-af', graph,
+         '-c:a', 'pcm_f64le', '-f', 'f64le', '-'])
+
+
+def pcm_difference(a, b, channels):
+    """(exact, lag, max abs difference) of two f64 PCM byte strings."""
+    from array import array
+    x, y = array('d'), array('d')
+    x.frombytes(a[:len(a) // 8 * 8])
+    y.frombytes(b[:len(b) // 8 * 8])
+    n = min(len(x), len(y)) // channels * channels
+    if n == 0:
+        return False, None, float('inf')
+    if x[:n] == y[:n]:
+        return True, 0, 0.0
+    # The lag that best aligns a 0.1 s excerpt of the first channel.
+    probe = range(AUDIO_RATE // 10, AUDIO_RATE // 5)
+    best = min(range(-64, 65), key=lambda lag: sum(
+        (x[i * channels] - y[(i + lag) * channels]) ** 2 for i in probe))
+    return False, best, max(abs(p - q) for p, q in zip(x[:n], y[:n]))
+
+
+DITHERED = ('ac3', 'eac3')
+
+
+def check_pcm_join(options, windows, directories, codec):
+    """The PCM the encoder's lattice filter makes from the carried pipe,
+    against what it made on main from the source (-noaccurate_seek -ss at the
+    rebase point, which starts the decode at the preceding video keyframe).
+
+    The carried PCM must equal main's: bit for bit, except AC-3's dither
+    (which depends on where a decode starts), which may differ by no more
+    than main's own decode started at another keyframe. The one licensed
+    difference is one main already had: on a millisecond clock, a codec whose
+    frames do not fall on whole milliseconds (TrueHD, DTS) is aligned by the
+    rounding of its first decoded frame, so main's own alignment moved with
+    the keyframe its decode started at. There the carried PCM may be offset
+    from main's, within the resampler's 1 ms. Each join is checked the same
+    way, on both paths."""
+    channels = int(subprocess.check_output([
+        options.ffprobe, '-v', 'error', '-select_streams', f'a:{options.audio}',
+        '-show_entries', 'stream=channels', '-of', 'csv=p=0', str(options.source)], text=True))
+    samples = AUDIO_RATE * 5 // 2
+
+    def main_pcm(start, back=0.0):
+        seek, _ = lattice(start)
+        return lattice_pcm(options, ['-noaccurate_seek', '-ss', f'{seek / AUDIO_RATE - back:.9f}',
+                                     '-i', str(options.source)], options.audio, start, samples)
+
+    probe = json.loads(subprocess.check_output([
+        options.ffprobe, '-v', 'error', '-select_streams', f'a:{options.audio}',
+        '-read_intervals', f'{float(windows[0][0]) - 3}%{float(windows[-1][1])}',
+        '-show_entries', 'packet=duration:stream=time_base', '-of', 'json', str(options.source)]))
+    millisecond = probe['streams'][0]['time_base'] == '1/1000'
+    off_lattice = millisecond and len({p.get('duration') for p in probe['packets']}) > 1
+
+    def matches(row, licensed, dither=1e-2):
+        if row['exact']:
+            return True
+        if row['lag'] == 0:
+            return codec in DITHERED and row['max_abs'] <= dither
+        return licensed and abs(row['lag']) < AUDIO_RATE // 1000
+
+    rows, carried, mains = [], [], []
+    for (start, _), directory in zip(windows, directories):
+        main = main_pcm(start)
+        pipe = lattice_pcm(options, ['-i', str(directory / 'audio.carried')], 0, start, samples)
+        assert len(pipe) == len(main) == samples * channels * 8, (start, len(pipe), len(main))
+        exact, lag, error = pcm_difference(main, main_pcm(start, 5.0), channels)
+        drift = {'exact': exact, 'lag': lag, 'max_abs': error}
+        exact, lag, error = pcm_difference(main, pipe, channels)
+        row = {'start': float(start), 'exact': exact, 'lag': lag, 'max_abs': error,
+               'main_from_another_keyframe': drift}
+        rows.append(row)
+        licensed = off_lattice or not matches(drift, False, float('inf'))
+        assert matches(row, licensed, max(1e-2, 2 * drift['max_abs'])), row
+        carried.append(pipe)
+        mains.append(main)
+    for k in range(len(windows) - 1):
+        shift = lattice(windows[k + 1][0])[1] - lattice(windows[k][0])[1]
+        joined = {}
+        for name, pcm in (('carried', carried), ('main', mains)):
+            tail = pcm[k][shift * channels * 8:]
+            exact, lag, error = pcm_difference(tail, pcm[k + 1][:len(tail)], channels)
+            joined[name] = {'exact': exact, 'lag': lag, 'max_abs': error}
+        rows.append({'join': k, **joined})
+        # The carried join is as continuous as main's.
+        main_join = joined['main']
+        licensed = off_lattice or not matches(main_join, False, float('inf'))
+        assert matches(joined['carried'], licensed, max(1e-2, 2 * main_join['max_abs'])), rows[-1]
+    return rows
+
+
+def helper_footprint(pid):
+    fds = len(os.listdir(f'/proc/{pid}/fd'))
+    rss = next(int(line.split()[1]) for line in Path(f'/proc/{pid}/status').read_text().splitlines()
+               if line.startswith('VmRSS:'))
+    return fds, rss
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--helper', type=Path, required=True)
@@ -206,7 +349,14 @@ def main():
     parser.add_argument('--audio', type=int, help='soundtrack ordinal to carry')
     parser.add_argument('--ffprobe', default='/usr/lib/jellyfin-ffmpeg/ffprobe')
     parser.add_argument('--ffmpeg', default='/usr/lib/jellyfin-ffmpeg/ffmpeg')
+    parser.add_argument('--pcm-join', action='store_true',
+                        help="carry the daemon's interval and compare the lattice PCM")
+    parser.add_argument('--session-only', action='store_true',
+                        help='no single-shot comparison (long sessions)')
+    parser.add_argument('--growth', type=int, default=0,
+                        help='require flat fd count and RSS from this window on')
     options = parser.parse_args()
+    assert not options.pcm_join or options.audio is not None
     options.raster = tuple(int(v) for v in options.raster.split('x'))
     options.output.mkdir(mode=0o700)
     fps = Fraction(options.fps)
@@ -218,13 +368,24 @@ def main():
     results = {'single': [], 'session': []}
     singles = []
     for i, (start, end) in enumerate(windows):
+        if options.session_only:
+            break
         result, elapsed = single_shot(options, source, start, end, frames, options.output / f'single-{i}')
         singles.append(result)
         results['single'].append(round(elapsed, 3))
+    codec = None
+    if options.audio is not None:
+        codec = subprocess.check_output([
+            options.ffprobe, '-v', 'error', '-select_streams', f'a:{options.audio}',
+            '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', str(options.source)],
+            text=True).strip()
     session = Session(options, options.output, options.audio)
+    footprints = []
     for i, (start, end) in enumerate(windows):
         audio = None
-        if options.audio is not None:
+        if options.pcm_join:
+            audio = daemon_interval(start, end)
+        elif options.audio is not None:
             # The encoder's soundtrack preroll begins about four seconds
             # before the window; its tail reaches half a second past it.
             audio = (start - 4, end + Fraction(1, 2))
@@ -232,6 +393,12 @@ def main():
         reply, nut, elapsed = session.window(start, end, frames, directory, audio)
         assert reply == b'done', (i, reply, (options.output / 'session.stderr').read_text())
         results['session'].append(round(elapsed, 3))
+        if options.session_only:
+            footprints.append(helper_footprint(session.process.pid))
+            if i >= 2:
+                # Keep only what the growth check reads.
+                subprocess.run(['rm', '-rf', str(options.output / f'session-{i - 2}')], check=True)
+            continue
         single = evidence(options.output / f'single-{i}')
         warm = evidence(directory)
         assert nut == singles[i], (i, nut, singles[i])
@@ -247,17 +414,13 @@ def main():
         for key in ('frames', 'boundary_pts_ticks', 'first_emitted_pts_ticks', 'last_emitted_end_ticks'):
             assert warm['complete'][key] == single['complete'][key], (i, key)
         if audio is not None:
-            codec = subprocess.check_output([
-                options.ffprobe, '-v', 'error', '-select_streams', f'a:{options.audio}',
-                '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', str(options.source)],
-                text=True).strip()
-            if codec != 'truehd':
+            if codec not in LOSSLESS:
                 # The carried packets are the source's, byte for byte.
                 expected = source_audio_packets(options, *audio)
-                actual = window_audio_packets(options, directory / 'audio.mka')
+                actual = window_audio_packets(options, directory / 'audio.carried')
                 assert actual == expected, (i, len(actual), len(expected), actual[:2], expected[:2])
                 continue
-            # ffprobe's MLP parser reframes TrueHD packets, so they are
+            # ffprobe's parsers reframe TrueHD and FLAC packets, so they are
             # compared through the decoder, which resynchronises on TrueHD's
             # major sync and is lossless: what the encoder keeps (the window
             # and its two seconds of AAC preroll) decodes to exactly the
@@ -270,7 +433,7 @@ def main():
             margin = Fraction(1, 100)
             expected = decoded_audio(options, options.source, options.audio,
                                      kept[0] - margin, kept[1] + margin, seek=audio[0] - 4)
-            actual = decoded_audio(options, directory / 'audio.mka', 0, *kept)
+            actual = decoded_audio(options, directory / 'audio.carried', 0, *kept)
             # TrueHD frames are 40 samples (0.83 ms) apart, so the frame a
             # millisecond timestamp names is found by its samples.
             first = next(j for j, (pts, digest) in enumerate(expected)
@@ -280,6 +443,22 @@ def main():
             for (want_pts, want), (have_pts, have) in zip(expected, actual):
                 assert have == want and abs(have_pts - want_pts) < Fraction(1, 1000), (
                     i, want_pts, have_pts)
+    if options.pcm_join:
+        results['pcm'] = check_pcm_join(
+            options, windows, [options.output / f'session-{i}' for i in range(len(windows))],
+            codec)
+    if options.session_only:
+        assert session.close() == 0
+        results['session'] = {'windows': len(windows),
+                              'mean': round(sum(results['session'][1:]) / (len(windows) - 1), 3),
+                              'max': max(results['session'][1:])}
+        if options.growth:
+            settled, last = footprints[options.growth - 1], footprints[-1]
+            results['footprint'] = {'at': options.growth, 'settled': settled, 'last': last}
+            assert last[0] == settled[0], ('descriptor growth', settled, last)
+            assert last[1] - settled[1] < 64 * 1024, ('RSS growth (KiB)', settled, last)
+        print(json.dumps(results))
+        return
     # A window that skips ahead is refused, and the session ends with it.
     start, end = windows[-1][1] + options.seconds, windows[-1][1] + 2 * options.seconds
     audio = (start - 4, end + Fraction(1, 2)) if options.audio is not None else None

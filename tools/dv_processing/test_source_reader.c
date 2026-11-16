@@ -200,6 +200,43 @@ static void start_failure(int fd) {
   source_reader_destroy(&r);
 }
 
+// A session raises each window's envelope on the running reader: the slots
+// it already filled are delivered, not fetched again, and a reader that had
+// stopped at its old envelope resumes from what it delivered.
+static void raised_limit_keeps_read_ahead(int fd) {
+  reset_hook();
+  assert(lseek(fd, 0, SEEK_SET) == 0);
+  struct budget_io io = { .fd = fd };
+  struct source_reader_io source = test_source_callbacks(&io);
+  source.limit = 3 * SOURCE_READER_CHUNK;
+  struct source_reader r = SOURCE_READER_INITIALIZER;
+  uint8_t *buffer = malloc(SOURCE_READER_CHUNK);
+  assert(buffer && source_reader_start(&r, &source) == 0);
+  await_done(&r);
+  assert(r.budget_end && io.bytes == 3 * SOURCE_READER_CHUNK);
+  exact(&r, buffer, 100, 0);
+  unsigned before = calls;
+  source.limit = 64 * SOURCE_READER_CHUNK;
+  assert(source_reader_set_limit(&r, &source) == 0);
+  // The stopped reader restarts from its delivered cursor; nothing it had
+  // delivered is read again.
+  exact(&r, buffer, SOURCE_READER_CHUNK, 100);
+  pthread_mutex_lock(&r.mutex);
+  while (r.count < SOURCE_READER_SLOTS) pthread_cond_wait(&r.readable, &r.mutex);
+  pthread_mutex_unlock(&r.mutex);
+  // A running reader keeps its filled slots across a raise.
+  size_t held = r.count;
+  uint64_t charged = io.bytes;
+  source.limit = 65 * SOURCE_READER_CHUNK;
+  assert(source_reader_set_limit(&r, &source) == 0 && r.count >= held && r.active);
+  assert(io.bytes == charged);
+  exact(&r, buffer, 64, 100 + SOURCE_READER_CHUNK);
+  assert(calls > before);
+  assert(source_reader_stop(&r) == 0);
+  source_reader_destroy(&r);
+  free(buffer);
+}
+
 int main(void) {
   assert(WINDOW_READ_LIMIT == 128ULL * 1024 * 1024);
   char path[] = "/tmp/plurx-source-reader-XXXXXX";
@@ -217,6 +254,7 @@ int main(void) {
   stop_full(fd);
   stop_inflight(fd);
   start_failure(fd);
+  raised_limit_keeps_read_ahead(fd);
   assert(close(fd) == 0);
   puts("source reader cursor, seek, EOF, short-read, EINTR, error, budget and stop controls passed");
 }

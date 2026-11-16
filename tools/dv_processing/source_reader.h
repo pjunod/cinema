@@ -193,6 +193,21 @@ static int64_t source_reader_seek(struct source_reader *r, const struct source_r
   return result;
 }
 
+// Raise the read envelope of an active reader without discarding the slots
+// it already holds. A reader that stopped at its old envelope starts again
+// from what it delivered.
+static int source_reader_set_limit(struct source_reader *r, const struct source_reader_io *io) {
+  if (!r->active) return source_reader_start(r, io);
+  pthread_mutex_lock(&r->mutex);
+  r->io.limit = io->limit;
+  bool ended = r->done;
+  pthread_cond_broadcast(&r->writable);
+  pthread_mutex_unlock(&r->mutex);
+  if (!ended) return 0;
+  int error = source_reader_stop(r);
+  return error ? error : source_reader_start(r, io);
+}
+
 static void source_reader_destroy(struct source_reader *r) {
   if (r->active) abort();
   free(r->data);
