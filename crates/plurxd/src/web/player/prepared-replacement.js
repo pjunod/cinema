@@ -34,6 +34,12 @@ const PREPARED_ALIGN_SEEK_MS=1500;
 // Corrective seeks per commit. The incumbent keeps moving while each one runs,
 // so a second measurement is worth taking and a third is a loop.
 const PREPARED_ALIGN_ATTEMPTS=2;
+// Re-aims a successor gets when it falls behind the incumbent before it is
+// ready, and the lead the first one aims ahead by. Each later re-aim doubles
+// the lead: a successor that fell behind once opened slower than the last lead
+// allowed for, and aiming it at the same distance again loses the same race.
+const PREPARED_CHASE_ATTEMPTS=4;
+const PREPARED_CHASE_LEAD_MS=3000;
 // A seek can leave one decoded frame from the old position in the callback
 // queue. Prove the successor advances monotonically before it takes the
 // picture; the incumbent remains visible while these frames are checked.
@@ -626,7 +632,12 @@ function preparedNativeAttach(p,state,spare){
   const onMetadata=()=>{
     spare.removeEventListener("loadedmetadata",onMetadata);
     if(!current()) return;
-    if(state.startAtSec>0) try{ spare.currentTime=state.startAtSec; }catch(e){}
+    // Aim at the incumbent's second NOW, not at the one recorded at staging:
+    // opening a 4K Dolby Vision stream can take longer than the whole staging
+    // lead, and the incumbent kept playing for all of it.
+    const incumbent=document.getElementById("video");
+    const aimSec=incumbent?preparedChaseTargetSec(p,state,incumbent,PREPARED_CHASE_LEAD_MS):state.startAtSec;
+    if(aimSec>0) try{ spare.currentTime=aimSec; }catch(e){}
     notePreparedMetadata(p,state);
     try{ const started=spare.play(); if(started&&started.catch) started.catch(()=>{}); }catch(e){}
   };
@@ -742,9 +753,14 @@ function notePreparedBuffer(p,state){
     }
     if(!preparedQualityProofReady(p,state)) return;
   }
+  if(state.chasing) return;
+  const filmMs=playbackFilmPositionMs(v,p);
+  if(preparedSuccessorBehind(p,state,spare,filmMs)){
+    preparedChaseIncumbent(p,state,v,spare,filmMs);
+    return;
+  }
   const through=preparedBufferedThroughMs(state,spare);
   if(through==null) return;
-  const filmMs=playbackFilmPositionMs(v,p);
   // The successor may start ahead to catch up quickly. Wait until its first
   // buffered range also covers the exact incumbent second to avoid a skip.
   let coversIncumbent=false;
@@ -768,6 +784,70 @@ function notePreparedBuffer(p,state){
       {buffered_through_ms:through});
   }
   commitPreparedReplacement(p,state);
+}
+// The successor plays muted at normal speed from wherever it was aimed, and
+// a browser buffers only a bounded window around the successor's OWN playhead.
+// A successor whose playhead is behind the incumbent's second therefore never
+// catches up: it advances no faster than the incumbent does, and its buffer
+// window trails it. That is how a Safari viewer watched DYN for a whole film
+// while a verified Profile 8.1 successor played 40 s behind, unseen, until the
+// server's preparation deadline reaped it. Behind means its playhead is earlier
+// than the incumbent's second and nothing it has buffered covers that second.
+//
+// Only a successor that has started counts: hls.js parses its manifest (which
+// is `metadata`) before it applies `startPosition`, and until the first append
+// the element reports time zero with nothing buffered. Judging that "behind"
+// would spend re-aims on a successor that has not begun.
+//
+// A voluntary hls.js trial keeps no back buffer, so a successor re-aimed ahead
+// of the incumbent would evict everything behind its own playhead and could
+// never cover the incumbent's second: re-aiming would trade behind-forever for
+// ahead-forever. Those trials keep their own bounded proof and pressure exits.
+function preparedSuccessorBehind(p,state,spare,filmMs){
+  if(!state.metadata||state.buffered||spare.seeking) return false;
+  if(!(Number(spare.readyState)>=2)||!(spare.buffered&&spare.buffered.length>0)) return false;
+  if(state.hls&&p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent)) return false;
+  const local=Number(spare.currentTime);
+  if(!Number.isFinite(local)) return false;
+  if(state.mediaOriginMs+local*1000>=filmMs) return false;
+  try{
+    for(let i=0;i<spare.buffered.length;i++){
+      const start=state.mediaOriginMs+spare.buffered.start(i)*1000;
+      const end=state.mediaOriginMs+spare.buffered.end(i)*1000;
+      if(start<=filmMs+250&&end>=filmMs) return false;
+    }
+  }catch(e){}
+  return true;
+}
+function preparedChaseTargetSec(p,state,v,leadMs){
+  return Math.max(0,preparedLocalPositionMs(playbackFilmPositionMs(v,p)+leadMs,state.mediaOriginMs)/1000);
+}
+// Re-aim a successor that fell behind at the incumbent's current second plus a
+// lead, a bounded number of times. Running out is a failed preparation, said
+// as such, so the server's slot is released now rather than at its deadline.
+function preparedChaseIncumbent(p,state,v,spare,filmMs){
+  const attempt=state.chaseAttempts||0;
+  const lagMs=Math.round(filmMs-(state.mediaOriginMs+(Number(spare.currentTime)||0)*1000));
+  if(attempt>=PREPARED_CHASE_ATTEMPTS){
+    failPreparedReplacement(p,state,`successor stayed ${lagMs} ms behind the incumbent after ${attempt} re-aims`);
+    return;
+  }
+  state.chaseAttempts=attempt+1;
+  state.chasing=true;
+  const leadMs=PREPARED_CHASE_LEAD_MS*(2**attempt);
+  const wanted=preparedChaseTargetSec(p,state,v,leadMs);
+  clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"chase",
+    message:`prepared ${state.sessionId} ${lagMs} ms behind the incumbent; `+
+      `re-aim ${attempt+1}/${PREPARED_CHASE_ATTEMPTS} at local ${wanted.toFixed(3)}s lead_ms=${leadMs}`},
+    playbackContext()));
+  preparedAlignSeek(spare,wanted).then((landed)=>{
+    state.chasing=false;
+    if(!landed) clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"chase",
+      message:`prepared ${state.sessionId} re-aim ${attempt+1} did not report seeked within ${PREPARED_ALIGN_SEEK_MS} ms`},
+      playbackContext()));
+    if(PLAYER===p&&preparedState(p)===state&&preparedVideoElement()===spare
+       &&!PREPARED_TERMINAL_STATES.includes(state.state)) notePreparedBuffer(p,state);
+  });
 }
 // The switch.
 //

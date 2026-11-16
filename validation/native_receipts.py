@@ -83,7 +83,9 @@ BUILD_SPECS = {
     # adds only the web curator-login-browser-check target, and A6 M3 adds the
     # vendor hiqlite `applied_mark::watch_tests` run to cluster-wal-check; no
     # native build recipe changed.
-    'Makefile': 'f1b4c9732821a6c423590e9e733d78a50572532ccfe9b6a2ffc38362f7fe066f',
+    # PR #1666 adds only `node --test tests/playback/prepared-successor-chase.test.js`
+    # to the web-unit-check recipe (a Node web test); no native recipe changes.
+    'Makefile': 'a7b767c0bc813c46c2fedd64fe465cc44748fb660f088c78a13e30d9a528440b',
     # Reviewed raw project spec at build 300. Counter-only variants may enter
     # the reviewed spec closure through APPLE_PROJECT_SHAPE; actual Git blobs
     # still bind fingerprints and case compatibility. Resource, script, or flag

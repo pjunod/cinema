@@ -1594,6 +1594,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/web-media-recovery.test.js
 	@node tests/playback/web-control.test.js
 	@node --test tests/playback/seek-control.test.js
+	@node --test tests/playback/prepared-successor-chase.test.js
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js
 	@node tests/web/player-dom.test.js
