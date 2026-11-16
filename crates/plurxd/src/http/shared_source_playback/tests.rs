@@ -1367,10 +1367,7 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
     if ranged_without_subtitles {
         assert_eq!(
             decoded.response().playlist_url,
-            format!(
-                "/api/v1/hls/{}/master.m3u8",
-                decoded.response().session_id
-            ),
+            format!("/api/v1/hls/{}/master.m3u8", decoded.response().session_id),
             "{mode:?} opens on the master"
         );
     } else if !native {
@@ -1717,13 +1714,19 @@ async fn actual_master_declares_the_range_without_subtitles(
         mode,
         SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted
     ) {
-        assert!(master.starts_with("#EXTM3U\n#EXT-X-VERSION:10\n"), "{master}");
+        assert!(
+            master.starts_with("#EXTM3U\n#EXT-X-VERSION:10\n"),
+            "{master}"
+        );
         assert!(
             master.contains("SUPPLEMENTAL-CODECS=\"dvh1.08."),
             "{mode:?} declares Profile 8 Dolby Vision: {master}"
         );
     } else {
-        assert!(!master.contains("SUPPLEMENTAL-CODECS"), "{mode:?}: {master}");
+        assert!(
+            !master.contains("SUPPLEMENTAL-CODECS"),
+            "{mode:?}: {master}"
+        );
     }
 }
 async fn actual_vtt_writer_end(

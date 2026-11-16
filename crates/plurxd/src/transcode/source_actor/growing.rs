@@ -223,8 +223,7 @@ impl SourceViewerActor {
                 if kind != SharingHlsResourceKind::Master && tracks.is_none() {
                     return Err(SourceWorkerError::Unsupported);
                 }
-                if tracks.is_some_and(|tracks| !tracks.matches(&self.0.assignment, &backing.file))
-                {
+                if tracks.is_some_and(|tracks| !tracks.matches(&self.0.assignment, &backing.file)) {
                     return Err(SourceWorkerError::Unavailable);
                 }
                 let manager = self
