@@ -890,22 +890,46 @@ function commitPreparedReplacement(p,state){
 // Phase one of the switch: put the successor on the incumbent's second while
 // the incumbent is still the one being seen and heard.
 //
-// Two attempts, and the drift is re-measured against the incumbent every time
-// rather than assumed to be the number that started this: the incumbent kept
-// playing for the whole duration of each seek. The web runs its successor
-// muted and PLAYING, so what a completed seek leaves behind is only the seek's
-// own latency and a rendezvous hold is not needed -- but the two-attempt bound
-// is the same one it would have had.
+// Chase deliberately aims ahead. Native HLS must retain that decoded position:
+// seeking backward can restart Safari's decoder and spend both seek bounds.
+// Hold the muted successor until the incumbent reaches it instead. Other
+// corrective seeks retain their two-attempt bound and post-seek buffer check.
 async function alignPreparedReplacement(p,state,v,spare){
   const live=()=>PLAYER===p&&preparedState(p)===state
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
     &&playbackOwnsAttachedMedia(p);
+  const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+  if(!state.hls&&!spare.seeking&&preparedAlignedBuffered(spare)
+    &&(spare.currentTime-target)*1000>preparedClockAlignmentSlackMs(p)){
+    if(!await holdPreparedNativeSuccessor(p,state,v,spare)||!live()) return false;
+    try{
+      spare.playbackRate=v.playbackRate;
+      const started=spare.play();
+      if(started&&started.catch) started.catch(()=>{
+        if(live()&&state.state==="committing") failPreparedReplacement(p,state,"native successor could not resume");
+      });
+    }catch(e){ failPreparedReplacement(p,state,"native successor could not resume"); return false; }
+    return exposePreparedReplacementAtFrame(p,state,v,spare);
+  }
+  let lastAlignment="";
   for(let attempt=0;attempt<PREPARED_ALIGN_ATTEMPTS;attempt++){
     if(!live()) return false;
     const wanted=Math.max(0,
       preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000);
+    const from=spare.currentTime, startedAt=performance.now();
     const landed=await preparedAlignSeek(spare,wanted);
     if(!live()) return false;
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    const ranges=[];
+    try{ for(let i=0;i<Math.min(spare.buffered.length,4);i++)
+      ranges.push([Math.round(spare.buffered.start(i)*1000),Math.round(spare.buffered.end(i)*1000)]); }catch(e){}
+    lastAlignment=`attempt=${attempt+1} seeked=${landed} elapsed_ms=${Math.round(performance.now()-startedAt)} `+
+      `from_ms=${Math.round(from*1000)} wanted_ms=${Math.round(wanted*1000)} `+
+      `landed_ms=${Math.round(spare.currentTime*1000)} drift_ms=${Math.round((spare.currentTime-target)*1000)} `+
+      `seeking=${spare.seeking} ready_state=${spare.readyState} buffered=${preparedAlignedBuffered(spare)} `+
+      `ranges_ms=${JSON.stringify(ranges)}`;
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_seek",
+      message:`prepared ${state.sessionId} alignment ${lastAlignment}`},playbackContext()));
     // `readyState` answers for the element, not for this position, and a seek
     // that landed in a hole reports HAVE_FUTURE_DATA about a range the
     // playhead is not in. Both questions have to be asked here.
@@ -920,8 +944,68 @@ async function alignPreparedReplacement(p,state,v,spare){
   // The incumbent is untouched and still playing. `failPreparedReplacement`
   // settles the staging with the server and hands the directed change its one
   // reopen.
-  failPreparedReplacement(p,state,"could not align");
+  failPreparedReplacement(p,state,`could not align: ${lastAlignment}`);
   return false;
+}
+// A bounded rendezvous, driven by the incumbent rather than the paused spare.
+// Reuse the exposure timer/listener ownership so supersede and teardown cancel
+// the wait. No seek, element swap, or audio transfer occurs during the hold.
+function holdPreparedNativeSuccessor(p,state,v,spare){
+  return new Promise((resolve)=>{
+    const live=()=>PLAYER===p&&preparedState(p)===state
+      &&document.getElementById("video")===v&&preparedVideoElement()===spare
+      &&playbackOwnsAttachedMedia(p);
+    const rate=Number(v.playbackRate), startedAt=performance.now();
+    let settled=false;
+    const finish=(ok,reason)=>{
+      if(settled) return;
+      settled=true;
+      if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
+      detachPreparedOverlapListeners(state);
+      if(!ok&&live()) failPreparedReplacement(p,state,`native alignment hold: ${reason}`);
+      resolve(ok);
+    };
+    if(!live()||v.paused||v.seeking||p.wantsPlayback===false||!(rate>0)){
+      finish(false,"viewer-intent");return;
+    }
+    try{ spare.pause(); }catch(e){ finish(false,"could not pause successor");return; }
+    const held=Number(spare.currentTime);
+    const aheadMs=held*1000-preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs);
+    if(!Number.isFinite(held)||bufferRunway(v)*1000<aheadMs+PREPARED_BUFFER_LEAD_MS){
+      finish(false,"insufficient incumbent runway");return;
+    }
+    const budgetMs=Math.min(aheadMs,PREPARED_CHASE_LEAD_MS*2**(PREPARED_CHASE_ATTEMPTS-1))/rate+PREPARED_ALIGN_SEEK_MS;
+    state.overlapPhase="native-align-hold";
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_hold",
+      message:`prepared ${state.sessionId} holding native successor at_ms=${Math.round(held*1000)} `+
+        `ahead_ms=${Math.round(aheadMs)} budget_ms=${Math.round(budgetMs)}`},playbackContext()));
+    const check=()=>{
+      if(settled) return;
+      if(!live()){ finish(false,"stale-owner");return; }
+      if(v.paused||v.seeking||p.wantsPlayback===false||Number(v.playbackRate)!==rate){
+        finish(false,"viewer-intent");return;
+      }
+      if(spare.seeking||!spare.paused||!preparedAlignedBuffered(spare)){
+        finish(false,"successor lost held buffer");return;
+      }
+      const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+      if(performance.now()-startedAt>=budgetMs){ finish(false,"deadline");return; }
+      if(target>=held){
+        if((target-held)*1000>preparedClockAlignmentSlackMs(p)){
+          finish(false,"incumbent passed held position");return;
+        }
+        clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_resume",
+          message:`prepared ${state.sessionId} resuming native successor `+
+            `elapsed_ms=${Math.round(performance.now()-startedAt)} drift_ms=${Math.round((held-target)*1000)}`},playbackContext()));
+        finish(true,"");return;
+      }
+      if(state.exposeFrameTimer!=null) clearTimeout(state.exposeFrameTimer);
+      state.exposeFrameTimer=setTimeout(check,10);
+    };
+    state.overlapListeners=["timeupdate","pause","seeking","ratechange"].map(name=>[name,check]);
+    for(const [name,listener] of state.overlapListeners) v.addEventListener(name,listener);
+    check();
+  });
 }
 // Resolve true when the element says the seek completed, false on the bound.
 function preparedAlignSeek(spare,wanted){
