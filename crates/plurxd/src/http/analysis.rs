@@ -82,10 +82,19 @@ pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Val
         metrics.sample.map(|sample| sample.analysis.failed_by_code),
     );
     let settings = state.applied.settings_snapshot().await?.values;
+    // Every member gets a row, so an idle node's override can be set too.
+    // The roster is display only; an unreadable one leaves this node's row.
+    let members = state
+        .membership
+        .activity_peers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|peer| peer.node_id);
     let source_capacity = crate::source_custody::capacity::summary(
         &settings,
         &source_io_holders,
-        [state.node_id.clone()],
+        std::iter::once(state.node_id.clone()).chain(members),
     );
     if let Some(object) = value.as_object_mut() {
         object.insert("source_capacity".to_owned(), source_capacity);
