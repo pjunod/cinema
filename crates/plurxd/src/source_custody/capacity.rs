@@ -16,8 +16,26 @@ pub(crate) const READERS_RANGE: std::ops::RangeInclusive<i64> = 1..=16;
 fn stored(settings: &BTreeMap<String, String>, key: &str) -> Option<i64> {
     settings
         .get(key)
-        .and_then(|value| value.trim().parse::<i64>().ok())
+        .map(|value| sql_integer(value))
         .filter(|value| READERS_RANGE.contains(value))
+}
+
+/// `CAST(value AS INTEGER)` as the claim reads a setting: leading spaces,
+/// then the longest signed-integer prefix (`"3 readers"` is 3), else 0.
+fn sql_integer(value: &str) -> i64 {
+    let text = value.trim_start();
+    let (sign, digits) = match text.as_bytes().first() {
+        Some(b'-') => (-1, &text[1..]),
+        Some(b'+') => (1, &text[1..]),
+        _ => (1, text),
+    };
+    let end = digits
+        .bytes()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end]
+        .parse::<i64>()
+        .map_or(0, |magnitude| sign * magnitude)
 }
 
 /// The cluster default, as the claim reads it.
@@ -158,6 +176,19 @@ mod tests {
             "live_demand": live, "lease_id": lease,
         }))
         .expect("holder")
+    }
+
+    /// Mutation: parse with `trim().parse()` (the summary then disagrees
+    /// with the claim's `CAST(value AS INTEGER)` on these values).
+    #[test]
+    fn settings_read_as_the_claim_casts_them() {
+        for (value, expected) in [(" 4", 4), ("3 readers", 3), ("5\n", 5), ("x", 2), ("-3", 2)] {
+            let settings = BTreeMap::from([(
+                keys::JOB_SOURCE_READERS_PER_NODE.to_owned(),
+                value.to_owned(),
+            )]);
+            assert_eq!(readers_per_node(&settings), expected, "{value:?}");
+        }
     }
 
     #[test]
