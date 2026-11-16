@@ -1722,9 +1722,13 @@ impl TranscodeManager {
     /// an unproved pairing falls back to software rather than failing in
     /// front of a viewer. Pinning it to x264 used to cap 4K Dolby Vision at
     /// 720p for every non-DV client.
+    ///
+    /// Reads the boot record only. The pairing used to be probed lazily here,
+    /// so the first Profile 5 reshape on a hardware-preferring node spawned a
+    /// capability child that no session or job owned.
     async fn dovi_reshape_encoder(&self, requested: &str) -> Encoder {
         let preferred = self.encoder_for_preference(requested);
-        if preferred != Encoder::Software && crate::ffmpeg::has_dovi_reshape_with(preferred).await {
+        if preferred != Encoder::Software && self.dovi_reshape_hardware.contains(&preferred) {
             preferred
         } else {
             Encoder::Software

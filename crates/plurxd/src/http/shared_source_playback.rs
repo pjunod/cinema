@@ -2955,9 +2955,13 @@ async fn build_real_source_start_fixture(
             .output()
             .await
             .expect("actual FFprobe");
-        assert!(probe.status.success(), "{}", String::from_utf8_lossy(&probe.stderr));
-        let document: serde_json::Value = serde_json::from_slice(&probe.stdout)
-            .expect("HDR fixture probe JSON");
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("HDR fixture probe JSON");
         assert_eq!(document["streams"][0]["color_transfer"], "smpte2084");
         assert_eq!(document["streams"][0]["color_primaries"], "bt2020");
     }

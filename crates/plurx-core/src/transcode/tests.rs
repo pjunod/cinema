@@ -1961,9 +1961,27 @@ fn copy_args_copy_audio_when_supported() {
 #[test]
 fn preserved_dolby_vision_copy_uses_scanned_base_colour_for_every_copy_recipe() {
     let cases = [
-        ("HDR10-compatible Profile 8", Some(1), "dolby_vision", true, Some("smpte2084")),
-        ("HDR10-compatible Profile 8", Some(6), "dolby_vision", true, Some("smpte2084")),
-        ("HLG-compatible Profile 8", Some(4), "dolby_vision", true, Some("arib-std-b67")),
+        (
+            "HDR10-compatible Profile 8",
+            Some(1),
+            "dolby_vision",
+            true,
+            Some("smpte2084"),
+        ),
+        (
+            "HDR10-compatible Profile 8",
+            Some(6),
+            "dolby_vision",
+            true,
+            Some("smpte2084"),
+        ),
+        (
+            "HLG-compatible Profile 8",
+            Some(4),
+            "dolby_vision",
+            true,
+            Some("arib-std-b67"),
+        ),
         ("Profile 5", Some(0), "dolby_vision", true, None),
         ("unknown compatibility", None, "dolby_vision", true, None),
         ("stripped HDR10 base", Some(1), "dolby_vision", false, None),
@@ -1990,14 +2008,7 @@ fn preserved_dolby_vision_copy_uses_scanned_base_colour_for_every_copy_recipe() 
         let recipes = [
             video.clone(),
             copy_index_pipe_args(&source, options),
-            copy_pipe_args_with_dolby_vision(
-                &source,
-                0.0,
-                None,
-                true,
-                Pacing::unpaced(),
-                options,
-            ),
+            copy_pipe_args_with_dolby_vision(&source, 0.0, None, true, Pacing::unpaced(), options),
         ];
         for args in recipes {
             match expected {

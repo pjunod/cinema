@@ -907,6 +907,10 @@ pub struct TranscodeManager {
     /// Whether boot proved the exact software/tonemapx/software renderer used
     /// for non-backward-compatible Dolby Vision.
     dovi_reshape: bool,
+    /// The hardware encoders boot proved that reshape with
+    /// ([`crate::ffmpeg::measure_dovi_reshape_hardware`]). A session reads
+    /// this record; it never probes a pairing itself.
+    dovi_reshape_hardware: Vec<plurx_core::transcode::Encoder>,
     /// Whether this daemon's ffmpeg proved the HDR10 passthrough renderer at
     /// boot ([`crate::ffmpeg::has_dovi_passthrough`]). Its own field, and its
     /// own probe: the SDR reshape graph proves nothing about a PQ output.

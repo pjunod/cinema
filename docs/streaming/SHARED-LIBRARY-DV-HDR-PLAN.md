@@ -529,12 +529,14 @@ both pass on the gate's FFmpeg 6.1 and are open questions for M2.
   in the gate container with `PLURX_FFMPEG` pointing at a copied
   jellyfin-ffmpeg 8.1. The binary cannot run inside `plurx/plurxd:latest`,
   because it needs glibc 2.39 and bookworm has 2.36.
-- **Not closed by T3.1.** `dovi_reshape_encoder` reaches
-  `has_dovi_reshape_with(hardware)`. That is a lazy capability probe
-  (synthetic input, no source read) that is memoized per encoder. Only the
-  software pairing is measured at boot. The first P5 reshape on a node whose
-  preferred encoder is hardware therefore spawns one unattributed capability
-  child, on the Source exactly as locally.
+- **Hardware reshape pairing measured at boot.** `dovi_reshape_encoder`
+  used to call `has_dovi_reshape_with(hardware)` lazily. That is a
+  per-encoder capability probe, and only the software pairing was measured
+  at boot, so the first P5 reshape on a hardware-preferring node spawned an
+  unattributed child, on the Source and locally. Boot now measures every
+  detected hardware pairing (`measure_dovi_reshape_hardware`, beside
+  `dovi_reshape`). The result is listed in the system report as
+  `dovi_reshape_hardware`, and the planner reads only that record.
 - **M1 fixture under FFmpeg 8 (`f79cea183`).** The production jellyfin-ffmpeg 8.1
   takes an encode's colour tags from the lavfi frames and ignores the
   `-color_*` options, so the HTTP fixture's "PQ" source came out untagged.
@@ -568,3 +570,13 @@ FFmpeg version-parsing defect.
 
 The production change and regression have not yet been compiled or run in the
 unit suite or CI. Those checks remain pending the final adversarial review.
+
+### Boot hardware reshape continuation (2026-11-16)
+
+The saved M3 boot-measurement patch is restored on the Codex continuation.
+The regression
+`the_first_profile5_reshape_on_a_hardware_node_spawns_no_capability_probe`
+checks the boot record's encoder choice and the capability-child spawn count
+for both proven and unproven hardware. Unit execution and its old-code
+counterfactual remain pending final qualification. No new feature switch or
+watchdog is introduced.
