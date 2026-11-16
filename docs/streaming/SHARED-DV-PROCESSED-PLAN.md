@@ -1,6 +1,6 @@
 # Shared processed Dolby Vision / FEL re-encode — design note (T4.1)
 
-**Status:** implemented in the integrated task stack; final qualification and deployment outstanding · **Effort:** `effort/shared-dv-hdr`, M4 · **Task PR:** [#1721](http://forge.lan:3000/noirr/plurx/pulls/1721) ·
+**Status:** merged to the effort and integrated with main32fa105ee; final review, qualification and deployment outstanding · **Effort:** `effort/shared-dv-hdr`, M4 · **Task PR:** [#1721](http://forge.lan:3000/noirr/plurx/pulls/1721) ·
 **Written:** 2026-11-15 · **Read against:** `wt-dvhdr-m2` @ `468e9e90d` (M1 code);
 `origin/main` @ `29b35e713` for the original design. The continuation
 execution state is recorded in §7; compile attempts are not test qualification.
@@ -8,9 +8,9 @@ Companion to [the shared DV/HDR plan](SHARED-LIBRARY-DV-HDR-PLAN.md), M4.
 
 Paths are relative to `crates/plurxd/src/` unless they start with `crates/` or `docs/`.
 Line numbers are from that worktree as it stood, which had uncommitted M2 edits
-(`http/hls/create.rs` among them); re-find by symbol. The receiver files cited
-(`shared_receiver_playback.rs`, `shared_receiver_successor.rs`,
-`crates/plurx-core/src/sharing_resources.rs`) are byte-identical to `origin/main`.
+(`http/hls/create.rs` among them); re-find by symbol. The receiver files cited were byte-identical to the original main baseline
+when this design was written; the implementation and integration updates are
+recorded in the execution sections below.
 
 ## 1. Answer in five lines
 
@@ -19,8 +19,8 @@ Line numbers are from that worktree as it stood, which had uncommitted M2 edits
    settlement. One call site changes: the first window stops minting its own
    producer slot and cancel token (`transcode/manager/create.rs:3811`).
 2. **Instance key:** unchanged function. The canonical key under it is already the
-   Source namespace; the incarnation is the Source assignment's. Reuse is scoped by
-   `share:<grant>:<viewer>`. No grant is added to the hash.
+   Source namespace; the incarnation is the Source assignment's. Reuse is scoped to
+   the exact grant/viewer principal. No grant is appended ad hoc to the hash.
 3. **Transport:** the upgrade rides **B's existing prepared successor**, which is
    an ordinary second Source Start. No Source-staged successor, no new Start kind.
 4. **A1/S8–S9:** none of them blocks M4. The S8 part M4 uses is on main; S9 and A1

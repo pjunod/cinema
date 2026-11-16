@@ -1,6 +1,6 @@
 # Shared Dolby Vision and HDR — deliver every local shape over sharing
 
-**Status:** M1–M4 integrated on the Codex stack; qualification and deployment remain open. PRs #1714, #1719, #1720 and #1721 · **Written:** 2026-11-15 · **Baseline:** `29b35e713` (read, not compiled).
+**Status:** M1–M4 merged to the effort; main qualification and deployment remain open. PRs #1714, #1719, #1720 and #1721 · **Written:** 2026-11-15 · **Original design baseline:** `29b35e713` (read, not compiled).
 
 Companion to `docs/streaming/SHARED-LIBRARY-PLAYBACK-RCA.md`
 (why shared starts fail) and `docs/features/SHARED-LIBRARIES-IMPLEMENTATION.md`
