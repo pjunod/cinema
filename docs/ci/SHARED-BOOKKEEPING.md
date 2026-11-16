@@ -111,15 +111,32 @@ upload records itself **in the forge**: `refs/cinema-published/<platform>` on
 one they hold. The floor therefore survives a new controller or a wiped state
 directory, and both upload paths share it.
 
+A ref only moves forward. The push is leased on the value just read
+(`--force-with-lease`), so a ref another publisher moved meanwhile is read
+again, never overwritten, and a commit with a lower count never replaces a
+higher one. On one host the two upload paths cannot overlap at all: the
+release job and `scripts/ship --apple` hold the same `publish.lock` in the
+controller's state directory, from the floor check to the record.
+
 **How to read it:** `git ls-remote origin 'refs/cinema-published/*'` shows the
 last published commit per platform; its build number is
 `git rev-list --count <commit>`. Before the first ref exists the floor is the
 last hand-claimed build (Apple 301, Android 207). A failed upload records
-nothing and may be retried. An upload that cannot be recorded fails loudly
-and prints the `git push` that records it. The controller also appends
-platform, number, source commit, stamp commit and time to
-`cinema-published-builds.jsonl` in its state directory; that file is a second
-local check, not the floor. The stores remain the authority.
+nothing and may be retried. The stores remain the authority.
+
+After an upload the controller first appends platform, number, source commit,
+stamp commit and time to `cinema-published-builds.jsonl` in its state
+directory, then pushes the ref. That file is a second, local check, not the
+floor — and it is what covers a failed push:
+
+| The run ended | The ledger file | The forge ref | The next run on that host |
+|---|---|---|---|
+| upload failed | no line | not moved | builds and uploads the same number again |
+| uploaded, ref pushed | line | moved | refuses that number; publishes the next commit |
+| uploaded, **ref push failed** (run is red) | line | not moved | pushes the ref and uploads nothing for that commit; a later commit is published only once the push has gone through |
+
+`python3 -m validation.mobile_build retry-unrecorded` does that retry on its
+own and prints each ref it moved.
 
 A stamp commit ends with `Build-Scope: store` or `Build-Scope: devices`. Only
 a commit on `main` gets `store`, and the Ansible upload task refuses anything
@@ -131,9 +148,36 @@ only on the signing controller. Whether it reads the build number through
 `noirr_mobile_metadata` cannot be verified from either repository, so the
 first publish after this lands is its acceptance.
 
-**Landing order:** the Ansible change goes on the controller's snapshot
-before or with this one. The old role would build `origin/main` unstamped,
-and `devicectl` accepts a lower build number than the device holds.
+### Landing order
+
+This change and its Ansible companion (`pjunod/ansible` #18) land in this
+order. Two Ansible copies matter, and they move at different steps:
+`~/code/ansible/media` runs `mobile-physical.yml` and `scripts/ship`; the
+channel job runs a pinned snapshot under
+`~/.local/share/plurx-mobile-publisher/versions/`, named by
+`PLURX_ANSIBLE_DIR`.
+
+1. **The #18 fix.** `read_plurx` applies the stamped rules only to a tree
+   that has `validation/mobile_build.py`; a tree from before this change is
+   read as it always was (Apple 301 / Android 207 differ, and pass). Without
+   it the new role refuses today's `main`.
+2. **Merge #18 and update `~/code/ansible/media`.** From here no path can
+   build development build `1`: the old role would have built `origin/main`
+   unstamped, and `devicectl` accepts a lower build number than the device
+   holds.
+3. **Land this change (#1648) with `train:solo`.**
+4. **Install a new publisher snapshot from the #18 merge and repoint
+   `PLURX_ANSIBLE_DIR`.** Never move the pinned snapshot to the #18 head
+   before #1648 is on `main`. The old snapshot is safe meanwhile: it is
+   handed the stamped pin.
+5. **The first client push is the acceptance test** — of the untracked
+   `mobile-channels.yml` and of the push to `refs/cinema-published/*`, which
+   the controller's credential has not made before.
+
+**How to read where it stands:** `git -C ~/code/ansible/media log -1` shows
+step 2; `validation/mobile_build.py` on `origin/main` shows step 3;
+`echo $PLURX_ANSIBLE_DIR` on the signing runner shows step 4;
+`git ls-remote origin 'refs/cinema-published/*'` shows step 5.
 
 ### A hotfix
 
@@ -172,7 +216,9 @@ refuses an edit to a total in the ledger itself.
 
 `scripts/release-cut` is the ledger's one writer: it folds every recorded
 delta into its total, keeps each reason as a comment on the row, and deletes
-the files, so the directory starts each release empty. Paperwork tells that
+the files, so the directory starts each release empty. The fold is worked out
+before the cut writes anything, so a file it cannot fold — an unknown shape, a
+total taken below zero — refuses the cut with the tree untouched. Paperwork tells that
 fold from a hand edit — a total may move only by the deltas of the files
 deleted with it.
 
