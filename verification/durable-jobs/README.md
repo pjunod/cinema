@@ -63,22 +63,35 @@ intentional, is retired with it.
 | Row field | Meaning |
 |---|---|
 | `anchor` | Exact text that must occur once in the file. |
-| `scope` | `item` pins the innermost named item that holds the anchor. `block` pins the brace block the anchor opens (Rust only): a match arm, a `match`, a loop, or an async or spawned block. |
-| `item` | Path of the selected item, such as `impl JobFence > fn renew`, `fn spawn_writer > block`, `trigger job_completed` or `[[package]] tokio 1.53.1`. A different path means the item was renamed or moved. |
+| `scope` | `item` pins the innermost named item that holds the anchor. `arm` (Rust only, for an anchor ending in a match arm's `=> {`) pins the function around the arm with the bodies of the other block arms left out; the scrutinee, every arm's pattern and guard in order, and the code around the match stay in. |
+| `item` | Path of the selected item, such as `impl JobFence > fn renew`, `fn spawn_writer > arm`, `#[cfg(test)] mod tests > fn probe`, `trigger job_completed` or `[[package]] tokio 1.53.1`. A different path means the item was renamed or moved. |
 | `item_sha256` | SHA-256 of the item's canonical text. |
 
 | Source | The item is |
 |---|---|
-| Rust | A `fn`, `impl`, `struct`, `enum`, `union`, `trait`, `mod`, `type`, `const`, `static` or `macro_rules!`, with its attributes and the comments directly above it. |
-| SQL | One statement. A trigger runs to the `END` that closes its body. |
-| `Cargo.toml`, `Cargo.lock` | The key that holds the anchor; when the anchor spans keys, their table. In the lockfile that is one `[[package]]` entry: version, checksum and direct dependencies. |
+| Rust | A `fn`, `impl`, `struct`, `enum`, `union`, `trait`, `mod`, `type`, `const`, `static` or `macro_rules!`, with its attributes and the comments directly above it. A `cfg` or `cfg_attr` on any item around it, or on the file, is part of the path and the hash. |
+| SQL | One statement; a trigger runs to the `END` that closes its body. Every other statement in the file that creates, drops or alters the same object is hashed with it, so a later `DROP` or second `CREATE` is drift. |
+| `Cargo.toml`, `Cargo.lock` | In a table, the key that holds the anchor. In an array of tables, the whole entry: a lockfile `[[package]]` with its version, checksum and direct dependencies, however little of it the anchor quotes. |
 | Python | A `def` or `class`, with its decorators. |
 
 **Canonical text.** In Rust and SQL a run of whitespace between tokens counts
-as one space, so a formatter reflow is not drift. String literals and
-comments are kept byte for byte, and a line comment keeps its line end, so
-code joined onto a comment line changes the hash. TOML and Python keep their
-layout; only line ends and trailing blanks are normalised.
+as one space, so re-indenting an item or re-wrapping a line at an existing
+space is not drift. A reflow that puts a break where there was no space
+(`a.b()` onto two lines, an argument list split one per line, an added
+trailing comma) does change the hash: it fails loudly and needs a re-pin,
+never a silent pass. String literals and comments are kept byte for byte,
+and a line comment keeps its line end, so code joined onto a comment line
+changes the hash. TOML and Python keep their layout; only line ends and
+trailing blanks are normalised.
+
+**Same-file dependencies.** A pin covers the item, not what the item calls.
+Where part of a row's claim lives in a function or constant the item reads
+from its own file (a retry count, a lease TTL, the function a thin wrapper
+delegates to, a fixture a conformance test stands on), that function or
+constant has its own row: `same-file dependency of <reader>: …` in a
+`mapping.json`, and the `dependencies` list in worker-refinement's
+`correspondence.json`. When a reviewed change makes a pinned item read
+something new that bears on its claim, add the row in the same re-pin.
 
 **An anchor never passes silently.** Each of these is an error, not a pass:
 the anchor is absent or occurs twice; it sits outside every named item; the
@@ -101,8 +114,11 @@ changes, so its smoke still runs.
 not available to the lane. It skips comments, strings, raw strings and
 character literals, and accepts an item keyword only where an item can start.
 It does not see items a macro generates: an anchor in one resolves to the
-written item around it. A pin does not see a change in a function the item
-calls; a callee the model depends on needs its own row.
+written item around it. A const-generic brace in a signature
+(`-> Foo<{ N }>`) is taken for the body, which yields an error or a coarser
+pin, never a narrower one. Dependency rows are chosen by review, one call
+deep and within the file: a callee in another file, or a callee's callee,
+is pinned only if someone gave it a row.
 
 ## Seeds share one safety transition relation
 

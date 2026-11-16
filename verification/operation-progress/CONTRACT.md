@@ -381,12 +381,36 @@ are unchanged. This is source correspondence, not model execution evidence.
 ## Item pins replace whole-file pins — 2026-11-15
 
 Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
-source file. Every of the 60 rows now records the item its anchor selects
-(`scope`, `item`, `item_sha256`) instead of its file's SHA-256;
+source file. Each row now records the item its anchor selects (`scope`,
+`item`, `item_sha256`);
 [the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
 defines the items and the hash. The migration ran at main `40cc6460d`, where
-every whole-file pin matched, so each item pin records source already
-reviewed under the old pins. Row 27 pins the `Query::Transaction` arm of the vendored writer, so a change to another request's arm is no longer drift for it. No source, anchor, model, configuration or
-property changes. The dated entries below that say "whole-file pins" describe
-the pins of their day. This is a change to the drift check, not review or
-execution evidence.
+every whole-file pin matched, so each pin records source already reviewed.
+
+**Coverage changed, and this is what it is now.** The 60 original rows pin
+named items. Two anchor a match arm (`Request::AcquireDomain => {` in
+`perform`, and row 27's `Query::Transaction(req) => {` in the vendored
+writer); each pins its function without the bodies of the other arms, so
+row 27 still sees the writer's loop, the scrutinee and every arm's pattern in
+order, which is where "serial" lives.
+
+70 `same-file dependency of …` rows pin what those items read in their own
+file and that carries part of the claim: `decide_cluster_job_authority`,
+`local_node_is_committed_voter` and the other membership reads behind rows 31
+and 32; `RELEASE_ATTEMPTS`, `RELEASE_RETRY_DELAY`, `lease_time_remaining` and
+`revoke` behind rows 13 to 15; `claim_with_resolution`, `library_candidates`,
+`settle` and the other helpers of rows 01 to 07; `publish_then_send`,
+`send_reply` and the source-layout guards of row 27; the publication helpers
+of rows 19 and 20; the timed client's `inner`, `validate_sql` and timeout
+error; the walker's page size and cancellation check; and the scheduler and
+worker loop bodies behind rows 42 and 43. `trait ClusterJobAuthority` in
+`coordination.rs` has a row because `may_execute_job` is its provided method.
+
+**Accepted loss.** No dependency rows for the rows recorded as outside the
+model (caption migration, managed-resource views, source-custody recovery),
+for `main.rs` startup, for the snapshot, backup and migration helpers of the
+writer, or for the scanner's naming and reporting helpers. Nothing in another
+file is followed except the trait above, and nothing more than one call away.
+
+No source, anchor, model, configuration or property changes. This is a change
+to the drift check, not review or execution evidence.

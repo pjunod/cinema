@@ -17,15 +17,38 @@ that set complete or that the abstractions are correct.
 ## Item pins replace whole-file pins — 2026-11-15
 
 Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
-source file. Every of the 126 rows now records the item its anchor selects
-(`scope`, `item`, `item_sha256`) instead of its file's SHA-256;
-[the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
+source file. Each row now records the item its anchor selects (`scope`,
+`item`, `item_sha256`); [the README](README.md#source-pins-cover-the-anchored-item)
 defines the items and the hash. The migration ran at main `40cc6460d`, where
-every whole-file pin matched, so each item pin records source already
-reviewed under the old pins. No source, anchor, model, configuration or
-property changes. The dated entries below that say "whole-file pins" describe
-the pins of their day. This is a change to the drift check, not review or
-execution evidence.
+every whole-file pin matched, so each pin records source already reviewed.
+
+**Coverage changed, and this is what it is now.** A whole-file pin caught any
+edit to a mapped file. An item pin catches an edit to the item, so the 126
+original rows were reviewed for claims that live outside their item:
+
+| What | Rows |
+|---|---|
+| Every original row pins a named item. The one match-arm anchor (`Request::Bind => {`) pins `fn perform` without the bodies of the other arms. The `artwork_retry_pass` and `genre_backfill_pass` citations pin their whole function, because the publisher is taken after the anchored `match`. | 126 |
+| Same-file functions and constants an authority row reads: the claim/renewal windows and codecs of the queue protocol, `ATOMIC_PUBLICATION_TTL_MS`, `fence_rejected`, `publication_row_id`, `lease_i64` and the seam hooks of fenced insertion, the lease SQL helpers of both backends, `with_conn`, the worker's request helpers, `acquire_job`, the producer's fenced publication path, and the fixtures the `formal_publication` conformance tests stand on. | 57 new `same-file dependency of …` rows |
+
+**Accepted loss, by row class.** These rows keep their item pin and get no
+dependency rows; an edit to something they call is no longer drift:
+
+- `review §3 citation` rows on callers that pass `PublicationStore::unfenced`
+  (`book.rs`, `genres.rs`, `local.rs`, `metadata/mod.rs`, `scan/mod.rs`,
+  `run_scan`, `run_targeted`): the claim is which publisher the caller
+  passes, and that is in the pinned function.
+- Rows recorded as isolation or exclusion boundaries outside the model (DV
+  title jobs, caption migration and continuity, managed-resource views,
+  source-custody recovery, `main.rs` startup, the schema migration lists):
+  they are tripwires on one item.
+- The `trait BackgroundJobStore` and `impl … BackgroundJobStore for T` rows
+  pin the whole trait and impl; the SQL constants they dispatch are pinned by
+  their own citation rows where a claim cites them.
+- Anything in another file, and anything more than one call away.
+
+No source, anchor, model, configuration or property changes. This is a change
+to the drift check, not review or execution evidence.
 
 ## Pipeline v2 probe and schedule (T5) — scoped correspondence review on 2026-11-08
 

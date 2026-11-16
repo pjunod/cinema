@@ -32,15 +32,32 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 ## Item pins replace whole-file pins — 2026-11-15
 
 Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
-source file. Every action, boundary and conformance-test row now records the item its anchor selects
-(`scope`, `item`, `item_sha256`) instead of its file's SHA-256;
+source file. Each action and boundary row now records the item its anchor
+selects, and each conformance test pins its own function;
 [the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
 defines the items and the hash. The migration ran at main `40cc6460d`, where
-every whole-file pin matched, so each item pin records source already
-reviewed under the old pins. The `heartbeat.queue.deadline` row named `ActiveBackgroundJob::claim`, a function that does not exist; its anchor is in `ActiveBackgroundJob::start`, and the row now says so. The check now requires each row's symbol to hold its anchor. No source, anchor, model, configuration or
-property changes. The dated entries below that say "whole-file pins" describe
-the pins of their day. This is a change to the drift check, not review or
-execution evidence.
+every whole-file pin matched.
+
+**Coverage changed, and this is what it is now.** Rows anchored on a match
+arm of `perform` or `poll_work` pin that function without the bodies of the
+other arms. Every other row pins its whole function, including
+`heartbeat.queue.deadline`, whose deadline channel and fence are built in
+`ActiveBackgroundJob::start` before the anchored task is spawned. That row
+named `ActiveBackgroundJob::claim`, a function that does not exist; it now
+names `::start`, and the check requires each row's symbol to hold its anchor.
+
+A new `dependencies` list in `correspondence.json` pins 45 same-file
+functions and constants the pinned items read: the claim, settlement and
+fence helpers of `background_jobs.rs`, `RELEASE_ATTEMPTS` and
+`RELEASE_RETRY_DELAY`, the request helpers of the worker and its environment,
+`trait ClusterJobAuthority`, and the fixtures the seven conformance tests
+stand on in `library_work.rs` and `formal_publication.rs`.
+
+**Accepted loss.** A fixture's own helpers, and anything in another file
+except the trait above, are not followed.
+
+No model, configuration or property changes. This is a change to the drift
+check, not review or execution evidence.
 
 ## Pipeline v2 request status (T4) — scoped correspondence review on 2026-11-08
 
