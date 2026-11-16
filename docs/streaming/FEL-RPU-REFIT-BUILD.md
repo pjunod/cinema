@@ -1,9 +1,9 @@
 # FEL RPU re-fit (F+) — build plan
 
-**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565,
-v4 bounded seek-preroll repair implemented and reviewed, qualification pending; 7 remains a follow-up after served
-F+ scores · **Updated:** 2026-11-13 · **Written:** 2026-11-12 ·
-**Owner:** Codex (continuing Claude) · **Decision:** Paul approved building F+
+**Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565 on main
+`59022fd2a`; M6 physical equivalence and the PR's fast lane remain open.
+Milestone 7 follows served F+ scores · **Updated:** 2026-11-16 · **Written:** 2026-11-12 ·
+**Owner:** Claude (Opus 5.5, continuing Codex) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
 
 Companion to the offline result,
@@ -16,12 +16,29 @@ a decoder or client protocol signal, stop and flag it: F+ changes RPU bytes
 on the server. Developer controls and playback-info presentation are part of
 §4 and §6, without changing how clients decode or identify their platform.
 
-The combined candidate integrates main `483d2bcf3` and reviewed Twilight source
-`757ba29badc75cc3872889f2b08459f280658d33`; that source has not yet landed.
-Worker protocol11 combines main's strict catalog provenance with the F+ digest.
-SQLite132 preserves exact title-demand continuity; F+ appends133. The reviewed integration also includes core typed-argument source `9f717f94e`
-and final Twilight launch/startup source `9db044132`. Independent integration
-review passed; exact-source qualification remains pending. No deployment is implied.
+The candidate merges main `59022fd2a` into the reviewed F+ integration
+(`846225459`, then main `6b891f63a` at `0d501cae6`). Worker protocol 11 combines
+strict catalog provenance with the F+ digest. Main took SQLite v133 for scoped
+application login, so the F+ curve extension is v134; the fixture rewind removes
+the empty F+ tail before main's delegation rewind. Rollout requires a compatible
+worker cohort and the rebuilt processing bundle. No deployment is implied.
+
+On the merged tree, production and test-target Clippy (`-D warnings`) and
+rustfmt pass, as do the focused store cases the renumber touches (307 library
+cases, 39 store-contract cases). Earlier focused core/store/daemon results whose
+inputs did not change are retained. Real video and controlled AAC publication
+each read back 310 whole and 139 seek RPUs against source clocks and stored
+curves; AAC also yielded 602 whole and 272 seek audio samples. Disk conversion
+passed on the contiguous zero-origin FEL window; the existing nonzero-origin
+refusal remains explicit (§3.6).
+
+The earlier native 48-patch control showed improved mapping, not the full M6
+equivalence criterion. A reviewed six-point Q23 constant-composition diagnostic
+is staged on the M3; its eight base-colour streams passed 96-frame lossless
+decode checks, but no native mux or capture has completed. M6 remains
+unqualified. The current-main PlayerView changed native test inputs, so earlier
+30/36 native passes are historical. PR #1565 stays `WIP:` until M6 is complete;
+with `MERGE_TRAIN` off it then lands through `scripts/land` after its fast lane.
 
 ## 1. Objective
 
@@ -357,10 +374,17 @@ real clock qualification separately compares all source PTS and every
 available DTS. It is not a claim of an independent full-source PTS census in
 production. Combined AAC muxing can change initial video cadence to absorb
 priming. Affected layouts must be refused before fitted media publication,
-even when distinct curves encode to the same byte count. AAC timing alignment
-and audio-bearing acceptance remain open; a video-only positive plus an AAC
-negative must not be reported as full AAC qualification. Developer readiness
-explains this limit without disabling the saved platform choices. The current
+even when distinct curves encode to the same byte count. AAC support
+is qualified only for measured layouts. A controlled zero-origin FEL plus
+stereo-PCM fixture passed the real AAC producer for whole and seek output:
+310/139 RPU readbacks and602/272 AAC samples. Its media facts come from the
+actual scanner; the fixture initially omitted profile7 compatibility facts,
+which incorrectly selected the profile5 no-filter path and retained EL NALs.
+The corrected fixture asserts the production video command matches canonical
+filtering. The nonzero-origin timing-disagreeing AAC case still refuses before
+publication. These two results establish a positive and negative boundary,
+not universal AAC-layout support. Developer readiness explains unsupported
+layouts without disabling the saved platform choices. The current
 hvc1 muxer also removes in-band parameter sets after the conversion filter;
 F+ retaining outputs therefore explicitly refuse even with known DTS. This
 does not change v1 behavior or claim existing retaining-copy paths qualified.
@@ -516,7 +540,7 @@ completed applicable results.
    - **Acceptance:** a job on Michael5400's source writes curves whose
      digest is stable across two runs. Cancelling it mid-run leaves no rows.
 4. **Copy-path serving:**
-   - **Contents:** pts → scene, revision v2, and the identity digest.
+   - **Contents:** pts → scene, fitted revision v4, and the identity digest.
    - **Acceptance:**
      - a fragment index built for a fitted title carries RPUs whose curves
        parse back equal to the stored ones;
@@ -532,6 +556,11 @@ completed applicable results.
      reported only for actual To81 conversion, with the generation's reason.
    - **Acceptance:** each state renders on the web and Apple Settings, and
      a dv_patch_clips run on macOS against a served fragment shows A == B.
+     This remains open: the historical control measured improvement, while the
+     exact-Q23 oracle diagnostic is prepared but has no native result. Preserve
+     the criterion; do not substitute a recovery percentage or an invented RGB
+     tolerance. The first six points must validate the method before completing
+     the remaining points.
 7. **Re-encode trials (§5):** plan first, then build.
 
 ## 7. Non-goals
