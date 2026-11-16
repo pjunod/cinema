@@ -3,8 +3,8 @@
 **Status:** open — milestones 1–2 merged; 3–6 candidate in PR #1565.
 The Q23 MMR candidate failed native equivalence. The replacement method,
 `dv-refit-safe-v2-mmr12`, publishes and scores a common Q12 chroma grid;
-its six-input diagnostic passes, while production-bound full 48-point qualification
-and the PR's fast lane remain open.
+its production-written candidate passes all 48 native points and controls.
+Independent review and the PR's fast lane remain open.
 Milestone 7 follows served F+ scores · **Updated:** 2026-11-16 · **Written:** 2026-11-12 ·
 **Owner:** Codex (continuing Claude's reviewed candidate) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
@@ -81,8 +81,7 @@ The 2026-11-16 [native receipt](FEL-RPU-REFIT-M6-2026-11-16.json) records
 completed six-point capture on an M3 Max with macOS 27.2.1. Constant, identity,
 repeat and spatial-uniformity controls pass. Five points overlap the exact-Q23
 constant oracle in every RGB channel. Point 06 (`[371,521,544]`) differs by
-8 FP16 steps in red and 2 in green; blue matches. M6 remains unqualified and
-the remaining 42 points have not run. The historical 48-patch improvement
+8 FP16 steps in red and 2 in green; blue matches. That original candidate failed M6; its remaining 42 points were not run. The historical 48-patch improvement
 measurement remains separate evidence.
 
 Two independently reviewed component-isolation epochs reproduce the difference.
@@ -110,10 +109,25 @@ errors and stored-curve guards evaluate the exact coefficients publication
 writes. The method version changes so reusable statistics are solved again;
 new selections exclude obsolete methods while existing digest pins retain
 their exact coefficients. No threshold, acceptance tolerance or enable gate
-changes. The new production writer must be bound to these candidate curves
-before completing full 48-point; the diagnostic alone is not M6 qualification.
-Every native phase exited successfully, reaped its children and released the
-Mac before offline scoring.
+changes. The actual production exporter parsed the retained real helper statistics,
+solved and qualified the current method, and wrote a 435-byte RPU with SHA-256
+`7d2b4d39312767afd1e957a6572c8c7e47c3a3c2007cf85ad28897a6137eb9fb`.
+The existing six nearest-Q12 captures contain exactly those bytes. Independent
+exact-composition reference verification binds them to this production candidate.
+The remaining 42 points ran once in three 14-point native epochs; every point
+passes the unchanged RGB mean-bin overlap criterion, with constant, identity,
+repeat and spatial-uniformity controls passing in every epoch.
+
+The [production-bound M6 receipt](FEL-RPU-REFIT-M6-Q12-2026-11-16.json)
+records the full 48-point union, source and RPU identities, unmodified frozen
+kernels, and released resources. Native render phases took under 180 seconds
+each. Every phase reaped its children and released the Mac before offline
+scoring. Python AST-dump and host-dictionary version differences initially
+stopped admission before capture; explicit metadata-only receipt migrations
+preserve the completed writer and lossless encoding work. No native capture,
+writer output or successful encode was repeated. This is an empirical native
+instrument qualification, not proof of Apple's internal coefficient precision
+or a formal opaque-pipeline error bound.
 
 The initial mux failure was a diagnostic comparison of wall-clock stream
 creation tags. A reviewed harness correction excludes only that tag, as the
@@ -128,7 +142,7 @@ and paperwork 17/17 pass. Store inventory and the three focused daemon
 regressions pass; the daemon cases ran under a 20 GiB/no-swap/four-CPU
 learner allocation after their first binary build exhausted its 15 GiB cap.
 Earlier native 30/36 passes have historical source scopes. PR #1565 stays
-`WIP:` pending M6 and required CI. `MERGE_TRAIN` is on; readiness then boards
+`WIP:` pending independent review and required CI; M6 now passes for the new method. `MERGE_TRAIN` is on; readiness then boards
 the train under [the merge convention](../ci/MERGE-TRAIN.md).
 
 ## 1. Objective

@@ -28,7 +28,8 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
 | [FEL-PICTURE-QUALITY-INVESTIGATION.md](FEL-PICTURE-QUALITY-INVESTIGATION.md) | FEL quality findings. | open |
 | [FEL-RPU-REFIT-BUILD.md](FEL-RPU-REFIT-BUILD.md) | F+ curves: build plan. | open |
-| [M6 native evidence](FEL-RPU-REFIT-M6-2026-11-16.json) | Six-point mismatch and Cr-MMR isolation. | open |
+| [Historical Q23 native evidence](FEL-RPU-REFIT-M6-2026-11-16.json) | Failed six-point candidate and Cr-MMR isolation; retained original evidence. | done |
+| [Q12 M6 qualification](FEL-RPU-REFIT-M6-Q12-2026-11-16.json) | Production-bound 48-point native equivalence, controls and resource release. | done |
 | [PLAYBACK-CACHE-BUDGET.md](PLAYBACK-CACHE-BUDGET.md) | Shared playback cache: reservations, eviction and protected readers. | built |
 | [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG seek failure: subtitle cancellation, Auto repair and qualification. | open |
 | [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari intent, lifecycle. | open |

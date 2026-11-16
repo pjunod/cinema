@@ -256,6 +256,12 @@
       "all_six_all_rgb_pass": true,
       "raw_captures_rerendered": false,
       "full48_qualified": false
+    },
+    "full48_qualification": {
+      "qualified": true,
+      "receipt": "FEL-RPU-REFIT-M6-Q12-2026-11-16.json",
+      "receipt_sha256": "d6b63f300a2c2152ea1c6ba5170055ac932b21143121c0a1e98c3ddb4c949486",
+      "historical_failure_unchanged": true
     }
   }
 }
