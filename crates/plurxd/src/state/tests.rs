@@ -5337,6 +5337,8 @@ async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling()
         .await
         .expect("file");
     let file = store.get_file(id).await.expect("read").expect("file");
+    // Running work always charges the active ceiling. Fake queued engine
+    // digests can be stranded by another test's shared live-engine snapshot.
     rusqlite::Connection::open(&path)
         .expect("seed connection")
         .execute_batch(&format!(
@@ -5346,7 +5348,7 @@ async fn a_viewer_preparation_is_queued_when_background_work_fills_the_ceiling()
                  trigger, force_rebuild, target_node_id, state, not_before_ms, created_at_ms,
                  updated_at_ms)
              SELECT 'filler-' || i, {id}, 100, 1, 'fragment_index', 'filler', '',
-                    'filler-' || i, 'normal', 'background', 0, 'node-filler', 'queued', 0, 0, 0
+                    'filler-' || i, 'normal', 'background', 0, 'node-filler', 'running', 0, 0, 0
                FROM n",
             ceiling = plurx_core::store::MAX_ACTIVE_ANALYSIS_REQUESTS,
         ))
