@@ -1000,8 +1000,9 @@ fn filtered_packet_hash_binds_its_first_pts_and_time_base() {
     assert!(filtered_packet_hash(raw.as_bytes(), 125, (1, 24000)).is_err());
 }
 
-/// hvc1 drops in-band parameter sets after CBS converts Annex B. The
-/// stripping policy matches; a claimed retaining policy must refuse.
+/// Packet identity follows emitted bytes, not a muxer's sample-entry tag.
+/// Deliberately strip the mux feed: a retaining source fingerprint must refuse,
+/// and a matching stripped fingerprint must not bypass fitted retention policy.
 #[tokio::test]
 async fn missing_dts_probe_refuses_retention_lost_by_the_mp4_muxer() {
     use plurx_core::testfixtures;
@@ -1040,6 +1041,11 @@ async fn missing_dts_probe_refuses_retention_lost_by_the_mp4_muxer() {
         u32::try_from(num).expect("num"),
         u32::try_from(den).expect("den"),
     );
+    // hvc1 may retain these sets (including in the pinned CI FFmpeg). Build a
+    // controlled loss instead of assuming the tag discards them. Both source
+    // fingerprints below are checked against this one actually stripped feed.
+    let feed = copy_pipe(&ffmpeg, source, 0, None, false).await;
+    let (init, fragments) = split(&feed);
     let mut cases = Vec::new();
     for retain in [false, true] {
         let video = transcode::CopyVideoOptions::new(false, true)
@@ -1052,15 +1058,6 @@ async fn missing_dts_probe_refuses_retention_lost_by_the_mp4_muxer() {
         .await;
         let hash =
             filtered_packet_hash(&hash_output, pts, base).expect("actual filtered first packet");
-        let feed = copy_pipe(
-            &ffmpeg,
-            source,
-            0,
-            None,
-            video.retains_hevc_parameter_sets(),
-        )
-        .await;
-        let (init, mut fragments) = split(&feed);
         let origin = RefitPacketOrigin {
             first_dts: None,
             first_pts: pts,
@@ -1072,23 +1069,23 @@ async fn missing_dts_probe_refuses_retention_lost_by_the_mp4_muxer() {
         if retain {
             assert!(
                 resolved.is_err(),
-                "hvc1 discarded the claimed retained parameter sets"
+                "a retaining fingerprint must refuse the deliberately stripped mux feed"
             );
         } else {
             resolved.expect("stripping policy matches every retained payload");
         }
-        cases.push((hash, init, fragments.remove(0), origin));
+        cases.push((hash, origin));
     }
     assert_ne!(
         cases[0].0, cases[1].0,
         "fixture must exercise actual in-band parameter sets"
     );
-    let wrong = RefitPacketOrigin {
+    let stripped_packet_witness = RefitPacketOrigin {
         first_sample_sha256: Some(cases[0].0),
-        ..cases[1].3
+        ..cases[1].1
     };
-    wrong
-        .resolve(&cases[1].1, &cases[1].2)
+    stripped_packet_witness
+        .resolve(&init, &fragments[0])
         .expect("packet identity witnesses the stripped payload, not a retention policy");
     let fitted_retaining = transcode::CopyVideoOptions::new(false, true)
         .with_dolby_vision_conversion(true)

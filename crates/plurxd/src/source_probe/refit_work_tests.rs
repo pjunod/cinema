@@ -248,6 +248,10 @@ async fn title(fx: &Fixture, name: &str, profile: i64, fel: bool) -> MediaFile {
                 video_codec: Some("hevc".into()),
                 dolby_vision: DolbyVisionFacts {
                     profile: Some(profile),
+                    // New serving selections need the numeric configuration
+                    // fields, independently of a complete FEL/refit verdict.
+                    level: Some(6),
+                    bl_compat_id: Some(1),
                     rpu_present: Some(true),
                     el_present: Some(true),
                     ..Default::default()
@@ -616,6 +620,10 @@ async fn new_refit_selections_require_current_method_but_legacy_pins_keep_exact_
 
     let fx = fixture().await;
     let file = title(&fx, "fit-method-upgrade", 7, true).await;
+    assert!(
+        plurx_core::playback::file_can_convert_to_p81(&file),
+        "the fixture must be eligible for new selections before testing fit versions"
+    );
     let src = source(
         &demand(&fx.store, file.id).await.expect("demand"),
         &helper(),
@@ -702,6 +710,8 @@ async fn new_refit_selections_require_current_method_but_legacy_pins_keep_exact_
     assert!(settlement.is_none(), "{settlement:?}");
     let current = table(&fx.store, file.id).await;
     assert_eq!(current.title.fit_version, FIT_VERSION);
+    assert_eq!(current.title.verdict, RefitVerdict::Fitted);
+    assert_eq!(digest_of(&current), current.title.curve_digest);
     let selected = current_table(fx.store.as_ref(), &file)
         .await
         .expect("current selection")
