@@ -1388,6 +1388,27 @@ impl TranscodeManager {
         }
     }
 
+    /// Whether this preparation captures the DV tools and renders a processed
+    /// first window inside the Start (the legacy arm). A Source never does:
+    /// its Start has no candidate context, and a processed window rendered
+    /// here would be processing work before the first frame, outside Source
+    /// custody. Processed delivery over sharing is M4's post-first-frame path.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn start_renders_a_processed_window(
+        selection: &plurx_core::transcode::dv_processing::DvSelection,
+        has_candidate_context: bool,
+        processed_trial: bool,
+        source: bool,
+    ) -> bool {
+        matches!(
+            selection,
+            plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
+                plurx_core::transcode::dv_processing::DvFallbackReason::AwaitingFirstWindow
+            )
+        ) && !source
+            && (!has_candidate_context || processed_trial)
+    }
+
     pub(crate) fn vod_dv_processing_from_snapshot(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         request: &SessionRequest,
@@ -2945,13 +2966,12 @@ impl TranscodeManager {
             }
         }
         #[cfg(target_os = "linux")]
-        let dv_tools = if matches!(
+        let dv_tools = if Self::start_renders_a_processed_window(
             &dv_processing,
-            plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
-                plurx_core::transcode::dv_processing::DvFallbackReason::AwaitingFirstWindow
-            )
-        ) && (req.candidate_context.is_none() || processed_trial)
-        {
+            req.candidate_context.is_some(),
+            processed_trial,
+            source_evidence.is_some(),
+        ) {
             match crate::vodencode::dv_runtime::ToolSet::capture().await {
                 Ok(Some(tools)) => Some(tools),
                 // A processed trial exists only to qualify processing: with no

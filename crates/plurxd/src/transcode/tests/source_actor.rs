@@ -4299,3 +4299,28 @@ async fn source_copy_identity_for_dolby_vision_equals_the_local_index_identity()
         ),
     );
 }
+
+#[test]
+fn source_compatible_base_encode_never_renders_a_processed_window_in_the_start() {
+    use plurx_core::transcode::dv_processing::{DvFallbackReason, DvSelection};
+    // What `vod_dv_processing_from_snapshot` answers for a compatible-base
+    // Dolby Vision encode on a node with DV processing on.
+    let awaiting = DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow);
+    // A Source Start carries no candidate context and is no processed trial.
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, false, true
+    ));
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, true, true
+    ));
+    // Local keeps its legacy first-window arm and its trial.
+    assert!(TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, false, false
+    ));
+    assert!(TranscodeManager::start_renders_a_processed_window(
+        &awaiting, true, true, false
+    ));
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, true, false, false
+    ));
+}
