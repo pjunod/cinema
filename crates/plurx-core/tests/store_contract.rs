@@ -816,6 +816,11 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_job_fenced",
     "retry_background_job",
     "claim_job",
+    // The same claim, reporting proposed / settled / skipped on the local
+    // verdict: tests/claim_local_verdict.rs drives it on both backends.
+    "claim_job_attempt",
+    // The verdict alone, for dv_title_scan before it binds (same test file).
+    "claim_verdict",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -21544,7 +21549,9 @@ fn contract_inventory_matches_every_store_method() {
     // +7: F+ curve-fit demand, publication, current and by-digest curves,
     // rebind, prune and progress remain named in BACKGROUND_JOB_METHODS
     // and covered by store_contract/dv_refit_jobs.rs on both backends.
-    assert_eq!(declared.len(), 604, "review the Store method count");
+    // +2: claim_job_attempt and claim_verdict, the claim local verdict
+    // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
+    assert_eq!(declared.len(), 606, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

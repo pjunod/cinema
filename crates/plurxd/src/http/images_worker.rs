@@ -630,6 +630,7 @@ async fn pass(
             after: cursor.clone(),
             now_ms: now_ms(),
             limit: 128,
+            admissible_only: false,
         })
         .await?;
     page.jobs.retain(|job| match job.supported_payload() {
