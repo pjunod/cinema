@@ -2921,7 +2921,11 @@ async fn build_real_source_start_fixture(
                 "-colorspace",
                 "bt2020nc",
                 "-x265-params",
-                "log-level=error:hdr10=1:repeat-headers=1",
+                // The colour description in the VUI too. FFmpeg 8 tags the
+                // encode from the (untagged) lavfi frames, not the -color_*
+                // options, so without it the source is not PQ there and the
+                // copy's muxer drops its HDR10-compatible Dolby Vision record.
+                "log-level=error:hdr10=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
             ]);
         if !native {
             // Matroska has no sample-entry tag to set.
