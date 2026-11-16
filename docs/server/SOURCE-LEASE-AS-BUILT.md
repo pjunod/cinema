@@ -1,6 +1,6 @@
 # Source leases and node capacity — as built
 
-**Status:** built; review fixes in progress on `claude/source-lease-steps-2-4` · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Written:** 2026-11-15
+**Status:** built; review fixes committed, [PR #1728](http://192.168.4.7:3000/noirr/plurx/pulls/1728) in final qualification · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Written:** 2026-11-15
 
 
 Built on `claude/source-lease-steps-2-4` (stacked on PR #1597) by Claude Opus
@@ -220,3 +220,36 @@ re-admission with and without collection, flattened v1 grant proposals,
 and owners created after expand. Their mutation receipts and the final local
 checks are recorded with the PR; source inspection alone is not execution
 qualification. No deployment is part of this change.
+
+
+## Local qualification and landing record
+
+Owner: GPT-6 Codex, session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`.
+[PR #1728](http://192.168.4.7:3000/noirr/plurx/pulls/1728) carries current CI
+and merge-train state; no deployment is part of this change.
+
+The store module run passed 767 cases; its four fixture failures passed
+failed-only retries. SQLite contracts passed 349/349. Claim-verdict and property
+checks, cluster activity (10/10), touched web tests, dispatch contracts,
+formatting, and both required Clippy checks passed on their recorded candidates.
+After the final compatibility changes, core Clippy, 50 affected lease/census
+tests, and both real replicated upgrade/bootstrap checks passed again. New
+regressions have pre-fix or mutation failure evidence. All three formal mapping
+checks pass.
+
+The replicated selection passed 63/91. The same 28 names fail on the recorded
+main baseline. Historical migration cases first encounter an earlier exact-tail
+fixture mismatch there; a fixture-adjusted representative v6 probe reaches the
+same downstream missing managed-schema marker. This is explicitly limited
+baseline evidence, not a claim that all 28 failure messages are identical.
+
+The daemon selection passed 881 cases with eight ignored and two failures.
+Gap-fill reproduces main's `copy_sync_unverified` refusal. The viewer-ceiling
+fixture depended on a process-global engine snapshot: its fake queued digest
+could be classified stranded during a parallel run. It now fills the ceiling
+with running background work, independent of that snapshot; the PR records its
+exact failed-test retry. Production queue policy is unchanged.
+
+Current main was integrated through `32fa105ee`. The enabled merge train
+qualifies the actual candidate and owns landing. Local results above do not
+substitute for its promotion verdict.
