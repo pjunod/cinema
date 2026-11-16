@@ -1077,7 +1077,7 @@ impl AppState {
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
-        .with_membership(self.membership.clone())
+        .with_membership(self.membership.clone(), self.cluster.directory())
         .with_jobs(Arc::clone(&self.jobs))
     }
 
@@ -1252,7 +1252,7 @@ impl AppState {
             )
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_applied_view(applied.clone())
-            .with_membership(membership.clone())
+            .with_membership(membership.clone(), cluster.directory())
             .with_peer_activity(peer_activity.clone()),
         );
         let sharing = Arc::new(crate::sharing::SharingManager::new(
@@ -1337,9 +1337,10 @@ impl AppState {
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
                 Some(membership.clone()),
+                Some(cluster.directory()),
             )
             .with_subtitle_jobs(Arc::clone(&jobs))
-            .with_serving_authority(serving.authority())
+            .with_serving_authority(cluster.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
         transcode.register_playback_cache(&playback_cache);
@@ -1398,7 +1399,7 @@ impl AppState {
             Arc::clone(&store),
             Arc::clone(&system),
             Arc::clone(&transcode),
-            serving.authority(),
+            cluster.authority(),
             node_id.clone(),
             live_tv_scratch,
             runtime_cache.join("live-tv"),
@@ -1847,6 +1848,7 @@ pub struct JobManager {
     /// Exact committed membership and internal addressing for optional peer
     /// hydration. Tests and recovery-only construction deliberately omit it.
     membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    directory: Option<crate::cluster::Directory>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
     /// Test-only provider override so the targeted-scan seam can be exercised
@@ -4071,6 +4073,7 @@ impl JobManager {
             coordinator,
             job_authority,
             membership: None,
+            directory: None,
             artwork_dir,
             scan_prune_percent,
             #[cfg(test)]
@@ -4128,8 +4131,10 @@ impl JobManager {
     fn with_membership(
         mut self,
         membership: plurx_core::cluster::membership::MembershipManager,
+        directory: crate::cluster::Directory,
     ) -> Self {
         self.membership = Some(membership);
+        self.directory = Some(directory);
         self
     }
 
@@ -11779,7 +11784,7 @@ impl JobManager {
             .flatten();
         if let Some(artifact) = &published {
             let hydrated = tokio::select! {
-                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(),
+                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(), self.directory.as_ref(),
                     &node_id, &worker.cache_root, artifact) => matches!(result, Ok(Some(_))),
                 () = lost.cancelled() => false,
             };

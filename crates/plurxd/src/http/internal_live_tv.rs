@@ -22,7 +22,7 @@ pub(crate) async fn snapshot(
     // This is a process-local atomic read and `/readyz` already exposes the
     // same fact. Put it before signature work so a fenced owner cannot reach
     // configuration, network, or FFmpeg code under any authentication shape.
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     authorize(&state, &headers, &body, SNAPSHOT_PATH).await?;
@@ -57,7 +57,7 @@ pub(crate) async fn guide(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, StatusCode> {
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     authorize(&state, &headers, &body, GUIDE_PATH).await?;
@@ -101,7 +101,7 @@ pub(crate) async fn start(
     {
         return status.into_response();
     }
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match state.live_tv.start_local(request).await {
@@ -139,7 +139,7 @@ pub(crate) async fn start_v2(
     {
         return status.into_response();
     }
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match state.live_tv.start_local(request.into()).await {
@@ -167,7 +167,7 @@ pub(crate) async fn activate(
         Ok(signer) => signer,
         Err(status) => return status.into_response(),
     };
-    let Some(_restart_admission) = state.serving.try_restart_admission().await else {
+    let Some(_restart_admission) = state.cluster.try_restart_admission().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match state.live_tv.activate_local(&request, &signer).await {
@@ -184,7 +184,7 @@ pub(crate) async fn resource(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, StatusCode> {
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     authorize(&state, &headers, &body, RESOURCE_PATH).await?;
@@ -316,7 +316,7 @@ pub(crate) async fn start_state(
 }
 
 async fn require_start_authority(state: &AppState) -> Result<(), StatusCode> {
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         Err(StatusCode::SERVICE_UNAVAILABLE)
     } else {
         Ok(())

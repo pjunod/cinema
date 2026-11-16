@@ -1502,26 +1502,29 @@ fn pipeline_digest_for_transform(
 pub(crate) async fn hydrate(
     store: &dyn Store,
     membership: Option<&MembershipManager>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
-    hydrate_inner(store, membership, node_id, root, artifact, true).await
+    hydrate_inner(store, membership, directory, node_id, root, artifact, true).await
 }
 
 pub(crate) async fn hydrate_for_job(
     store: &dyn Store,
     membership: Option<&MembershipManager>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
-    hydrate_inner(store, membership, node_id, root, artifact, false).await
+    hydrate_inner(store, membership, directory, node_id, root, artifact, false).await
 }
 
 async fn hydrate_inner(
     store: &dyn Store,
     membership: Option<&MembershipManager>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
@@ -1560,19 +1563,20 @@ async fn hydrate_inner(
             );
         }
     }
-    let Some(membership) = membership else {
+    let (Some(membership), Some(directory)) = (membership, directory) else {
         return Ok(None);
     };
-    let peers = membership
-        .media_peers()
+    let peers = directory
+        .peers(crate::cluster::Purpose::MediaWorkers)
         .await
         .map_err(|error| format!("listing fragment-index peers: {error}"))?
-        .into_iter()
+        .reachable()
+        .filter(|peer| peer.node_id != node_id)
         .filter_map(|peer| {
             peer.http_base
-                .map(|base| (peer.node_id, (base, peer.reachable)))
+                .clone()
+                .map(|base| (peer.node_id.clone(), (base, peer.reachable)))
         })
-        .filter(|(peer_node, (_, reachable))| peer_node != node_id && *reachable)
         .collect::<HashMap<_, _>>();
     let locations = store
         .cluster_fragment_index_locations(&artifact.cache_key)

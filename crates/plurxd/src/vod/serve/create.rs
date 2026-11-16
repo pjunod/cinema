@@ -3083,6 +3083,7 @@ mod principal_demand_tests {
             "node-a".to_owned(),
             root.path().join("index"),
             None,
+            None,
         );
         let request = SessionRequest {
             source_telemetry: None,

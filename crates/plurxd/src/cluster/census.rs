@@ -284,7 +284,6 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("copy_index_v3.rs", "membership", 2),
     ("copy_index_v3.rs", "type", 4),
     ("copy_index_v3.rs", "transport", 1),
-    ("copy_index_v3.rs", "roster", 1),
     ("desktop_control.rs", "membership", 4),
     ("desktop_control.rs", "replication", 4),
     ("desktop_control.rs", "serving", 12),
@@ -297,7 +296,6 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("dv_runtime.rs", "membership", 1),
     ("fragment_index_cluster.rs", "type", 4),
     ("fragment_index_cluster.rs", "transport", 1),
-    ("fragment_index_cluster.rs", "roster", 1),
     ("http/activity_starts.rs", "membership", 4),
     ("http/activity_starts.rs", "transport", 1),
     ("http/activity_starts.rs", "role", 1),
@@ -357,7 +355,6 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("http/internal_clock.rs", "type", 2),
     ("http/internal_clock.rs", "manager", 4),
     ("http/internal_live_tv.rs", "membership", 3),
-    ("http/internal_live_tv.rs", "serving", 7),
     ("http/internal_live_tv.rs", "manager", 3),
     ("http/internal_media.rs", "membership", 2),
     ("http/internal_media.rs", "manager", 2),
@@ -366,7 +363,6 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("http/internal_media_sessions.rs", "type", 4),
     ("http/internal_media_sessions.rs", "manager", 2),
     ("http/live_tv.rs", "membership", 1),
-    ("http/live_tv.rs", "serving", 7),
     ("http/live_tv.rs", "type", 1),
     ("http/live_tv.rs", "transport", 1),
     ("http/live_tv.rs", "manager", 1),
@@ -421,7 +417,7 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("live_tv/resource.rs", "serving", 3),
     ("main.rs", "membership", 19),
     ("main.rs", "replication", 4),
-    ("main.rs", "serving", 7),
+    ("main.rs", "serving", 4),
     ("main.rs", "type", 5),
     ("main.rs", "hiqlite", 2),
     ("main.rs", "manager", 8),
@@ -454,11 +450,9 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
     ("subtitle_models/mod.rs", "role", 1),
     ("subtitle_models/mod.rs", "roster", 1),
     ("subtitle_ranges.rs", "transport", 1),
-    ("subtitle_ranges.rs", "roster", 1),
     ("subtitle_source.rs", "membership", 3),
     ("subtitle_source.rs", "type", 4),
     ("subtitle_source.rs", "transport", 1),
-    ("subtitle_source.rs", "roster", 1),
     ("subtitle_work.rs", "role", 1),
     ("subtitles.rs", "manager", 2),
     ("trakt.rs", "role", 1),
@@ -479,7 +473,7 @@ const REACH_AROUNDS: &[(&str, &str, usize)] = &[
 ];
 
 /// The sum of [`REACH_AROUNDS`]; it may only fall.
-const CEILING: usize = 765;
+const CEILING: usize = 744;
 
 fn exempt(rel: &str) -> bool {
     EXEMPT.iter().any(|(path, _)| rel == *path)

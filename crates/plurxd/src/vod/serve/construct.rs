@@ -177,7 +177,7 @@ impl VodServe {
             .parent()
             .unwrap_or(base.as_path())
             .join(".runtime-cache");
-        Self::new_configured(base, runtime_cache, store, None, None, None)
+        Self::new_configured(base, runtime_cache, store, None, None, None, None)
     }
 
     /// Publish a producer-less VOD attachment for HTTP response-finalization
@@ -403,6 +403,7 @@ impl VodServe {
         node_id: String,
         cluster_index_root: PathBuf,
         membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        directory: Option<crate::cluster::Directory>,
     ) -> Arc<VodServe> {
         let runtime_cache = cluster_index_root
             .parent()
@@ -415,6 +416,7 @@ impl VodServe {
             node_id,
             cluster_index_root,
             membership,
+            directory,
         )
     }
 
@@ -425,6 +427,7 @@ impl VodServe {
         node_id: String,
         cluster_index_root: PathBuf,
         membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        directory: Option<crate::cluster::Directory>,
     ) -> Arc<VodServe> {
         Self::new_configured(
             base,
@@ -433,6 +436,7 @@ impl VodServe {
             Some(node_id),
             Some(cluster_index_root),
             membership,
+            directory,
         )
     }
 
@@ -443,6 +447,7 @@ impl VodServe {
         cluster_node_id: Option<String>,
         cluster_index_root: Option<PathBuf>,
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_directory: Option<crate::cluster::Directory>,
     ) -> Arc<VodServe> {
         let mut encoded_generation_scanner = EncodedGenerationScanner::new(base.clone());
         let obsolete_encoded_generations = encoded_generation_scanner.discover(
@@ -465,6 +470,7 @@ impl VodServe {
                 cluster_node_id,
                 cluster_index_root,
                 cluster_membership,
+                cluster_directory,
                 catalog_namespace: tokio::sync::OnceCell::new(),
                 copy_analysis: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
@@ -618,6 +624,7 @@ impl VodServe {
                 crate::copy_index_v3::resolve(
                     self.shared.store.as_ref(),
                     self.shared.cluster_membership.as_ref(),
+                    self.shared.cluster_directory.as_ref(),
                     node_id,
                     namespace,
                     &self.shared.runtime_cache,
@@ -773,6 +780,7 @@ impl VodServe {
         let index = crate::fragment_index_cluster::hydrate(
             self.shared.store.as_ref(),
             self.shared.cluster_membership.as_ref(),
+            self.shared.cluster_directory.as_ref(),
             node_id,
             root,
             &artifact,

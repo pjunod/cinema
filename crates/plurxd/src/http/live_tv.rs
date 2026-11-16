@@ -183,7 +183,7 @@ pub(crate) async fn guide_replica_loop(
         // then is the configuration read from the Store and acted on.
         if guide_viewed_on(&state.applied, &state.node_id).await {
             if let Ok(config) = state.live_tv.config().await {
-                if config.guide_fetches() && state.serving.is_ready() {
+                if config.guide_fetches() && state.cluster.authority().state().ready {
                     let _ = owner_guide(&state, &config, guide::refresh_window(config.guide_hours))
                         .await;
                 }
@@ -493,7 +493,7 @@ pub(crate) async fn issue_start(
     body: Option<Json<PublicLiveTvStart>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let deadline = deadline_after(PUBLIC_START_DEADLINE);
-    let generation = state.serving.authority().admit().ok_or_else(|| {
+    let generation = state.cluster.authority().admit().ok_or_else(|| {
         api_error(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
         ))
@@ -540,7 +540,7 @@ pub(crate) async fn start_session(
     // snapshot, two start attempts and two activation attempts can outlive the
     // clients' 45 s POST timeout and leave a session nobody is holding.
     let deadline = deadline_after(PUBLIC_START_DEADLINE);
-    let ingress_generation = state.serving.authority().admit().ok_or_else(|| {
+    let ingress_generation = state.cluster.authority().admit().ok_or_else(|| {
         ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
@@ -626,7 +626,7 @@ pub(crate) async fn start_session(
     let current = state.live_tv.config().await.map_err(api_error)?;
     if current.generation != config.generation
         || !current.enabled
-        || !state.serving.authority().is_current(ingress_generation)
+        || !state.cluster.authority().is_current(ingress_generation)
     {
         let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
         return Err(ApiError::typed_detail(
@@ -1062,7 +1062,7 @@ pub(crate) async fn readiness_for_config(
         },
     });
 
-    let serving_ready = state.serving.is_ready();
+    let serving_ready = state.cluster.authority().state().ready;
     checks.push(LiveTvReadinessCheck {
         id: "serving_authority",
         ready: serving_ready,
@@ -1387,7 +1387,7 @@ async fn owner_resource(
     state: &AppState,
     request: LiveTvResourceRequest,
 ) -> Result<Response<Body>, ApiError> {
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         return Err(ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
@@ -1970,7 +1970,7 @@ async fn owner_snapshot_within(
     probe_graph: bool,
     budget: tokio::time::Instant,
 ) -> Result<LiveTvSnapshot, LiveTvError> {
-    if !state.serving.is_ready() {
+    if !state.cluster.authority().state().ready {
         return Err(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
         ));

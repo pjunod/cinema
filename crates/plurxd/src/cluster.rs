@@ -84,9 +84,24 @@ impl Cluster {
     }
 
     /// May this node serve or commit now: the serving fence's authority.
-    #[allow(dead_code)] // slice 2 moves the Live TV and DVR fence reads here
     pub(crate) fn authority(&self) -> ServingAuthority {
         self.fence.authority()
+    }
+
+    /// Observe serving transitions through the same fence as admission.
+    pub(crate) fn subscribe_authority(
+        &self,
+    ) -> tokio::sync::watch::Receiver<crate::serving_fence::ServingState> {
+        self.fence.subscribe()
+    }
+
+    /// HTTP admission keeps the fence's restart-preparation semantics. The
+    /// projected authority has a different admission rule for existing DVR
+    /// work, so this must delegate to the fence itself.
+    pub(crate) async fn try_restart_admission(
+        &self,
+    ) -> Option<crate::serving_fence::RestartAdmission> {
+        self.fence.try_restart_admission().await
     }
 
     /// This node's standing and admission, from in-process state only: the
