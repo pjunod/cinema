@@ -332,13 +332,17 @@ def pending(root: Path) -> dict[str, str]:
     }
 
 
-def fold_owner_counts(root: Path) -> list[str]:
-    """Fold the recorded count changes into the owner ledger's totals.
+def fold_owner_counts(root: Path) -> tuple[str | None, list[str]]:
+    """The owner ledger with the recorded count changes folded into its totals.
 
     tests/rolling-producer-owners.d/ holds one file per change between
     releases (validation/owner_counts.py). The cut is the ledger's one writer:
     it adds each difference to its total, keeps the reason as a comment on the
     row, and deletes the files, so the directory starts each release empty.
+
+    Writes nothing. Returns the folded ledger text (None when there is
+    nothing to fold) and the fragment paths to delete, so `cut` can refuse a
+    bad fragment before it has changed any file.
     """
 
     from validation import owner_counts
@@ -346,18 +350,15 @@ def fold_owner_counts(root: Path) -> list[str]:
     ledger = root / OWNER_LEDGER
     directory = root / owner_counts.DIRECTORY
     if not ledger.is_file():
-        return []
+        return None, []
     try:
         fragments = owner_counts.read_fragments(directory)
         if not fragments:
-            return []
+            return None, []
         folded = owner_counts.fold(ledger.read_text(encoding="utf-8"), fragments)
     except owner_counts.OwnerCountError as exc:
         raise CutError(str(exc)) from exc
-    ledger.write_text(folded, encoding="utf-8")
-    for name in fragments:
-        (directory / name).unlink()
-    return [OWNER_LEDGER, *(f"{owner_counts.DIRECTORY}/{name}" for name in fragments)]
+    return folded, [f"{owner_counts.DIRECTORY}/{name}" for name in fragments]
 
 
 def cut(root: Path, version: str, date: str) -> list[str]:
@@ -389,13 +390,15 @@ def cut(root: Path, version: str, date: str) -> list[str]:
         current,
         version,
     )
+    owner_ledger, owner_fragments = fold_owner_counts(root)
+    owners = {} if owner_ledger is None else {OWNER_LEDGER: owner_ledger}
     # Every refusal above happens before any file is written.
-    for path, contents in {**moved, **claims}.items():
+    for path, contents in {**moved, **claims, **owners}.items():
         (root / path).write_text(contents, encoding="utf-8")
     folded = [f"{DIRECTORY}/{name}" for name in fragments]
-    for path in folded:
+    for path in (*folded, *owner_fragments):
         (root / path).unlink()
-    return [*moved, *sorted(claims), *folded, *fold_owner_counts(root)]
+    return [*moved, *sorted(claims), *folded, *owners, *owner_fragments]
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -110,6 +110,15 @@ def fold(ledger: str, fragments: Mapping[str, str]) -> str:
 
     before = totals(ledger)
     changes = parse_changes(fragments, frozenset(before))
+    below_zero = sorted(
+        f"{identifier} ({before[identifier]} {sum(d for _, d, _ in rows):+d})"
+        for identifier, rows in changes.items()
+        if before[identifier] + sum(d for _, d, _ in rows) < 0
+    )
+    if below_zero:
+        raise OwnerCountError(
+            "the recorded differences take a total below zero: " + ", ".join(below_zero)
+        )
     out: list[str] = []
     current = None
     for line in ledger.split("\n"):

@@ -323,6 +323,32 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in directory.iterdir()), ["README.md"])
         self.assertIn(f"changed {release_cut.OWNER_LEDGER}", result.stdout)
 
+    def test_a_count_change_that_cannot_be_folded_refuses_the_cut_and_nothing_is_written(self):
+        for name, fragment, message in (
+            ("unknown", '[[changes]]\nid = "no-such-shape"\ndelta = 1\nreason = "A shape."\n', "unknown shape id"),
+            ("below", '[[changes]]\nid = "spawn"\ndelta = -11\nreason = "More than there are."\n', "below zero"),
+        ):
+            with self.subTest(name=name):
+                root = self.tree()
+                ledger = root / release_cut.OWNER_LEDGER
+                ledger.parent.mkdir(parents=True)
+                ledger.write_text(
+                    'version = 1\n\n[[symbols]]\nid = "flag"\npattern = "F"\nexpected_occurrences = 3\n\n'
+                    '[[module_symbols]]\nid = "s"\npattern = "S"\nexpected_occurrences = 0\n\n'
+                    '[[module_structures]]\nid = "spawn"\npattern = "spawn"\nexpected_occurrences = 10\n'
+                )
+                directory = root / "tests/rolling-producer-owners.d"
+                directory.mkdir()
+                (directory / "pr-a.toml").write_text(fragment)
+                self.fragments(root, good="### Fixed\n\n- A good entry.\n")
+                git(root, "add", "-A")
+                git(root, "commit", "-qm", "fixture")
+                result = self.run_cut(root, "--date", "2026-09-28")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+                # Not a half-cut tree: no file changed and no fragment is gone.
+                self.assertEqual(git(root, "status", "--porcelain"), "")
+
     def test_a_malformed_fragment_refuses_the_cut_and_nothing_is_written(self):
         root = self.tree()
         self.fragments(root, bad="- An entry under no category.\n")
