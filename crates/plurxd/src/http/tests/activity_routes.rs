@@ -299,7 +299,6 @@ fn committed_learner_and_maintenance_owner_admit_signed_activity_and_stop() {
             .local_client()
             .expect("voter maintenance client")
             .execute(
-                "activity_learner_maintenance_fixture",
                 "INSERT INTO cluster_node_maintenance (node_id, requested_at, acknowledged_at) VALUES ($1, $2, NULL)",
                 hiqlite::params!(owner.as_str(), now_ms()),
             )
