@@ -256,16 +256,14 @@ def pcm_difference(a, b, channels):
     return False, best, max(abs(p - q) for p, q in zip(x[:n], y[:n]))
 
 
-DITHERED = ('ac3', 'eac3')
-
-
 def check_pcm_join(options, windows, directories, codec):
     """The PCM the encoder's lattice filter makes from the carried pipe,
     against what it made on main from the source (-noaccurate_seek -ss at the
     rebase point, which starts the decode at the preceding video keyframe).
 
-    The carried PCM must equal main's: bit for bit, except AC-3's dither
-    (which depends on where a decode starts), which may differ by no more
+    The carried PCM must equal main's bit for bit where main's own PCM does
+    not depend on where its decode starts. Where it does (AC-3's dither, the
+    AAC decoder's state), the carried PCM may differ from main's by no more
     than main's own decode started at another keyframe. The one licensed
     difference is one main already had: on a millisecond clock, a codec whose
     frames do not fall on whole milliseconds (TrueHD, DTS) is aligned by the
@@ -286,30 +284,36 @@ def check_pcm_join(options, windows, directories, codec):
     probe = json.loads(subprocess.check_output([
         options.ffprobe, '-v', 'error', '-select_streams', f'a:{options.audio}',
         '-read_intervals', f'{float(windows[0][0]) - 3}%{float(windows[-1][1])}',
-        '-show_entries', 'packet=duration:stream=time_base', '-of', 'json', str(options.source)]))
+        '-show_entries', 'packet=pts:stream=time_base', '-of', 'json', str(options.source)]))
     millisecond = probe['streams'][0]['time_base'] == '1/1000'
-    off_lattice = millisecond and len({p.get('duration') for p in probe['packets']}) > 1
+    pts = sorted(int(p['pts']) for p in probe['packets'])
+    off_lattice = millisecond and len({b - a for a, b in zip(pts, pts[1:])}) > 1
 
-    def matches(row, licensed, dither=1e-2):
+    def matches(row, licensed, spread=0.0):
         if row['exact']:
             return True
         if row['lag'] == 0:
-            return codec in DITHERED and row['max_abs'] <= dither
+            return row['max_abs'] <= spread
         return licensed and abs(row['lag']) < AUDIO_RATE // 1000
 
-    rows, carried, mains = [], [], []
+    rows, carried, mains, allowed = [], [], [], []
     for (start, _), directory in zip(windows, directories):
         main = main_pcm(start)
         pipe = lattice_pcm(options, ['-i', str(directory / 'audio.carried')], 0, start, samples)
         assert len(pipe) == len(main) == samples * channels * 8, (start, len(pipe), len(main))
-        exact, lag, error = pcm_difference(main, main_pcm(start, 5.0), channels)
-        drift = {'exact': exact, 'lag': lag, 'max_abs': error}
+        # Main's own spread: its decode started at other keyframes.
+        drifts = [pcm_difference(main, main_pcm(start, back), channels) for back in (1.0, 3.0, 5.0, 8.0)]
+        drift = {'exact': all(d[0] for d in drifts),
+                 'lag': next((d[1] for d in drifts if d[1] != 0), 0),
+                 'max_abs': max(d[2] for d in drifts if d[1] == 0) if any(d[1] == 0 for d in drifts) else 0.0}
         exact, lag, error = pcm_difference(main, pipe, channels)
         row = {'start': float(start), 'exact': exact, 'lag': lag, 'max_abs': error,
-               'main_from_another_keyframe': drift}
+               'main_from_other_keyframes': drift}
         rows.append(row)
         licensed = off_lattice or not matches(drift, False, float('inf'))
-        assert matches(row, licensed, max(1e-2, 2 * drift['max_abs'])), row
+        spread = 0.0 if drift['exact'] else max(1e-2, 2 * drift['max_abs'])
+        assert matches(row, licensed, spread), row
+        allowed.append((licensed, spread))
         carried.append(pipe)
         mains.append(main)
     for k in range(len(windows) - 1):
@@ -322,8 +326,11 @@ def check_pcm_join(options, windows, directories, codec):
         rows.append({'join': k, **joined})
         # The carried join is as continuous as main's.
         main_join = joined['main']
-        licensed = off_lattice or not matches(main_join, False, float('inf'))
-        assert matches(joined['carried'], licensed, max(1e-2, 2 * main_join['max_abs'])), rows[-1]
+        licensed = (allowed[k][0] or allowed[k + 1][0]
+                    or not matches(main_join, False, float('inf')))
+        spread = max(allowed[k][1], allowed[k + 1][1],
+                     0.0 if main_join['exact'] else 2 * main_join['max_abs'])
+        assert matches(joined['carried'], licensed, spread), rows[-1]
     return rows
 
 
