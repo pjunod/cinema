@@ -334,9 +334,6 @@ pub(super) async fn prepare_source_start(
         prepared.file(),
         prepared.native_subtitles(),
     ) {
-        Some(crate::transcode::source_actor::SourceDeliveryRefusal::DolbyVision) => {
-            Err(SourceStartFailure::DolbyVisionUnsupported)
-        }
         Some(crate::transcode::source_actor::SourceDeliveryRefusal::Unsupported) => {
             Err(SourceStartFailure::Unsupported)
         }

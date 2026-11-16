@@ -183,6 +183,38 @@ enum SourceFixtureVideo {
     /// writes one), so this proves the Source's cold Dolby Vision strip
     /// index and HDR10 delivery are wired, not RPU removal itself.
     DolbyVisionStrip,
+    /// The HDR10 source scanned as Dolby Vision Profile 5 (no compatible
+    /// base) on a node with the boot-proved RPU renderer, started as an encode:
+    /// the Source runs the per-source pixel proof as its own children.
+    DolbyVisionProfile5,
+}
+
+/// The actor mode that pauses a Source's own Profile 5 pixel-proof child.
+const SOURCE_FIXTURE_PROFILE5_PROOF: u8 = 66;
+
+/// Modes whose Source owns native subtitles.
+fn source_fixture_native(mode: u8) -> bool {
+    mode >= 21 && mode != SOURCE_FIXTURE_PROFILE5_PROOF
+}
+
+/// Modes whose prepared recipe is an encode.
+fn source_fixture_encoded(mode: u8) -> bool {
+    (12..=20).contains(&mode) || matches!(mode, 29 | 31 | 58 | SOURCE_FIXTURE_PROFILE5_PROOF)
+}
+
+/// The Source runs a Profile 5 encode's pixel proof as its own child, under
+/// its copy permit and file fence: the child is listed in Activity →
+/// Processes under the Source purpose with a Stop, it holds the start's CPU
+/// admission, a revocation while it runs leaves nothing published, and
+/// retirement settles only after the child is reaped. An interrupted proof
+/// is not a verdict, so nothing is remembered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_profile5_proof_runs_under_source_custody_and_settles_on_revoke() {
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        SOURCE_FIXTURE_PROFILE5_PROOF,
+        SourceFixtureVideo::DolbyVisionProfile5,
+    ))
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -333,7 +365,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         })
         .await
         .expect("item");
-    let file = directory.path().join(if mode >= 21 {
+    let file = directory.path().join(if source_fixture_native(mode) {
         "source.mkv"
     } else {
         "source.mp4"
@@ -361,7 +393,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
-    if mode >= 21 {
+    if source_fixture_native(mode) {
         let caption = directory.path().join("actual.srt");
         std::fs::write(
             &caption,
@@ -433,10 +465,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     if hdr10 {
         client.execute("UPDATE files SET video_codec='hevc',bit_depth=10,hdr='hdr10',audio_streams='[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]' WHERE id=1", hiqlite::params!()).await.expect("actual HDR10 scan facts");
     }
+    if matches!(video, SourceFixtureVideo::DolbyVisionProfile5) {
+        client.execute("UPDATE files SET hdr='dolby_vision',hdr_format='Dolby Vision · Profile 5',dv_profile=5,dv_bl_compat_id=0,dv_rpu_present=1 WHERE id=1", hiqlite::params!()).await.expect("Dolby Vision Profile 5 scan facts");
+    }
     if dolby_vision {
         client.execute("UPDATE files SET hdr='dolby_vision',hdr_format='Dolby Vision · Profile 8.1 (HDR10-compatible)',dv_profile=8,dv_level=6,dv_bl_compat_id=1,dv_el_present=0,dv_rpu_present=1 WHERE id=1", hiqlite::params!()).await.expect("Dolby Vision Profile 8.1 scan facts");
     }
-    if mode >= 21 {
+    if source_fixture_native(mode) {
         client
             .execute(
                 "UPDATE files SET container='matroska' WHERE id=1",
@@ -573,11 +608,11 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         body.aac = Some(true);
         body.caps = Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"hevc","max_height":2160,"present":["pq","sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"],"progressive_hevc_sample_entries":["hvc1"]})).expect("HDR10 client"));
     }
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+    if source_fixture_encoded(mode) {
         body.copy = Some(false);
         body.height = Some(if mode == 31 { 144 } else { 36 });
     }
-    if mode >= 21 {
+    if source_fixture_native(mode) {
         body.native_subtitles = Some(true);
         body.subtitle = Some(0);
     }
@@ -626,7 +661,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let mut prepared = preparation.await.expect("actual Source engine preparation");
-    if hdr10 {
+    if hdr10 && !source_fixture_encoded(mode) {
         assert_eq!(
             store
                 .get_file_probe_json(1)
@@ -658,7 +693,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
             matches!(video, SourceFixtureVideo::Hdr10Retention)
         );
     }
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+    if source_fixture_encoded(mode) {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
             "actual common preparation resolves an encoded recipe"
@@ -744,7 +779,9 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         EncoderCaps::default(),
         Pipeline::Cpu,
     );
-    let manager = manager.with_dv_strippable(dolby_vision);
+    let manager = manager
+        .with_dv_strippable(dolby_vision)
+        .with_dovi_reshape(matches!(video, SourceFixtureVideo::DolbyVisionProfile5));
     let manager = Arc::new(if hdr10 {
         manager.with_cache(
             directory.path().join("cache"),
@@ -1303,6 +1340,12 @@ async fn source_actual_actor(
                 .pause_after_wait_failure(),
         ),
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
+        SOURCE_FIXTURE_PROFILE5_PROOF => Some(
+            manager
+                .source_workers
+                .probe_hooks
+                .pause_after_dovi_proof_spawn(),
+        ),
         22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
         23 | 25 | 26 | 27 | 57 | 58 => {
             Some(manager.source_workers.native_hooks.pause_before_spawn())
@@ -1529,14 +1572,17 @@ async fn source_actual_actor(
             .await
             .expect("no preactivation media route")
             .is_none());
-        let pid = if mode >= 21 {
+        let pid = if source_fixture_native(mode) {
             manager.source_workers.native_hooks.spawned_pid()
-        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+        } else if source_fixture_encoded(mode) {
             manager.source_workers.probe_hooks.spawned_pid()
         } else {
             manager.source_workers.index_hooks.spawned_pid()
         };
-        if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
+        if matches!(
+            mode,
+            6 | 8 | 13 | 15 | 20 | 22 | 24 | SOURCE_FIXTURE_PROFILE5_PROOF
+        ) {
             assert!(pid > 0, "actual Source index child started");
         } else {
             assert_eq!(pid, 0, "refusal point precedes any actual child");
@@ -1546,7 +1592,24 @@ async fn source_actual_actor(
             Err(SourceWorkerError::Deadline)
         ));
         drop(joined); // A disconnected waiter cannot abandon the scan owner.
-        if matches!(mode, 6 | 7 | 13 | 14 | 22 | 23) {
+        if mode == SOURCE_FIXTURE_PROFILE5_PROOF {
+            // Activity attributes the child to the shared start, with a Stop.
+            let row = plurx_core::process::priority::running()
+                .into_iter()
+                .find(|row| row.pid == pid)
+                .expect("the Source proof child is listed in Activity");
+            assert_eq!(
+                row.purpose,
+                crate::transcode::source_preparation::SOURCE_DOVI_PIXEL_PROOF.purpose
+            );
+            assert_eq!(row.class, crate::process_control::ChildClass::Realtime);
+            #[cfg(target_os = "linux")]
+            assert!(row.stoppable, "Activity can stop the proof child");
+        }
+        if matches!(
+            mode,
+            6 | 7 | 13 | 14 | 22 | 23 | SOURCE_FIXTURE_PROFILE5_PROOF
+        ) {
             state
                 .store
                 .put_setting(keys::SHARING_ENABLED, "false")
@@ -1600,6 +1663,22 @@ async fn source_actual_actor(
             .expect("actual index retirement budget")
             .expect("confirmed scan/no-media-producer cleanup");
         assert_eq!(manager.admissions.software_in_use(), 0);
+        if mode == SOURCE_FIXTURE_PROFILE5_PROOF {
+            assert!(
+                !plurx_core::process::priority::running()
+                    .iter()
+                    .any(|row| row.pid == pid),
+                "retirement settles only after the proof child is reaped"
+            );
+            let file = state.store.get_file(1).await.expect("file").expect("file");
+            assert_eq!(
+                manager
+                    .dovi_proofs
+                    .verdict(&TranscodeManager::dovi_proof_key(&file)),
+                None,
+                "an interrupted proof is not a verdict"
+            );
+        }
         assert!(manager.lookup_source_worker(&assignment).is_none());
         let file = state
             .store
@@ -1718,7 +1797,7 @@ async fn source_actual_actor(
         return;
     }
 
-    if (12..=20).contains(&mode) || mode == 29 || mode == 31 || mode == 58 {
+    if source_fixture_encoded(mode) {
         let value = serde_json::to_value(&response).expect("complete encoded response");
         assert_eq!(value["height"], 72);
         assert_eq!(
@@ -2791,7 +2870,7 @@ async fn source_actual_actor(
             drop(guard);
         }
     }
-    let native_body = if mode >= 21 {
+    let native_body = if source_fixture_native(mode) {
         assert!(response.playlist_url.contains("master.m3u8"));
         assert!(matches!(
             actor
@@ -4201,27 +4280,24 @@ fn source_delivery_policy_admits_compatible_base_dolby_vision_encodes() {
 }
 
 #[test]
-fn source_delivery_policy_refuses_only_profile5_encodes_until_the_proof_is_owned() {
+fn source_delivery_policy_admits_profile5_encodes_now_the_source_owns_the_proof() {
     let profile5 = delivery_policy_profile5();
     assert!(plurx_core::playback::dolby_vision_needs_rpu_render(
         &profile5
     ));
     let encode = delivery_policy_request(SessionKind::Transcode { height: 1080 }, None);
-    assert_eq!(
-        source_delivery_refusal(&encode, &profile5, (false, None)),
-        Some(SourceDeliveryRefusal::DolbyVision)
-    );
-    assert_eq!(
-        source_delivery_refusal(&encode, &profile5, (true, Some(0))),
-        Some(SourceDeliveryRefusal::DolbyVision)
-    );
     // A burn always encodes, so a burn over Profile 5 needs the renderer too.
     let burn = delivery_policy_request(delivery_policy_copy(false, false), Some(0));
-    assert_eq!(
-        source_delivery_refusal(&burn, &profile5, (false, None)),
-        Some(SourceDeliveryRefusal::DolbyVision)
-    );
-    // Copies of the same source need no renderer.
+    for (name, request, native) in [
+        ("encode", &encode, (false, None)),
+        ("encode beside native subtitles", &encode, (true, Some(0))),
+    ] {
+        assert_eq!(
+            source_delivery_refusal(request, &profile5, native),
+            None,
+            "{name}: the Source runs the Profile 5 pixel proof as its own work and plans like local"
+        );
+    }
     for kind in [
         delivery_policy_copy(true, false),
         delivery_policy_copy(false, false),
@@ -4233,9 +4309,14 @@ fn source_delivery_policy_refuses_only_profile5_encodes_until_the_proof_is_owned
         );
     }
     // The burn arm is unchanged: a burn of a track the scan does not hold.
+    // Over Profile 5 a burn is decided by that arm alone, as over HDR10.
     let hdr10 = delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None);
     assert_eq!(
         source_delivery_refusal(&burn, &hdr10, (false, None)),
+        Some(SourceDeliveryRefusal::Unsupported)
+    );
+    assert_eq!(
+        source_delivery_refusal(&burn, &profile5, (false, None)),
         Some(SourceDeliveryRefusal::Unsupported)
     );
 }

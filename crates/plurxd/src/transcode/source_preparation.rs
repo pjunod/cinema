@@ -20,6 +20,8 @@ use tokio::{
 trait SourceProbeHooks: std::any::Any + Send + Sync {
     fn before_spawn(&self) -> crate::seam_hooks::HookFuture<'_>;
     fn after_spawn(&self, pid: u32) -> crate::seam_hooks::HookFuture<'_>;
+    /// After a Profile 5 pixel-proof child spawns ([`SOURCE_DOVI_PIXEL_PROOF`]).
+    fn after_dovi_proof_spawn(&self, pid: u32) -> crate::seam_hooks::HookFuture<'_>;
     fn before_reap_retry(&self) -> crate::seam_hooks::HookFuture<'_>;
     fn after_evidence(&self) -> crate::seam_hooks::HookFuture<'_>;
     fn inject_wait_failure(&self) -> bool;
@@ -32,6 +34,9 @@ impl SourceProbeHooks for NoSourceProbeHooks {
         Box::pin(crate::seam_hooks::HookReady)
     }
     fn after_spawn(&self, _: u32) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+    fn after_dovi_proof_spawn(&self, _: u32) -> crate::seam_hooks::HookFuture<'_> {
         Box::pin(crate::seam_hooks::HookReady)
     }
     fn before_reap_retry(&self) -> crate::seam_hooks::HookFuture<'_> {
@@ -65,6 +70,7 @@ impl Default for SourceProbeHookOwner {
 struct PausingSourceProbeHooks {
     before: crate::seam_hooks::PauseSlot,
     after: crate::seam_hooks::PauseSlot,
+    dovi_after: crate::seam_hooks::PauseSlot,
     retry: crate::seam_hooks::PauseSlot,
     evidence: crate::seam_hooks::PauseSlot,
     failed_wait: std::sync::atomic::AtomicBool,
@@ -81,6 +87,11 @@ impl SourceProbeHooks for PausingSourceProbeHooks {
         self.spawned_pid
             .store(pid, std::sync::atomic::Ordering::Release);
         self.after.hold()
+    }
+    fn after_dovi_proof_spawn(&self, pid: u32) -> crate::seam_hooks::HookFuture<'_> {
+        self.spawned_pid
+            .store(pid, std::sync::atomic::Ordering::Release);
+        self.dovi_after.hold()
     }
     fn before_reap_retry(&self) -> crate::seam_hooks::HookFuture<'_> {
         self.retry.hold()
@@ -125,6 +136,13 @@ impl SourceProbeHookOwner {
     }
     pub(crate) fn pause_after_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks().after.arm("source_probe_after_spawn")
+    }
+    /// Pause after the first Profile 5 pixel-proof child spawns; the
+    /// operation's other children pass.
+    pub(crate) fn pause_after_dovi_proof_spawn(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.test_hooks()
+            .dovi_after
+            .arm("source_probe_after_dovi_proof_spawn")
     }
     pub(crate) fn pause_after_wait_failure(&self) -> Arc<crate::seam_hooks::AsyncPause> {
         self.test_hooks()
@@ -275,8 +293,15 @@ pub(crate) struct SourceHeldProbeEvidence {
     engine: crate::ffmpeg::EncodedEngine,
     build: String,
     burn: Option<SourceBurnArtifacts>,
+    dovi_proof: Option<crate::ffmpeg::DoviPixelProof>,
 }
 impl SourceHeldProbeEvidence {
+    /// What this operation's own Profile 5 pixel proof established, when the
+    /// recipe asked for one. Evidence only: the caller records a verdict for
+    /// the planner and answers an inconclusive proof as not-yet.
+    pub(crate) fn dovi_proof(&self) -> Option<&crate::ffmpeg::DoviPixelProof> {
+        self.dovi_proof.as_ref()
+    }
     pub(crate) fn clock_reporter(&self) -> &crate::ffmpeg::EncodedExecutable {
         &self.clock_reporter
     }
@@ -360,6 +385,7 @@ pub(crate) fn start_source_probe(
     deadline: Instant,
     hooks: Arc<SourceProbeHookOwner>,
     burn: Option<SourceBurnAsk>,
+    dovi_proof: bool,
 ) -> SourceProbeOperation {
     let assignment = proof.assignment().clone();
     let state = Arc::new(ProbeState {
@@ -381,6 +407,7 @@ pub(crate) fn start_source_probe(
             &owned_cancel,
             &hooks,
             burn.as_ref(),
+            dovi_proof,
         )
         .await;
         *owned.result.lock().expect("Source probe result") = Some(result);
@@ -472,6 +499,20 @@ async fn bounded(input: impl AsyncRead + Unpin, cap: usize) -> Result<Vec<u8>, S
     }
     Ok(bytes)
 }
+/// A Source's Profile 5 pixel-proof child: the per-source proof the RPU
+/// renderer needs, run by the Source itself so the shared session's start owns
+/// it. Realtime, because a viewer's start waits on it; listed under this
+/// purpose in Activity → Processes with its own Stop, which ends only the
+/// proof (the start then answers not-yet, as an unfinished proof does locally).
+pub(crate) const SOURCE_DOVI_PIXEL_PROOF: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime(
+        "Dolby Vision pixel proof for a shared playback start",
+    );
+/// Each pixel-proof run's bound, the same one the local proof uses; the start
+/// deadline still wins when it is sooner.
+const SOURCE_DOVI_PIXEL_PROOF_RUN: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy)]
 pub(crate) struct SourceCommandExecutor<'a> {
     file: &'a MediaFile,
     source: &'a crate::fragment_index_cluster::SourceFence,
@@ -499,6 +540,34 @@ impl SourceCommandExecutor<'_> {
             self.hooks,
         )
         .await
+    }
+
+    /// The same owned child, spawned as `work` with its own deadline bound.
+    async fn output_as(
+        &self,
+        command: tokio::process::Command,
+        cap: usize,
+        work: crate::process_control::ChildWork,
+        bound: Duration,
+    ) -> Result<crate::ffmpeg::BoundedOutput, String> {
+        run_authorized_child(
+            self.file,
+            self.source,
+            SourceChildAuthority::Preparation {
+                proof: self.proof,
+                store: self.store,
+            },
+            self.deadline.min(Instant::now() + bound),
+            self.cancel,
+            command,
+            cap,
+            self.hooks,
+            None,
+            work,
+        )
+        .await
+        .map(|(output, _)| output)
+        .map_err(SourceChildFailure::reason)
     }
 
     /// The same owned child, with stdout written into `sink` instead of
@@ -586,6 +655,38 @@ async fn prepare_burn(
     })
 }
 
+/// The per-source Profile 5 pixel proof as this operation's own two children
+/// (RPU applied, RPU ignored), reading the held descriptor under the
+/// operation's permit, fence, authority, deadline and cancellation. The same
+/// graph and verdict mapping as the local proof
+/// ([`crate::ffmpeg::dovi_reshape_changes_pixels`]); an error in either run is
+/// inconclusive, never a verdict.
+async fn prove_dovi_pixels(execution: &SourceCommandExecutor<'_>) -> crate::ffmpeg::DoviPixelProof {
+    let run = |apply: bool| async move {
+        let command = crate::ffmpeg::source_dovi_pixel_probe_command(
+            &execution.source.handle,
+            execution.file,
+            apply,
+        )?;
+        let output = execution
+            .output_as(
+                command,
+                1024 * 1024,
+                SOURCE_DOVI_PIXEL_PROOF,
+                SOURCE_DOVI_PIXEL_PROOF_RUN,
+            )
+            .await?;
+        crate::ffmpeg::dovi_pixel_probe_frames(&output.stdout)
+    };
+    let enabled = run(true).await;
+    let disabled = run(false).await;
+    let proof = crate::ffmpeg::dovi_pixel_verdict(enabled, disabled);
+    if let crate::ffmpeg::DoviPixelProof::Inconclusive(reason) = &proof {
+        tracing::warn!(target: "plurxd::transcode", file = execution.file.id, %reason, "Source Dolby Vision pixel proof did not finish; not recording a verdict");
+    }
+    proof
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_probe(
     file: &MediaFile,
@@ -596,6 +697,7 @@ async fn run_probe(
     cancel: &tokio_util::sync::CancellationToken,
     hooks: &SourceProbeHookOwner,
     burn: Option<&SourceBurnAsk>,
+    dovi_proof: bool,
 ) -> Result<SourceHeldProbeEvidence, String> {
     // The reporter query is physical work too. It runs under this same actual
     // permit/owner; no cold global reporter-cache call may spawn unowned work.
@@ -657,6 +759,11 @@ async fn run_probe(
         Some(ask) => Some(prepare_burn(&execution, ask).await?),
         None => None,
     };
+    let dovi_proof = if dovi_proof {
+        Some(prove_dovi_pixels(&execution).await)
+    } else {
+        None
+    };
     // A text burn freezes its Fontconfig environment as this operation's own
     // work; a bitmap burn and an unburned recipe render no fonts.
     let (engine, build) = crate::ffmpeg::EncodedEngine::capture_source(
@@ -678,6 +785,7 @@ async fn run_probe(
         object_version: source.object_version().to_owned(),
         document,
         burn: artifacts,
+        dovi_proof,
     })
 }
 #[allow(clippy::too_many_arguments)]
@@ -747,6 +855,7 @@ pub(super) async fn run_resource_child(
         cap,
         hooks,
         None,
+        super::VOD_START_HELD_PROBE,
     )
     .await
     .map(|(output, _)| output)
@@ -793,6 +902,7 @@ async fn run_child_with(
         cap,
         hooks,
         sink,
+        super::VOD_START_HELD_PROBE,
     )
     .await
     .map_err(SourceChildFailure::reason)
@@ -809,6 +919,7 @@ async fn run_authorized_child(
     cap: usize,
     hooks: &SourceProbeHookOwner,
     sink: Option<tokio::fs::File>,
+    work: crate::process_control::ChildWork,
 ) -> Result<(crate::ffmpeg::BoundedOutput, Option<tokio::fs::File>), SourceChildFailure> {
     hooks.slot.get().before_spawn().await;
     let current = crate::fragment_index_cluster::open_source_playback_fence(
@@ -864,9 +975,16 @@ async fn run_authorized_child(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     let (mut child, _job) =
-        crate::process_control::spawn_job_owned(&mut command, super::VOD_START_HELD_PROBE)
-            .map_err(|e| e.to_string())?;
-    hooks.slot.get().after_spawn(child.id().unwrap_or(0)).await;
+        crate::process_control::spawn_job_owned(&mut command, work).map_err(|e| e.to_string())?;
+    if work == SOURCE_DOVI_PIXEL_PROOF {
+        hooks
+            .slot
+            .get()
+            .after_dovi_proof_spawn(child.id().unwrap_or(0))
+            .await;
+    } else {
+        hooks.slot.get().after_spawn(child.id().unwrap_or(0)).await;
+    }
     let mut output = child.stdout.take().map(|pipe| {
         tokio::spawn(async move {
             match sink {

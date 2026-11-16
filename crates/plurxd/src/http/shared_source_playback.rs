@@ -279,8 +279,9 @@ struct SourceStartIdentity {
     recipe: Vec<u8>,
     receiver_range: bool,
 }
-/// The typed refusal of a shared Dolby Vision delivery, on the Source and on
-/// B's own Start validation alike.
+/// The typed refusal an older Source answers a Dolby Vision delivery it did
+/// not build with. This Source never sends it (every shape local delivers is
+/// planned and built); B keeps decoding it for older peers.
 pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
     "sharing_start_dolby_vision_unsupported";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,9 +296,6 @@ enum SourceStartFailure {
     Conflict,
     Unresolved,
     Unsupported,
-    /// A Dolby Vision delivery this Source does not build yet: refused with
-    /// its own typed code after a fresh invocation claim, before admission.
-    DolbyVisionUnsupported,
     Deadline,
     /// Only the Store's exact atomic no-claim proof constructs this result.
     RetargetUnassigned,
@@ -1218,10 +1216,6 @@ impl SourceStartFailure {
             Self::Unsupported => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "sharing_start_unsupported",
-            ),
-            Self::DolbyVisionUnsupported => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                SHARING_START_DOLBY_VISION_UNSUPPORTED,
             ),
             Self::Unresolved => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unresolved"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
@@ -2571,8 +2565,9 @@ pub(crate) enum SourceFixtureMode {
     /// proof: the Source encodes Main10 PQ.
     Hdr10,
     /// The committed Profile 5 control (`strict_p5_fresh.mp4`, real P5 RPUs,
-    /// no compatible base) started as an encode: the one encode whose RPU
-    /// renderer proof is not Source-owned yet, refused before a claim.
+    /// no compatible base) started as an encode by an SDR-only player on a
+    /// node with the boot-proved RPU renderer: the Source runs the per-source
+    /// pixel proof as its own work and tone-maps through the RPU renderer.
     DolbyVisionProfile5Encoded,
     /// A Dolby Vision Profile 8.1 source (see [`dolby_vision_fixture_source`])
     /// started as a copy by a player that enumerates Profile 8: preserved.
@@ -2974,9 +2969,13 @@ async fn build_real_source_start_fixture(
             .output()
             .await
             .expect("actual FFprobe");
-        assert!(probe.status.success(), "{}", String::from_utf8_lossy(&probe.stderr));
-        let document: serde_json::Value = serde_json::from_slice(&probe.stdout)
-            .expect("HDR fixture probe JSON");
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("HDR fixture probe JSON");
         assert_eq!(document["streams"][0]["color_transfer"], "smpte2084");
         assert_eq!(document["streams"][0]["color_primaries"], "bt2020");
     }
@@ -3324,7 +3323,13 @@ async fn build_real_source_start_fixture(
             .with_subtitle_jobs(Arc::clone(&state.jobs))
             // The boot proof the HDR10 rung needs; the planner still decides the
             // grade from the player's caps.
-            .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10)),
+            .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10))
+            // The boot proof a Profile 5 encode needs; the per-source pixel
+            // proof is still the Source's own work.
+            .with_dovi_reshape(matches!(
+                mode,
+                SourceFixtureMode::DolbyVisionProfile5Encoded
+            )),
     );
     let mut headers = HeaderMap::new();
     headers.insert(
