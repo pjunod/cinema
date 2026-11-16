@@ -3686,7 +3686,8 @@ fn spawn_background_loops(
             .monitor_loop(background_shutdown.clone()),
     );
     tokio::spawn(
-        std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
+        std::sync::Arc::clone(&state.transcode)
+            .serving_fence_loop(state.cluster.subscribe_authority()),
     );
     state.membership.register_media_relay_acquisition();
     tokio::spawn(state.membership.clone().heartbeat_loop());
@@ -3764,10 +3765,10 @@ fn spawn_background_loops(
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv).settings_observer_loop(background_shutdown.clone()),
     );
-    tokio::spawn(
-        std::sync::Arc::clone(&state.live_tv)
-            .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
-    );
+    tokio::spawn(std::sync::Arc::clone(&state.live_tv).guide_refresh_loop(
+        state.cluster.subscribe_authority(),
+        background_shutdown.clone(),
+    ));
     // Running Live TV survives a loss of serving authority inside the session
     // grace, as rolling and progressive playback do; this loop decides when a
     // loss has outlasted it.
@@ -3775,7 +3776,7 @@ fn spawn_background_loops(
         state
             .live_tv
             .authority()
-            .serving_fence_loop(state.serving.subscribe()),
+            .serving_fence_loop(state.cluster.subscribe_authority()),
     );
     // One queue, one worker: the recording and reminder loops enqueue and
     // never await the network, so an unreachable endpoint cannot delay a

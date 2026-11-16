@@ -208,19 +208,28 @@ async fn prefetch(
     anchor: i64,
     span: i64,
 ) -> Result<(), String> {
-    let Some(membership) = access.membership() else {
+    let (Some(membership), Some(directory)) = (access.membership(), access.directory()) else {
         return Ok(());
     };
     let node_id = access.node_id().unwrap_or_default();
-    let peers = tokio::time::timeout(Duration::from_secs(2), membership.media_peers()).await;
+    let peers = tokio::time::timeout(
+        Duration::from_secs(2),
+        directory.peers(crate::cluster::Purpose::MediaWorkers),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
     let peers: Vec<_> = peers
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|peer| peer.reachable && peer.node_id != node_id && peer.http_base.is_some())
-        .take(2)
-        .collect();
+        .as_ref()
+        .map(|peers| {
+            peers
+                .reachable()
+                .filter(|peer| peer.node_id != node_id && peer.http_base.is_some())
+                .take(2)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     if peers.is_empty() {
         return Ok(());
     }

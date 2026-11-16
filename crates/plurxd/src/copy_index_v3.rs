@@ -147,6 +147,7 @@ pub(crate) fn peer_route_key(path: &str) -> Option<(&str, &str)> {
 struct Consumer<'a> {
     store: &'a dyn Store,
     membership: Option<&'a MembershipManager>,
+    directory: Option<&'a crate::cluster::Directory>,
     node_id: &'a str,
     namespace: &'a str,
     root: std::path::PathBuf,
@@ -165,6 +166,7 @@ struct Consumer<'a> {
 pub(crate) async fn resolve(
     store: &dyn Store,
     membership: Option<&MembershipManager>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     namespace: &str,
     runtime_cache: &Path,
@@ -188,6 +190,7 @@ pub(crate) async fn resolve(
     let consumer = Consumer {
         store,
         membership,
+        directory,
         node_id,
         namespace,
         root: crate::copy_analysis::v3_root(runtime_cache),
@@ -297,6 +300,7 @@ impl Consumer<'_> {
         let blob = match load_blob(
             self.store,
             self.membership,
+            self.directory,
             self.node_id,
             &self.root,
             variant,
@@ -559,6 +563,7 @@ enum Loaded {
 async fn load_blob(
     store: &dyn Store,
     membership: Option<&MembershipManager>,
+    directory: Option<&crate::cluster::Directory>,
     node_id: &str,
     root: &Path,
     variant: &CopyIndexV3Variant,
@@ -632,21 +637,22 @@ async fn load_blob(
     if locations.is_empty() {
         return Ok(Loaded::NoHolder);
     }
-    let Some(membership) = membership else {
+    let (Some(membership), Some(directory)) = (membership, directory) else {
         return Ok(Loaded::Unavailable);
     };
     // Holders that did not themselves say they hold nothing.
     let mut possible = locations.len();
-    let peers = membership
-        .media_peers()
+    let peers = directory
+        .peers(crate::cluster::Purpose::MediaWorkers)
         .await
         .map_err(|error| format!("listing copy index peers: {error}"))?
-        .into_iter()
+        .reachable()
+        .filter(|peer| peer.node_id != node_id)
         .filter_map(|peer| {
             peer.http_base
-                .map(|base| (peer.node_id, (base, peer.reachable)))
+                .clone()
+                .map(|base| (peer.node_id.clone(), (base, peer.reachable)))
         })
-        .filter(|(peer_node, (_, reachable))| peer_node != node_id && *reachable)
         .collect::<HashMap<_, _>>();
     let transport = PeerTransport::new(membership.clone());
     let request_path = peer_path(source_key, &artifact.blob_sha256);

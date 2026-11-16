@@ -485,6 +485,7 @@ pub(crate) struct StoreAccess {
     /// request path. Without it such a miss is `absent`.
     node_id: Option<String>,
     membership: Option<MembershipManager>,
+    directory: Option<crate::cluster::Directory>,
     jobs: Option<std::sync::Arc<crate::state::JobManager>>,
 }
 
@@ -505,6 +506,7 @@ impl StoreAccess {
             switch: Switch::Fixed(enabled),
             node_id: None,
             membership: None,
+            directory: None,
             jobs: None,
         }
     }
@@ -531,6 +533,7 @@ impl StoreAccess {
             switch: Switch::Setting(store),
             node_id: None,
             membership: None,
+            directory: None,
             jobs: None,
         }
     }
@@ -542,14 +545,23 @@ impl StoreAccess {
         self
     }
 
-    pub(crate) fn with_membership(mut self, membership: MembershipManager) -> Self {
+    pub(crate) fn with_membership(
+        mut self,
+        membership: MembershipManager,
+        directory: crate::cluster::Directory,
+    ) -> Self {
         self.membership = Some(membership);
+        self.directory = Some(directory);
         self
     }
 
     pub(crate) fn with_jobs(mut self, jobs: std::sync::Arc<crate::state::JobManager>) -> Self {
         self.jobs = Some(jobs);
         self
+    }
+
+    pub(crate) fn directory(&self) -> Option<&crate::cluster::Directory> {
+        self.directory.as_ref()
     }
 
     pub(crate) fn membership(&self) -> Option<&MembershipManager> {
@@ -840,10 +852,11 @@ pub(crate) async fn hydrate_from_peers(
     ordinal: i64,
     format: RepresentationFormat,
 ) -> bool {
-    let (Some(catalog), Some(node_id), Some(membership)) = (
+    let (Some(catalog), Some(node_id), Some(membership), Some(directory)) = (
         access.catalog(),
         access.node_id(),
         access.membership.as_ref(),
+        access.directory(),
     ) else {
         return false;
     };
@@ -883,7 +896,7 @@ pub(crate) async fn hydrate_from_peers(
     if bound.size != file.size as u64 || bound.mtime != file.mtime {
         return false;
     }
-    let peers = match membership.media_peers().await {
+    let peers = match directory.peers(crate::cluster::Purpose::MediaWorkers).await {
         Ok(peers) => peers,
         Err(error) => {
             tracing::debug!(file_id = file.id, %error, "listing subtitle-source peers");
@@ -891,9 +904,13 @@ pub(crate) async fn hydrate_from_peers(
         }
     };
     let reachable: std::collections::HashMap<_, _> = peers
-        .into_iter()
-        .filter(|peer| peer.reachable && peer.node_id != node_id)
-        .filter_map(|peer| peer.http_base.map(|base| (peer.node_id, base)))
+        .reachable()
+        .filter(|peer| peer.node_id != node_id)
+        .filter_map(|peer| {
+            peer.http_base
+                .clone()
+                .map(|base| (peer.node_id.clone(), base))
+        })
         .collect();
     let transport = PeerTransport::new(membership.clone());
     for row in rows {

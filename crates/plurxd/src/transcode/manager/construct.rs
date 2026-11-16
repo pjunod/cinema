@@ -62,6 +62,7 @@ impl TranscodeManager {
             runtime_cache,
             subtitle_cache,
             subtitle_membership: None,
+            subtitle_directory: None,
             subtitle_jobs: None,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
             artifact_qualification: std::sync::RwLock::new(ArtifactQualificationReadiness {
@@ -337,6 +338,7 @@ impl TranscodeManager {
             ffmpeg_build,
             node_id,
             None,
+            None,
         )
     }
 
@@ -345,7 +347,7 @@ impl TranscodeManager {
     /// from a canonicalized `transcode` leaf would move them when only that
     /// legacy child is a relocation symlink.
     #[allow(clippy::too_many_arguments)]
-    pub fn with_cache_layout(
+    pub(crate) fn with_cache_layout(
         mut self,
         cache_dir: PathBuf,
         runtime_cache: PathBuf,
@@ -354,12 +356,14 @@ impl TranscodeManager {
         ffmpeg_build: String,
         node_id: String,
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        cluster_directory: Option<crate::cluster::Directory>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.macos_video_probe =
             Arc::new(self.macos_video_probe.rebuilt(self.runtime_cache.clone()));
         self.subtitle_cache = subtitle_cache;
         self.subtitle_membership = cluster_membership.clone();
+        self.subtitle_directory = cluster_directory.clone();
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
@@ -370,6 +374,7 @@ impl TranscodeManager {
             node_id.clone(),
             crate::fragment_index_cluster::cache_root(&self.runtime_cache),
             cluster_membership,
+            cluster_directory,
         );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
@@ -426,9 +431,11 @@ impl TranscodeManager {
             &self.runtime_cache,
         )
         .on_node(self.cache_location().map(|(_, node_id)| node_id));
-        let access = match &self.subtitle_membership {
-            Some(membership) => access.with_membership(membership.clone()),
-            None => access,
+        let access = match (&self.subtitle_membership, &self.subtitle_directory) {
+            (Some(membership), Some(directory)) => {
+                access.with_membership(membership.clone(), directory.clone())
+            }
+            _ => access,
         };
         match &self.subtitle_jobs {
             Some(jobs) => access.with_jobs(Arc::clone(jobs)),

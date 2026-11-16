@@ -1,6 +1,6 @@
 # Cluster facade slice 2 — media rosters and Live TV authority
 
-**Status:** open — plan committed before implementation; source work may be prepared before #1646 lands, then requalified on its landed base.
+**Status:** open — source implemented and independently reviewed; local outcomes below, current-base effort qualification and landing pending.
 **Owner:** Codex. **Prepared:** 2026-11-16.
 
 Companion to [the facade contract](CLUSTER-FACADE-BUILD.md) and
@@ -97,3 +97,41 @@ abandonment metric references landed after the facade. The same failure occurs
 on the #1646 candidate and on main source with the unchanged census test. Do
 not raise the pin or claim this is caused by slice 2. Track the root facade
 migration separately from the media/Live TV scope.
+
+## Implementation ledger
+
+2026-11-16, Codex: the first source pass compiles with pinned Rust 1.97.1
+(`cargo check --locked -p plurxd --all-targets`, 130 seconds). It routes the
+four media rosters through clones of the existing shared directory, routes
+14 HTTP serving accesses through the facade, and moves three authority
+subscriptions at daemon composition. Production builders carry the directory
+beside the membership handle still required by peer transport. Local-only
+constructors continue to pass no cluster handles.
+
+The census pins fall by 21, from 765 to 744. The 28 local LiveTvAuthority
+field accesses remain counted; their grace/running-floor policy and field
+names are unchanged. The approximate 480 ceiling in the original plan is
+superseded for this bounded slice by this exact reduction; remaining
+membership, transport, role and local-wrapper sites are not hidden.
+
+Ten formal source rows retain unique anchors and unchanged statements:
+five durable-job state citations and its startup dependency; operation
+progress's fragment admission, two daemon loops and worker spawn. Only their
+whole-file digests change for constructor plumbing and subscriptions. This
+repinning is source correspondence maintenance, not new model qualification.
+The one independent whole-diff review by Codex subagent
+`/root/slice2_review` found no actionable issues. The post-review focused
+batch ran 99 tests: 98 passed; only the confirmed pre-existing system-metric
+census mismatch failed (actual 746, pinned 744). This includes media roster
+policy, copy-index holderless/unavailable outcomes, subtitle range failure
+and cancellation, Live TV HTTP and grace behavior, restart-drain behavior,
+local fragment hydration and C7's startup regression. No failing behavioral
+test was retried or hidden.
+
+`cargo fmt --all --check`, catalog lint, 104 served-script syntax checks and
+paperwork (16/16) pass. The three formal mappings have no source drift. Local
+Clippy with `-D warnings` remains red on the existing baseline warnings:
+`claim_skipped`, trial-admission fields/methods and the unused playback
+qualification subscription. The same warnings were present in the baseline
+compiler check; this slice does not silence them. No green Clippy result or
+fleet acceptance is claimed. Source is not yet published or deployed.
