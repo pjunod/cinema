@@ -2580,7 +2580,7 @@ async fn boot_observing(
     // fatal error (a full disk, a storage error, a panic) never serves again
     // in this process, so it resolves the same drain a signal does and the
     // process then exits non-zero for its supervisor to restart.
-    let raft_core_failure = state.replication.raft_core_failure();
+    let raft_core_failure = state.cluster.core_failure();
     let raft_core_fatal = Arc::new(std::sync::OnceLock::<String>::new());
     let raft_core_fatal_drain = Arc::clone(&raft_core_fatal);
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);

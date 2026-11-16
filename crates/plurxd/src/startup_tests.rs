@@ -5066,7 +5066,7 @@ fn a_dead_raft_core_drains_like_a_signal_and_exits_non_zero() {
 
     let source = include_str!("main.rs");
     let created = source
-        .find("let raft_core_failure = state.replication.raft_core_failure();")
+        .find("let raft_core_failure = state.cluster.core_failure();")
         .expect("the daemon watches its own Raft core");
     let router = source
         .find("let app = http::router(state);")

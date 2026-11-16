@@ -5679,6 +5679,23 @@ impl MembershipManager {
         self.inner.is_some()
     }
 
+    /// Resolves once, with OpenRaft's error, when this node's own database
+    /// Raft core quits on a fatal error (a storage error or a panic). It
+    /// never resolves for an ordinary `Raft::shutdown` or for a manager with
+    /// no replicated store: there is no local core to die. The core's own
+    /// terminal state on the metrics watch is the signal; nothing polls.
+    pub fn raft_core_failure(&self) -> impl std::future::Future<Output = String> + Send + 'static {
+        let watch = self.inner.as_ref().map(|inner| inner.local_metrics.clone());
+        async move {
+            if let Some(mut watch) = watch {
+                if let hiqlite::LocalDbCoreStop::Fatal(error) = watch.core_stopped().await {
+                    return error;
+                }
+            }
+            std::future::pending().await
+        }
+    }
+
     /// Deployment mode follows explicit configuration or the durable local
     /// peer, never peer reachability or the current voter count.
     #[must_use]
