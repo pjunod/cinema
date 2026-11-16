@@ -104,7 +104,7 @@ async fn build_receiver_fixture(
     let mut state = super::source_actor_test_state();
     state.store = Arc::clone(&selected.store);
     state.node_id = selected.identity.node_id.clone();
-    state.membership = selected.membership_manager();
+    state.replace_membership(selected.membership_manager());
     state.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
         state.membership.clone(),
         Arc::clone(&state.store),

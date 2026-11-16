@@ -507,7 +507,7 @@ mod fleet {
         let leader = selected.membership_manager();
         let mut ingress = crate::http::tests::test_state_without_router();
         ingress.node_id = selected.identity.node_id.clone();
-        ingress.membership = leader.clone();
+        ingress.replace_membership(leader.clone());
         ingress.cluster_advertisement = true;
         {
             let mut routes = startup.router.write().expect("leader routes");
@@ -537,7 +537,7 @@ mod fleet {
         // it, from its own sidecar.
         let mut peer_state = crate::http::tests::test_state_without_router();
         peer_state.node_id = answering_id.clone();
-        peer_state.membership = answering.membership_manager();
+        peer_state.replace_membership(answering.membership_manager());
         {
             let mut routes = answering_startup.router.write().expect("learner routes");
             *routes = routes.clone().merge(
