@@ -1,6 +1,6 @@
 # Shared processed Dolby Vision / FEL re-encode — design note (T4.1)
 
-**Status:** implementation in progress; qualification and deployment outstanding · **Effort:** `effort/shared-dv-hdr`, M4 ·
+**Status:** implemented in the integrated task stack; final qualification and deployment outstanding · **Effort:** `effort/shared-dv-hdr`, M4 · **Task PR:** [#1721](http://forge.lan:3000/noirr/plurx/pulls/1721) ·
 **Written:** 2026-11-15 · **Read against:** `wt-dvhdr-m2` @ `468e9e90d` (M1 code);
 `origin/main` @ `29b35e713` for the original design. The continuation
 execution state is recorded in §7; compile attempts are not test qualification.
@@ -282,11 +282,11 @@ T1.1's risk note covers `encoder_and_grade_preferring` only.
 |---|---|---|---|---|
 | T4.1 design note | claude-fable-5-2 (sub-agent) | 01BCWLA21tCtxWeNBWRHWsWn | — | written 2026-11-15; restored in `94f9568b5`; §6 defaults accepted in the handoff |
 | M1 correction (§5) | prior M1 owner | prior handoff | — | built in `5076a9681`; retained in this stack |
-| T4.2 | Codex + delegated GPT models | 2026-11-16 continuation | pending | implemented in `6b06553f4` and working tree; compile corrections in progress; no test qualification |
-| T4.3 | Codex + delegated GPT models | 2026-11-16 continuation | pending | Source operation/receipt and deadline cancellation implemented; real child/reader/semaphore regressions authored, unrun |
+| T4.2 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | implemented through `b55c8919b`; production/test targets compile there; M2 integration `fc94e3c67` still needs exact-head qualification |
+| T4.3 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | Source operation/receipt and deadline cancellation implemented; real child/reader/semaphore regressions authored, unrun |
 | T4.4 | GPT (Activity task) | shared M4 task | — | implementation in worktree; adversarial review and fast lane pending |
-| T4.5 | Codex + delegated GPT models | 2026-11-16 continuation | pending | Source-scoped private root attachment/reuse implemented; cross-grant/viewer acceptance remains |
-| T4.6 | Codex + delegated GPT models | 2026-11-16 continuation | pending | not started; physical switch, frame/audio and real-title evidence outstanding |
+| T4.5 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | Source-scoped private root attachment/reuse implemented; cross-grant/viewer acceptance remains |
+| T4.6 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | not started; physical switch, frame/audio and real-title evidence outstanding |
 
 ## 8. T4.4 Activity and Stop implementation note
 
@@ -305,3 +305,13 @@ signed request binding its node and operation ID. An older node without this
 exchange appears as an unavailable Activity peer until the coordinated cluster
 upgrade finishes. The task worktree has not run the focused tests or compile
 lane; T4.4 remains unqualified.
+
+### Integration status (2026-11-16)
+
+M1 + FF8 is task PR #1714, M2 #1719, M3 #1720 and M4 #1721. All target the
+effort and remain WIP. The stack includes the M2 client preservation ask,
+HDR master selection and enhancement relay. The final main-bound candidate
+will receive one adversarial review and one fast lane; unit execution has
+not started in this continuation. The active merge train performs main
+promotion, per Paul's explicit decision. Physical device qualification,
+deployment and real shared-title evidence remain open.
