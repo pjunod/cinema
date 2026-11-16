@@ -295,7 +295,7 @@ async function setItemTag(itemId,tagId,on){
 }
 async function openTagPicker(itemId){
   const tags=await curationTags(true);
-  const d=curationDialog("tag-picker","Add a tag",`<label>Tag <input id="tag-picker-q" autocomplete="off" placeholder="Type to find or create…" oninput="paintTagPicker(${itemId})" onkeydown="if(event.key==='Enter'){event.preventDefault();tagPickerEnter(${itemId})}"></label><div id="tag-picker-list"></div>${CURATION.canManage?`<div class="row" style="gap:12px"><span class="muted">New tags are</span><label class="row" style="gap:4px"><input type="radio" name="tag-new-scope" value="private" checked>Just me</label><label class="row" style="gap:4px"><input type="radio" name="tag-new-scope" value="household">Household</label></div>`:""}<p id="tag-picker-error" role="status"></p>`);
+  const d=curationDialog("tag-picker","Add a tag",`<form onsubmit="event.preventDefault();tagPickerEnter(${itemId})"><label>Tag <input id="tag-picker-q" autocomplete="off" enterkeyhint="done" placeholder="Type to find or create…" oninput="paintTagPicker(${itemId})"></label></form><div id="tag-picker-list"></div>${CURATION.canManage?`<div class="row" style="gap:12px"><span class="muted">New tags are</span><label class="row" style="gap:4px"><input type="radio" name="tag-new-scope" value="private" checked>Just me</label><label class="row" style="gap:4px"><input type="radio" name="tag-new-scope" value="household">Household</label></div>`:""}<p id="tag-picker-error" role="status"></p>`);
   d.dataset.tags=JSON.stringify(tags.filter(t=>t.editable&&!t.archived));
   paintTagPicker(itemId);inputIn(d,"#tag-picker-q")?.focus();
 }
