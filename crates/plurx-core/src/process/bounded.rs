@@ -304,20 +304,7 @@ pub async fn output_command_bundle_env_to_file(
         // then settles every write before the caller reads its progress.
         // A separate async file pump could outlive cancellation with an
         // in-flight filesystem write. The kernel bounds the child's file.
-        let limit = max_stdout_bytes as libc::rlim_t;
-        unsafe {
-            command.pre_exec(move || {
-                let bounds = libc::rlimit {
-                    rlim_cur: limit,
-                    rlim_max: limit,
-                };
-                if libc::setrlimit(libc::RLIMIT_FSIZE, &bounds) == 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error())
-                }
-            });
-        }
+        super::child_limits::file_size(command, max_stdout_bytes);
     }
     #[cfg(not(unix))]
     {
