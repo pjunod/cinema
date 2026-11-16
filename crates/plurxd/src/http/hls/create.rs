@@ -6979,8 +6979,9 @@ fn validate_prepared_copy_head(
     };
     match (expected_transfer, actual_transfer) {
         (Some(expected), Some(actual)) if expected == actual => {}
-        // Profile 5: no compatible base; the head declares the transfer.
-        (None, _) if dolby_vision_profile.is_some() => {}
+        // Profile 5 alone has no compatible base; its head declares the
+        // transfer. Every other Dolby Vision head must carry its known base.
+        (None, _) if dolby_vision_profile == Some(5) => {}
         _ => return Err(()),
     }
     if !caps.video.iter().any(|entry| {
@@ -7352,6 +7353,31 @@ mod source_copy_head_tests {
         assert!(validate_prepared_copy_head(&hdr10, 2160, &caps, (false, false), &plain).is_err());
         plain.sample_entry = *b"hvc1";
         assert!(validate_prepared_copy_head(&hdr10, 2160, &caps, (false, false), &plain).is_ok());
+    }
+    #[test]
+    fn source_copy_head_requires_a_known_base_for_every_profile_but_5() {
+        // A Profile 8 row whose base compatibility is unknown or none: no
+        // base transfer to check, so the head is refused, whatever it says.
+        let caps = dolby_vision_caps(&[8]);
+        for (compat, label) in [
+            (0, "Dolby Vision · Profile 8"),
+            (3, "Dolby Vision · Profile 8"),
+        ] {
+            let source = dolby_vision_file(8, compat, label);
+            for transfer in [16, 18, 1, 2] {
+                assert!(
+                    validate_prepared_copy_head(
+                        &source,
+                        2160,
+                        &caps,
+                        (true, false),
+                        &dolby_vision_head(*b"hvc1", transfer)
+                    )
+                    .is_err(),
+                    "compat {compat} transfer {transfer}"
+                );
+            }
+        }
     }
     #[test]
     fn source_copy_head_refuses_dolby_vision_for_a_client_without_the_profile() {
