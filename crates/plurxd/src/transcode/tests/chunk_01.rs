@@ -3490,7 +3490,7 @@ async fn profile5_requires_the_probed_software_renderer_pair() {
         .with_dovi_reshape(true);
     manager
         .dovi_proofs
-        .insert(TranscodeManager::dovi_proof_key(&file), true);
+        .record(TranscodeManager::dovi_proof_key(&file), true);
     let encoder = manager
         .encoder_for_file(&file, crate::process_control::ChildClass::Background)
         .await
@@ -3628,7 +3628,7 @@ async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
 
     // No verdict yet answers what the reshape reaches once proved, the only
     // outcome in which a rung is served.
-    manager.dovi_proofs.insert(key.clone(), true);
+    manager.dovi_proofs.record(key.clone(), true);
     assert_eq!(
         manager
             .capability_height_ceiling_for_request(Some(&file), false)
@@ -3648,7 +3648,7 @@ async fn the_ladder_ceiling_never_starts_a_dovi_pixel_proof() {
     refuted.mtime = 2;
     manager
         .dovi_proofs
-        .insert(TranscodeManager::dovi_proof_key(&refuted), false);
+        .record(TranscodeManager::dovi_proof_key(&refuted), false);
     assert_eq!(
         manager
             .dovi_reshape_encoder_advisory_with_preference(&refuted, "")
@@ -3910,7 +3910,7 @@ async fn the_hdr10_grade_is_refused_until_every_precondition_is_proved() {
     .with_dovi_passthrough(true);
     manager
         .dovi_proofs
-        .insert(TranscodeManager::dovi_proof_key(&file), true);
+        .record(TranscodeManager::dovi_proof_key(&file), true);
 
     // Everything proved, and asked for.
     assert_eq!(
@@ -4356,7 +4356,7 @@ async fn profile5_hdr10_keeps_the_proved_vaapi_encoder_and_grade() {
             EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
             .with_dovi_reshape(true).with_dovi_passthrough(renderer)
             .with_hdr10_passthrough_vaapi(hardware);
-        manager.dovi_proofs.insert(TranscodeManager::dovi_proof_key(&file), source_proved);
+        manager.dovi_proofs.record(TranscodeManager::dovi_proof_key(&file), source_proved);
         if !source_proved {
             assert!(manager.hdr10_grade_for_with_preference(&file, true, HDR10_HEIGHT,
                 Encoder::Vaapi, false, Encoder::Vaapi).await.is_err(), "unproved source is refused");

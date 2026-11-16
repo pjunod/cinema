@@ -959,12 +959,41 @@ async fn sharing_source_http_dolby_vision_base_encoded_to_sdr_h1_h2_and_confirme
     ))
     .await;
 }
+/// A Profile 5 encode over sharing, delivered as local delivers it: on the
+/// committed real Profile 5 control, the Source's own two pixel-proof
+/// children prove that the RPU changes pixels, the verdict is recorded, and
+/// the planner tone-maps through the RPU renderer without a second proof.
+/// The renderer is jellyfin-ffmpeg's `tonemapx`; a build without it SKIPs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no_cleanup() {
+async fn sharing_source_http_profile5_encoded_to_sdr_h1_h2_and_confirmed_end() {
+    if !crate::ffmpeg::has_dovi_reshape().await {
+        eprintln!(
+            "SKIP: this ffmpeg has no Dolby-aware tonemapx renderer to encode Profile 5 with"
+        );
+        return;
+    }
+    Box::pin(actual_source_resource_delivery(
+        SourceFixtureMode::DolbyVisionProfile5Encoded,
+    ))
+    .await;
+}
+/// A refuted Profile 5 proof is a verdict: the Source records it, the
+/// planner then answers exactly what it answers locally (the build cannot
+/// render this source) as a definite refusal, and a later start reads the
+/// remembered verdict instead of proving again. No probe runs in the planner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_profile5_refuted_proof_plans_like_local_and_spawns_no_second_probe() {
     use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
     let fixture =
         real_source_start_fixture_with(SourceFixtureMode::DolbyVisionProfile5Encoded, None).await;
-    let start = || {
+    let hooks = fixture.state.transcode.test_hooks();
+    hooks
+        .dovi_pixel_proof_script
+        .lock()
+        .expect("script")
+        .push_back(crate::ffmpeg::DoviPixelProof::Refuted);
+    let start = |request: Vec<u8>| {
         fixture_start(
             axum::extract::State((*fixture.state).clone()),
             fixture.headers.clone(),
@@ -972,7 +1001,7 @@ async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no
                 fixture.reference.item_id.as_str().to_owned(),
                 fixture.reference.file_id.as_str().to_owned(),
             )),
-            axum::body::Body::from(fixture.request.clone()),
+            axum::body::Body::from(request),
         )
     };
     let refused = |error: ApiError| async move {
@@ -982,62 +1011,44 @@ async fn sharing_source_http_dolby_vision_refusal_precedes_the_claim_and_owns_no
             .await
             .expect("typed refusal");
         let body: Value = serde_json::from_slice(&bytes).expect("JSON refusal");
-        assert_eq!(body["code"], SHARING_START_DOLBY_VISION_UNSUPPORTED);
+        assert_eq!(body["code"], "sharing_start_unsupported");
     };
     refused(
-        start()
+        start(fixture.request.clone())
             .await
-            .expect_err("a Profile 5 encode has no Source-owned RPU preparation"),
+            .expect_err("a refuted Profile 5 source has no renderer route"),
     )
     .await;
-    let entries = fixture
+    let file = fixture
         .state
-        .transcode
-        .source_http_starts
-        .entries
-        .lock()
-        .expect("registry")
-        .clone();
-    assert_eq!(entries.len(), 1, "the exact refused invocation is retained");
-    // Pure planning precedes owner designation (1ef67c7de): the refusal is
-    // decided from the prepared request before any claim, so the entry
-    // never acquired a binding, owns no durable or physical obligation and
-    // leaves admission capacity at once, with nothing for an End to clean.
-    assert!(
-        matches!(
-            *entries[0].task.stage.lock().expect("stage"),
-            SourceStartTaskStage::IntentReady { .. }
-        ),
-        "the refusal is decided before the claim"
+        .store
+        .get_file(1)
+        .await
+        .expect("file")
+        .expect("file");
+    assert_eq!(
+        fixture.state.transcode.dovi_proof_verdict(&file),
+        Some(false),
+        "the Source's refuted proof is a remembered verdict"
     );
-    assert!(
-        entries[0]
-            .task
-            .cleanup
-            .lock()
-            .expect("uninvoked Source custody")
-            .is_none(),
-        "no claimed invocation is left to fence"
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        1,
+        "one proof, the Source's; the planner read its verdict"
     );
-    assert!(
-        entries[0].actual_finished(),
-        "a pre-claim refusal releases its slot without a cleanup receipt"
+    let mut again: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+    again["session"]["request_id"] = json!(Uuid::new_v4());
+    refused(
+        start(serde_json::to_vec(&again).expect("second recipe"))
+            .await
+            .expect_err("the remembered verdict refuses again"),
+    )
+    .await;
+    assert_eq!(
+        hooks.dovi_pixel_proofs_run.load(Ordering::SeqCst),
+        1,
+        "a remembered verdict runs no second proof"
     );
-    assert_eq!(fixture.state.transcode.source_http_starts.live_entries(), 0);
-    for _ in 0..3 {
-        refused(start().await.expect_err("exact refusal retry")).await;
-        let registry = &fixture.state.transcode.source_http_starts;
-        assert!(
-            registry.entries.lock().expect("registry").is_empty(),
-            "a retry opens no second invocation"
-        );
-        let settled = registry.settled.lock().expect("settled receipts").clone();
-        assert_eq!(settled.len(), 1);
-        assert!(
-            std::sync::Arc::ptr_eq(&settled[0], &entries[0]),
-            "a retry replays the exact retained refusal"
-        );
-    }
     fixture.shutdown().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1277,14 +1288,29 @@ async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
                 String::from_utf8_lossy(&bytes)
             )
         });
+    if matches!(mode, SourceFixtureMode::DolbyVisionProfile5Encoded) {
+        // The Source's own proof reached the verdict the planner then read.
+        let file = fixture
+            .state
+            .store
+            .get_file(1)
+            .await
+            .expect("file")
+            .expect("file");
+        assert_eq!(
+            fixture.state.transcode.dovi_proof_verdict(&file),
+            Some(true),
+            "the real Profile 5 RPU changes pixels through the renderer"
+        );
+    }
     let expected_range = match mode {
         SourceFixtureMode::Hdr10
         | SourceFixtureMode::NativeHdr10Copy
         | SourceFixtureMode::DolbyVisionUnaffirmed
         | SourceFixtureMode::DolbyVisionStripped => Some("hdr10"),
-        SourceFixtureMode::Hdr10Sdr | SourceFixtureMode::DolbyVisionCompatibleEncoded => {
-            Some("sdr")
-        }
+        SourceFixtureMode::Hdr10Sdr
+        | SourceFixtureMode::DolbyVisionCompatibleEncoded
+        | SourceFixtureMode::DolbyVisionProfile5Encoded => Some("sdr"),
         SourceFixtureMode::DolbyVisionPreserved | SourceFixtureMode::DolbyVisionConverted => {
             Some("dolby_vision")
         }

@@ -1472,6 +1472,20 @@ impl TranscodeManager {
             }
             None => None,
         };
+        // A Profile 5 encode needs the per-source pixel proof the RPU renderer
+        // demands. The Source runs it as this operation's own children and
+        // records the verdict, so the planner below finds it and spawns
+        // nothing. Without the boot-proved renderer the planner refuses as it
+        // does locally, so no proof is worth running.
+        let key = Self::dovi_proof_key(prepared.file());
+        let dovi_proof = self.dovi_reshape
+            && plurx_core::playback::dolby_vision_needs_rpu_render(prepared.file())
+            && self.dovi_proofs.verdict(&key).is_none();
+        let scripted = if dovi_proof {
+            self.hooks.get().scripted_dovi_pixel_proof(prepared.file())
+        } else {
+            None
+        };
         *work = Some(super::source_preparation::start_source_probe(
             prepared.file().clone(),
             source,
@@ -1481,6 +1495,7 @@ impl TranscodeManager {
             deadline,
             Arc::clone(&self.source_workers.probe_hooks),
             burn,
+            dovi_proof && scripted.is_none(),
         ));
         let evidence = work
             .as_ref()
@@ -1489,6 +1504,18 @@ impl TranscodeManager {
             .await
             .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.probe_outcome", "Source encoded preparation refused"); SourceWorkerError::Unavailable })?;
         self.source_workers.probe_hooks.after_evidence().await;
+        if let Some(proof) = scripted.as_ref().or(evidence.dovi_proof()) {
+            match proof.verdict() {
+                Some(verdict) => self.dovi_proofs.record(key, verdict),
+                // Not a verdict: nothing is remembered and the start answers
+                // not-yet, exactly as an unfinished local proof does. The
+                // planner is not reached, so it cannot run an unowned proof.
+                None => {
+                    tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.dovi_proof", "Source encoded preparation refused");
+                    return Err(SourceWorkerError::Unavailable);
+                }
+            }
+        }
         // The probe permit is already dropped only after actual reap/pipes.
         // Encoder admission is separate and cannot self-deadlock against it.
         let current = owner.gate.current_preparation(&owner.assignment).await?;
@@ -1511,7 +1538,14 @@ impl TranscodeManager {
                     None => "unclassified",
                 };
                 tracing::warn!(target: "plurxd::transcode", stage = "source_encoded.encoder_plan", error_class, "Source encoded preparation refused");
-                SourceWorkerError::Unavailable
+                // The planner's own definite refusal (a refuted Profile 5
+                // proof, a renderer this build did not prove) is the same
+                // answer local gives, not an outage to retry.
+                if error_class == "unsupported_build" {
+                    SourceWorkerError::Unsupported
+                } else {
+                    SourceWorkerError::Unavailable
+                }
             })
     }
 
@@ -2168,14 +2202,12 @@ impl TranscodeManager {
 /// Source's own prepared request — the player's real caps through the shared
 /// planner, never a B claim — and its own scanned file facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// No Dolby Vision or HDR shape is refused here: preservation, the Profile 7
+/// conversion, a compatible-base encode, a Profile 5 encode (whose pixel
+/// proof the Source runs as its own work) and native subtitles beside any
+/// range are delivered exactly as local playback delivers them.
 pub(crate) enum SourceDeliveryRefusal {
-    /// A re-encode of a Profile 5 source: the only Dolby Vision shape whose
-    /// encode needs the RPU renderer, and that renderer's per-source pixel
-    /// proof is not Source-owned work yet. Preservation, the Profile 7
-    /// conversion (an in-process fragment rewrite), a compatible-base encode
-    /// (the ordinary HDR10/HLG base route) and native subtitles beside Dolby
-    /// Vision are all delivered exactly as local playback delivers them.
-    DolbyVision,
     /// A shape this Source does not build: a burn beside native subtitles, a
     /// burn of a downloaded sidecar or of a track the scan does not hold.
     Unsupported,
@@ -2192,11 +2224,6 @@ pub(crate) fn source_delivery_refusal(
     file: &plurx_core::domain::MediaFile,
     (native, _): (bool, Option<i64>),
 ) -> Option<SourceDeliveryRefusal> {
-    if source_recipe_is_encoded(request)
-        && plurx_core::playback::dolby_vision_needs_rpu_render(file)
-    {
-        return Some(SourceDeliveryRefusal::DolbyVision);
-    }
     if let Some(index) = request.subtitle_burn {
         let embedded = usize::try_from(index)
             .ok()
