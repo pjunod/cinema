@@ -1151,6 +1151,13 @@ fn processed_successor_decline_reports_only_on_its_live_b_generation() {
         ),
         (
             ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
+                code: crate::sharing_client::StartRetryCode::SourceNotPrepared,
+                retry_after_secs: 1,
+            }),
+            "Source has not prepared",
+        ),
+        (
+            ReceiverStartError::NotYet(crate::sharing_client::StartRetry {
                 code: crate::sharing_client::StartRetryCode::Overloaded,
                 retry_after_secs: 1,
             }),

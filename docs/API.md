@@ -4501,10 +4501,20 @@ admitted operation. Burns encode and sidecars are capped at 64 MiB. B checks
 returned HDR against the viewer's exact PQ/HLG claim; an SDR declaration
 overrides decoder HDR capability.
 
-Non-direct Dolby Vision returns 422 `sharing_start_dolby_vision_unsupported`.
-Direct keeps original bytes when the Source permits it. Downloaded burns and
-native subtitles beside HDR remain unsupported. A typed Start refusal proves
-neither End nor absence of earlier resources. Runtime qualification stays in
+Shared HLS negotiates Dolby Vision preservation, Profile 7 conversion and
+compatible-base encodes from the Source's scanned facts and the viewer's caps.
+DV delivery also requires B's explicit relay affirmation. Native text subtitles
+can accompany HDR without burning it to SDR. Older Sources may still return
+422 `sharing_start_dolby_vision_unsupported`; Direct retains original bytes
+when permitted. Downloaded burns remain unsupported.
+
+An affirming B can request one optional processed successor after first frame.
+Pending Source FEL title qualification answers typed 503
+`sharing_source_not_prepared` with `Retry-After: 1`; this is distinct from an
+owner still working at the caller deadline (`startup_timeout`). B does not
+retry the optional processed Start: it retains ordinary playback and reports
+the generation-bound processing skip. A typed refusal proves neither End nor
+absence of earlier resources. Runtime qualification stays in
 [the sharing status](features/SHARED-LIBRARIES-STATUS.md).
 
 The four pre-session asset routes answer `Cache-Control: no-store` and hold

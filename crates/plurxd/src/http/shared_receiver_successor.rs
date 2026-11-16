@@ -114,7 +114,8 @@ impl SuccessorSlot {
                 crate::sharing_client::StartRetryCode::Overloaded => {
                     "Source is busy; optional processed upgrade was not started."
                 }
-                crate::sharing_client::StartRetryCode::StartupTimeout => {
+                crate::sharing_client::StartRetryCode::SourceNotPrepared
+                | crate::sharing_client::StartRetryCode::StartupTimeout => {
                     "Source has not prepared the optional processed upgrade."
                 }
             },

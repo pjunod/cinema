@@ -282,9 +282,9 @@ T1.1's risk note covers `encoder_and_grade_preferring` only.
 |---|---|---|---|---|
 | T4.1 design note | claude-fable-5-2 (sub-agent) | 01BCWLA21tCtxWeNBWRHWsWn | — | written 2026-11-15; restored in `94f9568b5`; §6 defaults accepted in the handoff |
 | M1 correction (§5) | prior M1 owner | prior handoff | — | built in `5076a9681`; retained in this stack |
-| T4.2 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | implemented through `b55c8919b`; production/test targets compile there; M2 integration `fc94e3c67` still needs exact-head qualification |
+| T4.2 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | integrated with M2; production/test targets pass Clippy at `0d646e4a0`; final qualification pending |
 | T4.3 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | Source operation/receipt and deadline cancellation implemented; real child/reader/semaphore regressions authored, unrun |
-| T4.4 | GPT (Activity task) | shared M4 task | — | implementation in worktree; adversarial review and fast lane pending |
+| T4.4 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | Activity/Stop integrated; owner/settlement coverage being extended; final review and fast lane pending |
 | T4.5 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | Source-scoped private root attachment/reuse implemented; cross-grant/viewer acceptance remains |
 | T4.6 | Codex + delegated GPT models | 2026-11-16 continuation | #1721 | not started; physical switch, frame/audio and real-title evidence outstanding |
 
@@ -303,8 +303,8 @@ learners. Each snapshot is an exact signed member read with a signed bounded
 response. A remote Stop resolves the one owner from that snapshot and sends one
 signed request binding its node and operation ID. An older node without this
 exchange appears as an unavailable Activity peer until the coordinated cluster
-upgrade finishes. The task worktree has not run the focused tests or compile
-lane; T4.4 remains unqualified.
+upgrade finishes. Production and test targets pass the pinned Clippy check;
+no focused tests have run in this continuation. T4.4 remains unqualified.
 
 ### Integration status (2026-11-16)
 
@@ -315,3 +315,9 @@ will receive one adversarial review and one fast lane; unit execution has
 not started in this continuation. The active merge train performs main
 promotion, per Paul's explicit decision. Physical device qualification,
 deployment and real shared-title evidence remain open.
+
+The current fixtures cannot establish positive Source processed-root reuse or
+FEL renderer acceptance: the lifecycle renderer is `/bin/false`, and the HTTP
+Profile 7 sample has no enhancement layer. T4.5's positive reuse, cross-grant /
+viewer rejection and pending-FEL checks require the real-backend qualification
+receipt; no predicate-only test is cited as that evidence.

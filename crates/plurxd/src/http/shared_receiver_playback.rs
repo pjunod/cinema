@@ -142,6 +142,7 @@ fn log_source_status_peer_failure(stage: &'static str, error: crate::sharing_cli
         PeerError::Busy { .. } => ("busy", Some(429)),
         PeerError::DolbyVisionUnsupported => ("dolby_vision_unsupported", None),
         PeerError::StartNotYet { .. } => ("start_not_yet", Some(503)),
+        PeerError::StartNotPrepared { .. } => ("source_not_prepared", Some(503)),
     };
     tracing::warn!(target: "plurx::sharing", stage, error_class, http_status, "receiver Source status refused");
 }
@@ -2013,14 +2014,16 @@ async fn run_owner(
         tokio::select! {
             result = &mut start => break result.map_err(|error| match error {
                 crate::sharing_client::PeerError::DolbyVisionUnsupported => ReceiverStartError::DolbyVisionUnsupported,
-                error @ (crate::sharing_client::PeerError::StartNotYet { .. }
+                error @ (crate::sharing_client::PeerError::StartNotPrepared { .. }
+                    | crate::sharing_client::PeerError::StartNotYet { .. }
                     | crate::sharing_client::PeerError::Busy { .. }) if processed_successor => {
                     ReceiverStartError::NotYet(crate::sharing_client::StartRetry::from_peer(error)
                         .expect("typed processed Start refusal"))
                 },
                 // A retryable answer that escaped the re-post loop: the
                 // viewer's whole window is spent, and nobody is left to retry.
-                crate::sharing_client::PeerError::StartNotYet { .. }
+                crate::sharing_client::PeerError::StartNotPrepared { .. }
+                | crate::sharing_client::PeerError::StartNotYet { .. }
                 | crate::sharing_client::PeerError::Busy { .. } => ReceiverStartError::Deadline,
                 _ => ReceiverStartError::Unresolved,
             })?,

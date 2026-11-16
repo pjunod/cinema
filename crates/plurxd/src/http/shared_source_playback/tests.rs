@@ -1,5 +1,23 @@
 use super::*;
 use serde_json::json;
+
+/// The Source actor emits this worker result only for a validated pending
+/// title qualification. Its public reply has a closed retry contract.
+#[tokio::test]
+async fn sharing_source_http_pending_verdict_maps_to_typed_not_yet() {
+    use axum::response::IntoResponse;
+    let response =
+        SourceStartFailure::from(crate::transcode::source_actor::SourceWorkerError::NotYet)
+            .response()
+            .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("bounded pending-verdict body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("typed pending body");
+    assert_eq!(body["code"], "sharing_source_not_prepared");
+}
 pub(super) async fn actual_resource_request(
     address: std::net::SocketAddr,
     h2: bool,

@@ -227,6 +227,7 @@ use plurx_core::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceWorkerError {
     Unavailable,
+    NotYet,
     RescanRequired,
     CopyTargetExceeded,
     CopyInitContractChanged,
@@ -321,7 +322,17 @@ pub(super) struct SourceWorkerRegistry {
     index_hooks: Arc<crate::fragindex::SourceIndexHookOwner>,
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
     pub(super) native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
+    #[cfg(test)]
+    processed_activity_hook: std::sync::Mutex<Option<SourceProcessedActivityHook>>,
 }
+#[cfg(test)]
+pub(crate) type SourceProcessedActivityHook = Box<
+    dyn FnOnce(
+            Arc<crate::prodrun::ProducerSlot>,
+            tokio_util::sync::CancellationToken,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send,
+>;
 struct SourceViewerInner {
     control_target_duration_ms: i64,
     control_hooks: control::SourceControlHookOwner,
@@ -1492,6 +1503,14 @@ impl TranscodeManager {
             })
             .collect()
     }
+    #[cfg(test)]
+    pub(crate) fn arm_source_processed_activity_hook(&self, hook: SourceProcessedActivityHook) {
+        *self
+            .source_workers
+            .processed_activity_hook
+            .lock()
+            .expect("Source processed activity hook") = Some(hook);
+    }
     pub(crate) async fn stop_source_processed_session(
         &self,
         id: &str,
@@ -1651,6 +1670,18 @@ impl TranscodeManager {
                             cancel.cancel();
                         }
                     }
+                    #[cfg(test)]
+                    {
+                        let hook = manager
+                            .source_workers
+                            .processed_activity_hook
+                            .lock()
+                            .expect("Source processed activity hook")
+                            .take();
+                        if let Some(hook) = hook {
+                            hook(Arc::clone(&producer), cancel.clone()).await;
+                        }
+                    }
                     let current = trial_owner
                         .gate
                         .current_preparation(&trial_owner.assignment)
@@ -1681,10 +1712,13 @@ impl TranscodeManager {
                 },
             ));
             let operation = processed_work.as_ref().expect("Source processed owner");
-            let trial = operation
-                .outcome()
-                .await
-                .map_err(|_| SourceWorkerError::Unavailable)?;
+            let trial = operation.outcome().await.map_err(|reason| {
+                if super::pending_fel_qualification(&reason).is_some() {
+                    SourceWorkerError::NotYet
+                } else {
+                    SourceWorkerError::Unavailable
+                }
+            })?;
             owner.gate.current_preparation(&owner.assignment).await?;
             let encoding = Arc::clone(&trial.root.encoding);
             *processed_root = Some(trial.root);

@@ -287,6 +287,7 @@ pub(crate) const SHARING_START_DOLBY_VISION_UNSUPPORTED: &str =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceStartFailure {
     Unavailable,
+    NotYet,
     RescanRequired,
     CopyTargetExceeded,
     CopyInitContractChanged,
@@ -1189,6 +1190,7 @@ impl From<crate::transcode::source_actor::SourceWorkerError> for SourceStartFail
         use crate::transcode::source_actor::SourceWorkerError as E;
         match value {
             E::Unavailable => Self::Unavailable,
+            E::NotYet => Self::NotYet,
             E::RescanRequired => Self::RescanRequired,
             E::CopyTargetExceeded => Self::CopyTargetExceeded,
             E::CopyInitContractChanged => Self::CopyInitContractChanged,
@@ -1219,6 +1221,14 @@ impl SourceStartFailure {
             ),
             Self::Unresolved => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unresolved"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_unavailable"),
+            Self::NotYet => {
+                return ApiError::TypedRetry {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "sharing_source_not_prepared",
+                    message: "Source title qualification is pending".to_owned(),
+                    retry_after_seconds: 1,
+                }
+            }
             Self::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
         };
         #[cfg(test)]
