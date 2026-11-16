@@ -17,7 +17,8 @@ owns acceptance; the
 [status page](../../docs/cluster/FORMAL-VERIFICATION-PILOT-STATUS.md)
 records review and qualification. `mapping.json` binds the selected source,
 model, configurations, properties and expected outputs; changed inputs require
-a deliberate mapping review.
+a deliberate mapping review. A source row pins the item its anchor selects,
+not its file: see [Source pins cover the anchored item](#source-pins-cover-the-anchored-item).
 
 ## Run the pinned package
 
@@ -42,6 +43,66 @@ hard process kill/wait limits. The source/config hash and exact runtime
 options in each receipt identify the checked candidate. Peak process RSS is
 separate from the4GiB heap cap. Final qualification is recorded after review,
 not inferred from these development checks.
+
+## Source pins cover the anchored item
+
+Each source row in a package's `mapping.json`, and in worker-refinement's
+`correspondence.json`, pins **the item its anchor selects**, not the file
+that holds it. An edit elsewhere in the file is not drift. An edit inside the
+item fails `check-mapping` with
+`authority source drift requires review: <file> :: <item> (<row>)`, and the
+reviewer reads that item.
+
+Paul ruled this on 2026-11-15. Until then every row pinned its whole file by
+SHA-256, so any edit to a pinned file failed main's preflight until someone
+re-pinned by hand, whether or not it touched mapped code: 23 of the previous
+32 mapping edits were such re-pins. A check that fires on every edit stops
+being read as a review. The earlier position, that whole-file pins were
+intentional, is retired with it.
+
+| Row field | Meaning |
+|---|---|
+| `anchor` | Exact text that must occur once in the file. |
+| `scope` | `item` pins the innermost named item that holds the anchor. `block` pins the brace block the anchor opens (Rust only): a match arm, a `match`, a loop, or an async or spawned block. |
+| `item` | Path of the selected item, such as `impl JobFence > fn renew`, `fn spawn_writer > block`, `trigger job_completed` or `[[package]] tokio 1.53.1`. A different path means the item was renamed or moved. |
+| `item_sha256` | SHA-256 of the item's canonical text. |
+
+| Source | The item is |
+|---|---|
+| Rust | A `fn`, `impl`, `struct`, `enum`, `union`, `trait`, `mod`, `type`, `const`, `static` or `macro_rules!`, with its attributes and the comments directly above it. |
+| SQL | One statement. A trigger runs to the `END` that closes its body. |
+| `Cargo.toml`, `Cargo.lock` | The key that holds the anchor; when the anchor spans keys, their table. In the lockfile that is one `[[package]]` entry: version, checksum and direct dependencies. |
+| Python | A `def` or `class`, with its decorators. |
+
+**Canonical text.** In Rust and SQL a run of whitespace between tokens counts
+as one space, so a formatter reflow is not drift. String literals and
+comments are kept byte for byte, and a line comment keeps its line end, so
+code joined onto a comment line changes the hash. TOML and Python keep their
+layout; only line ends and trailing blanks are normalised.
+
+**An anchor never passes silently.** Each of these is an error, not a pass:
+the anchor is absent or occurs twice; it sits outside every named item; the
+item it selects has another path than the row records; the file does not lex
+(an unclosed delimiter, string or comment); the file type has no extractor;
+the row still carries a whole-file `sha256`; the mapping lacks
+`"pin_scheme": "item-v1"`.
+
+**Re-pinning.** `scripts/check-formal item-pins --package <name>` lists each
+row whose pin is stale; `--write` records the current pins. The command only
+does the arithmetic. The review is reading the items `check-mapping` named
+and recording the conclusion in the mapping's review basis.
+
+**What did not change.** `input_sha256` in the `check-mapping` output and in
+every receipt still records the whole-file SHA-256 of each source read, so a
+receipt identifies exact bytes. `affected` is still true when a mapped file
+changes, so its smoke still runs.
+
+**Limits.** The Rust extractor is a lexer, not a compiler; rust-analyzer is
+not available to the lane. It skips comments, strings, raw strings and
+character literals, and accepts an item keyword only where an item can start.
+It does not see items a macro generates: an anchor in one resolves to the
+written item around it. A pin does not see a change in a function the item
+calls; a callee the model depends on needs its own row.
 
 ## Seeds share one safety transition relation
 

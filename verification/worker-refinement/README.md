@@ -45,6 +45,12 @@ model, so model progress does not automatically transfer to Rust. The prior
 [operation-progress](../operation-progress/README.md) and
 [durable-jobs](../durable-jobs/README.md) executable packages are unchanged.
 
+Each action, boundary and conformance-test row in `correspondence.json` pins
+the item it names, not its file: the function or block its anchor selects,
+and each test's own function
+([how item pins work](../durable-jobs/README.md#source-pins-cover-the-anchored-item)).
+A row's `symbol` must be a function that holds its anchor.
+
 ## Run the pinned package after final review
 
 ```bash

@@ -377,3 +377,16 @@ bodies retain both parents' source. The Store parent registers both sets of
 conformance tests. Refresh only those whole-file source hashes after checking
 the existing anchors; model/configuration bytes and qualification identities
 are unchanged. This is source correspondence, not model execution evidence.
+
+## Item pins replace whole-file pins — 2026-11-15
+
+Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
+source file. Every of the 60 rows now records the item its anchor selects
+(`scope`, `item`, `item_sha256`) instead of its file's SHA-256;
+[the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
+defines the items and the hash. The migration ran at main `40cc6460d`, where
+every whole-file pin matched, so each item pin records source already
+reviewed under the old pins. Row 27 pins the `Query::Transaction` arm of the vendored writer, so a change to another request's arm is no longer drift for it. No source, anchor, model, configuration or
+property changes. The dated entries below that say "whole-file pins" describe
+the pins of their day. This is a change to the drift check, not review or
+execution evidence.

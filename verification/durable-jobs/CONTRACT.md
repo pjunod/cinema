@@ -9,10 +9,23 @@ locally; CI and promotion qualification separate ·
 Companion to [README.md](README.md), which gives the reproducible commands,
 and the [pilot proposal](../../docs/cluster/FORMAL-VERIFICATION-PILOT-PROPOSAL.md),
 which owns acceptance. The transition correspondence below is a **reviewed
-source mapping**, not an automatic refinement proof. Source hashes in
+source mapping**, not an automatic refinement proof. Item hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+
+## Item pins replace whole-file pins — 2026-11-15
+
+Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
+source file. Every of the 126 rows now records the item its anchor selects
+(`scope`, `item`, `item_sha256`) instead of its file's SHA-256;
+[the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
+defines the items and the hash. The migration ran at main `40cc6460d`, where
+every whole-file pin matched, so each item pin records source already
+reviewed under the old pins. No source, anchor, model, configuration or
+property changes. The dated entries below that say "whole-file pins" describe
+the pins of their day. This is a change to the drift check, not review or
+execution evidence.
 
 ## Pipeline v2 probe and schedule (T5) — scoped correspondence review on 2026-11-08
 

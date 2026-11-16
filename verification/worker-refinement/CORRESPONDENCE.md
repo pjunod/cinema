@@ -29,6 +29,19 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Item pins replace whole-file pins — 2026-11-15
+
+Paul ruled on 2026-11-15 that a mapping pins the anchored item, not the whole
+source file. Every action, boundary and conformance-test row now records the item its anchor selects
+(`scope`, `item`, `item_sha256`) instead of its file's SHA-256;
+[the README](../durable-jobs/README.md#source-pins-cover-the-anchored-item)
+defines the items and the hash. The migration ran at main `40cc6460d`, where
+every whole-file pin matched, so each item pin records source already
+reviewed under the old pins. The `heartbeat.queue.deadline` row named `ActiveBackgroundJob::claim`, a function that does not exist; its anchor is in `ActiveBackgroundJob::start`, and the row now says so. The check now requires each row's symbol to hold its anchor. No source, anchor, model, configuration or
+property changes. The dated entries below that say "whole-file pins" describe
+the pins of their day. This is a change to the drift check, not review or
+execution evidence.
+
 ## Pipeline v2 request status (T4) — scoped correspondence review on 2026-11-08
 
 Claude (`claude-opus-5-5`) reviewed PR #1407
