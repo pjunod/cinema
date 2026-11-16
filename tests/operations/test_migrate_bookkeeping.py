@@ -56,7 +56,7 @@ PATCHES = (
     "| 1 | First | generic bug | pending M6 | Upstream fixes it. |\n"
     "| 2 | Second | plurx policy | — | Never; Plurx owns it. |\n\n"
     "- The first patch.\n  Files: `src/a.rs`.\n- The second patch.\n  Files: `src/a.rs`.\n\n"
-    "Remove this vendor when (rows 1) retire and (rows 2) are unneeded.\n"
+    "Remove this vendor when (rows 1, 9) retire and (rows 2, 8) are unneeded.\n"
 )
 LEDGER_FILE = "vendor/hiqlite/PLURX-PATCH.md"
 README_NEW = "# Android\n\nIntro.\n\n> Status: **v0.8.0** — native viewer.\n\nBody.\n"
@@ -147,7 +147,7 @@ class MigrateBookkeepingCase(unittest.TestCase):
             "- The second patch.\n  Files: `src/a.rs`.\n",
             "- The second patch.\n  Files: `src/a.rs`.\n"
             "- The writer no longer panics on a dropped receiver.\n  Files: `src/a.rs`.\n",
-        ).replace("(rows 1)", "(rows 1 and 3)"))
+        ).replace("(rows 1, 9)", "(rows 1, 9 and 3)"))
         self.write("src/code.rs", "fn main() {}\n")
         self.commit("old-layout edits")
 
@@ -271,7 +271,7 @@ class MigrateBookkeepingCase(unittest.TestCase):
         ).replace(
             "- The second patch.\n  Files: `src/a.rs`.\n",
             "- The second patch.\n  Files: `src/a.rs`.\n- The third patch.\n  Files: `src/a.rs`.\n",
-        ).replace("(rows 1)", "(rows 1 and 3)")
+        ).replace("(rows 1, 9)", "(rows 1, 9 and 3)")
         self.write(LEDGER_FILE, extra(text))
         self.commit("a patch the old way")
         self.git("merge", "main", check=False)
@@ -289,7 +289,7 @@ class MigrateBookkeepingCase(unittest.TestCase):
         self.assertNotIn("| 3 |", ledger)
         self.assertNotIn("The third patch.", ledger)
         self.assertIn("carries two numbered patches", ledger)
-        self.assertIn("(rows 1) retire", ledger)
+        self.assertIn("(rows 1, 9) retire", ledger)
         self.assertTrue((self.root / "vendor/hiqlite/patches.d/third.toml").is_file())
 
     def test_a_patch_row_beside_an_edit_to_an_existing_row_is_refused_whole(self) -> None:
