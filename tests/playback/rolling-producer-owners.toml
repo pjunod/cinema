@@ -6447,7 +6447,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # fragmented pipe and back to an ordinary MP4) build the Dolby Vision fixture
 # source; testfixtures::run waits for and reaps each before the fixture reads
 # its output, and neither runs in a shipped binary.
-expected_occurrences = 354
+# FFmpeg 8 fixture fix: +1 test-only command in
+# `build_real_source_start_fixture`, a finite FFprobe of the generated HDR
+# base (awaited with `.output()`), asserting it is really PQ/BT.2020-tagged.
+expected_occurrences = 355
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

@@ -486,3 +486,26 @@ both pass on the gate's FFmpeg 6.1 and are open questions for M2.
   (`shared_source_forwarding.rs` `:253`, `:270`) needs no new field.
   `public_recipe_hash` strips every reserved token, so it is unchanged for an
   old receiver.
+
+### FFmpeg 8 copy colour metadata fix (2026-11-16)
+
+Manual FFmpeg 8 metadata captures in the private FF8 handoff show the muxer
+drops the Dolby Vision record when a Profile 8 compatibility-1 source has no
+base colour tags. Explicit BT.2020 primaries and PQ transfer preserve the
+Profile 8 record; an already PQ-tagged input also preserves it. The capture is
+in `ff8-receipts/manual-metadata.txt`.
+
+The copy recipe now derives output colour tags from the scanned Dolby Vision
+base compatibility: IDs 1 and 6 use PQ, and ID 4 uses HLG. The shared
+`copy_video_args` feeds the normal, index and production-pipe recipes, so the
+same tags enter the segment fingerprint. The added regression covers those
+IDs plus Profile 5, unknown compatibility, stripped copies and non-Dolby
+Vision HDR copies. The old `/ff8/bin/ffmpeg` wrapper was reported by `ldd` as
+“not a dynamic executable,” which made Source preparation refuse at its
+generic probe boundary; later captures using the actual executable show the
+base-encode path passing (`ff8-receipts/log-e8.txt` and
+`ff8-receipts/log-pre8b.txt`). That wrapper failure does not establish an
+FFmpeg version-parsing defect.
+
+The production change and regression have not yet been compiled or run in the
+unit suite or CI. Those checks remain pending the final adversarial review.

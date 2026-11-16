@@ -2600,15 +2600,11 @@ fn dolby_vision_fixture_source(
     compatibility: u8,
 ) {
     use plurx_core::fmp4::{self, FragmentReader, Unit};
-    // The fixture is built with `PLURX_FIXTURE_FFMPEG` when it is set: FFmpeg
-    // 8.1 (jellyfin-ffmpeg) does not read back the configuration record this
-    // function inserts into its own fragmented output, which FFmpeg 6.1 does,
-    // so a run that points the code under test at FFmpeg 8 builds its source
-    // with the older one.
-    let fixture_ffmpeg = std::env::var("PLURX_FIXTURE_FFMPEG")
-        .ok()
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(crate::ffmpeg::ffmpeg_bin);
+    // Built with the FFmpeg under test. FFmpeg 8 reads back and remuxes the
+    // record inserted here once the base is really PQ-tagged (see the base's
+    // probe in `build_real_source_start_fixture`); an untagged base was what
+    // made its muxer drop the record.
+    let fixture_ffmpeg = crate::ffmpeg::ffmpeg_bin();
     let mut fragmented = std::process::Command::new(&fixture_ffmpeg);
     fragmented
         .args(["-hide_banner", "-loglevel", "error", "-i"])
@@ -2943,6 +2939,33 @@ async fn build_real_source_start_fixture(
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
+    if hdr {
+        // The generated base must really be PQ/BT.2020, on every FFmpeg the
+        // fixture runs under. FFmpeg 8 ignores `-color_*` for an untagged
+        // lavfi encode; a base that is not PQ makes its compatibility-1 Dolby
+        // Vision record a contradiction, which FFmpeg 8's muxer drops on copy,
+        // and the failure then surfaces far away as a missing `dvvC`.
+        let probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_transfer,color_primaries",
+                "-of",
+                "json",
+            ])
+            .arg(&file)
+            .output()
+            .await
+            .expect("actual FFprobe");
+        assert!(probe.status.success(), "{}", String::from_utf8_lossy(&probe.stderr));
+        let document: serde_json::Value = serde_json::from_slice(&probe.stdout)
+            .expect("HDR fixture probe JSON");
+        assert_eq!(document["streams"][0]["color_transfer"], "smpte2084");
+        assert_eq!(document["streams"][0]["color_primaries"], "bt2020");
+    }
     match dolby_vision {
         // A real Profile 5 stream: the committed CC0 control and its RPUs.
         Some((5, _)) => {
