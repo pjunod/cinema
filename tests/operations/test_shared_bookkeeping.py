@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from validation import changelog_fragments as changelog  # noqa: E402
+from validation import owner_counts  # noqa: E402
 from validation.history import HistoryError, load_client_fixes  # noqa: E402
 from validation.runner import CatalogError, load_catalog  # noqa: E402
 
@@ -81,25 +82,23 @@ class RepositoryCase(unittest.TestCase):
         if before is None:
             self.skipTest(f"{OWNERS} is not on the merge base")
 
-        def totals(text: str) -> dict[str, int]:
-            catalog = tomllib.loads(text)
-            return {
-                row["id"]: row["expected_occurrences"]
-                for table in ("symbols", "module_symbols", "module_structures")
-                for row in catalog[table]
-            }
-
-        base, now = totals(before), totals((ROOT / OWNERS).read_text(encoding="utf-8"))
-        edited = sorted(
-            f"{identifier}: {base[identifier]} -> {now[identifier]}"
-            for identifier in base.keys() & now.keys()
-            if base[identifier] != now[identifier]
+        listed = subprocess.run(
+            ["git", "ls-tree", "--name-only", BASE, f"{owner_counts.DIRECTORY}/"], cwd=ROOT,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        ).stdout.split()
+        base_fragments = {
+            Path(path).name: base_file(path) or "" for path in listed if path.endswith(".toml")
+        }
+        now_names = frozenset(owner_counts.read_fragments(ROOT / owner_counts.DIRECTORY))
+        edited = owner_counts.direct_edits(
+            before, base_fragments, (ROOT / OWNERS).read_text(encoding="utf-8"), now_names
         )
         self.assertEqual(
-            edited,
+            list(edited),
             [],
-            f"{OWNERS} totals are closed to edits: record each difference as a delta row in "
-            "tests/rolling-producer-owners.d/<slug>.toml (`scripts/migrate-bookkeeping` does it)",
+            f"{OWNERS} totals move only when `scripts/release-cut` folds the recorded deltas in: "
+            "record each difference as a delta row in tests/rolling-producer-owners.d/<slug>.toml "
+            "(`scripts/migrate-bookkeeping` does it)",
         )
 
     def test_the_catalog_gains_no_paths_on_an_existing_point(self):
@@ -109,19 +108,23 @@ class RepositoryCase(unittest.TestCase):
         if before is None:
             self.skipTest(f"{CATALOG} is not on the merge base")
 
-        def paths(text: str) -> dict[str, set[str]]:
-            return {point["id"]: set(point["paths"]) for point in tomllib.loads(text)["points"]}
+        def paths(text: str) -> dict[str, list[str]]:
+            return {point["id"]: list(point["paths"]) for point in tomllib.loads(text)["points"]}
 
         base, now = paths(before), paths((ROOT / CATALOG).read_text(encoding="utf-8"))
-        added = sorted(
-            f"{identifier}: {path}"
+        # A rename or a narrowed glob changes a path in place and is allowed;
+        # what is refused is the list growing, which is the append every pull
+        # request used to make at the same list tail.
+        grown = sorted(
+            f"{identifier}: {len(base[identifier])} -> {len(now[identifier])} paths "
+            f"(new: {', '.join(sorted(set(now[identifier]) - set(base[identifier])))})"
             for identifier in base.keys() & now.keys()
-            for path in now[identifier] - base[identifier]
+            if len(now[identifier]) > len(base[identifier])
         )
         self.assertEqual(
-            added,
+            grown,
             [],
-            f"{CATALOG} is closed to new paths on an existing point: put them in "
+            f"{CATALOG} is closed to additional paths on an existing point: put them in "
             "validation/points.d/<slug>.toml (`scripts/migrate-bookkeeping` does it)",
         )
 
@@ -207,6 +210,55 @@ class ChangelogFragmentCase(unittest.TestCase):
         self.assertEqual(changelog.added_to_unreleased(base, added), ("- Zero.",))
         elsewhere = base.replace("- Old.\n", "- Old, reworded.\n")
         self.assertEqual(changelog.added_to_unreleased(base, elsewhere), ())
+
+
+class OwnerCountFoldCase(unittest.TestCase):
+    LEDGER = (
+        'version = 1\n\n[[symbols]]\nid = "flag"\npattern = "F"\nexpected_occurrences = 3\n\n'
+        '[[module_symbols]]\nid = "sentinel"\npattern = "S"\nexpected_occurrences = 0\n\n'
+        '[[module_structures]]\nid = "spawn"\n# Reviewed.\n\n# More review.\npattern = "spawn"\n'
+        'expected_occurrences = 10\n'
+    )
+    ROW = '[[changes]]\nid = "{}"\ndelta = {}\nreason = "{}"\n'
+
+    def test_the_fold_adds_every_delta_and_keeps_each_reason_on_its_row(self):
+        fragments = {
+            "b.toml": self.ROW.format("spawn", 1, "One joined fixture task."),
+            "a.toml": self.ROW.format("spawn", 2, "Two awaited cache reads.") + self.ROW.format("flag", -1, "Flag removed."),
+        }
+        folded = owner_counts.fold(self.LEDGER, fragments)
+        self.assertEqual(owner_counts.totals(folded), {"flag": 2, "sentinel": 0, "spawn": 13})
+        self.assertIn(
+            "# a (+2): Two awaited cache reads.\n# b (+1): One joined fixture task.\nexpected_occurrences = 13",
+            folded,
+        )
+        self.assertIn("# a (-1): Flag removed.\nexpected_occurrences = 2", folded)
+        # Folding is what the reviewed count already was, so the test that
+        # counts the source passes before and after it.
+        self.assertEqual(owner_counts.fold(folded, {}), folded)
+
+    def test_a_total_moves_only_by_the_deltas_of_the_files_folded_with_it(self):
+        fragments = {"a.toml": self.ROW.format("spawn", 2, "x"), "b.toml": self.ROW.format("spawn", 1, "y")}
+        names = frozenset(fragments)
+        # Untouched; a new fragment beside it; the release cut's fold.
+        self.assertEqual(owner_counts.direct_edits(self.LEDGER, fragments, self.LEDGER, names), ())
+        self.assertEqual(owner_counts.direct_edits(self.LEDGER, fragments, self.LEDGER, names | {"c.toml"}), ())
+        self.assertEqual(
+            owner_counts.direct_edits(self.LEDGER, fragments, owner_counts.fold(self.LEDGER, fragments), frozenset()), ()
+        )
+        # Folding one file of two moves the total by that file only.
+        partial = owner_counts.fold(self.LEDGER, {"a.toml": fragments["a.toml"]})
+        self.assertEqual(owner_counts.direct_edits(self.LEDGER, fragments, partial, frozenset({"b.toml"})), ())
+        # A hand edit, a fold that keeps its files, and files deleted without a fold.
+        edited = self.LEDGER.replace("expected_occurrences = 10", "expected_occurrences = 11")
+        self.assertEqual(owner_counts.direct_edits(self.LEDGER, fragments, edited, names), ("spawn: 10 -> 11",))
+        self.assertEqual(
+            owner_counts.direct_edits(self.LEDGER, fragments, owner_counts.fold(self.LEDGER, fragments), names),
+            ("spawn: 10 -> 13",),
+        )
+        self.assertEqual(
+            owner_counts.direct_edits(self.LEDGER, fragments, self.LEDGER, frozenset()), ("spawn: 10 -> 10",)
+        )
 
 
 class CatalogPathFragmentCase(unittest.TestCase):

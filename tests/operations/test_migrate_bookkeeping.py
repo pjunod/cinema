@@ -50,7 +50,8 @@ GRADLE = "android {\n        versionCode = {n}\n        versionName = \"0.8.0\"\
 PROJECT = 'settings:\n    MARKETING_VERSION: "0.8.0"\n    CURRENT_PROJECT_VERSION: "{n}"\n'
 README_OLD = "# Android\n\nIntro.\n\n> Status: **v0.8.0**, build `207` — an old change.\n>\n> Build `206` — older.\n\nBody.\n"
 PATCHES = (
-    "# Vendored Hiqlite\n\nPlurx carries two patches.\n\n"
+    "# Vendored Hiqlite\n\nPlurx carries two patches.\n\n**Owner:** someone.\n\n"
+    "Background on why the fork exists,\nover a few lines,\nso edits have room.\n\n"
     "| # | Patch | Kind | Upstream | Drop condition |\n|---:|---|---|---|---|\n"
     "| 1 | First | generic bug | pending M6 | Upstream fixes it. |\n"
     "| 2 | Second | plurx policy | — | Never; Plurx owns it. |\n\n"
@@ -221,10 +222,70 @@ class MigrateBookkeepingCase(unittest.TestCase):
         self.git("merge", "main", check=False)
         result = self.migrate()
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("MANUAL  STATUS.md", result.stdout)
-        # The effort itself was still written; only the page is left to settle.
-        self.assertTrue((self.root / "status.d/2026-11-15-new-effort.md").is_file())
+        self.assertIn("MANUAL  STATUS.md: not migrated and nothing written", result.stdout)
+        self.assertIn("status.d/<YYYY-MM-DD>-<slug>.md", result.stdout, "the instruction is exact")
+        self.assertIn("NOT complete", result.stdout)
+        # Nothing is in two places: the effort was not written, the page not touched.
+        self.assertFalse((self.root / "status.d/2026-11-15-new-effort.md").exists())
         self.assertIn("STATUS.md", self.git("diff", "--name-only", "--diff-filter=U").stdout)
+        self.assertIn("<<<<<<<", self.read("STATUS.md"))
+
+    def test_committed_conflict_markers_are_never_carried_into_a_fragment(self) -> None:
+        self.git("checkout", "-q", "-b", "feature", "old")
+        self.write("CHANGELOG.md", CHANGELOG.replace(
+            "### Fixed\n\n",
+            "### Fixed\n\n<<<<<<< HEAD\n- One side.\n=======\n- The other side.\n>>>>>>> other\n", 1))
+        self.commit("a changelog with committed markers")
+        self.git("merge", "main", check=False)
+        result = self.migrate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("conflict markers", result.stdout)
+        self.assertFalse((self.root / "changelog.d/feature.md").exists())
+        self.assertIn("<<<<<<< HEAD", self.read("CHANGELOG.md"), "the file is left as it was")
+
+    def patch_branch(self, extra) -> None:
+        self.git("checkout", "-q", "-b", "feature", "old")
+        text = PATCHES.replace("carries two patches", "carries three patches").replace(
+            "| 2 | Second | plurx policy | — | Never; Plurx owns it. |\n",
+            "| 2 | Second | plurx policy | — | Never; Plurx owns it. |\n"
+            "| 3 | Third | generic bug | pending M6 | Upstream fixes it. |\n",
+        ).replace(
+            "- The second patch.\n  Files: `src/a.rs`.\n",
+            "- The second patch.\n  Files: `src/a.rs`.\n- The third patch.\n  Files: `src/a.rs`.\n",
+        ).replace("(rows 1)", "(rows 1 and 3)")
+        self.write(LEDGER_FILE, extra(text))
+        self.commit("a patch the old way")
+        self.git("merge", "main", check=False)
+
+    def test_a_branch_edit_outside_the_patch_table_survives_the_move(self) -> None:
+        self.patch_branch(lambda text: text.replace(
+            "so edits have room.\n", "so edits have room.\nA sentence the branch added to the intro.\n"
+        ) + "\nA paragraph the branch added after the removal condition.\n")
+        result = self.migrate()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        ledger = self.read(LEDGER_FILE)
+        self.assertIn("A sentence the branch added to the intro.", ledger)
+        self.assertIn("A paragraph the branch added after the removal condition.", ledger)
+        # The row, its bullet and the restated count are gone; the target's wording is in.
+        self.assertNotIn("| 3 |", ledger)
+        self.assertNotIn("The third patch.", ledger)
+        self.assertIn("carries two numbered patches", ledger)
+        self.assertIn("(rows 1) retire", ledger)
+        self.assertTrue((self.root / "vendor/hiqlite/patches.d/third.toml").is_file())
+
+    def test_a_patch_row_beside_an_edit_to_an_existing_row_is_refused_whole(self) -> None:
+        # The branch restated the count on a second line, so the derived lines
+        # cannot be told apart from its own prose and the target's rewording
+        # of the count genuinely conflicts with it.
+        self.patch_branch(lambda text: text.replace(
+            "Plurx carries three patches.\n", "Plurx carries three patches.\nPlurx carries them with care.\n"))
+        result = self.migrate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"MANUAL  {LEDGER_FILE}: not migrated and nothing written", result.stdout)
+        self.assertIn("vendor/hiqlite/patches.d/<name>.toml", result.stdout)
+        # Not in two places: no patch file, and the ledger still holds the row.
+        self.assertFalse((self.root / "vendor/hiqlite/patches.d").exists())
+        self.assertIn("| 3 | Third |", self.read(LEDGER_FILE))
 
     def test_a_target_without_the_layout_is_refused(self) -> None:
         self.git("checkout", "-q", "-b", "feature", "old")

@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 ANDROID = "clients/android/app/build.gradle.kts"
 APPLE = "clients/apple/project.yml"
+OWNER_LEDGER = "tests/playback/rolling-producer-owners.toml"
 SPIKE_MANIFEST = "spikes/hiqlite-m0/Cargo.toml"
 SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 UNRELEASED = "## [Unreleased]"
@@ -331,6 +332,34 @@ def pending(root: Path) -> dict[str, str]:
     }
 
 
+def fold_owner_counts(root: Path) -> list[str]:
+    """Fold the recorded count changes into the owner ledger's totals.
+
+    tests/rolling-producer-owners.d/ holds one file per change between
+    releases (validation/owner_counts.py). The cut is the ledger's one writer:
+    it adds each difference to its total, keeps the reason as a comment on the
+    row, and deletes the files, so the directory starts each release empty.
+    """
+
+    from validation import owner_counts
+
+    ledger = root / OWNER_LEDGER
+    directory = root / owner_counts.DIRECTORY
+    if not ledger.is_file():
+        return []
+    try:
+        fragments = owner_counts.read_fragments(directory)
+        if not fragments:
+            return []
+        folded = owner_counts.fold(ledger.read_text(encoding="utf-8"), fragments)
+    except owner_counts.OwnerCountError as exc:
+        raise CutError(str(exc)) from exc
+    ledger.write_text(folded, encoding="utf-8")
+    for name in fragments:
+        (directory / name).unlink()
+    return [OWNER_LEDGER, *(f"{owner_counts.DIRECTORY}/{name}" for name in fragments)]
+
+
 def cut(root: Path, version: str, date: str) -> list[str]:
     """Rewrite the release files in place and return the paths it changed."""
 
@@ -366,7 +395,7 @@ def cut(root: Path, version: str, date: str) -> list[str]:
     folded = [f"{DIRECTORY}/{name}" for name in fragments]
     for path in folded:
         (root / path).unlink()
-    return [*moved, *sorted(claims), *folded]
+    return [*moved, *sorted(claims), *folded, *fold_owner_counts(root)]
 
 
 def main(argv: list[str] | None = None) -> int:

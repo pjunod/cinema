@@ -58,12 +58,23 @@ _NUMBER_LINES = {
 }
 
 
+_MARKER = re.compile(r"(?m)^(?:<{7}|={7}|>{7})(?: |$)")
+
+
+class Refused(Exception):
+    """A step cannot move this file's bookkeeping; nothing was written for it."""
+
+
 class Migration:
     def __init__(self, root: Path, theirs: str, slug: str) -> None:
         self.root, self.theirs, self.slug = root, theirs, slug
         self.base = self.git("merge-base", "HEAD", theirs).strip()
         self.done: list[str] = []
         self.manual: list[str] = []
+        # Fragments a step wants to write. They reach the disk only when the
+        # shared file they came out of settles, so a refusal never leaves an
+        # entry in two places.
+        self.pending: list[tuple[str, str, bool]] = []
 
     def git(self, *args: str, check: bool = True) -> str:
         result = subprocess.run(
@@ -94,16 +105,35 @@ class Migration:
         target.write_text(text, encoding="utf-8")
         self.git("add", "--", path)
 
-    def fragment(self, directory: str, suffix: str, text: str, *, append: bool = True) -> str:
-        path = f"{directory}/{self.slug}{suffix}"
-        existing = self.root / path
-        if append and existing.is_file() and existing.read_text(encoding="utf-8") != text:
-            text = existing.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + text
-        self.write(path, text)
+    def stage(self, path: str, text: str, *, append: bool = False) -> str:
+        """Queue a fragment; it is written when its shared file settles."""
+
+        if _MARKER.search(text):
+            raise Refused(
+                f"the text bound for {path} carries merge conflict markers the branch "
+                "committed; resolve them in the shared file, commit, and run this again"
+            )
+        self.pending.append((path, text, append))
         return path
 
-    def settle(self, path: str, stripped: str, base: str, theirs: str, what: str) -> bool:
-        """Three-way merge the branch's copy, less its bookkeeping, with the target's."""
+    def fragment(self, directory: str, suffix: str, text: str, *, append: bool = True) -> str:
+        return self.stage(f"{directory}/{self.slug}{suffix}", text, append=append)
+
+    def flush(self) -> None:
+        for path, text, append in self.pending:
+            existing = self.root / path
+            if append and existing.is_file() and existing.read_text(encoding="utf-8") != text:
+                text = existing.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + text
+            self.write(path, text)
+        self.pending.clear()
+
+    def settle(self, path: str, stripped: str, base: str, theirs: str, what: str, how: str = "") -> bool:
+        """Three-way merge the branch's copy, less its bookkeeping, with the target's.
+
+        Only a clean merge writes anything: the file and the fragments staged
+        for it. Otherwise nothing changes on disk and the file is named with
+        what to do by hand.
+        """
 
         with tempfile.TemporaryDirectory() as temporary:
             names = []
@@ -115,11 +145,15 @@ class Migration:
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
         if merged.returncode != 0:
+            staged = ", ".join(sorted({item[0] for item in self.pending})) or "nothing"
+            self.pending.clear()
             self.manual.append(
-                f"{path}: {what} moved out, but the branch's other edits to this file "
-                "conflict with the target's; resolve it by hand"
+                f"{path}: not migrated and nothing written ({staged} was not created). The "
+                "branch's other edits to this file conflict with the target's. "
+                + (how or "Resolve the file by hand, then run this again.")
             )
             return False
+        self.flush()
         self.write(path, merged.stdout)
         self.done.append(f"{path}: {what}")
         return True
@@ -176,7 +210,11 @@ class Migration:
                 continue
             kept.append(line)
         stripped = self.same_but_for_blank_lines("\n".join(kept), base)
-        self.settle(CHANGELOG, stripped, base, theirs, f"{sum(map(len, added.values()))} changelog line(s) -> {path}")
+        self.settle(
+            CHANGELOG, stripped, base, theirs, f"{sum(map(len, added.values()))} changelog line(s) -> {path}",
+            "Take the target's CHANGELOG.md (`git checkout --theirs CHANGELOG.md`) and put the "
+            f"lines you added under [Unreleased] in {path}.",
+        )
 
     # --- tests/client-fixes.toml ------------------------------------------
 
@@ -203,7 +241,11 @@ class Migration:
             self.manual.append(f"{CLIENT_FIXES}: could not isolate the new rows; move them by hand")
             return
         path = self.fragment("tests/client-fixes.d", ".toml", text)
-        self.settle(CLIENT_FIXES, stripped, base, theirs, f"{len(moved)} client fix row(s) -> {path}")
+        self.settle(
+            CLIENT_FIXES, stripped, base, theirs, f"{len(moved)} client fix row(s) -> {path}",
+            f"Take the target's ledger, re-apply your edits to existing rows, and put your new "
+            f"[[fixes]] rows in {path}.",
+        )
 
     # --- tests/playback/rolling-producer-owners.toml ----------------------
 
@@ -257,7 +299,11 @@ class Migration:
         text = "\n".join(rows)
         tomllib.loads(text)
         path = self.fragment("tests/rolling-producer-owners.d", ".toml", text, append=False)
-        self.settle(OWNERS, stripped, base, theirs, f"{len(rows)} count change(s) -> {path}")
+        self.settle(
+            OWNERS, stripped, base, theirs, f"{len(rows)} count change(s) -> {path}",
+            f"Take the target's ledger and record each total you changed as a [[changes]] row "
+            f"(id, delta, reason) in {path}.",
+        )
 
     # --- validation/points.toml -------------------------------------------
 
@@ -296,7 +342,11 @@ class Migration:
             for identifier, extra in sorted(added.items())
         ).rstrip("\n") + "\n"
         path = self.fragment("validation/points.d", ".toml", text)
-        self.settle(CATALOG, stripped, base, theirs, f"{sum(map(len, added.values()))} governed path(s) -> {path}")
+        self.settle(
+            CATALOG, stripped, base, theirs, f"{sum(map(len, added.values()))} governed path(s) -> {path}",
+            f"Resolve validation/points.toml without the paths you added to existing points, and "
+            f"put those in {path} as [[paths]] rows (point, add).",
+        )
 
     # --- STATUS.md --------------------------------------------------------
 
@@ -321,7 +371,7 @@ class Migration:
                 name = existing[-1].name if existing else None
             date = block["date"] or dt.date.today().isoformat()
             name = name or f"{date}-{slug}.md"
-            self.write(
+            self.stage(
                 f"{status_entries.DIRECTORY}/{name}",
                 status_entries.entry_text(block["title"], block["body"]),
             )
@@ -331,7 +381,11 @@ class Migration:
         if not written:
             return
         stripped = self.same_but_for_blank_lines("\n".join(lines), base)
-        self.settle(STATUS, stripped, base, theirs, f"{written} effort(s) -> {status_entries.DIRECTORY}/")
+        self.settle(
+            STATUS, stripped, base, theirs, f"{written} effort(s) -> {status_entries.DIRECTORY}/",
+            "Take the target's STATUS.md (`git checkout --theirs STATUS.md`) and write each of "
+            "your efforts as status.d/<YYYY-MM-DD>-<slug>.md (status.d/README.md).",
+        )
 
     # --- vendor/*/PLURX-PATCH.md ------------------------------------------
 
@@ -382,27 +436,27 @@ class Migration:
                 fields = {"patch": title, "kind": kind, "upstream": upstream, "drop": condition}
                 body = "".join(f"{key} = {json.dumps(value, ensure_ascii=False)}\n" for key, value in fields.items())
                 body += f"description = '''\n{text}\n'''\n"
-                target = f"{crate}/{vendor_patches.DIRECTORY}/{name}.toml"
-                self.write(target, body)
-                written.append(target)
+                written.append(self.stage(f"{crate}/{vendor_patches.DIRECTORY}/{name}.toml", body))
                 drop.update({index, *bullet})
             kept = [line for i, line in enumerate(lines) if i not in drop]
-            start = next((i for i, line in enumerate(kept) if line.startswith("| # |")), 0)
-            end = next((i for i, line in enumerate(kept) if line.startswith("Remove this vendor")), len(kept))
-            base_kept = base.split("\n")
-            base_start = next((i for i, line in enumerate(base_kept) if line.startswith("| # |")), 0)
-            base_end = next((i for i, line in enumerate(base_kept) if line.startswith("Remove this vendor")), len(base_kept))
-            text = lambda rows: [line for line in rows if line.strip()]  # noqa: E731
-            if text(kept[start:end]) != text(base_kept[base_start:base_end]):
-                self.manual.append(
-                    f"{path}: patches moved to {', '.join(written)}, but the branch also edited "
-                    "existing rows or bullets; carry those edits over by hand"
-                )
-                continue
-            # Only the count and the removal paragraph's row lists differ now.
-            self.write(path, theirs)
-            self.done.append(f"{path}: {len(written)} patch(es) -> {', '.join(written)}")
-            self.patch_count_constants()
+            # The count in words and the removal paragraph's row lists restate
+            # what is derived now; put those lines back as the branch found
+            # them. Every other edit the branch made stays and is merged.
+            derived = re.compile(r"Plurx carries \S+ |retire the \w+ generic bugs|\(rows? \d")
+            base_derived = [line for line in base.split("\n") if derived.search(line)]
+            indexes = [i for i, line in enumerate(kept) if derived.search(line)]
+            if len(indexes) == len(base_derived):
+                for index, line in zip(indexes, base_derived):
+                    kept[index] = line
+            stripped = self.same_but_for_blank_lines("\n".join(kept), base)
+            if self.settle(
+                path, stripped, base, theirs, f"{len(written)} patch(es) -> {', '.join(written)}",
+                f"Remove the rows you added from the table and their bullets, put the count "
+                f"sentence and the `(rows ...)` lists back as {self.theirs[:12]} has them, keep your "
+                f"other edits, and record each patch as {crate}/{vendor_patches.DIRECTORY}/<name>.toml "
+                f"({crate}/{vendor_patches.DIRECTORY}/README.md).",
+            ):
+                self.patch_count_constants()
 
     def patch_count_constants(self) -> None:
         """The ledger test no longer states a total; put its constants back."""
@@ -502,12 +556,19 @@ def main(argv: list[str] | None = None) -> int:
     for step in (migration.changelog, migration.client_fixes, migration.owners, migration.catalog,
                  migration.status, migration.vendor_ledgers, migration.build_numbers,
                  migration.android_readme):
-        step()
+        try:
+            step()
+        except (Refused, changelog_fragments.FragmentError) as refusal:
+            migration.pending.clear()
+            migration.manual.append(f"{step.__name__}: not migrated and nothing written; {refusal}")
 
     for line in migration.done:
         print(f"moved   {line}")
     for line in migration.manual:
         print(f"MANUAL  {line}")
+    if migration.manual:
+        print("migrate-bookkeeping: NOT complete — the MANUAL items above were left exactly as "
+              "they were; do them, then run this again.")
     if not migration.done and not migration.manual:
         print("migrate-bookkeeping: this branch has no shared-file bookkeeping to move")
     unmerged = [line for line in migration.git("diff", "--name-only", "--diff-filter=U").splitlines() if line]

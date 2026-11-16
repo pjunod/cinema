@@ -299,6 +299,30 @@ class ReleaseCutCase(unittest.TestCase):
             (root / "CHANGELOG.md").read_text(encoding="utf-8"),
         )
 
+    def test_the_cut_folds_recorded_count_changes_into_the_owner_ledger(self):
+        root = self.tree()
+        ledger = root / release_cut.OWNER_LEDGER
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text(
+            'version = 1\n\n[[symbols]]\nid = "flag"\npattern = "F"\nexpected_occurrences = 3\n\n'
+            '[[module_symbols]]\nid = "s"\npattern = "S"\nexpected_occurrences = 0\n\n'
+            '[[module_structures]]\nid = "spawn"\npattern = "spawn"\nexpected_occurrences = 10\n'
+        )
+        directory = root / "tests/rolling-producer-owners.d"
+        directory.mkdir()
+        (directory / "README.md").write_text("# not a fragment\n")
+        (directory / "pr-a.toml").write_text('[[changes]]\nid = "spawn"\ndelta = 2\nreason = "Two joined tasks."\n')
+        (directory / "pr-b.toml").write_text('[[changes]]\nid = "spawn"\ndelta = 1\nreason = "One awaited read."\n')
+        result = self.run_cut(root, "--date", "2026-09-28")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        folded = ledger.read_text()
+        self.assertIn(
+            "# pr-a (+2): Two joined tasks.\n# pr-b (+1): One awaited read.\nexpected_occurrences = 13",
+            folded,
+        )
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["README.md"])
+        self.assertIn(f"changed {release_cut.OWNER_LEDGER}", result.stdout)
+
     def test_a_malformed_fragment_refuses_the_cut_and_nothing_is_written(self):
         root = self.tree()
         self.fragments(root, bad="- An entry under no category.\n")

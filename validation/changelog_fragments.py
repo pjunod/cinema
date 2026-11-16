@@ -42,6 +42,8 @@ class FragmentError(ValueError):
 def parse(text: str, where: str) -> list[tuple[str, str]]:
     """`(category, entries)` for each `###` block of a fragment or section."""
 
+    if re.search(r"(?m)^(?:<{7}|={7}|>{7})(?: |$)", text):
+        raise FragmentError(f"{where}: carries merge conflict markers")
     headings = list(_HEADING.finditer(text))
     if text[: headings[0].start() if headings else len(text)].strip():
         raise FragmentError(f"{where}: text before the first `### <Category>` heading")
