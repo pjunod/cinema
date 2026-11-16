@@ -53,6 +53,7 @@ estimate, not permission to weaken the census or erase local state.
 | crates/plurxd/src/http/live_tv.rs, http/internal_live_tv.rs | Replace raw fence reads with facade answers without changing restart-admission semantics. |
 | crates/plurxd/src/cluster/census.rs | Lower only genuinely removed per-file, per-class sites and recompute the exact ceiling. |
 | verification/*/mapping.json | Review cited anchors and repin whole-file digests for changed sources; no invented semantic acceptance. |
+| validation/points.toml | Map the new execution plan to the existing cluster.membership functionality point. |
 | docs/cluster/CLUSTER-FACADE-BUILD.md, docs/cluster/README.md, docs/features/PROJECT-BACKLOG.md | Record slice ownership, source delivery, qualification and remaining slices without claiming deployment. |
 
 No raw serving access exists in http/dvr.rs on the inspected main. Inspect it
