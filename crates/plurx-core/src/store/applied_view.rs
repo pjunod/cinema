@@ -1526,6 +1526,18 @@ impl AppliedView {
             .map(|snapshot| (snapshot, ViewSource::Authority)))
     }
 
+    /// This node's applied mark when the view reads a local replica: the
+    /// handle other node-local caches (the cluster peer directory) stamp
+    /// their answers with. `None` on SQLite and for a remote authority.
+    #[cfg(feature = "hiqlite-store")]
+    #[must_use]
+    pub fn applied_mark(&self) -> Option<hiqlite::AppliedMarkHandle> {
+        match &self.mode {
+            Mode::Replicated(replicated) => Some(replicated.mark.clone()),
+            _ => None,
+        }
+    }
+
     /// Advisory facts, loaded now.
     #[must_use]
     pub fn observation(&self) -> AppliedViewObservation {

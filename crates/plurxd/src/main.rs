@@ -24,6 +24,7 @@ mod backup;
 mod cachekeep;
 mod channel_subjects;
 mod clock_offset;
+mod cluster;
 mod copy_analysis;
 mod copy_index_v3;
 mod copy_normalization;

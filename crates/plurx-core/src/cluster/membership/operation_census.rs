@@ -38,6 +38,7 @@ use std::collections::BTreeSet;
 /// keeps this list complete.
 const SOURCES: &[(&str, &str)] = &[
     ("membership.rs", include_str!("../membership.rs")),
+    ("membership/directory.rs", include_str!("directory.rs")),
     ("membership/lifecycle.rs", include_str!("lifecycle.rs")),
     (
         "membership/sharing_source_schema.rs",

@@ -6058,6 +6058,7 @@ pub(crate) struct MetricsState {
     start_attempts: Arc<crate::playstart::StartAttempts>,
     route_cache: Arc<crate::media_sessions::RouteCacheMetrics>,
     applied: plurx_core::store::AppliedViewMetrics,
+    cluster_directory: crate::cluster::Directory,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -6083,6 +6084,7 @@ impl FromRef<AppState> for MetricsState {
             start_attempts: Arc::clone(&state.start_attempts),
             route_cache: state.media_sessions.route_cache_metrics(),
             applied: state.applied.metrics_handle(),
+            cluster_directory: state.cluster.directory(),
         }
     }
 }
@@ -6285,6 +6287,21 @@ fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot
             histogram.count,
         ));
     }
+}
+
+/// Cluster facade B2: peer-directory reads by outcome. Loaded at scrape time
+/// from atomics; no Store read, no timer.
+fn render_cluster_directory_metrics(
+    reads: plurx_core::cluster::membership::directory::DirectoryReadCounts,
+) -> String {
+    format!(
+        "# HELP plurx_cluster_directory_reads_total Peer-directory reads by outcome: hit answered from the cached roster snapshot, reload a local read that replaced it, uncached a local read that could not be cached (no applied-mark stamp, or the roster moved during the read).\n\
+         # TYPE plurx_cluster_directory_reads_total counter\n\
+         plurx_cluster_directory_reads_total{{outcome=\"hit\"}} {}\n\
+         plurx_cluster_directory_reads_total{{outcome=\"reload\"}} {}\n\
+         plurx_cluster_directory_reads_total{{outcome=\"uncached\"}} {}\n",
+        reads.hit, reads.reload, reads.uncached
+    )
 }
 
 /// Playback-start E1a: the applied view's reads and the baseline it is sized
@@ -6632,7 +6649,8 @@ pub(crate) async fn metrics(
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot())
-        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait());
+        + &render_applied_view_metrics(&state.applied.observation(), &hiqlite::db_read_pool_wait())
+        + &render_cluster_directory_metrics(state.cluster_directory.reads());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\

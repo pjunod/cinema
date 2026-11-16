@@ -42,6 +42,7 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
+pub mod directory;
 pub mod lifecycle;
 mod sharing_source_schema;
 

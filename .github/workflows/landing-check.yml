@@ -1,0 +1,50 @@
+name: landing check
+
+# Forgejo reads the repository's existing .github/workflows directory.
+# No path filter: every push to main is judged, whatever it changed.
+#
+# `make history-check` in ci.yml reads a corrective pull request's
+# `Regression-Test:` lines from its landing commit, and ci.yml runs on a
+# manual dispatch. This asks the same question of each landing as it arrives,
+# so a merge made around `scripts/land` or the merge train is named within
+# minutes instead of at the next dispatch (thirteen were not, 2026-11-14/15).
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: landing-check-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  landing:
+    name: landings carry their Regression-Test lines
+    if: github.server_url != 'https://github.com' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:6a989b4d92f55b29befa9eae08f9cd59940b3067d771629549ebf5ab1f4d433d
+      options: --memory 7g --memory-swap 14g --cpus 3 --pids-limit 4096
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Every landing in this push carries its pull request's Regression-Test lines
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LANDING_BEFORE: ${{ github.event.before }}
+          LANDING_SHA: ${{ github.sha }}
+        run: python3 -m validation.landing check
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
