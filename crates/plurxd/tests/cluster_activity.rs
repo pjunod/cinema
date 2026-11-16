@@ -2334,12 +2334,16 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     // intent shape's separate `record_desired_selection` write is gone (9 ->
     // 8), and the claim answers the recorded row by one authority read that
     // replaces the `desired_row` read-back that write made (21 stays 21).
+    // Source leases: the playback lease is written once, by
+    // `register_foreground_source`; the separate
+    // `activate_foreground_source_custody` write is gone from the three
+    // shapes that read source (8/9/8 -> 7/8/7).
     let expected: [(&str, (u64, u64, u64)); 5] = [
         ("first play, VOD index", (23, 2, 6)),
         ("reopen, new position", (30, 2, 8)),
-        ("Auto encode, VOD", (19, 2, 8)),
-        ("index miss, rolling copy", (20, 2, 9)),
-        ("caps-v2 Auto, intent", (21, 2, 8)),
+        ("Auto encode, VOD", (19, 2, 7)),
+        ("index miss, rolling copy", (20, 2, 8)),
+        ("caps-v2 Auto, intent", (21, 2, 7)),
     ];
     let observed = measured
         .iter()
