@@ -4,7 +4,7 @@
 The Q23 MMR candidate failed native equivalence. The replacement method,
 `dv-refit-safe-v2-mmr12`, publishes and scores a common Q12 chroma grid;
 its production-written candidate passes all 48 native points and controls.
-Independent review and the PR's fast lane remain open.
+Independent review passed; the PR's fast lane remains open.
 Milestone 7 follows served F+ scores · **Updated:** 2026-11-16 · **Written:** 2026-11-12 ·
 **Owner:** Codex (continuing Claude's reviewed candidate) · **Decision:** Paul approved building F+
 and per-title re-encode trials against it, 2026-11-12
@@ -115,8 +115,15 @@ and paperwork 17/17 pass. Store inventory and the three focused daemon
 regressions pass; the daemon cases ran under a 20 GiB/no-swap/four-CPU
 learner allocation after their first binary build exhausted its 15 GiB cap.
 Earlier native 30/36 passes have historical source scopes. PR #1565 stays
-`WIP:` pending independent review and required CI; M6 now passes for the new method. `MERGE_TRAIN` is on; readiness then boards
+`WIP:` pending required CI; independent review and M6 pass for the new method. `MERGE_TRAIN` is on; readiness then boards
 the train under [the merge convention](../ci/MERGE-TRAIN.md).
+
+Current-main source `35d109d5e` (main `7829748b9` included) passes formatting,
+affected all-target compilation and Clippy with warnings denied. Its production
+export writes the exact same qualified RPU. The native receipt preserves its
+original measurement scope and separately binds this export and its verified
+source manifest; no accepted capture was repeated. Independent adversarial
+review of the integration found no code blockers. Unit tests await the fast lane.
 
 ## 1. Objective
 

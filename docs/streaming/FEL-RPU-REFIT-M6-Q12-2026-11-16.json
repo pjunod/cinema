@@ -15,6 +15,41 @@
     "source_rpu_sha256": "7d2b4d39312767afd1e957a6572c8c7e47c3a3c2007cf85ad28897a6137eb9fb"
   },
   "continuation_selector_sha256": "1b625bc593b510ddcc79aac2795b1e789fe317100ef5090b1e8b1cbc59cb904a",
+  "current_source_binding": {
+    "adversarial_review_sha256": "16dd059ce634513a57d2bae618d63c0666c873440939933fa470fdf5676dc423",
+    "build_admission_sha256": "f858070dd422c9216ca065097e1b3526b7c4d90886e02d4cf80123754fea4a70",
+    "build_release_sha256": "0cb1050a9d7b91db8b4cc8523d1b018d815d0c9287435d1e778aa3fe18496cec",
+    "candidate_rpu_bytes": 435,
+    "candidate_rpu_sha256": "7d2b4d39312767afd1e957a6572c8c7e47c3a3c2007cf85ad28897a6137eb9fb",
+    "changed_prior_native_closure_paths": [
+      "tools/dv_processing/base_dv_renderer.h",
+      "tools/dv_processing/controls/build_target_controls.sh",
+      "tools/dv_processing/dv_metadata.h",
+      "tools/dv_processing/fel_renderer.h"
+    ],
+    "current_production_rpu_byte_identical": true,
+    "fit_version": "dv-refit-safe-v2-mmr12",
+    "independent_native_mapping_readback_identical": true,
+    "kind": "plurx-m6-current-source-binding-v1",
+    "native_measurement_receipt_sha256": "d6b63f300a2c2152ea1c6ba5170055ac932b21143121c0a1e98c3ddb4c949486",
+    "native_measurement_source_commit": "685964948fa4a4c74f9c4f347eafa9807fc9ca48",
+    "native_recapture_required": false,
+    "new_native_captures": 0,
+    "producer_source_sha256": "f4d3f99c0c0e2a452484b3ee4a5f4184a9d2e7818f6407418c96cafa71adb161",
+    "production_export_receipt_sha256": "69869b0c867825573b79d8d0404ae3bae3bb5a6c4579f87c2b3e856793a8a61a",
+    "retained_helper_json_sha256": "cb3d0a11e68f1ca5f414457d031b90776fe881102226f067b1b53eb40cc6f667",
+    "retained_source_p7_sha256": "5e3685c2c2d0822241f1d349178fb331b2143261fd50e21bf76bf8d642e6ac8e",
+    "retained_statistics_basis": "Reviewed current-main GPU-only master-frame changes do not reach --refit-stats: unchanged map_fel_rpu and CPU refit_compose. No statistics decoder/ABI/pooling change.",
+    "scope": "Current-source compile/Clippy and real production export bind the previously qualified native program. Original source-scoped measurement receipts remain immutable.",
+    "source_commit": "35d109d5e80d3893251911e192c08bc83f7609dc",
+    "source_manifest_sha256": "fa02762bb12b81efb35d7fa096338062bcae122d6c8ef915b3588d16406d5d00",
+    "source_verified_blobs": 7286,
+    "static_exit_code": 0,
+    "static_log_sha256": "4ca7ed7ea98db129e4a3c9b9ac223261da1c7bcaad4542d031ccffa03077d94d",
+    "unit_tests_run": false,
+    "updated_utc": "2026-11-16T20:14:05.360637+00:00"
+  },
+  "current_source_binding_receipt_sha256": "d9652d95a1e39464c07036a94ccea5cbf2a58ead6e5eedfae8c1b3bd73e81811",
   "deployment_performed": false,
   "epochs": [
     {
@@ -127,6 +162,7 @@
   "full48_qualified": true,
   "kind": "plurx-m6-production-full48-v1",
   "native_input_closure_sha256": "fbd550398087da8f3255fb59dfff9bdeb3219f0351337bb103c37663865ff1d8",
+  "native_measurement_receipt_sha256": "d6b63f300a2c2152ea1c6ba5170055ac932b21143121c0a1e98c3ddb4c949486",
   "production_source_commit": "74bd64d4daaae795ed826eef907d4ed08c1cea3c",
   "qualified_points": [
     0,
