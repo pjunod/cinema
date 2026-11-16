@@ -799,7 +799,8 @@ impl JobFence {
         let Some(token) = self.source_token() else {
             return Ok(false);
         };
-        self.0
+        let permitted = self
+            .0
             .store
             .background_source_may_continue(
                 plurx_core::store::background_jobs_resources::BackgroundSourceOwner::Job {
@@ -807,7 +808,12 @@ impl JobFence {
                 },
                 unix_ms()?,
             )
-            .await
+            .await;
+        #[cfg(test)]
+        if matches!(&permitted, Ok(false)) {
+            faults::worker::at(faults::worker::Point::SourcePermissionDenied).await;
+        }
+        permitted
     }
 
     /// Caller must hold a verified whole-group stop acknowledgement.
