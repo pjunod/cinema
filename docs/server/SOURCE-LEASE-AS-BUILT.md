@@ -1,6 +1,6 @@
 # Source leases and node capacity — as built
 
-**Status:** built; review fixes committed, [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) in final qualification · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Written:** 2026-11-15
+**Status:** built; review fixes committed, [PR #1728](http://forge.lan:3000/noirr/plurx/pulls/1728) records qualification and landing · **Plan:** [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) · **Written:** 2026-11-15
 
 
 Built on `claude/source-lease-steps-2-4` (stacked on PR #1597) by Claude Opus
@@ -248,7 +248,7 @@ Gap-fill reproduces main's `copy_sync_unverified` refusal. The viewer-ceiling
 fixture depended on a process-global engine snapshot: its fake queued digest
 could be classified stranded during a parallel run. It now fills the ceiling
 with running background work, independent of that snapshot; the PR records its
-exact failed-test retry. Production queue policy is unchanged.
+successful exact failed-test retry. Production queue policy is unchanged.
 
 Current main was integrated through `32fa105ee`. The enabled merge train
 qualifies the actual candidate and owns landing. Local results above do not
