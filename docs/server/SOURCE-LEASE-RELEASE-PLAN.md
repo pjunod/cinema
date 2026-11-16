@@ -1,6 +1,6 @@
 # Source lease release — lease expiry frees source capacity, nothing else does
 
-**Status:** step 1 open (PR #1597) · step 2 built on branch `claude/source-lease-steps-2-4` (on #1597; not yet a PR) · steps 3–4 proposed · **Owner:** Claude
+**Status:** step 1 open (PR #1597) · steps 2–4 built on branch `claude/source-lease-steps-2-4` (on #1597; not yet a PR; steps 3–4 per [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md)) · **Owner:** Claude
 Opus 5.5 (session_01BCWLA1BAXKSuq2TLMK9Zna) · **Written:** 2026-11-14
 
 Companion to [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md), which
@@ -134,7 +134,7 @@ Two schema texts still describe the old model and change with step 3:
 **Acceptance:** `cargo clippy --all-targets -D warnings` is clean; the fast
 lane is green; Activity shows no recovery panel after a restart.
 
-### 4.3 Step 3 — one lease table
+### 4.3 Step 3 — one lease table (built)
 
 Replace `background_source_custody`, `foreground_source_owners` and the
 `source_io_occupancy` union with one table:
@@ -146,7 +146,7 @@ source_leases(owner, node_id, resource_key, expires_at_ms)
 The claim checks it, and the holder's heartbeat renews it. This needs a
 source-arbitration extension v2 with an explicit upgrade from v1.
 
-### 4.4 Step 4 — capacity per node, not one cluster slot (decision for Paul)
+### 4.4 Step 4 — capacity per node, not one cluster slot (built; Paul decided 2026-11-15)
 
 Today, with no storage domains, the whole cluster shares **one**
 `source_io` slot. A per-node default (for example two background readers per
@@ -172,3 +172,4 @@ one node from serialising the cluster.
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 | PR #1597 opened as a draft |
 | 2026-11-14 | Claude Opus 5.5 · session_01BCWLA1BAXKSuq2TLMK9Zna | Step 1 review | Fable review: 5 should-fix, 3 nits, all addressed (stamped grace, veto removed, witness retirement, role unpinning, shared lapse expression) |
 | 2026-11-15 | Claude Opus 5.5 · session_01BCWL9zn5U4msvhC85BdESw | Step 2 | proof machinery removed (branch claude/source-lease-steps-2-4) |
+| 2026-11-15 | Claude Opus 5.5 · session_01BCWL9zn5U4msvhC85BdESw | Steps 3–4 | one `source_leases` table; per-node readers (default 2, per-node override) and per-domain `source_readers` (default 1); built on claude/source-lease-steps-2-4 |

@@ -11,6 +11,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 | File | Answers | |
 |---|---|---|
 | [SOURCE-LEASE-RELEASE-PLAN.md](SOURCE-LEASE-RELEASE-PLAN.md) | Plan: lease expiry alone frees source capacity — why the physical-proof custody model is retired, the 60 s grace, and the removal steps. | open |
+| [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md) | Build plan and as-built record for source-lease steps 3 and 4: one `source_leases` table, per-node and per-domain source readers. | built |
 | [JOB-QUEUE-ROOT-CAUSE-AND-FIX.md](JOB-QUEUE-ROOT-CAUSE-AND-FIX.md) | November queue incident, recovered scan requests, cross-type scheduling, Activity completion rates, and remaining acceptance milestones. | open |
 | [STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md](STORAGE-DOMAINS-DEFERRED-APPLY-STATUS.md) | Deferred storage-domain implementation, ownership, review and qualification state. | built |
 | [STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md](STORAGE-DOMAINS-DEFERRED-APPLY-PLAN.md) | Plan: a storage-domain save always succeeds and applies once no live holder or library job depends on the changed keys; Settings shows it pending. | built |

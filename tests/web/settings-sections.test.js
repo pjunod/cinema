@@ -2837,3 +2837,30 @@ test("display targeting remains editable with unavailable or unmet advice",()=>{
   }
   assert.doesNotMatch(shippedSource("displayTargetHdr10Card"),/disabled/);
 });
+
+test("Libraries owns background source readers, and a lowered limit saves with the nodes still above it", async () => {
+  assert.match(shippedSource("librariesPanel"), /\$\{sourceReadersCard\(settings\)\}\$\{storageDomainsCard\(\)\}/, "a normal setting beside the storage domains, not the Developer tab");
+  const esc = value => String(value ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
+  const effect = new Function(`${shippedSource("sourceReadersEffect")}\nreturn sourceReadersEffect;`)();
+  assert.equal(effect({nodes:[{node_id:"node-a",maintenance:2,readers:2,waiting_to_apply:false}],domains:[]}), "Saved — in effect.");
+  assert.equal(effect({nodes:[{node_id:"node-a",maintenance:3,readers:1,waiting_to_apply:true}],domains:[{domain_id:"nas",maintenance:2,readers:1,waiting_to_apply:true}]}),
+    "Saved — node-a is running 3 of 1; domain nas is running 2 of 1; applies as they finish.");
+  const rows = new Function("esc", `${shippedSource("sourceReadersRows")}\nreturn sourceReadersRows;`)(esc);
+  const html = rows({source_readers_node_overrides:{"node-b":4},storage_domain_source_readers:{}},
+    {nodes:[{node_id:"node-a",maintenance:1,live:0}],domains:[]},["nas"]);
+  assert.match(html, /data-source-reader-node="node-a"[\s\S]*placeholder="Use default"/);
+  assert.match(html, /data-source-reader-node="node-b"[\s\S]*value="4"/, "an override for an idle node is listed");
+  assert.match(html, /data-source-reader-domain="nas"[\s\S]*placeholder="1"/);
+  const body = {};
+  const elements = {"source-readers-per-node":{value:"1"},"source-readers-error":{textContent:""},"source-readers-status":{textContent:""}};
+  const rowsIn = [{dataset:{sourceReaderNode:"node-a"},querySelector:()=>({value:""})}];
+  const domainsIn = [{dataset:{sourceReaderDomain:"nas"},querySelector:()=>({value:"2"})}];
+  const toasts = [];
+  const save = new Function("api","document","toast","cacheSettings","setCardSaved",`${shippedSource("sourceReadersEffect")}\n${shippedSource("saveSourceReaders")}\nreturn saveSourceReaders;`)(
+    async (path, options) => { if (path === "/settings") { Object.assign(body, options.body); return {}; } return {source_capacity:{nodes:[{node_id:"node-a",maintenance:3,readers:1,waiting_to_apply:true}],domains:[]}}; },
+    {getElementById:id=>elements[id],querySelectorAll:selector=>selector.includes("node")?rowsIn:domainsIn},
+    text=>toasts.push(text), ()=>{}, ()=>{});
+  await save(null);
+  assert.deepEqual(body, {source_readers_per_node:1,source_readers_node_overrides:{"node-a":null},storage_domain_source_readers:{nas:2}});
+  assert.match(elements["source-readers-status"].textContent, /node-a is running 3 of 1; applies as they finish/);
+});

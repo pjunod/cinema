@@ -807,14 +807,14 @@ test("Jobs reports independent worker rates and flags overdue scans even when ot
     assert.match(paint(d),/Job processing rate unavailable/);
   } finally {Object.assign(painter.durable,prior,{processing:prior.processing});painter.view.tab=tab;}
 });
-test("source custody held well past its lease stays prominent after its job disappears and escapes identities", () => {
+test("a source lease left long past its expiry stays prominent after its job disappears and escapes identities", () => {
   Object.assign(painter.durable,{rows:[],activeJobs:[]});
   const html=paint(snapshot({analysis:sourceObservation([sourceHolder({work_id:'gone-<reader>"',resource_key:'source_io:<disk>'})])}));
   const banner=html.indexOf("data-activity-source-recovery");
   assert.ok(banner>=0 && banner<html.indexOf('id="activity-status"'));
   assert.ok(banner<html.indexOf('id="cluster-workers"'));
-  assert.match(html,/Source capacity held past its lease/);
-  assert.match(html,/lease-expiry sweep normally releases them/);
+  assert.match(html,/Source leases not collected/);
+  assert.match(html,/store sweep normally deletes them within two minutes/);
   assert.doesNotMatch(html,/need recovery|does not prove a physical read/);
   assert.match(html,/gone-&lt;reader&gt;&quot;/);
   assert.match(html,/source_io:&lt;disk&gt;/);
@@ -822,11 +822,10 @@ test("source custody held well past its lease stays prominent after its job disa
   assert.match(html,/href="#\/analysis">Review source readers and analysis/);
   assert.doesNotMatch(html,/<reader>|<disk>|force.unlock/i);
 });
-test("source capacity is flagged only once the expiry sweep is overdue, from observed time and occupancy", () => {
+test("an uncollected lease is flagged only once the sweep is overdue, from observed time", () => {
   const observed=Date.now()-10000;
   for(const holder of [
     sourceHolder({phase:"reading",lease_expires_at_ms:observed+5000}),
-    sourceHolder({active_occupancy:false}),
     // Lapsed but inside the sweep's grace plus a tick: release is on its way.
     sourceHolder({phase:"cleanup_pending",lease_expires_at_ms:observed}),
     sourceHolder({phase:"cleanup_pending",lease_expires_at_ms:observed-179999}),
@@ -836,6 +835,10 @@ test("source capacity is flagged only once the expiry sweep is overdue, from obs
   }
   const overdue=paint(snapshot({analysis:sourceObservation([sourceHolder({phase:"reading",lease_expires_at_ms:observed-180000})],{now_ms:observed})}));
   assert.match(overdue,/data-activity-source-recovery/);
+  // A lease past its grace no longer counts, but one still present three
+  // minutes after expiry still shows that the sweep is not running.
+  const uncounted=paint(snapshot({analysis:sourceObservation([sourceHolder({active_occupancy:false,lease_expires_at_ms:observed-180000})],{now_ms:observed})}));
+  assert.match(uncounted,/data-activity-source-recovery/);
 });
 test("missing unavailable or stale reader observations leave source capacity unknown", () => {
   for(const analysis of [undefined,{available:false},sourceObservation([],{now_ms:Date.now()-60000}),sourceObservation([],{now_ms:Date.now()+60000}),sourceObservation([],{source_io_holders:undefined})]) {
@@ -858,7 +861,7 @@ test("queued library work explains global source recovery without guessing domai
     for(const kind of ["library_scan","metadata_refresh"]) {
       job.kind=kind;
       const html=paint(snapshot({analysis:sourceObservation([sourceHolder()])}));
-      assert.match(html,/durable-reason[^>]*>Shared source capacity is still held by an owner whose lease lapsed long ago/);
+      assert.match(html,/durable-reason[^>]*>A source lease that expired long ago has not been collected/);
     }
     for(const holder of [sourceHolder({resource_key:"source_io:other-library"}),sourceHolder({phase:"reading",lease_expires_at_ms:Date.now()+60000})]) {
       const html=paint(snapshot({analysis:sourceObservation([holder])}));

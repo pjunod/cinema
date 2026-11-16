@@ -1996,12 +1996,23 @@ mod source_tests {
         );
     }
     #[tokio::test]
-    async fn mapped_and_global_source_capacity_conflict_in_both_directions() {
+    async fn node_readers_conflict_whatever_keys_they_hold() {
+        // One background reader per node plus the live slot: readers on one
+        // node share its capacity whether their keys are mapped or global.
         for (held_keys, target_key) in [
             (["source_io", "source_io:disk-a"], "source_io"),
             (["source_io", "source_io"], "source_io:disk-a"),
         ] {
             let store = fixture();
+            store
+                .0
+                .lock()
+                .expect("connection")
+                .execute(
+                    "INSERT INTO settings VALUES('jobs.source_readers_per_node','1')",
+                    [],
+                )
+                .expect("one reader per node");
             let first = seed_job(&store);
             let second = seed_job(&store);
             let target = seed_job(&store);
