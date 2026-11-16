@@ -115,7 +115,7 @@
   "acceptance": "Existing M6 exact FP16-bin overlap criterion retained; PR1565 remains draft pending native qualification and its required CI.",
   "repair_candidate": {
     "fit_version": "dv-refit-safe-v2-mmr12",
-    "state": "implementation candidate; production-bound full48 and CI pending",
+    "state": "Production export bound to six passing native inputs; remaining42 and final CI pending",
     "cause": "Fine-grid software qualification did not describe the native MMR mapping. All-six explicit coefficient-grid controls identify a compatible publication representation; no claim about the location of native quantization.",
     "wire_denominator_bits": 23,
     "published_mmr_fraction_bits": 12,
@@ -238,6 +238,23 @@
           ]
         }
       },
+      "full48_qualified": false
+    },
+    "production_export": {
+      "source_commit": "74bd64d4daaae795ed826eef907d4ed08c1cea3c",
+      "candidate_rpu_sha256": "7d2b4d39312767afd1e957a6572c8c7e47c3a3c2007cf85ad28897a6137eb9fb",
+      "bytes": 435,
+      "title_curve_digest": "6373ab9d580701c4f8189510304260d157234fa5a36eb7ff75907fe20551325c",
+      "title_gain": 0.811230192898513,
+      "export_envelope_sha256": "1b36536c6760039545ba0406c86a7eededa5737420dc3617457cd4dd409e0196",
+      "native_input_closure_sha256": "fbd550398087da8f3255fb59dfff9bdeb3219f0351337bb103c37663865ff1d8",
+      "helper_redecoded": false
+    },
+    "initial_six_acceptance": {
+      "receipt_sha256": "d9545df8e93645a6c9cb79f293b0198ad2730d467da53ed34be1ae2fd3f5b532",
+      "criterion": "Unchanged exact FP16 mean-bin overlap, valid controls and exact production-RPU byte identity",
+      "all_six_all_rgb_pass": true,
+      "raw_captures_rerendered": false,
       "full48_qualified": false
     }
   }

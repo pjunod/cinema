@@ -390,10 +390,12 @@ review of PR #1565):
   a refused scene; gain 1 − served/identity; under 5% the title serves
   identity; a degenerate summary is identity for the whole title. The curve
   digest is sha256 over each scene's span and served integers.
-- **Acceptance.** Two real helper runs over the Michael5400 window print the
-  same bytes and the same digest
-  (`2a8d78f7cf05fff325afe70c4f5ce2d1972317027cd0bdb045202d16310cb75b`,
-  pinned by `dv_refit_title` tests against the recorded run).
+- **Acceptance.** The two retained real helper runs over the Michael5400
+  window agree byte for byte. The old Q23 method produced digest
+  `2a8d78f7cf05fff325afe70c4f5ce2d1972317027cd0bdb045202d16310cb75b`.
+  Re-solving the recorded statistics with the Q12 publication method produces
+  `3a4a130ecd156bed7846b908972a3d695ceacd4d141d12194bab4265772f420a`,
+  now the `dv_refit_title` fixture expectation; the helper was not rerun.
 
 ### 3.4 Solving and guard rails
 

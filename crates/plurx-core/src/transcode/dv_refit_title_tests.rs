@@ -9,7 +9,7 @@ const RECORDED: &str = include_str!("../../tests/fixtures/dv-refit/helper-run-mi
 
 /// The curve digest of [`RECORDED`]. Two separate real helper runs over the
 /// same window print this; a change here is a change to the served curves.
-const RECORDED_DIGEST: &str = "2a8d78f7cf05fff325afe70c4f5ce2d1972317027cd0bdb045202d16310cb75b";
+const RECORDED_DIGEST: &str = "3a4a130ecd156bed7846b908972a3d695ceacd4d141d12194bab4265772f420a";
 
 /// Samples of a scene whose composition is the identity mapping of the base
 /// layer moved by `offset` codes, with ±`noise` alternating around it, and
