@@ -517,6 +517,64 @@ fn old_owner_rows_bridge_until_contract() {
     assert!(!blocks(&conn), "its release follows");
 }
 
+/// Mutation: drop `source_lease_bridge_out_*` (an upgraded node's playback
+/// is invisible to a node still on the v1 binary during the roll).
+#[test]
+fn new_playback_is_mirrored_to_v1_owners_until_contract() {
+    for recursive in ["OFF", "ON"] {
+        let conn = rusqlite::Connection::open_in_memory().expect("v133");
+        SqliteStore::apply_migrations_for_test(
+            &conn,
+            super::source_leases::EXPANDED_VERSION as i64,
+        )
+        .expect("expanded catalogue");
+        conn.pragma_update(None, "recursive_triggers", recursive)
+            .expect("trigger recursion");
+        let v1 = |conn: &rusqlite::Connection| -> Vec<(String, i64, String, i64)> {
+            conn.prepare("SELECT owner_id,fence,phase,lease_expires_at_ms FROM foreground_source_owners ORDER BY owner_id")
+                .expect("v1 owners")
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                .expect("v1 rows")
+                .collect::<Result<_, _>>()
+                .expect("v1 owners read")
+        };
+        let leases = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row("SELECT count(*) FROM source_leases", [], |row| row.get(0))
+                .expect("leases")
+        };
+        conn.execute_batch("INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
+            VALUES('new-binary','playback','life',1,'node-b','{\"node_id\":\"node-b\"}','[\"source_io\"]','startup','{\"source_quiescent\":false}',1000,1000,30000);")
+            .expect("an upgraded node registers playback");
+        assert_eq!(
+            v1(&conn),
+            [("new-binary".to_owned(), 1, "startup".to_owned(), 30000)],
+            "recursive_triggers={recursive}: a v1 node's claims see it"
+        );
+        assert_eq!(leases(&conn), 1, "recursive_triggers={recursive}: no echo");
+        conn.execute_batch("UPDATE source_leases SET phase='refill',fence=2,expires_at_ms=40000,renewed_at_ms=2000 WHERE lease_id='new-binary';")
+            .expect("renew");
+        assert_eq!(
+            v1(&conn),
+            [("new-binary".to_owned(), 2, "refill".to_owned(), 40000)],
+            "recursive_triggers={recursive}: renewal follows"
+        );
+        // The v1 binary's own playback still bridges the other way.
+        conn.execute_batch("INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms)
+            VALUES('old-binary','{\"node_id\":\"node-a\"}','[\"source_io\"]',1,'startup','{}',1000,1000,30000);")
+            .expect("a v1 node registers playback");
+        assert_eq!(leases(&conn), 2, "recursive_triggers={recursive}");
+        conn.execute_batch("DELETE FROM source_leases WHERE lease_id='new-binary';")
+            .expect("release");
+        assert_eq!(
+            v1(&conn),
+            [("old-binary".to_owned(), 1, "startup".to_owned(), 30000)],
+            "recursive_triggers={recursive}: release follows"
+        );
+        conn.execute_batch(super::source_leases::CONTRACT)
+            .expect("contract drops the bridge with the v1 owners");
+    }
+}
+
 /// Mutation: drop the readiness guard from the contract.
 #[test]
 fn contract_waits_for_every_node() {

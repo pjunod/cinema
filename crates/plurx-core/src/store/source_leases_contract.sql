@@ -7,6 +7,12 @@ DROP TRIGGER source_lease_bridge_update;
 -- next statement
 DROP TRIGGER source_lease_bridge_delete;
 -- next statement
+DROP TRIGGER source_lease_bridge_out_insert;
+-- next statement
+DROP TRIGGER source_lease_bridge_out_update;
+-- next statement
+DROP TRIGGER source_lease_bridge_out_delete;
+-- next statement
 DROP VIEW source_io_occupancy;
 -- next statement
 DROP VIEW background_source_current_owners;

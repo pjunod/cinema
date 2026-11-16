@@ -647,26 +647,77 @@ FROM background_source_current_owners custody
 WHERE custody.owner_kind IN ('lease','offline') AND custody.authority_expires_at_ms>0 AND custody.fence>0
   AND CASE custody.owner_kind WHEN 'lease' THEN json_extract(custody.owner_json,'$.lease.owner_node_id') ELSE json_extract(custody.owner_json,'$.node_id') END IS NOT NULL;
 -- next statement
--- Rolling-deploy bridge: a node still on the v1 binary keeps registering
--- playback in foreground_source_owners. Mirror it, so that playback still
--- blocks background reads decided by upgraded nodes. Dropped by the contract.
+-- Rolling-deploy bridge, both ways, dropped by the contract. A node still on
+-- the v1 binary registers playback in foreground_source_owners: mirror it
+-- into source_leases, so its playback blocks background reads decided by
+-- upgraded nodes. An upgraded node's playback lease is mirrored back, so a
+-- v1 node's claims see it too. Each side writes only a row that differs,
+-- so a mirrored write ends at the other side, recursive triggers or not.
 CREATE TRIGGER source_lease_bridge_insert AFTER INSERT ON foreground_source_owners
 WHEN json_extract(NEW.identity_json,'$.node_id') IS NOT NULL
 BEGIN
-  INSERT OR REPLACE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
+  INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
   VALUES(NEW.owner_id,'playback',COALESCE(json_extract(NEW.identity_json,'$.lifetime_id'),NEW.owner_id),NEW.fence,json_extract(NEW.identity_json,'$.node_id'),
-    NEW.identity_json,NEW.resource_keys_json,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms);
+    NEW.identity_json,NEW.resource_keys_json,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
+  ON CONFLICT(lease_id) DO UPDATE SET owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
+    owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,projection_json=excluded.projection_json,
+    started_at_ms=excluded.started_at_ms,renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
+  WHERE (source_leases.owner_kind,source_leases.work_id,source_leases.fence,source_leases.node_id,source_leases.owner_json,source_leases.resource_keys_json,
+      source_leases.phase,source_leases.projection_json,source_leases.started_at_ms,source_leases.renewed_at_ms,source_leases.expires_at_ms)
+    IS NOT (excluded.owner_kind,excluded.work_id,excluded.fence,excluded.node_id,excluded.owner_json,excluded.resource_keys_json,
+      excluded.phase,excluded.projection_json,excluded.started_at_ms,excluded.renewed_at_ms,excluded.expires_at_ms);
 END;
 -- next statement
 CREATE TRIGGER source_lease_bridge_update AFTER UPDATE ON foreground_source_owners
 WHEN json_extract(NEW.identity_json,'$.node_id') IS NOT NULL
 BEGIN
-  INSERT OR REPLACE INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
+  INSERT INTO source_leases(lease_id,owner_kind,work_id,fence,node_id,owner_json,resource_keys_json,phase,projection_json,started_at_ms,renewed_at_ms,expires_at_ms)
   VALUES(NEW.owner_id,'playback',COALESCE(json_extract(NEW.identity_json,'$.lifetime_id'),NEW.owner_id),NEW.fence,json_extract(NEW.identity_json,'$.node_id'),
-    NEW.identity_json,NEW.resource_keys_json,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms);
+    NEW.identity_json,NEW.resource_keys_json,NEW.phase,NEW.projection_json,NEW.started_at_ms,NEW.updated_at_ms,NEW.lease_expires_at_ms)
+  ON CONFLICT(lease_id) DO UPDATE SET owner_kind=excluded.owner_kind,work_id=excluded.work_id,fence=excluded.fence,node_id=excluded.node_id,
+    owner_json=excluded.owner_json,resource_keys_json=excluded.resource_keys_json,phase=excluded.phase,projection_json=excluded.projection_json,
+    started_at_ms=excluded.started_at_ms,renewed_at_ms=excluded.renewed_at_ms,expires_at_ms=excluded.expires_at_ms
+  WHERE (source_leases.owner_kind,source_leases.work_id,source_leases.fence,source_leases.node_id,source_leases.owner_json,source_leases.resource_keys_json,
+      source_leases.phase,source_leases.projection_json,source_leases.started_at_ms,source_leases.renewed_at_ms,source_leases.expires_at_ms)
+    IS NOT (excluded.owner_kind,excluded.work_id,excluded.fence,excluded.node_id,excluded.owner_json,excluded.resource_keys_json,
+      excluded.phase,excluded.projection_json,excluded.started_at_ms,excluded.renewed_at_ms,excluded.expires_at_ms);
 END;
 -- next statement
 CREATE TRIGGER source_lease_bridge_delete AFTER DELETE ON foreground_source_owners
 BEGIN
   DELETE FROM source_leases WHERE lease_id=OLD.owner_id AND owner_kind='playback';
+END;
+-- next statement
+CREATE TRIGGER source_lease_bridge_out_insert AFTER INSERT ON source_leases
+WHEN NEW.owner_kind='playback'
+BEGIN
+  INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms)
+  VALUES(NEW.lease_id,NEW.owner_json,NEW.resource_keys_json,NEW.fence,NEW.phase,COALESCE(NEW.projection_json,'{}'),NEW.started_at_ms,NEW.renewed_at_ms,NEW.expires_at_ms)
+  ON CONFLICT(owner_id) DO UPDATE SET identity_json=excluded.identity_json,resource_keys_json=excluded.resource_keys_json,fence=excluded.fence,
+    phase=excluded.phase,projection_json=excluded.projection_json,started_at_ms=excluded.started_at_ms,updated_at_ms=excluded.updated_at_ms,
+    lease_expires_at_ms=excluded.lease_expires_at_ms
+  WHERE (foreground_source_owners.identity_json,foreground_source_owners.resource_keys_json,foreground_source_owners.fence,foreground_source_owners.phase,
+      foreground_source_owners.projection_json,foreground_source_owners.started_at_ms,foreground_source_owners.updated_at_ms,foreground_source_owners.lease_expires_at_ms)
+    IS NOT (excluded.identity_json,excluded.resource_keys_json,excluded.fence,excluded.phase,
+      excluded.projection_json,excluded.started_at_ms,excluded.updated_at_ms,excluded.lease_expires_at_ms);
+END;
+-- next statement
+CREATE TRIGGER source_lease_bridge_out_update AFTER UPDATE ON source_leases
+WHEN NEW.owner_kind='playback'
+BEGIN
+  INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms)
+  VALUES(NEW.lease_id,NEW.owner_json,NEW.resource_keys_json,NEW.fence,NEW.phase,COALESCE(NEW.projection_json,'{}'),NEW.started_at_ms,NEW.renewed_at_ms,NEW.expires_at_ms)
+  ON CONFLICT(owner_id) DO UPDATE SET identity_json=excluded.identity_json,resource_keys_json=excluded.resource_keys_json,fence=excluded.fence,
+    phase=excluded.phase,projection_json=excluded.projection_json,started_at_ms=excluded.started_at_ms,updated_at_ms=excluded.updated_at_ms,
+    lease_expires_at_ms=excluded.lease_expires_at_ms
+  WHERE (foreground_source_owners.identity_json,foreground_source_owners.resource_keys_json,foreground_source_owners.fence,foreground_source_owners.phase,
+      foreground_source_owners.projection_json,foreground_source_owners.started_at_ms,foreground_source_owners.updated_at_ms,foreground_source_owners.lease_expires_at_ms)
+    IS NOT (excluded.identity_json,excluded.resource_keys_json,excluded.fence,excluded.phase,
+      excluded.projection_json,excluded.started_at_ms,excluded.updated_at_ms,excluded.lease_expires_at_ms);
+END;
+-- next statement
+CREATE TRIGGER source_lease_bridge_out_delete AFTER DELETE ON source_leases
+WHEN OLD.owner_kind='playback'
+BEGIN
+  DELETE FROM foreground_source_owners WHERE owner_id=OLD.lease_id;
 END;
