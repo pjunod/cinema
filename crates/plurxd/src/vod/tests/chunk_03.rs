@@ -6156,3 +6156,124 @@ async fn prepared_acquisition_override_remains_response_scoped_and_owner_fenced(
     assert!(!serve.response_owner_is_live("acquire-one", &first.owner).await);
     assert!(matches!(serve.playlist_with_acquisition_start("acquire-one", Some(1_125)).await.expect("terminal").result, Err(VodError::Gone(Terminal::Deleted))));
 }
+
+/// A processed rendition's helper session, positioned for window 1 after a
+/// real window 0 on stand-in processes, in the rendition's own slot.
+#[cfg(target_os = "linux")]
+async fn rendition_with_live_helper_session(
+    base: &Path,
+) -> (Arc<Rendition>, crate::dv_segment::tests::SessionFixture) {
+    let rendition = synthetic_rendition(base).await;
+    let fixture = crate::dv_segment::tests::SessionFixture::new();
+    let producer = Arc::new(ProducerSlot::new());
+    let mut taken = rendition.dv_session.take(0).await;
+    let mut session = fixture.spawn_in(None, taken.home(), None).await;
+    fixture
+        .window(&mut session, &producer, 0)
+        .await
+        .expect("window 0");
+    taken.put(session).await;
+    drop(taken);
+    assert!(rendition.dv_session.activity().is_some());
+    assert!(!fixture.claim_is_free());
+    (rendition, fixture)
+}
+
+/// The decisions that keep a helper session between windows are the two
+/// followed by more of this rendition's production; the rest end it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_helper_session_survives_only_the_pacing_hold_and_make_room() {
+    use crate::prodsched::{Action, Hold};
+    let keeps = [
+        Action::Suspend {
+            produced_through: 3,
+            reason: Hold::Ahead { horizon: 4 },
+        },
+        Action::MakeRoom { wanted: 7_000 },
+        Action::Produce { next: 4 },
+    ];
+    for action in keeps {
+        assert!(!ends_helper_session(&action), "{action:?}");
+    }
+    let ends = [
+        Action::Idle,
+        Action::Suspend {
+            produced_through: 3,
+            reason: Hold::WorkingSetFull { free_bytes: 1 },
+        },
+    ];
+    for action in ends {
+        assert!(ends_helper_session(&action), "{action:?}");
+    }
+}
+
+/// T4/T7 at the rendition: the ahead stop keeps the live helper (the next
+/// contiguous window is warm), and `Terminate` ends it and returns only
+/// after its reap, so the capacity and worker claim it hands on are free.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn terminate_reaps_the_helper_session_before_it_returns_and_the_ahead_stop_keeps_it() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let (rendition, fixture) = rendition_with_live_helper_session(base.path()).await;
+    let _ = perform_driver_step(&serve.shared, &rendition, Step::Stop).await;
+    assert!(
+        rendition.dv_session.activity().is_some(),
+        "the pacing stop keeps the session"
+    );
+    assert!(!fixture.claim_is_free());
+    let _ = perform_driver_step(
+        &serve.shared,
+        &rendition,
+        Step::Terminate {
+            why: Termination::Idle,
+        },
+    )
+    .await;
+    assert!(rendition.dv_session.activity().is_none());
+    assert!(
+        fixture.claim_is_free(),
+        "the helper is reaped before Terminate returns"
+    );
+    let next = rendition.dv_session.take(1).await;
+    assert!(next.get().is_none(), "the next window starts cold");
+    assert_eq!(fixture.log().matches("exec").count(), 1);
+}
+
+/// T5 at the rendition: a restart (a seek of a running producer) ends the
+/// session and waits for its reap; a contiguous window after the ahead
+/// stop is served by the same helper; a window k+5 is not, and the old
+/// helper is reaped before the cold one starts.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn windows_k_k1_k5_use_two_helpers_and_a_restart_reaps_the_session() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let (rendition, fixture) = rendition_with_live_helper_session(base.path()).await;
+    let producer = Arc::new(ProducerSlot::new());
+    let mut warm = rendition.dv_session.take(1).await;
+    let mut session = warm.take().expect("window 1 is warm");
+    fixture
+        .window(&mut session, &producer, 1)
+        .await
+        .expect("window 1");
+    warm.put(session).await;
+    drop(warm);
+    let mut seek = rendition.dv_session.take(6).await;
+    assert!(seek.get().is_none());
+    assert!(fixture.claim_is_free(), "reaped before the cold window");
+    let mut cold = fixture.spawn_in(None, seek.home(), None).await;
+    fixture
+        .window(&mut cold, &producer, 6)
+        .await
+        .expect("window 6");
+    seek.put(cold).await;
+    drop(seek);
+    let log = fixture.log();
+    assert_eq!(log.matches("exec").count(), 2, "{log}");
+    assert_eq!(log.matches("window ").count(), 3, "{log}");
+    let _ = perform_driver_step(&serve.shared, &rendition, Step::Restart { at: 9 }).await;
+    assert!(rendition.dv_session.activity().is_none());
+    assert!(fixture.claim_is_free());
+}

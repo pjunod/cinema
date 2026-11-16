@@ -223,6 +223,26 @@ pub(super) async fn request_registered_driver_retirement(
     Ok(())
 }
 
+/// Whether a pass's decision ends a processed rendition's helper session
+/// between windows.
+///
+/// The session survives the two decisions that are followed by more of this
+/// rendition's production: the pacing hold `Hold::Ahead`, which a reader
+/// advancing clears by itself, and `MakeRoom`, which frees segment bytes (the
+/// session holds none) so a blocked reader's window can be produced next,
+/// warm. Everything that pauses production with no end in sight ends it:
+/// `Idle` and the indefinite holds. A paused viewer then holds no GPU state,
+/// and capacity another rendition needs moves through `Terminate`, which
+/// ends the session and waits for its reap.
+#[cfg(target_os = "linux")]
+pub(super) fn ends_helper_session(action: &Action) -> bool {
+    match action {
+        Action::Idle => true,
+        Action::Suspend { reason, .. } => !matches!(reason, crate::prodsched::Hold::Ahead { .. }),
+        _ => false,
+    }
+}
+
 pub(super) async fn perform_driver_step(
     shared: &Shared,
     rendition: &Rendition,
@@ -245,16 +265,25 @@ pub(super) async fn perform_driver_step(
             }
         }
     }
-    // Stopping, reclaiming or moving the producer ends the helper session
-    // too; its next window starts cold.
+    // Reclaiming or moving the producer ends the helper session too, and
+    // waits for its reap: whoever is handed the capacity next (a successor,
+    // the restarted window) finds the hardware slot and worker claim free.
+    // The pacing stop (`Hold::Ahead`) does not end it; see
+    // [`ends_helper_session`].
     #[cfg(target_os = "linux")]
     match step {
-        Step::Stop | Step::Terminate { .. } => rendition
-            .dv_session
-            .end(crate::dv_segment::SessionEnd::FlowStop),
-        Step::Restart { .. } => rendition
-            .dv_session
-            .end(crate::dv_segment::SessionEnd::Discontinuity),
+        Step::Terminate { .. } => {
+            rendition
+                .dv_session
+                .end_and_wait(crate::dv_segment::SessionEnd::FlowStop)
+                .await
+        }
+        Step::Restart { .. } => {
+            rendition
+                .dv_session
+                .end_and_wait(crate::dv_segment::SessionEnd::Discontinuity)
+                .await
+        }
         _ => {}
     }
     let performed = rendition.slot.perform(step, || {}).await?;
@@ -987,10 +1016,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 || (bounded_processing && matches!(decision.action, Action::MakeRoom { .. }))
             {
                 encoding.reset_active_production(epoch, false);
-                // The same point is where a running producer is stopped or
-                // reclaimed: the helper session between windows gives back
-                // its GPU state and worker claim, and the next window is cold.
-                #[cfg(target_os = "linux")]
+            }
+            #[cfg(target_os = "linux")]
+            if ends_helper_session(&decision.action) {
                 rendition
                     .dv_session
                     .end(crate::dv_segment::SessionEnd::FlowStop);
@@ -1058,7 +1086,14 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     // exactly this capacity. Competing for it as live work
                     // would register a waiter the speculative successor can
                     // never pass, and would take back what was just yielded.
-                    // The handoff's expiry wakes this driver again.
+                    // The handoff's expiry wakes this driver again. A helper
+                    // session between windows holds that capacity: it ends
+                    // and is reaped first.
+                    #[cfg(target_os = "linux")]
+                    rendition
+                        .dv_session
+                        .end_and_wait(crate::dv_segment::SessionEnd::FlowStop)
+                        .await;
                     encoding.cancel_wait();
                     arm_handoff_expiry(rendition);
                     return;
