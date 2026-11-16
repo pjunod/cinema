@@ -1,7 +1,6 @@
 # streaming/ — delivery: VOD, Dolby Vision, capabilities, reliability
 
-Status words and documentation rules: [docs index](../README.md). Add each
-document's row here in the same commit.
+Status definitions: [docs index](../README.md). Add rows here with each doc.
 
 Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 
@@ -22,9 +21,9 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-START-HISTORY.md](PLAYBACK-START-HISTORY.md) | Historical review dispositions. | live |
 | [SHARED-LIBRARY-PLAYBACK-RCA.md](SHARED-LIBRARY-PLAYBACK-RCA.md) | Shared-start timeouts, A1 fix, five fleet errors. | open |
 | [SHARED-LIBRARY-PLAYBACK-STATUS.md](SHARED-LIBRARY-PLAYBACK-STATUS.md) | PR #1472 ownership, implementation, retained evidence and merge prerequisites. | built |
-| [SHARED-LIBRARY-DV-HDR-PLAN.md](SHARED-LIBRARY-DV-HDR-PLAN.md) | Dolby Vision and HDR over sharing. | in progress |
-| [SHARED-DV-PROCESSED-PLAN.md](SHARED-DV-PROCESSED-PLAN.md) | Processed Dolby Vision / FEL over sharing (M4 of the shared DV plan). | in progress |
-| [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 Source-owned caption windows, custody initialization race and follow-up qualification. | done |
+| [SHARED-LIBRARY-DV-HDR-PLAN.md](SHARED-LIBRARY-DV-HDR-PLAN.md) | Shared Dolby Vision and HDR plan; M1–M4 status and acceptance. | in progress |
+| [SHARED-DV-PROCESSED-PLAN.md](SHARED-DV-PROCESSED-PLAN.md) | M4 processed Dolby Vision / FEL design and qualification. | in progress |
+| [SHARED-SUBTITLE-CUSTODY-AND-START-503.md](SHARED-SUBTITLE-CUSTODY-AND-START-503.md) | S5 caption custody, Start 503 race and qualification. | done |
 | [PLAYBACK-PUBLICATION-OVERLAY-STATUS.md](PLAYBACK-PUBLICATION-OVERLAY-STATUS.md) | Cold publication and Resume fault repair ledger. | open |
 | [HDR10E-PREPARATION-AND-WEB-RECOVERY.md](HDR10E-PREPARATION-AND-WEB-RECOVERY.md) | Preparation, native observation and rewatch resume repairs. | open |
 | [DV-TITLE-SCAN.md](DV-TITLE-SCAN.md) | How DV titles are scanned. | open |
@@ -48,7 +47,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md](PLAYBACK-STARTUP-ASTRA-IMPLEMENTATION-REVIEW.md) | Astra's final implementation review of frozen candidate `2bc1e54e1`; seven findings and the request-changes verdict. | done |
 | [PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md](PLAYBACK-STARTUP-ASTRA-DISPOSITIONS.md) | Source dispositions and outstanding review and qualification evidence for Astra's seven startup findings. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, one fast-lane PR. | open |
-| [PLAYBACK-START-FAILURES-2026-10-13.md](PLAYBACK-START-FAILURES-2026-10-13.md) | Standalone reader contention, unpublished native attachment, stale inventory/error ownership and separate Apple TV audio evidence; fixes built, deployment and physical acceptance open. | open |
+| [PLAYBACK-START-FAILURES-2026-10-13.md](PLAYBACK-START-FAILURES-2026-10-13.md) | Reader contention, native attachment, stale inventory and Apple TV audio; deployment and physical acceptance remain open. | open |
 | [BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md](BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md) | Five Apple TV remux interruptions from deploy restarts, quorum fences, rolling retirement and whole-file re-attestation (fixed). | open |
 | [HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md](HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md) | S1E5 outage: WAL correlations and SQL reproduction establish the missing lookup index; reviewed proposal covers migrations, cadence, web recovery. | open |
 | [Heated Rivalry quorum build status](HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, cleanup for the quorum repair. | open |
@@ -86,7 +85,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [TONE-MAP-CENSUS.md](TONE-MAP-CENSUS.md) | Operator census of each GPU/encoder graph against the CPU chain on authored PQ signals; feeds ruling R2. | built |
 | [TONE-MAP-CHAIN-CORRECTIONS.md](TONE-MAP-CHAIN-CORRECTIONS.md) | 2026-09-20 review plan: the hardware-download metadata test first, then MaxCLL at scan, explicit `peak=`, gamut before curve, dither, with an image-comparison protocol. | open |
 | [INTERLACE-IN-THE-MEDIA-CONTRACT.md](INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Field order contract, deinterlace/frame policy, Live TV field-rate bitrate fix and fixture acceptance. | open |
-| [AUDIO-RESOLVED-INDEPENDENTLY.md](AUDIO-RESOLVED-INDEPENDENTLY.md) | 2026-09-20 plan: audio negotiated apart from video, so a resolution change or burn no longer downmixes compatible multichannel audio; carried through recipe identity, manifests and handoffs. | open |
+| [AUDIO-RESOLVED-INDEPENDENTLY.md](AUDIO-RESOLVED-INDEPENDENTLY.md) | Plan for independent audio negotiation through recipes, manifests and handoffs. | open |
 | [AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md](AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md) | Shipped Jellyfin 8.1.3 per-side synthetic downmix measurements, clipping and AAC limiter margin; no real-content, listening, device or output enablement claim. | open |
 | [AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md](AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md) | Stereo downmix on real content: the incumbent fold clipped and AC-3/E-AC-3 applied stored levels; shipped float matrix with a −4 dBFS limiter, its encoded-VOD join proof. | open |
 | [VOD-BFRAMES-TIMELINE-DESIGN.md](VOD-BFRAMES-TIMELINE-DESIGN.md) | Strict presentation-grid implementation and optional signed-offset software B-frames; no-reorder default, per-family/client qualification and remaining evidence. | open |
@@ -95,7 +94,7 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md](ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md) | Why immersive AC-4 and delayed AC-3 broke live starts, what the fixes preserve, why the 103.1 capture cannot initialize its decoder. | open |
 | [ATSC 3.0 live audio repair status](ATSC3-AUDIO-STARTUP-STATUS.html) | Implementation, single adversarial review, final fast lane, merge and outstanding live acceptance. | open |
 | [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md) | Why idle tuners reported busy: subtitle backfill blocked admission; pool policy and refusal classification fixes. | built |
-| [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | 2026-09-24: why every ATSC 1.0 channel was encoded in stereo; copy-first audio selection, sink-derived AAC channels, Android hardware MPEG-2, an unreproduced aspect-ratio report. | built |
+| [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | Why ATSC 1.0 was encoded in stereo; copy-first selection, AAC channels, Android MPEG-2 and an open aspect-ratio report. | built |
 | [RESUME-ROLLING-PUBLICATION-RCA.md](RESUME-ROLLING-PUBLICATION-RCA.md) | Why resume failed across clients: rolling-engine fallback, unopened web MediaSource and progress update erasing position after failed startup. | open |
 | [PLAYBACK-STARTUP-LATENCY-M2-20261002.json](PLAYBACK-STARTUP-LATENCY-M2-20261002.json) | Candidate floor rejection arithmetic and bounded generated hls.js startup sweep; continuity/native qualification state. | open |
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.md](PLAYBACK-STARTUP-LATENCY-M0-20261002.md) | Native Safari preparation/publication incident and review-reported index backlog, with evidence limits. | done |
@@ -114,15 +113,15 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [Web seek incident evidence](../evidence/web-seek-rca-2026-10-02.json) · [mechanism replay](../evidence/web-seek-mechanism-replay.cjs) | Sanitized live seek traces, same-session loader intervention and executable incident-source mechanisms. | done |
 | [SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md](SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md) | The build order for that repair: one scratch ledger, writer barrier, exact release grace, growing reservations, ownership boundaries and the evidence each unit owes. | open |
 | [Seek scratch reservations status](SEEK-SCRATCH-RESERVATIONS-STATUS.html) | Live ledger for the effort: unit state, base and compiler, evidence, review, fast lane and deployment. | open |
-| [Seek scratch reservations receipt](../evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Exact base and compiler, accounting/release/mechanism proofs, which regression covers which acceptance row, what already failed before the change, what is still owed. | open |
+| [Seek scratch reservations receipt](../evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Base/compiler, accounting and release proofs, regression mapping, failures and remaining acceptance. | open |
 | [FFmpeg HLS write boundary receipt](../evidence/ffmpeg-hls-write-boundary-receipt-2026-09-24.md) | The loopback muxer's per-piece reservation, hole repair and proofs. | open |
 | [FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md](FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md) | Historical design proposal for the owned FFmpeg write boundary; use the receipt above for the implemented mechanism and proof. | done |
 | [MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) | Why one valid MKV was denied immutable VOD, why its rolling fallback violated AVFoundation's playlist-update deadline, packet-duration plus sliding-HLS repair contracts. | open |
-| [MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md) | The build contract for the reviewed MKV-duration and sliding-HLS repair: startup admission, packet evidence, publication scheduling, object grace, acceptance. | open |
+| [MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md) | Build contract for MKV admission, packet evidence, publication timing and acceptance. | open |
 | [MKV-DURATION-AND-SLIDING-HLS-STATUS.md](MKV-DURATION-AND-SLIDING-HLS-STATUS.md) | Live package, compiler, review, qualification, production-authorization ledger for the MKV-duration and sliding-HLS repair. | open |
 | [APPLE-TV-FORWARD-SKIPS-STATUS.md](APPLE-TV-FORWARD-SKIPS-STATUS.md) | Live implementation, review, focused-proof, fast-lane and merge ledger for cumulative rolling-publication pacing and Apple TV position continuity. | open |
 | [APPLE-TV-FORWARD-SKIPS-RCA.md](APPLE-TV-FORWARD-SKIPS-RCA.md) | Why rolling media advancing faster than playback made Apple TV skip forward, with production and AVPlayer replay evidence. | done |
-| [APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md](APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md) | Historical build contract for cumulative publication pacing, protected playback position and focused regressions; use the status above for actual delivery evidence. | done |
+| [APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md](APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md) | Historical build contract; see status above for delivery evidence. | done |
 | [CONTENT-ANALYSIS-REPAIR-STATUS.md](CONTENT-ANALYSIS-REPAIR-STATUS.md) | Live implementation ledger for selected-video completion, bounded retry, exact-identity repair, review, promotion. | open |
 | [CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md](CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md) | Why complete video indexes were labelled incomplete: fleet evidence, selected-stream duration, timeout policy, recovery constraints. | open |
 | [CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md](CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md) | Independent design review that found retry expiry and lost video identity before implementation. | done |
@@ -216,11 +215,11 @@ Start owners: [plan §6](PLAYBACK-START-PLAN.md#6-lane-status).
 | [APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md](APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md) | Why Apple and web HLS froze on a pacing hold, repair contract. | built |
 | [STUTTER-4K.md](STUTTER-4K.md) | 4K copy-path stutter: what it is, what it isn't, what to try next. | open |
 | [SEGMENTER-PLAN.md](SEGMENTER-PLAN.md) | GOP-aware segmenting — zero boundary drops on the copy path. | built |
-| [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | How Auto should preserve smooth original playback, choose display-appropriate intermediate transcodes, recover quality safely across Android, Apple and web. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md) | Adversarial findings on the automatic-quality plan, their disposition, remaining qualification risks. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md) | The independent Opus review request and the evidence it must challenge before implementation. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) | Lifecycle wrapper for the independent Opus review; links to its byte-identical source artifact and reconciliation. | done |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt) | Supplied independent Opus review, preserved byte-for-byte: four P1 and ten P2 findings and source evidence. | done |
+| [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | Auto plan for smooth playback and display-appropriate transcodes across clients. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md) | Plan review findings, dispositions and remaining qualification risks. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md) | Independent review request and evidence to challenge. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) | Review artifact wrapper and reconciliation. | done |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt) | Original review: four P1 and ten P2 findings with source evidence. | done |
 | [ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md) | The design for bandwidth-aware streaming. | live |
 
 ## Notes moved from the front of the docs index
