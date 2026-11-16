@@ -302,13 +302,14 @@ pub(super) async fn prepare_source_start(
     headers: &(impl super::forwarding::AuthenticationHeaders + Send + Sync + ?Sized),
     reference: SourcePlaybackTarget,
     session: CreateSession,
+    dolby_vision_withheld: bool,
 ) -> Result<PreparedSourceStart, SourceStartFailure> {
     if session.presentation.as_deref() == Some(DIRECT_PRESENTATION) {
         return Box::pin(prepare_source_direct(state, headers, reference, session))
             .await
             .map(|prepared| PreparedSourceStart::Direct(Box::new(prepared)));
     }
-    let prepared = Box::pin(super::super::hls::prepare_source_playback(
+    let mut prepared = Box::pin(super::super::hls::prepare_source_playback(
         state, headers, reference, session,
     ))
     .await
@@ -318,6 +319,9 @@ pub(super) async fn prepare_source_start(
         ApiError::Unprocessable(_) => SourceStartFailure::Unsupported,
         _ => SourceStartFailure::Unavailable,
     })?;
+    if dolby_vision_withheld && plurx_core::playback::is_dolby_vision(prepared.file()) {
+        prepared.add_plan_note(super::receiver_presentation::DOLBY_VISION_WITHHELD_NOTE);
+    }
     // The delivery policy is decided here, after a fresh claim, from the
     // Source's own prepared request (the player's real caps through the
     // shared planner) and its own scanned file facts. B is never trusted.

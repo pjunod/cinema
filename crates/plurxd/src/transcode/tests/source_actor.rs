@@ -177,6 +177,25 @@ enum SourceFixtureVideo {
     Hdr10,
     Hdr10Promotion,
     Hdr10Retention,
+    /// The HDR10 source scanned as Dolby Vision Profile 8.1 on a node with
+    /// `dovi_rpu`, started by an HDR10 player: the planner strips to the
+    /// HDR10 base. The generated stream carries no RPU (no fixture encoder
+    /// writes one), so this proves the Source's cold Dolby Vision strip
+    /// index and HDR10 delivery are wired, not RPU removal itself.
+    DolbyVisionStrip,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_actor_builds_cold_dolby_vision_strip_index_and_serves_hdr10_bytes() {
+    if !crate::ffmpeg::has_dovi_rpu().await {
+        eprintln!("SKIP: this ffmpeg has no dovi_rpu bitstream filter to strip with");
+        return;
+    }
+    Box::pin(source_copy_preadmission_fixture_with_hdr10(
+        5,
+        SourceFixtureVideo::DolbyVisionStrip,
+    ))
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -254,6 +273,13 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     let mut state = source_fixture_state();
     let state_mut = Arc::get_mut(&mut state).expect("sole fixture state");
     eprintln!("Source fixture: state constructed without Router");
+    let dolby_vision = matches!(video, SourceFixtureVideo::DolbyVisionStrip);
+    if dolby_vision {
+        state_mut.system = Arc::new(crate::state::SystemInfo {
+            dovi_rpu: true,
+            ..(*state_mut.system).clone()
+        });
+    }
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = membership.clone();
     state_mut.media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
@@ -406,6 +432,9 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
     client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',128,72,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,probe,crate::fragment_index_cluster::unix_ms()/1000)).await.expect("actual file facts");
     if hdr10 {
         client.execute("UPDATE files SET video_codec='hevc',bit_depth=10,hdr='hdr10',audio_streams='[{\"index\":0,\"codec\":\"eac3\",\"channels\":6,\"default\":true}]' WHERE id=1", hiqlite::params!()).await.expect("actual HDR10 scan facts");
+    }
+    if dolby_vision {
+        client.execute("UPDATE files SET hdr='dolby_vision',hdr_format='Dolby Vision · Profile 8.1 (HDR10-compatible)',dv_profile=8,dv_level=6,dv_bl_compat_id=1,dv_el_present=0,dv_rpu_present=1 WHERE id=1", hiqlite::params!()).await.expect("Dolby Vision Profile 8.1 scan facts");
     }
     if mode >= 21 {
         client
@@ -715,6 +744,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         EncoderCaps::default(),
         Pipeline::Cpu,
     );
+    let manager = manager.with_dv_strippable(dolby_vision);
     let manager = Arc::new(if hdr10 {
         manager.with_cache(
             directory.path().join("cache"),
@@ -801,6 +831,7 @@ async fn source_copy_preadmission_fixture_with_hdr10(mode: u8, video: SourceFixt
         &manager.admissions,
         store.as_ref(),
         Instant::now() + Duration::from_secs(10),
+        manager.dv_strippable(),
     ));
     let bytes = std::mem::size_of_val(admission.as_ref().get_ref());
     eprintln!("Source copy admission future: {bytes} bytes");
@@ -1114,7 +1145,9 @@ async fn source_actual_actor(
     mode: u8,
     client: hiqlite::Client,
 ) {
-    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10");
+    // A Dolby Vision Profile 8.1 strip delivers exactly the HDR10 base.
+    let dolby_vision_strip = prepared.file().hdr.as_deref() == Some("dolby_vision");
+    let hdr10 = prepared.file().hdr.as_deref() == Some("hdr10") || dolby_vision_strip;
     let delivered_fixture = prepared.file().path.with_extension("delivered.mp4");
     if mode == 55 {
         source_actual_unknown_register_reconciliation(state, manager, assignment).await;
@@ -1733,12 +1766,15 @@ async fn source_actual_actor(
             .get_file_probe_json(1)
             .await
             .expect("retained recipe facts");
-        let options = plurx_core::transcode::CopyVideoOptions::from_probe(
-            &file,
-            probe.as_deref(),
-            false,
-            false,
-        );
+        // The Source's own copy options: for a Dolby Vision strip this is
+        // the `dovi_rpu=strip=1` identity local indexes, not `filter_units`.
+        let options = manager.source_copy_video_options(&file, probe.as_deref(), false, false);
+        if dolby_vision_strip {
+            assert_eq!(
+                options,
+                crate::vodserve::copy_video_pipeline(&file, probe.as_deref(), true, false, false)
+            );
+        }
         let index = state
             .store
             .fragment_index(1, &crate::fragindex::identity_for(&file, options))
@@ -2897,6 +2933,13 @@ async fn source_actual_actor(
         );
         assert!(init.bytes.windows(4).any(|bytes| bytes == b"mdcv"));
         assert!(init.bytes.windows(4).any(|bytes| bytes == b"clli"));
+        assert!(
+            !init
+                .bytes
+                .windows(4)
+                .any(|bytes| bytes == b"dvvC" || bytes == b"dvcC" || bytes == b"dby1"),
+            "an HDR10 delivery, a Dolby Vision strip included, declares no Dolby Vision"
+        );
         let opened = actor
             .open_resource(
                 &SharingHlsResource::parse("seg00000.m4s").expect("typed copied HDR10 segment"),
@@ -3922,4 +3965,362 @@ async fn source_native_control_returns_while_parked_caption_work_retains_one_gua
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_sparse_input_reserves_before_write_and_releases_only_after_close() {
     Box::pin(source_copy_preadmission_fixture(65)).await;
+}
+
+fn delivery_policy_request(kind: SessionKind, subtitle_burn: Option<i64>) -> SessionRequest {
+    SessionRequest {
+        source_telemetry: None,
+        continuous_media: None,
+        dv_processing_destination: None,
+        sdr_master_codecs: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        audio_delivery: None,
+        audio_claim: None,
+        quality_catalog: None,
+        candidate_context: None,
+        control_sequence: None,
+        file_id: 1,
+        playback_id: "source-delivery-policy".into(),
+        request_id: None,
+        automatic: false,
+        previous_session_id: None,
+        reopen_reason: None,
+        kind,
+        start_seconds: 0.0,
+        audio_index: None,
+        subtitle_burn,
+        audio_offset_ms: 0,
+        hdr10: false,
+        presentation: Default::default(),
+        block_budget_secs: None,
+        transport: None,
+    }
+}
+
+fn delivery_policy_copy(preserve: bool, convert: bool) -> SessionKind {
+    SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: preserve,
+        convert_dolby_vision: convert,
+        dual_layer_as_copied: false,
+    }
+}
+
+/// A scanned HEVC source with the given coarse range, label and Dolby Vision
+/// record — the three facts the delivery policy reads.
+fn delivery_policy_file(
+    hdr: Option<&str>,
+    hdr_format: Option<&str>,
+    profile: Option<i64>,
+    bl_compat_id: Option<i64>,
+) -> plurx_core::domain::MediaFile {
+    plurx_core::domain::MediaFile {
+        downloaded_subtitles: Vec::new(),
+        id: 1,
+        item_id: 1,
+        path: std::path::PathBuf::from("/media/source-delivery-policy.mkv"),
+        size: 1,
+        mtime: 1,
+        duration_ms: Some(1_000),
+        container: Some("matroska".into()),
+        video_codec: Some("hevc".into()),
+        video_codec_tag: None,
+        field_order: None,
+        video_profile: Some("Main 10".into()),
+        width: Some(3840),
+        height: Some(2160),
+        bit_depth: Some(10),
+        hdr: hdr.map(Into::into),
+        hdr_format: hdr_format.map(Into::into),
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
+        bitrate: Some(20_000_000),
+        audio_streams: vec![],
+        subtitle_streams: vec![],
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+        dolby_vision: plurx_core::domain::DolbyVisionFacts {
+            profile,
+            level: profile.map(|_| 6),
+            bl_compat_id,
+            el_present: Some(profile == Some(7)),
+            rpu_present: profile.map(|_| true),
+        },
+    }
+}
+
+fn delivery_policy_profile8_1() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+        Some(8),
+        Some(1),
+    )
+}
+
+fn delivery_policy_profile8_4() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8.4 (HLG-compatible)"),
+        Some(8),
+        Some(4),
+    )
+}
+
+fn delivery_policy_profile7() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        Some(7),
+        Some(6),
+    )
+}
+
+fn delivery_policy_profile5() -> plurx_core::domain::MediaFile {
+    delivery_policy_file(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 5"),
+        Some(5),
+        Some(0),
+    )
+}
+
+#[test]
+fn source_delivery_policy_admits_dolby_vision_preserve_and_convert_copies() {
+    let no_native = (false, None);
+    for (name, file, preserve, convert) in [
+        ("P8.1 preserve", delivery_policy_profile8_1(), true, false),
+        ("P8.4 preserve", delivery_policy_profile8_4(), true, false),
+        ("P5 preserve", delivery_policy_profile5(), true, false),
+        (
+            "P7 to P8.1 convert",
+            delivery_policy_profile7(),
+            false,
+            true,
+        ),
+        ("P7 base strip", delivery_policy_profile7(), false, false),
+        (
+            "P8.1 base strip",
+            delivery_policy_profile8_1(),
+            false,
+            false,
+        ),
+    ] {
+        let request = delivery_policy_request(delivery_policy_copy(preserve, convert), None);
+        assert_eq!(
+            source_delivery_refusal(&request, &file, no_native),
+            None,
+            "{name}: a Dolby Vision copy is an in-process rewrite local delivers; the Source must too"
+        );
+    }
+}
+
+#[test]
+fn source_delivery_policy_admits_native_subtitles_over_hdr10_hlg_and_dolby_vision() {
+    let native = (true, Some(0));
+    for (name, file, kind) in [
+        (
+            "HDR10 copy",
+            delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None),
+            delivery_policy_copy(false, false),
+        ),
+        (
+            "HLG copy",
+            delivery_policy_file(Some("hlg"), Some("HLG"), None, None),
+            delivery_policy_copy(false, false),
+        ),
+        (
+            "HDR10 encode",
+            delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None),
+            SessionKind::Transcode { height: 1080 },
+        ),
+        (
+            "P8.1 preserve",
+            delivery_policy_profile8_1(),
+            delivery_policy_copy(true, false),
+        ),
+        (
+            "P7 convert",
+            delivery_policy_profile7(),
+            delivery_policy_copy(false, true),
+        ),
+        (
+            "P5 preserve",
+            delivery_policy_profile5(),
+            delivery_policy_copy(true, false),
+        ),
+        (
+            "P7 compatible-base encode",
+            delivery_policy_profile7(),
+            SessionKind::Transcode { height: 1080 },
+        ),
+    ] {
+        let request = delivery_policy_request(kind, None);
+        assert_eq!(
+            source_delivery_refusal(&request, &file, native),
+            None,
+            "{name}: native subtitles beside HDR or Dolby Vision need nothing range-specific"
+        );
+    }
+}
+
+#[test]
+fn source_delivery_policy_admits_compatible_base_dolby_vision_encodes() {
+    for (name, file) in [
+        ("P7 HDR10 base", delivery_policy_profile7()),
+        ("P8.1 HDR10 base", delivery_policy_profile8_1()),
+        ("P8.4 HLG base", delivery_policy_profile8_4()),
+        (
+            "label-only P8.1",
+            delivery_policy_file(
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 8.1 (HDR10-compatible)"),
+                None,
+                None,
+            ),
+        ),
+    ] {
+        assert!(
+            !plurx_core::playback::dolby_vision_needs_rpu_render(&file),
+            "{name}: a compatible base encodes through the ordinary base route"
+        );
+        for native in [(false, None), (true, Some(0))] {
+            let request = delivery_policy_request(SessionKind::Transcode { height: 1080 }, None);
+            assert_eq!(
+                source_delivery_refusal(&request, &file, native),
+                None,
+                "{name} {native:?}: a compatible-base encode spawns no RPU proof"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_delivery_policy_refuses_only_profile5_encodes_until_the_proof_is_owned() {
+    let profile5 = delivery_policy_profile5();
+    assert!(plurx_core::playback::dolby_vision_needs_rpu_render(
+        &profile5
+    ));
+    let encode = delivery_policy_request(SessionKind::Transcode { height: 1080 }, None);
+    assert_eq!(
+        source_delivery_refusal(&encode, &profile5, (false, None)),
+        Some(SourceDeliveryRefusal::DolbyVision)
+    );
+    assert_eq!(
+        source_delivery_refusal(&encode, &profile5, (true, Some(0))),
+        Some(SourceDeliveryRefusal::DolbyVision)
+    );
+    // A burn always encodes, so a burn over Profile 5 needs the renderer too.
+    let burn = delivery_policy_request(delivery_policy_copy(false, false), Some(0));
+    assert_eq!(
+        source_delivery_refusal(&burn, &profile5, (false, None)),
+        Some(SourceDeliveryRefusal::DolbyVision)
+    );
+    // Copies of the same source need no renderer.
+    for kind in [
+        delivery_policy_copy(true, false),
+        delivery_policy_copy(false, false),
+    ] {
+        let request = delivery_policy_request(kind, None);
+        assert_eq!(
+            source_delivery_refusal(&request, &profile5, (true, Some(0))),
+            None
+        );
+    }
+    // The burn arm is unchanged: a burn of a track the scan does not hold.
+    let hdr10 = delivery_policy_file(Some("hdr10"), Some("HDR10"), None, None);
+    assert_eq!(
+        source_delivery_refusal(&burn, &hdr10, (false, None)),
+        Some(SourceDeliveryRefusal::Unsupported)
+    );
+}
+
+#[tokio::test]
+async fn source_copy_identity_for_dolby_vision_equals_the_local_index_identity() {
+    let store: Arc<dyn Store> =
+        Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let directory = crate::test_tempdir().expect("work directory");
+    for dv_strippable in [false, true] {
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            directory.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_dv_strippable(dv_strippable);
+        for (name, file) in [
+            ("P8.1", delivery_policy_profile8_1()),
+            ("P7", delivery_policy_profile7()),
+            ("P5", delivery_policy_profile5()),
+        ] {
+            for (shape, preserve, convert) in [
+                ("strip", false, false),
+                ("preserve", true, false),
+                ("convert", false, true),
+            ] {
+                let source = manager.source_copy_video_options(&file, None, preserve, convert);
+                let local = crate::vodserve::copy_video_pipeline(
+                    &file,
+                    None,
+                    dv_strippable,
+                    preserve,
+                    convert,
+                );
+                assert_eq!(
+                    crate::fragindex::identity_for(&file, source),
+                    crate::fragindex::identity_for(&file, local),
+                    "{name} {shape} dovi_rpu={dv_strippable}: the Source must cut the pipeline local indexed"
+                );
+            }
+        }
+    }
+    // The strip is the shape `dovi_rpu` decides: with it the Source strips
+    // with `dovi_rpu=strip=1`, which is a different identity from the
+    // `filter_units`-only pipeline a hard-coded `false` named.
+    let file = delivery_policy_profile8_1();
+    let measured = TranscodeManager::new(
+        Arc::clone(&store),
+        directory.path().to_owned(),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dv_strippable(true)
+    .source_copy_video_options(&file, None, false, false);
+    assert_ne!(
+        crate::fragindex::identity_for(&file, measured),
+        crate::fragindex::identity_for(
+            &file,
+            crate::vodserve::copy_video_pipeline(&file, None, false, false, false)
+        ),
+    );
+}
+
+#[test]
+fn source_compatible_base_encode_never_renders_a_processed_window_in_the_start() {
+    use plurx_core::transcode::dv_processing::{DvFallbackReason, DvSelection};
+    // What `vod_dv_processing_from_snapshot` answers for a compatible-base
+    // Dolby Vision encode on a node with DV processing on.
+    let awaiting = DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow);
+    // A Source Start carries no candidate context and is no processed trial.
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, false, true
+    ));
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, true, true
+    ));
+    // Local keeps its legacy first-window arm and its trial.
+    assert!(TranscodeManager::start_renders_a_processed_window(
+        &awaiting, false, false, false
+    ));
+    assert!(TranscodeManager::start_renders_a_processed_window(
+        &awaiting, true, true, false
+    ));
+    assert!(!TranscodeManager::start_renders_a_processed_window(
+        &awaiting, true, false, false
+    ));
 }

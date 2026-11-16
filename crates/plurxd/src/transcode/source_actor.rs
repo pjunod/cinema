@@ -1143,6 +1143,30 @@ impl SourceProducerAuthority {
 }
 
 impl TranscodeManager {
+    /// The copy pipeline a Source cuts for a prepared copy recipe.
+    ///
+    /// Exactly the options local VOD builds (`copy_video_pipeline`) from the
+    /// same inputs, with the node's boot-measured `dovi_rpu`
+    /// ([`Self::dv_strippable`]): a Dolby Vision copy then has the
+    /// fragment-index identity local analysis built, and a base strip uses
+    /// `dovi_rpu=strip=1` rather than leaving a stale `dvcC` behind
+    /// `filter_units`.
+    pub(crate) fn source_copy_video_options(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        probe: Option<&str>,
+        preserve_dolby_vision: bool,
+        convert_dolby_vision: bool,
+    ) -> plurx_core::transcode::CopyVideoOptions {
+        plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            probe,
+            self.dv_strippable(),
+            preserve_dolby_vision,
+        )
+        .with_dolby_vision_conversion(convert_dolby_vision)
+    }
+
     pub(crate) fn lookup_source_worker(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -1285,12 +1309,13 @@ impl TranscodeManager {
         work: &mut Option<crate::fragindex::SourceIndexOperation>,
     ) -> Result<(), SourceWorkerError> {
         let file = prepared.file();
-        if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
-            || plurx_core::playback::is_dolby_vision(file)
-        {
+        if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265")) {
             // Existing warm indexes retain their established support policy.
             return Ok(());
         }
+        // A Dolby Vision copy (strip, preserve or the Profile 7 conversion)
+        // is indexed exactly as local indexes it: `index_pass` takes the
+        // Dolby Vision passes from the same options the copy is cut with.
         let SessionKind::Copy {
             preserve_dolby_vision,
             convert_dolby_vision,
@@ -1299,9 +1324,6 @@ impl TranscodeManager {
         else {
             return Err(SourceWorkerError::Unsupported);
         };
-        if preserve_dolby_vision || convert_dolby_vision {
-            return Err(SourceWorkerError::Unsupported);
-        }
         let authority = owner.gate.current_preparation(&owner.assignment).await?;
         let stored_probe = self
             .store
@@ -1325,11 +1347,11 @@ impl TranscodeManager {
         }
         // Match Source VOD's exact recipe, including parameter-set promotion
         // and retention. A plain-copy identity cannot stand in for either.
-        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+        let video = self.source_copy_video_options(
             file,
             stored_probe.as_deref(),
-            false,
-            false,
+            preserve_dolby_vision,
+            convert_dolby_vision,
         );
         let identity = crate::fragindex::identity_for(file, video);
         if self
@@ -1656,6 +1678,7 @@ impl TranscodeManager {
                     self.store.as_ref(),
                     deadline,
                     encoding,
+                    self.dv_strippable(),
                 ))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -2146,13 +2169,15 @@ impl TranscodeManager {
 /// planner, never a B claim — and its own scanned file facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceDeliveryRefusal {
-    /// Any Dolby Vision delivery: preservation, the Profile 7 conversion, a
-    /// re-encode of a Dolby Vision source (the RPU renderer's per-source
-    /// proof is not Source-owned work yet) or native subtitles beside one.
+    /// A re-encode of a Profile 5 source: the only Dolby Vision shape whose
+    /// encode needs the RPU renderer, and that renderer's per-source pixel
+    /// proof is not Source-owned work yet. Preservation, the Profile 7
+    /// conversion (an in-process fragment rewrite), a compatible-base encode
+    /// (the ordinary HDR10/HLG base route) and native subtitles beside Dolby
+    /// Vision are all delivered exactly as local playback delivers them.
     DolbyVision,
-    /// A shape this Source does not build: native subtitles over an HDR
-    /// source, a burn beside native subtitles, a burn of a downloaded sidecar
-    /// or of a track the scan does not hold.
+    /// A shape this Source does not build: a burn beside native subtitles, a
+    /// burn of a downloaded sidecar or of a track the scan does not hold.
     Unsupported,
 }
 
@@ -2167,22 +2192,10 @@ pub(crate) fn source_delivery_refusal(
     file: &plurx_core::domain::MediaFile,
     (native, _): (bool, Option<i64>),
 ) -> Option<SourceDeliveryRefusal> {
-    if let SessionKind::Copy {
-        preserve_dolby_vision,
-        convert_dolby_vision,
-        ..
-    } = request.kind
-    {
-        if preserve_dolby_vision || convert_dolby_vision {
-            return Some(SourceDeliveryRefusal::DolbyVision);
-        }
-    }
-    if plurx_core::playback::is_dolby_vision(file) && (source_recipe_is_encoded(request) || native)
+    if source_recipe_is_encoded(request)
+        && plurx_core::playback::dolby_vision_needs_rpu_render(file)
     {
         return Some(SourceDeliveryRefusal::DolbyVision);
-    }
-    if native && plurx_core::playback::hdr_route(file).is_some() {
-        return Some(SourceDeliveryRefusal::Unsupported);
     }
     if let Some(index) = request.subtitle_burn {
         let embedded = usize::try_from(index)

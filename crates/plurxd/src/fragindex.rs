@@ -2030,6 +2030,14 @@ impl SourceIndexOperation {
 /// Source copy indexing uses current bounded stored H264/HEVC completion
 /// evidence. Missing/ambiguous evidence never starts a fallback live probe.
 #[allow(clippy::too_many_arguments)]
+/// The copies a Source cold index scans: any H264/HEVC copy, Dolby Vision
+/// included. [`index_pass`] takes the strip, preserve and Profile 7 → 8.1
+/// passes from the same options the copy is cut with, exactly as local
+/// indexing does.
+fn source_index_admits(file: &MediaFile) -> bool {
+    matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
+}
+
 pub(crate) fn start_source_index(
     file: MediaFile,
     source: crate::fragment_index_cluster::SourceFence,
@@ -2042,12 +2050,11 @@ pub(crate) fn start_source_index(
     store: Arc<dyn plurx_core::store::Store>,
     hooks: Arc<SourceIndexHookOwner>,
 ) -> Result<SourceIndexOperation, String> {
-    if !matches!(file.video_codec.as_deref(), Some("h264" | "hevc" | "h265"))
-        || plurx_core::playback::is_dolby_vision(&file)
+    if !source_index_admits(&file)
         || Instant::now() >= deadline
         || file.id.to_string() != authority.assignment().binding().file_id().as_str()
     {
-        return Err("Source index supports bounded non-Dolby H264/HEVC copy only".into());
+        return Err("Source index supports bounded H264/HEVC copy only".into());
     }
     if stored_probe.len() > 1024 * 1024 {
         return Err("Source index has no bounded stored completion evidence".into());

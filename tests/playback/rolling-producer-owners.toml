@@ -6442,7 +6442,15 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # loop verifies relative/custom/non-profile commands keep their resolution
 # and cwd, while a known absolute no-input candidate receives the owned cwd.
 # This fixture launches no child.
-expected_occurrences = 352
+# Shared Dolby Vision M1 (T1.6): +2 test-only commands in
+# `dolby_vision_fixture_source`. Two finite synchronous FFmpeg remuxes (to a
+# fragmented pipe and back to an ordinary MP4) build the Dolby Vision fixture
+# source; testfixtures::run waits for and reaps each before the fixture reads
+# its output, and neither runs in a shipped binary.
+# FFmpeg 8 fixture fix: +1 test-only command in
+# `build_real_source_start_fixture`, a finite FFprobe of the generated HDR
+# base (awaited with `.output()`), asserting it is really PQ/BT.2020-tagged.
+expected_occurrences = 355
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
