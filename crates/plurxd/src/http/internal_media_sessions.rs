@@ -1334,6 +1334,7 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            processed_upgrade: None,
             enhancement: None,
             effective_processing: None,
             delivered_audio: None,

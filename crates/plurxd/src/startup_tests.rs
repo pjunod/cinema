@@ -3669,6 +3669,7 @@ fn the_system_record_reports_the_encoder_the_probe_selected() {
             },
             dovi_rpu: true,
             dovi_reshape: true,
+            dovi_reshape_hardware: Vec::new(),
             dovi_passthrough: true,
             dovi_passthrough_qsv: true,
             hdr10_passthrough: true,

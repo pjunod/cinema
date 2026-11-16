@@ -332,6 +332,8 @@ impl TranscodeManager {
                 native: None,
                 direct_start: None,
                 direct_activity: None,
+                processed_cancel: None,
+                processed_activity: None,
             }),
             changed: tokio::sync::Notify::new(),
         });

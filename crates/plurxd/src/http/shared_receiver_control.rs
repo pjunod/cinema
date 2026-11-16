@@ -332,8 +332,8 @@ async fn finish_accepted(
                 Ok(value) => plurx_core::store::stored_switch(value.as_deref(), true),
                 Err(_) => false,
             };
-            if let Some(digest) = actor.observe_ask(state, request, enabled) {
-                actor.stage_successor(state, request, tuple.duration_ms, digest);
+            if let Some(dispatch) = actor.observe_ask(state, request, enabled) {
+                actor.stage_successor(state, request, tuple.duration_ms, dispatch);
             }
         }
     }

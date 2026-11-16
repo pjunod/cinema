@@ -424,6 +424,92 @@ pub(crate) fn start_source_probe(
     }
 }
 
+/// Receipt for the exact Source assignment whose bounded processed trial has
+/// reaped its renderer/encoder and joined its source readers.
+pub(crate) struct SourceProcessedSettlement {
+    assignment: SourceDispatchAssignment,
+}
+impl SourceProcessedSettlement {
+    pub(crate) fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
+        self.assignment.same_identity(assignment)
+    }
+}
+struct ProcessedState {
+    result: Mutex<Option<Result<super::ProcessedUpgradeTrial, String>>>,
+    settled: AtomicBool,
+    changed: Notify,
+}
+pub(crate) struct SourceProcessedOperation {
+    assignment: SourceDispatchAssignment,
+    state: Arc<ProcessedState>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+impl SourceProcessedOperation {
+    pub(crate) fn cancel(&self) {
+        self.cancel.cancel();
+    }
+    pub(crate) fn cancellation(&self) -> tokio_util::sync::CancellationToken {
+        self.cancel.clone()
+    }
+    pub(crate) async fn settle(&self) -> SourceProcessedSettlement {
+        loop {
+            let changed = self.state.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.state.settled.load(Ordering::Acquire) {
+                return SourceProcessedSettlement {
+                    assignment: self.assignment.clone(),
+                };
+            }
+            changed.await;
+        }
+    }
+    pub(crate) async fn outcome(&self) -> Result<super::ProcessedUpgradeTrial, String> {
+        self.settle().await;
+        self.state
+            .result
+            .lock()
+            .map_err(|_| "Source processed result poisoned")?
+            .take()
+            .ok_or("Source processed result already consumed")?
+    }
+}
+/// Detaching the operation preserves physical custody when the Start waiter
+/// reaches its deadline. Retirement cancels and awaits its actual settlement;
+/// it never treats dropping that waiter as proof that children have stopped.
+pub(crate) fn start_source_processed<F, Fut>(
+    assignment: SourceDispatchAssignment,
+    run: F,
+) -> SourceProcessedOperation
+where
+    F: FnOnce(Arc<crate::prodrun::ProducerSlot>, tokio_util::sync::CancellationToken) -> Fut
+        + Send
+        + 'static,
+    Fut:
+        std::future::Future<Output = Result<super::ProcessedUpgradeTrial, String>> + Send + 'static,
+{
+    let state = Arc::new(ProcessedState {
+        result: Mutex::new(None),
+        settled: AtomicBool::new(false),
+        changed: Notify::new(),
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let owned = Arc::clone(&state);
+    let token = cancel.clone();
+    let producer = Arc::new(crate::prodrun::ProducerSlot::new());
+    tokio::spawn(async move {
+        let result = run(producer, token).await;
+        *owned.result.lock().expect("Source processed result") = Some(result);
+        owned.settled.store(true, Ordering::Release);
+        owned.changed.notify_waiters();
+    });
+    SourceProcessedOperation {
+        assignment,
+        state,
+        cancel,
+    }
+}
+
 enum SourceChildFailure {
     OutputBound(&'static str),
     ChildFailed,

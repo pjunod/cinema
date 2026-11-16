@@ -478,6 +478,10 @@ impl PeerConnection {
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+                )
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
                 );
             if let Some(secret) = credential {
                 let mut value = HeaderValue::from_str(&format!("CinemaShare {}", secret.expose()))
@@ -715,6 +719,10 @@ impl PeerConnection {
                 .header(
                     crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER,
                     crate::http::shared_source_playback::receiver_presentation::DOLBY_VISION_RECEIVER_HEADER_VALUE,
+                )
+                .header(
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER,
+                    crate::http::shared_source_playback::receiver_presentation::PROCESSED_UPGRADE_RECEIVER_HEADER_VALUE,
                 );
             // Outside the canonical body: the Source's Start identity is the
             // digest of those bytes, so a re-post with less time left is

@@ -156,6 +156,7 @@ fn successor_of(
         selection,
         61_250,
         Uuid::new_v4(),
+        false,
     )
     .expect("expressible ask");
     let (entry, _) = registry
@@ -215,9 +216,10 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         mode: SubtitleMode::Native,
         track: Some(3),
     };
-    let built: Value =
-        serde_json::from_str(&successor_request(&original, &ask, 61_250, id).expect("manual"))
-            .expect("JSON");
+    let built: Value = serde_json::from_str(
+        &successor_request(&original, &ask, 61_250, id, false).expect("manual"),
+    )
+    .expect("JSON");
     assert_eq!(built["request_id"], id.to_string());
     assert_eq!(
         built["playback_id"], "player",
@@ -251,9 +253,10 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         &built.to_string()
     ));
 
-    let built: Value =
-        serde_json::from_str(&successor_request(&original, &selection(), 0, id).expect("auto"))
-            .expect("JSON");
+    let built: Value = serde_json::from_str(
+        &successor_request(&original, &selection(), 0, id, false).expect("auto"),
+    )
+    .expect("JSON");
     assert_eq!(built["quality_auto"], true);
     assert!(
         built.get("copy").is_none() && built.get("height").is_none(),
@@ -270,7 +273,7 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         ..selection()
     };
     let built: Value = serde_json::from_str(
-        &successor_request(&original, &original_ask, 0, id).expect("original"),
+        &successor_request(&original, &original_ask, 0, id, false).expect("original"),
     )
     .expect("JSON");
     assert_eq!(
@@ -297,21 +300,21 @@ fn sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position() 
         ..selection()
     };
     let built: Value =
-        serde_json::from_str(&successor_request(&original, &burn, 0, id).expect("burn"))
+        serde_json::from_str(&successor_request(&original, &burn, 0, id, false).expect("burn"))
             .expect("burn JSON");
     assert_eq!(built["subtitle_burn"], 1);
     assert_eq!(built["copy"], false);
     assert!(built.get("native_subtitles").is_none());
     assert!(built.get("subtitle").is_none());
     for refused in [codec, grade] {
-        assert!(successor_request(&original, &refused, 0, id).is_none());
+        assert!(successor_request(&original, &refused, 0, id, false).is_none());
     }
     let direct =
         serde_json::json!({"playback_id":"player","request_id":"r","presentation":"direct"});
     let reopened =
         serde_json::json!({"playback_id":"player","request_id":"r","reopen_reason":"stall"});
     for refused in [direct, reopened] {
-        assert!(successor_request(&refused.to_string(), &selection(), 0, id).is_none());
+        assert!(successor_request(&refused.to_string(), &selection(), 0, id, false).is_none());
     }
 }
 
@@ -756,6 +759,7 @@ async fn sharing_receiver_viewer_cap_declines_typed() {
         &ask,
         0,
         Uuid::new_v4(),
+        false,
     )
     .expect("ask");
     assert!(matches!(
@@ -967,4 +971,78 @@ async fn sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask()
             "an aborted change never restages the session's own ask"
         );
     }
+}
+
+#[test]
+fn shared_processed_offer_waits_for_first_frame_and_is_one_shot() {
+    let registry = ReceiverStartRegistry::default();
+    let state = Arc::new(crate::http::source_actor_test_state());
+    let predecessor = registered(&registry, "predecessor", "player", 1);
+    publish_hls(&predecessor);
+    if let Some(Ok(ReceiverPublished::Hls(start))) =
+        predecessor.state.lock().expect("owner").start.as_mut()
+    {
+        start.processed_upgrade = Some("offered".to_owned());
+    }
+    let actor = ReceiverStartActor(predecessor.clone());
+    let mut starting = request(&generation(&predecessor), 1, selection());
+    starting.render_state = pc::RenderState::Starting;
+    assert_eq!(actor.observe_ask(&state, &starting, true), None);
+    let rendering = request(&generation(&predecessor), 2, selection());
+    let digest = selection().desired().digest();
+    assert_eq!(
+        actor.observe_ask(&state, &rendering, true),
+        Some(digest.clone())
+    );
+    let built: Value = serde_json::from_str(
+        &successor_request(
+            &predecessor.intent.recipe.request_json,
+            &selection(),
+            61_250,
+            Uuid::new_v4(),
+            true,
+        )
+        .expect("processed successor"),
+    )
+    .expect("JSON");
+    assert_eq!(built["processed_upgrade"], true);
+    assert_eq!(
+        actor.observe_ask(&state, &rendering, true),
+        None,
+        "a refused Source Start cannot dispatch the offer again"
+    );
+    let changed = request(&generation(&predecessor), 3, manual(480));
+    assert_eq!(
+        actor.observe_ask(&state, &changed, true),
+        Some(manual(480).desired().digest()),
+        "explicit viewer ask still dispatches"
+    );
+}
+
+#[test]
+fn shared_processed_offer_is_spent_by_viewer_change_before_first_frame() {
+    let registry = ReceiverStartRegistry::default();
+    let state = Arc::new(crate::http::source_actor_test_state());
+    let predecessor = registered(&registry, "predecessor", "player", 1);
+    publish_hls(&predecessor);
+    if let Some(Ok(ReceiverPublished::Hls(start))) =
+        predecessor.state.lock().expect("owner").start.as_mut()
+    {
+        start.processed_upgrade = Some("offered".to_owned());
+    }
+    let actor = ReceiverStartActor(predecessor.clone());
+    let mut starting = request(&generation(&predecessor), 1, selection());
+    starting.render_state = pc::RenderState::Starting;
+    assert_eq!(actor.observe_ask(&state, &starting, true), None);
+    let changed = request(&generation(&predecessor), 2, manual(480));
+    assert_eq!(
+        actor.observe_ask(&state, &changed, true),
+        Some(manual(480).desired().digest())
+    );
+    let original = request(&generation(&predecessor), 3, selection());
+    assert_eq!(
+        actor.observe_ask(&state, &original, true),
+        None,
+        "returning to the original ask does not revive the offer"
+    );
 }

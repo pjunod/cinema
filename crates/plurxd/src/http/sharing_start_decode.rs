@@ -175,6 +175,10 @@ fn validate_response(response: &StartResponse, incarnation: Uuid) -> Result<()> 
         || response
             .media_origin_ms
             .is_some_and(|n| !(-MAX_SAFE..=MAX_SAFE).contains(&n))
+        || response
+            .processed_upgrade
+            .as_deref()
+            .is_some_and(|value| value != "offered")
         || response.ladder.len() > 64
         || response.plan_notes.len() > 64
         || response
@@ -296,6 +300,25 @@ mod tests {
             response.control.expect("control").generation,
             incarnation.to_string()
         );
+    }
+    #[test]
+    fn sharing_start_decoder_accepts_only_the_processed_offer_literal() {
+        let (expected, good) = fixture();
+        assert!(decode(&good, &expected).is_ok(), "absence is legacy wire");
+        let mut offered = good.clone();
+        offered["response"]["processed_upgrade"] = json!("offered");
+        assert!(decode(&offered, &expected).is_ok());
+        for bad in [
+            json!(null),
+            json!("ready"),
+            json!("processing"),
+            json!(true),
+            json!(false),
+        ] {
+            let mut start = good.clone();
+            start["response"]["processed_upgrade"] = bad;
+            assert!(decode(&start, &expected).is_err());
+        }
     }
     #[test]
     fn sharing_start_decoder_closes_dynamic_range_and_binds_the_dolby_vision_profile() {

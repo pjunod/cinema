@@ -198,6 +198,9 @@ pub(super) fn explicit_hls_hevc_claim(caps: &plurx_core::playback::DeviceCaps) -
 /// and orphan the first.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct CreateSession {
+    /// Receiver-affirmed shared upgrade: false is ordinary support, true requests the prepared successor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processed_upgrade: Option<bool>,
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
     pub playback_id: String,
@@ -4794,6 +4797,7 @@ async fn create_with_purpose_attempt(
         processing_decline.as_deref(),
     );
     let response = StartResponse {
+        processed_upgrade: None,
         enhancement,
         effective_processing,
         delivered_audio: info.audio_delivery.clone(),
@@ -6457,10 +6461,19 @@ pub(crate) struct PreparedSourcePlayback {
     source_invocation_fingerprint: Option<String>,
     source_presentation: Option<SourceCopyPresentation>,
     copy_head_caps: plurx_core::playback::DeviceCaps,
+    processed_upgrade_requested: bool,
+    processed_upgrade_offered: bool,
+    processed_upgrade_ask: crate::transcode::ProcessedUpgradeAsk,
     decision: super::super::stream::DecisionResponse,
 }
 #[allow(dead_code)]
 impl PreparedSourcePlayback {
+    pub(crate) fn processed_upgrade_requested(&self) -> bool {
+        self.processed_upgrade_requested
+    }
+    pub(crate) fn processed_upgrade_ask(&self) -> &crate::transcode::ProcessedUpgradeAsk {
+        &self.processed_upgrade_ask
+    }
     pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
         &self.resolved.request
     }
@@ -6613,6 +6626,7 @@ impl PreparedSourcePlayback {
             info.playlist_url.clone()
         };
         Ok(StartResponse {
+            processed_upgrade: self.processed_upgrade_offered.then(|| "offered".to_owned()),
             // The FEL / RPU / DYN rows are a local response field that
             // `StartResponse` never deserializes, so the receiver's closed
             // Start decoder cannot relay them: a Source Start carrying them
@@ -6816,7 +6830,10 @@ pub(crate) async fn prepare_source_playback<
         unix_ms(),
     );
     let hdr10_requested = review.hdr10;
-    let resolved = resolve_plan_for_principal(
+    let processed_upgrade = body.processed_upgrade;
+    let processed_query =
+        body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(Some(&review)));
+    let mut resolved = resolve_plan_for_principal(
         FilePlanInputs {
             snapshot: Some(&snapshot),
             state,
@@ -6829,6 +6846,72 @@ pub(crate) async fn prepare_source_playback<
         body,
     )
     .await?;
+    let processed_upgrade_ask = crate::transcode::ProcessedUpgradeAsk {
+        canonical_caps: Some(caps.clone()),
+        target_height: u32::try_from(resolved.height).map_err(|_| refused("processed_height"))?,
+        grade: if resolved.request.hdr10 || decision.delivered_dynamic_range == "hdr10" {
+            plurx_core::transcode::OutputGrade::Hdr10
+        } else {
+            plurx_core::transcode::OutputGrade::Sdr
+        },
+        names_processed: false,
+        encoded_rung: matches!(
+            resolved.request.kind,
+            crate::transcode::SessionKind::Transcode { .. }
+        ),
+        recipe_digest: [0; 32],
+        required_fel_qualification: None,
+        catalog_query: Some(processed_query),
+        display_target: None,
+        display_target_note: None,
+    };
+    let destination = if processed_upgrade.is_some() {
+        match crate::transcode::TranscodeManager::processed_upgrade_gates_with_ask(
+            &resolved.request,
+            &snapshot,
+            hdr10_requested,
+            Some(&processed_upgrade_ask),
+        ) {
+            Ok(destination) => destination,
+            Err(reason) if processed_upgrade == Some(true) => {
+                return Err(ApiError::Conflict(reason))
+            }
+            Err(reason) => {
+                resolved
+                    .plan_notes
+                    .push(format!("Processed upgrade: {reason}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if processed_upgrade == Some(true) {
+        #[cfg(target_os = "linux")]
+        {
+            if destination.is_none() {
+                return Err(ApiError::Conflict(
+                    "processed upgrade no longer applies".into(),
+                ));
+            }
+            let (mut trial, _) =
+                crate::transcode::TranscodeManager::processed_qualification_input_with_ask(
+                    &snapshot,
+                    &resolved.request,
+                    resolved.height,
+                    &processed_upgrade_ask,
+                )
+                .map_err(ApiError::Conflict)?;
+            // Source has its own held probe and current assignment. A local Auto
+            // candidate's dispatch context is not its processed-trial authority.
+            trial.candidate_context = None;
+            resolved.request = trial;
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err(ApiError::Conflict(
+            "processed upgrades require a processing Source".into(),
+        ));
+    }
     // Source preparation must not run the local census, which can change
     // the revision being authorized and starts children outside its owner.
     let probe_json = snapshot.probe_json.as_deref();
@@ -6874,6 +6957,9 @@ pub(crate) async fn prepare_source_playback<
         source_invocation_fingerprint: None,
         source_presentation: None,
         copy_head_caps: caps,
+        processed_upgrade_requested: processed_upgrade == Some(true),
+        processed_upgrade_offered: processed_upgrade == Some(false) && destination.is_some(),
+        processed_upgrade_ask,
         target,
         principal,
         file,

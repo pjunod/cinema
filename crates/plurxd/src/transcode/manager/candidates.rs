@@ -116,18 +116,41 @@ impl TranscodeManager {
         destination: plurx_core::transcode::dv_processing::DvDestination,
         held_video_bps: Option<u64>,
     ) -> Result<transcode::EnhancementRateEnvelope, String> {
-        let context = request
+        let ask = request
             .candidate_context
-            .as_ref()
+            .as_deref()
+            .map(ProcessedUpgradeAsk::from_candidate)
             .ok_or("processed rate requires its current candidate context")?;
+        Self::processed_enhancement_envelope_with_ask(
+            snapshot,
+            request,
+            options,
+            input_has_audio,
+            strip_dovi,
+            destination,
+            held_video_bps,
+            &ask,
+        )
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn processed_enhancement_envelope_with_ask(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        options: &TranscodeOptions,
+        input_has_audio: bool,
+        strip_dovi: bool,
+        destination: plurx_core::transcode::dv_processing::DvDestination,
+        held_video_bps: Option<u64>,
+        context: &ProcessedUpgradeAsk,
+    ) -> Result<transcode::EnhancementRateEnvelope, String> {
         let caps = context
             .canonical_caps
             .as_ref()
             .ok_or("processed rate requires current client capabilities")?;
         let file = &snapshot.file;
-        let rung = if !context.selected_candidate.processed_dv
-            && context.selected_candidate.route == CandidateRoute::Encode
-        {
+        let rung = if !context.names_processed && context.encoded_rung {
             options.video_bitrate_kbps
         } else {
             super::bitrate_for_height(options.target_height)
@@ -291,14 +314,24 @@ impl TranscodeManager {
     pub(super) fn processed_qualification_destination(
         request: &SessionRequest,
     ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
+        let ask = request
+            .candidate_context
+            .as_deref()
+            .map(ProcessedUpgradeAsk::from_candidate);
+        Self::processed_qualification_destination_with_ask(request, ask.as_ref())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn processed_qualification_destination_with_ask(
+        request: &SessionRequest,
+        ask: Option<&ProcessedUpgradeAsk>,
+    ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
         use plurx_core::transcode::dv_processing::DvDestination;
         let (_, destination, _) = request.dv_processing_route()?;
         if request.dv_processing_destination.is_none()
             && matches!(request.kind, SessionKind::Transcode { .. })
         {
-            match request
-                .candidate_context
-                .as_ref()
+            match ask
                 .and_then(|context| context.catalog_query.as_ref())
                 .and_then(|query| query.copy_contract)
             {
@@ -310,9 +343,7 @@ impl TranscodeManager {
         if request.dv_processing_destination.is_none()
             && matches!(request.kind, SessionKind::Transcode { .. })
             && !request.hdr10
-            && request
-                .candidate_context
-                .as_ref()
+            && ask
                 .and_then(|context| context.canonical_caps.as_ref())
                 .and_then(|caps| caps.display.as_ref())
                 .is_some_and(|display| !display.hdr && !display.dolby_vision)
@@ -331,12 +362,24 @@ impl TranscodeManager {
         request: &SessionRequest,
         height: i64,
     ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
-        let destination = Self::processed_qualification_destination(request)?
-            .ok_or("native Dolby Vision copy has no processed destination")?;
-        let original = request
+        let ask = request
             .candidate_context
-            .as_ref()
+            .as_deref()
+            .map(ProcessedUpgradeAsk::from_candidate)
             .ok_or("processed trial context missing")?;
+        Self::processed_qualification_input_with_ask(snapshot, request, height, &ask)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn processed_qualification_input_with_ask(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        height: i64,
+        original: &ProcessedUpgradeAsk,
+    ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
+        let destination =
+            Self::processed_qualification_destination_with_ask(request, Some(original))?
+                .ok_or("native Dolby Vision copy has no processed destination")?;
         let query = original
             .catalog_query
             .as_ref()

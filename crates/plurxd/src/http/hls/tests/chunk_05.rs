@@ -2879,7 +2879,9 @@ fn a_sessions_badge_names_the_range_and_the_profile_it_actually_carries() {
 
 /// A create body with nothing set, to be spread over.
 fn bare_create() -> CreateSession {
+            processed_upgrade: None,
     CreateSession {
+            processed_upgrade: None,
         source_telemetry: None,
         intent: None,
         control_sequence: None,
@@ -3054,6 +3056,7 @@ async fn constrained_hevc_create_without_hls_is_refused_before_request_admission
             HeaderMap::new(),
             super::super::network::RemoteAddress(None),
             Json(CreateSession {
+            processed_upgrade: None,
                 playback_id: playback_id.clone(),
                 request_id: Some(request_id.clone()),
                 copy: Some(true),
@@ -3259,6 +3262,7 @@ async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get()
     let id = uuid::Uuid::new_v4().to_string();
     let incarnation = uuid::Uuid::new_v4().to_string();
     let mut request = CreateSession {
+            processed_upgrade: None,
         playback_id: "passive-http-player".to_owned(),
         request_id: Some(incarnation.clone()),
         copy: Some(true),
@@ -3411,6 +3415,7 @@ async fn sdr_master_codecs_is_frozen_when_the_session_is_created() {
             HeaderMap::new(),
             super::super::network::RemoteAddress(None),
             Json(CreateSession {
+            processed_upgrade: None,
                 playback_id: format!("sdr-codecs-{stored}"),
                 intent: Some(envelope(1, DesiredQuality::Original)),
                 copy: Some(true),

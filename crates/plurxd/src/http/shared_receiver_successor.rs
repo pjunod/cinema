@@ -63,6 +63,10 @@ pub(super) struct HandoffState {
     /// once. Cleared when its successor is withdrawn because the client left
     /// it or aborted it, so a renewed ask stages again.
     dispatched_digest: Option<String>,
+    /// An accepted Source Start offered one server-owned processed successor.
+    processed_offer: bool,
+    /// Dispatch is one-shot even if Source refuses or the viewer aborts.
+    processed_spent: bool,
     /// The latest `dual_player_preparation` the client declared.
     dual_player: bool,
     /// The one prepared successor slot.
@@ -71,6 +75,19 @@ pub(super) struct HandoffState {
     /// only once this has fully retired and freed its slots.
     withdrawing: Option<Arc<ReceiverStartInner>>,
     pub(super) replies: AckReplies,
+}
+
+#[derive(Debug)]
+pub(super) struct SuccessorDispatch {
+    digest: String,
+    processed_upgrade: bool,
+}
+
+#[cfg(test)]
+impl PartialEq<String> for SuccessorDispatch {
+    fn eq(&self, other: &String) -> bool {
+        self.digest.as_str() == other.as_str()
+    }
 }
 
 struct SuccessorSlot {
@@ -270,8 +287,12 @@ pub(super) fn successor_request(
     selection: &ClientSelection,
     start_ms: i64,
     request_id: Uuid,
+    processed_upgrade: bool,
 ) -> Option<String> {
-    if selection.codec != CodecPolicy::Auto || selection.dynamic_range != DynamicRangePolicy::Auto {
+    if !processed_upgrade
+        && (selection.codec != CodecPolicy::Auto
+            || selection.dynamic_range != DynamicRangePolicy::Auto)
+    {
         return None;
     }
     let mut value: Value = serde_json::from_str(original).ok()?;
@@ -294,8 +315,6 @@ pub(super) fn successor_request(
         "control_sequence",
         "reopen_reason",
         "intent",
-        "subtitle_burn",
-        "subtitle_burn_sdr",
     ] {
         object.remove(key);
     }
@@ -303,6 +322,15 @@ pub(super) fn successor_request(
     #[allow(clippy::cast_precision_loss)] // A validated film position, far below 2^53 ms.
     let start = start_ms.max(0) as f64 / 1_000.0;
     object.insert("start".into(), serde_json::json!(start));
+    if processed_upgrade {
+        // This is the original accepted Source recipe, not a new quality
+        // choice. Preserve its copy, grade, tracks and explicit overrides.
+        object.insert("processed_upgrade".into(), true.into());
+        return serde_json::to_string(&value).ok();
+    }
+    object.remove("processed_upgrade");
+    object.remove("subtitle_burn");
+    object.remove("subtitle_burn_sdr");
     let mut overrides = match object.remove("overrides") {
         Some(Value::Object(map)) => map,
         Some(Value::Null) | None => serde_json::Map::new(),
@@ -477,7 +505,7 @@ impl ReceiverStartActor {
         state: &Arc<AppState>,
         request: &ControlRequestV1,
         enabled: bool,
-    ) -> Option<String> {
+    ) -> Option<SuccessorDispatch> {
         // An uncommitted successor is not what the viewer watches: it stages
         // nothing of its own until the client commits to it.
         if self.0.awaiting_commit() {
@@ -487,7 +515,12 @@ impl ReceiverStartActor {
         let (stage, withdrawn) =
             {
                 let mut owned = self.0.state.lock().expect("receiver owner");
+                let offered = owned.start.as_ref().is_some_and(|start| {
+                    matches!(start, Ok(ReceiverPublished::Hls(response))
+                        if response.processed_upgrade.as_deref() == Some("offered"))
+                });
                 let handoff = &mut owned.handoff;
+                handoff.processed_offer |= offered;
                 if let Some(capabilities) = request.capabilities.as_ref() {
                     handoff.dual_player = capabilities.dual_player_preparation;
                 }
@@ -503,6 +536,14 @@ impl ReceiverStartActor {
                 }) {
                     handoff.withdrawing = None;
                 }
+                if handoff
+                    .own_digest
+                    .as_deref()
+                    .is_some_and(|own| own != digest)
+                {
+                    // A viewer-directed change outranks the offered upgrade.
+                    handoff.processed_spent = true;
+                }
                 let withdrawn = if handoff
                     .slot
                     .as_ref()
@@ -516,10 +557,34 @@ impl ReceiverStartActor {
                     handoff.withdrawing = Some(Arc::clone(successor));
                     handoff.dispatched_digest = None;
                 }
+                if handoff.own_digest.is_none() {
+                    handoff.own_digest = Some(digest.clone());
+                }
                 let stage = match handoff.own_digest.as_deref() {
-                    None => {
-                        handoff.own_digest = Some(digest.clone());
-                        None
+                    Some(own)
+                        if own == digest
+                            && handoff.processed_offer
+                            && !handoff.processed_spent
+                            && request.render_state
+                                == crate::playback_control::RenderState::Rendering
+                            && matches!(
+                                request.demand,
+                                crate::playback_control::PlaybackDemand::Active
+                                    | crate::playback_control::PlaybackDemand::Hold
+                            )
+                            && request.seek_target_ms.is_none()
+                            && handoff.slot.is_none()
+                            && handoff.withdrawing.is_none()
+                            && handoff.dual_player
+                            && enabled
+                            && accepts_shared_successor(request) =>
+                    {
+                        handoff.processed_spent = true;
+                        handoff.dispatched_digest = Some(digest.clone());
+                        Some(SuccessorDispatch {
+                            digest,
+                            processed_upgrade: true,
+                        })
                     }
                     Some(own)
                         if own != digest
@@ -531,9 +596,12 @@ impl ReceiverStartActor {
                             && accepts_shared_successor(request) =>
                     {
                         handoff.dispatched_digest = Some(digest.clone());
-                        Some(digest)
+                        Some(SuccessorDispatch {
+                            digest,
+                            processed_upgrade: false,
+                        })
                     }
-                    Some(_) => None,
+                    Some(_) | None => None,
                 };
                 (stage, withdrawn)
             };
@@ -553,7 +621,7 @@ impl ReceiverStartActor {
         state: &Arc<AppState>,
         request: &ControlRequestV1,
         duration_ms: Option<i64>,
-        digest: String,
+        dispatch: SuccessorDispatch,
     ) {
         // Bounded by the film itself, as Local bounds its seam: the looser
         // validation slack past the end is not a place a successor may begin.
@@ -562,11 +630,28 @@ impl ReceiverStartActor {
             Some(duration) if duration > 0 => asked.min(duration),
             _ => asked,
         };
+        let SuccessorDispatch {
+            digest,
+            processed_upgrade,
+        } = dispatch;
+        if self
+            .0
+            .state
+            .lock()
+            .expect("receiver owner")
+            .handoff
+            .dispatched_digest
+            .as_deref()
+            != Some(digest.as_str())
+        {
+            return;
+        }
         let Some(request_json) = successor_request(
             &self.0.intent.recipe.request_json,
             &request.selection,
             film_ms,
             Uuid::new_v4(),
+            processed_upgrade,
         ) else {
             return;
         };
