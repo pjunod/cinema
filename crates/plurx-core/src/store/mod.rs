@@ -4998,6 +4998,21 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         requested_since: i64,
     ) -> Result<Vec<OfflinePackage>, StoreError>;
 
+    /// [`pending_offline_source_probes`](Self::pending_offline_source_probes)
+    /// as this node's own replica holds it, read without consensus and
+    /// without a leader round trip.
+    ///
+    /// A hint and never an authorization: a replica that has not applied a
+    /// new probe yet answers empty, and the probe is answered on the first
+    /// pass after it applies. The probe loop uses it only to decide whether
+    /// the authoritative read is owed; that read and the answer's write stay
+    /// the only things that act.
+    async fn local_pending_offline_source_probes(
+        &self,
+        node_id: &str,
+        requested_since: i64,
+    ) -> Result<Vec<OfflinePackage>, StoreError>;
+
     async fn answer_offline_source_probe(
         &self,
         package_id: &str,
@@ -6089,6 +6104,25 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         owner_node_id: &str,
         now_ms: i64,
     ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
+
+    /// Whether this node's own replica holds an active session owned by
+    /// `owner_node_id` whose lease outlives `now_ms`, read without consensus
+    /// and without a leader round trip. Every row
+    /// [`owned_media_sessions`](Self::owned_media_sessions) returns satisfies
+    /// it, so `false` means the authoritative inventory would be empty on
+    /// this replica.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a replica that has not applied a takeover yet, `true` a row the
+    /// inventory's other predicates exclude. The lease loop uses it only to
+    /// decide whether the inventory is owed on a tick when this process runs
+    /// and remembers no session; the inventory and the renewals stay the only
+    /// things that act.
+    async fn owned_media_sessions_hint(
+        &self,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 }
 
 /// Node-local fragment indexes.

@@ -189,13 +189,13 @@
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "9b6d41e2a23aa92bf844c1add771b51034aa06b3874798f2753731b41d70df04"
+        "sha256": "cc935027f73046c64bf141d6718b5bba0508c5655813e7d15687a2b6597f7cc2"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "9b6d41e2a23aa92bf844c1add771b51034aa06b3874798f2753731b41d70df04"
+        "sha256": "cc935027f73046c64bf141d6718b5bba0508c5655813e7d15687a2b6597f7cc2"
       },
       {
         "table": "33 local raft metrics authority",
@@ -255,13 +255,13 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "c178f37f6791929ce9697ad5c0e2a5337d48a7875a2c623cec30cd6130f2c063"
+        "sha256": "dc73c74fb8c0fd03ee5937d8853f2f345ccdefb84ff8a59b5c1b84ed7fbfe482"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "c178f37f6791929ce9697ad5c0e2a5337d48a7875a2c623cec30cd6130f2c063"
+        "sha256": "dc73c74fb8c0fd03ee5937d8853f2f345ccdefb84ff8a59b5c1b84ed7fbfe482"
       },
       {
         "table": "44 main worker spawn no shutdown arg",

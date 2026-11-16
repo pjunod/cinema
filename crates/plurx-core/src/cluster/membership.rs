@@ -10536,7 +10536,7 @@ impl MembershipManager {
                 Ok(()) => {
                     match tokio::time::timeout(
                         Duration::from_secs(5),
-                        self.coordinate_purpose_keys(),
+                        self.heartbeat_purpose_keys(),
                     )
                     .await
                     {
@@ -12450,6 +12450,30 @@ impl MembershipManager {
         Ok(())
     }
 
+    /// The heartbeat's turn of [`Self::coordinate_purpose_keys`], every ten
+    /// seconds on every node: the sharing switch is looked at in this node's
+    /// own replica first, as the clock guard's `enforcement_hint` looks at
+    /// its switch, and only a switch this replica holds on pays the
+    /// factory's authoritative read and what follows it. Sharing is off on
+    /// most clusters, so this is the whole idle cost. An enable this replica
+    /// has not applied yet is coordinated on the first heartbeat after it
+    /// applies; startup and the Source schema step still call the factory
+    /// itself.
+    pub async fn heartbeat_purpose_keys(&self) -> Result<(), MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        let hint = inner
+            .store
+            .local_setting_hint("sharing_enabled")
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        if !crate::store::stored_switch(hint.as_deref(), false) {
+            return Ok(());
+        }
+        self.coordinate_purpose_keys().await
+    }
+
     /// Bounded explicit startup/heartbeat factory. A member completing a later
     /// upgrade can make the exact current floor ready without a read handler
     /// repairing key state. The saved sharing choice is never overridden.
@@ -13422,6 +13446,19 @@ impl MembershipManager {
             return Ok(0);
         };
         let now = unix_seconds()?;
+        // An idle pass is this replica's word that nothing is addressed to
+        // this node, and costs no leader round trip. A probe this replica has
+        // not applied yet is answered on the first pass after it applies; the
+        // removal that asked waits on the answer, not on a particular pass.
+        // Only a hit pays the authoritative read, and that read, not the
+        // hint, decides what is answered.
+        let hint = inner
+            .store
+            .local_pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
+            .await;
+        if !probe_hint_owes_authority(&hint) {
+            return Ok(0);
+        }
         let pending = inner
             .store
             .pending_offline_source_probes(&inner.identity.node_id, now - PROBE_REQUEST_TTL)
@@ -13454,8 +13491,8 @@ impl MembershipManager {
     ///
     /// A removal blocks an operator while it waits for these answers, so the
     /// cadence is the responsiveness of node removal itself, not a background
-    /// housekeeping interval. Idle passes cost one indexed lookup that
-    /// normally returns nothing.
+    /// housekeeping interval. Idle passes cost one indexed lookup on this
+    /// node's own replica that normally returns nothing.
     pub async fn offline_source_probe_loop(self) {
         if self.inner.is_none() {
             return;
@@ -13476,6 +13513,14 @@ impl MembershipManager {
             }
         }
     }
+}
+
+/// Whether the offline probe pass owes the authoritative read, given this
+/// replica's answer. An empty answer is the idle case. A replica that cannot
+/// answer says nothing about the leader, which may well hold a probe a
+/// removal is waiting on: that is a hit, as the lease loop treats its hint.
+fn probe_hint_owes_authority<T>(hint: &Result<Vec<T>, crate::error::StoreError>) -> bool {
+    !matches!(hint, Ok(rows) if rows.is_empty())
 }
 
 /// Positive proof that *this* machine can read a package's exact source.
