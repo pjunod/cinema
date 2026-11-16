@@ -899,8 +899,10 @@ async function alignPreparedReplacement(p,state,v,spare){
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
     &&playbackOwnsAttachedMedia(p);
   const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
-  if(!state.hls&&!spare.seeking&&preparedAlignedBuffered(spare)
-    &&(spare.currentTime-target)*1000>preparedClockAlignmentSlackMs(p)){
+  // Native readiness chooses WHEN to resume, never whether to seek backward.
+  // Incumbent-relative buffer_ready can leave less than a second past the
+  // successor itself (the Safari replay had only 496ms). Pause and warm it.
+  if(!state.hls&&(spare.currentTime-target)*1000>preparedClockAlignmentSlackMs(p)){
     if(!await holdPreparedNativeSuccessor(p,state,v,spare)||!live()) return false;
     try{
       spare.playbackRate=v.playbackRate;
@@ -969,35 +971,57 @@ function holdPreparedNativeSuccessor(p,state,v,spare){
       finish(false,"viewer-intent");return;
     }
     try{ spare.pause(); }catch(e){ finish(false,"could not pause successor");return; }
-    const held=Number(spare.currentTime);
-    const aheadMs=held*1000-preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs);
-    if(!Number.isFinite(held)||bufferRunway(v)*1000<aheadMs+PREPARED_BUFFER_LEAD_MS){
+    const requested=Number(spare.currentTime);
+    const aheadMs=requested*1000-preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs);
+    if(!Number.isFinite(requested)||bufferRunway(v)*1000<aheadMs+PREPARED_BUFFER_LEAD_MS){
       finish(false,"insufficient incumbent runway");return;
     }
     const budgetMs=Math.min(aheadMs,PREPARED_CHASE_LEAD_MS*2**(PREPARED_CHASE_ATTEMPTS-1))/rate+PREPARED_ALIGN_SEEK_MS;
+    let held=null, warmed=false;
     state.overlapPhase="native-align-hold";
+    const through=preparedBufferedThroughMs(state,spare);
+    const future=through==null?"none":Math.round(through-state.mediaOriginMs-requested*1000);
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_hold",
-      message:`prepared ${state.sessionId} holding native successor at_ms=${Math.round(held*1000)} `+
-        `ahead_ms=${Math.round(aheadMs)} budget_ms=${Math.round(budgetMs)}`},playbackContext()));
+      message:`prepared ${state.sessionId} holding native successor at_ms=${Math.round(requested*1000)} `+
+        `ahead_ms=${Math.round(aheadMs)} future_ms=${future} seeking=${spare.seeking} `+
+        `ready_state=${spare.readyState} budget_ms=${Math.round(budgetMs)}`},playbackContext()));
     const check=()=>{
       if(settled) return;
       if(!live()){ finish(false,"stale-owner");return; }
       if(v.paused||v.seeking||p.wantsPlayback===false||Number(v.playbackRate)!==rate){
         finish(false,"viewer-intent");return;
       }
-      if(spare.seeking||!spare.paused||!preparedAlignedBuffered(spare)){
-        finish(false,"successor lost held buffer");return;
-      }
-      const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+      if(!spare.paused){ finish(false,"successor resumed during hold");return; }
+      // Entry, seek completion, and warming share ONE deadline. A queued old
+      // seeked event is not evidence that the current seek finished.
       if(performance.now()-startedAt>=budgetMs){ finish(false,"deadline");return; }
-      if(target>=held){
-        if((target-held)*1000>preparedClockAlignmentSlackMs(p)){
-          finish(false,"incumbent passed held position");return;
+      if(held==null&&!spare.seeking){
+        held=Number(spare.currentTime);
+        const ahead=held*1000-preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs);
+        if(!Number.isFinite(held)||bufferRunway(v)*1000<Math.max(0,ahead)+PREPARED_BUFFER_LEAD_MS){
+          finish(false,"insufficient incumbent runway");return;
         }
-        clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_resume",
-          message:`prepared ${state.sessionId} resuming native successor `+
-            `elapsed_ms=${Math.round(performance.now()-startedAt)} drift_ms=${Math.round((held-target)*1000)}`},playbackContext()));
-        finish(true,"");return;
+      }else if(held!=null&&spare.seeking){
+        finish(false,"successor sought during hold");return;
+      }
+      if(held!=null){
+        if(Math.abs(Number(spare.currentTime)-held)*1000>preparedClockAlignmentSlackMs(p)){
+          finish(false,"held position changed");return;
+        }
+        const buffered=preparedAlignedBuffered(spare);
+        if(warmed&&!buffered){ finish(false,"successor lost held buffer");return; }
+        if(buffered) warmed=true;
+        const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+        if(target>=held){
+          if((target-held)*1000>preparedClockAlignmentSlackMs(p)){
+            finish(false,"incumbent passed held position");return;
+          }
+          if(!buffered){ finish(false,"successor not ready at rendezvous");return; }
+          clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"align_resume",
+            message:`prepared ${state.sessionId} resuming native successor held_at_ms=${Math.round(held*1000)} `+
+              `elapsed_ms=${Math.round(performance.now()-startedAt)} drift_ms=${Math.round((held-target)*1000)}`},playbackContext()));
+          finish(true,"");return;
+        }
       }
       if(state.exposeFrameTimer!=null) clearTimeout(state.exposeFrameTimer);
       state.exposeFrameTimer=setTimeout(check,10);

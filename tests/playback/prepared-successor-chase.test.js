@@ -147,13 +147,13 @@ function nativeHoldHarness({origin=0,rate=1,runway=40}={}){
   }
   return {ctx,player,state,incumbent,spare,timers,logs,failed,exposed,seeks,
     start(){ctx.notePreparedBuffer(player,state);},
-    async arrive(overshoot=0){incumbent.currentTime=origin/1000+1038.739+overshoot;
+    async arrive(overshoot=0,held=1038.739){incumbent.currentTime=origin/1000+held+overshoot;
       incumbent.emit("timeupdate");await tick();},
     async advance(ms){now+=ms;for(const [id,t] of [...timers])if(t.at<=now){timers.delete(id);t.fn();}await tick();},
     detach(){attached=false;},
-    prove({drift=0}={}){
-      for(let i=0;i<4;i++) frame(spare,1038.739+i/24,1000+i*1000/24,1+i);
-      frame(incumbent,origin/1000+1038.739+3/24+drift,1125,100);
+    prove({drift=0,held=1038.739}={}){
+      for(let i=0;i<4;i++) frame(spare,held+i/24,1000+i*1000/24,1+i);
+      frame(incumbent,origin/1000+held+3/24+drift,1125,100);
     }};
 }
 
@@ -231,5 +231,79 @@ test("alignment telemetry distinguishes seek timeout, buffer loss, and residual 
     if(outcome==="buffer")assert.match(seeks[0].message,/ready_state=2 buffered=false/);
     if(outcome==="drift")assert.match(seeks[0].message,/drift_ms=-100/);
     assert.match(h.failed[0],/could not align: attempt=2/);
+  }
+});
+
+// The 21:21 UTC Safari replay had 4338ms of buffer past the incumbent but
+// only 496ms past the successor. #1711 treated that as a reason to seek back.
+test("native hold warms the replay's 496ms own runway without a backward seek",async()=>{
+  const h=nativeHoldHarness();h.incumbent.currentTime=2191.821;h.spare.currentTime=2195.663;
+  h.spare.buffered=ranges([[2188,2196.159]]);h.start();
+  assert.equal(h.spare.paused,true,"thin native runway must enter the hold, not a backward seek");
+  assert.equal(h.seeks.length,0);assert.equal(h.failed.length,0);assert.equal(h.exposed.length,0);
+  await h.advance(1000);
+  assert.equal(h.failed.length,0,"initial thin buffer is allowed to warm while paused");
+  h.spare.buffered=ranges([[2188,2199]]);await h.advance(10);
+  await h.arrive(0,2195.663);
+  assert.equal(h.spare.paused,false);assert.equal(h.seeks.length,0);
+  assert.equal(h.exposed.length,0,"warm buffer and resume still need decoded frame proof");
+  h.prove({held:2195.663});assert.equal(h.exposed.length,1);assert.equal(h.failed.length,0);
+  assert.equal(h.timers.size,0);
+});
+
+test("native hold freezes the completed seek position rather than its requested target",async()=>{
+  const h=nativeHoldHarness();h.spare.seeking=true;h.spare.readyState=2;h.start();
+  assert.equal(h.spare.paused,true);assert.equal(h.seeks.length,0);
+  // A stale seeked event cannot prove that the element has finished seeking.
+  h.spare.emit("seeked");await h.advance(10);
+  assert.equal(h.failed.length,0);assert.equal(h.exposed.length,0);
+  h.spare.currentTime=1039;h.spare.seeking=false;h.spare.readyState=4;await h.advance(10);
+  await h.arrive();assert.equal(h.spare.paused,true,"the requested 1038.739 is not the actual rendezvous");
+  await h.arrive(0,1039);assert.equal(h.spare.paused,false);
+  h.prove({held:1039});assert.equal(h.exposed.length,1);assert.equal(h.seeks.length,0);
+});
+
+test("native hold waits for future-data readiness without seeking back",async()=>{
+  const h=nativeHoldHarness();h.spare.readyState=2;h.start();await h.advance(10);
+  assert.equal(h.spare.paused,true);assert.equal(h.failed.length,0);assert.equal(h.seeks.length,0);
+  h.spare.readyState=3;await h.advance(10);await h.arrive();h.prove();
+  assert.equal(h.exposed.length,1);assert.equal(h.failed.length,0);
+});
+
+test("native hold refuses thin buffer at crossing and bounds an unfinished seek",async()=>{
+  const thin=nativeHoldHarness();thin.spare.buffered=ranges([[1032,1039.235]]);thin.start();
+  await thin.arrive();assert.match(thin.failed[0],/not ready at rendezvous/);
+  assert.equal(thin.exposed.length,0);assert.equal(thin.incumbent.muted,false);
+  assert.equal(thin.seeks.length,0);assert.equal(thin.timers.size,0);
+  const seeking=nativeHoldHarness();seeking.spare.seeking=true;seeking.start();
+  await seeking.advance(6000);assert.match(seeking.failed[0],/deadline/);
+  assert.equal(seeking.exposed.length,0);assert.equal(seeking.seeks.length,0);
+  assert.equal(seeking.timers.size,0);
+});
+
+test("native hold checks the settled seek position for overshoot and incumbent runway",async()=>{
+  for(const at of [1034,1075]){
+    const h=nativeHoldHarness();h.spare.seeking=true;h.start();
+    h.spare.currentTime=at;h.spare.buffered=ranges([[at,at+10]]);h.spare.seeking=false;
+    await h.advance(10);
+    assert.match(h.failed[0],at===1034?/passed held position/:/insufficient incumbent runway/);
+    assert.equal(h.exposed.length,0);assert.equal(h.seeks.length,0);assert.equal(h.timers.size,0);
+  }
+});
+
+test("native hold does not reset its deadline after seek completion or warming",async()=>{
+  const h=nativeHoldHarness();h.spare.seeking=true;h.start();await h.advance(5000);
+  h.spare.seeking=false;await h.advance(10);await h.advance(300);
+  assert.match(h.failed[0],/deadline/);assert.equal(h.exposed.length,0);assert.equal(h.timers.size,0);
+});
+
+test("native hold tears down while initially thin or still seeking",async()=>{
+  for(const pending of ["thin","seek"]){
+    const h=nativeHoldHarness();
+    if(pending==="thin")h.spare.buffered=ranges([[1032,1039.235]]);
+    else h.spare.seeking=true;
+    h.start();h.ctx.freePreparedReplacement(h.player,h.state);
+    assert.equal(h.timers.size,0);assert.equal(h.state.overlapListeners,null);
+    await h.arrive();assert.equal(h.exposed.length,0);assert.equal(h.failed.length,0);
   }
 });
