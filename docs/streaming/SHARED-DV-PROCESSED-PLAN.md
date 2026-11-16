@@ -321,3 +321,18 @@ FEL renderer acceptance: the lifecycle renderer is `/bin/false`, and the HTTP
 Profile 7 sample has no enhancement layer. T4.5's positive reuse, cross-grant /
 viewer rejection and pending-FEL checks require the real-backend qualification
 receipt; no predicate-only test is cited as that evidence.
+
+### Current-main integration (2026-11-16)
+
+Task PRs #1714, #1719, #1720 and #1721 merged after the compile-only effort
+gate8199 passed. Their final effort tree exactly matched tested fee07e071.
+Main32fa105ee is integrated at b74f9c952; client fixture corrections follow
+the request's bounded-range capability, retaining no-cap refusal coverage.
+Main already contained the feature-off AppliedView inference fix.
+
+Activity now uses the cluster facade's Operations roster (learners and stale
+members retained). Member authorization/signing remain fresh exact proofs,
+separate from directory caching. The existing transport call remains counted;
+the census ceiling falls by eleven. New-base compiler/static checks precede
+one final adversarial review and runtime qualification. Deployment and real
+shared-title/device acceptance remain open.

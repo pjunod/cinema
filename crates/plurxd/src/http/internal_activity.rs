@@ -16,12 +16,13 @@ use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeer, MembershipError};
+use plurx_core::cluster::membership::ActivityPeer;
 use serde::{Deserialize, Serialize};
 
 use super::peer_transport::{deadline_after, PeerAuthMode, PeerTransport, PeerTransportError};
 #[cfg(test)]
 use super::peer_transport::{NODE_HEADER, SIGNATURE_HEADER, TARGET_HEADER, TIMESTAMP_HEADER};
+use crate::cluster::{ClusterError, Directory, Purpose};
 use crate::state::AppState;
 
 pub const PATH: &str = "/_internal/v1/activity-snapshot";
@@ -234,7 +235,8 @@ pub(super) async fn local_worker_capacity(state: &AppState) -> ActivityWorkers {
 
 async fn local_workers_with_details(state: &AppState, detailed: bool) -> ActivityWorkers {
     let runtime = state.transcode.media_node_runtime().await;
-    let accepting_work = state.serving.is_ready() && !state.membership.local_maintenance_active();
+    let accepting_work = state.cluster.authority().state().ready
+        && state.cluster.role().admission != crate::cluster::Admission::Maintenance;
     let children = plurx_core::process::priority::running();
     let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
     ActivityWorkers {
@@ -427,36 +429,57 @@ pub fn prometheus_cluster_activity() -> String {
 #[allow(dead_code)] // wired now so #326 does not need state/main territory
 #[derive(Clone)]
 pub struct PeerActivityClient {
-    membership: plurx_core::cluster::membership::MembershipManager,
+    directory: Directory,
     transport: PeerTransport,
     reads: Arc<tokio::sync::Mutex<PeerActivityReadGate>>,
     owner_reads:
         Arc<tokio::sync::Mutex<HashMap<String, (tokio::time::Instant, PeerActivityOutcome)>>>,
 }
 
+#[derive(Debug)]
+pub(crate) enum PeerActivityStopError {
+    Directory(ClusterError),
+    Transport(PeerTransportError),
+}
+
+impl std::fmt::Display for PeerActivityStopError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Directory(error) => write!(formatter, "{error}"),
+            Self::Transport(error) => write!(formatter, "peer transport: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for PeerActivityStopError {}
+
 #[allow(dead_code)]
 impl PeerActivityClient {
     #[must_use]
-    pub fn new(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
+    pub(crate) fn new(
+        membership: plurx_core::cluster::membership::MembershipManager,
+        directory: Directory,
+    ) -> Self {
         Self {
-            transport: PeerTransport::new(membership.clone()),
-            membership,
+            transport: PeerTransport::new(membership),
+            directory,
             reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
             owner_reads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn snapshots(&self) -> Result<SharedPeerActivity, MembershipError> {
+    pub(crate) async fn snapshots(&self) -> Result<SharedPeerActivity, ClusterError> {
         let directory = self.clone();
         let fetcher = self.clone();
         shared_peer_activity(
             &self.reads,
             move || async move {
                 directory
-                    .membership
-                    .operations_peers()
+                    .directory
+                    .peers(Purpose::Operations)
                     .await
                     .inspect_err(|_| record_aggregation(2))
+                    .map(|peers| peers.all().to_vec())
             },
             move |peers| async move {
                 record_aggregation(0);
@@ -479,10 +502,10 @@ impl PeerActivityClient {
     /// and the held async lock make concurrent overview requests one physical
     /// peer read without turning the lightweight DVR poll into an all-node
     /// Activity fan-out.
-    pub async fn owner_snapshot(
+    pub(crate) async fn owner_snapshot(
         &self,
         owner_node_id: &str,
-    ) -> Result<PeerActivityOutcome, MembershipError> {
+    ) -> Result<PeerActivityOutcome, ClusterError> {
         let mut gate = self.owner_reads.lock().await;
         if let Some((completed_at, outcome)) = gate.get(owner_node_id) {
             if completed_at.elapsed() <= ACTIVITY_SNAPSHOT_REUSE {
@@ -492,16 +515,15 @@ impl PeerActivityClient {
                 ));
             }
         }
-        let peer = self
-            .membership
-            .operations_peers()
-            .await?
-            .into_iter()
+        let peers = self.directory.peers(Purpose::Operations).await?;
+        let peer = peers
+            .all()
+            .iter()
             .find(|peer| peer.node_id == owner_node_id);
         let outcome = match peer {
             Some(peer) => {
                 let deadline = deadline_after(TIMEOUT);
-                fetch_peer_activity(self.clone(), peer, deadline).await
+                fetch_peer_activity(self.clone(), peer.clone(), deadline).await
             }
             None => PeerActivityOutcome::Unsupported,
         };
@@ -546,28 +568,30 @@ impl PeerActivityClient {
     /// Route one admin Stop only to the committed member named by a fresh
     /// Activity row. Membership supplies the address; the signed body binds
     /// both that node and the exact opaque Source operation id.
-    pub async fn stop_processed_on(
+    pub(crate) async fn stop_processed_on(
         &self,
         owner_node_id: &str,
         stop_id: &str,
-    ) -> Result<StatusCode, PeerTransportError> {
+    ) -> Result<StatusCode, PeerActivityStopError> {
         if !valid_source_stop_id(stop_id) && !valid_receiver_stop_id(stop_id) {
-            return Err(PeerTransportError::InvalidResponse);
+            return Err(PeerActivityStopError::Transport(
+                PeerTransportError::InvalidResponse,
+            ));
         }
-        let peer = self
-            .membership
-            .operations_peers()
+        let (_, base) = self
+            .directory
+            .peers(Purpose::Operations)
             .await
-            .map_err(|_| PeerTransportError::Unreachable)?
-            .into_iter()
-            .find(|peer| peer.node_id == owner_node_id && peer.reachable)
-            .ok_or(PeerTransportError::Unreachable)?;
-        let base = peer.http_base.ok_or(PeerTransportError::Unreachable)?;
+            .map_err(PeerActivityStopError::Directory)?
+            .find(owner_node_id)
+            .ok_or(PeerActivityStopError::Transport(
+                PeerTransportError::Unreachable,
+            ))?;
         let body = serde_json::to_vec(&SourceStopRequest {
             node_id: owner_node_id.to_owned(),
             stop_id: stop_id.to_owned(),
         })
-        .map_err(|_| PeerTransportError::InvalidResponse)?;
+        .map_err(|_| PeerActivityStopError::Transport(PeerTransportError::InvalidResponse))?;
         let response = self
             .transport
             .request(
@@ -584,7 +608,8 @@ impl PeerActivityClient {
                 1_024,
                 PeerAuthMode::ExactRequestAndMemberResponse,
             )
-            .await?;
+            .await
+            .map_err(PeerActivityStopError::Transport)?;
         match response.status {
             reqwest::StatusCode::NO_CONTENT
             | reqwest::StatusCode::NOT_FOUND
@@ -594,7 +619,9 @@ impl PeerActivityClient {
                 Ok(StatusCode::from_u16(response.status.as_u16())
                     .expect("known Source stop status"))
             }
-            _ => Err(PeerTransportError::InvalidResponse),
+            _ => Err(PeerActivityStopError::Transport(
+                PeerTransportError::InvalidResponse,
+            )),
         }
     }
 }
@@ -619,10 +646,10 @@ async fn shared_peer_activity<R, RFut, T, F, Fut>(
     gate: &tokio::sync::Mutex<PeerActivityReadGate>,
     resolve: R,
     fetch: F,
-) -> Result<SharedPeerActivity, MembershipError>
+) -> Result<SharedPeerActivity, ClusterError>
 where
     R: FnOnce() -> RFut,
-    RFut: Future<Output = Result<T, MembershipError>>,
+    RFut: Future<Output = Result<T, ClusterError>>,
     F: FnOnce(T) -> Fut,
     Fut: Future<Output = Vec<(String, PeerActivityOutcome)>>,
 {
@@ -730,8 +757,8 @@ pub async fn snapshot(
     let auth =
         super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_internal_peer_read_request(&auth, "GET", PATH, &[])
+        .cluster
+        .verify_member_read_request(&auth, "GET", PATH, &[])
         .await
         .unwrap_or(false)
     {
@@ -763,8 +790,8 @@ pub async fn stop_source_processed(
     let auth =
         super::peer_transport::exact_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
-        .membership
-        .authorize_internal_peer_request(&auth, "POST", SOURCE_STOP_PATH, &body)
+        .cluster
+        .verify_member_request(&auth, "POST", SOURCE_STOP_PATH, &body)
         .await
         .unwrap_or(false)
     {
@@ -807,8 +834,8 @@ fn signed_activity_response(
 ) -> Result<Response, StatusCode> {
     let payload = super::peer_transport::signed_response_payload(status.as_u16(), &body);
     let signature = state
-        .membership
-        .sign_internal_peer_response(&auth.node_id, &auth.nonce, path, &payload)
+        .cluster
+        .sign_member_response(&auth.node_id, &auth.nonce, path, &payload)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let mut response = (status, body).into_response();
     response.headers_mut().extend(snapshot_response_headers());
@@ -1509,9 +1536,8 @@ mod tests {
 
     #[tokio::test]
     async fn reachable_peer_without_activity_origin_is_unsupported_not_unreachable() {
-        let client = PeerActivityClient::new(
-            plurx_core::cluster::membership::MembershipManager::unavailable(),
-        );
+        let membership = plurx_core::cluster::membership::MembershipManager::unavailable();
+        let client = PeerActivityClient::new(membership.clone(), Directory::new(membership));
         let outcome = fetch_peer_activity(
             client,
             ActivityPeer {

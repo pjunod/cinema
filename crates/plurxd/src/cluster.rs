@@ -52,7 +52,7 @@ use plurx_core::cluster::membership::directory::{
     roster_now, AppliedStanding, DirectoryReadCounts, RosterDirectory, RosterSnapshot,
 };
 use plurx_core::cluster::membership::{
-    ActivityPeer, LocalServingRole, MembershipError, MembershipManager,
+    ActivityPeer, InternalPeerAuth, LocalServingRole, MembershipError, MembershipManager,
 };
 
 use crate::serving_fence::{ServingAuthority, ServingFence};
@@ -84,7 +84,6 @@ impl Cluster {
     }
 
     /// May this node serve or commit now: the serving fence's authority.
-    #[allow(dead_code)] // slice 2 moves the Live TV and DVR fence reads here
     pub(crate) fn authority(&self) -> ServingAuthority {
         self.fence.authority()
     }
@@ -120,6 +119,47 @@ impl Cluster {
     /// The shared directory, for a subsystem that keeps its own handle.
     pub(crate) fn directory(&self) -> Directory {
         self.directory.clone()
+    }
+
+    /// Exact member authentication remains a fresh membership proof, never a
+    /// cached peer-directory lookup. Activity read and Stop use their
+    /// existing, distinct authorization windows.
+    pub(crate) async fn verify_member_read_request(
+        &self,
+        auth: &InternalPeerAuth,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<bool, ClusterError> {
+        self.membership
+            .authorize_internal_peer_read_request(auth, method, path, body)
+            .await
+            .map_err(ClusterError)
+    }
+
+    pub(crate) async fn verify_member_request(
+        &self,
+        auth: &InternalPeerAuth,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<bool, ClusterError> {
+        self.membership
+            .authorize_internal_peer_request(auth, method, path, body)
+            .await
+            .map_err(ClusterError)
+    }
+
+    pub(crate) fn sign_member_response(
+        &self,
+        target_node_id: &str,
+        request_nonce: &str,
+        path: &str,
+        response: &[u8],
+    ) -> Result<String, ClusterError> {
+        self.membership
+            .sign_internal_peer_response(target_node_id, request_nonce, path, response)
+            .map_err(ClusterError)
     }
 }
 
@@ -165,6 +205,8 @@ pub(crate) enum Purpose {
     Voters,
     /// Ready media targets, learners included (`media_peers`).
     MediaWorkers,
+    /// Every other committed member, including learners and stale rows.
+    Operations,
 }
 
 /// A failed roster read. Displays exactly as the membership error it wraps,
@@ -242,6 +284,7 @@ impl Peers {
         let list = match purpose {
             Purpose::Voters => snapshot.voters(now),
             Purpose::MediaWorkers => snapshot.media_workers(now, true).map_err(ClusterError)?,
+            Purpose::Operations => snapshot.operations(now).map_err(ClusterError)?,
         };
         Ok(Self { list })
     }
@@ -425,6 +468,11 @@ pub(crate) mod tests {
             ids(&Peers::of(&snapshot, Purpose::MediaWorkers, NOW).expect("roles")),
             ["node-2", "node-3", "node-5"],
             "media workers: ready members, learners included"
+        );
+        assert_eq!(
+            ids(&Peers::of(&snapshot, Purpose::Operations, NOW).expect("operations")),
+            ["node-2", "node-3", "node-4", "node-5"],
+            "operations: every committed member, including stale voters and learners"
         );
     }
 
