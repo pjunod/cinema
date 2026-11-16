@@ -313,9 +313,12 @@ pub(super) async fn begin_phase<T: QueueSql>(
     Ok(None)
 }
 
-/// The phase closes once its source lease is gone: released by its owner, or
-/// collected by the sweep after expiry plus the grace. A successor may finish
-/// this bookkeeping only once that lease is actually absent.
+/// Close the phase in one transaction: delete the phase's own source lease
+/// (the one the role names as active), release its reservations and clear
+/// the role. The caller has joined every read of the phase (or the process
+/// that could read is gone), so the lease's lifetime ends with the phase
+/// itself; nothing depends on a separate, best-effort release, which the
+/// request heartbeat would otherwise keep renewing.
 pub(super) async fn finish_phase<T: QueueSql>(
     store: &T,
     phase: AnalysisPhysicalPhase,
@@ -326,11 +329,17 @@ pub(super) async fn finish_phase<T: QueueSql>(
     let body = encode(
         &serde_json::json!({"claim":phase.claim,"source":phase.source,"sequence":phase.phase_sequence,"custody_id":phase.custody.custody_id}),
     )?;
-    let closed=format!("role.request_id=json_extract($1,'$.claim.request_id') AND role.active_custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.sequence') AND role.physical_node_id=json_extract($1,'$.claim.node_id') AND role.physical_fence=json_extract($1,'$.claim.fence') AND {} AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)",source_match("role"));
+    let exact=format!("role.request_id=json_extract($1,'$.claim.request_id') AND role.active_custody_id=json_extract($1,'$.custody_id') AND role.phase_sequence=json_extract($1,'$.sequence') AND role.physical_node_id=json_extract($1,'$.claim.node_id') AND role.physical_fence=json_extract($1,'$.claim.fence') AND {}",source_match("role"));
+    let end=format!("DELETE FROM source_leases WHERE lease_id=json_extract($1,'$.custody_id') AND owner_kind='analysis' AND EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE {exact})");
+    let closed=format!("{exact} AND NOT EXISTS(SELECT 1 FROM source_leases lease WHERE lease.lease_id=role.active_custody_id)");
     let release=format!("DELETE FROM analysis_source_reservations WHERE request_id=json_extract($1,'$.claim.request_id') AND fence=json_extract($1,'$.claim.fence') AND EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE {closed})");
     let clear=format!("UPDATE analysis_coordination_roles AS role SET active_custody_id=NULL,physical_node_id=NULL,physical_fence=NULL WHERE {closed}");
     let attempt = store
-        .queue_transaction(vec![(release, body.clone()), (clear, body.clone())])
+        .queue_transaction(vec![
+            (end, body.clone()),
+            (release, body.clone()),
+            (clear, body.clone()),
+        ])
         .await;
     let rows=store.queue_sql(format!("SELECT CASE WHEN EXISTS(SELECT 1 FROM analysis_coordination_roles role WHERE role.request_id=json_extract($1,'$.claim.request_id') AND {} AND role.phase_sequence>=json_extract($1,'$.sequence') AND (role.active_custody_id IS NULL OR role.active_custody_id<>json_extract($1,'$.custody_id'))) THEN 'true' ELSE 'false' END AS result_json",source_match("role")),body,false,true).await?;
     let finished = rows

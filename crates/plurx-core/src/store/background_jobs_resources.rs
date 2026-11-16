@@ -1265,26 +1265,17 @@ mod source_tests {
             .await
             .expect("exact service")
             .is_some());
-        assert!(!coordinator::finish_phase(&store, first.clone())
-            .await
-            .expect("still reading"));
-        assert!(!coordinator::finish_phase(&store, first.clone())
-            .await
-            .expect("receipt still retained"));
-        assert!(
-            release_background_custody(&store, first.custody.clone(), 1000)
-                .await
-                .expect("release")
-        );
-        assert!(
-            coordinator::begin_phase(&store, claim.clone(), source.clone(), 0, 1000)
-                .await
-                .expect("registration after settlement cannot recreate receipt")
-                .is_none()
-        );
+        // The owner closes the phase once its reads joined: the lease goes
+        // in the same transaction, with no separate release before it.
         assert!(coordinator::finish_phase(&store, first.clone())
             .await
             .expect("close phase"));
+        assert!(
+            !release_background_custody(&store, first.custody.clone(), 1000)
+                .await
+                .expect("release after close"),
+            "closing the phase deleted its lease"
+        );
         assert!(
             coordinator::begin_phase(&store, claim.clone(), source.clone(), 0, 1000)
                 .await
