@@ -356,6 +356,7 @@ fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
     // survive to be acknowledged.
     let binding = || PreparedActionBinding {
         successor: PreparedSuccessorAction {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             staged_incarnation_id: staged.clone(),
@@ -366,6 +367,7 @@ fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
             effective_selection: selection.clone(),
         },
         action: ControlAction::Prepare {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             action_id: action_id.clone(),
@@ -2335,6 +2337,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
         let control = ControlState {
             prepared_action: Some(PreparedActionBinding {
                 successor: PreparedSuccessorAction {
+                    delivered_dolby_vision_profile: None,
                     enhancement: None,
                     control: None,
                     staged_incarnation_id: staged.clone(),
@@ -2354,6 +2357,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
                     },
                 },
                 action: ControlAction::Prepare {
+                    delivered_dolby_vision_profile: None,
                     enhancement: None,
                     control: None,
                     action_id: action_id.clone(),
@@ -2609,6 +2613,7 @@ fn the_preparation_action_is_a_transaction_not_a_report() {
 fn a_relayed_preparation_cannot_point_a_client_anywhere() {
     let session = uuid::Uuid::new_v4().to_string();
     let honest = ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         control: None,
         enhancement: None,
         action_id: uuid::Uuid::new_v4().to_string(),
@@ -2635,6 +2640,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a protocol-relative URL onto another host",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2647,6 +2653,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an absolute URL onto another host",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2659,6 +2666,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "no session at all",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2671,6 +2679,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "no action id to fence the acknowledgement with",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: String::new(),
@@ -2683,6 +2692,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an action id that acknowledgements cannot parse",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: "not-a-uuid".to_owned(),
@@ -2695,6 +2705,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a backslash-relative URL, which browsers treat as //",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2707,6 +2718,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "the session named only in a query parameter",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2719,6 +2731,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "the session named only in a fragment",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2731,6 +2744,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a path that climbs out of the session's own",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2743,6 +2757,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "encoded dot segments normalized after validation",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2755,6 +2770,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an internal backslash normalized as a path separator",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2767,6 +2783,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an arbitrary same-origin route containing the session id",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2779,6 +2796,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a session id that is not one",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2793,6 +2811,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
             // zero); only one outside the representable range is garbage.
             "an origin outside the representable media range",
             ControlAction::Prepare {
+                delivered_dolby_vision_profile: None,
                 enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
@@ -2809,6 +2828,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
     let mut invalid_selection = effective_selection;
     invalid_selection.height = crate::transcode::MAX_HEIGHT + 1;
     let invalid_nested = ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         control: None,
         enhancement: None,
         action_id,
@@ -2840,6 +2860,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
 fn a_relayed_preparation_needs_the_declared_vocabulary() {
     let session = uuid::Uuid::new_v4().to_string();
     let action = ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         control: None,
         enhancement: None,
         action_id: uuid::Uuid::new_v4().to_string(),
@@ -2862,6 +2883,7 @@ fn a_relayed_preparation_needs_the_declared_vocabulary() {
 fn prepare_action() -> ControlAction {
     let session = uuid::Uuid::new_v4().to_string();
     ControlAction::Prepare {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         action_id: uuid::Uuid::new_v4().to_string(),
@@ -2970,6 +2992,7 @@ fn a_new_ask_in_the_same_packet_refuses_the_old_asks_commit() {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3233,6 +3256,7 @@ fn a_refused_packet_cannot_advance_the_ask_and_strand_a_successor() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3349,6 +3373,7 @@ fn a_successor_staged_without_a_recorded_ask_still_commits() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3734,6 +3759,7 @@ fn a_prepared_successor_gets_one_action_identity_and_replays_it_exactly() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -3833,6 +3859,7 @@ fn preparation_acknowledgements_are_fenced_recorded_and_replayed() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -3998,6 +4025,7 @@ fn failed_preparation_acknowledgement_moves_the_slot_to_aborting() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -4088,6 +4116,7 @@ fn expired_or_abort_won_commit_acknowledgement_is_rejected_and_replayed() {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            delivered_dolby_vision_profile: None,
             enhancement: None,
             control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
@@ -4183,6 +4212,7 @@ fn settled_deadline_abort_still_rejects_its_late_commit_acknowledgement() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -4333,6 +4363,7 @@ fn vocabulary_is_frozen_for_the_sequence_that_was_accepted() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -4388,6 +4419,7 @@ fn a_changed_payload_cannot_consume_the_next_sequence() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -4450,6 +4482,7 @@ fn owner_epoch_rollover_aborts_instead_of_reannouncing_old_staging() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -4505,6 +4538,7 @@ fn an_expired_preparation_cannot_cross_the_acceptance_boundary() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id,
@@ -5219,6 +5253,7 @@ async fn a_staged_successor_round_trips_through_the_actor_mailbox() {
     let request = request();
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: "successor-1".to_owned(),
@@ -5307,6 +5342,7 @@ async fn preparation_ownership_transfers_before_a_dropped_actor_reply() {
     );
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
@@ -16845,6 +16881,7 @@ fn accept_step_rejection_order() {
     };
     let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
     let successor = |media_origin_ms: i64| PreparedSuccessorAction {
+        delivered_dolby_vision_profile: None,
         enhancement: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
@@ -17887,4 +17924,48 @@ fn committed_timeline_origin_is_signed_without_widening_buffer_positions() {
     ack.committed_media_origin_ms = Some(-83);
     ack.buffered_through_ms = Some(-1);
     assert_eq!(ack.validate(), Err("acknowledgement.buffered_through_ms"));
+}
+
+#[test]
+fn prepared_delivery_profile_survives_wire_and_legacy_absence() {
+    let mut selection = prepared_selection();
+    selection.dynamic_range = Some("dolby_vision".to_owned());
+    let action = PreparedSuccessorAction {
+        staged_incarnation_id: uuid::Uuid::new_v4().to_string(),
+        deadline_ms: i64::MAX,
+        session_id: "profile81-successor".to_owned(),
+        playlist_url: "/api/v1/hls/profile81-successor/index.m3u8".to_owned(),
+        control: None,
+        media_origin_ms: 0,
+        effective_selection: selection,
+        enhancement: None,
+        delivered_dolby_vision_profile: Some(8),
+    }
+    .into_action();
+    let mut wire = serde_json::to_value(&action).expect("Prepare serialization");
+    assert_eq!(wire["delivered_dolby_vision_profile"], 8);
+    assert_eq!(wire["effective_selection"]["dynamic_range"], "dolby_vision");
+    let round_trip: ControlAction = serde_json::from_value(wire.clone()).expect("Prepare decoding");
+    assert_eq!(round_trip, action);
+    assert!(
+        believable(&round_trip),
+        "the delivery fields survive a response relay"
+    );
+    wire.as_object_mut()
+        .expect("Prepare object")
+        .remove("delivered_dolby_vision_profile");
+    let legacy: ControlAction = serde_json::from_value(wire.clone()).expect("legacy Prepare");
+    assert!(matches!(
+        legacy,
+        ControlAction::Prepare {
+            delivered_dolby_vision_profile: None,
+            ..
+        }
+    ));
+    assert!(serde_json::to_value(legacy)
+        .expect("legacy serialization")
+        .get("delivered_dolby_vision_profile")
+        .is_none());
+    wire["delivered_dolby_vision_profile"] = serde_json::json!("8");
+    assert!(serde_json::from_value::<ControlAction>(wire).is_err());
 }

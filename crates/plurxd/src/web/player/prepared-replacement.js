@@ -350,6 +350,8 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     // The successor's own enhancement claim, parsed as on a create response;
     // absent (an older server) stays null.
     enhancement:typeof playbackEnhancementFromWire==="function"?playbackEnhancementFromWire(action.enhancement):null,
+    deliveredDvProfile:action.effective_selection?.dynamic_range==='dolby_vision'
+      ?action.delivered_dolby_vision_profile??null:null,
     sharedContext,
     mediaOriginMs:originMs,offeredOriginMs,vod:false,
     selection:action.effective_selection,
@@ -1346,6 +1348,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     probeUrl:p.probeUrl,offset:p.offset,vod:p.vod,rangePresentation:p.rangePresentation,wantsPlayback:p.wantsPlayback,
     method:p.method,copyHls:p.copyHls,autoHeight:p.autoHeight,encoder:p.encoder,
     qualityCandidateId:p.qualityCandidateId,deliveredRange:p.deliveredRange,
+    deliveredDvProfile:p.deliveredDvProfile,
     enhancement:p.enhancement||null,health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
@@ -1372,6 +1375,10 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     p.encoder=null;
     p.deliveredRange=candidate.grade;
   }
+  // The built successor's delivery overrides the candidate's PQ base grade.
+  // This also applies when the predecessor's catalog lacks the new candidate.
+  if(state.selection?.dynamic_range) p.deliveredRange=state.selection.dynamic_range;
+  p.deliveredDvProfile=state.deliveredDvProfile??null;
   p.health=null;
   p.healthObservedAt=null;
   p.presentationAdvancedAt=null;

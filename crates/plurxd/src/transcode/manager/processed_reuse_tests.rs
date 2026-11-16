@@ -743,6 +743,43 @@ async fn fixture(destination: DvDestination) -> Fixture {
 }
 
 #[tokio::test]
+async fn processed_stream_format_reports_the_attached_carrier_not_its_pq_base() {
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let f = fixture(destination).await;
+        assert_eq!(
+            f.encoding.plan.output_contract().output_dynamic_range(),
+            "hdr10",
+            "both admitted processing destinations encode a PQ base"
+        );
+        let status = f
+            .manager
+            .vod
+            .status(&f.session_id)
+            .await
+            .expect("attached status");
+        let json = serde_json::to_value(status).expect("status JSON");
+        assert_eq!(
+            json["stream_format"]["dynamic_range"],
+            if destination == DvDestination::Profile81 {
+                "dolby_vision"
+            } else {
+                "hdr10"
+            },
+            "only the exact attached P81 processing plan supplies DV signaling"
+        );
+        assert_eq!(
+            json["stream_format"]["pipeline"],
+            f.encoding.plan.options().pipeline.name(),
+            "the carrier does not relabel the frozen processing pipeline"
+        );
+        assert_eq!(
+            json["stream_format"]["encoder"],
+            f.encoding.delivered_output_encoder()
+        );
+    }
+}
+
+#[tokio::test]
 async fn processed_profile81_master_declares_hdr10_compatibility() {
     for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
         let f = fixture(destination).await;

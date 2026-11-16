@@ -2227,6 +2227,7 @@ async fn staged_successor_action(
             start.delivered_dynamic_range,
         ),
         enhancement: start.enhancement,
+        delivered_dolby_vision_profile: start.delivered_dolby_vision_profile,
     };
     if !crate::playback_control::prepared_payload_is_valid(
         None,

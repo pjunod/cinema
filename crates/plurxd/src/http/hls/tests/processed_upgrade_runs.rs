@@ -868,3 +868,210 @@ async fn a_claim_closed_mid_trial_drops_the_retried_trial() {
     assert_eq!(outcome, "declined");
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// Exercise the actual staging/reservation and announcement boundary. The
+/// optional processing facts are the root owner's input to this boundary;
+/// descriptive candidates and requested destinations are deliberately identical
+/// in the negative case and cannot replace that input.
+async fn staged_processing_delivery_round_trip(profile81: bool, verified: bool) {
+    use super::preparation::{
+        AcceptedAsk, PreparationPurpose, PreparationStageOutcome, StagedProcessingDelivery,
+        StagedSuccessorIds,
+    };
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::transcode::{OutputGrade, dv_processing::DvDestination};
+    let dir = crate::test_tempdir().expect("state dir");
+    let playback = unique_playback_id("staged-processing-delivery");
+    let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+    let mut source = staged_source_file();
+    source.video_codec = Some("hevc".into());
+    source.bit_depth = Some(10);
+    source.hdr = Some("smpte2084".into());
+    source.dolby_vision.profile = Some(7);
+    source.dolby_vision.el_present = Some(true);
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest([0x8a; 32]),
+        recipe_digest: [0x8a; 32],
+        route: CandidateRoute::Encode,
+        planned_codec: Some("hevc".into()),
+        processed_dv: true,
+        normalized_geometry: true,
+        width: 3840,
+        height: 2160,
+        target_height: 2160,
+        average_bps: Some(12_000_000),
+        peak_bps: Some(18_000_000),
+        grade: OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    };
+    let processed = crate::transcode::SessionRequest {
+        playback_id: playback.clone(),
+        hdr10: true,
+        dv_processing_destination: Some(if profile81 {
+            DvDestination::Profile81
+        } else {
+            DvDestination::Hdr10
+        }),
+        candidate_context: Some(Box::new(
+            crate::transcode::TranscodeManager::candidate_context(&candidate),
+        )),
+        ..staged_candidate_request()
+    };
+    let ids = StagedSuccessorIds::mint();
+    let incarnation = ids.incarnation_id.clone();
+    let successor_session = ids.session_id.clone();
+    let outcome = super::preparation::stage_prepared_successor_with_delivery_as(
+        &fixture.state,
+        &session,
+        &route,
+        &staged_predecessor_recipe(&route),
+        &processed,
+        Some(&source),
+        &fixture.state.node_id,
+        PreparationPurpose::SelectionChange,
+        AcceptedAsk {
+            prepared_proof: None,
+            film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+            desired_digest: None,
+            planning_cancellation: None,
+            planning_registration: None,
+            quality_intent: None,
+        },
+        false,
+        ids,
+        verified.then_some(StagedProcessingDelivery {
+            dolby_vision_profile: profile81.then_some(8),
+            fel: Some(true),
+        }),
+    )
+    .await;
+    assert_eq!(outcome, PreparationStageOutcome::Staged);
+    let successor = fixture
+        .store
+        .media_session_route_by_incarnation(&incarnation)
+        .await
+        .expect("route read")
+        .expect("the exact minted successor was reserved");
+    assert_eq!(successor.session_id, successor_session);
+    let start: StartResponse =
+        serde_json::from_str(&successor.response_json).expect("durable StartResponse");
+    let delivered = if profile81 && verified {
+        "dolby_vision"
+    } else {
+        "hdr10"
+    };
+    let expected_profile = (profile81 && verified).then_some(8);
+    assert_eq!(start.delivered_dynamic_range.as_deref(), Some(delivered));
+    assert_eq!(start.delivered_dolby_vision_profile, expected_profile);
+    let enhancement = start.enhancement.as_ref().expect("DV source enhancement");
+    assert_eq!(
+        enhancement
+            .active
+            .contains(&plurx_core::playback::enhancement::EnhancementBadge::Fel),
+        verified,
+        "source FEL and candidate.processed_dv never invent an admitted processing plan"
+    );
+    assert_eq!(
+        enhancement.requires_effective_processing,
+        !verified || !profile81
+    );
+    let mut request = control_request(route.incarnation_id.clone());
+    request.supported_actions = Some(vec![
+        crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned(),
+    ]);
+    let (status, offer) = control_body(
+        control_local_inner(
+            &fixture.state,
+            &route,
+            request,
+            unix_ms().saturating_add(4_000),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{offer}");
+    assert_eq!(offer["action"]["type"], "prepare", "{offer}");
+    assert_eq!(offer["action"]["session_id"], successor_session);
+    assert_eq!(
+        offer["action"]["effective_selection"]["dynamic_range"],
+        delivered
+    );
+    assert_eq!(
+        offer["action"]
+            .get("delivered_dolby_vision_profile")
+            .and_then(serde_json::Value::as_u64),
+        expected_profile.map(u64::from)
+    );
+    assert_eq!(
+        offer["action"]["enhancement"],
+        serde_json::to_value(enhancement).expect("enhancement wire")
+    );
+
+    // The served-window report must bind to the staged generation AND its
+    // authoritative delivered carrier when public control projects the owner
+    // header. Reconstructed P81 evidence must not disappear as HDR10-E.
+    let report = serde_json::json!({"generation":incarnation,"hdr10_enhanced":!profile81,
+        "profile81_reconstructed":profile81,"fel_contributed":true,
+        "applied_operations":["RpuColorConversion","TargetMapping","LinearNlqResidual"]});
+    let mut response = Json(serde_json::json!({"generation":incarnation,
+        "effective_selection":{"dynamic_range":delivered}}))
+    .into_response();
+    response.headers_mut().insert(
+        "x-plurx-dv-processing",
+        axum::http::HeaderValue::from_str(&report.to_string()).expect("owner header"),
+    );
+    let projected = super::control::public_control_processing(response).await;
+    let bytes = axum::body::to_bytes(projected.into_body(), 65536)
+        .await
+        .expect("public body");
+    let projected: serde_json::Value = serde_json::from_slice(&bytes).expect("public control");
+    assert_eq!(
+        projected.get("effective_processing").is_some(),
+        verified || !profile81,
+        "a current HDR10 owner receipt is valid without an earlier root marker; a P81 receipt still needs its DV carrier"
+    );
+    if !verified {
+        assert!(enhancement.details.is_empty(), "pending metadata cannot contradict a later owner receipt");
+        assert!(
+            enhancement.active.is_empty(),
+            "without a verified root, no processing badge is active before its owner receipt"
+        );
+        assert!(
+            !enhancement
+                .active
+                .contains(&plurx_core::playback::enhancement::EnhancementBadge::Fel)
+        );
+    }
+    if verified || !profile81 {
+        assert_eq!(
+            projected["effective_processing"]["profile81_reconstructed"]
+                .as_bool()
+                .unwrap_or(false),
+            profile81
+        );
+        assert_eq!(projected["effective_processing"]["fel_contributed"], true);
+    }
+}
+
+#[tokio::test]
+async fn verified_profile81_staged_delivery_survives_durable_start_prepare_and_control_projection()
+{
+    staged_processing_delivery_round_trip(true, true).await;
+}
+
+#[tokio::test]
+async fn verified_hdr10_staged_delivery_keeps_its_effective_processing_requirement() {
+    staged_processing_delivery_round_trip(false, true).await;
+}
+
+#[tokio::test]
+async fn a_processed_candidate_without_verified_root_does_not_claim_profile81_or_fel() {
+    staged_processing_delivery_round_trip(true, false).await;
+}
+
+#[tokio::test]
+async fn a_processed_hdr10_candidate_without_verified_root_accepts_its_current_owner_receipt() {
+    staged_processing_delivery_round_trip(false, false).await;
+}
