@@ -288,6 +288,36 @@ class MobileChannelsCase(unittest.TestCase):
         release(self.base, head)
         self.assertTrue((self.root / "state" / mobile_build.LEDGER).is_file())
 
+    def test_an_upload_the_forge_did_not_record_is_not_uploaded_again(self) -> None:
+        head = self.change("android", 1)
+        with patch.object(mobile_build, "_advance_published",
+                          side_effect=mobile_build.MobileBuildError("forge refused the push")):
+            with self.assertRaisesRegex(ValueError, "could not be recorded in the forge"):
+                release(self.base, head)
+        # Uploaded, and known to this host although the forge holds nothing.
+        self.assertTrue((self.root / "command.json").exists())
+        ledger = self.root / "state" / mobile_build.LEDGER
+        self.assertEqual(len(ledger.read_text().splitlines()), 1)
+        self.assertEqual(self.run_git("for-each-ref", "refs/cinema-published"), "")
+        (self.root / "command.json").unlink()
+        # The re-run pushes the ref and builds nothing.
+        release(self.base, head)
+        self.assertFalse((self.root / "command.json").exists())
+        self.assertEqual(self.run_git("rev-parse", "refs/cinema-published/android"), head)
+        self.assertEqual(len(ledger.read_text().splitlines()), 1)
+        # While the forge stays unreachable, a later commit is not published
+        # past the unrecorded one either.
+        apple = self.change("apple", 1)
+        with patch.object(mobile_build, "_advance_published",
+                          side_effect=mobile_build.MobileBuildError("forge refused the push")):
+            with self.assertRaises(ValueError):
+                release(head, apple)
+        newer = self.change("android", 2)
+        with patch.object(mobile_build, "_advance_published",
+                          side_effect=mobile_build.MobileBuildError("forge refused the push")):
+            with self.assertRaisesRegex(ValueError, "still not recorded in the forge"):
+                release(apple, newer)
+
     def test_a_comment_only_client_change_publishes_nothing(self) -> None:
         self.commit("clients/android/app/src/main/Player.kt", "val revision = 1\n")
         before = self.run_git("rev-parse", "HEAD")
@@ -377,6 +407,13 @@ class EveryBuildPathStampsCase(unittest.TestCase):
         self.assertLess(ship.index('run "${MOBILE_ARGS[@]}"'), ship.index("mobile_build record"))
         self.assertIn('-e "plurx_repo=$MOBILE_REPO"', ship)
         self.assertNotIn('plurx_repo=$ROOT"', ship)
+        # It holds the channel job's publish lock from before the floor check,
+        # and records an earlier unrecorded upload before reading the floor.
+        self.assertIn('exec 9>>"$PUBLISH_STATE/publish.lock"', ship)
+        self.assertIn("validation.mobile_build publish-lock --fd 9", ship)
+        self.assertLess(ship.index("publish-lock --fd 9"), ship.index("retry-unrecorded"))
+        self.assertLess(ship.index("retry-unrecorded"), ship.index('"${STAMP_ARGS[@]}"'))
+        self.assertIn("mobile_build.publish_lock(state)", self.read("validation/mobile_channels.py"))
         # A TestFlight upload is a store upload: main only.
         self.assertIn('[ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store ios tvos)', ship)
 

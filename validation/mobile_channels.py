@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -77,11 +77,12 @@ def release(base: str, head: str) -> None:
     # Shares the same lock name across apps/repos on this signing controller.
     # Workflow concurrency queues this repo; the file lock also excludes other
     # automated publishers using this controller entry point.
-    with (state / "publish.lock").open("a") as lock:
+    # `scripts/ship --apple` takes it too (mobile_build.publish_lock).
+    with contextlib.ExitStack() as held:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ValueError("another mobile channel release is running; retry this job") from exc
+            held.enter_context(mobile_build.publish_lock(state))
+        except mobile_build.MobileBuildError as exc:
+            raise ValueError(f"another mobile channel release is running; retry this job ({exc})") from exc
         if not (ansible / "mobile-channels.yml").is_file() or not inventory.is_file():
             raise ValueError("configure PLURX_ANSIBLE_DIR and PLURX_ANSIBLE_INVENTORY on the signing runner")
         subprocess.run(["git", "-C", str(source), "fetch", "origin",
@@ -95,6 +96,16 @@ def release(base: str, head: str) -> None:
             print("No mobile release inputs changed.")
             return
         try:
+            # An earlier upload whose forge record failed left only its ledger
+            # line. Record it now; a platform recorded for this very commit is
+            # already in the store and is not built again.
+            recorded = mobile_build.retry_unrecorded(source, state)
+            for platform, commit in sorted(recorded.items()):
+                print(f"Recorded the earlier {platform} upload of {commit} in the forge.", flush=True)
+            platforms = [p for p in platforms if recorded.get(p) != current]
+            if not platforms:
+                print(f"Cinema {current} was already uploaded; nothing to publish.", flush=True)
+                return
             # Stores take main only, a number above the last one published
             # here, and the tree mobile_build stamps: the one place a build
             # tree comes from.

@@ -183,6 +183,21 @@ if [ $((DO_APPLE + DO_ANDROID)) -gt 0 ]; then
       note "uncommitted changes are not shipped: the build is of $(git -C "$ROOT" rev-parse --short HEAD)"
     fi
     STAMP_ARGS=(checkout --repo "$ROOT" --commit HEAD --fetch)
+    if [ "$DO_APPLE" -eq 1 ]; then
+      # One store publisher at a time on this Mac: the lock the channel job
+      # holds (validation/mobile_channels.py), from the floor check to the
+      # forge record. The descriptor stays open, and so locked, until this
+      # script exits.
+      PUBLISH_STATE="${PLURX_MOBILE_STATE_DIR:-$HOME/.local/state/noirr/mobile-channels}"
+      mkdir -p "$PUBLISH_STATE"
+      exec 9>>"$PUBLISH_STATE/publish.lock"
+      PYTHONPATH="$ROOT" python3 -m validation.mobile_build publish-lock --fd 9 \
+        || die "another mobile release is running on this Mac (see above)"
+      # An earlier upload whose forge record failed is recorded first, so the
+      # floor below knows it and the same number is not uploaded again.
+      PYTHONPATH="$ROOT" python3 -m validation.mobile_build retry-unrecorded --repo "$ROOT" \
+        || die "an earlier upload is still not recorded in the forge (see above)"
+    fi
     # A TestFlight upload is a store upload: main only, and above the last
     # build the forge records for iOS and tvOS.
     [ "$DO_APPLE" -eq 1 ] && STAMP_ARGS+=(--store ios tvos)
@@ -210,7 +225,7 @@ if [ $((DO_APPLE + DO_ANDROID)) -gt 0 ]; then
     # The upload succeeded: move the forge's publication refs, so the next
     # release, from any host, starts above this build.
     PYTHONPATH="$ROOT" python3 -m validation.mobile_build record "$MOBILE_REPO" --repo "$ROOT" --platforms ios tvos >/dev/null \
-      || die "uploaded, but the publication was not recorded in the forge (see above)"
+      || die "uploaded, but the publication was not recorded in the forge (see above); the next --apple run retries it"
     note "recorded the TestFlight build in the forge"
   fi
 fi

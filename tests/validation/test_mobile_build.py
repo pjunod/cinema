@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -256,6 +258,90 @@ class MobileBuildCase(unittest.TestCase):
             record_published(self.root, ["android"], 5, self.base, "b" * 40)
         with self.assertRaises(MobileBuildError):
             require_above_published(self.root, ["android"], 999)
+
+    def test_a_publication_ref_only_moves_forward_and_only_from_the_value_read(self):
+        self.origin()
+        first = self.commit("first release")
+        second = self.commit("second release")
+        third = self.commit("third release")
+        ref = "refs/cinema-published/android"
+        record_published(self.root, ["android"], build_number(self.root, second), second, "b" * 40)
+        # An older main commit whose publish finishes late leaves the ref alone.
+        record_published(self.root, ["android"], build_number(self.root, first), first, "c" * 40)
+        self.assertEqual(git(self.root, "rev-parse", ref), second)
+        # A stale read: this publisher saw no ref, or an older one, while
+        # another moved it. The lease refuses the push and the ref is read again.
+        real = mobile_build.forge_published
+        for stale, publishing, expected in (
+            ({}, third, third),
+            ({"android": (build_number(self.root, first), first)}, second, third),
+        ):
+            reads = []
+
+            def read(source, stale=stale, reads=reads):
+                reads.append(None)
+                return stale if len(reads) == 1 else real(source)
+
+            with self.subTest(stale=stale), patch.object(mobile_build, "forge_published", read):
+                record_published(
+                    self.root, ["android"], build_number(self.root, publishing), publishing, "d" * 40
+                )
+                self.assertEqual(len(reads), 2)
+            self.assertEqual(git(self.root, "rev-parse", ref), expected)
+        source = Path(mobile_build.__file__).read_text(encoding="utf-8")
+        self.assertIn("--force-with-lease=", source)
+        self.assertNotIn('"--force"', source)
+
+    def test_an_upload_the_forge_did_not_record_is_kept_locally_and_only_the_push_is_retried(self):
+        self.origin()
+        state = self.root.parent / "state"
+        head = self.commit("a release")
+        number = build_number(self.root, head)
+        git(self.root, "remote", "set-url", "origin", str(self.root.parent / "no-such-forge"))
+        with self.assertRaisesRegex(MobileBuildError, "retries the push"):
+            record_published(self.root, ["ios", "android"], number, head, "b" * 40, state)
+        # The ledger line was written before the push, so this host knows the build.
+        self.assertEqual(published(state)["android"]["source_commit"], head)
+        with self.assertRaises(MobileBuildError):
+            mobile_build.retry_unrecorded(self.root, state)
+        git(self.root, "remote", "set-url", "origin", str(self.root))
+        self.assertEqual(forge_published(self.root), {})
+        with self.assertRaisesRegex(MobileBuildError, "per this controller's ledger"):
+            require_above_published(self.root, ["android"], number, state)
+        self.assertEqual(mobile_build.retry_unrecorded(self.root, state), {"android": head, "ios": head})
+        self.assertEqual(forge_published(self.root), {"android": (number, head), "ios": (number, head)})
+        self.assertEqual(mobile_build.retry_unrecorded(self.root, state), {})
+        self.assertEqual(len((state / mobile_build.LEDGER).read_text().splitlines()), 2)
+
+    def test_one_publish_lock_serves_the_channel_job_and_a_shell_that_holds_a_descriptor(self):
+        state = self.root.parent / "state"
+        with mobile_build.publish_lock(state):
+            with self.assertRaisesRegex(MobileBuildError, "another mobile release holds"):
+                with mobile_build.publish_lock(state):
+                    self.fail("the lock was taken twice")
+        # scripts/ship opens the file on descriptor 9 and has this module lock
+        # it; the lock outlives that helper and lasts as long as the shell.
+        repo = Path(mobile_build.__file__).resolve().parents[1]
+        probe = (
+            "import sys\nfrom pathlib import Path\nfrom validation import mobile_build\n"
+            "try:\n    with mobile_build.publish_lock(Path(sys.argv[1])):\n        print('free')\n"
+            "except mobile_build.MobileBuildError:\n    print('held')\n"
+        )
+        script = (
+            'exec 9>>"$STATE/publish.lock"\n'
+            '"$PY" -m validation.mobile_build publish-lock --fd 9 || exit 7\n'
+            '"$PY" -c "$PROBE" "$STATE"\n'
+            '"$PY" -m validation.mobile_build publish-lock --fd 9 9>>"$STATE/publish.lock"; echo "second=$?"\n'
+        )
+        result = subprocess.run(
+            ["bash", "-c", script], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, "STATE": str(state), "PLURX_MOBILE_STATE_DIR": str(state),
+                 "PY": sys.executable, "PROBE": probe, "PYTHONPATH": str(repo)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["held", "second=1"])
+        with mobile_build.publish_lock(state):
+            pass  # released when the shell exited
 
     def test_the_controller_ledger_is_a_second_floor_and_names_both_commits(self):
         self.origin()

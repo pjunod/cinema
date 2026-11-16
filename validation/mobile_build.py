@@ -39,8 +39,12 @@ Every store upload records itself in the forge (`record_published`): the ref
 published. `require_above_published` reads those refs before any build and
 refuses a number at or below the one they hold, so a rewritten `main` cannot
 be uploaded under a number the store already has, and the floor survives a
-new controller or a wiped state directory. The controller's own ledger file
-is kept as a second, local record of the stamp commit and the time.
+new controller or a wiped state directory. A ref only moves forward: the push
+is leased on the value read, and a commit with a lower count never replaces a
+higher one. The controller's own ledger file is written first, as a second,
+local record of the stamp commit and the time; when the ref push then fails,
+that line is what stops a re-run from uploading the same number again, and
+the next run retries only the push (`retry_unrecorded`).
 
 A stamp commit says what it may be used for (`Build-Scope: store` or
 `devices`); only a commit on `main` gets the store scope, and the Ansible
@@ -50,7 +54,9 @@ upload task requires it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -74,6 +80,7 @@ GOOGLE_PLAY_CEILING = 2_100_000_000
 MAIN = "origin/main"
 PIN = "pinned-source.git"
 LEDGER = "cinema-published-builds.jsonl"
+PUBLISH_LOCK = "publish.lock"
 PUBLISHED_REFS = "refs/cinema-published"
 SCOPE_TRAILER = "Build-Scope"
 # Which hand-claimed floor each release platform inherits.
@@ -399,38 +406,151 @@ def require_above_published(
             )
 
 
+def publish_state() -> Path:
+    """The signing controller's publish state: its lock and its ledger file."""
+
+    return Path(
+        os.environ.get("PLURX_MOBILE_STATE_DIR", "~/.local/state/noirr/mobile-channels")
+    ).expanduser()
+
+
+def take_publish_lock(state: Path, descriptor: int) -> None:
+    """Lock `publish.lock` through a descriptor the caller already holds open.
+
+    The lock belongs to the open file, so it lasts until the caller closes
+    the descriptor or exits: `scripts/ship` opens the file, hands the
+    descriptor here, and keeps it for the whole upload.
+    """
+
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise MobileBuildError(
+            f"another mobile release holds {state / PUBLISH_LOCK}; retry when it has finished"
+        ) from exc
+
+
+@contextlib.contextmanager
+def publish_lock(state: Path):
+    """One store publisher at a time on this host, whichever entry point it used."""
+
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (state / PUBLISH_LOCK).open("a") as lock:
+        take_publish_lock(state, lock.fileno())
+        yield
+
+
+def _advance_published(source: Path, platforms: list[str], source_commit: str) -> None:
+    """Move each platform's publication ref on `origin` forward to `source_commit`.
+
+    Forward only. Each push is leased on the value just read from the forge,
+    so a ref another publisher moved in the meantime is read again instead of
+    overwritten, and a ref that already names a commit with as many commits
+    or more is left where it is: a publish of an older `main` commit that
+    finishes late does not lower the floor.
+    """
+
+    count = int(_git(source, "rev-list", "--count", source_commit))
+    failure: MobileBuildError | None = None
+    for _ in range(3):
+        held = forge_published(source)
+        refspecs, leases = [], []
+        for platform in platforms:
+            ref = f"{PUBLISHED_REFS}/{platform}"
+            holds = held.get(platform)
+            if holds is not None and (holds[1] == source_commit or holds[0] >= count):
+                continue
+            refspecs.append(f"{source_commit}:{ref}")
+            # An empty expectation means "the ref must not exist yet".
+            leases.append(f"--force-with-lease={ref}:{holds[1] if holds else ''}")
+        if not refspecs:
+            return
+        try:
+            _git(source, "push", "--quiet", *leases, "origin", *refspecs)
+        except MobileBuildError as exc:
+            failure = exc
+            continue
+        for refspec in refspecs:
+            _git(source, "update-ref", refspec.split(":", 1)[1], source_commit)
+        return
+    raise failure  # type: ignore[misc]
+
+
 def record_published(
     source: Path, platforms: list[str], build: int, source_commit: str, stamp_commit: str,
     state: Path | None = None,
 ) -> None:
-    """Record a publication in the forge, and in this controller's ledger file.
+    """Record a publication in this controller's ledger file, then in the forge.
 
-    Moves `refs/cinema-published/<platform>` on `origin` to the source commit.
-    A failure here is raised: the build is already in the store, and the next
-    release must not start from a floor that does not know it.
+    The ledger line is written first. The build is already in the store, so
+    if the forge cannot be reached the line is what refuses a re-run of the
+    same number here (`require_above_published`), and `retry_unrecorded`
+    pushes the ref on the next run. The failure is still raised: other hosts
+    do not know the build until the ref moves.
     """
 
-    refspecs = [f"{source_commit}:{PUBLISHED_REFS}/{platform}" for platform in platforms]
+    if state is not None:
+        state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with (state / LEDGER).open("a", encoding="utf-8") as ledger:
+            for platform in platforms:
+                ledger.write(json.dumps({
+                    "platform": platform, "build": build, "source_commit": source_commit,
+                    "stamp_commit": stamp_commit, "at": at,
+                }, sort_keys=True) + "\n")
     try:
-        _git(source, "push", "--quiet", "--force", "origin", *refspecs)
+        _advance_published(source, platforms, source_commit)
     except MobileBuildError as exc:
+        kept = (
+            f"It is in {state / LEDGER}, so this host will not upload that number again, "
+            "and the next release run here retries the push; to retry it now: "
+            "python3 -m validation.mobile_build retry-unrecorded"
+            if state is not None else
+            "Record it by hand before the next release: git push origin "
+            + " ".join(f"{source_commit}:{PUBLISHED_REFS}/{platform}" for platform in platforms)
+        )
         raise MobileBuildError(
             f"build {build} of {source_commit[:12]} was published for {', '.join(platforms)} but "
-            f"could not be recorded in the forge ({exc}). Record it by hand before the next "
-            f"release: git push --force origin {' '.join(refspecs)}"
+            f"could not be recorded in the forge ({exc}). {kept}"
         ) from exc
-    for platform in platforms:
-        _git(source, "update-ref", f"{PUBLISHED_REFS}/{platform}", source_commit)
-    if state is None:
-        return
-    state.mkdir(parents=True, exist_ok=True, mode=0o700)
-    at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with (state / LEDGER).open("a", encoding="utf-8") as ledger:
-        for platform in platforms:
-            ledger.write(json.dumps({
-                "platform": platform, "build": build, "source_commit": source_commit,
-                "stamp_commit": stamp_commit, "at": at,
-            }, sort_keys=True) + "\n")
+
+
+def retry_unrecorded(source: Path, state: Path) -> dict[str, str]:
+    """Push the publication refs this controller's ledger holds and the forge does not.
+
+    A store upload whose ref push failed left only its ledger line. Returns
+    `{platform: commit}` for each ref moved now, so a caller can tell a
+    release that is already in the store from one still to build. A ledger
+    row whose commit this repository no longer has (a rewritten `main`) stays
+    a local floor only.
+    """
+
+    latest = published(state)
+    if not latest:
+        return {}
+    held = forge_published(source)
+    pending: dict[str, list[str]] = {}
+    for platform, row in sorted(latest.items()):
+        commit = str(row.get("source_commit", ""))
+        if platform not in PLATFORM_FLOOR or not re.fullmatch(r"[0-9a-f]{40}", commit):
+            continue
+        if _git(source, "cat-file", "-e", f"{commit}^{{commit}}", status=True) != "0":
+            continue
+        count = int(_git(source, "rev-list", "--count", commit))
+        if platform in held and (held[platform][1] == commit or held[platform][0] >= count):
+            continue
+        pending.setdefault(commit, []).append(platform)
+    moved: dict[str, str] = {}
+    for commit, platforms in pending.items():
+        try:
+            _advance_published(source, platforms, commit)
+        except MobileBuildError as exc:
+            raise MobileBuildError(
+                f"{commit[:12]} was published for {', '.join(platforms)} (see {state / LEDGER}) "
+                f"and is still not recorded in the forge ({exc})"
+            ) from exc
+        moved.update({platform: commit for platform in platforms})
+    return moved
 
 
 def default_state() -> Path:
@@ -464,6 +584,15 @@ def main(argv: list[str] | None = None) -> int:
     record.add_argument("root", type=Path, help="the stamped checkout that was uploaded")
     record.add_argument("--repo", type=Path, default=REPO_ROOT)
     record.add_argument("--platforms", nargs="+", required=True, choices=sorted(PLATFORM_FLOOR))
+    retry = commands.add_parser(
+        "retry-unrecorded",
+        help="push the publication refs of uploads this host's ledger holds and the forge does not",
+    )
+    retry.add_argument("--repo", type=Path, default=REPO_ROOT)
+    lock = commands.add_parser(
+        "publish-lock", help="take this host's publish lock on an inherited file descriptor"
+    )
+    lock.add_argument("--fd", type=int, required=True)
     source = commands.add_parser(
         "release-source",
         help="print the path of the pinned repository whose main is origin/main, stamped",
@@ -483,8 +612,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise MobileBuildError(f"{args.root} is not a store-scope release checkout")
             build = require_stamped(args.root)["android"]
             stamp = _git(args.root, "rev-parse", "HEAD")
-            record_published(args.repo, args.platforms, build, _git(args.root, "rev-parse", "HEAD^"), stamp)
+            record_published(
+                args.repo, args.platforms, build, _git(args.root, "rev-parse", "HEAD^"), stamp,
+                publish_state(),
+            )
             print(build)
+        elif args.command == "retry-unrecorded":
+            for platform, commit in sorted(retry_unrecorded(args.repo, publish_state()).items()):
+                print(f"{platform} {commit}")
+        elif args.command == "publish-lock":
+            take_publish_lock(publish_state(), args.fd)
         elif args.command == "require-stamped":
             builds = require_stamped(args.root)
             print(builds["android"])
@@ -503,7 +640,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.store:
                     require_main(args.repo, args.commit)
                     require_above_published(
-                        args.repo, args.store, build_number(args.repo, args.commit)
+                        args.repo, args.store, build_number(args.repo, args.commit),
+                        publish_state(),
                     )
                 path, _, _ = release_checkout(
                     args.repo, state, args.commit, "store" if args.store else "devices"
