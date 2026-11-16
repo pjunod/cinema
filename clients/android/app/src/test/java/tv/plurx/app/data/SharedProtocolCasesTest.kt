@@ -67,7 +67,7 @@ class SharedProtocolCasesTest {
         return PlaybackFileContext.authenticatedDetailForTest(reference, c.string("file_id"), transport)
     }
 
-    private fun hlsRequest() = CreateSessionReq(playback_id = "player-fixture", request_id = "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0", presentation = "vod")
+    private fun hlsRequest() = CreateSessionReq(playback_id = "player-fixture", request_id = "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0", presentation = "vod", caps = SharedFixture("301").caps())
     private fun directRequest() = CreateSessionReq(playback_id = "player-fixture", request_id = "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0", presentation = "direct")
 
     @Test fun sourceIdsKeepTheExactDecimalWireGrammar() {
@@ -104,13 +104,23 @@ class SharedProtocolCasesTest {
         val public = start.getValue("public").jsonObject
         val session = start.getValue("receiver").string("session_id")
         val base = base()
-        val bound = SharedStart.decode(public.toString()).bindInitial(base, hlsRequest())
+        val request = hlsRequest()
+        val boundedRange = request.caps?.transports?.contains("hls-bounded-range-v1") == true
+        val bound = SharedStart.decode(public.toString()).bindInitial(base, request)
         assertEquals(session, bound.sessionId)
         assertEquals(start.getValue("receiver").string("incarnation_id"), bound.start.response.control!!.generation)
         val rows = clientRows(start.getValue("mutations").jsonArray)
         assertTrue(rows.size >= 15)
-        for (row in rows) assertEquals(row.string("id"), row.string("expected") == "accepted",
-            accepts { SharedStart.decode(mutated(public, row, session).toString()).bindInitial(base, hlsRequest()) })
+        for (row in rows) {
+            val expected = (if (boundedRange) row["bounded_range_expected"]?.jsonPrimitive?.content else null) ?: row.string("expected")
+            assertEquals(row.string("id"), expected == "accepted",
+                accepts { SharedStart.decode(mutated(public, row, session).toString()).bindInitial(base, request) })
+        }
+        val unadvertised = request.copy(caps = null)
+        val whole = JsonObject(public + ("media_origin_ms" to JsonPrimitive(0)))
+        assertTrue(accepts { SharedStart.decode(whole.toString()).bindInitial(base, unadvertised) })
+        val boundedWithoutAffirmation = JsonObject(whole + ("vod" to JsonPrimitive(false)))
+        assertFalse(accepts { SharedStart.decode(boundedWithoutAffirmation.toString()).bindInitial(base, unadvertised) })
     }
 
     @Test fun directStartRepliesMimeSetAndUrlBinding(): Unit = runBlocking {
