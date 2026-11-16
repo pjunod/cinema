@@ -3351,7 +3351,7 @@ const JOIN_SNAPSHOT_MIN_COPY_BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
 /// The longest the snapshot builder waits for storage that can fit the build
 /// or cannot be measured before attempting it (Hiqlite's
 /// `snapshot_storage_deferral`, which Plurx leaves at its default). Storage
-/// that cannot fit the build at all (patch 32) defers with no bound, so such
+/// that cannot fit the build at all (patch 33) defers with no bound, so such
 /// a join's build outlives this budget and the backstop below ends the join.
 #[cfg(feature = "hiqlite-store")]
 const JOIN_SNAPSHOT_STORAGE_DEFERRAL: Duration = Duration::from_secs(600);

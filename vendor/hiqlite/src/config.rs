@@ -117,7 +117,7 @@ pub struct NodeConfig {
     pub snapshot_transfer_timeout: Duration,
     /// Storage admission wait, at most ten minutes, for a build that can fit but is
     /// short of the comfortable floor, or whose storage is unknown; 0 attempts it at
-    /// once. Plurx patch 32: a build that cannot fit waits without this bound.
+    /// once. Plurx patch 33: a build that cannot fit waits without this bound.
     pub snapshot_storage_deferral: Duration,
     /// Plurx patch 27: up to [`crate::APPLIED_MARK_MAX_TABLES`] table names
     /// whose committed changes this node's applied mark counts, one dedicated

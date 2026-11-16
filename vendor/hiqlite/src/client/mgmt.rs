@@ -155,7 +155,7 @@ impl LocalDbRaftMetrics {
         self.receiver.changed().await.is_ok()
     }
 
-    /// Plurx patch 32: wait until this node's database Raft core stops, and
+    /// Plurx patch 33: wait until this node's database Raft core stops, and
     /// say how. OpenRaft's core publishes its terminal state as
     /// `running_state`: `Err(Fatal::Stopped)` after an ordinary
     /// `Raft::shutdown`, any other `Err` when it quit on a storage error or
@@ -181,7 +181,7 @@ impl LocalDbRaftMetrics {
     }
 }
 
-/// Plurx patch 32: how this node's database Raft core stopped.
+/// Plurx patch 33: how this node's database Raft core stopped.
 #[cfg(feature = "sqlite")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalDbCoreStop {
@@ -876,7 +876,7 @@ impl Client {
                 tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
             }
             state.raft_db.raft.shutdown().await?;
-            // Plurx patch 32: the SQL writer's shutdown removes the lock file,
+            // Plurx patch 33: the SQL writer's shutdown removes the lock file,
             // so it runs whatever the WAL's shutdown returns (a WAL whose
             // writer died on an IO error fails here) and a clean stop is not
             // mistaken for a crash by the next start's auto-heal.
@@ -1159,7 +1159,7 @@ impl Client {
             }
             state.raft_db.raft.shutdown().await?;
             info!("Shutting down sqlite logs writer");
-            // Plurx patch 32: the SQL writer's shutdown removes the lock file,
+            // Plurx patch 33: the SQL writer's shutdown removes the lock file,
             // so it runs whatever the WAL's shutdown returns (a WAL whose
             // writer died on an IO error fails here) and a clean stop is not
             // mistaken for a crash by the next start's auto-heal.

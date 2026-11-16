@@ -28,7 +28,7 @@ After this change:
 | Terminal state | openraft 0.9.25 `core/raft_core.rs:245` | The core publishes `running_state = Err(err)` when `main` returns: `Fatal::Stopped` after `Raft::shutdown`, `Fatal::StorageError` after a storage-error quit. A panic drops the watch without a terminal state. |
 | Build error is fatal | `raft_core.rs:1381` | `command_result.result?` on the state-machine notification: a `build_snapshot` error ends the core. No existing mechanism lets a build fail without that. |
 | Build runs off the loop | `core/sm/worker.rs:186` | The build is a spawned task. A pending build sets only `building_snapshot` (`snapshot_handler/mod.rs:34`), which blocks the next build trigger. Log purge waits for a new snapshot; receive and install stay live. |
-| Observer | `vendor/hiqlite/src/client/mgmt.rs:165` `LocalDbRaftMetrics::core_stopped` (patch 32) | Waits on the watch; `Stopped` or `Fatal(text)`. |
+| Observer | `vendor/hiqlite/src/client/mgmt.rs:165` `LocalDbRaftMetrics::core_stopped` (patch 33) | Waits on the watch; `Stopped` or `Fatal(text)`. |
 | Monitor | `crates/plurx-core/src/cluster/migration.rs:7256` `raft_core_failure` | Resolves only on `Fatal`. For SQLite or a remote client it stays pending forever. |
 | Call site | `crates/plurxd/src/main.rs:2649` | The last arm of the drain's biased `select!`, after the signal and the leave. `exit_after_drain` (`:2748`) returns a typed `RaftCoreFatal`; the store close after it is bounded at 30 s (`:2051`), and `daemon_main` exits 1 after its runtime shuts down (`:657`). |
 | Admission | `vendor/hiqlite/src/snapshot_admission.rs:97` | Three bands, below. Re-probed every 10 s; ends with an error once the SQL writer has gone. |
@@ -133,5 +133,5 @@ disk-space watchdog, nothing about why the disk filled.
 | Date | Step | Agent-Model | Result |
 |---|---|---|---|
 | 2026-11-15 | Design | coordinator | brief |
-| 2026-11-15 | Build | claude-opus-5-5 | Patch 32 (built as 31; renumbered after main's row 29) plus the daemon exit. On media1 the follower test passed 3/3: the core died on the blocked snapshot path, the process exited non-zero inside the 90 s bound, the other two kept a leader, and the restarted follower rejoined. It fails with the drain arm removed, as does each other test with its subject mutated. C2 holds: `leader-shutdown` passed, and M3 leader SIGTERM passed 3/3, with the successor named 131–133 ms after SIGTERM. |
+| 2026-11-15 | Build | claude-opus-5-5 | Patch 33 (built as 31; renumbered twice as main took rows 29 and 32) plus the daemon exit. On media1 the follower test passed 3/3: the core died on the blocked snapshot path, the process exited non-zero inside the 90 s bound, the other two kept a leader, and the restarted follower rejoined. It fails with the drain arm removed, as does each other test with its subject mutated. C2 holds: `leader-shutdown` passed, and M3 leader SIGTERM passed 3/3, with the successor named 131–133 ms after SIGTERM. |
 | 2026-11-15 | Review fixes | claude-opus-5-5 | REVIEW_ROW |

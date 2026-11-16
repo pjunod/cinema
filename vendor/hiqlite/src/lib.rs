@@ -97,6 +97,10 @@ pub use query::cust_types::VecText;
 #[cfg(feature = "sqlite")]
 pub use crate::query::rows::Row;
 #[cfg(feature = "sqlite")]
+pub use crate::store::state_machine::sqlite::writer::{
+    DbWriterAbandonedReplies, db_writer_abandoned_replies,
+};
+#[cfg(feature = "sqlite")]
 pub use crate::store::state_machine::sqlite::{
     param::Param,
     state_machine::{Params, StateMachineData},
