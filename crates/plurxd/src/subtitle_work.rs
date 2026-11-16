@@ -116,7 +116,7 @@ impl JobManager {
         self: &Arc<Self>,
         transcode: &TranscodeManager,
     ) -> bool {
-        if !self.subtitle_source_queue_enabled().await
+        if !crate::state::lane_subtitle_source_queue_enabled(&self.applied).await
             || !self
                 .job_authority
                 .may_execute_job(JobKind::SubtitleExtract)
