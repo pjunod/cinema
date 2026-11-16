@@ -253,13 +253,6 @@ pub(crate) trait AuthenticationHeaders {
     fn authenticated_receiver_presentation(&self) -> Option<bool> {
         None
     }
-    /// The receiver's Dolby Vision relay affirmation when an authenticated
-    /// context already decided it; `None` reads the raw header. Only the
-    /// public ingress asks: it records the answer in the effective recipe
-    /// (`DOLBY_VISION_RELAY`), which is what every forwarded owner plans from.
-    fn authenticated_receiver_dolby_vision(&self) -> Option<bool> {
-        None
-    }
     fn raw_headers(&self) -> &HeaderMap;
     fn authenticated_hash(&self) -> Option<&str> {
         None

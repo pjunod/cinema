@@ -29,9 +29,6 @@ struct SourceStartInput {
     // The canonical complete client recipe is retained for exact retry identity;
     // the actual engine's normalized fingerprint is separately bound at prepare.
     canonical_recipe: Vec<u8>,
-    /// The typed session's caps had their Dolby Vision claims removed because
-    /// the receiver did not affirm Dolby Vision relay.
-    dolby_vision_withheld: bool,
 }
 #[derive(Default)]
 pub(crate) struct SourceStartRegistry {
@@ -2043,7 +2040,12 @@ async fn own_start(
         &headers,
         reference.clone(),
         input.session,
-        input.dolby_vision_withheld,
+        // The ingress already withheld Dolby Vision from this recipe for a
+        // receiver that did not affirm relay; a Start taken here with the
+        // receiver's own headers can also say so. A forwarded owner cannot
+        // tell a withheld recipe from one that never claimed Dolby Vision.
+        headers.forwarded_ingress().is_none()
+            && !receiver_presentation::authenticated_receiver_dolby_vision(&headers),
     ))
     .await?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
@@ -2247,23 +2249,12 @@ fn parse_start_request(bytes: &[u8], item: &str, file: &str) -> Result<SourceSta
         return Err(invalid());
     }
     let session_value = value.get("session").ok_or_else(invalid)?;
-    let mut session: CreateSession =
+    let session: CreateSession =
         serde_json::from_value(session_value.clone()).map_err(|_| invalid())?;
     let typed = serde_json::to_value(&session).map_err(|_| invalid())?;
     if !closed_provided_fields(session_value, &typed) {
         return Err(invalid());
     }
-    // A receiver that has not affirmed Dolby Vision relay would refuse a
-    // Dolby Vision Start: plan its viewer's session without Dolby Vision, so
-    // the shared planner chooses the next-best delivery itself. Direct play
-    // keeps its own caps.
-    let dolby_vision_withheld =
-        !super::sharing_direct_wire::session_presentation_is_direct(session_value)
-            && !receiver_presentation::dolby_vision_relayed(bytes)
-            && session
-                .caps
-                .as_mut()
-                .is_some_and(receiver_presentation::withhold_dolby_vision);
     let request_id = Uuid::parse_str(session.request_id.as_deref().ok_or_else(invalid)?)
         .map_err(|_| invalid())?;
     Ok(SourceStartInput {
@@ -2271,7 +2262,6 @@ fn parse_start_request(bytes: &[u8], item: &str, file: &str) -> Result<SourceSta
         session,
         request_id,
         canonical_recipe: bytes.to_vec(),
-        dolby_vision_withheld,
     })
 }
 // Ordinary CreateSession supports omitted optional fields and explicit numeric
