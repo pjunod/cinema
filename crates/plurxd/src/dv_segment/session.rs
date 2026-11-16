@@ -12,19 +12,25 @@
 //! window is still its own unit of proof: it has its own encoder process,
 //! private spool, evidence directory, deadline, observations, verification
 //! and publication, exactly as a single window had. The session owns what
-//! the whole graph held: the source read custody, the source-offset lane and
-//! the admission (with its exclusive worker claim), so the rendition's
-//! retained credit is used by this one helper and no second process.
+//! the whole graph held: the source read custody and the admission (with its
+//! exclusive worker claim), so the rendition's retained credit is used by
+//! this one helper and no second process. The helper reads the source through
+//! its custody URL, never the shared descriptor, so it holds no source-offset
+//! lane.
 //!
-//! The session is node-local, lives no longer than its rendition, and is
-//! visible in Activity as the "DV streaming reconstruction" process, which
-//! the existing process stop ends (the next window then fails and falls back,
-//! as any window failure does).
+//! The session is node-local and lives no longer than its rendition. Activity
+//! shows it twice: as the "DV streaming reconstruction" process, attributed
+//! to its title and rendition, which the existing process stop ends (the next
+//! window then fails and falls back, as any window failure does); and on the
+//! playback's processing line, with the helper's pid, start and windows.
 //!
-//! It ends, and the next window starts cold, when play moves elsewhere
-//! (seek, discontinuity), production pauses or yields (flow stop, idle,
-//! capacity hold), the rendition closes, its source read authority ends, or a
-//! window fails. Only a window failure is a backend failure.
+//! It survives the self-clearing pacing hold (`Hold::Ahead`) and `MakeRoom`,
+//! which frees segment bytes the session does not hold. It ends, and the next
+//! window starts cold, when play moves elsewhere (seek, discontinuity), the
+//! producer is stopped, restarted or yields its capacity (flow stop, idle, an
+//! indefinite hold, a handoff), the rendition closes, its source read
+//! authority ends, or a window fails. Only a window failure is a backend
+//! failure.
 #![cfg(target_os = "linux")]
 use super::*;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -180,6 +186,9 @@ pub(crate) struct SessionHelper {
     pub(crate) source_origin: plurx_core::transcode::dv_processing::DvSourceOrigin,
     /// The encoder's soundtrack ordinal (`-map 0:a:K`), when it has one.
     pub(crate) audio_ordinal: Option<u32>,
+    /// That soundtrack's channel count from the daemon's probe, which the
+    /// helper cannot always read from the container itself.
+    pub(crate) audio_channels: Option<u32>,
 }
 
 impl SessionHelper {
@@ -224,6 +233,9 @@ impl SessionHelper {
         ]);
         if let Some(ordinal) = self.audio_ordinal {
             args.extend(["--audio-ordinal".into(), ordinal.to_string()]);
+            if let Some(channels) = self.audio_channels {
+                args.extend(["--audio-channels".into(), channels.to_string()]);
+            }
         }
         Ok(args)
     }
@@ -261,31 +273,89 @@ pub(crate) struct SessionWindowRequest {
 }
 
 /// The physical owners every process of a session's graph holds: the source
-/// read use, the source-offset lane and the admission. The helper and each
-/// window's encoder hold one reference; the last reap releases them.
+/// read use and the admission. The helper and each window's encoder hold one
+/// reference; the last reap releases them.
 struct SessionResources {
     _source_input: SourceInputUse,
     source: Arc<SourceFence>,
-    original_offset: u64,
-    offset_lane: Option<OwnedSemaphorePermit>,
     admission: SegmentAdmission,
 }
-impl Drop for SessionResources {
+
+/// What Activity shows of a rendition's live helper session.
+pub(crate) use crate::vodserve::ProcessingHelper as HelperActivity;
+
+/// Where a rendition's sessions live: the label Activity attributes their
+/// helper to, the live helper's activity, and the count of retirements not
+/// yet reaped. Every session started for the rendition holds it, so a
+/// session dropped anywhere is still retired under this count and the next
+/// cold window waits for its reap.
+pub(crate) struct SessionHome {
+    label: String,
+    live: std::sync::Mutex<Option<HelperActivity>>,
+    retiring: tokio::sync::watch::Sender<usize>,
+}
+
+/// One retirement being reaped; dropping it (the task ended, or the runtime
+/// cancelled it) takes it off the count.
+struct Retiring(Arc<SessionHome>);
+impl Drop for Retiring {
     fn drop(&mut self) {
-        // As Resources: the lane stays closed if the shared offset cannot be
-        // restored.
-        if (&self.source.handle)
-            .seek(SeekFrom::Start(self.original_offset))
-            .is_err()
-        {
-            if let Some(lane) = self.offset_lane.take() {
-                lane.forget();
+        self.0.retiring.send_modify(|count| *count = count.saturating_sub(1));
+    }
+}
+
+impl SessionHome {
+    /// A home for one rendition's sessions; `label` names its title and
+    /// rendition in Activity.
+    pub(crate) fn new(label: String) -> Arc<Self> {
+        let mut label = label;
+        if label.len() > 200 {
+            let mut end = 200;
+            while !label.is_char_boundary(end) {
+                end -= 1;
             }
+            label.truncate(end);
         }
+        Arc::new(Self {
+            label,
+            live: std::sync::Mutex::new(None),
+            retiring: tokio::sync::watch::channel(0).0,
+        })
+    }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, Option<HelperActivity>> {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn activity(&self) -> Option<HelperActivity> {
+        *self.live()
+    }
+
+    /// Retire `session` in the background, counted until it is reaped.
+    fn retire(self: &Arc<Self>, session: HelperSession, cause: SessionEnd) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        self.retiring.send_modify(|count| *count += 1);
+        let counted = Retiring(Arc::clone(self));
+        runtime.spawn(async move {
+            session.retire(cause).await;
+            drop(counted);
+        });
+    }
+
+    /// Wait until every counted retirement is reaped. Cancelling the wait
+    /// loses nothing: the count is only lowered by the reaps themselves.
+    async fn settled(&self) {
+        let mut count = self.retiring.subscribe();
+        let _ = count.wait_for(|count| *count == 0).await;
     }
 }
 
 struct SessionProcess {
+    pid: u32,
     control: Arc<ControlSocket>,
     slot: Arc<ProducerSlot>,
     registration: ProducerRegistration,
@@ -307,22 +377,19 @@ pub(crate) struct HelperSession {
     next: Option<(u32, (i64, u32))>,
     windows: u32,
     observer: Option<crate::source_custody::SourceObserver>,
+    home: Arc<SessionHome>,
 }
 
 impl HelperSession {
-    /// Start a session's helper. It takes the window's custody, lane and
+    /// Start a session's helper. It takes the window's custody and
     /// admission, which then belong to the session until it ends.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn(
         helper: SessionHelper,
         source_input: Arc<SourceInputLease>,
         observer: Option<crate::source_custody::SourceObserver>,
         source: Arc<SourceFence>,
-        source_offsets: Arc<Semaphore>,
         admission: SegmentAdmission,
-        deadline: Instant,
-        cancel: &CancellationToken,
-        stages: &WindowStageClock,
+        home: Arc<SessionHome>,
     ) -> Result<Self, String> {
         let identity = helper.identity()?;
         let held = admission.resources();
@@ -332,25 +399,16 @@ impl HelperSession {
             .software
             .ok_or("concurrent helper and encoder lack their frozen CPU debit")?
             .threads();
-        let lane = acquire_offset_lane(source_offsets, deadline, cancel, stages).await?;
         check_source(&source)?;
         if source.handle.metadata().map_err(|e| e.to_string())?.len() == 0 {
             return Err("finite streaming source exceeds byte envelope".into());
         }
-        let original_offset = (&source.handle)
-            .stream_position()
-            .map_err(|e| e.to_string())?;
         let args = helper.args(&source_input.url)?;
         let resources = Arc::new(SessionResources {
             _source_input: source_input.physical_owner(),
             source,
-            original_offset,
-            offset_lane: Some(lane),
             admission,
         });
-        (&resources.source.handle)
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| e.to_string())?;
         let (control, child) = ControlSocket::pair().map_err(|e| e.to_string())?;
         let renderer_env: Vec<_> = helper
             .renderer_env
@@ -363,18 +421,27 @@ impl HelperSession {
             SpawnOptions {
                 runtime_cache: &helper.runtime_cache,
                 progress: Progress::None,
-                descriptors: Descriptors::from_files(
-                    Some(&resources.source.handle),
-                    None,
-                    Some(&child),
-                    false,
-                ),
+                // The helper reads the source through its custody URL; it
+                // inherits only the control socket.
+                descriptors: Descriptors::from_files(None, None, Some(&child), false),
                 env: &renderer_env,
                 work: crate::process_control::ChildWork::realtime("DV streaming reconstruction"),
             },
         )?;
         drop(child);
-        stages.mark(WindowStage::HelperSpawned);
+        let pid = spawned.child.id().ok_or("DV helper session has no pid")?;
+        plurx_core::process::priority::attribute(pid, format!("Processed DV for {}", home.label));
+        let started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        *home.live() = Some(HelperActivity {
+            pid,
+            started_at_ms,
+            windows: 0,
+            in_flight: true,
+        });
+        tracing::info!(target: "plurxd::dv", pid, serves = %home.label,
+            "DV helper session started");
         let slot = Arc::new(ProducerSlot::new());
         let (registration, writers) = slot
             .attach_registered_job_owned(
@@ -438,6 +505,7 @@ impl HelperSession {
         });
         Ok(Self {
             process: Some(SessionProcess {
+                pid,
                 control: Arc::new(control),
                 slot,
                 registration,
@@ -453,7 +521,13 @@ impl HelperSession {
             next: None,
             windows: 0,
             observer,
+            home,
         })
+    }
+
+    /// The helper's process id while it runs.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.process.as_ref().map(|process| process.pid)
     }
 
     /// The plan index of the window this session can produce next.
@@ -495,18 +569,23 @@ impl HelperSession {
     }
 
     /// Why this live session cannot produce another window, if it cannot.
+    ///
+    /// Lost read authority is checked first: a custody that ends during a
+    /// window fails the helper's next read, and the helper exits on it, but
+    /// the window failed because its custody ended, not because the backend
+    /// did. A read failure with the authority intact (the source changed, an
+    /// I/O error) is a failure.
     pub(crate) fn unusable(&self) -> Option<SessionEnd> {
         let process = self.process.as_ref()?;
-        if process.exit.borrow().is_some() {
-            return Some(SessionEnd::WindowFailed);
-        }
         if self
             .observer
             .as_ref()
             .is_some_and(|observer| !observer.has_authority())
-            || process.source_input.read_failed()
         {
             return Some(SessionEnd::SourceAuthority);
+        }
+        if process.exit.borrow().is_some() || process.source_input.read_failed() {
+            return Some(SessionEnd::WindowFailed);
         }
         None
     }
@@ -551,6 +630,13 @@ impl HelperSession {
             .try_reserve_empty()
             .map_err(|e| e.to_string())?;
         check_source(&process.resources.source)?;
+        let mut command = format!("window {start} {end} {} {preroll}", request.frames);
+        if let Some(((from_n, from_d), (end_n, end_d))) = request.audio {
+            if from_n < 0 || end_n < 0 || from_d == 0 || end_d == 0 {
+                return Err("invalid carried soundtrack interval".into());
+            }
+            command.push_str(&format!(" {from_n}/{from_d} {end_n}/{end_d}"));
+        }
         let directory = tempfile::Builder::new()
             .prefix("dv-stream-")
             .tempdir_in(&self.runtime_cache)
@@ -588,17 +674,8 @@ impl HelperSession {
         drop(nut_read);
         let audio_write = audio.map(|(_, write)| write);
         request.stages.mark(WindowStage::EncoderSpawned);
-        let mut command = format!("window {start} {end} {} {preroll}", request.frames);
         let mut fds = vec![nut_write.as_raw_fd(), held.as_raw_fd()];
-        if let (Some(((from_n, from_d), (end_n, end_d))), Some(write)) =
-            (request.audio, audio_write.as_ref())
-        {
-            if from_n < 0 || end_n < 0 || from_d == 0 || end_d == 0 {
-                return Err("invalid carried soundtrack interval".into());
-            }
-            command.push_str(&format!(" {from_n}/{from_d} {end_n}/{end_d}"));
-            fds.push(write.as_raw_fd());
-        }
+        fds.extend(audio_write.as_ref().map(AsRawFd::as_raw_fd));
         let (registration, writers) = reservation.attach_registered_job_owned(
             encoded.child,
             encoded.child_job,
@@ -620,6 +697,8 @@ impl HelperSession {
                 .await;
             return Err(format!("DV helper session command: {error}"));
         }
+        // For every window, warm or cold, "helper spawned" is the moment
+        // the helper was handed this window's command.
         request.stages.mark(WindowStage::HelperSpawned);
         let completion = supervise_session_window(
             Arc::clone(&process.control),
@@ -636,6 +715,11 @@ impl HelperSession {
             request.window.end,
         ));
         self.windows = self.windows.saturating_add(1);
+        let windows = self.windows;
+        if let Some(live) = self.home.live().as_mut().filter(|live| live.pid == process.pid) {
+            live.windows = windows;
+            live.in_flight = true;
+        }
         Ok(SegmentProducer {
             registration,
             writers: Some(writers),
@@ -651,24 +735,45 @@ impl HelperSession {
     /// custody once every process of the graph is reaped.
     pub(crate) async fn retire(mut self, cause: SessionEnd) {
         if let Some(process) = self.process.take() {
-            retire_process(process, cause, self.windows).await;
+            retire_process(process, cause, self.windows, &self.home).await;
         }
     }
 }
 
 impl Drop for HelperSession {
+    /// A session dropped without [`HelperSession::retire`] (a panic, a
+    /// dropped future) is still retired, counted in its rendition's home so
+    /// the next cold window waits for its reap.
     fn drop(&mut self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
         if let Some(process) = self.process.take() {
-            let windows = self.windows;
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(retire_process(process, SessionEnd::Closed, windows));
-            }
+            let session = HelperSession {
+                process: Some(process),
+                identity: Vec::new(),
+                mode: self.mode,
+                decode: self.decode,
+                cpu_threads: self.cpu_threads,
+                runtime_cache: PathBuf::new(),
+                next: None,
+                windows: self.windows,
+                observer: None,
+                home: Arc::clone(&self.home),
+            };
+            self.home.retire(session, SessionEnd::Closed);
         }
     }
 }
 
-async fn retire_process(process: SessionProcess, cause: SessionEnd, windows: u32) {
+async fn retire_process(
+    process: SessionProcess,
+    cause: SessionEnd,
+    windows: u32,
+    home: &SessionHome,
+) {
     let SessionProcess {
+        pid,
         control,
         slot,
         registration,
@@ -680,8 +785,14 @@ async fn retire_process(process: SessionProcess, cause: SessionEnd, windows: u32
     let _ = slot.request_registered_retirement(&registration).await;
     registration.wait_confirmed_reap().await;
     drop(resources);
+    {
+        let mut live = home.live();
+        if live.is_some_and(|live| live.pid == pid) {
+            *live = None;
+        }
+    }
     let closed = source_input.close_and_wait().await;
-    tracing::info!(target: "plurxd::dv", windows, cause = ?cause,
+    tracing::info!(target: "plurxd::dv", pid, serves = %home.label, windows, cause = ?cause,
         source_closed = closed.is_ok(), "DV helper session ended");
 }
 
@@ -752,15 +863,14 @@ fn supervise_session_window(
 }
 
 /// The rendition's one live session, between its windows.
-#[derive(Default)]
 pub(crate) struct HelperSessionSlot {
     state: std::sync::Mutex<SlotState>,
+    home: Arc<SessionHome>,
 }
 
 #[derive(Default)]
 struct SlotState {
     session: Option<HelperSession>,
-    retiring: Vec<tokio::task::JoinHandle<()>>,
     /// Counts ends, so a window that took the session before an end cannot
     /// put it back after.
     ended: u64,
@@ -788,6 +898,10 @@ impl TakenSession<'_> {
     pub(crate) fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
     }
+    /// Where a cold window's new session lives.
+    pub(crate) fn home(&self) -> Arc<SessionHome> {
+        Arc::clone(&self.slot.home)
+    }
     /// Give a completed window's session back for the next window.
     pub(crate) async fn put(&mut self, session: HelperSession) {
         self.slot.put(session, self.stamp).await;
@@ -797,23 +911,39 @@ impl TakenSession<'_> {
 impl Drop for TakenSession<'_> {
     fn drop(&mut self) {
         if let Some(session) = self.session.take() {
-            self.slot.retire_tracked(session, SessionEnd::Discontinuity);
+            self.slot.home.retire(session, SessionEnd::Discontinuity);
         }
     }
 }
 
 impl HelperSessionSlot {
+    /// The slot of one rendition; `label` names its title and rendition in
+    /// Activity.
+    pub(crate) fn new(label: String) -> Self {
+        Self {
+            state: std::sync::Mutex::default(),
+            home: SessionHome::new(label),
+        }
+    }
+
+    /// The slot of the rendition `key` of `file`: Activity attributes its
+    /// helper to the title's file and the rendition.
+    pub(crate) fn for_rendition(key: &str, file: &std::path::Path) -> Self {
+        let title = file
+            .file_stem()
+            .map_or_else(|| file.display().to_string(), |stem| stem.to_string_lossy().into_owned());
+        Self::new(format!("{title} · rendition {key}"))
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, SlotState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn retire_tracked(&self, session: HelperSession, cause: SessionEnd) {
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let handle = runtime.spawn(session.retire(cause));
-            self.lock().retiring.push(handle);
-        }
+    /// The live helper, for Activity.
+    pub(crate) fn activity(&self) -> Option<HelperActivity> {
+        self.home.activity()
     }
 
     /// End the session now. Never waits, so a caller may hold any lock; the
@@ -825,20 +955,15 @@ impl HelperSessionSlot {
             state.session.take()
         };
         if let Some(session) = session {
-            self.retire_tracked(session, cause);
+            self.home.retire(session, cause);
         }
     }
 
-    async fn settle(&self) {
-        loop {
-            let handles = std::mem::take(&mut self.lock().retiring);
-            if handles.is_empty() {
-                return;
-            }
-            for handle in handles {
-                let _ = handle.await;
-            }
-        }
+    /// End the session and wait until its helper is reaped and its capacity
+    /// and worker claim are free, for a caller that hands them on.
+    pub(crate) async fn end_and_wait(&self, cause: SessionEnd) {
+        self.end(cause);
+        self.home.settled().await;
     }
 
     /// The live session if it is positioned for window `at` and can still
@@ -864,12 +989,12 @@ impl HelperSessionSlot {
             if cause == SessionEnd::WindowFailed {
                 failure = Some(session.exit_cause());
             }
-            self.retire_tracked(session, cause);
+            self.home.retire(session, cause);
         }
         if taken.is_none() {
             self.end(SessionEnd::Discontinuity);
         }
-        self.settle().await;
+        self.home.settled().await;
         let stamp = self.lock().ended;
         TakenSession {
             slot: self,
@@ -887,6 +1012,11 @@ impl HelperSessionSlot {
             if state.ended != taken || state.session.is_some() {
                 Some(session)
             } else {
+                if let (Some(live), Some(pid)) = (self.home.live().as_mut(), session.pid()) {
+                    if live.pid == pid {
+                        live.in_flight = false;
+                    }
+                }
                 state.session = Some(session);
                 None
             }
@@ -894,6 +1024,12 @@ impl HelperSessionSlot {
         if let Some(session) = rejected {
             session.retire(SessionEnd::FlowStop).await;
         }
+    }
+}
+
+impl Default for HelperSessionSlot {
+    fn default() -> Self {
+        Self::new("an unnamed rendition".into())
     }
 }
 

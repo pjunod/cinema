@@ -419,6 +419,7 @@ pub(super) async fn spawn_generation(
                     crate::vodencode::dv_runtime::WindowSource::Open {
                         input: source_custody,
                         admission: crate::dv_segment::SegmentAdmission::Retained(worker),
+                        home: warm_session.home(),
                     }
                 }
             };

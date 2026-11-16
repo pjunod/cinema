@@ -33,6 +33,9 @@ pub(crate) enum WindowSource {
     Open {
         input: crate::source_input::SourceInput,
         admission: crate::dv_segment::SegmentAdmission,
+        /// Where the new session lives: its rendition's attribution and reap
+        /// tracking.
+        home: Arc<crate::dv_segment::SessionHome>,
     },
     /// The rendition's live session continues with its next window.
     Session(crate::dv_segment::HelperSession),
@@ -77,7 +80,7 @@ impl<T> WindowRun<T> {
     /// and reap it otherwise. A session whose source authority ended, or
     /// that needed a different helper, ended for an ordinary reason: the
     /// caller starts the next window cold and does not fail the episode.
-    async fn settle(
+    pub(crate) async fn settle(
         result: Result<WindowOutcome<T>, String>,
         session: Option<crate::dv_segment::HelperSession>,
     ) -> Self {
@@ -116,11 +119,23 @@ impl<T> WindowRun<T> {
     }
 }
 
+/// How far before its encoder's rebase point a window's carried soundtrack
+/// starts, in microseconds. The encoder's resampler (`aresample=async=1:
+/// first_pts=0`) corrects a first frame only when it lies more than 1 ms from
+/// the rebase point, so its first decoded frame must always lie well before
+/// it: then it drops exactly the samples before the rebase point, as it did
+/// when it demuxed the source itself from the preceding keyframe. A decoder
+/// can begin only at a sync point; TrueHD's major syncs may be 128 access
+/// units (107 ms) apart, and the other codecs' frames are at most 64 ms, so
+/// 200 ms always leaves a decoded frame before the rebase point.
+pub(crate) const SOUNDTRACK_LEAD_US: i128 = 200_000;
+
 /// The soundtrack interval a window's encoder reads, on the source clock:
-/// from its decoder preroll start (the film time its lattice filter rebases
-/// on, `asetpts=PTS-seek/TB`) to half a second past the window's end,
-/// extended by any negative sync offset, so its AAC preroll, its trim and its
-/// last frame all have their samples. `[from, end)` as exact rationals.
+/// from [`SOUNDTRACK_LEAD_US`] before its decoder preroll start (the film
+/// time its lattice filter rebases on, `asetpts=PTS-seek/TB`) to half a
+/// second past the window's end, extended by any negative sync offset, so its
+/// AAC preroll, its trim and its last frame all have their samples.
+/// `[from, end)` as exact rationals.
 #[cfg(target_os = "linux")]
 pub(crate) fn window_soundtrack(
     source_clock: plurx_core::transcode::VodSourceClock,
@@ -134,8 +149,8 @@ pub(crate) fn window_soundtrack(
         start_seconds,
         offset_ms,
     ));
-    // seek / 48000 s + origin / 1e6 s, over 6e6.
-    let from = (seek * 125 + origin * 6).max(0);
+    // seek / 48000 s + origin / 1e6 s - the lead, over 6e6.
+    let from = (seek * 125 + (origin - SOUNDTRACK_LEAD_US) * 6).max(0);
     if timescale == 0 {
         return Err("invalid window clock".into());
     }
@@ -913,7 +928,6 @@ pub(crate) async fn held_source_mastering(
 pub(crate) struct RuntimeRecipe {
     pub(crate) tools: Arc<ToolSet>,
     pub(crate) source: Arc<crate::fragment_index_cluster::SourceFence>,
-    pub(crate) source_offsets: Arc<tokio::sync::Semaphore>,
     pub(crate) source_tick: (u32, u32),
     pub(crate) source_origin: plurx_core::transcode::dv_processing::DvSourceOrigin,
     pub(crate) native_bl: (u32, u32),
@@ -1254,6 +1268,10 @@ impl RuntimeRecipe {
                 WindowSource::Open {
                     input: source_input,
                     admission,
+                    home: crate::dv_segment::SessionHome::new(format!(
+                        "{} · single window",
+                        file.path.display()
+                    )),
                 },
                 None,
             )
@@ -1386,7 +1404,10 @@ impl RuntimeRecipe {
                     .start_ticks
                     .is_multiple_of(u64::from(grid.denominator))
                 || !self.source.unchanged()
-                || !self.tools.is_current().await
+                // A live session's helper was checked when it started; the
+                // window's verification checks the bundle again.
+                || (!matches!(source, Some(WindowSource::Session(_)))
+                    && !self.tools.is_current().await)
             {
                 return Err("source/backend/window changed before processing".into());
             }
@@ -1468,9 +1489,21 @@ impl RuntimeRecipe {
                 display_target: export_policy.display_target(),
                 source_origin: self.source_origin,
                 audio_ordinal,
+                audio_channels: audio_ordinal.and_then(|ordinal| {
+                    file.audio_streams
+                        .iter()
+                        .find(|stream| stream.index == i64::from(ordinal))
+                        .and_then(|stream| stream.channels)
+                        .and_then(|channels| u32::try_from(channels).ok())
+                        .filter(|channels| (1..=64).contains(channels))
+                }),
             };
             let session = match source.take().ok_or("processed window has no source")? {
-                WindowSource::Open { input, admission } => {
+                WindowSource::Open {
+                    input,
+                    admission,
+                    home,
+                } => {
                     let observer = input.foreground_observer();
                     let lease = crate::dv_segment::SourceInputLease::new(input.without_prefetch());
                     match crate::dv_segment::HelperSession::spawn(
@@ -1478,11 +1511,8 @@ impl RuntimeRecipe {
                         Arc::clone(&lease),
                         observer,
                         self.source.clone(),
-                        self.source_offsets.clone(),
                         admission,
-                        deadline,
-                        &cancel,
-                        &stages,
+                        home,
                     )
                     .await
                     {
@@ -2914,88 +2944,6 @@ mod helper_session_lifecycle {
             Some(SessionEnd::WindowFailed),
             "a helper that died after its acknowledgement serves nothing more"
         );
-    }
-
-    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-        let from = source.find(start).unwrap_or_else(|| panic!("{start}"));
-        let to = source[from..].find(end).unwrap_or_else(|| panic!("{end}")) + from;
-        &source[from..to]
-    }
-
-    /// The generation's failure arm: an ordinary session end is handled
-    /// before, and instead of, the episode refusal.
-    #[test]
-    fn an_ordinary_session_end_never_reaches_refuse_episode() {
-        let generation = include_str!("vod/generation.rs");
-        let arms = between(
-            generation,
-            "let verified = match verified {",
-            "if let Some(authority) = &source_authority {",
-        );
-        let ordinary = arms
-            .find("Err(_) if session_ended_ordinarily =>")
-            .expect("ordinary session end arm");
-        let refusal = arms.find("runtime.refuse_episode()").expect("refusal arm");
-        assert!(ordinary < refusal, "{arms}");
-        assert!(
-            !arms[ordinary..refusal].contains("record_failure"),
-            "{arms}"
-        );
-        assert!(generation.contains("session_ended_ordinarily = run.ended_ordinarily();"));
-    }
-
-    /// Flow stop, reclaim and repositioning end the session at the points
-    /// where a running producer is stopped, killed or moved.
-    #[test]
-    fn flow_stop_idle_and_moves_end_the_session() {
-        let driver = include_str!("vod/driver.rs");
-        let decision = between(
-            driver,
-            "if matches!(decision.action, Action::Idle | Action::Suspend { .. })",
-            "// Record only this pass's decision.",
-        );
-        assert!(
-            decision.contains(".end(crate::dv_segment::SessionEnd::FlowStop)"),
-            "{decision}"
-        );
-        let step = between(
-            driver,
-            "pub(super) async fn perform_driver_step(",
-            "record_performed_step(",
-        );
-        assert!(
-            step.contains("Step::Stop | Step::Terminate { .. } => rendition"),
-            "{step}"
-        );
-        assert!(step.contains("Step::Restart { .. } => rendition"), "{step}");
-    }
-
-    /// The helper's per-process bounds are per window in a session, and a
-    /// session's evidence is opened relative to each window's directory.
-    #[test]
-    fn helper_bounds_and_evidence_are_per_window() {
-        let helper = include_str!("../../../tools/dv_processing/segment_decode_render.c");
-        let window = between(
-            helper,
-            "static void run_window(",
-            "static void close_source(",
-        );
-        for reset in [
-            "movie_io.read_limit = charged + WINDOW_READ_LIMIT;",
-            "movie_reader_source.limit = movie_io.read_limit;",
-            "unsigned packets = 0, video_packets = 0;",
-            "preroll = paired = coded_count = 0;",
-            "check_window_bounds",
-        ] {
-            assert!(window.contains(reset) || helper.contains(reset), "{reset}");
-        }
-        let session = between(helper, "static void session_loop(void) {", "int main(");
-        assert!(!session.contains("chdir"), "{session}");
-        assert!(
-            session.contains("openat(window_dir, \"renderer.jsonl\""),
-            "{session}"
-        );
-        assert!(!helper.contains("chdir(argv[2])"));
     }
 }
 

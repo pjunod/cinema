@@ -995,6 +995,8 @@ impl Shared {
             plan.duration_ticks() as f64 / f64::from(timescale) / plan.len() as f64
         };
         let plan_len = plan.len();
+        #[cfg(target_os = "linux")]
+        let dv_session = crate::dv_segment::HelperSessionSlot::for_rendition(key, &recipe.file.path);
         let rendition = Arc::new(Rendition {
             ephemeral_processing,
             _processed_instance_allowance: processed_instance_allowance,
@@ -1030,7 +1032,7 @@ impl Shared {
             source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             #[cfg(target_os = "linux")]
-            dv_session: Default::default(),
+            dv_session,
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),

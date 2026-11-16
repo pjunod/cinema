@@ -283,6 +283,10 @@ pub struct RunningChild {
     pub purpose: &'static str,
     pub reason: &'static str,
     pub program: String,
+    /// What this child serves, when its owner said ([`attribute`]): for a
+    /// long-lived child, the title and stream it works for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serves: Option<String>,
     pub started_at_ms: u64,
     pub requested: Option<ChildPolicy>,
     pub observed: Observed,
@@ -305,6 +309,7 @@ struct Entry {
     pid: u32,
     work: ChildWork,
     program: String,
+    serves: Option<String>,
     started_at_ms: u64,
     #[cfg(target_os = "linux")]
     pidfd: Option<std::os::fd::OwnedFd>,
@@ -372,6 +377,7 @@ pub(crate) fn register(
         pid,
         work,
         program,
+        serves: None,
         started_at_ms,
         #[cfg(target_os = "linux")]
         pidfd: linux::pidfd_open(pid),
@@ -381,6 +387,27 @@ pub(crate) fn register(
     registry.next += 1;
     registry.entries.insert(key, entry);
     Some(Registration { key })
+}
+
+/// Say what a listed child serves, for Activity. `false` when no listed
+/// child has that pid. The text is bounded to 256 bytes.
+pub fn attribute(pid: u32, serves: String) -> bool {
+    let mut serves = serves;
+    if serves.len() > 256 {
+        let mut end = 256;
+        while !serves.is_char_boundary(end) {
+            end -= 1;
+        }
+        serves.truncate(end);
+    }
+    let mut registry = registry();
+    match registry.entries.values_mut().find(|entry| entry.pid == pid) {
+        Some(entry) => {
+            entry.serves = Some(serves);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Whether [`register`] counts a just-started child as unapplied: its
@@ -405,13 +432,14 @@ pub fn running() -> Vec<RunningChild> {
                 entry.pid,
                 entry.work,
                 entry.program.clone(),
+                entry.serves.clone(),
                 entry.started_at_ms,
                 stoppable,
             )
         })
         .collect::<Vec<_>>();
     rows.into_iter()
-        .map(|(pid, work, program, started_at_ms, stoppable)| {
+        .map(|(pid, work, program, serves, started_at_ms, stoppable)| {
             let policy = work.class.policy();
             let observed = observe(pid);
             RunningChild {
@@ -420,6 +448,7 @@ pub fn running() -> Vec<RunningChild> {
                 purpose: work.purpose,
                 reason: work.class.reason(),
                 program,
+                serves,
                 started_at_ms,
                 requested: cfg!(unix).then_some(policy),
                 applied: observed.applied(policy),

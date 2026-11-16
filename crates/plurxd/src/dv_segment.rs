@@ -29,8 +29,8 @@ mod session;
 mod stage_clock;
 #[cfg(target_os = "linux")]
 pub(crate) use session::{
-    HelperSession, HelperSessionSlot, SessionEnd, SessionHelper, SessionWindowRequest,
-    SoundtrackInterval,
+    HelperSession, HelperSessionSlot, SessionEnd, SessionHelper, SessionHome,
+    SessionWindowRequest, SoundtrackInterval,
 };
 #[cfg(target_os = "linux")]
 pub(crate) use stage_clock::{HelperStages, WindowStage, WindowStageClock};
@@ -2000,7 +2000,7 @@ pub(crate) async fn physical_probe() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3018,8 +3018,11 @@ mod tests {
         );
     }
 
+    /// Stand-in helper and encoder processes speaking the real session
+    /// protocol, with the retained credit and worker claim a processed
+    /// rendition holds.
     #[cfg(target_os = "linux")]
-    struct SessionFixture {
+    pub(crate) struct SessionFixture {
         cache: tempfile::TempDir,
         log: PathBuf,
         renderer: PathBuf,
@@ -3032,7 +3035,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl SessionFixture {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             use std::io::Write as _;
             use std::os::unix::fs::PermissionsExt as _;
             let cache = tempfile::tempdir().expect("runtime cache");
@@ -3115,6 +3118,7 @@ mod tests {
                 display_target: None,
                 source_origin: Self::origin(),
                 audio_ordinal: Some(0),
+                audio_channels: Some(2),
             }
         }
 
@@ -3131,13 +3135,25 @@ mod tests {
             SegmentAdmission::Retained(parent.try_claim_worker().expect("worker"))
         }
 
-        fn claim_is_free(&self) -> bool {
+        pub(crate) fn claim_is_free(&self) -> bool {
             self.binding
                 .current()
                 .is_none_or(|credit| credit.try_claim_worker().is_some())
         }
 
-        async fn spawn(&self, refuse: Option<&str>) -> HelperSession {
+        pub(crate) async fn spawn(&self, refuse: Option<&str>) -> HelperSession {
+            self.spawn_in(refuse, SessionHome::new("Session Test · rendition t".into()), None)
+                .await
+        }
+
+        /// A session started for a rendition's slot (`home`), observing
+        /// `observer`'s read authority when one is given.
+        pub(crate) async fn spawn_in(
+            &self,
+            refuse: Option<&str>,
+            home: Arc<SessionHome>,
+            observer: Option<crate::source_custody::SourceObserver>,
+        ) -> HelperSession {
             let (input, file) =
                 crate::source_input::SourceInput::qualification_fixture(b"session source bytes")
                     .await;
@@ -3148,13 +3164,10 @@ mod tests {
             HelperSession::spawn(
                 self.helper(refuse),
                 SourceInputLease::new(input),
-                None,
+                observer,
                 source,
-                Arc::new(Semaphore::new(1)),
                 self.admission(),
-                Instant::now() + Duration::from_secs(10),
-                &CancellationToken::new(),
-                &WindowStageClock::start(),
+                home,
             )
             .await
             .expect("session helper")
@@ -3195,7 +3208,7 @@ mod tests {
 
         /// Run one window to its end, as the processed-window owner does, and
         /// return what its encoder read and the helper's observations.
-        async fn window(
+        pub(crate) async fn window(
             &self,
             session: &mut HelperSession,
             producer: &Arc<ProducerSlot>,
@@ -3244,7 +3257,7 @@ mod tests {
             }
         }
 
-        fn log(&self) -> String {
+        pub(crate) fn log(&self) -> String {
             std::fs::read_to_string(&self.log).unwrap_or_default()
         }
     }
@@ -3316,7 +3329,7 @@ mod tests {
         let producer = Arc::new(ProducerSlot::new());
         let mut taken = slot.take(0).await;
         assert!(taken.get().is_none(), "no session yet");
-        let mut session = fixture.spawn(None).await;
+        let mut session = fixture.spawn_in(None, taken.home(), None).await;
         fixture
             .window(&mut session, &producer, 0)
             .await
@@ -3339,7 +3352,7 @@ mod tests {
         );
         assert_eq!(fixture.log().matches("exec").count(), 1);
         // The cold window's own session can claim the worker.
-        let mut cold = fixture.spawn(None).await;
+        let mut cold = fixture.spawn_in(None, seek.home(), None).await;
         fixture
             .window(&mut cold, &producer, 5)
             .await
@@ -3357,7 +3370,7 @@ mod tests {
         let slot = HelperSessionSlot::default();
         let producer = Arc::new(ProducerSlot::new());
         let mut taken = slot.take(0).await;
-        let mut session = fixture.spawn(None).await;
+        let mut session = fixture.spawn_in(None, taken.home(), None).await;
         fixture
             .window(&mut session, &producer, 0)
             .await
@@ -3404,7 +3417,9 @@ mod tests {
         let slot = HelperSessionSlot::default();
         let producer = Arc::new(ProducerSlot::new());
         let mut taken = slot.take(0).await;
-        let mut session = fixture.spawn(Some("exit:window 0/1")).await;
+        let mut session = fixture
+            .spawn_in(Some("exit:window 0/1"), taken.home(), None)
+            .await;
         fixture
             .window(&mut session, &producer, 0)
             .await
@@ -3429,9 +3444,228 @@ mod tests {
         assert!(fixture.claim_is_free(), "the ended helper is reaped");
     }
 
-    /// The soundtrack a window carries starts exactly where its encoder's
-    /// lattice filter rebases (`asetpts=PTS-seek/TB`), on the source clock,
-    /// and the encoder reads it from the helper's Matroska pipe with no seek.
+    /// A custody that loses its read authority while a window runs makes the
+    /// helper's next read fail and the helper exit. That is ordinary
+    /// lifecycle, typed before the exit: the window's session ends as
+    /// `SourceAuthority`, which never refuses the episode, and the next
+    /// window opens new custody.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn authority_lost_during_a_window_ends_the_session_ordinarily() {
+        let fixture = SessionFixture::new();
+        let (observer, lose_authority) =
+            crate::source_custody::SourceObserver::detached_for_test();
+        let mut session = fixture
+            .spawn_in(
+                Some("window 2/1"),
+                SessionHome::new("Authority · rendition a".into()),
+                Some(observer),
+            )
+            .await;
+        let producer = Arc::new(ProducerSlot::new());
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("window before the loss");
+        assert_eq!(session.unusable(), None);
+        lose_authority.cancel();
+        // The helper's read of window 1 fails and it exits mid-window.
+        let cause = fixture
+            .window(&mut session, &producer, 1)
+            .await
+            .expect_err("the window fails with its helper");
+        assert!(cause.contains("session test refusal"), "{cause}");
+        assert_eq!(
+            session.unusable(),
+            Some(SessionEnd::SourceAuthority),
+            "lost authority is the cause even though the helper exited"
+        );
+        let run = crate::vodencode::dv_runtime::WindowRun::<()>::settle(Err(cause), Some(session))
+            .await;
+        assert_eq!(run.ended, Some(SessionEnd::SourceAuthority));
+        assert!(
+            run.ended_ordinarily(),
+            "the generation restarts the window cold and does not refuse the episode"
+        );
+        assert!(run.session.is_none());
+        assert!(fixture.claim_is_free(), "the ended session is reaped");
+    }
+
+    /// A helper exit with the read authority intact stays a window failure.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_helper_exit_with_authority_intact_is_a_window_failure() {
+        let fixture = SessionFixture::new();
+        let (observer, _authority) = crate::source_custody::SourceObserver::detached_for_test();
+        let mut session = fixture
+            .spawn_in(
+                Some("window 0/1"),
+                SessionHome::new("Authority · rendition b".into()),
+                Some(observer),
+            )
+            .await;
+        let producer = Arc::new(ProducerSlot::new());
+        let cause = fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect_err("refused window");
+        let run = crate::vodencode::dv_runtime::WindowRun::<()>::settle(Err(cause), Some(session))
+            .await;
+        assert_eq!(run.ended, Some(SessionEnd::WindowFailed));
+        assert!(!run.ended_ordinarily());
+    }
+
+    /// A session dropped without `retire` (a panic, a dropped future) is
+    /// retired under its rendition's count: the next cold window's `take`
+    /// waits for its reap, so the worker claim is free for the cold helper.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_dropped_session_is_reaped_before_the_next_cold_window() {
+        let fixture = SessionFixture::new();
+        let slot = HelperSessionSlot::default();
+        let producer = Arc::new(ProducerSlot::new());
+        let taken = slot.take(0).await;
+        let mut session = fixture.spawn_in(None, taken.home(), None).await;
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("window");
+        drop(session);
+        drop(taken);
+        let cold = slot.take(1).await;
+        assert!(cold.get().is_none());
+        assert!(
+            fixture.claim_is_free(),
+            "take waited for the dropped session's reap"
+        );
+    }
+
+    /// Cancelling a `take` while it waits for a reap loses nothing: the
+    /// next `take` still waits for it.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_cancelled_take_keeps_waiting_for_the_reap() {
+        use futures_util::FutureExt as _;
+        let fixture = SessionFixture::new();
+        let slot = HelperSessionSlot::default();
+        let producer = Arc::new(ProducerSlot::new());
+        let mut taken = slot.take(0).await;
+        let mut session = fixture.spawn_in(None, taken.home(), None).await;
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("window");
+        taken.put(session).await;
+        drop(taken);
+        slot.end(SessionEnd::FlowStop);
+        // Polled once and dropped while the retirement is still running.
+        assert!(slot.take(1).now_or_never().is_none());
+        let next = slot.take(1).await;
+        assert!(next.get().is_none());
+        assert!(fixture.claim_is_free());
+    }
+
+    /// T9: the long-lived helper is attributable in the product. Activity's
+    /// process list names the title and rendition it serves; the
+    /// rendition's playback line carries its pid, start and windows; its
+    /// stop from Activity fails the next window (the ordinary fallback), and
+    /// its reap clears both.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn the_helper_is_attributed_in_activity_and_its_stop_fails_the_next_window() {
+        let fixture = SessionFixture::new();
+        let slot = HelperSessionSlot::new("Axel F · rendition dv-r1".into());
+        let producer = Arc::new(ProducerSlot::new());
+        let mut taken = slot.take(0).await;
+        let mut session = fixture.spawn_in(None, taken.home(), None).await;
+        let pid = session.pid().expect("pid");
+        let row = plurx_core::process::priority::running()
+            .into_iter()
+            .find(|row| row.pid == pid)
+            .expect("the helper is listed");
+        assert_eq!(row.purpose, "DV streaming reconstruction");
+        assert_eq!(
+            row.serves.as_deref(),
+            Some("Processed DV for Axel F · rendition dv-r1")
+        );
+        assert!(row.stoppable);
+        let live = slot.activity().expect("playback line");
+        assert_eq!((live.pid, live.windows, live.in_flight), (pid, 0, true));
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("window");
+        assert_eq!(slot.activity().map(|live| live.windows), Some(1));
+        taken.put(session).await;
+        drop(taken);
+        let live = slot.activity().expect("between windows");
+        assert_eq!((live.pid, live.windows, live.in_flight), (pid, 1, false));
+        assert!(plurx_core::process::priority::stop(pid).expect("stop"));
+        let mut failure = None;
+        for _ in 0..200 {
+            let mut next = slot.take(1).await;
+            if let Some(cause) = next.failure() {
+                failure = Some(cause.to_owned());
+                break;
+            }
+            let session = next.take().expect("still live");
+            next.put(session).await;
+            drop(next);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(failure.is_some(), "the stopped helper fails the next window");
+        assert!(slot.activity().is_none(), "the reaped helper leaves Activity");
+        assert!(plurx_core::process::priority::running()
+            .iter()
+            .all(|row| row.pid != pid));
+        assert!(fixture.claim_is_free());
+    }
+
+    /// A window whose soundtrack interval is invalid is refused before its
+    /// encoder starts, and the session stays positioned for it.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn an_invalid_soundtrack_interval_is_refused_before_any_encoder() {
+        let fixture = SessionFixture::new();
+        let mut session = fixture.spawn(None).await;
+        let producer = Arc::new(ProducerSlot::new());
+        let refused = session
+            .window(SessionWindowRequest {
+                encoder: fixture.encoder.clone(),
+                encoder_args: SessionFixture::encoder_args(),
+                producer: Arc::clone(&producer),
+                at: 0,
+                window: SegmentWindow {
+                    start: (0, 1),
+                    end: (2, 1),
+                    max_preroll: 512,
+                    source_origin: Some(SessionFixture::origin()),
+                },
+                frames: 48,
+                audio: Some(((-1, 1), (3, 1))),
+                deadline: Instant::now() + Duration::from_secs(20),
+                cancel: CancellationToken::new(),
+                stages: WindowStageClock::start(),
+            })
+            .await;
+        assert!(refused.is_err());
+        assert_eq!(session.unusable(), None);
+        assert_eq!(session.next_index(), None);
+        assert!(
+            matches!(producer.belief().await, crate::prodexec::Producer::Absent { .. }),
+            "no encoder was started or registered"
+        );
+        fixture
+            .window(&mut session, &producer, 0)
+            .await
+            .expect("the session still serves the window");
+        session.retire(SessionEnd::Closed).await;
+    }
+
+    /// The soundtrack a window carries starts a fixed 200 ms before its
+    /// encoder's lattice filter rebases (`asetpts=PTS-seek/TB`), on the
+    /// source clock, so the resampler always drops the samples before the
+    /// rebase point; the encoder reads it from the helper's pipe with no seek.
     #[test]
     #[cfg(target_os = "linux")]
     fn the_carried_soundtrack_starts_where_the_encoder_rebases() {
@@ -3471,12 +3705,9 @@ mod tests {
             .expect("production graph");
             assert!(!args.iter().any(|arg| arg == "-ss"), "{args:?}");
             let audio = args
-                .windows(6)
-                .position(|scope| {
-                    scope[2..] == ["-f", "matroska", "-i", "/proc/self/fd/4"]
-                        && scope[0] == "-threads"
-                })
-                .expect("the soundtrack input is the helper's Matroska pipe");
+                .windows(4)
+                .position(|scope| scope == ["-threads", "1", "-i", "/proc/self/fd/4"])
+                .expect("the soundtrack input is the helper's pipe, its container probed");
             assert_eq!(args[audio - 2], "-itsoffset", "{args:?}");
             assert!(
                 args.windows(2).any(|pair| pair == ["-map", "1:a:0"]),
@@ -3502,7 +3733,10 @@ mod tests {
                 )
                 .expect("soundtrack interval");
             let from_film = from as f64 / f64::from(from_den) - origin as f64 / 1e6;
-            assert!((from_film - seek).abs() < 1e-9, "{from_film} vs {seek}");
+            assert!(
+                (from_film - (seek - 0.2)).abs() < 1e-9,
+                "the carried soundtrack starts 200 ms before the rebase point: {from_film} vs {seek}"
+            );
             let end_film = end as f64 / f64::from(end_den) - origin as f64 / 1e6;
             assert!(
                 end_film >= 614.5 + f64::from((-offset_ms).max(0) as i32) / 1000.0 - 1e-9,

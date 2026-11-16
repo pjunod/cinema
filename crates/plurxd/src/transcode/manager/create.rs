@@ -3758,7 +3758,7 @@ impl TranscodeManager {
                             return Err("complete-title display-target scan changed during preparation".into());
                         }
                     }
-                    let runtime = RuntimeRecipe { tools, source, source_offsets, source_frame_probe,
+                    let runtime = RuntimeRecipe { tools, source, source_frame_probe,
                         source_tick, source_origin, native_bl, source_clock, preferences,
                         display_target,
                         display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
@@ -3810,7 +3810,7 @@ impl TranscodeManager {
                     // retired and reaped here, before the credit moves on.
                     let run = runtime.execute_with_source_input(file, &processed_plan, &processed_options, grid,
                         entry, &executable.path,
-                        crate::vodencode::dv_runtime::WindowSource::Open { input, admission },
+                        crate::vodencode::dv_runtime::WindowSource::Open { input, admission, home: crate::dv_segment::SessionHome::new(format!("{} · processed trial", file.path.display())) },
                         Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None,
                         processing_deadline, Some(source_open_started.elapsed())).await;
                     if let Some(session) = run.session {

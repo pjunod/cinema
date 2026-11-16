@@ -3038,7 +3038,6 @@ async fn graph_holding(
     crate::vodencode::dv_runtime::RuntimeRecipe {
         tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(backend)),
         source,
-        source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
         display_target: None,
         display: None,
         display_target_note: None,

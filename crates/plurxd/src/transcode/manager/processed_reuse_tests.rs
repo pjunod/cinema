@@ -1545,7 +1545,6 @@ printf '%s\n' '{}'
             backend,
         )),
         source: Arc::clone(&source),
-        source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
         display_target,
         display: caps.display.clone(),
         display_target_note: display_target_note.clone(),

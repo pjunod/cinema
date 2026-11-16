@@ -1489,25 +1489,19 @@ pub fn vod_completed_reconstructed_pipe_args(
             .map(|(i, _)| i)
             .ok_or("reconstructed audio input unavailable")?;
         // The DV helper carries this window's soundtrack packets, unchanged,
-        // from its own read of the source in a Matroska pipe: the encoder
-        // never opens the source. The pipe starts at the soundtrack preroll
-        // and cannot seek, so the source seek is dropped; the lattice filter
-        // rebases on the same film time from the packets' own timestamps.
+        // from its own read of the source in a pipe: the encoder never opens
+        // the source. The pipe is NUT, which keeps the source's time base,
+        // or Matroska for a codec NUT cannot tag (TrueHD); the encoder probes
+        // which. It starts just before the soundtrack preroll and cannot
+        // seek, so the source seek is dropped; the lattice filter rebases on
+        // the same film time from the packets' own timestamps.
         if input < 3 || args[input - 3] != "-noaccurate_seek" || args[input - 2] != "-ss" {
             return Err("reconstructed audio input has no source seek");
         }
         args.drain(input - 3..input);
         let input = input - 3;
         args[input + 1] = audio_fd.into();
-        args.splice(
-            input..input,
-            [
-                "-threads".into(),
-                "1".into(),
-                "-f".into(),
-                "matroska".into(),
-            ],
-        );
+        args.splice(input..input, ["-threads".into(), "1".into()]);
         for index in 0..args.len().saturating_sub(1) {
             if args[index] == "-map" && args[index + 1].starts_with("1:a:") {
                 args[index + 1] = "1:a:0".into();

@@ -828,6 +828,21 @@ pub struct ProcessingActivity {
     /// The served base layer is the FEL-composed picture.
     pub fel_composed: bool,
     pub live_rendering: bool,
+    /// The rendition's live DV helper session, when it has one: the process
+    /// Activity lists, linked to this playback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper: Option<ProcessingHelper>,
+}
+
+/// A processed rendition's long-lived DV helper, as its playback's Activity
+/// line shows it.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProcessingHelper {
+    pub pid: u32,
+    pub started_at_ms: u64,
+    /// Windows the helper has been given, the one in flight included.
+    pub windows: u32,
+    pub in_flight: bool,
 }
 
 impl ProcessingActivity {

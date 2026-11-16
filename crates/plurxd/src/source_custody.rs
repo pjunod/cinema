@@ -1309,6 +1309,21 @@ impl SourceObserver {
     pub(crate) fn has_authority(&self) -> bool {
         !self.reads.authority_lost.is_cancelled()
     }
+    /// An observer with no custody actor behind it, and the token that ends
+    /// its read authority.
+    #[cfg(test)]
+    pub(crate) fn detached_for_test() -> (Self, tokio_util::sync::CancellationToken) {
+        let reads = Arc::new(ReadActivity::default());
+        let lost = reads.authority_lost.clone();
+        (
+            Self {
+                commands: mpsc::unbounded_channel().0,
+                reads,
+                foreground_bytes: 0,
+            },
+            lost,
+        )
+    }
     pub(crate) fn mark_cleanup_pending(&self) {
         let _ = self.commands.send(Command::CleanupPending);
     }

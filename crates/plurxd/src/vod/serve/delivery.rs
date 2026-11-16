@@ -1971,13 +1971,15 @@ fn processing_activity(rendition: &Rendition) -> Option<crate::vodserve::Process
         let DvSelection::Selected(plan) = &encoding.dv_processing else {
             return None;
         };
-        Some(processing_activity_text(
+        let mut activity = processing_activity_text(
             plan.destination(),
             runtime.mode == DvProcessingMode::Fel && plan.reconstructs_fel(),
             runtime.decode == crate::dv_segment::RendererDecode::Gpu,
             &encoding.delivered_output_encoder(),
             rendition.ephemeral_processing,
-        ))
+        );
+        activity.helper = rendition.dv_session.activity();
+        Some(activity)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -2033,6 +2035,7 @@ pub(crate) fn processing_activity_text(
         reason: reason.to_owned(),
         fel_composed,
         live_rendering,
+        helper: None,
     }
 }
 

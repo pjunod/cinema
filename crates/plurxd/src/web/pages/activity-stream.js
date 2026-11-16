@@ -185,7 +185,7 @@ function activityStreamCell(de,session,open){
   // What the GPU is doing for this stream and why, in plain view: the
   // attribution a processed graph owes the operator (Stop playback ends it).
   const proc=(session&&session.vod_observation&&session.vod_observation.processing)||(de.vod_observation&&de.vod_observation.processing);
-  const processing=proc?`<div class="stream-processing" data-processing="${esc(proc.delivered)}"><b>${esc(proc.delivered)}</b> <span class="sub">· ${esc(proc.work)}</span><div class="muted">Why: ${esc(proc.reason)}${proc.live_rendering?" · live rendering":""}${proc.fel_composed?" · FEL composed":""}</div></div>`:"";
+  const processing=proc?`<div class="stream-processing" data-processing="${esc(proc.delivered)}"><b>${esc(proc.delivered)}</b> <span class="sub">· ${esc(proc.work)}</span><div class="muted">Why: ${esc(proc.reason)}${proc.live_rendering?" · live rendering":""}${proc.fel_composed?" · FEL composed":""}</div>${proc.helper?`<div class="muted" data-helper="${esc(String(proc.helper.pid))}">DV helper pid ${esc(String(proc.helper.pid))} · started ${fmtAgo(Math.floor(proc.helper.started_at_ms/1000))} · ${esc(String(proc.helper.windows))} window${proc.helper.windows===1?"":"s"} · ${proc.helper.in_flight?"producing":"between windows"}</div>`:""}</div>`:"";
   const meters=activityStreamMeters(de,session);
   const strip=meters.length?`<div class="stream-meters">${meters.map(meter=>`<div class="stream-meter ${meter.tone||""}"><span class="k">${esc(meter.k)}</span><span class="v">${esc(meter.v)}${meter.of?`<span class="of">${esc(meter.of)}</span>`:""}</span>${
     meter.bar!=null?`<span class="stream-bar" aria-hidden="true"><i style="width:${Math.round(meter.bar*100)}%"></i></span>`:""}</div>`).join("")}</div>`:"";
@@ -488,7 +488,7 @@ function activityProcessesHtml(rows){
     const refused=row.applied===false?` <span class="pill warn">priority not applied</span>`:"";
     const pid=String(row.pid);
     return `<tr data-process="${esc(pid)}">
-      <td><b>${esc(row.purpose)}</b><div class="muted" style="font-size:12px">${esc(row.reason)}</div></td>
+      <td><b>${esc(row.purpose)}</b>${row.serves?`<div class="sub" data-serves>${esc(row.serves)}</div>`:""}<div class="muted" style="font-size:12px">${esc(row.reason)}</div></td>
       <td>${esc(row.program)} <span class="muted">· pid ${esc(pid)}</span></td>
       <td>${kind}${levels?` <span class="muted">· ${esc(levels)}</span>`:""}${refused}</td>
       <td class="muted">${fmtAgo(Math.floor(row.started_at_ms/1000))}</td>
