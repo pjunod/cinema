@@ -641,19 +641,18 @@ completed applicable results.
    - **Contents:** the ordering and the injection.
    - **Acceptance:** a disk conversion of a fitted title reads back the
      stored curves frame by frame, and an unfitted FEL title waits.
-6. **Developer section and playback info:** built, acceptance pending.
+6. **Developer section and playback info:** built; native acceptance passes.
    - The report comes from the attached rendition's pinned digest and
      captured gain. Status polls do not read the curve store. Identity is
      reported only for actual To81 conversion, with the generation's reason.
    - **Acceptance:** each state renders on the web and Apple Settings, and
      a dv_patch_clips run on macOS against a served fragment shows A == B.
-     This remains open: the historical control measured improvement, while the
-     2026-11-16 six-point native run has valid controls but point 06 fails
-     exact FP16-bin overlap in red and green. The linked receipt retains that
-     failure and the common-grid repair diagnostic: nearest-Q12 MMR agrees
-     with independent references at all six inputs. Bind the production
-     candidate to the tested program, then complete the remaining 42. Preserve
-     the exact overlap criterion; no recovery percentage or invented tolerance.
+     The historical Q23 candidate failed point 06; that failure stays recorded.
+     The production-written nearest-Q12 replacement passes all 48 native
+     points and controls under the exact overlap criterion, including after
+     current-main byte-identity verification. UI state checks run in the fast
+     lane. Physical playback on every platform remains the Developer card's
+     graduation requirement; this M3 qualification does not claim it.
 7. **Re-encode trials (§5):** plan first, then build.
 
 ## 7. Non-goals
