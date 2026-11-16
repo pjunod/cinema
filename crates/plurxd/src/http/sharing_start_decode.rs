@@ -40,8 +40,13 @@ impl DecodedSourceHlsStart {
         let value = super::sharing_decision_decode::bounded_decision_value(&mut json)
             .map_err(|_| SharingResourceUnsupported)?;
         json.end().map_err(|_| SharingResourceUnsupported)?;
-        let envelope: Envelope =
+        let mut envelope: Envelope =
             serde_json::from_value(value.clone()).map_err(|_| SharingResourceUnsupported)?;
+        // `StartResponse` never deserializes the local FEL / RPU / DYN rows (a
+        // local replay recomputes them). A Source Start carries the ones its
+        // own planner computed; B decodes them with the same type, holds them
+        // to the shape the planner builds, and relays them unchanged.
+        envelope.response.enhancement = relayed_enhancement(&value)?;
         if &envelope.reference != expected
             || expected.server_id.is_nil()
             || expected.catalogue_epoch.is_nil()
@@ -160,6 +165,22 @@ pub(crate) fn delivered_range_presentable(request_json: &str, response: &StartRe
     }
 }
 
+fn relayed_enhancement(
+    value: &serde_json::Value,
+) -> Result<Option<plurx_core::playback::enhancement::PlaybackEnhancement>> {
+    let Some(raw) = value
+        .get("response")
+        .and_then(|response| response.get("enhancement"))
+    else {
+        return Ok(None);
+    };
+    let enhancement: plurx_core::playback::enhancement::PlaybackEnhancement =
+        serde_json::from_value(raw.clone()).map_err(|_| SharingResourceUnsupported)?;
+    if !enhancement.is_well_formed() {
+        return Err(SharingResourceUnsupported);
+    }
+    Ok(Some(enhancement))
+}
 fn v4(id: Uuid) -> bool {
     id.get_version_num() == 4 && id.get_variant() == Variant::RFC4122 && !id.is_nil()
 }
@@ -296,6 +317,81 @@ mod tests {
             response.control.expect("control").generation,
             incarnation.to_string()
         );
+    }
+    #[test]
+    fn sharing_start_decoder_relays_the_enhancement_rows_it_can_hold_to_the_planner_shape() {
+        let (expected, good) = fixture();
+        let rows = json!({
+            "active":["RPU","DYN"],
+            "details":[
+                {"badge":"FEL","active":false,"text":"No full enhancement layer in this source."},
+                {"badge":"RPU","active":true,"text":"Reshaping is applied by the display."},
+                {"badge":"DYN","active":true,"text":"Dynamic metadata reaches the display."}
+            ],
+            "requires_effective_processing":true
+        });
+        let mut carried = good.clone();
+        carried["response"]["delivered_dynamic_range"] = json!("dolby_vision");
+        carried["response"]["delivered_dolby_vision_profile"] = json!(8);
+        carried["response"]["enhancement"] = rows.clone();
+        let decoded = decode(&carried, &expected).expect("a Start with enhancement rows");
+        let relayed = decoded
+            .response()
+            .enhancement
+            .clone()
+            .expect("relayed enhancement");
+        assert_eq!(serde_json::to_value(&relayed).expect("rows"), rows);
+        assert_eq!(
+            serde_json::to_value(decoded.response()).expect("whole response"),
+            carried["response"],
+            "the rows round-trip unchanged"
+        );
+        let mut empty = carried.clone();
+        empty["response"]["enhancement"] = json!({"active":[],"details":[]});
+        assert!(decode(&empty, &expected).is_ok());
+        // Absent stays absent.
+        assert!(decode(&good, &expected)
+            .expect("plain Start")
+            .response()
+            .enhancement
+            .is_none());
+        let mut bad = Vec::new();
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["active"] = json!(["FEL", "RPU", "DYN"]);
+        bad.push(("active names an inactive detail", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["active"] = json!(["DYN", "RPU"]);
+        bad.push(("active out of display order", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["badge"] = json!("RPU");
+        bad.push(("duplicate badge", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["badge"] = json!("HDR");
+        bad.push(("unknown badge", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["text"] = json!("x".repeat(1025));
+        bad.push(("overlong text", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["text"] = json!("  ");
+        bad.push(("blank text", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["text"] = json!("line\nbreak");
+        bad.push(("control character", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["details"][0]["extra"] = json!(1);
+        bad.push(("unknown detail field", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"]["requires_effective_processing"] = json!(false);
+        bad.push(("non-canonical false flag", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"] = json!(null);
+        bad.push(("null rows", v));
+        let mut v = carried.clone();
+        v["response"]["enhancement"] = json!("RPU");
+        bad.push(("not an object", v));
+        for (why, value) in bad {
+            assert!(decode(&value, &expected).is_err(), "{why}");
+        }
     }
     #[test]
     fn sharing_start_decoder_closes_dynamic_range_and_binds_the_dolby_vision_profile() {

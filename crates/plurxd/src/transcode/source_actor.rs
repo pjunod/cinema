@@ -363,6 +363,10 @@ enum SourcePhysicalSettlement {
 struct SourceViewerState {
     backing: SourceBacking,
     native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
+    /// The bounded probe evidence a copy was planned from. The master
+    /// presents it whether or not native subtitle tracks were prepared: an
+    /// HDR or Dolby Vision session opens on the master for its range facts.
+    presentation_probe: Option<String>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     retirement_requested: bool,
     retirement_mode: crate::sharing_connection_custody::DriverCloseMode,
@@ -744,8 +748,7 @@ impl SourceViewerActor {
         }) || (query.is_some() && native.is_none())
             || (matches!(
                 resource.kind(),
-                SharingHlsResourceKind::Master
-                    | SharingHlsResourceKind::Video
+                SharingHlsResourceKind::Video
                     | SharingHlsResourceKind::SubtitlePlaylist { .. }
                     | SharingHlsResourceKind::SubtitleSegment { .. }
             ) && native.is_none())
@@ -852,7 +855,19 @@ impl SourceViewerActor {
             SharingHlsResourceKind::Master
             | SharingHlsResourceKind::SubtitlePlaylist { .. }
             | SharingHlsResourceKind::SubtitleSegment { .. } => {
-                let tracks = native.as_ref().ok_or(SourceWorkerError::Unsupported)?;
+                // The master needs no prepared subtitle tracks: without them
+                // it admits none and still declares the session's range.
+                let tracks = native.as_ref();
+                if kind != SharingHlsResourceKind::Master && tracks.is_none() {
+                    return Err(SourceWorkerError::Unsupported);
+                }
+                let probe = self
+                    .0
+                    .state
+                    .lock()
+                    .expect("Source copy presentation")
+                    .presentation_probe
+                    .clone();
                 let publication = manager
                     .vod
                     .playlist(&session_id)
@@ -874,21 +889,20 @@ impl SourceViewerActor {
                 {
                     return Err(SourceWorkerError::Unavailable);
                 }
-                if !tracks.matches(&self.0.assignment, &facts.file) {
+                if tracks.is_some_and(|tracks| !tracks.matches(&self.0.assignment, &facts.file)) {
                     return Err(SourceWorkerError::Unavailable);
                 }
-                let (file, context) =
-                    source_native_presentation(facts, tracks.presentation_probe().as_deref());
-                let payload = match kind {
-                    SharingHlsResourceKind::Master => {
+                let (file, context) = source_native_presentation(facts, probe.as_deref());
+                let payload = match (kind, tracks) {
+                    (SharingHlsResourceKind::Master, tracks) => {
                         SourceResourcePayload::Playlist(crate::http::hls::source_native_master(
                             &file,
-                            tracks.selected(),
+                            tracks.and_then(|tracks| tracks.selected()),
                             &context,
-                            &tracks.indexes(),
+                            &tracks.map(|tracks| tracks.indexes()).unwrap_or_default(),
                         ))
                     }
-                    SharingHlsResourceKind::SubtitlePlaylist { index } => {
+                    (SharingHlsResourceKind::SubtitlePlaylist { index }, Some(tracks)) => {
                         if !tracks.has_track(index) {
                             return Err(SourceWorkerError::Unsupported);
                         }
@@ -896,7 +910,7 @@ impl SourceViewerActor {
                             &video,
                         ))
                     }
-                    SharingHlsResourceKind::SubtitleSegment { index } => {
+                    (SharingHlsResourceKind::SubtitleSegment { index }, Some(tracks)) => {
                         if !tracks.has_track(index) {
                             return Err(SourceWorkerError::Unsupported);
                         }
@@ -1256,6 +1270,7 @@ impl TranscodeManager {
                 bodies: 0,
                 planned_session: None,
                 native: None,
+                presentation_probe: None,
                 direct_start: None,
                 direct_activity: None,
             }),
@@ -1336,15 +1351,12 @@ impl TranscodeManager {
         {
             return Err(SourceWorkerError::Unsupported);
         }
-        if let Some(tracks) = owner
+        owner
             .state
             .lock()
             .expect("Source copy presentation")
-            .native
-            .as_ref()
-        {
-            tracks.set_presentation_probe(stored_probe.as_deref());
-        }
+            .presentation_probe
+            .clone_from(&stored_probe);
         // Match Source VOD's exact recipe, including parameter-set promotion
         // and retention. A plain-copy identity cannot stand in for either.
         let video = self.source_copy_video_options(
