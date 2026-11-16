@@ -258,14 +258,14 @@ macro_rules! claim_foreground_window {
 /// the counted leases (a re-asked admission leaves its own lease out).
 macro_rules! claim_source_holders {
     ($key:literal, $node:literal, $now:literal) => { claim_source_holders!($key, $node, $now, "") };
-    ($key:literal, $node:literal, $now:literal, $extra:literal) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, ")>=", node_source_readers!($node), "+1 OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, ")>=", domain_source_readers!($key), "+1))") };
+    ($key:literal, $node:literal, $now:literal, $extra:expr) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, ")>=", node_source_readers!($node), "+1 OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, ")>=", domain_source_readers!($key), "+1))") };
 }
 
 /// Maintenance readers already fill the node, or the mapped storage domain
 /// `$key`. Applied only when the claimant serves no live demand.
 macro_rules! claim_maintenance_reader {
     ($key:literal, $node:literal, $now:literal) => { claim_maintenance_reader!($key, $node, $now, "") };
-    ($key:literal, $node:literal, $now:literal, $extra:literal) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", node_source_readers!($node), " OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", domain_source_readers!($key), "))") };
+    ($key:literal, $node:literal, $now:literal, $extra:expr) => { concat!("((SELECT COUNT(*) FROM source_leases held WHERE held.node_id=", $node, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", node_source_readers!($node), " OR (", $key, "!='source_io' AND (SELECT COUNT(*) FROM source_leases held,json_each(held.resource_keys_json) held_key WHERE held_key.value=", $key, " AND ", lease_counted!($now), $extra, " AND NOT ", lease_live!($now), ")>=", domain_source_readers!($key), "))") };
 }
 
 pub(super) const ENQUEUE_SQL: &str = concat!(
@@ -615,21 +615,46 @@ pub(super) const JOB_JSON: &str = r#"json_object(
     'created_at_ms', created_at_ms, 'updated_at_ms', updated_at_ms
 )"#;
 
-pub(super) const CLAIM_SQL: &str = concat!(
-    r#"
-UPDATE background_jobs SET
-  failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
-  attempt_errors = CASE WHEN state = 'running' THEN
-    CASE WHEN length(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired') <= 2048 THEN attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired' ELSE 'history_compacted,' || substr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), instr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), ',') + 1) END ELSE attempt_errors END,
-  state = 'running', owner_node_id = json_extract($1, '$.node_id'),
-  owner_boot_id = json_extract($1, '$.boot_id'), claim_id = json_extract($1, '$.claim_id'),
-  fence = fence + 1, revision = revision + 1,
-  lease_expires_ms = json_extract($1, '$.now_ms') + 30000,
-  updated_at_ms = json_extract($1, '$.now_ms')
-WHERE id = json_extract($1, '$.job_id')
+// The claim statement's WHERE clause, one fragment per predicate group
+// (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md §3.1). `CLAIM_SQL` is the
+// authority and is assembled from these fragments verbatim; the local claim
+// verdict and the candidate listing are assembled from the same fragments, so
+// neither can drift from what the statement admits. Every fragment reads the
+// claimed row as the unaliased `background_jobs` and the request as `$1`
+// (`node_id`, `now_ms` and, in the identity and ledger groups, the claim's own
+// fields). The source fragments take the job id expression as `$job`: the
+// statement and the verdict bind it to the request's `job_id`, which SQLite
+// pushes into every branch of the resource view; a listing binds the row.
+
+/// The CAS identity: the job, the revision the claimant saw, kind and payload.
+macro_rules! claim_identity {
+    () => {
+        r#"id = json_extract($1, '$.job_id')
   AND revision = json_extract($1, '$.expected_revision')
-  AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
-  AND (kind!='dv_title_scan' OR EXISTS(SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+  AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')"#
+    };
+}
+
+/// A subtitle extraction is claimable only while its analysis request is
+/// live. Every candidate listing applies this one predicate, filtered or
+/// not, as the listing did before the claim statement was split: a settled
+/// request's job is not work on any backend.
+macro_rules! claim_subtitle_extract_demand {
+    () => {
+        r#"(kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
+        AND file.size = request.source_size AND file.mtime = request.source_mtime
+      WHERE request.request_id = json_extract(background_jobs.payload_json, '$.source_generation')
+        AND request.file_id = json_extract(background_jobs.payload_json, '$.file_id')
+        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
+        AND request.cancel_requested = 0))"#
+    };
+}
+
+/// Per-kind demand and configuration admission.
+macro_rules! claim_kind_demand {
+    () => {
+        concat!(
+        r#"(kind!='dv_title_scan' OR EXISTS(SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
     WHERE d.revision=json_extract(background_jobs.payload_json,'$.probe_revision')
     AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
     AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
@@ -653,12 +678,9 @@ WHERE id = json_extract($1, '$.job_id')
   AND (kind!='subtitle_transcribe_managed' OR EXISTS (SELECT 1 FROM files file WHERE file.id=json_extract(background_jobs.payload_json,'$.file_id') AND file.size=json_extract(background_jobs.payload_json,'$.source_size') AND file.mtime=json_extract(background_jobs.payload_json,'$.source_mtime') AND file.probe_json IS NOT NULL))
   -- Match the subtitle projection's preconditions before its trigger runs. A
   -- settled request is an ordinary lost claim, never an ambiguous SQL failure.
-  AND (kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
-        AND file.size = request.source_size AND file.mtime = request.source_mtime
-      WHERE request.request_id = json_extract(background_jobs.payload_json, '$.source_generation')
-        AND request.file_id = json_extract(background_jobs.payload_json, '$.file_id')
-        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
-        AND request.cancel_requested = 0))
+  AND "#,
+    claim_subtitle_extract_demand!(),
+    r#"
   AND (kind != 'media_probe' OR (EXISTS (SELECT 1 FROM job_leases lease
  WHERE lease.resource = json_extract(background_jobs.payload_json,'$.coordinator.resource')
  AND lease.owner_node_id = json_extract(background_jobs.payload_json,'$.coordinator.node_id')
@@ -678,8 +700,16 @@ WHERE id = json_extract($1, '$.job_id')
   AND (kind != 'subtitle_model_operation' OR NOT EXISTS (
     SELECT 1 FROM background_jobs other WHERE other.kind='subtitle_model_operation'
       AND other.id != background_jobs.id AND other.target_node_id=background_jobs.target_node_id
-      AND other.state IN ('running','cancelling') AND other.lease_expires_ms > json_extract($1,'$.now_ms')))
-  AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
+      AND other.state IN ('running','cancelling') AND other.lease_expires_ms > json_extract($1,'$.now_ms')))"#
+    )
+    };
+}
+
+/// Placement, queue state, retry and attempt budget, a pending waiter, owner
+/// membership and the counters.
+macro_rules! claim_state {
+    () => {
+        r#"(target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
   AND (kind = 'fragment_index_build' OR failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END < attempt_limit)
@@ -692,48 +722,419 @@ WHERE id = json_extract($1, '$.job_id')
       AND failed_attempts + CASE WHEN background_jobs.state = 'running'
         AND participation_fence = background_jobs.fence THEN 1 ELSE 0 END < attempt_limit)))
   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
-  AND fence < 9223372036854775807 AND revision < 9223372036854775807
-  AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
-  AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
+  AND fence < 9223372036854775807 AND revision < 9223372036854775807"#
+    };
+}
+
+/// This claim id has no attempt yet, and the attempt ledger has room.
+macro_rules! claim_attempt_ledger {
+    () => {
+        r#"NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
+  AND (SELECT COUNT(*) FROM background_job_attempts) < 40000"#
+    };
+}
+
+/// The foreground permission group for a claim or candidate listing.
+macro_rules! claim_foreground_admission {
+    ($job:literal) => { concat!(
+        "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key LIKE 'source_io%' AND ",
+        claim_foreground_window!("required.resource_key", "json_extract($1,'$.now_ms')"), ")") };
+}
+
+/// Per-node and per-domain holder caps, plus the unchanged provider slots.
+/// A claimant excludes only its own job's prior fences; other jobs still
+/// count those leases through expiry plus grace.
+macro_rules! claim_holder_admission {
+    ($job:literal) => { concat!(
+        "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key LIKE 'source_io%' AND ",
+        claim_source_holders!("required.resource_key", "json_extract($1,'$.node_id')", "json_extract($1,'$.now_ms')",
+            concat!(" AND NOT (held.owner_kind='job' AND held.work_id=", $job, ")")),
+        ") AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key NOT LIKE 'source_io%' AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key=required.resource_key AND held.expires_at_ms>json_extract($1,'$.now_ms') AND held.job_id!=background_jobs.id)>=2)") };
+}
+
+/// Reserve the last node/domain reader for live demand, on every claim path.
+macro_rules! claim_maintenance_admission {
+    ($job:literal) => { concat!(
+        "NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id=", $job,
+        " AND required.resource_key LIKE 'source_io%' AND NOT ",
+        live_job_interest!("background_jobs.id", "background_jobs.fence", "json_extract($1,'$.now_ms')"),
+        " AND ",
+        claim_maintenance_reader!("required.resource_key", "json_extract($1,'$.node_id')", "json_extract($1,'$.now_ms')",
+            concat!(" AND NOT (held.owner_kind='job' AND held.work_id=", $job, ")")), ")") };
+}
+
+pub(super) const CLAIM_SQL: &str = concat!(
+    r#"
+UPDATE background_jobs SET
+  failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+  attempt_errors = CASE WHEN state = 'running' THEN
+    CASE WHEN length(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired') <= 2048 THEN attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired' ELSE 'history_compacted,' || substr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), instr(substr(attempt_errors || CASE WHEN attempt_errors = '' THEN '' ELSE ',' END || 'lease_expired', -1800), ',') + 1) END ELSE attempt_errors END,
+  state = 'running', owner_node_id = json_extract($1, '$.node_id'),
+  owner_boot_id = json_extract($1, '$.boot_id'), claim_id = json_extract($1, '$.claim_id'),
+  fence = fence + 1, revision = revision + 1,
+  lease_expires_ms = json_extract($1, '$.now_ms') + 30000,
+  updated_at_ms = json_extract($1, '$.now_ms')
+WHERE "#,
+    claim_identity!(),
+    "\n  AND ",
+    claim_kind_demand!(),
+    "\n  AND ",
+    claim_state!(),
+    "\n  AND ",
+    claim_attempt_ledger!(),
+    r#"
   -- The outer CAS already fixes id to this request. Bind resource lookup to
   -- that same value so SQLite pushes the identity into every UNION branch
   -- of the resource view instead of scanning all jobs under the Raft writer.
-  -- Source capacity is counted on source_leases: per node, plus each mapped
-  -- storage domain cluster-wide. A lease charges until its expiry plus the
-  -- grace, whether or not a sweep has run. One reader per node and domain
-  -- stays reserved for live demand; playback is never counted. The
-  -- claimant's own earlier fence (a reader of this job that may still be
-  -- running) charges every other claim until its grace, not this one: a
-  -- job never waits on its own ghost.
-  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = json_extract($1, '$.job_id') AND required.resource_key LIKE 'source_io%'
-      AND ("#,
-    claim_foreground_window!("required.resource_key", "json_extract($1,'$.now_ms')"),
-    " OR ",
-    claim_source_holders!(
-        "required.resource_key",
-        "json_extract($1,'$.node_id')",
-        "json_extract($1,'$.now_ms')",
-        " AND NOT (held.owner_kind='job' AND held.work_id=json_extract($1,'$.job_id'))"
-    ),
-    " OR (NOT ",
-    live_job_interest!("background_jobs.id", "0", "json_extract($1, '$.now_ms')"),
-    " AND ",
-    claim_maintenance_reader!(
-        "required.resource_key",
-        "json_extract($1,'$.node_id')",
-        "json_extract($1,'$.now_ms')",
-        " AND NOT (held.owner_kind='job' AND held.work_id=json_extract($1,'$.job_id'))"
-    ),
-    r#")))
-  -- Other shared resources (provider slots) keep their two reservation
-  -- slots (claim effects); a full pair refuses here instead of aborting.
-  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = json_extract($1, '$.job_id') AND required.resource_key NOT LIKE 'source_io%'
-      AND (SELECT COUNT(*) FROM background_job_reservations held WHERE held.resource_key = required.resource_key
-          AND held.expires_at_ms > json_extract($1, '$.now_ms') AND held.job_id != background_jobs.id) >= 2)
-"#
+  -- Lease capacity counts until expiry plus grace, without waiting for a sweep.
+  AND "#,
+    claim_foreground_admission!("json_extract($1,'$.job_id')"),
+    "\n  AND ",
+    claim_holder_admission!("json_extract($1, '$.job_id')"),
+    r#"
+  -- A second source reader is reserved for live demand. Classification uses
+  -- durable consumer ownership, never the job's caller-supplied priority.
+  AND "#,
+    claim_maintenance_admission!("json_extract($1, '$.job_id')"),
+    "\n"
 );
+
+/// Why this node's applied replica says [`CLAIM_SQL`] would refuse a claim
+/// (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md §3.2): the first predicate
+/// group, in the statement's order, that refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimBlock {
+    /// Identity, queue state, placement, attempts or counters.
+    State,
+    /// The kind's own demand or configuration admission.
+    KindDemand,
+    /// Playback does not permit background reads, including its expiry grace.
+    ForegroundWindow,
+    /// The node/domain holder cap or provider slots are full.
+    SourceHolders,
+    /// The last node/domain reader is reserved for live demand.
+    MaintenanceReader,
+}
+
+impl ClaimBlock {
+    pub const ALL: [Self; 5] = [
+        Self::State,
+        Self::KindDemand,
+        Self::ForegroundWindow,
+        Self::SourceHolders,
+        Self::MaintenanceReader,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::State => "state",
+            Self::KindDemand => "kind_demand",
+            Self::ForegroundWindow => "foreground_window",
+            Self::SourceHolders => "source_holders",
+            Self::MaintenanceReader => "maintenance_reader",
+        }
+    }
+}
+
+/// The local claim verdict for one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ClaimVerdict {
+    /// The first refusing group; `None` when the statement would admit.
+    pub block: Option<ClaimBlock>,
+    /// Whether the kind-demand group holds, whatever else refuses: a caller
+    /// that repairs demand (the title bind) needs it on its own.
+    pub kind_demand: bool,
+}
+
+/// The local claim verdict: [`CLAIM_SQL`]'s predicate groups, each evaluated
+/// once against this node's applied replica for the request's row. A
+/// predicate that is NULL refuses, as in a WHERE clause. The row filter leaves
+/// out exactly the rows the claim's authoritative pre-read answers without
+/// proposing — missing, owner removed, another kind or payload version (by
+/// column or by the payload's own tag), cancelling or cancelled, or this
+/// claim's own replay — so those keep their own outcomes. No row means no
+/// verdict.
+const CLAIM_VERDICT_SQL: &str = concat!(
+    r#"WITH groups AS MATERIALIZED (SELECT
+  COALESCE(("#,
+    claim_identity!(),
+    "\n  AND ",
+    claim_state!(),
+    "\n  AND ",
+    claim_attempt_ledger!(),
+    r#"), 0) AS state_ok,
+  COALESCE(("#,
+    claim_kind_demand!(),
+    r#"), 0) AS kind_ok,
+  COALESCE(("#,
+    claim_foreground_admission!("json_extract($1,'$.job_id')"),
+    r#"), 0) AS foreground_ok,
+  COALESCE(("#,
+    claim_holder_admission!("json_extract($1, '$.job_id')"),
+    r#"), 0) AS holders_ok,
+  COALESCE(("#,
+    claim_maintenance_admission!("json_extract($1, '$.job_id')"),
+    r#"), 0) AS reader_ok
+FROM background_jobs
+WHERE id = json_extract($1, '$.job_id')
+  AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
+  AND json_extract(payload_json, '$.kind') IS kind
+  AND state NOT IN ('cancelling','cancelled')
+  AND (owner_node_id IS NULL OR claim_id IS NOT json_extract($1, '$.claim_id'))
+  AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id')))
+SELECT json_object('block', CASE WHEN NOT state_ok THEN 'state' WHEN NOT kind_ok THEN 'kind_demand'
+    WHEN NOT foreground_ok THEN 'foreground_window' WHEN NOT holders_ok THEN 'source_holders'
+    WHEN NOT reader_ok THEN 'maintenance_reader' END,
+  'kind_demand', json(CASE WHEN kind_ok THEN 'true' ELSE 'false' END)) AS result_json
+FROM groups"#
+);
+
+/// The claim statement's row predicates for a listed job (plan §3.1): kind
+/// demand, state and the three source groups, evaluated for `job` without a
+/// claim request. An `admissible_only` listing on a replica never offers a
+/// job the statement would refuse, so a claim pass blocked behind a held
+/// source lists nothing and proposes nothing. The identity and attempt-ledger groups need the claim's
+/// own revision and id and stay with the statement. The job-level predicates
+/// the listing already spells out beside its interest join stay too; they
+/// are the same predicates, and they let SQLite narrow by index first.
+const CANDIDATE_ADMISSION_SQL: &str = concat!(
+    r#"EXISTS (SELECT 1 FROM background_jobs WHERE background_jobs.id = job.id
+  AND "#,
+    claim_kind_demand!(),
+    "\n  AND ",
+    claim_state!(),
+    "\n  AND ",
+    claim_foreground_admission!("background_jobs.id"),
+    "\n  AND ",
+    claim_holder_admission!("background_jobs.id"),
+    "\n  AND ",
+    claim_maintenance_admission!("background_jobs.id"),
+    ")"
+);
+
+/// What every listing requires of a job, on either backend and whether or
+/// not the caller asked for an admissible listing: the subtitle-extraction
+/// demand the listing has always applied.
+const CANDIDATE_BASE_SQL: &str = concat!(
+    "EXISTS (SELECT 1 FROM background_jobs WHERE background_jobs.id = job.id\n  AND ",
+    claim_subtitle_extract_demand!(),
+    ")"
+);
+
+/// The candidate listing, with `admission` as one more predicate on each
+/// listed job: [`CANDIDATE_BASE_SQL`], or [`CANDIDATE_ADMISSION_SQL`] (which
+/// includes it through the kind-demand group) for an admissible listing.
+fn candidate_listing_sql(admission: &str) -> String {
+    format!(
+        r#"WITH selection AS (
+                SELECT COALESCE(json_extract($1, '$.after.selected_at_ms'), json_extract($1, '$.now_ms')) AS selected_at_ms
+            ), recent AS (
+                SELECT job.priority FROM background_job_attempts attempt JOIN background_jobs job ON job.id = attempt.job_id
+                WHERE attempt.owner_node_id = json_extract($1, '$.node_id')
+                  AND job.kind IN (SELECT value FROM json_each($1, '$.kinds'))
+                  AND attempt.outcome IN ('succeeded','failed','cancelled')
+                  AND attempt.finished_at_ms <= (SELECT selected_at_ms FROM selection)
+                ORDER BY attempt.finished_at_ms DESC, attempt.job_id, attempt.fence DESC LIMIT 8
+            ), fairness AS (
+                SELECT COALESCE(json_extract($1, '$.after.fairness_floor'),
+                    CASE WHEN COUNT(*) = 8 THEN MIN(priority) ELSE 0 END) AS fairness_floor FROM recent
+            ), interests AS (
+                SELECT waiter.job_id, waiter.state, waiter.not_before_ms, waiter.retry_deadline_ms,
+                    waiter.deadline_ms, waiter.failed_attempts, waiter.attempt_limit, waiter.participation_fence,
+                    CASE WHEN waiter.request_scope LIKE 'user:%' THEN waiter.request_scope
+                        WHEN COALESCE(item.library_id, json_extract(job.payload_json, '$.library_id')) IS NOT NULL
+                        THEN 'library:' || COALESCE(item.library_id, json_extract(job.payload_json, '$.library_id'))
+                        ELSE waiter.request_scope END AS scheduling_scope
+                FROM background_job_waiters waiter JOIN background_jobs job ON job.id = waiter.job_id
+                LEFT JOIN files file ON file.id = json_extract(job.payload_json, '$.file_id')
+                LEFT JOIN items item ON item.id = file.item_id
+            ), scope_usage AS (
+                SELECT interest.scheduling_scope, MAX(attempt.started_at_ms) AS last_claim_ms
+                FROM interests interest JOIN background_job_attempts attempt ON attempt.job_id = interest.job_id
+                WHERE attempt.owner_node_id = json_extract($1, '$.node_id')
+                    AND attempt.started_at_ms <= (SELECT selected_at_ms FROM selection)
+                GROUP BY interest.scheduling_scope
+            ), eligible AS (
+                SELECT job.id, MIN(COALESCE(usage.last_claim_ms, 0)) AS scope_last_claim_ms
+                FROM background_jobs job JOIN interests interest ON interest.job_id = job.id
+                LEFT JOIN scope_usage usage ON usage.scheduling_scope = interest.scheduling_scope
+                WHERE job.kind IN (SELECT value FROM json_each($1, '$.kinds')) AND job.payload_version = 1
+                    AND {admission}
+                    AND (job.target_node_id IS NULL OR job.target_node_id = json_extract($1, '$.node_id'))
+                    AND (job.state = 'queued' OR (job.state = 'running' AND job.lease_expires_ms <= json_extract($1, '$.now_ms')))
+                    AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > json_extract($1, '$.now_ms'))
+                    AND job.not_before_ms <= json_extract($1, '$.now_ms')
+                    AND interest.state = 'pending' AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
+                    AND (job.kind != 'fragment_index_build' OR (
+                        interest.not_before_ms <= json_extract($1, '$.now_ms')
+                        AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract($1, '$.now_ms'))
+                        AND interest.failed_attempts + CASE WHEN job.state = 'running'
+                          AND interest.participation_fence = job.fence THEN 1 ELSE 0 END < interest.attempt_limit))
+                GROUP BY job.id
+            ), ranked AS (
+                SELECT job.*, eligible.scope_last_claim_ms, selection.selected_at_ms, fairness.fairness_floor,
+                    CASE WHEN job.priority = 3 THEN 6 WHEN job.priority < fairness.fairness_floor THEN 5
+                        ELSE job.priority * 2 END AS selection_rank
+                FROM background_jobs job JOIN eligible ON eligible.id = job.id CROSS JOIN fairness CROSS JOIN selection
+            )
+            SELECT json_object('job', {JOB_JSON}, 'scope_last_claim_ms', scope_last_claim_ms,
+                'selected_at_ms', selected_at_ms, 'fairness_floor', fairness_floor) AS result_json FROM ranked
+            WHERE json_extract($1, '$.after') IS NULL
+                OR selection_rank < CASE WHEN json_extract($1, '$.after.priority') = 3 THEN 6
+                    WHEN json_extract($1, '$.after.priority') < fairness_floor THEN 5 ELSE json_extract($1, '$.after.priority') * 2 END
+                OR (selection_rank = CASE WHEN json_extract($1, '$.after.priority') = 3 THEN 6
+                    WHEN json_extract($1, '$.after.priority') < fairness_floor THEN 5 ELSE json_extract($1, '$.after.priority') * 2 END
+                  AND (scope_last_claim_ms, created_at_ms, id) > (json_extract($1, '$.after.scope_last_claim_ms'),
+                    json_extract($1, '$.after.created_at_ms'), json_extract($1, '$.after.id')))
+            ORDER BY selection_rank DESC, scope_last_claim_ms, created_at_ms, id LIMIT json_extract($1, '$.limit') + 1"#
+    )
+}
+
+/// The claim statement and the queries assembled from its fragments, for the
+/// differential test in `tests/claim_local_verdict.rs`. Fixtures only.
+#[cfg(feature = "fixtures")]
+#[doc(hidden)]
+pub mod claim_sql_fixture {
+    pub const CLAIM_SQL: &str = super::CLAIM_SQL;
+    pub const CLAIM_VERDICT_SQL: &str = super::CLAIM_VERDICT_SQL;
+
+    #[must_use]
+    pub fn candidate_listing_sql(admissible: bool) -> String {
+        super::candidate_listing_sql(if admissible {
+            super::CANDIDATE_ADMISSION_SQL
+        } else {
+            super::CANDIDATE_BASE_SQL
+        })
+    }
+}
+
+/// How a claim attempt ended, beside its [`ClaimOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimPath {
+    /// [`CLAIM_SQL`] was proposed.
+    Proposed,
+    /// The authoritative pre-read answered (missing, replayed, cancelled or
+    /// unsupported) without a proposal.
+    Settled,
+    /// This node's replica showed the statement would refuse: no pre-read
+    /// and no proposal. The outcome is [`ClaimOutcome::Contended`].
+    Skipped(ClaimBlock),
+}
+
+/// A claim's outcome and how it was reached.
+#[derive(Debug, Clone)]
+pub struct ClaimAttempt {
+    pub outcome: ClaimOutcome,
+    pub path: ClaimPath,
+}
+
+/// The local verdict for `request` (`body` is its encoding): `Some` only
+/// when this process has an applied replica holding the row. A stale verdict
+/// is safe either way (plan §3.3): a stale block is re-evaluated on the next
+/// pass, a stale admit costs the one refused proposal of today. A local read
+/// error is no verdict.
+async fn local_claim_verdict<T: QueueSql + ?Sized>(store: &T, body: &str) -> Option<ClaimVerdict> {
+    match store
+        .local_replica_sql(CLAIM_VERDICT_SQL.to_owned(), body.to_owned())
+        .await
+    {
+        Ok(Some(rows)) => rows.first().and_then(|row| decode(row).ok()),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::debug!(%error, "local claim verdict unavailable; proposing");
+            None
+        }
+    }
+}
+
+/// [`BackgroundJobStore::claim_job`], reporting how it ended. On a process
+/// with an applied replica the local verdict runs first, and a claim the
+/// replica shows the statement refusing is neither pre-read nor proposed.
+async fn claim_attempt<T: QueueSql + ?Sized>(
+    store: &T,
+    request: ClaimJob,
+) -> Result<ClaimAttempt, StoreError> {
+    request.validate()?;
+    let body = encode(&request)?;
+    if let Some(block) = local_claim_verdict(store, &body)
+        .await
+        .and_then(|verdict| verdict.block)
+    {
+        return Ok(ClaimAttempt {
+            outcome: ClaimOutcome::Contended,
+            path: ClaimPath::Skipped(block),
+        });
+    }
+    let settled = |outcome| {
+        Ok(ClaimAttempt {
+            outcome,
+            path: ClaimPath::Settled,
+        })
+    };
+    // Replaying an acknowledged or ambiguous claim must return its current
+    // identity, not compete for a fresh fence. Never adopt another boot.
+    let previous = store.queue_sql(
+        format!("SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
+        body.clone(), false, true,
+    ).await?;
+    let Some(previous) = previous.first() else {
+        return settled(ClaimOutcome::ExpiredOrPruned);
+    };
+    let snapshot: ClaimSnapshot = decode(previous)?;
+    let previous = snapshot.job;
+    if previous.payload_version != request.payload_version
+        || previous
+            .supported_payload()
+            .map(|payload| payload.kind())
+            .ok()
+            != Some(request.kind)
+    {
+        return settled(ClaimOutcome::Unsupported);
+    }
+    if let Some(token) = &previous.token {
+        if token.claim_id == request.claim_id {
+            return settled(
+                if snapshot.resources_current == 1
+                    && previous.state == JobState::Running
+                    && token.node_id == request.node_id
+                    && token.boot_id == request.boot_id
+                    && token.lease_expires_ms > request.now_ms
+                    && (previous.retry_deadline_ms == 0
+                        || previous.retry_deadline_ms > request.now_ms)
+                {
+                    ClaimOutcome::Claimed {
+                        job: Box::new(previous),
+                    }
+                } else {
+                    ClaimOutcome::ExpiredOrPruned
+                },
+            );
+        }
+    }
+    if matches!(previous.state, JobState::Cancelling | JobState::Cancelled) {
+        return settled(ClaimOutcome::Cancelled);
+    }
+    let rows = store
+        .queue_sql(
+            format!("{CLAIM_SQL} RETURNING {JOB_JSON} AS result_json"),
+            body,
+            true,
+            true,
+        )
+        .await?;
+    Ok(ClaimAttempt {
+        outcome: match rows.first() {
+            Some(row) => ClaimOutcome::Claimed { job: decode(row)? },
+            None => ClaimOutcome::Contended,
+        },
+        path: ClaimPath::Proposed,
+    })
+}
 
 const RENEW_SQL: &str = r#"
 WITH inputs AS (
@@ -2067,6 +2468,13 @@ pub struct CandidateQuery {
     pub after: Option<CandidateCursor>,
     pub now_ms: i64,
     pub limit: usize,
+    /// List only jobs the claim statement would admit now, as this process's
+    /// applied replica sees them (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md
+    /// §3.1). Only for a claim pass whose refused claim has no side effect:
+    /// a listing that advertises turns, records waits or counts must see the
+    /// blocked jobs too. Ignored without a replica (SQLite lists everything).
+    #[serde(default)]
+    pub admissible_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2797,6 +3205,21 @@ pub trait BackgroundJobStore: Send + Sync {
         replacement: crate::cluster::coordination::Lease,
     ) -> Result<EnqueueOutcome, StoreError>;
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
+    /// [`Self::claim_job`], also saying how it ended: proposed, settled by
+    /// the authoritative pre-read, or skipped because this node's applied
+    /// replica shows the claim statement refusing it.
+    async fn claim_job_attempt(&self, request: ClaimJob) -> Result<ClaimAttempt, StoreError>;
+    /// The local claim verdict for a claim of `job_id` at the revision this
+    /// node's applied replica holds, read from that replica alone: no quorum
+    /// read, nothing written. `None` on SQLite, without a replica, or for a
+    /// row the claim's pre-read answers itself.
+    async fn claim_verdict(
+        &self,
+        job_id: &str,
+        kind: JobKind,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<ClaimVerdict>, StoreError>;
     /// Narrow entry point shared by voter and learner artifact workers.
     async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
@@ -3032,6 +3455,18 @@ pub(super) trait QueueSql: Send + Sync {
         mutation: bool,
         authoritative: bool,
     ) -> Result<Vec<String>, StoreError>;
+
+    /// Run a read on this process's own applied replica. `None` when there is
+    /// none: the SQLite store is its own authority (its claims must not start
+    /// skipping), and a remote-authority client has no replica. A replica can
+    /// lag, so only a read whose stale answer is safe may use this.
+    async fn local_replica_sql(
+        &self,
+        _sql: String,
+        _request: String,
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        Ok(None)
+    }
 }
 
 // Claim acknowledgement and renewal reconciliation must not revive a token
@@ -4260,74 +4695,29 @@ LIMIT 1
         {
             return Err(invalid("invalid background candidate query"));
         }
-        let rows = self.queue_sql(format!(
-            r#"WITH selection AS (
-                SELECT COALESCE(json_extract($1, '$.after.selected_at_ms'), json_extract($1, '$.now_ms')) AS selected_at_ms
-            ), recent AS (
-                SELECT job.priority FROM background_job_attempts attempt JOIN background_jobs job ON job.id = attempt.job_id
-                WHERE attempt.owner_node_id = json_extract($1, '$.node_id')
-                  AND job.kind IN (SELECT value FROM json_each($1, '$.kinds'))
-                  AND attempt.outcome IN ('succeeded','failed','cancelled')
-                  AND attempt.finished_at_ms <= (SELECT selected_at_ms FROM selection)
-                ORDER BY attempt.finished_at_ms DESC, attempt.job_id, attempt.fence DESC LIMIT 8
-            ), fairness AS (
-                SELECT COALESCE(json_extract($1, '$.after.fairness_floor'),
-                    CASE WHEN COUNT(*) = 8 THEN MIN(priority) ELSE 0 END) AS fairness_floor FROM recent
-            ), interests AS (
-                SELECT waiter.job_id, waiter.state, waiter.not_before_ms, waiter.retry_deadline_ms,
-                    waiter.deadline_ms, waiter.failed_attempts, waiter.attempt_limit, waiter.participation_fence,
-                    CASE WHEN waiter.request_scope LIKE 'user:%' THEN waiter.request_scope
-                        WHEN COALESCE(item.library_id, json_extract(job.payload_json, '$.library_id')) IS NOT NULL
-                        THEN 'library:' || COALESCE(item.library_id, json_extract(job.payload_json, '$.library_id'))
-                        ELSE waiter.request_scope END AS scheduling_scope
-                FROM background_job_waiters waiter JOIN background_jobs job ON job.id = waiter.job_id
-                LEFT JOIN files file ON file.id = json_extract(job.payload_json, '$.file_id')
-                LEFT JOIN items item ON item.id = file.item_id
-            ), scope_usage AS (
-                SELECT interest.scheduling_scope, MAX(attempt.started_at_ms) AS last_claim_ms
-                FROM interests interest JOIN background_job_attempts attempt ON attempt.job_id = interest.job_id
-                WHERE attempt.owner_node_id = json_extract($1, '$.node_id')
-                    AND attempt.started_at_ms <= (SELECT selected_at_ms FROM selection)
-                GROUP BY interest.scheduling_scope
-            ), eligible AS (
-                SELECT job.id, MIN(COALESCE(usage.last_claim_ms, 0)) AS scope_last_claim_ms
-                FROM background_jobs job JOIN interests interest ON interest.job_id = job.id
-                LEFT JOIN scope_usage usage ON usage.scheduling_scope = interest.scheduling_scope
-                WHERE job.kind IN (SELECT value FROM json_each($1, '$.kinds')) AND job.payload_version = 1
-                    AND (job.kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
-        AND file.size = request.source_size AND file.mtime = request.source_mtime
-      WHERE request.request_id = json_extract(job.payload_json, '$.source_generation')
-        AND request.file_id = json_extract(job.payload_json, '$.file_id')
-        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
-        AND request.cancel_requested = 0))
-                    AND (job.target_node_id IS NULL OR job.target_node_id = json_extract($1, '$.node_id'))
-                    AND (job.state = 'queued' OR (job.state = 'running' AND job.lease_expires_ms <= json_extract($1, '$.now_ms')))
-                    AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > json_extract($1, '$.now_ms'))
-                    AND job.not_before_ms <= json_extract($1, '$.now_ms')
-                    AND interest.state = 'pending' AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
-                    AND (job.kind != 'fragment_index_build' OR (
-                        interest.not_before_ms <= json_extract($1, '$.now_ms')
-                        AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract($1, '$.now_ms'))
-                        AND interest.failed_attempts + CASE WHEN job.state = 'running'
-                          AND interest.participation_fence = job.fence THEN 1 ELSE 0 END < interest.attempt_limit))
-                GROUP BY job.id
-            ), ranked AS (
-                SELECT job.*, eligible.scope_last_claim_ms, selection.selected_at_ms, fairness.fairness_floor,
-                    CASE WHEN job.priority = 3 THEN 6 WHEN job.priority < fairness.fairness_floor THEN 5
-                        ELSE job.priority * 2 END AS selection_rank
-                FROM background_jobs job JOIN eligible ON eligible.id = job.id CROSS JOIN fairness CROSS JOIN selection
-            )
-            SELECT json_object('job', {JOB_JSON}, 'scope_last_claim_ms', scope_last_claim_ms,
-                'selected_at_ms', selected_at_ms, 'fairness_floor', fairness_floor) AS result_json FROM ranked
-            WHERE json_extract($1, '$.after') IS NULL
-                OR selection_rank < CASE WHEN json_extract($1, '$.after.priority') = 3 THEN 6
-                    WHEN json_extract($1, '$.after.priority') < fairness_floor THEN 5 ELSE json_extract($1, '$.after.priority') * 2 END
-                OR (selection_rank = CASE WHEN json_extract($1, '$.after.priority') = 3 THEN 6
-                    WHEN json_extract($1, '$.after.priority') < fairness_floor THEN 5 ELSE json_extract($1, '$.after.priority') * 2 END
-                  AND (scope_last_claim_ms, created_at_ms, id) > (json_extract($1, '$.after.scope_last_claim_ms'),
-                    json_extract($1, '$.after.created_at_ms'), json_extract($1, '$.after.id')))
-            ORDER BY selection_rank DESC, scope_last_claim_ms, created_at_ms, id LIMIT json_extract($1, '$.limit') + 1"#
-        ), encode(&query)?, false, false).await?;
+        let body = encode(&query)?;
+        // The admissible listing is this process's replica's own view, like
+        // the claim verdict: SQLite (its own authority) and a client without
+        // a replica list as they always did, and so does every caller that
+        // did not ask for it.
+        let admissible = if query.admissible_only {
+            self.local_replica_sql(candidate_listing_sql(CANDIDATE_ADMISSION_SQL), body.clone())
+                .await?
+        } else {
+            None
+        };
+        let rows = match admissible {
+            Some(rows) => rows,
+            None => {
+                self.queue_sql(
+                    candidate_listing_sql(CANDIDATE_BASE_SQL),
+                    body,
+                    false,
+                    false,
+                )
+                .await?
+            }
+        };
         #[derive(Deserialize)]
         struct Candidate {
             job: BackgroundJob,
@@ -4851,60 +5241,49 @@ LIMIT 1
     }
 
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError> {
-        request.validate()?;
-        // Replaying an acknowledged or ambiguous claim must return its current
-        // identity, not compete for a fresh fence. Never adopt another boot.
-        let previous = self.queue_sql(
-            format!("SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
-            encode(&request)?, false, true,
-        ).await?;
-        let Some(previous) = previous.first() else {
-            return Ok(ClaimOutcome::ExpiredOrPruned);
-        };
-        let snapshot: ClaimSnapshot = decode(previous)?;
-        let previous = snapshot.job;
-        if previous.payload_version != request.payload_version
-            || previous
-                .supported_payload()
-                .map(|payload| payload.kind())
-                .ok()
-                != Some(request.kind)
-        {
-            return Ok(ClaimOutcome::Unsupported);
+        Ok(claim_attempt(self, request).await?.outcome)
+    }
+
+    async fn claim_job_attempt(&self, request: ClaimJob) -> Result<ClaimAttempt, StoreError> {
+        claim_attempt(self, request).await
+    }
+
+    async fn claim_verdict(
+        &self,
+        job_id: &str,
+        kind: JobKind,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<ClaimVerdict>, StoreError> {
+        if uuid::Uuid::parse_str(job_id).is_err() {
+            return Err(invalid("invalid background job id"));
         }
-        if let Some(token) = &previous.token {
-            if token.claim_id == request.claim_id {
-                return if snapshot.resources_current == 1
-                    && previous.state == JobState::Running
-                    && token.node_id == request.node_id
-                    && token.boot_id == request.boot_id
-                    && token.lease_expires_ms > request.now_ms
-                    && (previous.retry_deadline_ms == 0
-                        || previous.retry_deadline_ms > request.now_ms)
-                {
-                    Ok(ClaimOutcome::Claimed {
-                        job: Box::new(previous),
-                    })
-                } else {
-                    Ok(ClaimOutcome::ExpiredOrPruned)
-                };
-            }
-        }
-        if matches!(previous.state, JobState::Cancelling | JobState::Cancelled) {
-            return Ok(ClaimOutcome::Cancelled);
-        }
-        let rows = self
-            .queue_sql(
-                format!("{CLAIM_SQL} RETURNING {JOB_JSON} AS result_json"),
-                encode(&request)?,
-                true,
-                true,
+        let Some(rows) = self
+            .local_replica_sql(
+                "SELECT CAST(revision AS TEXT) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.id')"
+                    .to_owned(),
+                encode(&serde_json::json!({ "id": job_id }))?,
             )
-            .await?;
-        match rows.first() {
-            Some(row) => Ok(ClaimOutcome::Claimed { job: decode(row)? }),
-            None => Ok(ClaimOutcome::Contended),
-        }
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(revision) = rows.first().and_then(|row| row.parse::<i64>().ok()) else {
+            return Ok(None);
+        };
+        let request = ClaimJob {
+            job_id: job_id.to_owned(),
+            expected_revision: revision,
+            node_id: node_id.to_owned(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            payload_version: 1,
+            now_ms,
+            dispatched_at_ms: now_ms,
+        };
+        request.validate()?;
+        Ok(local_claim_verdict(self, &encode(&request)?).await)
     }
 
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError> {

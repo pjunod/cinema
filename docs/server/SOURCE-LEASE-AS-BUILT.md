@@ -132,8 +132,12 @@ reason. Section numbers (§) are the plan's.
     is the upgrade test: v1 store with a live job reader → expand carries it
     → restart waits for node-b's capability → contract → restart is a no-op →
     three `source_io` readers on three nodes. The fresh-vs-chain schema
-    comparison runs the chain's contract first. A1's differential test
-    (#1625) is not on this base.
+    comparison runs the chain's contract first. Main integration includes
+    A1 (#1625): claim, local verdict and admissible candidate listing all
+    share the lease admission groups. The provider-slot refusal belongs to
+    the holder group too; a full provider pair is refused before proposing.
+    A1's direct-SQL fixtures now write leases and preserve their original
+    two-and-one limits with an explicit reader setting.
 
 
 ## Review disposition — remaining nits and accepted limits
@@ -156,3 +160,20 @@ The playback write delta is recorded with M4 in
 the three source-reading create shapes lose one replicated write each.
 Host-identity binds remain until step 2 is on every node for rollback; their
 removal is a later operator change. This PR does not deploy anything.
+
+
+## Main integration — preserve published history and shared admission
+
+Both dependency PRs (#1597 and #1625) landed before final qualification.
+The branch integrates `main` at `0680483c2`. Main already published SQLite
+v133 for delegation, so the lease expand and contract follow at v134/v135;
+v133 is preserved unchanged. Historical fixtures rewind leases before the
+delegation tail and validate that neither rewrite discards owned data.
+The import inventory combines delegation's three durable tables with the
+lease replacement's net removal of one table (two owners become one lease table).
+
+The claim's lease terms remain the same macros used by source registration,
+analysis and resume. Claim, replica verdict and candidate listing wrap those
+terms in the same three admission groups; no local decision grants authority
+or replaces the replicated claim. Provider reservations keep their two-slot
+limit. Only the claimant job is excluded from its own lease holder counts.

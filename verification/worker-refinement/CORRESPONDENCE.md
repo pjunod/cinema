@@ -5,6 +5,21 @@ machine-readable [correspondence.json](correspondence.json) binds 57 TLA
 `Next` actions and 18 source boundaries to Rust anchors and selected tests.
 It is a source-drift and gap receipt, not a refinement proof.
 
+
+## Source lease steps 3+4 — scoped correspondence review on 2026-11-16
+
+gpt-6-luna authored this review; independent review is pending. This records
+source correspondence only, not execution evidence. It supersedes the
+historical custody-journal and reboot-wait descriptions below for current
+source behavior; those sections remain historical and do not describe the
+current lease path.
+
+| Source change | Correspondence | Model or liveness impact |
+|---|---|---|
+| Exact-source leases replace the custody activation path | `activate_background_with_journal` and its activation-journal cleanup are removed. Release is bounded; owner expiry remains the recovery fallback. | Existing source lease actions remain descriptive. No new model or liveness proof. |
+| Coordinated phase lease close | The current close is atomic in the Store. | No new model transition or liveness claim. |
+| Review scope | Source correspondence for these lease changes only. | Configurations, action inventory, and model properties are unchanged. |
+
 The action inventory is `DispatchRejected`, `DetachedReleaseApply`,
 `RenewalLostAck`, `ProbeReturn`, `Admission`, `ClaimSend`, `DomainSend`,
 `BindSend`, `ItemSend`, `CompleteSend`, `ReleaseSend`, `SettleSend`,

@@ -110,6 +110,8 @@ mod applied_view;
 mod background_jobs;
 #[path = "store_contract/claim_selection.rs"]
 mod claim_selection;
+#[path = "store_contract/delegation.rs"]
+mod delegation;
 #[path = "store_contract/dv_title_jobs.rs"]
 mod dv_title_jobs;
 #[path = "store_contract/formal_publication.rs"]
@@ -801,6 +803,11 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_job_fenced",
     "retry_background_job",
     "claim_job",
+    // The same claim, reporting proposed / settled / skipped on the local
+    // verdict: tests/claim_local_verdict.rs drives it on both backends.
+    "claim_job_attempt",
+    // The verdict alone, for dv_title_scan before it binds (same test file).
+    "claim_verdict",
     "claim_artifact_job",
     "resolve_claim",
     "job_labels",
@@ -873,6 +880,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "offline_transfers_in_flight",
     "request_offline_source_probes",
     "pending_offline_source_probes",
+    "local_pending_offline_source_probes",
     "answer_offline_source_probe",
     "outstanding_offline_source_probes",
     "verified_offline_source_nodes",
@@ -987,6 +995,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "end_media_session",
     "maintain_media_sessions",
     "owned_media_sessions",
+    "owned_media_sessions_hint",
     "prepare_media_session",
     "rejoin_media_session_preparation",
     "staged_media_session_for_playback",
@@ -5495,6 +5504,30 @@ async fn media_session_a_committed_successor_can_renew_and_outlives_its_preparat
         assert!(
             owned.iter().any(|lease| lease.incarnation_id == staged),
             "{backend}: commit removes the staging ledger and makes the successor renewable"
+        );
+        // The lease loop's idle hint covers the inventory: every row the
+        // inventory returns makes it true, and a node owning nothing reads
+        // false, all from this replica.
+        assert!(
+            store
+                .owned_media_sessions_hint("staged-node", 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner hint: {error}")),
+            "{backend}: an owned, renewable session is visible to the hint"
+        );
+        assert!(
+            !store
+                .owned_media_sessions_hint("another-node", 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other owner hint: {error}")),
+            "{backend}: a node that owns nothing reads an idle hint"
+        );
+        assert!(
+            !store
+                .owned_media_sessions_hint("staged-node", i64::MAX)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired hint: {error}")),
+            "{backend}: an expired lease is not one the inventory would return"
         );
         let renewed = store
             .renew_media_sessions(
@@ -19770,6 +19803,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "cluster_fragment_index_locations",
             "cluster_fragment_index_sources",
             "continuous_quality_ledgers",
+            "delegation_clients",
+            "delegation_codes",
+            "delegation_grants",
             "dv_conversions",
             "dv_recovery_guards",
             "dvr_recordings",
@@ -21905,9 +21941,18 @@ fn contract_inventory_matches_every_store_method() {
     // covered on both backends by `dv_title_jobs::title_live_paging_*` and
     // `dv_title_jobs::title_live_preemption_rejects_running_and_backoff_candidates`.
     // No new trait or supertrait of `Store`.
-    // -8: the source-lease build removed the activate/abort/mark-settled/
-    // settled proof methods for foreground and background custody.
-    assert_eq!(declared.len(), 587, "review the Store method count");
+    // +1: `local_pending_offline_source_probes` on `OfflinePackageStore`, the
+    // replica read of `pending_offline_source_probes`'s own statement that
+    // decides only whether the probe loop asks the authority; inert on
+    // SQLite like the rest of node removal. No new trait or supertrait.
+    // +1: `owned_media_sessions_hint` on `MediaSessionStore`, a replica read
+    // of a superset of `owned_media_sessions`'s predicate that decides only
+    // whether the lease loop takes that inventory; covered on both backends
+    // by `media_session_a_committed_successor_can_renew_and_outlives_its_preparation`.
+    // +2: claim_job_attempt and claim_verdict, the claim local verdict
+    // (docs/cluster/CLAIM-LOCAL-VERDICT-BUILD.md), in BACKGROUND_JOB_METHODS.
+    // -8: source leases remove the foreground/background custody proof methods.
+    assert_eq!(declared.len(), 591, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

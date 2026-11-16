@@ -1951,7 +1951,10 @@ pattern = "ServingAuthority"
 # Measured on the merge with main at 36: 36 + (-9) = 27.
 # PR1341: +3 in serving_fence.rs: the packed ready+generation word and
 # `admit_or_outage_baseline` project the same ServingAuthority.
-expected_occurrences = 31
+# 31 -> 33 with the cluster facade (B1 slice 1): `crate::cluster`'s import
+# and its `authority()` return type. The facade hands out the fence's own
+# authority; it projects nothing new and owns no producer.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2268,7 +2271,11 @@ pattern = "publication_ready_at_ms"
 # with a publishable fence. Test-only.
 # 168 -> 169 with the E1c review: the HTTP route-view fixture activates with
 # a publishable fence. Test-only.
-expected_occurrences = 169
+# 169 -> 171 with #1629 (idle quorum pollers): lease_inventory_tests.rs
+# builds one blocked and one publishable media-session row to prove an idle
+# lease tick takes no inventory and an owned row still does. Test-only; no
+# fence is advanced or cleared.
+expected_occurrences = 171
 # PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
 # blocked incumbent activation, existing Confirm settlement, then successor
 # publication readback after exact predecessor end and handoff. Test-only;
@@ -2340,7 +2347,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # writes the blocked sentinel the way every other actor registration does.
 # 59 -> 60 with E1c: route_view_tests.rs's committed-row helper activates
 # behind the blocked sentinel, as every activation must. Test-only.
-expected_occurrences = 60
+# 60 -> 61 with #1629: the same lease_inventory_tests.rs fixture seeds one
+# row with the blocked sentinel. Test-only.
+expected_occurrences = 61
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3993,10 +4002,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
 # the staging task, joined by tokio::time::timeout on its JoinHandle.
 
+# +5 with #1629 (idle quorum pollers), all test-only tokio::spawn of the
+# real loops under test, each joined or cancelled by its test's shutdown
+# token: live_tv/tests.rs spawns dvr_loop twice and reminder_loop once;
+# sharing.rs's idle-loop test spawns run and claim_loop. No production
+# task owner is added.
 # Source lease step 2 (2026-11-15): -14, all removals. The reader
 # witness, census and physical-stop recovery module, the completion ledger
 # and their tests are deleted; no shape is added.
-expected_occurrences = 1147
+expected_occurrences = 1152
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5918,12 +5932,38 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 #1595 (d722b0c36): test-only, in http/hls/tests/processed_upgrade_runs.rs;
 # two 2 s test timeouts (registration seam, staging join) and the 260 ms
 # control-cadence sleep.
+# Sharing outage policy (A6 M1): +4. SessionGrace::resolve_from bounds one
+# recovery wait with timeout_at and UnknownSpan paces its re-reads with
+# sleep, both on the owner's own task (no new task or timer owner); two
+# test-only timeouts bound the outage-retirement fixture's waits.
+# +4 measured on main after #1610 (cb9bba471, a processed trial claims
+# its own viewer's encoder permit), which landed without updating this
+# ledger; reconciled here so every lane's preflight passes again.
 # +1 with #1597 (lease expiry releases source capacity):
 # `Completion::retire_after_release` in background_jobs/source/completion.rs
 # sleeps REAP_CHECK (5 s) between checks of whether the store sweep has
 # released its custody, then removes its local witness. It owns no producer,
 # process or child, spawns nothing, and decides nothing about capacity: the
 # sweep does; the loop only ends the ledger task once there is nothing left.
+# Change-driven sharing monitors (A6 M3): +2 net. The Source body and
+# receiver connection monitors drop their one-second `interval` for a wait on
+# the applied-mark watch, the serving fence and (receiver) the lease deadline,
+# paced by a one-second `sleep_until` floor after their last look; the
+# listener's fixed sleep becomes the same floor. Every timer runs on the
+# monitor's own task; no new task or timer owner.
+# +1 test-only timeout: the listener change-driven test bounds an hour with
+# no change, which must read nothing; expiry is the passing case.
+# +2 #1657 (main-units harness repairs), test-only: http/tests.rs's
+# `settle_admitted_scans` polls the scan queue every 25 ms (at most 200
+# rounds, then fails), and state/tests.rs's idle-wake test sleeps 100 ms on a
+# paused clock so the worker's first pass is parked before the request. Both
+# run on the test's own task; no task, producer or process.
+# +10 with #1629 (idle quorum pollers): media_sessions.rs's lease loop
+# replaces one timeout with two timeout_at bounds on its own task (+1 net);
+# playback_cache.rs's ceiling read and sharing.rs's loop_enabled each bound
+# an applied-view read with timeout on the caller's task (+2); the rest are
+# test-only waits in live_tv/tests.rs (5) and sharing.rs (2). No new task or
+# timer owner.
 # Source lease step 2 (2026-11-15): -28, all removals. The reader
 # witness, census and physical-stop recovery module, the completion ledger
 # and their tests are deleted; no shape is added.
@@ -5933,7 +5973,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the source-custody activation, settlement and recovery loops in
 # background_jobs.rs and source_custody.rs go with the leases that replace
 # them; no shape is added. The +4 drift above stays visible.
-expected_occurrences = 2193
+expected_occurrences = 2216
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -7178,10 +7218,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Sharing listener (#1598): +5 SharingManager::status() reads in the listener
 # tests, asserting the reported listener state. They read an in-memory status
 # snapshot; none launches a process.
+
+# Sharing outage policy (A6 M1): -1. The listener tests were rewritten
+# around UnknownSpan with one fewer SharingManager::status() read; none of
+# them launches a process.
+# +1 SharingManager::status() read in the listener change-driven test (A6 M3);
+# it reads listener state and launches nothing.
+# +1 with #1629: the sharing idle-loop test reads SharingManager::status()
+# to observe the listener state; it launches nothing.
 # Source lease step 2 (2026-11-15): -9, all removals. The reader
 # witness, census and physical-stop recovery module, the completion ledger
 # and their tests are deleted; no shape is added.
-expected_occurrences = 926
+expected_occurrences = 927
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -7495,10 +7543,17 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Reader B0/B1: +1 explicit wait for the verified native true fixture. The
 # fixture retains ChildJob through the positive physical join. The output-pipe
 # collision fixture now calls status instead of output (net zero lifecycle).
+
+# Sharing outage policy (A6 M1): +1 closed.wait() in the receiver
+# connection monitor, racing its outage-grace wait against the same accepted
+# transport's closure the loop already waits on. No process is involved.
+# Change-driven sharing monitors (A6 M3): +1 closed.wait() in the receiver
+# connection monitor's one-second floor wait, beside its change wait. No
+# process is involved.
 # Source lease step 2 (2026-11-15): -14, all removals. The reader
 # witness, census and physical-stop recovery module, the completion ledger
 # and their tests are deleted; no shape is added.
-expected_occurrences = 379
+expected_occurrences = 381
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

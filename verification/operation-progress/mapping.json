@@ -9,43 +9,43 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "839beccba8712db1eab6a4d8055fa7c970a09fb969aae967a9f3609dbc1217f1"
+        "sha256": "d239eb770ea16e52399ed49776084ba1da4cab3f62492f55d8f730a014884841"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "839beccba8712db1eab6a4d8055fa7c970a09fb969aae967a9f3609dbc1217f1"
+        "sha256": "d239eb770ea16e52399ed49776084ba1da4cab3f62492f55d8f730a014884841"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "839beccba8712db1eab6a4d8055fa7c970a09fb969aae967a9f3609dbc1217f1"
+        "sha256": "d239eb770ea16e52399ed49776084ba1da4cab3f62492f55d8f730a014884841"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "839beccba8712db1eab6a4d8055fa7c970a09fb969aae967a9f3609dbc1217f1"
+        "sha256": "d239eb770ea16e52399ed49776084ba1da4cab3f62492f55d8f730a014884841"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "839beccba8712db1eab6a4d8055fa7c970a09fb969aae967a9f3609dbc1217f1"
+        "sha256": "d239eb770ea16e52399ed49776084ba1da4cab3f62492f55d8f730a014884841"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "839beccba8712db1eab6a4d8055fa7c970a09fb969aae967a9f3609dbc1217f1"
+        "sha256": "d239eb770ea16e52399ed49776084ba1da4cab3f62492f55d8f730a014884841"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "839beccba8712db1eab6a4d8055fa7c970a09fb969aae967a9f3609dbc1217f1"
+        "sha256": "d239eb770ea16e52399ed49776084ba1da4cab3f62492f55d8f730a014884841"
       },
       {
         "table": "08 worker acquisition and cleanup",
@@ -129,43 +129,43 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "fcfbc3d86989748b7f9e4cc9cf1d9e1bb463f33a9c54177bde1ff31ebdc78034"
+        "sha256": "f042a25a52e1ab6bc9dc53961bb8ec7f5ea06bc8a6687bb63c9c3839f2d739a2"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "fcfbc3d86989748b7f9e4cc9cf1d9e1bb463f33a9c54177bde1ff31ebdc78034"
+        "sha256": "f042a25a52e1ab6bc9dc53961bb8ec7f5ea06bc8a6687bb63c9c3839f2d739a2"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "fcfbc3d86989748b7f9e4cc9cf1d9e1bb463f33a9c54177bde1ff31ebdc78034"
+        "sha256": "f042a25a52e1ab6bc9dc53961bb8ec7f5ea06bc8a6687bb63c9c3839f2d739a2"
       },
       {
         "table": "24 vendor transaction rate limit",
         "source": "vendor/hiqlite/src/client/transaction.rs",
         "anchor": "self.rate_limit_db().await?;",
-        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+        "sha256": "cdfcba45d5401192f02273204e2179bb27d45a753aa9eb9b36257ef91c1864a6"
       },
       {
         "table": "25 vendor leader transaction write",
         "source": "vendor/hiqlite/src/client/transaction.rs",
         "anchor": ".client_write(QueryWrite::Transaction(queries))",
-        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+        "sha256": "cdfcba45d5401192f02273204e2179bb27d45a753aa9eb9b36257ef91c1864a6"
       },
       {
         "table": "26 vendor follower transaction reply",
         "source": "vendor/hiqlite/src/client/transaction.rs",
         "anchor": ".send_async(ClientStreamReq::Transaction(ClientTransactionPayload {",
-        "sha256": "c0a7cd7e4cd3ee5e70144e2cc3a44e6d5acf2336a29a0d7f042429146f56e0f2"
+        "sha256": "cdfcba45d5401192f02273204e2179bb27d45a753aa9eb9b36257ef91c1864a6"
       },
       {
         "table": "27 vendor serial SQLite transaction",
         "source": "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs",
         "anchor": "Query::Transaction(req) => {",
-        "sha256": "f8a650550c2f8c8fb35d642b903d97cf01fb3f71e3a3ded454c4b217f67ccd73"
+        "sha256": "09788791cf51c1a0edb5f1ec91f6323c4c53857ed93c88e55d56658fd4327c1b"
       },
       {
         "table": "28 library completion conditional update",
@@ -183,25 +183,25 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "3fe6b17625e352d4f55817ceafa98aec4a2d54acc3f2f9bfbca23d087bc12d68"
+        "sha256": "f3b1b09782abcf83c7f8a4ecbf0e23ef998bd91784b257dbf5f0ae9549e5adfa"
       },
       {
         "table": "31 authority implementation",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "impl ClusterJobAuthority for MembershipManager {",
-        "sha256": "b76626f3817e51752fe87d79fe3a3bc95d37aae40890479dfe4b592e0f92f75f"
+        "sha256": "80cce2add0907c981941de8a88e9b9e7a710b762d79a4289bd2893ebb4223fc8"
       },
       {
         "table": "32 voter authority read",
         "source": "crates/plurx-core/src/cluster/membership.rs",
         "anchor": "pub async fn may_run_cluster_jobs(&self) -> bool {",
-        "sha256": "b76626f3817e51752fe87d79fe3a3bc95d37aae40890479dfe4b592e0f92f75f"
+        "sha256": "80cce2add0907c981941de8a88e9b9e7a710b762d79a4289bd2893ebb4223fc8"
       },
       {
         "table": "33 local raft metrics authority",
         "source": "vendor/hiqlite/src/client/mgmt.rs",
         "anchor": "pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {",
-        "sha256": "5e78ddcbe108eb1a1f4f27b2d23d51f4a360d899307df5deb69a84951a706178"
+        "sha256": "d881f37d0a2c5187c54a17fcb68be6764c0837441e54e92e49d0e8310789d28c"
       },
       {
         "table": "34 scanner page capacity",
@@ -255,19 +255,19 @@
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "4c4a01648288fb5ebf0a0cf5598d2c13bc053afad9872a2dd27d16027fe6ba84"
+        "sha256": "de03d15822ba1c92dfd76ea18878620bf6ee1de79c5499b3130ad6f7e729cc23"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "4c4a01648288fb5ebf0a0cf5598d2c13bc053afad9872a2dd27d16027fe6ba84"
+        "sha256": "de03d15822ba1c92dfd76ea18878620bf6ee1de79c5499b3130ad6f7e729cc23"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "4c21b23269a532505259fc84206a0f97985afd993cdfb2eb2cf9ab2dfe0c892a"
+        "sha256": "c58b7e4eaf1aa36abc4d283d8d1321abf1ae499365146d3d166e77fa94e99ba4"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -279,7 +279,7 @@
         "table": "FIFO lock contract pinned Tokio dependency",
         "source": "Cargo.lock",
         "anchor": "name = \"tokio\"\nversion = \"1.53.1\"",
-        "sha256": "c39e63b126a56a89cafb7c0ac4499fcaccb65130666c15de6f53dbc6de6a6905"
+        "sha256": "e695f3e56e76a60e3b6d63b521afb997be2537360bb1c9c51dc55cda35495bdd"
       },
       {
         "table": "production-consumed post-claim lifecycle controller; local safety only",

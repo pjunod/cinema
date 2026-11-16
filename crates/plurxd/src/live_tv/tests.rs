@@ -8139,3 +8139,114 @@ async fn live_tv_delete_defers_response_pins_and_retries_after_playlist_promotio
         .is_success());
     assert!(!root.path().join("segment-000001.ts").exists());
 }
+
+/// A4: with Live TV off, the recording and reminder loops look at the
+/// configuration every tick on every node. They look through the node's
+/// applied settings view (a standalone view counts a `view` read) and do
+/// not take the Store's configuration read, which is what observes the
+/// configuration into the projection: it stays unobserved here. The view's
+/// answer parses exactly as the Store's does. This covers the settings
+/// reads only: the recording loop's row listings and the reminder loop's
+/// transition write still run every tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_live_tv_loops_look_through_the_applied_view() {
+    use plurx_core::store::{AppliedTable, AppliedView, ViewSource};
+    let root = tempfile::tempdir().expect("live TV idle fixture");
+    let manager = test_manager(root.path());
+    let applied = AppliedView::authority(Arc::clone(&manager.store));
+    manager.set_applied_view(applied.clone());
+    let reads = |source| {
+        applied
+            .observation()
+            .view_total(AppliedTable::Settings, source)
+    };
+    let shutdown = CancellationToken::new();
+    let (recordings, _) = super::webhook::channel();
+    let (reminders, _) = super::webhook::channel();
+    let dvr = tokio::spawn(Arc::clone(&manager).dvr_loop(recordings, shutdown.clone()));
+    let reminder = tokio::spawn(super::dvr::reminder_loop(
+        Arc::clone(&manager),
+        reminders,
+        shutdown.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reads(ViewSource::View) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both loops look through the view");
+    shutdown.cancel();
+    dvr.await.expect("recording loop");
+    reminder.await.expect("reminder loop");
+    assert_eq!(reads(ViewSource::Authority), 0);
+    assert!(
+        manager
+            .metrics
+            .projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .is_none(),
+        "an idle tick takes no Store configuration read"
+    );
+    assert!(!super::dvr::recordings_library_viewed_ours(&applied, "node-a").await);
+
+    let (viewed, _) = crate::live_tv::viewed_configs(&applied, "node-a")
+        .await
+        .expect("view configuration");
+    let (stored, _) = manager.dvr_configs().await.expect("Store configuration");
+    assert_eq!(viewed, stored);
+}
+
+/// A4 review: a view that has not applied an enable saved on another node
+/// says Live TV is off while the Store says it is on. A node holding a
+/// transport takes the Store's read before it closes anything, so the
+/// viewer's transport survives; a node holding nothing stays local.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lagging_view_does_not_close_a_held_transport() {
+    use plurx_core::store::{AppliedView, SqliteStore};
+    let root = crate::test_tempdir().expect("live TV lag fixture");
+    let manager = test_manager(root.path());
+    seed_test_config(&manager).await;
+    let lagging: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("view store"));
+    manager.set_applied_view(AppliedView::authority(Arc::clone(&lagging)));
+    let session = register_test_session_at(
+        &manager,
+        7,
+        &hex_request_id(31),
+        LiveTvSessionPhase::Active,
+        tokio::time::Instant::now(),
+        0,
+    )
+    .await;
+    let _transport = give_own_transport(&manager, &session);
+    assert_eq!(manager.transports_held(), 1);
+    let shutdown = CancellationToken::new();
+    let (recordings, _) = super::webhook::channel();
+    let dvr = tokio::spawn(Arc::clone(&manager).dvr_loop(recordings, shutdown.clone()));
+    // The Store's read observes the configuration into the projection.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while manager
+            .metrics
+            .projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config
+            .is_none()
+            && manager.transports_held() == 1
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the tick ran");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        manager.transports_held(),
+        1,
+        "the transport survives a view that lags the Store"
+    );
+    dvr.abort();
+    let _ = dvr.await;
+}

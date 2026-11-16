@@ -25,8 +25,8 @@ pub(crate) const CONTRACT: &str = include_str!("source_leases_contract.sql");
 /// The claim-effects trigger the expand rewrites; part of the lease shape.
 pub(crate) const CLAIM_EFFECTS: &str = "background_job_claim_effects";
 /// SQLite schema version before the expand and after it.
-pub(crate) const PRE_LEASE_VERSION: usize = 132;
-pub(crate) const EXPANDED_VERSION: usize = 133;
+pub(crate) const PRE_LEASE_VERSION: usize = 133;
+pub(crate) const EXPANDED_VERSION: usize = 134;
 /// The SQLite schema that first carries `source_leases` (import plans).
 pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = EXPANDED_VERSION as i64;
 

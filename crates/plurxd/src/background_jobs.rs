@@ -9,8 +9,8 @@ use std::time::Duration;
 use plurx_core::cluster::coordination::ClusterJobAuthority;
 use plurx_core::error::StoreError;
 use plurx_core::store::background_jobs::{
-    BackgroundJob, ClaimJob, ClaimOutcome, ClaimResolution, JobPublishOutcome, JobSettlement,
-    JobToken, PublishTranscodeJob, RenewJobs, RenewOutcome, ResolveClaim, SettleJob,
+    BackgroundJob, ClaimJob, ClaimOutcome, ClaimPath, ClaimResolution, JobPublishOutcome,
+    JobSettlement, JobToken, PublishTranscodeJob, RenewJobs, RenewOutcome, ResolveClaim, SettleJob,
     TranscodeJobOutput, JOB_LEASE_MS, JOB_RENEW_INTERVAL_MS,
 };
 use plurx_core::store::Store;
@@ -28,7 +28,7 @@ pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
 use metrics::Event;
-pub(crate) use metrics::{accepted_claims, prometheus};
+pub(crate) use metrics::{accepted_claims, claim_skipped, prometheus};
 
 #[path = "background_jobs/analysis_reconcile.rs"]
 pub(crate) mod analysis_reconcile;
@@ -283,6 +283,12 @@ pub(crate) struct ActiveBackgroundJob {
 /// A failed RPC is not a failed claim. Resolve the same identity while the
 /// caller continues holding its local permit; do not try another candidate
 /// merely because the first acknowledgement disappeared.
+///
+/// `claim_write` and `claim_refused` count proposals only, so their ratio is
+/// the share of proposals the statement refused. A claim this node's applied
+/// replica showed the statement refusing was never proposed: it counts
+/// `claim_skipped{reason}` and nothing else. A claim the authoritative
+/// pre-read settled, or one whose call failed before saying, is neither.
 pub(crate) async fn claim_with_resolution(
     store: &dyn Store,
     candidate: &BackgroundJob,
@@ -290,12 +296,20 @@ pub(crate) async fn claim_with_resolution(
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let kind = request.kind;
     let issued = Instant::now();
-    metrics::event(kind, Event::ClaimWrite);
     let queue_age = request
         .now_ms
         .saturating_sub(candidate.created_at_ms)
         .max(0) as u64;
-    let result = claim_with_resolution_inner(store, request).await;
+    let mut path = None;
+    let result = claim_with_resolution_inner(store, request, &mut path).await;
+    if let Some(ClaimPath::Skipped(block)) = path {
+        metrics::claim_skipped(kind, block);
+        return result;
+    }
+    let proposed = path == Some(ClaimPath::Proposed);
+    if proposed {
+        metrics::event(kind, Event::ClaimWrite);
+    }
     metrics::claim_latency(kind, issued.elapsed());
     match &result {
         Ok(Some(_)) => {
@@ -305,7 +319,8 @@ pub(crate) async fn claim_with_resolution(
                 metrics::event(kind, Event::Takeover);
             }
         }
-        Ok(None) => metrics::event(kind, Event::ClaimRefused),
+        Ok(None) if proposed => metrics::event(kind, Event::ClaimRefused),
+        Ok(None) => {}
         Err(_) => metrics::event(kind, Event::ClaimError),
     }
     result
@@ -314,16 +329,19 @@ pub(crate) async fn claim_with_resolution(
 async fn claim_with_resolution_inner(
     store: &dyn Store,
     request: ClaimJob,
+    path: &mut Option<ClaimPath>,
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let issued = Instant::now();
     let deadline = issued + Duration::from_millis(JOB_LEASE_MS as u64);
-    let claimed = if request.kind.permits_artifact_execution() {
-        store.claim_artifact_job(request.clone()).await
-    } else {
-        store.claim_job(request.clone()).await
-    };
+    // `claim_artifact_job` is `claim_job` behind the same artifact-kind check
+    // this worker already branches on; the attempt form reports the path.
+    let claimed = store.claim_job_attempt(request.clone()).await;
     #[cfg(test)]
     let claimed = faults::after_commit(faults::CLAIM, claimed);
+    let claimed = claimed.map(|attempt| {
+        *path = Some(attempt.path);
+        attempt.outcome
+    });
     match claimed {
         Ok(ClaimOutcome::Claimed { job }) if Instant::now() < deadline => {
             let remaining = job.token.as_ref().map_or(0, |token| {
@@ -1964,6 +1982,10 @@ pub(crate) async fn claim_pretranscode(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Execution authority is read once per pass for every kind it may claim,
+    // and once more before its first claim, not once per candidate: a
+    // learner's check is a quorum read, and per candidate it was one per
+    // refusal. An owned job keeps re-checking authority while it runs.
     let mut kinds = Vec::new();
     for kind in [
         JobKind::TranscodePrepare,
@@ -1977,6 +1999,9 @@ pub(crate) async fn claim_pretranscode(
     if kinds.is_empty() {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -1986,6 +2011,8 @@ pub(crate) async fn claim_pretranscode(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -2023,12 +2050,6 @@ pub(crate) async fn claim_pretranscode(
                 let Some(admission) = transcode.admit_encoded_preparation() else {
                     return Ok(None);
                 };
-                if !authority
-                    .may_execute_job(JobKind::EncodedOutputPrepare)
-                    .await
-                {
-                    continue;
-                }
                 let now_ms = unix_ms()?;
                 let request = ClaimJob {
                     job_id: candidate.id.clone(),
@@ -2041,6 +2062,15 @@ pub(crate) async fn claim_pretranscode(
                     now_ms,
                     dispatched_at_ms: now_ms,
                 };
+                if !authority_rechecked {
+                    if !authority
+                        .may_execute_job(JobKind::EncodedOutputPrepare)
+                        .await
+                    {
+                        return Ok(None);
+                    }
+                    authority_rechecked = true;
+                }
                 let Some((job, deadline)) =
                     claim_with_resolution(store.as_ref(), &candidate, request).await?
                 else {
@@ -2073,9 +2103,6 @@ pub(crate) async fn claim_pretranscode(
                 let Some(admission) = transcode.admit_fragment().await else {
                     return Ok(None);
                 };
-                if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
-                    continue;
-                }
                 let now_ms = unix_ms()?;
                 let request = ClaimJob {
                     job_id: candidate.id.clone(),
@@ -2088,6 +2115,12 @@ pub(crate) async fn claim_pretranscode(
                     now_ms,
                     dispatched_at_ms: now_ms,
                 };
+                if !authority_rechecked {
+                    if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
+                        return Ok(None);
+                    }
+                    authority_rechecked = true;
+                }
                 let Some((job, deadline)) =
                     claim_with_resolution(store.as_ref(), &candidate, request).await?
                 else {
@@ -2138,9 +2171,6 @@ pub(crate) async fn claim_pretranscode(
                     continue;
                 }
             };
-            if !authority.may_execute_job(JobKind::TranscodePrepare).await {
-                return Ok(None);
-            }
             let now_ms = unix_ms()?;
             let request = ClaimJob {
                 job_id: candidate.id.clone(),
@@ -2153,6 +2183,12 @@ pub(crate) async fn claim_pretranscode(
                 now_ms,
                 dispatched_at_ms: now_ms,
             };
+            if !authority_rechecked {
+                if !authority.may_execute_job(JobKind::TranscodePrepare).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) =
                 claim_with_resolution(store.as_ref(), &candidate, request).await?
             else {
@@ -2246,6 +2282,7 @@ pub(crate) async fn claim_fragment(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Authority once per pass, as in `claim_pretranscode`.
     let mut eligible_kinds = Vec::new();
     for kind in [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate] {
         if authority.may_execute_job(kind).await {
@@ -2255,6 +2292,9 @@ pub(crate) async fn claim_fragment(
     if eligible_kinds.is_empty() {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -2264,6 +2304,8 @@ pub(crate) async fn claim_fragment(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -2298,9 +2340,6 @@ pub(crate) async fn claim_fragment(
             let Some(admission) = transcode.admit_fragment().await else {
                 return Ok(None);
             };
-            if !authority.may_execute_job(kind).await {
-                continue;
-            }
             let now_ms = unix_ms()?;
             let request = ClaimJob {
                 job_id: candidate.id.clone(),
@@ -2313,6 +2352,12 @@ pub(crate) async fn claim_fragment(
                 now_ms,
                 dispatched_at_ms: now_ms,
             };
+            if !authority_rechecked {
+                if !authority.may_execute_job(kind).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) =
                 claim_with_resolution(store.as_ref(), &candidate, request).await?
             else {
@@ -2407,6 +2452,7 @@ pub(crate) async fn fragment_siblings(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                admissible_only: false,
             })
             .await?;
         for candidate in page.jobs {
@@ -2783,6 +2829,7 @@ async fn library_candidates(
             after,
             now_ms: unix_ms()?,
             limit: MAX_PAGE_SIZE,
+            admissible_only: false,
         })
         .await
 }
@@ -3018,9 +3065,13 @@ pub(crate) async fn claim_subtitle(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    // Authority once per pass, as in `claim_pretranscode`.
     if !authority.may_execute_job(JobKind::SubtitleExtract).await {
         return Ok(None);
     }
+    // Re-read authority once more right before this pass first claims:
+    // a node de-authorised while it walked the page claims nothing.
+    let mut authority_rechecked = false;
     let mut cursor = None;
     for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
         let page = store
@@ -3030,6 +3081,8 @@ pub(crate) async fn claim_subtitle(
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
+                // A refused claim here only moves to the next candidate.
+                admissible_only: true,
             })
             .await?;
         for candidate in page.jobs {
@@ -3053,10 +3106,13 @@ pub(crate) async fn claim_subtitle(
             if tokio::fs::File::open(&file.path).await.is_err() {
                 continue;
             }
-            if !authority.may_execute_job(JobKind::SubtitleExtract).await {
-                return Ok(None);
-            }
             let now_ms = unix_ms()?;
+            if !authority_rechecked {
+                if !authority.may_execute_job(JobKind::SubtitleExtract).await {
+                    return Ok(None);
+                }
+                authority_rechecked = true;
+            }
             let Some((job, deadline)) = claim_with_resolution(
                 store.as_ref(),
                 &candidate,
@@ -3228,6 +3284,7 @@ pub(crate) mod tests {
                 after: None,
                 now_ms: unix_ms().expect("clock"),
                 limit: plurx_core::store::background_jobs::MAX_PAGE_SIZE,
+                admissible_only: false,
             })
             .await
             .expect("candidates");

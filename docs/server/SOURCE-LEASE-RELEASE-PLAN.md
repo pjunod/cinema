@@ -1,7 +1,10 @@
 # Source lease release — lease expiry frees source capacity, nothing else does
 
-**Status:** step 1 open (PR #1597) · steps 2–4 built on branch `claude/source-lease-steps-2-4` (on #1597; not yet a PR; steps 3–4 per [SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md](SOURCE-LEASE-TABLE-AND-NODE-CAPACITY-BUILD.md)) · **Owner:** Claude
-Opus 5.5 (session_01BCWLA1BAXKSuq2TLMK9Zna) · **Written:** 2026-11-14
+**Status:** step 1 merged (#1597); steps 2–4 built on
+`claude/source-lease-steps-2-4`, final integration review and qualification
+pending ([as built](SOURCE-LEASE-AS-BUILT.md)) · **Owner:** GPT-6 Codex,
+session `01a1e5c0-d4b1-7740-93b4-a0e0123a79cf`, continuing Claude Opus 5.5 ·
+**Written:** 2026-11-14 · **Updated:** 2026-11-16
 
 Companion to [SOURCE-CUSTODY-RECOVERY.md](../archive/SOURCE-CUSTODY-RECOVERY.md), which
 records the physical-proof model this plan retires, and

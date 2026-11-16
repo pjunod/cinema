@@ -149,7 +149,7 @@ async fn actual_nonowner_forwarding(
         .expect("actual candidate startup"));
     let mut ingress = crate::http::source_actor_test_state();
     ingress.store = Arc::clone(&selected.store);
-    ingress.membership = selected.membership_manager();
+    ingress.replace_membership(selected.membership_manager());
     ingress.clock_observer = observation
         .observer()
         .await

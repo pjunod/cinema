@@ -568,7 +568,7 @@ async fn expand_carries_live_holders_and_drops_ownerless_custody() {
 /// Mutation: remove the bridge triggers.
 #[test]
 fn old_owner_rows_bridge_until_contract() {
-    let conn = rusqlite::Connection::open_in_memory().expect("v133");
+    let conn = rusqlite::Connection::open_in_memory().expect("v134");
     SqliteStore::apply_migrations_for_test(&conn, super::source_leases::EXPANDED_VERSION as i64)
         .expect("expanded catalogue");
     conn.execute_batch("INSERT INTO foreground_source_owners(owner_id,identity_json,resource_keys_json,fence,phase,projection_json,started_at_ms,updated_at_ms,lease_expires_at_ms)
@@ -602,7 +602,7 @@ fn old_owner_rows_bridge_until_contract() {
 #[test]
 fn new_playback_is_mirrored_to_v1_owners_until_contract() {
     for recursive in ["OFF", "ON"] {
-        let conn = rusqlite::Connection::open_in_memory().expect("v133");
+        let conn = rusqlite::Connection::open_in_memory().expect("v134");
         SqliteStore::apply_migrations_for_test(
             &conn,
             super::source_leases::EXPANDED_VERSION as i64,
@@ -658,7 +658,7 @@ fn new_playback_is_mirrored_to_v1_owners_until_contract() {
 /// Mutation: drop the readiness guard from the contract.
 #[test]
 fn contract_waits_for_every_node() {
-    let conn = rusqlite::Connection::open_in_memory().expect("v133");
+    let conn = rusqlite::Connection::open_in_memory().expect("v134");
     SqliteStore::apply_migrations_for_test(&conn, super::source_leases::EXPANDED_VERSION as i64)
         .expect("expanded catalogue");
     conn.execute_batch("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,last_seen_at INTEGER,removed_at INTEGER);

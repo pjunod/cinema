@@ -1162,7 +1162,8 @@ async fn fragment_cancelled_due_interest_does_not_schedule_future_interest_early
             kinds: vec![JobKind::FragmentIndexBuild],
             now_ms: 4_000,
             after: None,
-            limit: 100
+            limit: 100,
+            admissible_only: false,
         })
         .await
         .expect("candidates")
@@ -1325,6 +1326,7 @@ async fn background_subtitles_reconcile_historical_ready_demand_without_overwrit
         after: None,
         now_ms: token.lease_expires_ms,
         limit: 100,
+        admissible_only: false,
     };
     // A valid abandoned owner remains reclaimable; upkeep must not discard it.
     assert!(!store
@@ -1766,7 +1768,7 @@ fn receipt_pressure_literals_match_constants() {
         .map(|(index, _)| index)
         .collect();
     // v129 replaces it once more, adding only the custody clause (pinned in
-    // custody_retention's own test); v133 (the source-lease expand) restores
+    // custody_retention's own test); v134 (the source-lease expand) restores
     // the v86 text (pinned in source_leases' own test); nothing after it
     // redefines it.
     assert_eq!(

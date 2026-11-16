@@ -313,13 +313,6 @@ os = "Linux"
 arch = "ARM64"
 labels = ["lab", "ubuntu-26.04", "ci-arm64"]
 
-[[runners]]
-name = "gha-macb-linux-arm-01"
-host = "macb"
-os = "Linux"
-arch = "ARM64"
-labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "primary"]
-
 # Native Linux Rust compiler on the M3 Max. Forgejo run #6624 passed the
 # all-target check and vendored Hiqlite Clippy in the Ubuntu 24.04 job image.
 # Capacity one, with an eight-CPU and 16 GiB job limit.

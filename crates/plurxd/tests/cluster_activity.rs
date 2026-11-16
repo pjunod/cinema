@@ -131,6 +131,40 @@ impl Daemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    /// SIGTERM: what a supervisor sends for a planned stop. The daemon keeps
+    /// running through its drain; `exited` reports when it is gone.
+    fn terminate(&mut self) {
+        let pid = libc::pid_t::try_from(self.child.id()).expect("daemon pid fits pid_t");
+        // SAFETY: `pid` is this test's own live child, and SIGTERM is a fixed
+        // POSIX constant.
+        let sent = unsafe { libc::kill(pid, libc::SIGTERM) };
+        assert_eq!(sent, 0, "send SIGTERM: {}", std::io::Error::last_os_error());
+    }
+
+    /// The exit status once the process is gone, without waiting for it.
+    fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().expect("daemon status")
+    }
+
+    /// The instant the process exits, from a dedicated thread blocked in
+    /// `waitid(WNOWAIT)`: it observes the exit without reaping, so `exited`
+    /// still reads the status afterwards.
+    fn exit_watch(&self) -> std::sync::mpsc::Receiver<Instant> {
+        let pid = libc::id_t::from(self.child.id());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // SAFETY: an all-zero `siginfo_t` is a valid out-parameter, and
+            // `pid` is this test's own child.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let waited =
+                unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
+            if waited == 0 {
+                let _ = sender.send(Instant::now());
+            }
+        });
+        receiver
+    }
 }
 
 impl Drop for Daemon {
@@ -1597,6 +1631,10 @@ struct ThreeVoters {
     target: String,
     /// Which of node A, B and C (0, 1, 2) the target is.
     target_index: usize,
+    /// Which of node A, B and C the leader was when the cluster formed.
+    leader_index: usize,
+    /// Node A, B and C's HTTP bases, in that order.
+    bases: [String; 3],
 }
 
 impl ThreeVoters {
@@ -1639,17 +1677,27 @@ impl ThreeVoters {
             .iter()
             .position(|(node_id, _)| *node_id != leader)
             .expect("a follower");
+        let leader_index = bases
+            .iter()
+            .position(|(node_id, _)| *node_id == leader)
+            .expect("the leader's index");
         Self {
             voters,
             node_c,
             leader_base,
             target: bases[target_index].0.clone(),
             target_index,
+            leader_index,
+            bases: std::array::from_fn(|index| bases[index].1.clone()),
         }
     }
 
     fn target_daemon(&mut self) -> &mut Daemon {
-        match self.target_index {
+        self.daemon(self.target_index)
+    }
+
+    fn daemon(&mut self, index: usize) -> &mut Daemon {
+        match index {
             0 => &mut self.voters.node_a,
             1 => &mut self.voters.node_b,
             _ => &mut self.node_c,
@@ -1713,6 +1761,281 @@ impl ThreeVoters {
             "the removed follower is still a voter: {removed}"
         );
         removed
+    }
+}
+
+/// One voter's own Raft view, read from its store-free `/metrics`: its term,
+/// whether it knows a leader, and whether it is that leader. `None` when the
+/// process does not answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RaftView {
+    term: u64,
+    leader_known: bool,
+    is_leader: bool,
+}
+
+async fn raft_view(client: &reqwest::Client, base: &str) -> Option<RaftView> {
+    let body = client
+        .get(format!("{base}/metrics"))
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let value = |name: &str| {
+        body.lines().find_map(|line| {
+            let (metric, value) = line.split_once(' ')?;
+            (metric == name)
+                .then(|| value.parse::<u64>().ok())
+                .flatten()
+        })
+    };
+    Some(RaftView {
+        term: value("plurx_raft_current_term")?,
+        leader_known: value("plurx_raft_leader_known")? == 1,
+        is_leader: value("plurx_raft_is_leader")? == 1,
+    })
+}
+
+/// The survivors' common leader: both know a leader in the same term and one
+/// of them is it. Raft has one leader per term, so that names who both follow.
+fn surviving_leader(views: &[(usize, Option<RaftView>)]) -> Option<(usize, u64)> {
+    let term = views.first()?.1?.term;
+    if views
+        .iter()
+        .any(|(_, view)| view.is_none_or(|view| !view.leader_known || view.term != term))
+    {
+        return None;
+    }
+    views
+        .iter()
+        .find(|(_, view)| view.is_some_and(|view| view.is_leader))
+        .map(|(index, _)| (*index, term))
+}
+
+/// Wait until the leader's roster shows both followers as handoff candidates:
+/// reachable, out of maintenance, with zero apply lag. A stopping leader's
+/// handoff chooses from exactly this roster.
+async fn wait_for_handoff_candidates(client: &reqwest::Client, cluster: &mut ThreeVoters) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let leader_base = cluster.leader_base.clone();
+    let token = cluster.voters.token.clone();
+    loop {
+        let leader_index = cluster.leader_index;
+        cluster
+            .daemon(leader_index)
+            .assert_running("waiting for handoff candidates");
+        if let Ok(response) = client
+            .get(format!("{leader_base}/api/v1/cluster/nodes"))
+            .bearer_auth(&token)
+            .send()
+            .await
+        {
+            if let Ok(body) = response.json::<Value>().await {
+                if body["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.len() == 3
+                        && nodes.iter().all(|node| {
+                            node["is_voter"] == true
+                                && node["reachable"] == true
+                                && node["maintenance"] == false
+                                && (node["is_leader"] == true
+                                    || node["apply_lag_entries"].as_u64() == Some(0))
+                        })
+                }) {
+                    return;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the followers never became handoff candidates\n{}",
+            cluster.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Audit C2: SIGTERM to the leader's plurxd moves leadership to a survivor
+/// while the old process is still draining, and that leader holds after the
+/// old process exits. Before, the leader led through its whole drain and
+/// stopped Raft cold, and the survivors waited out a timeout election.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_on_the_leader_moves_leadership_before_its_raft_stops() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    wait_for_handoff_candidates(&client, &mut cluster).await;
+    // Older than its 4 s leader lease, as any leader a deploy stops is.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let leader = cluster.leader_index;
+    let before = raft_view(&client, &cluster.bases[leader])
+        .await
+        .expect("the leader answers metrics");
+    assert!(before.is_leader, "node {leader} leads: {before:?}");
+    let survivors = (0..3).filter(|index| *index != leader).collect::<Vec<_>>();
+
+    let survivor_count = survivors.len();
+    let exit = cluster.daemon(leader).exit_watch();
+    cluster.daemon(leader).terminate();
+    let signalled = Instant::now();
+    // Evidence only from answered samples: a sample a busy survivor does not
+    // answer in time proves nothing either way.
+    let mut first_named = vec![None::<(Instant, u64)>; 3];
+    let mut successor = None::<(usize, u64)>;
+    let mut answered = 0_u32;
+    let mut exited_at = None::<Instant>;
+    loop {
+        for index in survivors.iter().copied() {
+            let Some(view) = raft_view(&client, &cluster.bases[index]).await else {
+                continue;
+            };
+            answered += 1;
+            if view.term > before.term && view.is_leader {
+                match successor {
+                    None => successor = Some((index, view.term)),
+                    Some(known) => assert_eq!(
+                        known,
+                        (index, view.term),
+                        "two survivors led after the handoff\n{}",
+                        cluster.diagnostics()
+                    ),
+                }
+            }
+            if let Some((at, named_term)) = first_named[index] {
+                // Once a survivor follows the successor it must keep doing so.
+                assert!(
+                    view.leader_known && view.term == named_term,
+                    "survivor {index} stopped following the successor {:?} after SIGTERM \
+                     (named at {:?}): {view:?}\n{}",
+                    signalled.elapsed(),
+                    at - signalled,
+                    cluster.diagnostics()
+                );
+            } else if view.leader_known && view.term > before.term {
+                first_named[index] = Some((Instant::now(), view.term));
+            }
+        }
+        if exited_at.is_none() {
+            exited_at = exit.try_recv().ok();
+        }
+        let named = survivors
+            .iter()
+            .filter(|index| first_named[**index].is_some())
+            .count();
+        assert!(
+            named == survivor_count || signalled.elapsed() < Duration::from_secs(3),
+            "no surviving leader named by both survivors within 3 s of SIGTERM: \
+             {first_named:?}\n{}",
+            cluster.diagnostics()
+        );
+        assert!(
+            signalled.elapsed() < Duration::from_secs(120),
+            "the old leader never finished its drain\n{}",
+            cluster.diagnostics()
+        );
+        if exited_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(10)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let exited_at = exited_at.expect("the loop ends after the exit");
+    let status = cluster
+        .daemon(leader)
+        .exited()
+        .expect("the dedicated wait saw the old leader exit");
+    assert!(
+        status.success(),
+        "the old leader's drain ended {status}\n{}",
+        cluster.diagnostics()
+    );
+    let (successor, term) = successor.expect("a survivor led after the handoff");
+    for index in survivors.iter().copied() {
+        let (named, named_term) = first_named[index].expect("both survivors named the successor");
+        assert_eq!(
+            named_term, term,
+            "survivor {index} named a leader in another term"
+        );
+        assert!(
+            named < exited_at,
+            "survivor {index} first named the successor {:?} after SIGTERM, but the old \
+             process exited at {:?}\n{}",
+            named - signalled,
+            exited_at - signalled,
+            cluster.diagnostics()
+        );
+    }
+    // At least half the 100 ms rounds over the whole window were answered by
+    // each survivor on average: enough samples that "held" means something.
+    let rounds = (exited_at - signalled + Duration::from_secs(10)).as_millis() / 100;
+    assert!(
+        u128::from(answered) >= rounds,
+        "only {answered} survivor samples answered over {rounds} rounds"
+    );
+    println!(
+        "sigterm on the leader: node {leader} -> node {successor}, term {} -> {term}, \
+         named {:?} after SIGTERM, old process exited {:?} after it, {answered} answered samples",
+        before.term,
+        survivors
+            .iter()
+            .filter_map(|index| first_named[*index].map(|(at, _)| at))
+            .max()
+            .map(|at| at - signalled)
+            .unwrap_or_default(),
+        exited_at - signalled
+    );
+}
+
+/// A follower's SIGTERM moves nothing: the leader and its term hold through
+/// the follower's whole drain and after it exits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_on_a_follower_changes_no_leader() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    wait_for_handoff_candidates(&client, &mut cluster).await;
+    let leader = cluster.leader_index;
+    let follower = cluster.target_index;
+    let others = (0..3)
+        .filter(|index| *index != follower)
+        .collect::<Vec<_>>();
+    let before = raft_view(&client, &cluster.bases[leader])
+        .await
+        .expect("the leader answers metrics");
+    assert!(before.is_leader, "node {leader} leads: {before:?}");
+
+    cluster.daemon(follower).terminate();
+    let signalled = Instant::now();
+    let mut exited_at = None;
+    loop {
+        let mut views = Vec::new();
+        for index in others.iter().copied() {
+            views.push((index, raft_view(&client, &cluster.bases[index]).await));
+        }
+        assert_eq!(
+            surviving_leader(&views),
+            Some((leader, before.term)),
+            "a follower's stop changed leadership ({:?} after SIGTERM): {views:?}\n{}",
+            signalled.elapsed(),
+            cluster.diagnostics()
+        );
+        if exited_at.is_none() {
+            if let Some(status) = cluster.daemon(follower).exited() {
+                assert!(status.success(), "the follower's drain ended {status}");
+                exited_at = Some(Instant::now());
+            } else {
+                assert!(
+                    signalled.elapsed() < Duration::from_secs(120),
+                    "the follower never finished its drain\n{}",
+                    cluster.diagnostics()
+                );
+            }
+        }
+        if exited_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(10)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

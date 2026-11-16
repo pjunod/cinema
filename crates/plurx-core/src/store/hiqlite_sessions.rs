@@ -1569,6 +1569,14 @@ impl From<&mut Row<'_>> for PendingMaintenanceRow {
     }
 }
 
+struct OwnedHintRow;
+
+impl From<&mut Row<'_>> for OwnedHintRow {
+    fn from(_: &mut Row<'_>) -> Self {
+        Self
+    }
+}
+
 struct OwnedLeaseRow(Result<OwnedMediaSessionLease, StoreError>);
 
 impl From<&mut Row<'_>> for OwnedLeaseRow {
@@ -6723,6 +6731,32 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .map(|row| row.0)
             .collect()
+    }
+
+    async fn owned_media_sessions_hint(
+        &self,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if owner_node_id.is_empty() || owner_node_id.len() > 256 {
+            return Err(StoreError::Task("invalid media-session owner".to_owned()));
+        }
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. Every row `owned_media_sessions` returns is active, owned
+        // here and unexpired, so this predicate holds for each of them; see
+        // the trait method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<OwnedHintRow, _>(
+                "owned_media_sessions_hint",
+                "SELECT 1 AS owned FROM media_sessions \
+                 WHERE owner_node_id = $1 AND state = 'active' \
+                   AND lease_expires_at_ms > $2 LIMIT 1",
+                params!(owner_node_id, now_ms),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(!rows.is_empty())
     }
 
     async fn reserve_producer_recovery(

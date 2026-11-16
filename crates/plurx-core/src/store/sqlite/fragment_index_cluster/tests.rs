@@ -1432,16 +1432,23 @@ async fn terminal_analysis_history_has_a_hard_global_cap() {
     store
         .with_conn(|conn| {
             let transaction = conn.unchecked_transaction()?;
-            for generation in 0_i64..=8_192 {
-                transaction.execute(
+            // One prepared statement for all 8,193 rows. Preparing this
+            // INSERT costs about 35 ms in a debug build (the table's triggers
+            // and foreign keys are compiled into every plan), so preparing it
+            // per row made this test 276 s alone and a 20-minute timeout on a
+            // loaded shard. The cap is exercised by the UPDATE below either way.
+            {
+                let mut insert = transaction.prepare(
                     "INSERT INTO analysis_requests
                           (request_id, file_id, source_size, source_mtime, component,
                            force_rebuild, target_node_id, state, fence, attempts,
                            not_before_ms, created_at_ms, updated_at_ms)
                          VALUES (?1, 1, 100, ?2, 'fragment_index', 0, 'node-a',
                                  'failed', 0, 1, 0, ?2, ?2)",
-                    params![format!("terminal-{generation:05}"), generation],
                 )?;
+                for generation in 0_i64..=8_192 {
+                    insert.execute(params![format!("terminal-{generation:05}"), generation])?;
+                }
             }
             transaction.execute(
                 "INSERT INTO analysis_requests

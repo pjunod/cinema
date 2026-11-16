@@ -2255,13 +2255,40 @@ mod tests {
         }
     }
 
+    /// Take what is left of the current poll's cooperative budget, so the
+    /// next tokio resource this task polls parks it. Polling
+    /// `consume_budget` with a waker that does nothing takes one unit each
+    /// time and is pending once none is left; a poll with no budget (outside
+    /// a runtime) never is, hence the bound.
+    fn spend_cooperative_budget() {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..1024 {
+            let unit = std::pin::pin!(tokio::task::consume_budget());
+            if std::future::Future::poll(unit, &mut context).is_pending() {
+                return;
+            }
+        }
+        panic!("the attempt is polled without a cooperative budget; it cannot be parked");
+    }
+
     /// Run a whole-file attestation and drop it once it has read `past` bytes,
     /// the way a playback preemption drops the attempt future.
+    ///
+    /// A dropped future stops at the await it is parked on, so the attempt
+    /// has to park once after it reports `past`. Reading does not promise
+    /// that: `tokio::fs::File` hands each read to a blocking thread, and when
+    /// that thread finishes before the attempt polls it (one CPU, a loaded
+    /// runner) the read is ready at once, the attempt hashes on to the end of
+    /// the fixture inside a single poll, and there was nothing left to
+    /// preempt. So the report spends the poll's cooperative budget: tokio
+    /// then parks the attempt at its next blocking read whatever the thread
+    /// did, and the biased select below sees `stop` first.
     async fn preempt_full_attestation(node_id: &str, file: &MediaFile, past: u64) {
         let stop = tokio::sync::Notify::new();
         let report = |bytes: u64| {
             if bytes >= past {
                 stop.notify_one();
+                spend_cooperative_budget();
             }
         };
         tokio::select! {

@@ -76,7 +76,19 @@ impl Settings {
     }
 }
 async fn read_settings(state: &AppState) -> Result<Settings, StoreError> {
-    let value = state.store.get_setting(&format!("{PREFIX}config")).await?;
+    parse_settings(state.store.get_setting(&format!("{PREFIX}config")).await?)
+}
+
+/// [`read_settings`] from this node's applied settings view, for the 15 s
+/// pass's look at whether transcription is on and how (A4). The job it then
+/// claims is claimed through the Store, and a save made here raises the
+/// settings floor, so it is read back from the authority until this replica
+/// holds it.
+async fn pass_settings(applied: &plurx_core::store::AppliedView) -> Result<Settings, StoreError> {
+    parse_settings(applied.setting(&format!("{PREFIX}config")).await?)
+}
+
+fn parse_settings(value: Option<String>) -> Result<Settings, StoreError> {
     match value {
         None => Ok(Settings::default()),
         Some(value) => {
@@ -1782,7 +1794,7 @@ async fn pass(
     shutdown: &CancellationToken,
     model_cache: &mut Option<(String, Model)>,
 ) -> Result<(), StoreError> {
-    let config = read_settings(state).await?;
+    let config = pass_settings(&state.applied).await?;
     if !config.enabled {
         return Ok(());
     }
@@ -1847,6 +1859,7 @@ async fn pass(
             after: None,
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         })
         .await?;
     for candidate in page.jobs {
@@ -2115,6 +2128,39 @@ async fn automatic_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A4: the 15 s pass looks at the transcription settings through the
+    /// node's applied view (a standalone view counts a `view` read; a direct
+    /// Store read counts nothing), and follows a save.
+    #[tokio::test]
+    async fn the_pass_reads_its_settings_through_the_applied_view() {
+        use plurx_core::store::{
+            AppliedTable, AppliedView, SettingsStore, SqliteStore, ViewSource,
+        };
+        let store = std::sync::Arc::new(SqliteStore::open_in_memory().expect("SQLite"));
+        let applied = AppliedView::authority(store.clone());
+        assert!(!pass_settings(&applied).await.expect("defaults").enabled);
+        let enabled = Settings {
+            enabled: true,
+            ..Settings::default()
+        };
+        store
+            .put_setting(
+                &format!("{PREFIX}config"),
+                &serde_json::to_string(&enabled).expect("settings"),
+            )
+            .await
+            .expect("save");
+        assert!(pass_settings(&applied).await.expect("saved").enabled);
+        let observation = applied.observation();
+        assert_eq!(
+            (
+                observation.view_total(AppliedTable::Settings, ViewSource::View),
+                observation.view_total(AppliedTable::Settings, ViewSource::Authority),
+            ),
+            (2, 0)
+        );
+    }
 
     fn write_pcm_fixture(path: &Path, signal: bool) {
         let mut bytes = b"RIFF".to_vec();
@@ -3475,6 +3521,7 @@ mod tests {
                 after: None,
                 now_ms: now,
                 limit: 1,
+                admissible_only: false,
             })
             .await
             .expect("candidate")

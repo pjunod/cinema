@@ -1365,9 +1365,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::storage_domain_pending::SCHEMA,
     // v132: exact FEL outbox continuity and independent quality waiters.
     super::dv_title_jobs::MIGRATION_V2,
-    // v133: source leases expand: one lease row per source reader.
+    // v133: optional scoped application login, separate from native sessions.
+    super::delegation::SCHEMA,
+    // v134: source leases expand: one lease row per source reader.
     super::source_leases::EXPAND,
-    // v134: source leases contract: the v1 source-owner objects go. A
+    // v135: source leases contract: the v1 source-owner objects go. A
     // single SQLite process has no older binary to wait for.
     super::source_leases::CONTRACT,
 ];
@@ -1843,6 +1845,9 @@ impl SqliteStore {
         already_applied: bool,
     ) -> Result<(), StoreError> {
         let tx = conn.unchecked_transaction()?;
+        if version == 133 {
+            super::delegation::verify_predecessor(&tx)?;
+        }
         if !already_applied {
             if version == super::subtitle_managed_schema::RESOURCE_MIGRATION_VERSION {
                 super::subtitle_managed_schema::verify_resource_predecessor(&tx)?;
@@ -1861,6 +1866,9 @@ impl SqliteStore {
             }
             tx.execute_batch(sql)
                 .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
+        }
+        if version == 133 {
+            super::delegation::verify_sqlite(&tx)?;
         }
         // Foreign keys are OFF for the step (see the caller), so integrity is
         // checked here, before the step can commit.
@@ -1964,6 +1972,7 @@ impl SqliteStore {
         super::subtitle_text_translation_schema::verify_sqlite(conn)?;
         super::shared_caption_schema::verify_sqlite(conn)?;
         super::playback_handoffs::verify_sqlite(conn)?;
+        super::delegation::verify_sqlite(conn)?;
         super::scan_request_v2::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
