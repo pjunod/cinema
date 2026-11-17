@@ -810,7 +810,7 @@ async fn root_edit_keeps_existing_receipt_bytes_in_the_new_scope() {
             sql(
                 &store,
                 &format!(
-                    "SELECT allocated_bytes FROM background_source_service_grants WHERE receipt_id='{}'",
+                    "SELECT CAST(allocated_bytes AS TEXT) FROM background_source_service_grants WHERE receipt_id='{}'",
                     first_grant.receipt_id
                 )
             )
