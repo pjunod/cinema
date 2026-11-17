@@ -18,6 +18,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Source playback Start observes membership at its claim boundary after pure
+  preparation. Slow filesystem or planning work no longer consumes the
+  five-second authority proof before it is used; claim expiry, file and grant
+  checks, and overlapping playback ownership are preserved.
+
 - Web prepared upgrades keep predecessor control observations on their own
   media source through exposure, so a transient successor wait cannot cancel
   its own preparation. The first visible frame freezes the final commit;

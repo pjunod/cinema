@@ -54,6 +54,115 @@ pub(super) async fn actual_resource_request(
     let _ = driver.await;
     axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
 }
+/// Planning may wait on actual filesystem/Store work longer than the five-
+/// second member-proof lifetime. This ages the old placement of that proof,
+/// not the intent or the actual singleton's continuously running heartbeat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_source_http_direct_claim_observes_members_after_slow_preparation() {
+    use std::time::{Duration, Instant};
+    let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
+    let pause = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .preparation_finished_pause
+        .arm("Source preparation finished before claim observation");
+    let state = (*fixture.state).clone();
+    let headers = fixture.headers.clone();
+    let reference = fixture.reference.clone();
+    let request = fixture.request.clone();
+    let starting = tokio::spawn(async move {
+        fixture_start(
+            axum::extract::State(state),
+            headers,
+            axum::extract::Path((
+                reference.item_id.as_str().to_owned(),
+                reference.file_id.as_str().to_owned(),
+            )),
+            axum::body::Body::from(request),
+        )
+        .await
+    });
+    let held = pause.reached().await;
+    // The old observation necessarily precedes this rendezvous. Wait for the
+    // actual Store wall clock to exceed its 5,000ms limit; virtual Tokio time
+    // cannot expire that proof. Every sleep is derived from this wall target.
+    let expired_after_ms = crate::state::clock_ms() + 5_000;
+    loop {
+        let remaining_ms = expired_after_ms.saturating_sub(crate::state::clock_ms());
+        if remaining_ms < 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis((remaining_ms + 1) as u64)).await;
+    }
+    held.release();
+    let response = starting
+        .await
+        .expect("actual Direct Start task")
+        .expect("claim uses a member observation made after preparation");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("actual Direct Start body");
+    let decoded = crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
+        &bytes,
+        &fixture.reference,
+    )
+    .expect("exact actual Direct Start lineage");
+    let input = parse_start_request(
+        &fixture.request,
+        fixture.reference.item_id.as_str(),
+        fixture.reference.file_id.as_str(),
+    )
+    .expect("original exact request");
+    let entry = fixture
+        .state
+        .transcode
+        .source_http_starts
+        .entries
+        .lock()
+        .expect("actual retained Source task")
+        .iter()
+        .find(|entry| entry.identity.request_id == input.request_id)
+        .cloned()
+        .expect("the exact Start retained its actual factory owner");
+    let owned = entry
+        .wait(Instant::now() + Duration::from_secs(1))
+        .await
+        .expect("actual Direct factory");
+    let binding = owned.assignment.binding();
+    assert_eq!(binding.incarnation_id(), decoded.incarnation_id());
+    assert_eq!(binding.request_id(), input.request_id.to_string());
+    assert_eq!(binding.playback_id(), input.session.playback_id);
+    let source_headers: SourceHeaders = fixture.headers.clone().into();
+    let viewer = viewer_hash(&source_headers).expect("actual authenticated viewer");
+    assert_eq!(
+        binding.principal(),
+        &plurx_core::playback_principal::PlaybackPrincipal::sharing(fixture.grant, &viewer)
+            .expect("actual grant principal")
+    );
+    assert_eq!(binding.source_server_id(), fixture.reference.server_id);
+    assert_eq!(binding.catalogue_epoch(), fixture.reference.catalogue_epoch);
+    assert_eq!(binding.library_id(), &fixture.reference.library_id);
+    assert_eq!(binding.item_id(), &fixture.reference.item_id);
+    assert_eq!(binding.file_id(), &fixture.reference.file_id);
+    assert_eq!(binding.file_revision(), &fixture.reference.revision);
+    assert!(owned.actor.is_direct());
+    let (direct, guard) = owned
+        .actor
+        .open_direct_start(Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("actual factory retains its held unchanged source file");
+    assert_eq!(direct.session_id, decoded.direct().session_id);
+    assert!(direct.length > 0);
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(15), owned.actor.retire())
+        .await
+        .expect("actual Direct factory joins")
+        .expect("actual source custody settles");
+    drop(owned);
+    fixture.shutdown().await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_http_initialization_overlapping_real_h2_registration_starts_and_ends() {
     actual_source_initialization_interleave(InitializationAssertionCase::CurrentAuthority).await;
