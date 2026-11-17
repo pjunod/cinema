@@ -1922,5 +1922,81 @@
     },
     "scoring_params_role": "Active-area mask only; target identities come from capture frames and helper execution, not the historical score params target line.",
     "runtime_identity_limit": "Intel enclosing application revision advanced from 314b155908aa44ae4bb3e9fd6f7f57e2c4f8270a to 32fa105eed4194d85f3cbc97794b6864fb99d2ad between baseline and candidate. Runtime image, package manifest and engine digests match on each device; AMD enclosing application revision also matches. Qualification binds the isolated helper override, not application-source equivalence."
+  },
+  "additional_full_frame_cpu": {
+    "smile_w33": {
+      "stage": "research double CPU raster control, not GPU/served/physical qualification",
+      "target_peak_nits": 600,
+      "target_black_nits": 0.0001,
+      "active_l5": [
+        0,
+        0,
+        120,
+        120
+      ],
+      "active_pixels": 7372800,
+      "source_rgba_sha256": "b052a8df5e6efec957013c0a694b7fbe6ef05e2684a8593db76d3b40bab307f5",
+      "licensed_reference_sha256": "613b05b863af55ed4000e89295932a53183b460ab16e62dd26ee9e49e0d5bf1e",
+      "unchanged_control_byte_identical": {
+        "control_sha256": "a177d6a7c854accef85633ed898280f051505ad17fc12a7544ac163f5402a49c",
+        "preserved_sha256": "a177d6a7c854accef85633ed898280f051505ad17fc12a7544ac163f5402a49c",
+        "byte_identical": true
+      },
+      "xml_change": "TargetDisplay ID27 MinimumBrightness only: 0.005 to0.0001",
+      "input_provenance_sha256": "96ae8013e966f8cd37be458533bd1d62f5de442d4503fa8169e6e35b6ed0812a",
+      "licensed_receipt_sha256": "1f575263678114145ec240c4e0767a08e0ad640877fd937ad5d359211943bca8",
+      "render_receipt_sha256": "2f104963741d1ce7a9048f1a25b4f366f820f1cb396f0ba6db0b4eafa0d1505b",
+      "control_candidate_scalar_binding_sha256": "7c5e08d599e0f9967e4707d14b729baefa1fb49189c5492285b4948a31086701",
+      "analytical_output_sha256": "2b07d97bea8c8c58f1b26131d4d9170cc1b5b1c9b5b3f820b40dd94769a282a6",
+      "measured_output_sha256": "08840014adb088a961e7c95c30dcd3fb24ee1e3b00871ace1da2a1f35cd2fa23",
+      "score_sha256": "b343012391a8969f5a25e78f92e9ebf454dfd9cb93d9b7011af918e95f92c540",
+      "score": {
+        "frame": "smile600-black0001-cpu",
+        "l5": [
+          0,
+          0,
+          120,
+          120
+        ],
+        "active_pixels": 7372800,
+        "arms": {
+          "analytic": {
+            "max_de": 0.6741254043923073,
+            "mean_de": 0.00468432951619282,
+            "over_0.05": 16014,
+            "max_at": [
+              424,
+              1990
+            ]
+          },
+          "measured": {
+            "max_de": 0.009413350574937297,
+            "mean_de": 0.0038964189490341816,
+            "over_0.05": 0,
+            "max_at": [
+              251,
+              139
+            ]
+          }
+        },
+        "vs": {
+          "measured vs analytic": {
+            "worse": 2994323,
+            "equal": 0,
+            "better": 4378477,
+            "max_de_of_worse": 0.009413350574937297,
+            "worse_over_0.05": 0,
+            "max_increase": 0.007073458008657551,
+            "worse_coords_npz": "worse/measured__vs__analytic.npz",
+            "worse_coords_sha256": "e08aa0891887f39a3244b7614cc3a93c46d738f432e3702db7f50b7a66ea2bc0"
+          }
+        }
+      },
+      "private_artifacts": [
+        "hdr-acceptance-p8-20261116/licensed-references/smile600-black0001",
+        "hdr-acceptance-p8-20261116/licensed-references/smile600-control005-dictionary",
+        "hdr-acceptance-p8-20261116/scores/smile600-black0001-cpu"
+      ]
+    }
   }
 }

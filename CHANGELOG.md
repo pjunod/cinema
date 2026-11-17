@@ -18,6 +18,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Auto playback keeps foreground admission through VOD creation, so a cold
+  start can ask background work to yield; prepared successors retain their
+  separate speculative purpose even when they share a cached rendition.
+- Reattaching to a cached VOD rendition no longer sends source telemetry to
+  its retired input owner. The next live input receives pending telemetry.
 - Preserve measured CM29 dark-chroma mapping for qualified P3 display targets with black from zero through 0.005 nits, while retaining each target's tone curve.
 - Clocked Source copies and Analysis gap fills preserve the first video
   sample's duration when AAC begins earlier. The MP4 muxer previously

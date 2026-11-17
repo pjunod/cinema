@@ -101,6 +101,18 @@ served application deployment, physical display output, broader scene coverage,
 or universal mapper fidelity on the stress grid. Integrated adversarial review and affected test state are recorded in
 [PR #1727](http://forge.lan:3000/noirr/plurx/pulls/1727).
 
+## The missing Smile low-black reference confirms the same cause
+
+A new licensed 600 / 0.0001-nit reference changes only target ID27's minimum
+brightness. The fresh unchanged 0.005 control is byte-identical to the preserved
+reference. On all 7,372,800 active pixels of the preserved Smile w33 master,
+the research double CPU control changes maximum dE from 0.6741254 to 0.0094134
+and pixels above 0.05 from 16,014 to zero. All 2,994,323 worsening coordinates
+are retained and hash-bound, with none above 0.05; 4,378,477 pixels improve.
+The manifest binds both rasters, binary receipts, references, metadata and the
+complete coordinate archive. This fills the licensed-reference and CPU-analysis
+gap; it does not claim P7 GPU, served or physical qualification at this target.
+
 ## The whole stress grid remains an explicit mapper limitation
 
 A separate unpartitioned 120,937-color grid mixes a 33³ BT.2020/PQ cube, seeded
