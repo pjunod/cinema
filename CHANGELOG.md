@@ -19,8 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 ### Fixed
 
 - Linux Player live starts and out-of-range seeks identify MPV as their consumer,
-  so complete first fragments can be served without waiting for Safari’s
-  48-second presentation window. Rolling reserve and native Safari admission
+  so their startup window covers MPV’s producer/reload behavior instead of
+  inheriting Safari’s 48-second presentation window. Unknown producer capacity
+  retains conservative admission, and early publication cannot bypass the
+  initial capacity assessment. Native Safari admission and steady reserve
   retain their existing contracts.
 
 - Web prepared upgrades keep predecessor control observations on their own

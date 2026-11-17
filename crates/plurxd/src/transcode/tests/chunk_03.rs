@@ -559,7 +559,7 @@
             let hlsjs = transport == Some("hlsjs");
             let mpv = transport == Some("mpv");
             let policy = if mpv {
-                RollingStartupPolicy::FirstCompleteSegment
+                RollingStartupPolicy::MpvReloadWindow
             } else if hlsjs {
                 RollingStartupPolicy::FirstReloadWindow
             } else {
@@ -567,34 +567,40 @@
             };
             assert_eq!(clock.startup_policy, policy);
             assert_eq!(clock.startup_policy.uses_small_bootstrap(), hlsjs || mpv);
-            for rate in [0.25, 1.0, 4.0] {
-                let expected = if mpv {
-                    ((2_000.0_f64 * rate).ceil() as i64).clamp(2_000, ROLLING_RESERVE_MAX_MS)
-                } else if hlsjs {
-                    ((16_000.0_f64 * rate).ceil() as i64).clamp(16_000, ROLLING_RESERVE_MAX_MS)
-                } else {
-                    rolling_initial_runway_ms(rate)
-                };
+            // Fixed expected values keep the contract independent of the
+            // production arithmetic. MPV's required floor is never capped.
+            for (rate, mpv_ms, js_ms, native_ms) in [
+                (0.25, 18_313, 16_000, 48_000),
+                (1.0, 25_250, 16_000, 48_000),
+                (4.0, 68_000, 64_000, 124_000),
+            ] {
+                let expected = if mpv { mpv_ms } else if hlsjs { js_ms } else { native_ms };
                 assert_eq!(clock.startup_policy.bootstrap_ms(rate), expected);
+                assert!(mpv_ms <= ROLLING_RESERVE_MAX_MS);
             }
             clock.reset_for_attempt(1);
+            clock.initial_capacity_checked = true;
             clock.reset_for_attempt(2);
+            assert!(!clock.initial_capacity_checked, "replacement must assess capacity again");
             clock.clear_attempt();
             clock.bind_startup_transport(if hlsjs { Some("native") } else { Some("hlsjs") });
             assert_eq!(clock.startup_policy, policy, "reattachment cannot change the admitted contract");
         }
+        assert!(rolling_mpv_reload_runway_ms(16.0) > ROLLING_RESERVE_MAX_MS,
+            "an unsupported floor must not silently shrink into the reserve cap");
     }
 
-    /// Replay the measured MPV seek: the writer committed a 2.795s cut
-    /// immediately, but native admission withheld it for another 22.281s.
-    /// A short first snapshot must replenish without changing steady reserve.
+    /// This replays publication, not physical playback. The seek leaves 233ms
+    /// before the requested position. Writer inventory advances only after
+    /// the 2x producer has had time to complete each variable GOP.
     #[tokio::test]
-    async fn rolling_mpv_first_cut_is_published_and_replenished() {
+    async fn rolling_mpv_reload_window_rejects_first_cut_and_refills_as_produced() {
         for explicit in [false, true] {
             let directory = crate::test_tempdir().expect("MPV bootstrap");
             let mut session = test_session(directory.path().to_path_buf());
             session.start_seconds = 5_853.872;
             session.media_origin_seconds = 5_853.639;
+            session.progress.recent_milli.store(2_000, Relaxed);
             session.publication.lock().await.bind_startup_transport(Some("mpv"));
             if explicit {
                 accept_rolling_publication_demand(
@@ -603,25 +609,216 @@
                     crate::playback_control::RenderState::Starting,
                 ).await;
             }
-            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.795], false)).await.expect("first complete cut");
-            session.publication_cycle("mpv-bootstrap").await.expect("first publication");
-            let available_at = {
+            let started = Instant::now();
+            let durations = [2.795, 8.100, 4.200, 11.387];
+            let mut produced_ms = 0_i64;
+            for count in 1..=durations.len() {
+                produced_ms += (durations[count - 1] * 1_000.0_f64).round() as i64;
+                tokio::fs::write(directory.path().join("index.m3u8"),
+                    rolling_playlist(&durations[..count], false)).await.expect("completed writer cuts");
+                session.publication_cycle_at("mpv-bootstrap",
+                    started + Duration::from_micros(produced_ms as u64 * 500)).await.expect("admission assessment");
                 let clock = session.publication.lock().await;
-                let served = clock.served.as_ref().expect("MPV admits the measured first cut");
-                assert_eq!(served.end_ms, 2_795);
-                assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
-                served.available_at
-            };
-            // Variable GOP lengths retain complete-object selection. The
-            // low-reserve path replenishes before the steady 16s cadence.
-            tokio::fs::write(directory.path().join("index.m3u8"), rolling_playlist(&[2.795, 8.100, 4.200], false)).await.expect("next complete cuts");
-            session.publication_cycle_at("mpv-refill", available_at + Duration::from_secs(2)).await.expect("replenishment");
+                if count < 4 {
+                    assert!(clock.served.is_none(), "{count} cuts cannot cover MPV's reload window");
+                } else {
+                    let served = clock.served.as_ref().expect("complete reload window");
+                    assert_eq!(served.end_ms, 26_482);
+                    assert!(served.end_ms - 233 >= 25_250);
+                    assert_eq!(clock.reserve_phase, RollingReservePhase::AwaitingPresentation);
+                    assert!(!clock.initial_capacity_checked, "the old capacity threshold is still ahead");
+                }
+            }
+            let first = session.publication.lock().await.served.clone().expect("first snapshot");
+            // The next 8.1s GOP needs 4.05 wall seconds at 2x. A policy
+            // cycle at +2s cannot manufacture that future inventory.
+            session.publication_cycle_at("mpv-before-next-cut",
+                first.available_at + Duration::from_secs(2)).await.expect("unchanged inventory");
+            assert_eq!(session.publication.lock().await.served.as_ref().expect("snapshot").revision, first.revision);
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[2.795, 8.100, 4.200, 11.387, 8.100], false)).await.expect("next produced GOP");
+            session.publication_cycle_at("mpv-refill",
+                first.available_at + Duration::from_millis(4_300)).await.expect("poll after the completed cut");
             let clock = session.publication.lock().await;
-            let served = clock.served.as_ref().expect("replenished MPV snapshot");
-            assert_eq!(served.end_ms, 15_095);
+            let served = clock.served.as_ref().expect("replenished snapshot");
+            assert_eq!(served.end_ms, 34_582);
+            assert!(served.available_at >= first.available_at + Duration::from_millis(4_300));
             assert_ne!(clock.reserve_phase, RollingReservePhase::Steady);
-            assert!(served.end_ms < ROLLING_INITIAL_RUNWAY_MS);
-            assert_eq!(clock.startup_policy.bootstrap_ms(1.0), 2_000);
+            assert_eq!(rolling_initial_runway_ms(1.0), 48_000, "steady reserve is unchanged");
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_mpv_unknown_capacity_keeps_native_rounding_and_slow_capacity_fails() {
+        for explicit in [false, true] {
+            for speed in [None, Some(900)] {
+                let directory = crate::test_tempdir().expect("MPV capacity fallback");
+                let mut session = test_session(directory.path().to_path_buf());
+                session.start_seconds = 5_853.872;
+                session.media_origin_seconds = 5_853.639;
+                session.publication.lock().await.bind_startup_transport(Some("mpv"));
+                if let Some(speed) = speed {
+                    session.progress.recent_milli.store(speed, Relaxed);
+                }
+                if explicit {
+                    accept_rolling_publication_demand(&session, 1, 5_853_872, 1.0,
+                        crate::playback_control::PlaybackDemand::Active,
+                        crate::playback_control::RenderState::Starting).await;
+                }
+                tokio::fs::write(directory.path().join("index.m3u8"),
+                    rolling_playlist(&[2.795, 8.1, 4.2, 11.387], false)).await.expect("short inventory");
+                session.publication_cycle("mpv-capacity-short").await.expect("native fallback waits");
+                assert!(session.publication.lock().await.served.is_none());
+                // A 48s endpoint still lacks the 233ms seek lead. Unknown
+                // capacity rounds up to a real 49s cut, including legacy.
+                tokio::fs::write(directory.path().join("index.m3u8"),
+                    rolling_playlist(&[2.795, 8.1, 4.2, 11.387, 8.1, 8.1, 5.318], false)).await.expect("old initial capacity boundary");
+                let assessed = session.publication_cycle("mpv-capacity-boundary").await;
+                if speed.is_some() {
+                    assert!(assessed.expect_err("known slow producer must fail at 48s")
+                        .starts_with("rolling_insufficient_capacity:"));
+                    assert!(session.publication.lock().await.served.is_none());
+                    continue;
+                }
+                assessed.expect("unknown capacity can wait for the full native window");
+                assert!(session.publication.lock().await.served.is_none());
+                tokio::fs::write(directory.path().join("index.m3u8"),
+                    rolling_playlist(&[2.795, 8.1, 4.2, 11.387, 8.1, 8.1, 5.318, 1.0], false)).await.expect("rounded native inventory");
+                session.publication_cycle("mpv-capacity-rounded").await.expect("full native fallback");
+                assert_eq!(session.publication.lock().await.served.as_ref().expect("49s rounded window").end_ms, 49_000);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_mpv_early_publication_does_not_waive_initial_capacity_assessment() {
+        for explicit in [false, true] {
+            let directory = crate::test_tempdir().expect("MPV later slowdown");
+            let session = test_session(directory.path().to_path_buf());
+            session.publication.lock().await.bind_startup_transport(Some("mpv"));
+            session.progress.recent_milli.store(2_000, Relaxed);
+            if explicit {
+                accept_rolling_publication_demand(&session, 1, 0, 1.0,
+                    crate::playback_control::PlaybackDemand::Active,
+                    crate::playback_control::RenderState::Starting).await;
+            }
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[13.0; 2], false)).await.expect("short sustainable start");
+            session.publication_cycle("mpv-initial-fast").await.expect("early publication");
+            let first = session.publication.lock().await.served.clone().expect("early snapshot");
+            session.progress.recent_milli.store(900, Relaxed);
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[13.0, 13.0, 11.0], false)).await.expect("progress below capacity boundary");
+            session.publication_cycle_at("mpv-slow-progress",
+                first.available_at + Duration::from_secs(13)).await.expect("not assessed below 48s");
+            assert_eq!(session.publication.lock().await.served.as_ref().expect("progress published").end_ms, 37_000);
+            tokio::fs::write(directory.path().join("index.m3u8"),
+                rolling_playlist(&[13.0, 13.0, 11.0, 11.0], false)).await.expect("new cut reaches initial capacity boundary");
+            let refusal = session.publication_cycle_at("mpv-initial-capacity-still-due",
+                first.available_at + Duration::from_secs(26)).await.expect_err("new progress must not conceal under-capacity production");
+            assert!(refusal.starts_with("rolling_insufficient_capacity:"));
+            assert_eq!(session.publication.lock().await.served.as_ref().expect("last accepted snapshot").end_ms, 37_000);
+        }
+    }
+
+    #[derive(Debug)]
+    struct MpvReloadReplay {
+        reloads: Vec<(i64, usize)>,
+        underflow_at_ms: Option<f64>,
+    }
+
+    /// Independent timed-inventory model of FFmpeg 8.1.2 hls.c's reload
+    /// scheduling: last EXTINF after a changed playlist, target/2 after an
+    /// unchanged one. Instant segment reads model demux read-ahead; the media
+    /// clock consumes at `rate`. This is a conditional service-envelope test,
+    /// not physical MPV/network acceptance or a guarantee from recent speed.
+    fn replay_mpv_reload_inventory(
+        durations_ms: &[i64],
+        first_count: usize,
+        seek_offset_ms: i64,
+        rate: f64,
+        producer_speed: f64,
+        horizon_ms: i64,
+    ) -> Result<MpvReloadReplay, &'static str> {
+        if !producer_speed.is_finite() || producer_speed < rate {
+            return Err("unsupported production envelope");
+        }
+        assert!(durations_ms.iter().all(|duration| (1..=16_000).contains(duration)));
+        let mut ends = Vec::with_capacity(durations_ms.len());
+        let mut end = 0_i64;
+        for duration in durations_ms {
+            end += duration;
+            ends.push(end);
+        }
+        let initial_end = ends[first_count - 1];
+        let mut snapshots = vec![(0_i64, first_count)];
+        let mut published_count = first_count;
+        let mut last_publication_ms = 0_i64;
+        // No future inventory: each complete GOP costs duration/speed. The
+        // publisher polls every 250ms, spaces commits by at least 2s, and
+        // delivery adds the declared 1s operating envelope.
+        for wall_ms in (250..=horizon_ms).step_by(250) {
+            let produced_count = ends.iter().take_while(|end| {
+                (**end - initial_end) as f64 <= wall_ms as f64 * producer_speed
+            }).count();
+            if produced_count > published_count && wall_ms - last_publication_ms >= 2_000 {
+                published_count = produced_count;
+                last_publication_ms = wall_ms;
+                snapshots.push((wall_ms + 1_000, published_count));
+            }
+        }
+        let mut replay = MpvReloadReplay { reloads: Vec::new(), underflow_at_ms: None };
+        let mut seen_count = first_count;
+        let mut next_reload_ms = durations_ms[first_count - 1];
+        loop {
+            let exhausts_at = (ends[seen_count - 1] - seek_offset_ms) as f64 / rate;
+            if exhausts_at < next_reload_ms.min(horizon_ms) as f64 {
+                replay.underflow_at_ms.get_or_insert(exhausts_at);
+            }
+            if next_reload_ms > horizon_ms {
+                return Ok(replay);
+            }
+            let available_count = snapshots.iter().rev().find(|(at, _)| *at <= next_reload_ms)
+                .expect("initial snapshot").1;
+            replay.reloads.push((next_reload_ms, available_count));
+            let changed = available_count > seen_count;
+            seen_count = available_count;
+            next_reload_ms += if changed { durations_ms[seen_count - 1] } else { 8_000 };
+        }
+    }
+
+    #[test]
+    fn rolling_mpv_reload_model_reproduces_first_cut_unchanged_reload_stall() {
+        let replay = replay_mpv_reload_inventory(
+            &[2_795, 8_100, 4_200, 11_387, 16_000], 1, 0, 1.0, 2.0, 12_000,
+        ).expect("2x producer supports 1x playback");
+        assert_eq!(&replay.reloads[..2], &[(2_795, 1), (10_795, 3)]);
+        assert_eq!(replay.underflow_at_ms, Some(2_795.0),
+            "the 4.05s next GOP misses the first reload; the 8s retry cannot pay playback");
+    }
+
+    #[test]
+    fn rolling_mpv_reload_model_covers_variable_gops_rates_and_seek_offset() {
+        let durations: Vec<i64> = [2_795, 8_100, 4_200, 11_387, 16_000, 1_301]
+            .into_iter().cycle().take(300).collect();
+        for rate in [0.25, 1.0, 4.0] {
+            let required_ms = RollingStartupPolicy::MpvReloadWindow.bootstrap_ms(rate);
+            let mut end_ms = 0;
+            let first_count = durations.iter().position(|duration| {
+                end_ms += duration;
+                end_ms - 233 >= required_ms
+            }).expect("complete admission endpoint") + 1;
+            let replay = replay_mpv_reload_inventory(
+                &durations, first_count, 233, rate, rate, 300_000,
+            ).expect("production at playback rate is within the declared envelope");
+            assert_eq!(replay.underflow_at_ms, None, "{rate}x timed replay: {replay:?}");
+            if rate == 0.25 {
+                assert!(replay.reloads.windows(2).any(|pair| pair[0].1 == pair[1].1),
+                    "long production gaps must exercise repeated unchanged reloads");
+            }
+            assert_eq!(replay_mpv_reload_inventory(
+                &durations, first_count, 233, rate, rate * 0.9, 300_000,
+            ).expect_err("under-capacity has no finite continuity guarantee"), "unsupported production envelope");
         }
     }
 

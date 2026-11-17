@@ -3,7 +3,7 @@
 **Updated:** 2026-11-13 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
-- **2026-11-17 · MPV live opening delay:** Owner Codex (Sol Player implementation). Retained phase logs identify 22.281 seconds withholding a complete first cut for Safari admission. Explicit MPV startup policy and truthful client transport implemented; review, affected validation and runtime acceptance pending. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
+- **2026-11-17 · MPV live opening delay:** Owner Codex (Sol Player implementation). Retained phase logs identify 22.281 seconds withholding a complete first cut for Safari admission. Truthful client transport is implemented and Player tests pass. First-cut admission is held after a reload-starvation finding; the derived producer/reload policy and initial capacity assessment are being revised. Rust validation and runtime acceptance remain open. [Ledger](docs/streaming/MPV-LIVE-STARTUP.md).
 
 - **2026-11-17 · Web prepared-switch ownership:** owner GPT. New Moon's exposed
   successor could report Waiting under its predecessor's control generation,
