@@ -61,7 +61,7 @@ class DvHelperOwnershipTests(unittest.TestCase):
         # A context copy: no --from, so the helper sources are this checkout's.
         self.assertIn("COPY tools/dv_processing /build-inputs/dv_processing", helpers)
         build = [line for line in helpers if line.startswith("RUN ")]
-        self.assertEqual(len(build), 2)
+        self.assertEqual(len(build), 3)
         self.assertIn("sh /build-inputs/dv_processing/build-bundle.sh /opt/dv-dependencies /opt/dv-bundle", build[0])
         self.assertIn("bundle-manifest.py /opt/dv-bundle/sources /opt/dv-bundle --verify", build[0])
         runtime = instructions(stage(source, "runtime"))
@@ -94,6 +94,45 @@ class DvHelperOwnershipTests(unittest.TestCase):
         self.assertFalse(any("dv-processing-helpers" in line for line in ci))
         for name in ("runtime-assets", "dv-processing-dependencies"):
             self.assertEqual(len(instructions(stage(source, name))), 1, name)
+
+    def test_application_build_runs_the_base_master_black_control(self):
+        """Compiled where the headers are, run where a Vulkan device is: the
+        image cannot build with a base renderer that remaps the master."""
+        source = DOCKERFILE.read_text(encoding="utf-8")
+        helpers = instructions(stage(source, "dv-processing-helpers"))
+        compile_ = [line for line in helpers if "test_base_master_black" in line]
+        self.assertEqual(len(compile_), 1)
+        self.assertTrue(compile_[0].startswith("RUN "))
+        self.assertIn("-Wall -Wextra -Werror", compile_[0])
+        self.assertIn("-frounding-math -ffp-contract=off", compile_[0])
+        self.assertIn("/build-inputs/dv_processing/controls/test_base_master_black.c", compile_[0])
+        self.assertIn("-o /opt/dv-controls/test_base_master_black", compile_[0])
+        self.assertNotIn("||", compile_[0])
+        self.assertNotIn(";", compile_[0])
+        runtime = instructions(stage(source, "runtime"))
+        run = [line for line in runtime if "test_base_master_black" in line]
+        self.assertEqual(len(run), 1)
+        run = run[0]
+        # Mounted, not copied: the control adds no bytes to the image.
+        self.assertTrue(run.startswith(
+            "RUN --mount=type=bind,from=dv-processing-helpers,source=/opt/dv-controls,target=/opt/dv-controls "))
+        self.assertFalse(any(line.startswith("COPY") and "dv-controls" in line for line in runtime))
+        # After the bundle it exercises is installed, on the software device,
+        # and the last command of its instruction: its status is the step's.
+        self.assertGreater(runtime.index(run), runtime.index(
+            "COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing"))
+        self.assertIn("-name 'lvp_icd.*.json'", run)
+        self.assertIn('test -n "$icd"', run)
+        self.assertIn('VK_ICD_FILENAMES="$icd" LD_LIBRARY_PATH=/usr/lib/plurx/dv-processing/lib', run)
+        self.assertTrue(run.rstrip().endswith("/opt/dv-controls/test_base_master_black"))
+        self.assertNotIn("||", run)
+        self.assertNotIn(";", run)
+        # The control covers every family the base renderer serves.
+        control = (ROOT / "tools/dv_processing/controls/test_base_master_black.c").read_text(encoding="utf-8")
+        for family in ('{"p8", 8,', '{"p7_base_only", 7,', '{"p5", 5,'):
+            self.assertIn(family, control)
+        self.assertIn("passed = reconstructs(&families[i], (int)i) && passed;", control)
+        self.assertIn("if (!passed)\n    return 1;", control)
 
     def test_application_build_runs_the_active_area_c_controls(self):
         helpers = instructions(stage(DOCKERFILE.read_text(encoding="utf-8"), "dv-processing-helpers"))

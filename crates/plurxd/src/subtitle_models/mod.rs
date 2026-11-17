@@ -1079,6 +1079,7 @@ async fn next_candidates(
             after: cursor.clone(),
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         })
         .await?;
     *cursor = page.next.clone();
@@ -2021,6 +2022,7 @@ mod tests {
                 after: None,
                 now_ms: crate::state::clock_ms() + 10,
                 limit: 32,
+                admissible_only: false,
             })
             .await
             .expect("automatic Verify");
@@ -2342,6 +2344,7 @@ mod tests {
                 after: None,
                 now_ms: crate::state::clock_ms(),
                 limit: 32,
+                admissible_only: false,
             })
             .await
             .expect("candidates");
@@ -2801,6 +2804,7 @@ mod tests {
             after: None,
             now_ms: crate::state::clock_ms(),
             limit: 32,
+            admissible_only: false,
         };
         assert_eq!(
             state

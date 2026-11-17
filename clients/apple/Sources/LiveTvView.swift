@@ -438,14 +438,17 @@ final class LiveTvPlayerController: ObservableObject {
     /// A coalesced tune. Every repeat inside the contract's window replaces
     /// the last, so a held direction or a fast run along the neighbour strip
     /// costs one tuner start rather than one per press.
-    func requestChannel(_ channel: LiveTvChannel) {
+    @discardableResult
+    func requestChannel(_ channel: LiveTvChannel) -> Task<Void, Never> {
         channelChange?.cancel()
-        channelChange = Task { @MainActor [weak self] in
+        let change = Task { @MainActor [weak self] in
             let delay = UInt64(LiveTvInputRouting.channelCoalesceMilliseconds) * 1_000_000
             do { try await Task.sleep(nanoseconds: delay) } catch { return }
             guard let self, !Task.isCancelled else { return }
             await self.watch(channel)
         }
+        channelChange = change
+        return change
     }
 
     static func playerFailure(_ error: Error?) -> LiveTvFailure {

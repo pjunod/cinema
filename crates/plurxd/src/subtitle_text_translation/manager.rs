@@ -442,6 +442,7 @@ pub(crate) async fn worker_pass(
             after: None,
             now_ms: crate::state::clock_ms(),
             limit: 16,
+            admissible_only: false,
         })
         .await?;
     for candidate in candidates.jobs {
