@@ -126,6 +126,24 @@ async fn directory_invalidation_fixture() {
     );
     assert!(first.operations(t0).expect("bounded").is_empty());
 
+    // A real unrelated Raft write advances the applied index but not a roster
+    // revision. Production registration must preserve the cached Arc.
+    let before_unrelated = directory.reads();
+    leader.client.execute(
+        "directory_invalidation_fixture",
+        "INSERT INTO settings (key, value, updated_at) VALUES ('directory.unrelated', 'yes', 0)",
+        params!(),
+    ).await.expect("unrelated settings write");
+    let unrelated = directory
+        .snapshot()
+        .await
+        .expect("read after unrelated apply");
+    assert!(
+        Arc::ptr_eq(&first, &unrelated),
+        "unrelated apply preserves the roster snapshot"
+    );
+    assert_eq!(directory.reads().reload, before_unrelated.reload);
+
     // A row: the redeemed learner's identity, not yet a Raft member.
     let token = manager
         .issue_token(Duration::from_secs(120))
@@ -223,6 +241,29 @@ async fn directory_invalidation_fixture() {
         "the admitted learner is a committed member on the next read"
     );
     assert!(member.voters(t0).is_empty(), "a learner is never a voter");
+
+    // The HTTP endpoint has its own registered slot, separate from node and
+    // progress updates. The very next read sees the new advertised URL.
+    let new_url = format!("http://{}/directory-new", learner_ports[0]);
+    assert_eq!(
+        leader
+            .client
+            .execute(
+                "directory_invalidation_fixture",
+                "UPDATE cluster_node_http SET public_http_url = $1 WHERE node_id = $2",
+                params!(new_url.clone(), learner_id.as_str()),
+            )
+            .await
+            .expect("HTTP roster change"),
+        1
+    );
+    let endpoint = directory.snapshot().await.expect("changed endpoint read");
+    assert!(!Arc::ptr_eq(&member, &endpoint));
+    assert_eq!(
+        endpoint.operations(t0).expect("bounded")[0].http_base,
+        Some(new_url)
+    );
+
     assert_eq!(member.voter_count(), 1);
 
     // A progress row: ready, then unready. Each changes the next answer.

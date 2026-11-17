@@ -77,7 +77,8 @@ use super::HiqliteAuthStore;
 use crate::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 
 /// Tables the applied views stamp, one revision each. The mark registers
-/// these and [`SHARING_WATCH_TABLES`] (`production_hiqlite_defaults_with_read_pool`).
+/// these, [`SHARING_WATCH_TABLES`] and the canonical roster tables
+/// (`production_hiqlite_defaults_with_read_pool`).
 pub const APPLIED_VIEW_TABLES: &[&str] = &["settings", "media_sessions"];
 
 /// Tables the sharing monitors wait on (A6 M3), registered after the
@@ -103,10 +104,10 @@ pub const APPLIED_MARK_DELETES_ONLY: &[&str] = &["tokens"];
 
 /// Every table the applied mark registers, in slot order.
 pub fn applied_mark_tables() -> impl Iterator<Item = &'static str> {
-    APPLIED_VIEW_TABLES
-        .iter()
-        .chain(SHARING_WATCH_TABLES)
-        .copied()
+    let tables = APPLIED_VIEW_TABLES.iter().chain(SHARING_WATCH_TABLES);
+    #[cfg(feature = "hiqlite-store")]
+    let tables = tables.chain(crate::cluster::membership::directory::ROSTER_TABLES.iter());
+    tables.copied()
 }
 
 /// A sharing monitor's wait for its next look (A6 M3). Armed before the
